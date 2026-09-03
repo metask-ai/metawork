@@ -683,7 +683,7 @@ summary::-webkit-details-marker {
   min-height: 0;
   overflow: hidden;
   color: var(--settings-ink);
-  background: var(--settings-frost);
+  background: var(--ui-surface-panel);
 }
 
 .settings-header,
@@ -693,8 +693,8 @@ summary::-webkit-details-marker {
 
 .settings-header {
   display: grid;
-  grid-template-columns: var(--settings-navigation-track) minmax(0, 1fr);
-  min-height: 64px;
+  grid-template-columns: var(--settings-navigation-track);
+  min-height: 52px;
   padding: 0;
   align-items: center;
   gap: 0;
@@ -729,39 +729,6 @@ summary::-webkit-details-marker {
 .settings-back:hover {
   color: var(--settings-brand-strong);
   background: var(--settings-brand-mist);
-}
-
-.settings-header-copy {
-  display: flex;
-  width: 100%;
-  max-width: var(--settings-content-max-width);
-  justify-self: center;
-  min-height: 64px;
-  min-width: 0;
-  padding: 10px 32px;
-  align-items: baseline;
-  gap: 18px;
-}
-
-.settings-header-copy h1,
-.settings-header-copy > p:last-child {
-  margin: 0;
-}
-
-.settings-header-copy h1 {
-  flex: 0 0 auto;
-  outline: none;
-  font-size: var(--text-display);
-  font-weight: 720;
-  letter-spacing: -0.035em;
-  line-height: 1.2;
-}
-
-.settings-header-copy > p:last-child {
-  max-width: 640px;
-  color: var(--settings-muted);
-  font-size: var(--text-control);
-  line-height: 1.4;
 }
 
 .settings-layout {
@@ -841,6 +808,7 @@ summary::-webkit-details-marker {
   width: 100%;
   min-width: 0;
   min-height: 0;
+  background: var(--ui-surface-panel);
   padding: 22px
     max(32px, calc((100% - var(--settings-content-max-width)) / 2 + 32px)) 72px;
   overflow: hidden auto;
@@ -848,29 +816,29 @@ summary::-webkit-details-marker {
   scrollbar-gutter: stable;
 }
 
-.settings-section-heading p,
 .settings-section-heading h2 {
   margin: 0;
-}
-
-.settings-section-heading p {
-  color: var(--settings-brand);
-  font-size: var(--text-micro);
-  font-weight: 760;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.settings-section-heading h2 {
-  margin-top: 5px;
   font-size: var(--text-display);
   font-weight: 720;
   letter-spacing: -0.03em;
   line-height: 1.2;
 }
 
+.settings-section-heading + .settings-group,
+.settings-section > .settings-group ~ .settings-group {
+  margin-top: 32px;
+}
+
+.settings-group-label {
+  margin: 0;
+  color: var(--settings-ink);
+  font-size: var(--text-control);
+  font-weight: 720;
+  line-height: 1.4;
+}
+
 .settings-preference-list {
-  margin-top: 16px;
+  margin-top: 12px;
   overflow: hidden;
   border: 1px solid var(--settings-line);
   border-radius: 14px;
@@ -881,7 +849,7 @@ summary::-webkit-details-marker {
 .permission-policy-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
-  margin-top: 16px;
+  margin-top: 12px;
   padding: 20px;
   align-items: center;
   gap: 18px 28px;
@@ -984,7 +952,7 @@ summary::-webkit-details-marker {
 .settings-identity-row {
   display: grid;
   grid-template-columns: 46px minmax(0, 1fr) auto;
-  margin-top: 16px;
+  margin-top: 12px;
   padding: 14px 16px;
   align-items: center;
   gap: 14px;
@@ -1042,7 +1010,7 @@ summary::-webkit-details-marker {
 
 .settings-execution-group {
   position: relative;
-  margin-top: 14px;
+  margin-top: 12px;
   overflow: hidden;
   border: 1px solid var(--settings-line);
   border-radius: 16px;
@@ -1055,7 +1023,7 @@ summary::-webkit-details-marker {
 .settings-model-connections {
   display: grid;
   gap: 14px;
-  margin-top: 20px;
+  margin-top: 12px;
   padding: 18px;
   border: 1px solid var(--settings-line);
   border-radius: 14px;
@@ -1291,6 +1259,10 @@ summary::-webkit-details-marker {
   gap: 20px;
   border-bottom: 1px solid var(--settings-line);
   background: var(--ui-surface-panel);
+}
+
+.settings-execution-group > .settings-execution-header {
+  justify-content: flex-end;
 }
 
 .settings-execution-header h3 {
@@ -1589,11 +1561,13 @@ summary::-webkit-details-marker {
 .settings-danger-zone {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  margin-top: 32px;
-  padding: 22px 4px 0;
-  align-items: start;
+  margin-top: 12px;
+  padding: 18px;
+  align-items: center;
   gap: 24px;
-  border-top: 1px solid var(--ui-border);
+  border: 1px solid var(--settings-line);
+  border-radius: 14px;
+  background: var(--settings-paper);
 }
 
 .settings-danger-zone h3,
@@ -2281,11 +2255,8 @@ button.run-process-tool:hover {
 
 @media (max-width: 760px) {
   .settings-header {
-    grid-template-columns: 150px minmax(0, 1fr);
-  }
-
-  .settings-header-copy {
-    padding-inline: 20px;
+    grid-template-columns: 1fr;
+    min-height: auto;
   }
 
   .settings-layout {
@@ -2344,17 +2315,6 @@ button.run-process-tool:hover {
 
   .settings-back {
     margin-top: 0;
-  }
-
-  .settings-header-copy h1 {
-    font-size: var(--text-display);
-  }
-
-  .settings-header-copy {
-    min-height: 0;
-    padding: 4px 14px 12px;
-    align-items: baseline;
-    gap: 12px;
   }
 
   .settings-row {
