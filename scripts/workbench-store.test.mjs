@@ -72,6 +72,45 @@ test("pending scopes isolate unrelated mutations and reject duplicate admission"
   assert.equal(pending.end("task:4"), true);
 });
 
+test("a new connection generation invalidates the previous Workbench projection", () => {
+  const accepted = workbenchReducer(initialWorkbenchState, {
+    type: "generation.started",
+    generation: "1",
+  });
+  const hydrated = workbenchReducer(accepted, {
+    type: "snapshot.accepted",
+    generation: "1",
+    snapshot: snapshot("1", [task("2", "1")]),
+  });
+  const selected = workbenchReducer(hydrated, {
+    type: "task.selected",
+    taskId: "2",
+  });
+  const reconnecting = workbenchReducer(selected, {
+    type: "generation.started",
+    generation: "2",
+  });
+
+  assert.equal(reconnecting.connectionGeneration, "2");
+  assert.equal(reconnecting.snapshotGeneration, null);
+  assert.deepEqual(reconnecting.snapshot.tasks, []);
+  assert.equal(reconnecting.activeTaskId, null);
+  assert.equal(reconnecting.draftOpen, false);
+});
+
+test("a late snapshot from an older generation is ignored", () => {
+  const current = workbenchReducer(initialWorkbenchState, {
+    type: "generation.started",
+    generation: "2",
+  });
+  const stale = workbenchReducer(current, {
+    type: "snapshot.accepted",
+    generation: "1",
+    snapshot: snapshot("1", [task("stale", "1")]),
+  });
+  assert.equal(stale, current);
+});
+
 test("a signed-out Host snapshot restores an active Run instead of hiding it", () => {
   const running = {
     ...task("2", "1"),

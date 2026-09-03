@@ -27,6 +27,13 @@ export function connectionStatus(
       { diagnostic: status.diagnostic },
     );
 
+  if (status.kind === "connection_failed")
+    return attentionStatus(
+      "connection.failed",
+      { scope: "connection" },
+      { diagnostic: status.diagnostic },
+    );
+
   const componentMismatch =
     status.source === "bootstrap" &&
     (status.code === "identity_mismatch" ||

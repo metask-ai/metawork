@@ -120,6 +120,29 @@ test("contract mismatch is terminal and never enters connection retry backoff", 
   });
 });
 
+test("bootstrap transport failure is classified separately from snapshot sync failure", async () => {
+  const statuses = [];
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => undefined,
+    onHostSignal: () => () => undefined,
+    connect: async () => {
+      throw new Error("Host is not running");
+    },
+    disconnect: async () => undefined,
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: () => undefined,
+    onStatus: (status) => statuses.push(status),
+    onReady: () => undefined,
+    onViewSyncFailed: () => undefined,
+  });
+
+  await assert.rejects(connection.start(), /Host is not running/);
+  assert.equal(statuses.at(-1)?.kind, "connection_failed");
+  assert.equal(statuses.at(-1)?.failure, "bootstrap_failed");
+});
+
 test("snapshot contract failure is terminal and never enters refresh retry backoff", async () => {
   let fetchCalls = 0;
   const statuses = [];
@@ -148,6 +171,7 @@ test("snapshot contract failure is terminal and never enters refresh retry backo
   await assert.rejects(connection.start(), RendererBridgeContractError);
   assert.equal(fetchCalls, 1);
   assert.equal(statuses.at(-1)?.kind, "contract_failed");
+  assert.equal(statuses.at(-1)?.failure, "snapshot_contract_failed");
   assert.equal(statuses.at(-1)?.source, "snapshot");
   assert.equal(statuses.at(-1)?.code, "invalid_response");
   const shellStatus = connectionStatus(statuses.at(-1));
@@ -158,6 +182,65 @@ test("snapshot contract failure is terminal and never enters refresh retry backo
     retryable: true,
   });
   assert.equal(failed.at(-1), true);
+});
+
+test("snapshot publication carries the generation that produced it", async () => {
+  const publications = [];
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => undefined,
+    onHostSignal: () => () => undefined,
+    connect: async () => "generation-2",
+    disconnect: async () => undefined,
+    fetchSnapshot: async () => snapshot("1"),
+    ping: async () => ({ sequence: 1 }),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: (value, generation) => publications.push({ value, generation }),
+    onStatus: () => undefined,
+    onReady: () => undefined,
+    onViewSyncFailed: () => undefined,
+  });
+
+  await connection.start();
+  assert.equal(publications[0]?.generation, "generation-2");
+  await connection.stop();
+});
+
+test("a bootstrap contract mismatch during recovery remains a root failure", async () => {
+  let connectCalls = 0;
+  const statuses = [];
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => undefined,
+    onHostSignal: () => () => undefined,
+    connect: async () => {
+      connectCalls += 1;
+      if (connectCalls === 1) return "1";
+      throw new RendererBridgeContractError(
+        "revision_mismatch",
+        "Host requires metawork.renderer-bridge revision 2",
+      );
+    },
+    disconnect: async () => undefined,
+    fetchSnapshot: async () => {
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "snapshot shape is stale",
+      );
+    },
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: () => undefined,
+    onStatus: (status) => statuses.push(status),
+    onReady: () => undefined,
+    onViewSyncFailed: () => undefined,
+  });
+
+  await assert.rejects(connection.start(), RendererBridgeContractError);
+  await assert.rejects(connection.retry(), RendererBridgeContractError);
+  assert.equal(statuses.at(-1)?.source, "bootstrap");
+  assert.equal(statuses.at(-1)?.failure, "bootstrap_failed");
 });
 
 test("Workbench connection publishes only synchronized snapshots", async () => {
