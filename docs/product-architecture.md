@@ -88,6 +88,8 @@ Models validates source-qualified ModelRef and expected revision
 → publish canonical projection
 ```
 
+Metask `metaskSelection` 只是 Provider-local intent，只有 `defaultSelection` 才是 Product Control 消费的 global desired intent；前者有效而后者为空时不得安装 ExecutionConfig，`newTaskAdmission` 必须保持 unavailable。恢复只能显式提交现有完整 `ModelRef` 到 `selectDefault`，随后走上述正常 reconcile，不得由 Product Control 猜测首个模型、硬编码模型名或手工推进 execution generation。
+
 Models desired commit 不等待、查询或受制于任何消费者。后续 resolve、scrub 或 install 失败时，desired state 保持已提交，active state保留旧 binding或进入 unavailable；失败不回滚 Models，也不改写 Account。Connection CRUD/test 不隐式改变 global default，普通 metadata mutation 只修改 Models-owned connection事实。
 
 每个 Account prepared transition 的 commit 仍在主线程单一 turn 内完成。Models catalog 可以跨 worker completion，但只由 Models attempt 与 authorization generation 接纳。实际 Product execution 安装只能发生在 Models desired state提交之后；后续 fallible effect 只能改变 Product active/recovery projection。
@@ -107,6 +109,8 @@ Models 每次 resolve 只产生一个调用方 owned candidate，绑定精确 `M
 `models.json` schema 1 是 Models aggregate 的唯一 canonical store。它保存 Metask 的无 secret Provider-local intent、source-qualified global default、selection revision、connection id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、拆分后的 connection/source/catalog revision 和待完成 credential deletion tombstone；不保存 OAuth token、API credential、credential locator、migration marker 或 Product binding generation。API credential 只进入系统安全存储；既有 service identity 和以 connection id 派生的 account identity 保持不变。
 
 首次 bootstrap 只读取当前格式的 `models.json`。canonical 文件不存在时，在一次 Models transaction 中初始化空的当前 schema；`preferences.json`、`model-connections.json` 及其 decoder、归档和迁移 marker 不属于当前 authority，也不参与恢复或 fallback。canonical bytes 缺失字段、包含旧 shape 或损坏时必须 fail closed，不能转换旧 generation/revision、猜测默认来源或静默清空已有事实。schema 标识保持为 1，当前格式通过原地 hard cut 收口。
+
+Models persistence health 精确区分：当前 canonical 可用为 `ready`；Models file capability 存在但 canonical 读取、严格解码或提交结果不可信为 `recovery_required`；file capability 本身不存在为 `unavailable`。只有 `recovery_required` 允许用户确认后用当前可信内存事实安装空的 schema 1 store；Models owner 与 Product Control 必须在执行时重新校验该资格。`ready` 与 `unavailable` 都拒绝 reset，Renderer 不能为其显示破坏性恢复动作。reset 不读取、转换或归档旧 bytes，不改写 Account、Workspace、Task、Run 或对话历史；既有 Task 已拥有的 ExecutionConfig 继续按原生命周期收口。
 
 连接删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后以一次 registry commit 替换为完整连接。credential 替换先持久撤销旧 readiness 和对应 default，再覆盖同一稳定 connection locator，最后以新的 connection/source generation 恢复为待测试状态；写入或最终提交失败时连接必须保持 `missing/configuring`，不得让旧 readiness 配上新 credential。启动与后续 mutation 必须排空 tombstone。确认 credential 缺失时撤销对应 default 并持久化 `credential_status = missing`；安全存储暂时不可读不能被误写成已确认缺失。Execution 恢复与 Account identity 恢复相互独立，一方 unavailable 不得使另一方的持久化事实被清空或覆盖。
 
