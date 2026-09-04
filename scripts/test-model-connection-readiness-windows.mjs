@@ -101,7 +101,6 @@ try {
     displayName: "Readiness provider",
     protocol: "openai_chat_completions",
     normalizedBaseUrl: endpoint,
-    model: { id: model, displayName: "Readiness model" },
   }).then(
     (value) => ({ value, error: null }),
     (error) => ({ value: null, error }),
@@ -162,7 +161,7 @@ try {
     commandTimeoutMs,
     "created Model Connection",
   );
-  const { connection } = created;
+  let { connection } = created;
   if (
     !isWireId(connection.connectionRevision) ||
     connection.protocol !== "openai_chat_completions" ||
@@ -193,6 +192,30 @@ try {
     throw new Error(
       "captured credential was not committed to Windows Credential Manager",
     );
+
+  assertAcceptedIfPresent(
+    await invokeBridge("metawork.models.customModels.add", {
+      sourceId: connection.id,
+      expectedConnectionRevision: connection.connectionRevision,
+      expectedCatalogGeneration: connection.catalogGeneration,
+      model: { id: model, displayName: "Readiness model" },
+    }),
+    "Provider model add",
+  );
+  const configured = await poll(
+    async () => {
+      const current = await snapshot();
+      const item = current.models?.connections?.find(
+        (candidate) => candidate.id === connection.id,
+      );
+      return item?.models?.some((candidate) => candidate.id === model)
+        ? { current, item }
+        : null;
+    },
+    commandTimeoutMs,
+    "configured Provider model",
+  );
+  connection = configured.item;
 
   assertAcceptedIfPresent(
     await invokeBridge("metawork.models.connections.test", {

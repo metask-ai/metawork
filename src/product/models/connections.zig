@@ -198,7 +198,7 @@ pub const Registry = struct {
             return error.Capacity;
         contract.validateModelConnectionSpec(input.spec) catch
             return error.InvalidConnection;
-        if (input.credential_slot.id.len == 0 or input.model.id.len == 0 or
+        if (input.credential_slot.id.len == 0 or
             connection_revision == 0 or source_generation == 0 or
             catalog_generation == 0)
             return error.InvalidConnection;
@@ -223,13 +223,6 @@ pub const Registry = struct {
             .catalog_generation = catalog_generation,
         };
         errdefer connection.deinit(self.allocator);
-        try connection.models.append(self.allocator, .{
-            .id = try self.allocator.dupe(u8, input.model.id),
-            .display_name = try self.allocator.dupe(u8, input.model.display_name),
-            .metadata = input.model.metadata,
-            .metadata_provenance = .user_declared,
-        });
-        connection.selected_model = try self.allocator.dupe(u8, input.model.id);
         try self.connections.append(self.allocator, connection);
     }
 
@@ -447,7 +440,13 @@ pub const Registry = struct {
             .metadata_provenance = .user_declared,
         };
         errdefer model.deinit(self.allocator);
+        const first_model = connection.models.items.len == 0;
+        var selected_model: []u8 = &.{};
+        if (first_model)
+            selected_model = try self.allocator.dupe(u8, command.model.id);
+        errdefer if (selected_model.len != 0) self.allocator.free(selected_model);
         try connection.models.append(self.allocator, model);
+        if (first_model) connection.selected_model = selected_model;
         connection.connection_revision = next_connection_revision;
         connection.catalog_generation = next_catalog_generation;
         _ = settleTesting(connection);
@@ -549,7 +548,6 @@ pub const Registry = struct {
             command.expected_connection_revision,
             command.expected_catalog_generation,
         );
-        if (connection.models.items.len <= 1) return error.InvalidConnection;
         if (next_connection_revision == 0 or
             next_connection_revision == connection.connection_revision or
             next_catalog_generation == 0 or
@@ -577,7 +575,7 @@ pub const Registry = struct {
             command.selection.model_id,
         );
         var selected_model: []u8 = &.{};
-        if (selected_changed) {
+        if (selected_changed and connection.models.items.len > 1) {
             const replacement_index: usize = if (index == 0) 1 else 0;
             selected_model = try self.allocator.dupe(
                 u8,
@@ -1162,8 +1160,7 @@ pub fn encodeAlloc(
     var connection_storage: [contract.Limits.model_connection_entries]CanonicalConnectionWire = undefined;
     var model_storage: [contract.Limits.model_connection_entries][contract.Limits.model_connection_model_entries]CanonicalModelWire = undefined;
     for (registry.connections.items, 0..) |connection, connection_index| {
-        if (connection.models.items.len == 0 or
-            connection.models.items.len > contract.Limits.model_connection_model_entries)
+        if (connection.models.items.len > contract.Limits.model_connection_model_entries)
             return error.InvalidData;
         for (connection.models.items, 0..) |model, model_index|
             model_storage[connection_index][model_index] = .{
@@ -1267,7 +1264,6 @@ pub fn decode(
             connection_wire.connection_revision == 0 or
             connection_wire.source_generation == 0 or
             connection_wire.catalog_generation == 0 or
-            connection_wire.models.len == 0 or
             connection_wire.models.len > contract.Limits.model_connection_model_entries)
             return error.InvalidData;
         contract.validateModelConnectionSpec(.{
@@ -1321,9 +1317,13 @@ pub fn decode(
                 .ready_source_generation = ready_source_generation,
             });
         }
-        if (!connectionHasModel(&connection, connection_wire.selected_model))
-            return error.InvalidData;
-        connection.selected_model = try allocator.dupe(u8, connection_wire.selected_model);
+        if (connection_wire.models.len == 0) {
+            if (connection_wire.selected_model.len != 0) return error.InvalidData;
+        } else {
+            if (!connectionHasModel(&connection, connection_wire.selected_model))
+                return error.InvalidData;
+            connection.selected_model = try allocator.dupe(u8, connection_wire.selected_model);
+        }
         try result.connections.append(allocator, connection);
     }
     if (wire.default_selection) |selection| {
@@ -1533,6 +1533,51 @@ test "registry creates and selects a native model connection" {
     try std.testing.expectEqualStrings("slot-1", values[0].id);
     try std.testing.expectEqualStrings("gpt-5", values[0].selected_model);
     try contract.validateModelConnectionView(values[0]);
+}
+
+test "registry persists a provider before its first model is configured" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.create(.{
+        .connection_id = "slot-empty",
+        .spec = .{
+            .display_name = "Empty provider",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        .credential_slot = .{ .id = "slot-empty" },
+    }, 1, 2, 3);
+    const created = registry.views()[0];
+    try std.testing.expectEqual(@as(usize, 0), created.models.len);
+    try std.testing.expectEqualStrings("", created.selected_model);
+    try contract.validateModelConnectionView(created);
+
+    const encoded = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(encoded);
+    var restored = try decode(std.testing.allocator, encoded);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 0), restored.views()[0].models.len);
+
+    try restored.addCustomModel(.{
+        .source_id = "slot-empty",
+        .expected_connection_revision = 1,
+        .expected_catalog_generation = 3,
+        .model = .{ .id = "gpt-5" },
+    }, 4, 5);
+    const configured = restored.views()[0];
+    try std.testing.expectEqual(@as(usize, 1), configured.models.len);
+    try std.testing.expectEqualStrings("gpt-5", configured.selected_model);
+    try contract.validateModelConnectionView(configured);
+
+    try restored.removeCustomModel(.{
+        .selection = .{ .source_id = "slot-empty", .model_id = "gpt-5" },
+        .expected_connection_revision = 4,
+        .expected_catalog_generation = 5,
+    }, 6, 7, null);
+    const emptied = restored.views()[0];
+    try std.testing.expectEqual(@as(usize, 0), emptied.models.len);
+    try std.testing.expectEqualStrings("", emptied.selected_model);
+    try contract.validateModelConnectionView(emptied);
 }
 
 test "registry hard cut rejects the retired provider field" {
@@ -2142,6 +2187,29 @@ test "model connection file store atomically restores registry bytes" {
     );
 }
 
-fn testCreate(registry: *Registry, input: contract.ModelConnectionCreateCommand) !void {
-    try registry.create(input, 1, 2, 3);
+const TestModelConnectionCreate = struct {
+    connection_id: []const u8,
+    spec: contract.ModelConnectionSpec,
+    credential_slot: contract.ModelConnectionCredentialSlot,
+    model: contract.CustomModelInput,
+};
+
+/// Builds an already-configured fixture through the public two-command
+/// Provider-create/model-add workflow. Seed revisions are deliberately outside
+/// the ordinary test baseline so the configured fixture retains the historical
+/// 1/2/3 revision values expected by behavior-specific tests below.
+fn testCreate(registry: *Registry, input: TestModelConnectionCreate) !void {
+    const seed_connection_revision = std.math.maxInt(u64);
+    const seed_catalog_generation = std.math.maxInt(u64) - 1;
+    try registry.create(.{
+        .connection_id = input.connection_id,
+        .spec = input.spec,
+        .credential_slot = input.credential_slot,
+    }, seed_connection_revision, 2, seed_catalog_generation);
+    try registry.addCustomModel(.{
+        .source_id = input.connection_id,
+        .expected_connection_revision = seed_connection_revision,
+        .expected_catalog_generation = seed_catalog_generation,
+        .model = input.model,
+    }, 1, 3);
 }

@@ -191,7 +191,6 @@ test("Models connection commands carry split source-qualified revisions", async 
     displayName: "Provider",
     protocol: "openai_responses",
     normalizedBaseUrl: "https://api.example.com/v1/responses",
-    modelId: "model-a",
   });
   await client.updateModelConnection({
     sourceId: "source-1",
@@ -228,7 +227,6 @@ test("Models connection commands carry split source-qualified revisions", async 
         displayName: "Provider",
         protocol: "openai_responses",
         normalizedBaseUrl: "https://api.example.com/v1/responses",
-        model: { id: "model-a", displayName: "" },
       },
     },
     {

@@ -845,16 +845,19 @@ export const enUS = {
   "settings.model_connection_name": "Provider name",
   "settings.model_connection_name_placeholder": "My OpenAI service",
   "settings.model_connection_protocol": "Protocol",
-  "settings.model_connection_endpoint": "Service endpoint",
-  "settings.model_connection_model_id": "Model ID",
+  "settings.model_connection_endpoint": "Base URL",
   "settings.model_connection_model_id_placeholder": "gpt-5",
-  "settings.model_connection_secure_capture_help":
-    "After you save, MetaWork will ask for this provider's API key in a secure Host window.",
+  "settings.provider_secure_api_key_title": "Entered in a secure Host window",
+  "settings.provider_secure_api_key_help":
+    "MetaWork stores the key in the operating system credential store. It is never exposed to this page.",
+  "settings.provider_models_configured_elsewhere":
+    "Add and test models from the Models page after this provider is saved.",
+  "settings.provider_set_key_and_save": "Set API key and save",
   "settings.model_connection_route.protocol": "Protocol",
-  "settings.model_connection_route.endpoint": "Endpoint",
-  "settings.model_connection_route.model": "Model",
+  "settings.model_connection_route.endpoint": "Base URL",
+  "settings.model_connection_route.api_key": "API key",
   "settings.model_connection_edit_help":
-    "Changing the protocol or endpoint requires another connection test. The API key is not shown or changed here.",
+    "Changing the protocol or Base URL requires another connection test. The API key is not shown or changed here.",
   "settings.model_connection_replace_credential": "Replace API key",
   "settings.model_connection_remove_confirm":
     "Remove this provider and its stored credential? If it supplies the default model, new tasks will pause until you choose another. Existing tasks keep their current binding.",
@@ -893,6 +896,11 @@ export const enUS = {
     "This configuration currently provides only one available model.",
   "settings.model_menu_help":
     "Choose from models available to the selected provider and API key.",
+  "settings.custom_model_add_help":
+    "Enter the model ID exposed by this provider. It will be tested before it can become the default.",
+  "settings.custom_model_add": "Add model",
+  "settings.custom_model_adding": "Adding…",
+  "settings.custom_model_test": "Test model",
   "settings.choose_selection": "Choose",
   "settings.change_selection": "Change",
   "settings.view_selection": "View options",

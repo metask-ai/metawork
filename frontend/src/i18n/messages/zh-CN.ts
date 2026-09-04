@@ -775,16 +775,19 @@ export const zhCN: Record<MessageId, string> = {
   "settings.model_connection_name": "Provider 名称",
   "settings.model_connection_name_placeholder": "我的 OpenAI 服务",
   "settings.model_connection_protocol": "协议",
-  "settings.model_connection_endpoint": "服务地址",
-  "settings.model_connection_model_id": "模型 ID",
+  "settings.model_connection_endpoint": "服务地址（Base URL）",
   "settings.model_connection_model_id_placeholder": "gpt-5",
-  "settings.model_connection_secure_capture_help":
-    "保存后，MetaWork 会在安全的 Host 窗口中采集这个 Provider 的 API Key。",
+  "settings.provider_secure_api_key_title": "在安全的 Host 窗口中输入",
+  "settings.provider_secure_api_key_help":
+    "MetaWork 将密钥保存到操作系统凭据存储，不会向当前页面暴露密钥。",
+  "settings.provider_models_configured_elsewhere":
+    "保存 Provider 后，请在模型页面添加并测试模型。",
+  "settings.provider_set_key_and_save": "设置 API Key 并保存",
   "settings.model_connection_route.protocol": "协议",
-  "settings.model_connection_route.endpoint": "服务地址",
-  "settings.model_connection_route.model": "模型",
+  "settings.model_connection_route.endpoint": "Base URL",
+  "settings.model_connection_route.api_key": "API Key",
   "settings.model_connection_edit_help":
-    "修改协议或服务地址后需要重新测试连接；这里不会显示或修改 API Key。",
+    "修改协议或 Base URL 后需要重新测试连接；这里不会显示或修改 API Key。",
   "settings.model_connection_replace_credential": "替换 API Key",
   "settings.model_connection_remove_confirm":
     "删除这个 Provider 及其保存的凭据？如果它提供当前默认模型，选择其他模型前新任务将暂停；已有任务仍保留当前绑定。",
@@ -820,6 +823,11 @@ export const zhCN: Record<MessageId, string> = {
     "选择新任务使用的模型；已有任务继续使用创建时绑定的模型。",
   "settings.only_model_help": "当前配置只提供这一个可用模型。",
   "settings.model_menu_help": "从所选 Provider 与 API Key 的可用模型中选择。",
+  "settings.custom_model_add_help":
+    "输入这个 Provider 开放的模型 ID；测试通过后才能设为默认模型。",
+  "settings.custom_model_add": "添加模型",
+  "settings.custom_model_adding": "正在添加…",
+  "settings.custom_model_test": "测试模型",
   "settings.choose_selection": "选择",
   "settings.change_selection": "更改",
   "settings.view_selection": "查看选项",

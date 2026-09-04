@@ -23,7 +23,6 @@ const CreateFn = *const fn (
     *anyopaque,
     []const u8,
     models_contract.ModelConnectionSpec,
-    models_contract.CustomModelInput,
 ) models_contract.CommandResult;
 const ReplaceCredentialFn = *const fn (
     *anyopaque,
@@ -69,13 +68,11 @@ pub const Host = struct {
     fn create(
         context: *anyopaque,
         spec: models_contract.ModelConnectionSpec,
-        model: models_contract.CustomModelInput,
     ) bridge.ModelConnectionCreateOutcome {
         const self: *Host = @ptrCast(@alignCast(context));
         var secret_storage: [models_contract.Limits.credential_bytes]u8 = undefined;
         return self.createWithStorage(
             spec,
-            model,
             &secret_storage,
         );
     }
@@ -83,7 +80,6 @@ pub const Host = struct {
     fn createWithStorage(
         self: *Host,
         spec: models_contract.ModelConnectionSpec,
-        model: models_contract.CustomModelInput,
         secret_storage: []u8,
     ) bridge.ModelConnectionCreateOutcome {
         std.crypto.secureZero(u8, secret_storage);
@@ -91,9 +87,9 @@ pub const Host = struct {
         if (!self.available()) return .unavailable;
         const result = self.capture_fn(
             self.capture_context,
-            "Add model connection",
-            "Enter the API credential for this connection.",
-            "Save connection",
+            "Add provider",
+            "Enter the API key for this provider.",
+            "Save provider",
             "Cancel",
             secret_storage,
         ) orelse return .unavailable;
@@ -107,7 +103,6 @@ pub const Host = struct {
             self.create_context,
             secret_storage[0..captured],
             spec,
-            model,
         ) };
     }
 
@@ -177,13 +172,11 @@ fn coordinatorCreate(
     context: *anyopaque,
     secret: []const u8,
     spec: models_contract.ModelConnectionSpec,
-    model: models_contract.CustomModelInput,
 ) models_contract.CommandResult {
     const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
     return coordinator.createWithCapturedCredential(
         secret,
         spec,
-        model,
     );
 }
 
@@ -232,7 +225,6 @@ const TestContext = struct {
         context: *anyopaque,
         secret: []const u8,
         _: models_contract.ModelConnectionSpec,
-        _: models_contract.CustomModelInput,
     ) models_contract.CommandResult {
         const self: *TestContext = @ptrCast(@alignCast(context));
         self.create_called = true;
@@ -253,7 +245,6 @@ const TestContext = struct {
             context,
             secret,
             test_spec,
-            .{ .id = "model", .display_name = "Model" },
         );
     }
 
@@ -281,7 +272,6 @@ test "Model Connection host clears captured plaintext after submission" {
     var storage: [32]u8 = @splat(0xa5);
     const result = host.createWithStorage(
         test_spec,
-        .{ .id = "model", .display_name = "Model" },
         &storage,
     );
     try std.testing.expect(result == .submitted);
@@ -300,7 +290,6 @@ test "Model Connection host clears capture on cancellation and unavailability" {
     var storage: [32]u8 = @splat(0xa5);
     try std.testing.expect(host.createWithStorage(
         test_spec,
-        .{ .id = "model", .display_name = "Model" },
         &storage,
     ) == .cancelled);
     try std.testing.expect(!context.create_called);
@@ -310,7 +299,6 @@ test "Model Connection host clears capture on cancellation and unavailability" {
     @memset(&storage, 0xa5);
     try std.testing.expect(host.createWithStorage(
         test_spec,
-        .{ .id = "model", .display_name = "Model" },
         &storage,
     ) == .unavailable);
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** storage.len), &storage);
@@ -319,7 +307,6 @@ test "Model Connection host clears capture on cancellation and unavailability" {
     @memset(&storage, 0xa5);
     const invalid = host.createWithStorage(
         test_spec,
-        .{ .id = "model", .display_name = "Model" },
         &storage,
     );
     try std.testing.expect(invalid == .submitted);
@@ -334,7 +321,6 @@ test "Model Connection host clears plaintext after Models rejects create" {
     var storage: [32]u8 = @splat(0xa5);
     const result = host.createWithStorage(
         test_spec,
-        .{ .id = "model", .display_name = "Model" },
         &storage,
     );
     try std.testing.expect(result == .submitted);

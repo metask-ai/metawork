@@ -174,7 +174,6 @@ pub const ModelConnectionHost = struct {
     create_fn: *const fn (
         *anyopaque,
         models_contract.ModelConnectionSpec,
-        models_contract.CustomModelInput,
     ) ModelConnectionCreateOutcome,
     replace_credential_fn: *const fn (
         *anyopaque,
@@ -1667,11 +1666,8 @@ pub const Dispatcher = struct {
         if (parsed.value.displayName.len == 0 or
             parsed.value.displayName.len > models_contract.Limits.display_name_bytes or
             parsed.value.normalizedBaseUrl.len == 0 or
-            parsed.value.normalizedBaseUrl.len > models_contract.Limits.base_url_bytes or
-            parsed.value.model.id.len == 0 or
-            parsed.value.model.id.len > models_contract.Limits.model_id_bytes)
+            parsed.value.normalizedBaseUrl.len > models_contract.Limits.base_url_bytes)
             return error.InvalidBridgePayload;
-        const model = try parseCustomModel(parsed.value.model);
         const spec: models_contract.ModelConnectionSpec = .{
             .display_name = parsed.value.displayName,
             .protocol = protocol,
@@ -1687,7 +1683,6 @@ pub const Dispatcher = struct {
         return encodeExecutionResult(output, switch (host.create_fn(
             host.context,
             spec,
-            model,
         )) {
             .submitted => |result| result,
             .cancelled => .rejected(.user_cancelled),

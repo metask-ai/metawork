@@ -3089,6 +3089,21 @@ export default function App() {
                 client.replaceModelConnectionCredential(connectionId, revision),
               )
             }
+            onAddCustomModel={(
+              connectionId,
+              connectionRevision,
+              catalogGeneration,
+              modelId,
+            ) =>
+              runExecutionCommand(() =>
+                client.addCustomModel({
+                  sourceId: connectionId,
+                  expectedConnectionRevision: connectionRevision,
+                  expectedCatalogGeneration: catalogGeneration,
+                  model: { id: modelId },
+                }),
+              )
+            }
             onRemoveModelConnection={(connectionId, generation) =>
               runExecutionCommand(() =>
                 client.removeModelConnection(connectionId, generation),

@@ -568,15 +568,12 @@ export class BridgeClient {
     displayName: string;
     protocol: Protocol;
     normalizedBaseUrl: string;
-    modelId: string;
-    modelDisplayName?: string;
   }) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionCreate, {
         displayName: input.displayName,
         protocol: input.protocol,
         normalizedBaseUrl: input.normalizedBaseUrl,
-        model: { id: input.modelId, displayName: input.modelDisplayName ?? "" },
       }),
     );
   }

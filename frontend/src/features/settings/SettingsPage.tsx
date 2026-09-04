@@ -27,10 +27,18 @@ type RequestedSelection = {
 type ModelConnectionDraft = {
   displayName: string;
   protocol: Protocol;
-  normalizedBaseUrl: string;
-  modelId: string;
+  baseUrl: string;
 };
-type ModelConnectionEditDraft = Omit<ModelConnectionDraft, "modelId"> & {
+type ModelConnectionSubmission = {
+  displayName: string;
+  protocol: Protocol;
+  normalizedBaseUrl: string;
+};
+type ModelConnectionEditDraft = ModelConnectionDraft & {
+  connectionId: string;
+  expectedConnectionRevision: string;
+};
+type ModelConnectionEditSubmission = ModelConnectionSubmission & {
   connectionId: string;
   expectedConnectionRevision: string;
 };
@@ -39,19 +47,52 @@ type ModelConnectionRemoval = {
   expectedConnectionRevision: string;
 };
 
-const modelConnectionEndpointDefaults: Record<Protocol, string> = {
-  openai_responses: "https://api.openai.com/v1/responses",
-  anthropic_messages: "https://api.anthropic.com/v1/messages",
-  openai_chat_completions: "https://api.openai.com/v1/chat/completions",
+const modelConnectionBaseUrlExamples: Record<Protocol, string> = {
+  openai_responses: "https://api.openai.com/v1",
+  anthropic_messages: "https://api.anthropic.com",
+  openai_chat_completions: "https://api.openai.com/v1",
   gemini_native: "https://generativelanguage.googleapis.com",
 };
+
+const modelConnectionRequestPaths: Record<Protocol, string> = {
+  openai_responses: "/responses",
+  openai_chat_completions: "/chat/completions",
+  anthropic_messages: "/v1/messages",
+  gemini_native: "",
+};
+
+function trimTrailingSlashes(value: string) {
+  return value.replace(/\/+$/u, "");
+}
+
+export function modelConnectionEndpointFromBaseUrl(
+  protocol: Protocol,
+  baseUrl: string,
+) {
+  const normalizedBase = trimTrailingSlashes(baseUrl.trim());
+  const requestPath = modelConnectionRequestPaths[protocol];
+  if (!requestPath || normalizedBase.endsWith(requestPath)) {
+    return normalizedBase;
+  }
+  return `${normalizedBase}${requestPath}`;
+}
+
+function modelConnectionBaseUrlFromEndpoint(
+  protocol: Protocol,
+  endpoint: string,
+) {
+  const normalizedEndpoint = trimTrailingSlashes(endpoint);
+  const requestPath = modelConnectionRequestPaths[protocol];
+  return requestPath && normalizedEndpoint.endsWith(requestPath)
+    ? normalizedEndpoint.slice(0, -requestPath.length)
+    : normalizedEndpoint;
+}
 
 function newModelConnectionDraft(): ModelConnectionDraft {
   return {
     displayName: "",
     protocol: "openai_chat_completions",
-    normalizedBaseUrl: modelConnectionEndpointDefaults.openai_chat_completions,
-    modelId: "",
+    baseUrl: "",
   };
 }
 
@@ -117,6 +158,7 @@ export function SettingsPage({
   onCreateModelConnection,
   onUpdateModelConnection,
   onReplaceModelConnectionCredential,
+  onAddCustomModel,
   onRemoveModelConnection,
   onTestModelConnection,
   onSelectModelConnection,
@@ -150,13 +192,21 @@ export function SettingsPage({
   onCancel: () => void;
   onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
-  onCreateModelConnection: (input: ModelConnectionDraft) => Promise<boolean>;
+  onCreateModelConnection: (
+    input: ModelConnectionSubmission,
+  ) => Promise<boolean>;
   onUpdateModelConnection: (
-    input: ModelConnectionEditDraft,
+    input: ModelConnectionEditSubmission,
   ) => Promise<boolean>;
   onReplaceModelConnectionCredential: (
     connectionId: string,
     expectedConnectionRevision: string,
+  ) => Promise<boolean>;
+  onAddCustomModel: (
+    connectionId: string,
+    expectedConnectionRevision: string,
+    expectedCatalogGeneration: string,
+    modelId: string,
   ) => Promise<boolean>;
   onRemoveModelConnection: (
     connectionId: string,
@@ -199,6 +249,8 @@ export function SettingsPage({
   const [modelConnectionDraft, setModelConnectionDraft] =
     useState<ModelConnectionDraft | null>(null);
   const [creatingModelConnection, setCreatingModelConnection] = useState(false);
+  const [customModelId, setCustomModelId] = useState("");
+  const [addingCustomModel, setAddingCustomModel] = useState(false);
   const [modelConnectionEdit, setModelConnectionEdit] =
     useState<ModelConnectionEditDraft | null>(null);
   const [modelConnectionRemoval, setModelConnectionRemoval] =
@@ -288,9 +340,9 @@ export function SettingsPage({
       (metaskCatalogState === "ready" || metaskCatalogState === "choosing")) ||
       models.connections.some(
         (connection) =>
-          connection.state === "ready" &&
+          connection.enabled &&
           connection.credentialStatus === "ready" &&
-          connection.models.some((model) => model.ready),
+          connection.state !== "disabled",
       ));
   const canChooseApi =
     modelsPersistenceReady &&
@@ -342,9 +394,9 @@ export function SettingsPage({
         description: modelConnectionProtocolLabel(connection.protocol, t),
         descriptionKind: "text" as const,
         disabled:
-          connection.state !== "ready" ||
+          !connection.enabled ||
           connection.credentialStatus !== "ready" ||
-          !connection.models.some((model) => model.ready),
+          connection.state === "disabled",
       })),
     ],
     [account.state, metaskCatalogState, models.connections, t],
@@ -398,12 +450,17 @@ export function SettingsPage({
   }, [metaskModels, requestedModel, selectedConnection, selectedProviderId, t]);
   const modelConnectionProtocolOptions = useMemo<SelectionMenuOption[]>(
     () =>
-      (["openai_chat_completions", "gemini_native"] as const).map(
-        (protocol) => ({
-          value: protocol,
-          label: modelConnectionProtocolLabel(protocol, t),
-        }),
-      ),
+      (
+        [
+          "openai_responses",
+          "openai_chat_completions",
+          "anthropic_messages",
+          "gemini_native",
+        ] as const
+      ).map((protocol) => ({
+        value: protocol,
+        label: modelConnectionProtocolLabel(protocol, t),
+      })),
     [t],
   );
   const displayedApiId = providerIsMetask
@@ -429,6 +486,12 @@ export function SettingsPage({
     displayedModelId.length > 0 &&
     modelOptions.length === 1 &&
     !modelHasAlternative;
+  const customModelNeedingTest =
+    !providerIsMetask &&
+    selectedConnection &&
+    !selectedConnection.models.some((model) => model.ready)
+      ? selectedConnection.models[0]
+      : undefined;
   const modelPlaceholder =
     providerIsMetask && modelCatalogLoading
       ? t("settings.model_loading")
@@ -631,14 +694,17 @@ export function SettingsPage({
 
   async function submitModelConnection() {
     if (!modelConnectionDraft || creatingModelConnection) return;
+    const baseUrl = modelConnectionDraft.baseUrl.trim();
+    const displayName = modelConnectionDraft.displayName.trim();
+    if (!displayName || !baseUrl) return;
     const input = {
-      ...modelConnectionDraft,
-      displayName: modelConnectionDraft.displayName.trim(),
-      normalizedBaseUrl: modelConnectionDraft.normalizedBaseUrl.trim(),
-      modelId: modelConnectionDraft.modelId.trim(),
+      displayName,
+      protocol: modelConnectionDraft.protocol,
+      normalizedBaseUrl: modelConnectionEndpointFromBaseUrl(
+        modelConnectionDraft.protocol,
+        baseUrl,
+      ),
     };
-    if (!input.displayName || !input.normalizedBaseUrl || !input.modelId)
-      return;
     setCreatingModelConnection(true);
     try {
       if (await onCreateModelConnection(input)) {
@@ -650,14 +716,42 @@ export function SettingsPage({
     }
   }
 
+  async function addCustomModel() {
+    const modelId = customModelId.trim();
+    if (!selectedConnection || !modelId || addingCustomModel) return;
+    setAddingCustomModel(true);
+    try {
+      if (
+        await onAddCustomModel(
+          selectedConnection.id,
+          selectedConnection.connectionRevision,
+          selectedConnection.catalogGeneration,
+          modelId,
+        )
+      ) {
+        setCustomModelId("");
+      }
+    } finally {
+      setAddingCustomModel(false);
+    }
+  }
+
   async function submitModelConnectionEdit() {
     if (!modelConnectionEdit || mutatingModelConnection) return;
+    const baseUrl = modelConnectionEdit.baseUrl.trim();
+    const displayName = modelConnectionEdit.displayName.trim();
+    if (!displayName || !baseUrl) return;
     const input = {
-      ...modelConnectionEdit,
-      displayName: modelConnectionEdit.displayName.trim(),
-      normalizedBaseUrl: modelConnectionEdit.normalizedBaseUrl.trim(),
+      connectionId: modelConnectionEdit.connectionId,
+      expectedConnectionRevision:
+        modelConnectionEdit.expectedConnectionRevision,
+      displayName,
+      protocol: modelConnectionEdit.protocol,
+      normalizedBaseUrl: modelConnectionEndpointFromBaseUrl(
+        modelConnectionEdit.protocol,
+        baseUrl,
+      ),
     };
-    if (!input.displayName || !input.normalizedBaseUrl) return;
     setMutatingModelConnection(true);
     try {
       if (await onUpdateModelConnection(input)) setModelConnectionEdit(null);
@@ -1104,6 +1198,7 @@ export function SettingsPage({
                           setRequestedProviderId(value);
                           setRequestedApi(null);
                           setRequestedModel(null);
+                          setCustomModelId("");
                         }}
                       />
                     </div>
@@ -1193,71 +1288,154 @@ export function SettingsPage({
                         {t("settings.default_model")}
                       </label>
                       <p>
-                        {providerIsMetask &&
-                        modelCatalogLoading &&
-                        (candidateApi || committedApi)
-                          ? t("settings.loading_models_for", {
-                              api:
-                                candidateApi?.name ||
-                                committedApi?.name ||
-                                t("account.api_fallback"),
-                            })
-                          : t(
-                              modelIsOnlyOption
-                                ? "settings.only_model_help"
-                                : "settings.default_model_help",
-                            )}
+                        {!providerIsMetask &&
+                        selectedConnection?.models.length === 0
+                          ? t("settings.custom_model_add_help")
+                          : providerIsMetask &&
+                              modelCatalogLoading &&
+                              (candidateApi || committedApi)
+                            ? t("settings.loading_models_for", {
+                                api:
+                                  candidateApi?.name ||
+                                  committedApi?.name ||
+                                  t("account.api_fallback"),
+                              })
+                            : t(
+                                modelIsOnlyOption
+                                  ? "settings.only_model_help"
+                                  : "settings.default_model_help",
+                              )}
                       </p>
                     </div>
                     <div className="settings-control-stack">
-                      <SelectionMenu
-                        triggerId="settings-model"
-                        value={
-                          providerIsMetask
-                            ? candidateModelId || displayedModelId
-                            : displayedModelId
-                        }
-                        options={modelOptions}
-                        placeholder={modelPlaceholder}
-                        ariaLabel={t("settings.default_model")}
-                        helper={t("settings.model_menu_help")}
-                        actionLabel={t(
-                          modelIsOnlyOption
-                            ? "settings.view_selection"
-                            : displayedModelId
-                              ? "settings.change_selection"
-                              : "settings.choose_selection",
-                        )}
-                        disabled={
-                          disabled ||
-                          (providerIsMetask && accountDisabled) ||
-                          !canChooseModel ||
-                          modelOptions.length === 0
-                        }
-                        busy={providerIsMetask && modelBusy}
-                        leading={<Icon name="model" />}
-                        triggerClassName="settings-control"
-                        contentClassName="settings-selection-menu"
-                        onValueChange={(value) => {
-                          if (!providerIsMetask && selectedConnection) {
-                            onSelectModelConnection(
-                              selectedConnection.id,
-                              selectedConnection.connectionRevision,
-                              value,
-                            );
-                            return;
-                          }
-                          const model = metaskModels.find(
-                            (candidate) => candidate.id === value,
-                          );
-                          if (!model) return;
-                          setRequestedModel({
-                            selectionId: value,
-                            label: modelLabel(model, t),
-                          });
-                          onSelectModel(value);
-                        }}
-                      />
+                      {!providerIsMetask &&
+                      selectedConnection?.models.length === 0 ? (
+                        <form
+                          className="settings-custom-model-add"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            void addCustomModel();
+                          }}
+                        >
+                          <input
+                            id="settings-model"
+                            className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
+                            autoComplete="off"
+                            maxLength={256}
+                            value={customModelId}
+                            placeholder={t(
+                              "settings.model_connection_model_id_placeholder",
+                            )}
+                            disabled={
+                              disabled || executionDisabled || addingCustomModel
+                            }
+                            onChange={(event) =>
+                              setCustomModelId(event.target.value)
+                            }
+                          />
+                          <Button
+                            type="submit"
+                            size="sm"
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              addingCustomModel ||
+                              !customModelId.trim()
+                            }
+                          >
+                            {addingCustomModel
+                              ? t("settings.custom_model_adding")
+                              : t("settings.custom_model_add")}
+                          </Button>
+                        </form>
+                      ) : (
+                        <>
+                          <SelectionMenu
+                            triggerId="settings-model"
+                            value={
+                              providerIsMetask
+                                ? candidateModelId || displayedModelId
+                                : displayedModelId
+                            }
+                            options={modelOptions}
+                            placeholder={modelPlaceholder}
+                            ariaLabel={t("settings.default_model")}
+                            helper={t("settings.model_menu_help")}
+                            actionLabel={t(
+                              modelIsOnlyOption
+                                ? "settings.view_selection"
+                                : displayedModelId
+                                  ? "settings.change_selection"
+                                  : "settings.choose_selection",
+                            )}
+                            disabled={
+                              disabled ||
+                              (providerIsMetask && accountDisabled) ||
+                              !canChooseModel ||
+                              modelOptions.length === 0
+                            }
+                            busy={providerIsMetask && modelBusy}
+                            leading={<Icon name="model" />}
+                            triggerClassName="settings-control"
+                            contentClassName="settings-selection-menu"
+                            onValueChange={(value) => {
+                              if (!providerIsMetask && selectedConnection) {
+                                onSelectModelConnection(
+                                  selectedConnection.id,
+                                  selectedConnection.connectionRevision,
+                                  value,
+                                );
+                                return;
+                              }
+                              const model = metaskModels.find(
+                                (candidate) => candidate.id === value,
+                              );
+                              if (!model) return;
+                              setRequestedModel({
+                                selectionId: value,
+                                label: modelLabel(model, t),
+                              });
+                              onSelectModel(value);
+                            }}
+                          />
+                          {customModelNeedingTest && selectedConnection && (
+                            <div className="settings-custom-model-test">
+                              <span>
+                                <code>{customModelNeedingTest.id}</code>
+                                <small>
+                                  {modelConnectionTestStatusLabel(
+                                    customModelNeedingTest.testStatus,
+                                    t,
+                                  )}
+                                </small>
+                              </span>
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                disabled={
+                                  disabled ||
+                                  executionDisabled ||
+                                  customModelNeedingTest.testStatus ===
+                                    "testing"
+                                }
+                                onClick={() =>
+                                  onTestModelConnection(
+                                    selectedConnection.id,
+                                    selectedConnection.connectionRevision,
+                                    customModelNeedingTest.id,
+                                    selectedConnection.sourceGeneration,
+                                    selectedConnection.catalogGeneration,
+                                  )
+                                }
+                              >
+                                {customModelNeedingTest.testStatus === "testing"
+                                  ? t("settings.model_connection_testing")
+                                  : t("settings.custom_model_test")}
+                              </Button>
+                            </div>
+                          )}
+                        </>
+                      )}
                       {providerIsMetask && modelHasPendingChange && (
                         <span className="settings-pending-label">
                           <span aria-hidden="true" />
@@ -1408,7 +1586,7 @@ export function SettingsPage({
                             {t("settings.model_connection_route.endpoint")}
                           </span>
                           <span>
-                            {t("settings.model_connection_route.model")}
+                            {t("settings.model_connection_route.api_key")}
                           </span>
                         </div>
                         <label className="settings-model-connection-create-field">
@@ -1460,10 +1638,6 @@ export function SettingsPage({
                                   ? {
                                       ...current,
                                       protocol,
-                                      normalizedBaseUrl:
-                                        modelConnectionEndpointDefaults[
-                                          protocol
-                                        ],
                                     }
                                   : current,
                               );
@@ -1477,7 +1651,12 @@ export function SettingsPage({
                             autoComplete="url"
                             inputMode="url"
                             maxLength={2048}
-                            value={modelConnectionDraft.normalizedBaseUrl}
+                            value={modelConnectionDraft.baseUrl}
+                            placeholder={
+                              modelConnectionBaseUrlExamples[
+                                modelConnectionDraft.protocol
+                              ]
+                            }
                             disabled={
                               disabled ||
                               executionDisabled ||
@@ -1488,40 +1667,30 @@ export function SettingsPage({
                                 current
                                   ? {
                                       ...current,
-                                      normalizedBaseUrl: event.target.value,
+                                      baseUrl: event.target.value,
                                     }
                                   : current,
                               )
                             }
                           />
                         </label>
-                        <label className="settings-model-connection-create-field settings-model-connection-create-field-wide">
-                          <span>{t("settings.model_connection_model_id")}</span>
-                          <input
-                            className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
-                            autoComplete="off"
-                            maxLength={256}
-                            value={modelConnectionDraft.modelId}
-                            placeholder={t(
-                              "settings.model_connection_model_id_placeholder",
-                            )}
-                            disabled={
-                              disabled ||
-                              executionDisabled ||
-                              creatingModelConnection
-                            }
-                            onChange={(event) =>
-                              setModelConnectionDraft((current) =>
-                                current
-                                  ? { ...current, modelId: event.target.value }
-                                  : current,
-                              )
-                            }
-                          />
-                        </label>
+                        <div className="settings-model-connection-create-field settings-model-connection-create-field-wide">
+                          <span>{t("settings.api_key")}</span>
+                          <div className="settings-secure-credential-handoff">
+                            <Icon name="shield" />
+                            <span>
+                              <strong>
+                                {t("settings.provider_secure_api_key_title")}
+                              </strong>
+                              <small>
+                                {t("settings.provider_secure_api_key_help")}
+                              </small>
+                            </span>
+                          </div>
+                        </div>
                         <div className="settings-model-connection-create-footer">
                           <p>
-                            {t("settings.model_connection_secure_capture_help")}
+                            {t("settings.provider_models_configured_elsewhere")}
                           </p>
                           <Button
                             type="submit"
@@ -1531,13 +1700,12 @@ export function SettingsPage({
                               executionDisabled ||
                               creatingModelConnection ||
                               !modelConnectionDraft.displayName.trim() ||
-                              !modelConnectionDraft.normalizedBaseUrl.trim() ||
-                              !modelConnectionDraft.modelId.trim()
+                              !modelConnectionDraft.baseUrl.trim()
                             }
                           >
                             {creatingModelConnection
                               ? t("settings.model_connection_adding")
-                              : t("settings.model_connection_add")}
+                              : t("settings.provider_set_key_and_save")}
                           </Button>
                         </div>
                       </form>
@@ -1568,7 +1736,10 @@ export function SettingsPage({
                                     t,
                                   )}
                                   <span aria-hidden="true"> · </span>
-                                  {connection.normalizedBaseUrl}
+                                  {modelConnectionBaseUrlFromEndpoint(
+                                    connection.protocol,
+                                    connection.normalizedBaseUrl,
+                                  )}
                                 </span>
                                 <span>
                                   {modelConnectionCredentialLabel(
@@ -1646,8 +1817,11 @@ export function SettingsPage({
                                         connection.connectionRevision,
                                       displayName: connection.displayName,
                                       protocol: connection.protocol,
-                                      normalizedBaseUrl:
-                                        connection.normalizedBaseUrl,
+                                      baseUrl:
+                                        modelConnectionBaseUrlFromEndpoint(
+                                          connection.protocol,
+                                          connection.normalizedBaseUrl,
+                                        ),
                                     });
                                   }}
                                 >
@@ -1733,10 +1907,6 @@ export function SettingsPage({
                                             ? {
                                                 ...current,
                                                 protocol,
-                                                normalizedBaseUrl:
-                                                  modelConnectionEndpointDefaults[
-                                                    protocol
-                                                  ],
                                               }
                                             : current,
                                         );
@@ -1752,9 +1922,7 @@ export function SettingsPage({
                                       autoComplete="url"
                                       inputMode="url"
                                       maxLength={2048}
-                                      value={
-                                        modelConnectionEdit.normalizedBaseUrl
-                                      }
+                                      value={modelConnectionEdit.baseUrl}
                                       disabled={
                                         disabled ||
                                         executionDisabled ||
@@ -1765,8 +1933,7 @@ export function SettingsPage({
                                           current
                                             ? {
                                                 ...current,
-                                                normalizedBaseUrl:
-                                                  event.target.value,
+                                                baseUrl: event.target.value,
                                               }
                                             : current,
                                         )
@@ -1796,7 +1963,7 @@ export function SettingsPage({
                                         executionDisabled ||
                                         mutatingModelConnection ||
                                         !modelConnectionEdit.displayName.trim() ||
-                                        !modelConnectionEdit.normalizedBaseUrl.trim()
+                                        !modelConnectionEdit.baseUrl.trim()
                                       }
                                     >
                                       {mutatingModelConnection

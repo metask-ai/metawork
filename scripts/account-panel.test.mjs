@@ -182,6 +182,7 @@ function renderSettings(account, models = readyModels, options = {}) {
       cancelDisabled: false,
       onCreateModelConnection: async () => false,
       onUpdateModelConnection: async () => false,
+      onAddCustomModel: async () => false,
       onRemoveModelConnection: async () => false,
       onTestModelConnection() {},
       onSelectModelConnection() {},

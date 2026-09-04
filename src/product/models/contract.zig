@@ -277,7 +277,6 @@ pub const ModelConnectionCreateCommand = struct {
     connection_id: []const u8,
     spec: ModelConnectionSpec,
     credential_slot: ModelConnectionCredentialSlot,
-    model: CustomModelInput,
 };
 
 pub const ModelConnectionUpdateCommand = struct {
@@ -714,7 +713,6 @@ pub fn validateModelConnectionCommand(command: ModelConnectionCommand) Validatio
             try validateRequired(value.connection_id, Limits.instance_id_bytes);
             try validateModelConnectionSpec(value.spec);
             try validateRequired(value.credential_slot.id, Limits.instance_id_bytes);
-            try validateCustomModelInput(value.model);
         },
         .update => |value| {
             try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
@@ -847,10 +845,16 @@ pub fn validateModelConnectionView(view: ModelConnectionView) ValidationError!vo
     if (view.connection_revision == 0 or view.source_generation == 0 or
         view.catalog_generation == 0)
         return error.InvalidGeneration;
-    if (view.models.len == 0 or
-        view.models.len > Limits.model_connection_model_entries)
+    if (view.models.len > Limits.model_connection_model_entries)
         return error.CollectionTooLarge;
-    try validateRequired(view.selected_model, Limits.model_id_bytes);
+    if (view.models.len == 0) {
+        if (view.selected_model.len != 0 or
+            view.test_status != .untested or
+            view.state != .configuring)
+            return error.InconsistentState;
+    } else {
+        try validateRequired(view.selected_model, Limits.model_id_bytes);
+    }
     var ready_models: usize = 0;
     var selected_test_status: ?ModelConnectionTestStatus = null;
     for (view.models, 0..) |model, index| {
@@ -873,9 +877,11 @@ pub fn validateModelConnectionView(view: ModelConnectionView) ValidationError!vo
     for (view.models) |model| {
         if (std.mem.eql(u8, model.id, view.selected_model)) matches += 1;
     }
-    if (matches != 1) return error.InconsistentState;
-    if (selected_test_status.? != view.test_status)
-        return error.InconsistentState;
+    if (view.models.len != 0) {
+        if (matches != 1) return error.InconsistentState;
+        if (selected_test_status.? != view.test_status)
+            return error.InconsistentState;
+    }
     if (view.state == .ready and
         (view.credential_status != .ready or !view.enabled or ready_models == 0))
         return error.InconsistentState;

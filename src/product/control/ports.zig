@@ -46,7 +46,7 @@ pub const ModelsManagement = struct {
     start_model_connections_unavailable_fn: *const fn (*anyopaque) void,
     stop_model_connections_fn: *const fn (*anyopaque) void,
     reset_model_store_fn: *const fn (*anyopaque, u64) models_contract.CommandResult,
-    create_model_connection_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSpec, models_contract.CustomModelInput) models_contract.CommandResult,
+    create_model_connection_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSpec) models_contract.CommandResult,
     replace_model_connection_credential_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult,
     submit_model_connection_fn: *const fn (*anyopaque, models_contract.ModelConnectionCommand) models_contract.CommandResult,
     begin_model_connection_probe_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand) models_contract.Preparation,
@@ -68,8 +68,8 @@ pub const ModelsManagement = struct {
     pub fn resetModelStore(self: ModelsManagement, expected_revision: u64) models_contract.CommandResult {
         return self.reset_model_store_fn(self.context, expected_revision);
     }
-    pub fn createModelConnectionWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.ModelConnectionSpec, model: models_contract.CustomModelInput) models_contract.CommandResult {
-        return self.create_model_connection_fn(self.context, secret, spec, model);
+    pub fn createModelConnectionWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.ModelConnectionSpec) models_contract.CommandResult {
+        return self.create_model_connection_fn(self.context, secret, spec);
     }
     pub fn replaceModelConnectionCredential(self: ModelsManagement, secret: []const u8, selection: models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult {
         return self.replace_model_connection_credential_fn(self.context, secret, selection);

@@ -334,13 +334,11 @@ pub const Coordinator = struct {
         self: *Coordinator,
         secret: []const u8,
         spec: models_contract.ModelConnectionSpec,
-        model: models_contract.CustomModelInput,
     ) models_contract.CommandResult {
         self.assertMainThread();
         return self.management.createModelConnectionWithCredential(
             secret,
             spec,
-            model,
         );
     }
 

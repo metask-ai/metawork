@@ -98,9 +98,8 @@ const { SelectionMenu } = await vite.ssrLoadModule(
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
-const { SettingsPage } = await vite.ssrLoadModule(
-  "/src/features/settings/SettingsPage.tsx",
-);
+const { SettingsPage, modelConnectionEndpointFromBaseUrl } =
+  await vite.ssrLoadModule("/src/features/settings/SettingsPage.tsx");
 const { GlobalSearch } = await vite.ssrLoadModule(
   "/src/features/search/GlobalSearch.tsx",
 );
@@ -400,6 +399,9 @@ function settingsElement(account, overrides = {}) {
       onUpdateModelConnection() {
         return Promise.resolve(false);
       },
+      onAddCustomModel() {
+        return Promise.resolve(false);
+      },
       onRemoveModelConnection() {
         return Promise.resolve(false);
       },
@@ -462,6 +464,93 @@ test("Settings exposes Providers only for the complete Host gate", () => {
   fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
   assert.ok(screen.getByRole("heading", { name: "Add provider" }));
   assert.ok(screen.getByRole("button", { name: "Back to providers" }));
+});
+
+test("Provider setup keeps Base URL user-owned and submits the protocol endpoint", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const submitted = [];
+  render(
+    settingsElement(readySettingsAccount, {
+      modelConnectionCapabilities: {
+        management: true,
+        secretCapture: true,
+        connectionTest: true,
+      },
+      onCreateModelConnection(input) {
+        submitted.push(input);
+        return Promise.resolve(false);
+      },
+    }),
+  );
+
+  await user.click(screen.getByRole("link", { name: "Providers" }));
+  await user.click(screen.getByRole("button", { name: "Add provider" }));
+
+  const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
+  assert.equal(baseUrl.value, "");
+  assert.equal(baseUrl.placeholder, "https://api.openai.com/v1");
+  assert.equal(screen.queryByRole("textbox", { name: /model id/i }), null);
+  assert.ok(screen.getByText("Entered in a secure Host window"));
+
+  await user.click(screen.getByRole("combobox", { name: "Protocol" }));
+  for (const name of [
+    "OpenAI Responses",
+    "OpenAI Chat Completions",
+    "Anthropic Messages",
+    "Gemini Native",
+  ]) {
+    assert.ok(await screen.findByRole("option", { name }));
+  }
+  await user.click(screen.getByRole("option", { name: "Anthropic Messages" }));
+  assert.equal(baseUrl.value, "");
+  assert.equal(baseUrl.placeholder, "https://api.anthropic.com");
+
+  await user.type(
+    screen.getByRole("textbox", { name: "Provider name" }),
+    "My Anthropic",
+  );
+  await user.type(baseUrl, "https://api.anthropic.com/");
+  await user.click(
+    screen.getByRole("button", { name: "Set API key and save" }),
+  );
+  assert.deepEqual(submitted, [
+    {
+      displayName: "My Anthropic",
+      protocol: "anthropic_messages",
+      normalizedBaseUrl: "https://api.anthropic.com/v1/messages",
+    },
+  ]);
+});
+
+test("Provider Base URLs map to all four existing protocol endpoints", () => {
+  assert.equal(
+    modelConnectionEndpointFromBaseUrl(
+      "openai_responses",
+      "https://api.openai.com/v1/",
+    ),
+    "https://api.openai.com/v1/responses",
+  );
+  assert.equal(
+    modelConnectionEndpointFromBaseUrl(
+      "openai_chat_completions",
+      "https://api.openai.com/v1",
+    ),
+    "https://api.openai.com/v1/chat/completions",
+  );
+  assert.equal(
+    modelConnectionEndpointFromBaseUrl(
+      "anthropic_messages",
+      "https://api.anthropic.com",
+    ),
+    "https://api.anthropic.com/v1/messages",
+  );
+  assert.equal(
+    modelConnectionEndpointFromBaseUrl(
+      "gemini_native",
+      "https://generativelanguage.googleapis.com",
+    ),
+    "https://generativelanguage.googleapis.com",
+  );
 });
 
 test("Settings completes the API transaction before replacing committed defaults", async () => {
@@ -650,6 +739,51 @@ test("Settings keeps Metask available while a model connection is the default", 
   await user.click(screen.getByRole("combobox", { name: "Default model" }));
   await user.click(await screen.findByRole("option", { name: /Model One/ }));
   assert.deepEqual(view.selections.model, ["model-1"]);
+});
+
+test("Models adds the first model to an already saved provider", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const additions = [];
+  renderSettings(readySettingsAccount, {
+    models: {
+      ...readySettingsModels,
+      connections: [
+        {
+          id: "connection-empty",
+          displayName: "Empty provider",
+          protocol: "openai_responses",
+          normalizedBaseUrl: "https://api.openai.com/v1/responses",
+          state: "configuring",
+          testStatus: "untested",
+          credentialStatus: "ready",
+          enabled: true,
+          models: [],
+          selectedModel: "",
+          connectionRevision: "3",
+          sourceGeneration: "5",
+          catalogGeneration: "7",
+        },
+      ],
+    },
+    onAddCustomModel(...input) {
+      additions.push(input);
+      return Promise.resolve(false);
+    },
+  });
+
+  await user.click(screen.getByRole("combobox", { name: "Provider" }));
+  await user.click(
+    await screen.findByRole("option", { name: /Empty provider/ }),
+  );
+  assert.match(
+    screen.getByRole("combobox", { name: "API key" }).textContent,
+    /Saved API key/,
+  );
+
+  const modelId = screen.getByRole("textbox", { name: "Default model" });
+  await user.type(modelId, "gpt-5.6-sol");
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  assert.deepEqual(additions, [["connection-empty", "3", "7", "gpt-5.6-sol"]]);
 });
 
 test("Settings keeps Account cancellation independent from Models loading", async () => {

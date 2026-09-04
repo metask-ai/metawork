@@ -2152,12 +2152,10 @@ pub const Runtime = struct {
         self: *Runtime,
         secret: []const u8,
         spec: models_contract.ModelConnectionSpec,
-        model: models_contract.CustomModelInput,
     ) models_contract.CommandResult {
         const result = self.model_connections.createWithCredential(
             secret,
             spec,
-            model,
         );
         if (result.accepted) self.finishExecutionCommitNoFail();
         return result;
@@ -2361,11 +2359,20 @@ pub const Runtime = struct {
                     .protocol = input.protocol,
                     .normalized_base_url = input.base_url,
                 },
-                .{
+            ).accepted) return error.InvalidAutomationExecution;
+            view = self.modelsView();
+            if (view.model_connections.len != 1)
+                return error.InvalidAutomationExecution;
+            const provider = view.model_connections[0];
+            if (!self.submitModelConnectionCommand(.{ .add_custom_model = .{
+                .source_id = provider.id,
+                .expected_connection_revision = provider.connection_revision,
+                .expected_catalog_generation = provider.catalog_generation,
+                .model = .{
                     .id = input.model,
                     .display_name = input.model,
                 },
-            ).accepted) return error.InvalidAutomationExecution;
+            } }).accepted) return error.InvalidAutomationExecution;
         } else {
             const restored = view.model_connections[0];
             if (restored.credential_status != .missing or
@@ -7105,8 +7112,8 @@ fn controlStopModelConnections(context: *anyopaque) void {
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
 }
-fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: models_contract.ModelConnectionSpec, model: models_contract.CustomModelInput) models_contract.CommandResult {
-    return controlOwner(context).createModelConnectionWithCredential(secret, spec, model);
+fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: models_contract.ModelConnectionSpec) models_contract.CommandResult {
+    return controlOwner(context).createModelConnectionWithCredential(secret, spec);
 }
 fn controlReplaceModelConnectionCredential(context: *anyopaque, secret: []const u8, selection: models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult {
     return controlOwner(context).replaceModelConnectionCredential(secret, selection);
@@ -10809,9 +10816,17 @@ fn createReadyTestModelConnection(
             .protocol = .openai_responses,
             .normalized_base_url = "https://api.openai.com/v1/responses",
         },
-        .{ .id = "gpt-5", .display_name = "GPT-5" },
     ).accepted);
-    const view = control.model_connections.views()[0];
+    var view = control.model_connections.views()[0];
+    try std.testing.expect(control.submitModelConnectionCommand(.{
+        .add_custom_model = .{
+            .source_id = view.id,
+            .expected_connection_revision = view.connection_revision,
+            .expected_catalog_generation = view.catalog_generation,
+            .model = .{ .id = "gpt-5", .display_name = "GPT-5" },
+        },
+    }).accepted);
+    view = control.model_connections.views()[0];
     const selection: models_contract.ModelConnectionSelectionCommand = .{
         .source_id = TestModelConnectionVault.slot,
         .expected_connection_revision = view.connection_revision,

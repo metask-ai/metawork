@@ -104,7 +104,6 @@ pub const ModelConnectionCreate = struct {
     displayName: []const u8,
     protocol: []const u8,
     normalizedBaseUrl: []const u8,
-    model: CustomModel,
 };
 pub const ModelConnectionUpdate = struct {
     sourceId: []const u8,
@@ -657,6 +656,20 @@ test "Task creation requires an explicit nullable catalog revision" {
         error.InvalidBridgePayload,
         parsePayload(TaskCreate,
             \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3"}
+        ),
+    );
+}
+
+test "Model Connection create accepts Provider metadata and rejects the retired model field" {
+    var provider = try parsePayload(ModelConnectionCreate,
+        \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses"}
+    );
+    defer provider.deinit();
+    try std.testing.expectEqualStrings("Provider", provider.value.displayName);
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(ModelConnectionCreate,
+            \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses","model":{"id":"gpt-5"}}
         ),
     );
 }

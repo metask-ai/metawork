@@ -1139,6 +1139,46 @@ summary::-webkit-details-marker {
   font-size: var(--text-control);
 }
 
+.settings-secure-credential-handoff {
+  display: flex;
+  min-height: 58px;
+  padding: 10px 12px;
+  align-items: center;
+  gap: 11px;
+  border: 1px solid var(--settings-line);
+  border-radius: 11px;
+  color: var(--settings-brand-strong);
+  background: var(--settings-paper);
+}
+
+.settings-secure-credential-handoff > svg {
+  flex: 0 0 auto;
+  font-size: 17px;
+}
+
+.settings-secure-credential-handoff > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.settings-secure-credential-handoff strong,
+.settings-secure-credential-handoff small {
+  display: block;
+}
+
+.settings-secure-credential-handoff strong {
+  color: var(--settings-ink);
+  font-size: var(--text-control);
+  font-weight: 690;
+}
+
+.settings-secure-credential-handoff small {
+  color: var(--settings-muted);
+  font-size: var(--text-label);
+  line-height: 1.4;
+}
+
 .settings-model-connection-create-footer {
   display: flex;
   grid-column: 1 / -1;
@@ -1154,6 +1194,47 @@ summary::-webkit-details-marker {
   color: var(--settings-muted);
   font-size: var(--text-label);
   line-height: 1.45;
+}
+
+.settings-custom-model-add,
+.settings-custom-model-test {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-custom-model-add .settings-model-connection-input {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.settings-custom-model-test {
+  min-height: 44px;
+  padding: 7px 8px 7px 12px;
+  justify-content: space-between;
+  border: 1px solid var(--settings-line);
+  border-radius: 11px;
+  background: var(--settings-frost);
+}
+
+.settings-custom-model-test > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.settings-custom-model-test code {
+  overflow: hidden;
+  color: var(--settings-ink);
+  font-size: var(--text-control);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-custom-model-test small {
+  color: var(--settings-muted);
+  font-size: var(--text-label);
 }
 
 .settings-model-connection-list {
@@ -2409,6 +2490,12 @@ button.run-process-tool:hover {
   }
 
   .settings-model-connection-create-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-custom-model-add,
+  .settings-custom-model-test {
     align-items: stretch;
     flex-direction: column;
   }
