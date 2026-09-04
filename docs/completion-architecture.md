@@ -1,6 +1,6 @@
 # MetaWork Completion 架构
 
-> 状态：Agent-owned one-shot Completion 的 source of truth；当前消费者为 Model Connection Probe 与首个 Run 自动标题
+> 状态：Agent-owned one-shot Completion 的 source of truth；当前消费者为 Custom Provider Probe 与首个 Run 自动标题
 
 本文定义 MetaWork 自有的无 Tool、非流式 Completion 边界。它不属于 Metask AgentCore Run/Event 协议，也不建立第二套 AgentLoop；测试归属和持续回归入口见[验证规范](validation.md)。
 
@@ -14,7 +14,7 @@ Completion.complete(request, cancellation) -> Result | Failure
 
 当前消费者只有：
 
-- Model Connection Probe；每次 preparation 精确绑定 `ModelRef + connection revision + source generation + catalog generation`，完成时任一 token 过期都只销毁结果，不提交 Models 状态；
+- Custom Model Probe；每次 preparation 精确绑定 `ModelRef + provider revision + source generation + catalog generation`，完成时任一 token 过期都只销毁结果，不提交 Models 状态；
 - 首个 Run 的自动标题生成。
 
 两者都只消费最终文本，不消费 token delta、thinking delta 或其他流式事件。因此 Completion 使用 Provider 的非流式 JSON 接口，不提供 `Stream`、`next()` 或 SSE。
@@ -23,7 +23,7 @@ Completion.complete(request, cancellation) -> Result | Failure
 
 - `src/agent` 拥有 Completion 请求、结果、错误、协议 codec 和调用语义。
 - `src/app` 只实现一次 buffered HTTP/TLS 请求及请求级取消。
-- Product Models 合同拥有通用 Protocol/ExecutionConfig；Account 只拥有 Metask credential authority，Models aggregate 独立拥有 Model Connection credential authority，Completion 不拥有任一服务实例或 credential。
+- Product Models 合同拥有通用 Protocol/ExecutionConfig；Account 只拥有 Metask credential authority，Models aggregate 独立拥有 Custom Provider credential authority，Completion 不拥有任一服务实例或 credential。
 - Completion 使用与对应 Agent Run 相同、已冻结的 ExecutionConfig；不发现、选择或替换模型。
 - MetaWork 不修改 `metacodes`，也不要求 AgentCore 提供 Completion。
 

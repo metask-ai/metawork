@@ -65,19 +65,19 @@ flowchart TB
 
 Renderer 拥有 WebUI 页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以缓存 canonical Product projection，但不能成为 Workspace、Task、Run、Account、Agent execution、持久化历史、permission 或原生窗口状态的唯一 owner；WebView reload 或重连后必须能够从 Host Snapshot 重建界面。
 
-Renderer 按不可信调用方处理。它不访问任意文件或进程，不持久保存或投影 Provider credential，不持有原生 identity/handle 或系统 capability，不执行窗口、托盘、快捷键等平台 effect，也不根据 DOM、Toast、URL、显示文本或本地缓存发明 Product policy。用户在 Model Connection 表单中显式填写的 API Key 只允许停留到一次 create/replace command 提交完成，之后必须从表单状态清除；该窄例外不赋予 Renderer credential authority。
+Renderer 按不可信调用方处理。它不访问任意文件或进程，不持久保存或投影 Provider credential，不持有原生 identity/handle 或系统 capability，不执行窗口、托盘、快捷键等平台 effect，也不根据 DOM、Toast、URL、显示文本或本地缓存发明 Product policy。用户在 Custom Provider 表单中显式填写的 API Key 只允许停留到一次 create/replace command 提交完成，之后必须从表单状态清除；该窄例外不赋予 Renderer credential authority。
 
 ### 3.2 Bridge
 
 Bridge 是 Renderer 与可信 Host 之间的唯一通信边界。产品命令面只严格解码、校验 source/window authority、dispatch typed command 并运输 Snapshot/Event；受限平台 capability 面只接受已登记的封闭 intent 并交给 Application。两面可以复用 transport 和 origin policy，但不共享产品状态或系统执行 authority。
 
-Bridge 不决定 Task admission、Workspace authority、Agent cancellation、credential replacement、持久化或恢复，不持有 AgentCore handle、Product 内部指针或系统 handle。除 Model Connection create/replace command 的调用期 API Key 外，Bridge 不接收 raw secret；该命令只做严格解码、边界校验和同步转交，不记录、缓存、投影或返回 secret。连接、command catalog、wire、snapshot identity、retry 和 fail-closed 规则只由[Renderer Bridge 合同](renderer-bridge-contract.md)定义。
+Bridge 不决定 Task admission、Workspace authority、Agent cancellation、credential replacement、持久化或恢复，不持有 AgentCore handle、Product 内部指针或系统 handle。除 Custom Provider create/replace command 的调用期 API Key 外，Bridge 不接收 raw secret；该命令只做严格解码、边界校验和同步转交，不记录、缓存、投影或返回 secret。连接、command catalog、wire、snapshot identity、retry 和 fail-closed 规则只由[Renderer Bridge 合同](renderer-bridge-contract.md)定义。
 
 ### 3.3 Product
 
 Product 是产品事实与行为的逻辑边界。Bridge 把 typed 产品命令交给内部对应 owner；这些 owner 执行 admission、事务、持久化与恢复，并共同生成 canonical 产品 projection。Product policy 不依赖 Renderer component state、DOM、WebView URL 或 Application 平台实现。
 
-Account 与 Product Control 是 Product 的两个 named owner。Models、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 owner；其中 Account 只拥有 Metask identity/authorization，Models 发布 Product 通用 protocol/config 合同并拥有 Metask provider catalog/selection和 user-managed Model Connection。Account 授权是 Metask provider 的可用性前提，但 Account 与 Models 不互相导入；Application 只以单次 owned authorization lease完成组合。Product Control 只通过 Agent 公共执行表面消费 Agent 能力；Application 只执行平台 effect、生命周期和跨 owner coordination。内部事务、authority 和失败语义只由[Product 架构](product-architecture.md)与[Account 架构](account-architecture.md)定义。
+Account 与 Product Control 是 Product 的两个 named owner。Models、Workspace、Task、Schedule、Skill 与 MCP 是 Product Control 持有的 aggregate，不形成新的顶层 owner；其中 Account 只拥有 Metask identity/authorization，Models 发布 Product 通用 protocol/config 合同并拥有 Metask provider catalog/selection和 user-managed Custom Provider。Account 授权是 Metask provider 的可用性前提，但 Account 与 Models 不互相导入；Application 只以单次 owned authorization lease完成组合。Product Control 只通过 Agent 公共执行表面消费 Agent 能力；Application 只执行平台 effect、生命周期和跨 owner coordination。内部事务、authority 和失败语义只由[Product 架构](product-architecture.md)与[Account 架构](account-architecture.md)定义。
 
 ### 3.4 Agent 与 AgentCore
 
@@ -156,7 +156,7 @@ Storage 当前不进入生产 Application/Product 运行图。直接 SQLite back
 
 ## 4. 跨模块合同
 
-- Renderer → Bridge 只提交产品语义命令或已登记的封闭平台 intent；不得携带平台实现名、任意 action、系统 handle、物理路径或任意执行配置。唯一 secret-bearing 产品命令是用户显式触发的 Model Connection create/replace，其 API Key 只能作为有界字段一次性转交 Models credential mutation；
+- Renderer → Bridge 只提交产品语义命令或已登记的封闭平台 intent；不得携带平台实现名、任意 action、系统 handle、物理路径或任意执行配置。唯一 secret-bearing 产品命令是用户显式触发的 Custom Provider create/replace，其 API Key 只能作为有界字段一次性转交 Models credential mutation；
 - Bridge → Product 只提交严格解码后的 typed command；业务拒绝由 Product 返回 typed result，malformed payload、伪造 ownership 与 authority failure 由 Bridge fail closed；
 - Product → Bridge 只发布 canonical、无 secret projection；Bridge 只拥有编码后的 transport bytes、connection/snapshot identity 与 delivery 状态；
 - Product Control → Agent 只经 Agent 公共执行表面，Agent → AgentCore 是唯一 typed SDK/ABI 路径；Application 只管理 Agent composition、lifecycle 和 event-ready wake；
@@ -181,8 +181,8 @@ Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通�
 
 - Renderer 和所有 Bridge payload 都按不可信输入处理；command 默认拒绝，dev/release origin 分离，Host 重新校验 window、identity、ownership、generation、membership、资源范围与时效；
 - trusted Workspace 只能由 Host 原生选择和确认产生的 capability 授权；Renderer 不能提交路径、boolean 或显示名称自行建立 trust；
-- credential 和 secret 默认只能存在于对应 Product owner、系统 credential storage 和执行所需的 Application-owned bounded copy。用户显式填写的 Model Connection API Key 可以短暂存在于 Renderer password form 与专用 create/replace Bridge command；提交后必须立即清除表单状态并交给 Models 写入系统 credential storage。Bridge 不得记录、缓存、投影或返回该字段；任何 secret 仍不得进入 event、snapshot、日志、raw diagnostic、产品历史、checkpoint record 或持久化 metadata；
-- production protocol、endpoint、model 与 credential authority 只能来自 Product Models、Account/MCP 等对应合同；Model Connection 表单只负责创建或替换 Models-owned source，不能把 API Key、arbitrary URL 或临时字段直接注入 Run；
+- credential 和 secret 默认只能存在于对应 Product owner、系统 credential storage 和执行所需的 Application-owned bounded copy。用户显式填写的 Custom Provider API Key 可以短暂存在于 Renderer password form 与专用 create/replace Bridge command；提交后必须立即清除表单状态并交给 Models 写入系统 credential storage。Bridge 不得记录、缓存、投影或返回该字段；任何 secret 仍不得进入 event、snapshot、日志、raw diagnostic、产品历史、checkpoint record 或持久化 metadata；
+- production protocol、endpoint、model 与 credential authority 只能来自 Product Models、Account/MCP 等对应合同；Custom Provider 表单只负责创建或替换 Models-owned source，不能把 API Key、arbitrary URL 或临时字段直接注入 Run；
 - Host 在形成 projection 前执行 schema-aware filtering、credential redaction、UTF-8 与容量验证；Renderer 不是 secret 过滤边界；
 - permission 是 Product/Agent 协作的安全事实，不是 Renderer preference 或平行 AgentCore protocol。持久规则必须绑定 stable Workspace、tool/version、operation、canonical resource constraint 与 rule schema；相关 authority 变化时 fail closed；
 - 外部依赖只从 canonical、已验证输入消费；source copy、可变版本、静默 fallback 和绕过 verifier 的替代路径均不构成有效能力；
