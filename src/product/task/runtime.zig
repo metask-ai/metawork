@@ -1149,7 +1149,6 @@ pub const Runtime = struct {
         var owned_live = true;
         errdefer if (owned_live) deinitCreateCandidate(self, &owned, release);
         const slot = self.emptyIndex() orelse return error.TaskCapacity;
-        if (self.next_task_id == 0) return error.TaskIdentityExhausted;
         const runs = try self.allocator.alloc(?task_state.RunRecord, max_runs);
         var runs_owned = true;
         errdefer if (runs_owned) self.allocator.free(runs);
@@ -1162,9 +1161,8 @@ pub const Runtime = struct {
         var ui_history_owned = true;
         errdefer if (ui_history_owned) self.allocator.free(ui_history);
         @memset(ui_history, null);
-        const task_id = self.next_task_id;
+        const task_id = try self.takeTaskId();
         const previous_next_recent_order = self.next_recent_order;
-        self.next_task_id +%= 1;
         self.tasks[slot] = .{
             .durable = .{
                 .id = task_id,
@@ -2136,6 +2134,15 @@ pub const Runtime = struct {
         return result;
     }
 
+    fn takeTaskId(self: *Runtime) error{TaskIdentityExhausted}!u64 {
+        if (self.next_task_id == 0 or
+            self.next_task_id == std.math.maxInt(u64))
+            return error.TaskIdentityExhausted;
+        const result = self.next_task_id;
+        self.next_task_id += 1;
+        return result;
+    }
+
     pub fn noteLateTerminal(self: *Runtime) u64 {
         self.late_terminal_event_count +|= 1;
         return self.late_terminal_event_count;
@@ -2967,7 +2974,8 @@ pub const Runtime = struct {
         if (task.runtime.active_operation != .none or
             task.runtime.liveConst() != null)
             return error.RecoveryUnavailable;
-        if (self.next_restore_attempt_id == 0)
+        if (self.next_restore_attempt_id == 0 or
+            self.next_restore_attempt_id == std.math.maxInt(u64))
             return error.RestoreAttemptExhausted;
         const attempt_id = self.next_restore_attempt_id;
         var checkpoint_copy = try checkpoint.clone(self.allocator);
@@ -3066,7 +3074,7 @@ pub const Runtime = struct {
             return err;
         };
         job_owned = false;
-        self.next_restore_attempt_id +%= 1;
+        self.next_restore_attempt_id += 1;
         return attempt_id;
     }
 
@@ -5417,4 +5425,11 @@ test "Runtime owns bounded Task collection and monotonic process facts" {
     try std.testing.expectEqual(@as(u64, 1), runtime.takeRecentOrder());
     try std.testing.expectEqual(@as(u64, 2), runtime.next_recent_order);
     try std.testing.expectEqual(@as(u64, 1), runtime.noteLateTerminal());
+
+    runtime.next_task_id = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.TaskIdentityExhausted,
+        runtime.takeTaskId(),
+    );
+    try std.testing.expectEqual(std.math.maxInt(u64), runtime.next_task_id);
 }

@@ -630,7 +630,8 @@ pub const Runtime = struct {
             return error.WorkspaceCapacity;
         if (slot == null) slot = findEmpty(self.records);
         const target = slot orelse return error.WorkspaceCapacity;
-        if (self.next_id == 0) return error.WorkspaceIdentityExhausted;
+        if (self.next_id == 0 or self.next_id == std.math.maxInt(u64))
+            return error.WorkspaceIdentityExhausted;
 
         const owned_root = try storage.copy(canonical, self.max_workspace_bytes);
         errdefer storage.free(owned_root);
@@ -650,7 +651,7 @@ pub const Runtime = struct {
         errdefer if (owned_temporary) |root| storage.free(root);
 
         const previous_next_id = self.next_id;
-        self.next_id +%= 1;
+        self.next_id += 1;
         self.records[target] = .{
             .id = previous_next_id,
             .canonical_root = owned_root,
@@ -840,7 +841,8 @@ pub const Runtime = struct {
             return error.InvalidWorkspace;
         if (self.count(.automatic) >= self.max_automatic) return error.WorkspaceCapacity;
         const target = findEmpty(self.records) orelse return error.WorkspaceCapacity;
-        if (self.next_id == 0) return error.WorkspaceIdentityExhausted;
+        if (self.next_id == 0 or self.next_id == std.math.maxInt(u64))
+            return error.WorkspaceIdentityExhausted;
         const owned_root = try storage.copy(canonical_root, self.max_workspace_bytes);
         errdefer storage.free(owned_root);
         const projected_root = try storage.project(
@@ -858,7 +860,7 @@ pub const Runtime = struct {
         const temporary = try storage.copy(canonical_root, self.max_workspace_bytes);
         errdefer storage.free(temporary);
         const id = self.next_id;
-        self.next_id +%= 1;
+        self.next_id += 1;
         self.records[target] = .{
             .id = id,
             .kind = .automatic,
@@ -1003,9 +1005,11 @@ pub const Runtime = struct {
     }
 
     fn takeRecentOrder(self: *Runtime) Error!u64 {
-        if (self.next_recent_order == 0) return error.WorkspaceOrderExhausted;
+        if (self.next_recent_order == 0 or
+            self.next_recent_order == std.math.maxInt(u64))
+            return error.WorkspaceOrderExhausted;
         const result = self.next_recent_order;
-        self.next_recent_order +%= 1;
+        self.next_recent_order += 1;
         return result;
     }
 

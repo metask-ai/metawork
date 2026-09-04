@@ -464,6 +464,10 @@ const TaskWorkspaceOrderContext = struct {
     preparation: *product_workspace.OrderPreparation,
 };
 
+const WorkspaceAutomaticAllocation = @typeInfo(
+    @typeInfo(@TypeOf(product_workspace.Runtime.allocateAutomatic)).@"fn".return_type.?,
+).error_union.payload;
+
 const PreparedTaskCreate = struct {
     task: task_runtime.PreparedCreate,
     order: product_workspace.OrderPreparation,
@@ -486,7 +490,7 @@ const PreparedTaskCreate = struct {
 
 const PreparedScheduledAdmission = struct {
     control: *Runtime,
-    allocation: product_workspace.AutomaticAllocation,
+    allocation: WorkspaceAutomaticAllocation,
     workspace_id: u64,
     task: PreparedTaskCreate,
     run: task_runtime.PreparedRun,
