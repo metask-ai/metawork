@@ -4,11 +4,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("metawork_product_models_contract");
 const ports = @import("product_models_ports");
-const registry_impl = @import("product_models_connections");
+const registry_impl = @import("product_models_providers");
 const metask_provider = @import("product_models_metask");
 
 pub const StartError = error{
-    ModelConnectionsDirectoryUnavailable,
+    CustomProvidersDirectoryUnavailable,
     ModelsStateUnavailable,
 };
 pub const DefaultBinding = registry_impl.Registry.DefaultBinding;
@@ -133,7 +133,7 @@ pub const Runtime = struct {
         self.assertMainThread();
         std.debug.assert(self.store == null and self.credential_vault == null);
         if (absolute_directory.len == 0 or !std.fs.path.isAbsolute(absolute_directory))
-            return error.ModelConnectionsDirectoryUnavailable;
+            return error.CustomProvidersDirectoryUnavailable;
         const public_catalog = self.allocator.create(metask_provider.PublicCatalog) catch
             return error.ModelsStateUnavailable;
         public_catalog.* = .{};
@@ -160,7 +160,7 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn views(self: *Runtime) []const contract.ModelConnectionView {
+    pub fn views(self: *Runtime) []const contract.CustomProviderView {
         self.assertMainThread();
         return self.registry.views();
     }
@@ -221,7 +221,7 @@ pub const Runtime = struct {
             .selection_revision = self.registry.selection_revision,
             .operation = if (self.catalog_attempt == null) .idle else .refreshing_catalog,
             .error_code = if (!self.store_healthy) .persistence_unavailable else self.metask_error,
-            .model_connections = self.registry.views(),
+            .custom_providers = self.registry.views(),
         };
     }
 
@@ -252,18 +252,18 @@ pub const Runtime = struct {
             command.expected_catalog_generation != self.metask_catalog_generation)
             return .{ .rejected = .generation_mismatch };
         const intent = self.registry.metaskIntent() orelse
-            return .{ .rejected = .invalid_connection };
+            return .{ .rejected = .invalid_provider };
         if (command.expected_metask_selection_revision != intent.selection_revision or
             !std.mem.eql(u8, principal_ref, intent.principal_ref))
             return .{ .rejected = .generation_mismatch };
         if (!std.mem.startsWith(u8, command.source_id, "metask:") or
             command.source_id.len == "metask:".len)
-            return .{ .rejected = .invalid_connection };
+            return .{ .rejected = .invalid_provider };
         const api_key_id = command.source_id["metask:".len..];
         if (api_key_id.len > contract.Limits.api_key_id_bytes or
             self.metask_public_catalog == null or
             !self.metask_public_catalog.?.hasApiKey(api_key_id))
-            return .{ .rejected = .invalid_connection };
+            return .{ .rejected = .invalid_provider };
         return switch (self.beginMetaskCatalogRefresh(
             principal_ref,
             authorization_generation,
@@ -491,12 +491,12 @@ pub const Runtime = struct {
             return .rejected(.generation_mismatch);
         const api_key_id = self.metask_catalog.selectedApiKeyId();
         const protocol = self.metask_catalog.selectedProtocol() orelse
-            return .rejected(.invalid_connection);
+            return .rejected(.invalid_provider);
         if (!metaskSourceMatches(command.selection.source_id, api_key_id) or
             !self.metask_catalog.hasModel(command.selection.model_id))
             return .rejected(.model_not_found);
         const principal_ref = self.metask_catalog.ownerAccountId();
-        if (principal_ref.len == 0) return .rejected(.invalid_connection);
+        if (principal_ref.len == 0) return .rejected(.invalid_provider);
         if (current) |value| {
             if (std.mem.eql(u8, value.principal_ref, principal_ref) and
                 std.mem.eql(u8, value.api_key_id, api_key_id) and
@@ -550,7 +550,7 @@ pub const Runtime = struct {
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         if (self.catalog_attempt != null) return .rejected(.operation_in_progress);
         const intent = self.registry.metaskIntent() orelse
-            return .rejected(.invalid_connection);
+            return .rejected(.invalid_provider);
         if (command.expected_selection_revision != self.registry.selection_revision or
             command.expected_source_generation != intent.source_generation or
             command.expected_catalog_generation != self.metask_catalog_generation or
@@ -592,18 +592,18 @@ pub const Runtime = struct {
             command.selection.model_id.len > contract.Limits.model_id_bytes or
             command.expected_source_generation == 0 or
             command.expected_catalog_generation == 0)
-            return .rejected(.invalid_connection);
+            return .rejected(.invalid_provider);
         if (std.mem.startsWith(u8, command.selection.source_id, "metask:"))
             return self.selectMetaskDefault(command);
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         if (command.expected_selection_revision != self.registry.selection_revision)
             return .rejected(.generation_mismatch);
-        const connection = for (self.registry.views()) |value| {
+        const provider = for (self.registry.views()) |value| {
             if (std.mem.eql(u8, value.id, command.selection.source_id))
                 break value;
-        } else return .rejected(.invalid_connection);
-        if (connection.source_generation != command.expected_source_generation or
-            connection.catalog_generation != command.expected_catalog_generation)
+        } else return .rejected(.invalid_provider);
+        if (provider.source_generation != command.expected_source_generation or
+            provider.catalog_generation != command.expected_catalog_generation)
             return .rejected(.generation_mismatch);
         if (self.registry.defaultSelection()) |current| {
             if (std.mem.eql(u8, current.source_id, command.selection.source_id) and
@@ -616,8 +616,8 @@ pub const Runtime = struct {
         const selection_revision = self.freshGeneration(candidate.selection_revision) catch
             return .rejected(.local_resource_exhausted);
         candidate.selectDefault(.{
-            .source_id = connection.id,
-            .expected_connection_revision = connection.connection_revision,
+            .source_id = provider.id,
+            .expected_provider_revision = provider.provider_revision,
         }, command.selection.model_id, selection_revision) catch |err|
             return .rejected(mapRegistryError(err));
         return self.commitCandidate(&candidate, true);
@@ -656,7 +656,7 @@ pub const Runtime = struct {
             return null;
         return .{
             .selection = selection,
-            .source = .model_connection,
+            .source = .custom_provider,
             .source_generation = binding.source_generation,
             .selection_revision = self.registry.selection_revision,
             .protocol = binding.protocol,
@@ -677,7 +677,7 @@ pub const Runtime = struct {
                         intent.model_id,
                     ) and self.metask_catalog.selectedProtocol() == intent.protocol;
             },
-            .model_connection => self.credential_vault != null and
+            .custom_provider => self.credential_vault != null and
                 self.registry.defaultBinding() != null,
         };
     }
@@ -727,47 +727,47 @@ pub const Runtime = struct {
             );
     }
 
-    pub fn submitCommand(self: *Runtime, command: contract.ModelConnectionCommand) contract.CommandResult {
+    pub fn submitCommand(self: *Runtime, command: contract.CustomProviderCommand) contract.CommandResult {
         self.assertMainThread();
-        contract.validateModelConnectionCommand(command) catch
-            return .rejected(.invalid_connection);
+        contract.validateCustomProviderCommand(command) catch
+            return .rejected(.invalid_provider);
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         var candidate = self.registry.clone() catch |err| return .rejected(mapRegistryError(err));
         defer candidate.deinit();
         switch (command) {
             .create => |value| {
-                const connection_revision = self.freshGeneration(0) catch
+                const provider_revision = self.freshGeneration(0) catch
                     return .rejected(.local_resource_exhausted);
-                const source_generation = self.freshGeneration(connection_revision) catch
+                const source_generation = self.freshGeneration(provider_revision) catch
                     return .rejected(.local_resource_exhausted);
                 const catalog_generation = self.freshGeneration(source_generation) catch
                     return .rejected(.local_resource_exhausted);
-                candidate.create(value, connection_revision, source_generation, catalog_generation) catch |err|
+                candidate.create(value, provider_revision, source_generation, catalog_generation) catch |err|
                     return .rejected(mapRegistryError(err));
             },
             .update => |value| {
-                const current = findConnectionView(candidate.views(), value.selection.source_id) orelse
-                    return .rejected(.connection_not_found);
+                const current = findProviderView(candidate.views(), value.selection.source_id) orelse
+                    return .rejected(.provider_not_found);
                 const authority_changed = current.protocol != value.spec.protocol or
                     !std.mem.eql(u8, current.normalized_base_url, value.spec.normalized_base_url);
-                const connection_revision = self.freshGeneration(current.connection_revision) catch
+                const provider_revision = self.freshGeneration(current.provider_revision) catch
                     return .rejected(.local_resource_exhausted);
                 const source_generation = if (authority_changed)
-                    self.freshGeneration(candidate.sourceGenerationForConnection(current.id) orelse
-                        return .rejected(.connection_not_found)) catch
+                    self.freshGeneration(candidate.sourceGenerationForProvider(current.id) orelse
+                        return .rejected(.provider_not_found)) catch
                         return .rejected(.local_resource_exhausted)
                 else
                     null;
-                const selection_revision = if (authority_changed and isDefaultConnection(&candidate, current.id))
+                const selection_revision = if (authority_changed and isDefaultProvider(&candidate, current.id))
                     self.freshGeneration(candidate.selection_revision) catch
                         return .rejected(.local_resource_exhausted)
                 else
                     null;
-                candidate.update(value, connection_revision, source_generation, selection_revision) catch |err|
+                candidate.update(value, provider_revision, source_generation, selection_revision) catch |err|
                     return .rejected(mapRegistryError(err));
             },
             .remove => |value| {
-                const selection_revision = if (isDefaultConnection(&candidate, value.source_id))
+                const selection_revision = if (isDefaultProvider(&candidate, value.source_id))
                     self.freshGeneration(candidate.selection_revision) catch
                         return .rejected(.local_resource_exhausted)
                 else
@@ -775,22 +775,22 @@ pub const Runtime = struct {
                 candidate.remove(value, selection_revision) catch |err|
                     return .rejected(mapRegistryError(err));
             },
-            .test_connection => |value| candidate.markTesting(value) catch |err|
+            .test_model => |value| candidate.markTesting(value) catch |err|
                 return .rejected(mapRegistryError(err)),
             .add_custom_model => |value| {
-                const current = findConnectionView(candidate.views(), value.source_id) orelse
-                    return .rejected(.connection_not_found);
-                const connection_revision = self.freshGeneration(current.connection_revision) catch
+                const current = findProviderView(candidate.views(), value.source_id) orelse
+                    return .rejected(.provider_not_found);
+                const provider_revision = self.freshGeneration(current.provider_revision) catch
                     return .rejected(.local_resource_exhausted);
                 const catalog_generation = self.freshGeneration(current.catalog_generation) catch
                     return .rejected(.local_resource_exhausted);
-                candidate.addCustomModel(value, connection_revision, catalog_generation) catch |err|
+                candidate.addCustomModel(value, provider_revision, catalog_generation) catch |err|
                     return .rejected(mapRegistryError(err));
             },
             .replace_custom_model => |value| {
-                const current = findConnectionView(candidate.views(), value.selection.source_id) orelse
-                    return .rejected(.connection_not_found);
-                const connection_revision = self.freshGeneration(current.connection_revision) catch
+                const current = findProviderView(candidate.views(), value.selection.source_id) orelse
+                    return .rejected(.provider_not_found);
+                const provider_revision = self.freshGeneration(current.provider_revision) catch
                     return .rejected(.local_resource_exhausted);
                 const catalog_generation = self.freshGeneration(current.catalog_generation) catch
                     return .rejected(.local_resource_exhausted);
@@ -805,15 +805,15 @@ pub const Runtime = struct {
                     null;
                 candidate.replaceCustomModel(
                     value,
-                    connection_revision,
+                    provider_revision,
                     catalog_generation,
                     selection_revision,
                 ) catch |err| return .rejected(mapRegistryError(err));
             },
             .remove_custom_model => |value| {
-                const current = findConnectionView(candidate.views(), value.selection.source_id) orelse
-                    return .rejected(.connection_not_found);
-                const connection_revision = self.freshGeneration(current.connection_revision) catch
+                const current = findProviderView(candidate.views(), value.selection.source_id) orelse
+                    return .rejected(.provider_not_found);
+                const provider_revision = self.freshGeneration(current.provider_revision) catch
                     return .rejected(.local_resource_exhausted);
                 const catalog_generation = self.freshGeneration(current.catalog_generation) catch
                     return .rejected(.local_resource_exhausted);
@@ -824,7 +824,7 @@ pub const Runtime = struct {
                     null;
                 candidate.removeCustomModel(
                     value,
-                    connection_revision,
+                    provider_revision,
                     catalog_generation,
                     selection_revision,
                 ) catch |err| return .rejected(mapRegistryError(err));
@@ -835,7 +835,7 @@ pub const Runtime = struct {
 
     pub fn completeTest(
         self: *Runtime,
-        command: contract.ModelConnectionTestCommand,
+        command: contract.CustomModelTestCommand,
         succeeded: bool,
     ) contract.CommandResult {
         self.assertMainThread();
@@ -891,13 +891,13 @@ pub const Runtime = struct {
     pub fn createWithCredential(
         self: *Runtime,
         secret: []const u8,
-        spec: contract.ModelConnectionSpec,
+        spec: contract.CustomProviderSpec,
     ) contract.CommandResult {
         self.assertMainThread();
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
-        contract.validateModelConnectionSpec(spec) catch return .rejected(.invalid_connection);
+        contract.validateCustomProviderSpec(spec) catch return .rejected(.invalid_provider);
         if (secret.len == 0 or secret.len > contract.Limits.credential_bytes)
-            return .rejected(.invalid_connection);
+            return .rejected(.invalid_provider);
         const vault = self.credential_vault orelse return .rejected(.capture_unavailable);
         var slot_storage: [ports.credential_slot_bytes]u8 = undefined;
         const slot_id = vault.generateSlot(&slot_storage) catch
@@ -918,11 +918,11 @@ pub const Runtime = struct {
             return .rejected(mapRegistryError(err));
         };
         defer committed.deinit();
-        const connection_revision = self.freshGeneration(0) catch {
+        const provider_revision = self.freshGeneration(0) catch {
             self.drainCredentialCleanup();
             return .rejected(.local_resource_exhausted);
         };
-        const source_generation = self.freshGeneration(connection_revision) catch {
+        const source_generation = self.freshGeneration(provider_revision) catch {
             self.drainCredentialCleanup();
             return .rejected(.local_resource_exhausted);
         };
@@ -931,16 +931,16 @@ pub const Runtime = struct {
             return .rejected(.local_resource_exhausted);
         };
         committed.create(.{
-            .connection_id = slot_id,
+            .provider_id = slot_id,
             .spec = spec,
             .credential_slot = .{ .id = slot_id },
-        }, connection_revision, source_generation, catalog_generation) catch |err| {
+        }, provider_revision, source_generation, catalog_generation) catch |err| {
             self.drainCredentialCleanup();
             return .rejected(mapRegistryError(err));
         };
         committed.completeCredentialDeletion(slot_id) catch {
             self.drainCredentialCleanup();
-            return .rejected(.invalid_connection);
+            return .rejected(.invalid_provider);
         };
         const result = self.commitCandidate(&committed, true);
         if (!result.accepted and self.store_healthy) self.drainCredentialCleanup();
@@ -950,22 +950,22 @@ pub const Runtime = struct {
     /// Replaces a credential using a fail-closed two-commit transaction:
     /// first revoke durable readiness, then write the Host secret, and only
     /// then publish a fresh source authority. A partial failure therefore
-    /// leaves a repairable non-runnable connection, never stale readiness.
+    /// leaves a repairable non-runnable provider, never stale readiness.
     pub fn replaceCredential(
         self: *Runtime,
         secret: []const u8,
-        selection: contract.ModelConnectionSelectionCommand,
+        selection: contract.CustomProviderSelectionCommand,
     ) contract.CommandResult {
         self.assertMainThread();
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         if (secret.len == 0 or secret.len > contract.Limits.credential_bytes)
-            return .rejected(.invalid_connection);
+            return .rejected(.invalid_provider);
         const vault = self.credential_vault orelse return .rejected(.capture_unavailable);
 
         var revoked = self.registry.clone() catch
             return .rejected(.local_resource_exhausted);
         defer revoked.deinit();
-        const clears_default = isDefaultConnection(&revoked, selection.source_id);
+        const clears_default = isDefaultProvider(&revoked, selection.source_id);
         const selection_revision = if (clears_default)
             self.freshGeneration(revoked.selection_revision) catch
                 return .rejected(.local_resource_exhausted)
@@ -979,16 +979,16 @@ pub const Runtime = struct {
         vault.store(selection.source_id, secret) catch
             return .rejected(.credential_write_failed);
 
-        const current = findConnectionView(self.registry.views(), selection.source_id) orelse
-            return .rejected(.connection_not_found);
+        const current = findProviderView(self.registry.views(), selection.source_id) orelse
+            return .rejected(.provider_not_found);
         var restored = self.registry.clone() catch
             return .rejected(.local_resource_exhausted);
         defer restored.deinit();
-        const connection_revision = self.freshGeneration(current.connection_revision) catch
+        const provider_revision = self.freshGeneration(current.provider_revision) catch
             return .rejected(.local_resource_exhausted);
         const source_generation = self.freshGeneration(current.source_generation) catch
             return .rejected(.local_resource_exhausted);
-        restored.restoreCredential(selection, connection_revision, source_generation) catch |err|
+        restored.restoreCredential(selection, provider_revision, source_generation) catch |err|
             return .rejected(mapRegistryError(err));
         return self.commitCandidate(&restored, true);
     }
@@ -1024,7 +1024,7 @@ pub const Runtime = struct {
 
     pub fn resolveProbeCandidate(
         self: *Runtime,
-        command: contract.ModelConnectionTestCommand,
+        command: contract.CustomModelTestCommand,
     ) !contract.OwnedSourceCandidate {
         self.assertMainThread();
         return self.resolveBindingCandidate(
@@ -1044,7 +1044,7 @@ pub const Runtime = struct {
                 &source_storage,
                 "metask:{s}",
                 .{intent.api_key_id},
-            ) catch return error.InvalidConnection;
+            ) catch return error.InvalidProvider;
             if (std.mem.eql(u8, selection.source_id, source_id)) {
                 if (!std.mem.eql(u8, selection.model_id, intent.model_id) or
                     intent.protocol == null or intent.source_generation == 0 or
@@ -1060,7 +1060,7 @@ pub const Runtime = struct {
                     intent.source_generation,
                 ) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
-                    else => error.InvalidConnection,
+                    else => error.InvalidProvider,
                 };
             }
         }
@@ -1082,7 +1082,7 @@ pub const Runtime = struct {
         const vault = self.credential_vault orelse return error.CredentialStoreUnavailable;
         var secret_storage: [contract.Limits.credential_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &secret_storage);
-        const secret = (try vault.get(binding.connection_id, &secret_storage)) orelse
+        const secret = (try vault.get(binding.provider_id, &secret_storage)) orelse
             return error.CredentialNotFound;
         const model_id = try self.allocator.dupe(u8, binding.model_id);
         errdefer self.allocator.free(model_id);
@@ -1095,13 +1095,13 @@ pub const Runtime = struct {
         }
         return contract.OwnedSourceCandidate.initOwned(
             self.allocator,
-            .model_connection,
+            .custom_provider,
             binding.protocol,
             model_id,
             normalized_base_url,
             binding.source_generation,
             credential,
-            binding.connection_id,
+            binding.provider_id,
         );
     }
 
@@ -1198,8 +1198,8 @@ pub const Runtime = struct {
             return;
         };
         candidate.markCredentialMissing(.{
-            .source_id = binding.connection_id,
-            .expected_connection_revision = binding.connection_revision,
+            .source_id = binding.provider_id,
+            .expected_provider_revision = binding.provider_revision,
         }, selection_revision) catch {
             self.store_healthy = false;
             return;
@@ -1212,11 +1212,11 @@ pub const Runtime = struct {
     fn drainCredentialCleanup(self: *Runtime) void {
         if (!self.store_healthy) return;
         const vault = self.credential_vault orelse return;
-        while (self.registry.nextCredentialDeletion()) |connection_id| {
-            vault.delete(connection_id) catch return;
+        while (self.registry.nextCredentialDeletion()) |provider_id| {
+            vault.delete(provider_id) catch return;
             var candidate = self.registry.clone() catch return;
             defer candidate.deinit();
-            candidate.completeCredentialDeletion(connection_id) catch return;
+            candidate.completeCredentialDeletion(provider_id) catch return;
             const result = self.commitCandidate(&candidate, false);
             if (!result.accepted) return;
         }
@@ -1229,12 +1229,12 @@ pub const Runtime = struct {
 
 fn mapRegistryError(err: anyerror) contract.ManagementError {
     return switch (err) {
-        error.ConnectionNotFound => .connection_not_found,
+        error.ProviderNotFound => .provider_not_found,
         error.GenerationMismatch => .generation_mismatch,
         error.ModelNotFound => .model_not_found,
         error.Capacity => .capacity,
         error.OutOfMemory => .local_resource_exhausted,
-        else => .invalid_connection,
+        else => .invalid_provider,
     };
 }
 
@@ -1254,18 +1254,18 @@ fn mapModelsError(error_code: contract.ModelsError) contract.ManagementError {
     };
 }
 
-fn findConnectionView(
-    views: []const contract.ModelConnectionView,
-    connection_id: []const u8,
-) ?contract.ModelConnectionView {
+fn findProviderView(
+    views: []const contract.CustomProviderView,
+    provider_id: []const u8,
+) ?contract.CustomProviderView {
     for (views) |view|
-        if (std.mem.eql(u8, view.id, connection_id)) return view;
+        if (std.mem.eql(u8, view.id, provider_id)) return view;
     return null;
 }
 
-fn isDefaultConnection(registry: *const registry_impl.Registry, connection_id: []const u8) bool {
+fn isDefaultProvider(registry: *const registry_impl.Registry, provider_id: []const u8) bool {
     const selection = registry.defaultSelection() orelse return false;
-    return std.mem.eql(u8, selection.source_id, connection_id);
+    return std.mem.eql(u8, selection.source_id, provider_id);
 }
 
 fn isDefaultModel(registry: *const registry_impl.Registry, model: contract.ModelRef) bool {
@@ -1285,7 +1285,7 @@ fn metaskSourceMatches(source_id: []const u8, api_key_id: []const u8) bool {
 }
 
 const TestVault = struct {
-    const slot = "model-connection-00000000000000000000000000000001";
+    const slot = "custom-provider-00000000000000000000000000000001";
 
     secret: [contract.Limits.credential_bytes]u8 = undefined,
     secret_len: usize = 0,
@@ -1334,7 +1334,7 @@ const TestVault = struct {
 fn createTestProviderWithModel(
     runtime: *Runtime,
     secret: []const u8,
-    spec: contract.ModelConnectionSpec,
+    spec: contract.CustomProviderSpec,
     model: contract.CustomModelInput,
 ) !void {
     try std.testing.expect(runtime.createWithCredential(secret, spec).accepted);
@@ -1342,7 +1342,7 @@ fn createTestProviderWithModel(
     const provider = providers[providers.len - 1];
     try std.testing.expect(runtime.submitCommand(.{ .add_custom_model = .{
         .source_id = provider.id,
-        .expected_connection_revision = provider.connection_revision,
+        .expected_provider_revision = provider.provider_revision,
         .expected_catalog_generation = provider.catalog_generation,
         .model = model,
     } }).accepted);
@@ -1369,9 +1369,8 @@ test "Models Runtime durably creates a Provider before its first model" {
             .normalized_base_url = "https://api.anthropic.com/v1/messages",
         }).accepted);
         const provider = runtime.views()[0];
-        try std.testing.expectEqual(contract.ModelConnectionState.configuring, provider.state);
+        try std.testing.expectEqual(contract.CustomProviderState.configuring, provider.state);
         try std.testing.expectEqual(@as(usize, 0), provider.models.len);
-        try std.testing.expectEqualStrings("", provider.selected_model);
         try std.testing.expect(vault.present);
         try std.testing.expect(runtime.defaultAuthority() == null);
         try std.testing.expect((try runtime.resolveDefault()) == null);
@@ -1387,12 +1386,11 @@ test "Models Runtime durably creates a Provider before its first model" {
         const providers = restored.views();
         try std.testing.expectEqual(@as(usize, 1), providers.len);
         try std.testing.expectEqual(@as(usize, 0), providers[0].models.len);
-        try std.testing.expectEqualStrings("", providers[0].selected_model);
         try std.testing.expect(restored.defaultAuthority() == null);
     }
 }
 
-test "Models Runtime owns durable model connections and source resolution" {
+test "Models Runtime owns durable custom providers and source resolution" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1419,35 +1417,35 @@ test "Models Runtime owns durable model connections and source resolution" {
         );
         const view = runtime.views()[0];
         try std.testing.expectEqualStrings(TestVault.slot, view.id);
-        const selection: contract.ModelConnectionSelectionCommand = .{
+        const selection: contract.CustomProviderSelectionCommand = .{
             // Registry views are borrowed until the next committed mutation.
             // Commands arrive with independently owned request bytes in
             // production, so keep this test selection independently stable.
             .source_id = TestVault.slot,
-            .expected_connection_revision = view.connection_revision,
+            .expected_provider_revision = view.provider_revision,
         };
-        try std.testing.expect(runtime.submitCommand(.{ .test_connection = .{
+        try std.testing.expect(runtime.submitCommand(.{ .test_model = .{
             .model = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
-            .expected_connection_revision = selection.expected_connection_revision,
+            .expected_provider_revision = selection.expected_provider_revision,
             .expected_source_generation = view.source_generation,
             .expected_catalog_generation = view.catalog_generation,
         } }).accepted);
         try std.testing.expect(runtime.completeTest(.{
             .model = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
-            .expected_connection_revision = selection.expected_connection_revision,
+            .expected_provider_revision = selection.expected_provider_revision,
             .expected_source_generation = view.source_generation,
             .expected_catalog_generation = view.catalog_generation,
         }, true).accepted);
-        const connection = runtime.views()[0];
+        const provider = runtime.views()[0];
         try std.testing.expect(runtime.selectDefault(.{
             .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
             .expected_selection_revision = runtime.view().selection_revision,
-            .expected_source_generation = connection.source_generation,
-            .expected_catalog_generation = connection.catalog_generation,
+            .expected_source_generation = provider.source_generation,
+            .expected_catalog_generation = provider.catalog_generation,
         }).accepted);
         const authority = runtime.defaultAuthority() orelse
             return error.TestUnexpectedResult;
-        try std.testing.expectEqual(contract.Source.model_connection, authority.source);
+        try std.testing.expectEqual(contract.Source.custom_provider, authority.source);
         try std.testing.expectEqualStrings(TestVault.slot, authority.selection.source_id);
         try std.testing.expectEqualStrings("gpt-5", authority.selection.model_id);
         try std.testing.expect(authority.source_generation != 0);
@@ -1473,7 +1471,7 @@ test "Models Runtime owns durable model connections and source resolution" {
                 return error.TestUnexpectedResult;
             defer candidate.deinit();
             try std.testing.expectEqualStrings("provider-secret", candidate.input().api_key);
-            try std.testing.expectEqualStrings("model_connection:" ++ TestVault.slot, candidate.input().target.provider_id);
+            try std.testing.expectEqualStrings("custom_provider:" ++ TestVault.slot, candidate.input().target.provider_id);
         }
 
         const previous_selection_revision = restored.view().selection_revision;
@@ -1485,10 +1483,10 @@ test "Models Runtime owns durable model connections and source resolution" {
         try std.testing.expect(restored.view().selection_revision != previous_selection_revision);
         const missing = restored.views()[0];
         try std.testing.expectEqual(
-            contract.ModelConnectionCredentialStatus.missing,
+            contract.CustomProviderCredentialStatus.missing,
             missing.credential_status,
         );
-        try std.testing.expectEqual(contract.ModelConnectionState.configuring, missing.state);
+        try std.testing.expectEqual(contract.CustomProviderState.configuring, missing.state);
     }
 
     {
@@ -1504,10 +1502,10 @@ test "Models Runtime owns durable model connections and source resolution" {
         try std.testing.expect(restarted.view().default_selection == null);
         const missing = restarted.views()[0];
         try std.testing.expectEqual(
-            contract.ModelConnectionCredentialStatus.missing,
+            contract.CustomProviderCredentialStatus.missing,
             missing.credential_status,
         );
-        try std.testing.expectEqual(contract.ModelConnectionState.configuring, missing.state);
+        try std.testing.expectEqual(contract.CustomProviderState.configuring, missing.state);
     }
 }
 
@@ -1536,19 +1534,19 @@ test "credential replacement revokes readiness before writing and restores fresh
         .{ .id = "model-1", .display_name = "Model 1" },
     );
     const initial = runtime.views()[0];
-    const selection: contract.ModelConnectionSelectionCommand = .{
+    const selection: contract.CustomProviderSelectionCommand = .{
         .source_id = TestVault.slot,
-        .expected_connection_revision = initial.connection_revision,
+        .expected_provider_revision = initial.provider_revision,
     };
-    try std.testing.expect(runtime.submitCommand(.{ .test_connection = .{
+    try std.testing.expect(runtime.submitCommand(.{ .test_model = .{
         .model = .{ .source_id = TestVault.slot, .model_id = "model-1" },
-        .expected_connection_revision = initial.connection_revision,
+        .expected_provider_revision = initial.provider_revision,
         .expected_source_generation = initial.source_generation,
         .expected_catalog_generation = initial.catalog_generation,
     } }).accepted);
     try std.testing.expect(runtime.completeTest(.{
         .model = .{ .source_id = TestVault.slot, .model_id = "model-1" },
-        .expected_connection_revision = initial.connection_revision,
+        .expected_provider_revision = initial.provider_revision,
         .expected_source_generation = initial.source_generation,
         .expected_catalog_generation = initial.catalog_generation,
     }, true).accepted);
@@ -1566,19 +1564,19 @@ test "credential replacement revokes readiness before writing and restores fresh
     try std.testing.expectEqual(contract.ManagementError.credential_write_failed, failed.error_code.?);
     try std.testing.expect(runtime.view().default_selection == null);
     const revoked = runtime.views()[0];
-    try std.testing.expectEqual(contract.ModelConnectionCredentialStatus.missing, revoked.credential_status);
-    try std.testing.expectEqual(contract.ModelConnectionState.configuring, revoked.state);
+    try std.testing.expectEqual(contract.CustomProviderCredentialStatus.missing, revoked.credential_status);
+    try std.testing.expectEqual(contract.CustomProviderState.configuring, revoked.state);
     try std.testing.expect(!revoked.models[0].ready);
 
     vault.fail_store = false;
     try std.testing.expect(runtime.replaceCredential("new-secret", .{
         .source_id = TestVault.slot,
-        .expected_connection_revision = revoked.connection_revision,
+        .expected_provider_revision = revoked.provider_revision,
     }).accepted);
     const restored = runtime.views()[0];
-    try std.testing.expectEqual(contract.ModelConnectionCredentialStatus.ready, restored.credential_status);
-    try std.testing.expectEqual(contract.ModelConnectionState.configuring, restored.state);
-    try std.testing.expect(restored.connection_revision != initial.connection_revision);
+    try std.testing.expectEqual(contract.CustomProviderCredentialStatus.ready, restored.credential_status);
+    try std.testing.expectEqual(contract.CustomProviderState.configuring, restored.state);
+    try std.testing.expect(restored.provider_revision != initial.provider_revision);
     try std.testing.expect(restored.source_generation != initial.source_generation);
     try std.testing.expectEqualStrings("new-secret", vault.secret[0..vault.secret_len]);
 }
@@ -1909,7 +1907,7 @@ test "Models bootstrap initializes canonical store and ignores retired files" {
         "preferences.json",
         "{\"selection_owner_account_id\":\"retired\"}",
     );
-    try writeTestFile(&tmp.dir, "model-connections.json", "not-json");
+    try writeTestFile(&tmp.dir, "custom-providers.json", "not-json");
 
     var vault: TestVault = .{};
     var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
@@ -1923,20 +1921,20 @@ test "Models bootstrap initializes canonical store and ignores retired files" {
     const view = runtime.view();
     try std.testing.expect(view.metask_selection == null);
     try std.testing.expect(view.default_selection == null);
-    try std.testing.expectEqual(@as(usize, 0), view.model_connections.len);
+    try std.testing.expectEqual(@as(usize, 0), view.custom_providers.len);
     const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
         return error.TestExpectedEqual;
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings(
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"connections\":[]}",
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
         bytes,
     );
 }
 
-test "Models bootstrap rejects retired and damaged canonical shapes" {
+test "Models bootstrap rejects damaged canonical shapes" {
     const inputs = [_][]const u8{
-        "{\"default_connection_id\":null,\"default_execution_generation\":0,\"pending_credential_deletions\":[],\"connections\":[]}",
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"migration\":{\"legacy_marker\":true},\"pending_credential_deletions\":[],\"connections\":[]}",
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[]}",
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[],\"unknown\":true}",
         "not-json",
     };
     for (inputs) |input| {
@@ -1975,7 +1973,7 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
     try writeTestFile(
         &tmp.dir,
         registry_impl.store_file_name,
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"migration\":{\"legacy_marker\":true},\"pending_credential_deletions\":[],\"connections\":[]}",
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[]}",
     );
 
     var vault: TestVault = .{};
@@ -2000,7 +1998,7 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
         return error.TestExpectedEqual;
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings(
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"connections\":[]}",
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
         bytes,
     );
 }

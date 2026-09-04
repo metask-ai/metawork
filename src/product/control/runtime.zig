@@ -302,7 +302,7 @@ pub const Configuration = struct {
     schedule_notifier: ScheduleNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
     skill_enablement: SkillEnablementConfiguration = .{},
-    model_connections: ModelConnectionCapabilities = .{},
+    custom_providers: CustomProviderCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
     completion_factory: CompletionFactory = .{},
 };
@@ -326,10 +326,10 @@ pub const CompletionFactory = struct {
     }
 };
 
-pub const ModelConnectionCapabilities = struct {
+pub const CustomProviderCapabilities = struct {
     management: bool = false,
     secret_capture: bool = false,
-    connection_test: bool = false,
+    model_test: bool = false,
 };
 
 pub const CheckpointStoreConfiguration = struct {
@@ -393,19 +393,19 @@ const account_snapshot_text_bytes: usize =
     account_contract.Limits.account_id_bytes +
     account_contract.Limits.display_name_bytes +
     account_contract.Limits.safe_diagnostic_bytes;
-const model_connection_snapshot_text_bytes: usize =
-    models_contract.Limits.model_connection_entries *
+const custom_provider_snapshot_text_bytes: usize =
+    models_contract.Limits.custom_provider_entries *
     (models_contract.Limits.instance_id_bytes +
         models_contract.Limits.display_name_bytes +
         models_contract.Limits.base_url_bytes +
         models_contract.Limits.model_id_bytes +
-        models_contract.Limits.model_connection_model_entries *
+        models_contract.Limits.custom_provider_model_entries *
             (models_contract.Limits.model_id_bytes +
                 models_contract.Limits.model_display_name_bytes));
 const account_snapshot_overhead: usize = 1024;
 const model_metadata_snapshot_bytes: usize = 1024;
-const model_connection_snapshot_overhead: usize = 1024 +
-    models_contract.Limits.model_connection_entries * 256;
+const custom_provider_snapshot_overhead: usize = 1024 +
+    models_contract.Limits.custom_provider_entries * 256;
 const workspace_snapshot_overhead: usize = 512;
 const task_snapshot_overhead: usize = 1024;
 const scheduled_task_snapshot_overhead: usize = 1024;
@@ -1013,8 +1013,8 @@ const CatalogSnapshot = catalog_snapshot.Snapshot;
 
 const McpRefreshTestJob = if (builtin.is_test) mcp_testing.RefreshJob else struct {};
 
-pub const PreparedModelConnectionBinding =
-    execution_state.PreparedModelConnectionBinding;
+pub const PreparedCustomProviderBinding =
+    execution_state.PreparedCustomProviderBinding;
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -1052,9 +1052,9 @@ pub const Runtime = struct {
     default_permission_profile: PermissionProfile = .approval_required,
     account_projection: account_projection.Projection,
     execution_state: execution_state.State,
-    model_connections: models_aggregate.Runtime,
+    custom_providers: models_aggregate.Runtime,
     canonical_user_home: ?[]u8,
-    model_connection_capabilities: ModelConnectionCapabilities,
+    custom_provider_capabilities: CustomProviderCapabilities,
     completion_factory: CompletionFactory,
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -1102,12 +1102,12 @@ pub const Runtime = struct {
         errdefer account_projection_state.deinit();
         var execution_state_state = try execution_state.State.init(allocator);
         errdefer execution_state_state.deinit();
-        var model_connections = models_aggregate.Runtime.init(
+        var custom_providers = models_aggregate.Runtime.init(
             allocator,
             io,
             std.Thread.getCurrentId(),
         );
-        errdefer model_connections.deinit();
+        errdefer custom_providers.deinit();
         const canonical_user_home = if (configuration.directories.canonical_user_home) |home| home_copy: {
             if (home.len == 0 or !std.fs.path.isAbsolute(home) or
                 !std.unicode.utf8ValidateSlice(home))
@@ -1288,9 +1288,9 @@ pub const Runtime = struct {
             .file_change_lane = file_change_lane_value,
             .account_projection = account_projection_state,
             .execution_state = execution_state_state,
-            .model_connections = model_connections,
+            .custom_providers = custom_providers,
             .canonical_user_home = canonical_user_home,
-            .model_connection_capabilities = configuration.model_connections,
+            .custom_provider_capabilities = configuration.custom_providers,
             .completion_factory = configuration.completion_factory,
         };
         skill_owned = false;
@@ -1972,28 +1972,28 @@ pub const Runtime = struct {
         );
     }
 
-    /// Installs a Host-resolved user Model Connection execution without
+    /// Installs a Host-resolved user Custom Provider execution without
     /// pretending that it is a Metask OAuth account/catalog. The active
     /// execution still uses the same Runtime-owned secret and generation
     /// machinery as the built-in path.
-    pub fn prepareModelConnectionBinding(
+    pub fn prepareCustomProviderBinding(
         self: *Runtime,
-        connection_id: []const u8,
+        provider_id: []const u8,
         model_id: []const u8,
-    ) std.mem.Allocator.Error!PreparedModelConnectionBinding {
-        return PreparedModelConnectionBinding.init(
+    ) std.mem.Allocator.Error!PreparedCustomProviderBinding {
+        return PreparedCustomProviderBinding.init(
             self.allocator,
-            connection_id,
+            provider_id,
             model_id,
         );
     }
 
-    pub fn installModelConnectionExecutionNoFail(
+    pub fn installCustomProviderExecutionNoFail(
         self: *Runtime,
         execution: *models_contract.OwnedConfig,
-        prepared_binding: *PreparedModelConnectionBinding,
+        prepared_binding: *PreparedCustomProviderBinding,
     ) void {
-        self.execution_state.installModelConnectionNoFail(
+        self.execution_state.installCustomProviderNoFail(
             execution,
             prepared_binding,
             self.executionProjectionRedaction(),
@@ -2066,25 +2066,25 @@ pub const Runtime = struct {
     }
 
     pub fn modelsView(self: *Runtime) models_contract.ModelsView {
-        return self.model_connections.view();
+        return self.custom_providers.view();
     }
 
-    pub fn startModelConnections(
+    pub fn startCustomProviders(
         self: *Runtime,
         absolute_directory: []const u8,
         vault: models_ports.CredentialVault,
     ) models_aggregate.StartError!void {
-        try self.model_connections.start(absolute_directory, vault);
+        try self.custom_providers.start(absolute_directory, vault);
         self.reconcileModelsDefaultNoFail(false, false);
         self.finishExecutionCommitNoFail();
     }
 
-    pub fn startModelConnectionsUnavailable(self: *Runtime) void {
-        self.model_connections.startUnavailable();
+    pub fn startCustomProvidersUnavailable(self: *Runtime) void {
+        self.custom_providers.startUnavailable();
     }
 
-    pub fn stopModelConnections(self: *Runtime) void {
-        self.model_connections.stop();
+    pub fn stopCustomProviders(self: *Runtime) void {
+        self.custom_providers.stop();
     }
 
     /// Hard-resets the Models canonical store after an explicit user
@@ -2102,7 +2102,7 @@ pub const Runtime = struct {
             return .rejected(.operation_in_progress);
         if (self.modelsView().persistence_health != .recovery_required)
             return .rejected(.persistence_unavailable);
-        const result = self.model_connections.resetStore();
+        const result = self.custom_providers.resetStore();
         if (!result.accepted) return result;
         self.reconcileModelsDefaultNoFail(false, false);
         self.finishExecutionCommitNoFail();
@@ -2117,7 +2117,7 @@ pub const Runtime = struct {
             return .rejected(.operation_in_progress);
         if (self.executionReplacementPending())
             return .rejected(.operation_in_progress);
-        const result = self.model_connections.selectDefault(command);
+        const result = self.custom_providers.selectDefault(command);
         if (result.accepted) {
             self.reconcileModelsDefaultNoFail(false, false);
             self.finishExecutionCommitNoFail();
@@ -2133,7 +2133,7 @@ pub const Runtime = struct {
             return .rejected(.operation_in_progress);
         if (self.executionReplacementPending())
             return .rejected(.operation_in_progress);
-        const result = self.model_connections.configureMetaskSelection(command);
+        const result = self.custom_providers.configureMetaskSelection(command);
         if (result.accepted) {
             self.reconcileModelsDefaultNoFail(false, false);
             self.finishExecutionCommitNoFail();
@@ -2141,13 +2141,13 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn submitModelConnectionCommand(
+    pub fn submitCustomProviderCommand(
         self: *Runtime,
-        command: models_contract.ModelConnectionCommand,
+        command: models_contract.CustomProviderCommand,
     ) models_contract.CommandResult {
-        if (command == .test_connection)
+        if (command == .test_model)
             return .rejected(.test_unavailable);
-        const result = self.model_connections.submitCommand(command);
+        const result = self.custom_providers.submitCommand(command);
         if (result.accepted) {
             self.reconcileModelsDefaultNoFail(false, false);
             self.finishExecutionCommitNoFail();
@@ -2155,20 +2155,20 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn beginModelConnectionProbe(
+    pub fn beginCustomProviderProbe(
         self: *Runtime,
-        command: models_contract.ModelConnectionTestCommand,
+        command: models_contract.CustomModelTestCommand,
     ) models_contract.Preparation {
         const execution_generation = self.nextExecutionGeneration(
             self.executionGeneration(),
         ) catch return .{ .rejected = .local_resource_exhausted };
-        var candidate = self.model_connections.resolveProbeCandidate(command) catch
+        var candidate = self.custom_providers.resolveProbeCandidate(command) catch
             return .{ .rejected = .test_unavailable };
         defer candidate.deinit();
         var execution = candidate.intoConfig(execution_generation) catch
             return .{ .rejected = .test_unavailable };
-        const result = self.model_connections.submitCommand(.{
-            .test_connection = command,
+        const result = self.custom_providers.submitCommand(.{
+            .test_model = command,
         });
         if (!result.accepted) {
             execution.deinit();
@@ -2178,12 +2178,12 @@ pub const Runtime = struct {
         return .{ .ready = execution };
     }
 
-    pub fn completeModelConnectionTest(
+    pub fn completeCustomModelTest(
         self: *Runtime,
-        command: models_contract.ModelConnectionTestCommand,
+        command: models_contract.CustomModelTestCommand,
         succeeded: bool,
     ) models_contract.CommandResult {
-        const result = self.model_connections.completeTest(command, succeeded);
+        const result = self.custom_providers.completeTest(command, succeeded);
         if (result.accepted) self.finishExecutionCommitNoFail();
         return result;
     }
@@ -2193,7 +2193,7 @@ pub const Runtime = struct {
         principal_ref: []const u8,
         authorization_generation: u64,
     ) models_contract.CatalogRefreshPrepareResult {
-        return self.model_connections.prepareMetaskCatalogRefresh(
+        return self.custom_providers.prepareMetaskCatalogRefresh(
             principal_ref,
             authorization_generation,
         );
@@ -2205,7 +2205,7 @@ pub const Runtime = struct {
         authorization_generation: u64,
         command: models_contract.SelectMetaskApiKeyCommand,
     ) models_contract.CatalogSelectionPrepareResult {
-        return self.model_connections.prepareMetaskApiKeySelection(
+        return self.custom_providers.prepareMetaskApiKeySelection(
             principal_ref,
             authorization_generation,
             command,
@@ -2218,7 +2218,7 @@ pub const Runtime = struct {
         authorization_generation: u64,
         completion: *models_ports.OwnedCatalogCompletion,
     ) models_contract.ModelsError {
-        const result = self.model_connections.completeMetaskCatalogRefresh(
+        const result = self.custom_providers.completeMetaskCatalogRefresh(
             attempt_id,
             authorization_generation,
             completion,
@@ -2236,7 +2236,7 @@ pub const Runtime = struct {
         error_code: models_contract.ModelsError,
         safe_diagnostic: []const u8,
     ) void {
-        self.model_connections.failMetaskCatalogRefresh(
+        self.custom_providers.failMetaskCatalogRefresh(
             attempt_id,
             authorization_generation,
             error_code,
@@ -2246,17 +2246,17 @@ pub const Runtime = struct {
     }
 
     pub fn setMetaskAuthorizationUnavailable(self: *Runtime) void {
-        self.model_connections.setMetaskAuthorizationUnavailable();
+        self.custom_providers.setMetaskAuthorizationUnavailable();
         self.reconcileModelsDefaultNoFail(false, true);
         self.finishExecutionCommitNoFail();
     }
 
-    pub fn createModelConnectionWithCredential(
+    pub fn createCustomProviderWithCredential(
         self: *Runtime,
         secret: []const u8,
-        spec: models_contract.ModelConnectionSpec,
+        spec: models_contract.CustomProviderSpec,
     ) models_contract.CommandResult {
-        const result = self.model_connections.createWithCredential(
+        const result = self.custom_providers.createWithCredential(
             secret,
             spec,
         );
@@ -2264,12 +2264,12 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn replaceModelConnectionCredential(
+    pub fn replaceCustomProviderCredential(
         self: *Runtime,
         secret: []const u8,
-        selection: models_contract.ModelConnectionSelectionCommand,
+        selection: models_contract.CustomProviderSelectionCommand,
     ) models_contract.CommandResult {
-        const result = self.model_connections.replaceCredential(secret, selection);
+        const result = self.custom_providers.replaceCredential(secret, selection);
         // The fail-closed first phase may revoke stale readiness even when the
         // subsequent credential write or final commit fails.
         self.reconcileModelsDefaultNoFail(false, false);
@@ -2277,22 +2277,22 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn modelConnectionDefaultBinding(
+    pub fn customProviderDefaultBinding(
         self: *const Runtime,
     ) ?models_contract.DefaultBinding {
-        const binding = self.model_connections.defaultBinding() orelse return null;
+        const binding = self.custom_providers.defaultBinding() orelse return null;
         return .{
-            .connection_id = binding.connection_id,
+            .provider_id = binding.provider_id,
             .model_id = binding.model_id,
         };
     }
 
-    pub fn clearModelConnectionDefault(self: *Runtime) models_contract.CommandResult {
-        return self.model_connections.clearDefault();
+    pub fn clearCustomProviderDefault(self: *Runtime) models_contract.CommandResult {
+        return self.custom_providers.clearDefault();
     }
 
     pub fn nextExecutionGeneration(self: *Runtime, current: u64) !u64 {
-        return self.model_connections.nextGeneration(current);
+        return self.custom_providers.nextGeneration(current);
     }
 
     fn reconcileModelsDefaultNoFail(
@@ -2300,7 +2300,7 @@ pub const Runtime = struct {
         refresh_aligned: bool,
         clear_unresolvable: bool,
     ) void {
-        const desired = self.model_connections.defaultAuthority() orelse {
+        const desired = self.custom_providers.defaultAuthority() orelse {
             if (self.execution_state.hasRecordedDefaultAuthority())
                 self.clearRecordedModelsDefaultNoFail();
             return;
@@ -2308,7 +2308,7 @@ pub const Runtime = struct {
         const aligned = self.execution_state.defaultAuthorityMatches(desired);
         if (aligned and !refresh_aligned and !clear_unresolvable) return;
 
-        var candidate = (self.model_connections.resolveDefault() catch {
+        var candidate = (self.custom_providers.resolveDefault() catch {
             if (clear_unresolvable and
                 self.execution_state.hasRecordedDefaultAuthority() and
                 self.execution_state.activeSource() == .metask)
@@ -2352,8 +2352,8 @@ pub const Runtime = struct {
             return;
         };
         defer execution.deinit();
-        var prepared_binding: ?PreparedModelConnectionBinding = if (desired.source == .model_connection)
-            self.prepareModelConnectionBinding(
+        var prepared_binding: ?PreparedCustomProviderBinding = if (desired.source == .custom_provider)
+            self.prepareCustomProviderBinding(
                 desired.selection.source_id,
                 desired.selection.model_id,
             ) catch {
@@ -2387,7 +2387,7 @@ pub const Runtime = struct {
                 desired.source_generation,
                 self.executionProjectionRedaction(),
             ),
-            .model_connection => self.execution_state.installModelConnectionNoFail(
+            .custom_provider => self.execution_state.installCustomProviderNoFail(
                 &execution,
                 &prepared_binding.?,
                 self.executionProjectionRedaction(),
@@ -2426,15 +2426,15 @@ pub const Runtime = struct {
         self.finishDefaultExecutionCommitNoFail();
     }
 
-    pub fn modelConnectionExecutionActive(
+    pub fn customProviderExecutionActive(
         self: *const Runtime,
-        connection_id: []const u8,
+        provider_id: []const u8,
     ) bool {
-        return self.execution_state.modelConnectionActive(connection_id);
+        return self.execution_state.customProviderActive(provider_id);
     }
 
-    pub fn modelConnectionExecutionSelected(self: *const Runtime) bool {
-        return self.execution_state.modelConnectionSelected();
+    pub fn customProviderExecutionSelected(self: *const Runtime) bool {
+        return self.execution_state.customProviderSelected();
     }
 
     pub fn executionGeneration(self: *const Runtime) u64 {
@@ -2442,7 +2442,7 @@ pub const Runtime = struct {
     }
 
     /// Automation composes its fixture through the same Models authority and
-    /// Product reconciliation path as a user-created Model Connection. Release
+    /// Product reconciliation path as a user-created Custom Provider. Release
     /// builds reject this Application-only bootstrap before observing input.
     pub fn installAutomationExecution(
         self: *Runtime,
@@ -2451,11 +2451,11 @@ pub const Runtime = struct {
         if (!build_options.automation)
             return error.InvalidAutomationExecution;
         var view = self.modelsView();
-        if (view.model_connections.len > 1)
+        if (view.custom_providers.len > 1)
             return error.InvalidAutomationExecution;
 
-        if (view.model_connections.len == 0) {
-            if (!self.createModelConnectionWithCredential(
+        if (view.custom_providers.len == 0) {
+            if (!self.createCustomProviderWithCredential(
                 input.credential,
                 .{
                     .display_name = "Automation fixture",
@@ -2464,12 +2464,12 @@ pub const Runtime = struct {
                 },
             ).accepted) return error.InvalidAutomationExecution;
             view = self.modelsView();
-            if (view.model_connections.len != 1)
+            if (view.custom_providers.len != 1)
                 return error.InvalidAutomationExecution;
-            const provider = view.model_connections[0];
-            if (!self.submitModelConnectionCommand(.{ .add_custom_model = .{
+            const provider = view.custom_providers[0];
+            if (!self.submitCustomProviderCommand(.{ .add_custom_model = .{
                 .source_id = provider.id,
-                .expected_connection_revision = provider.connection_revision,
+                .expected_provider_revision = provider.provider_revision,
                 .expected_catalog_generation = provider.catalog_generation,
                 .model = .{
                     .id = input.model,
@@ -2477,38 +2477,38 @@ pub const Runtime = struct {
                 },
             } }).accepted) return error.InvalidAutomationExecution;
         } else {
-            const restored = view.model_connections[0];
+            const restored = view.custom_providers[0];
             if (restored.credential_status != .missing or
                 !std.mem.eql(u8, restored.display_name, "Automation fixture") or
                 restored.protocol != input.protocol or
                 !std.mem.eql(u8, restored.normalized_base_url, input.base_url) or
                 restored.models.len != 1 or
                 !std.mem.eql(u8, restored.models[0].id, input.model) or
-                !self.replaceModelConnectionCredential(input.credential, .{
+                !self.replaceCustomProviderCredential(input.credential, .{
                     .source_id = restored.id,
-                    .expected_connection_revision = restored.connection_revision,
+                    .expected_provider_revision = restored.provider_revision,
                 }).accepted) return error.InvalidAutomationExecution;
         }
 
         view = self.modelsView();
-        if (view.model_connections.len != 1)
+        if (view.custom_providers.len != 1)
             return error.InvalidAutomationExecution;
-        const created = view.model_connections[0];
+        const created = view.custom_providers[0];
         if (created.models.len != 1 or
             !std.mem.eql(u8, created.models[0].id, input.model))
             return error.InvalidAutomationExecution;
         // Every accepted Models command swaps the committed Registry. Keep the
         // connection identity owned across those commits instead of borrowing
         // it from a view that the first probe commit invalidates.
-        const connection_id = try self.allocator.dupe(u8, created.id);
-        defer self.allocator.free(connection_id);
-        const probe_command: models_contract.ModelConnectionTestCommand = .{
-            .model = .{ .source_id = connection_id, .model_id = input.model },
-            .expected_connection_revision = created.connection_revision,
+        const provider_id = try self.allocator.dupe(u8, created.id);
+        defer self.allocator.free(provider_id);
+        const probe_command: models_contract.CustomModelTestCommand = .{
+            .model = .{ .source_id = provider_id, .model_id = input.model },
+            .expected_provider_revision = created.provider_revision,
             .expected_source_generation = created.source_generation,
             .expected_catalog_generation = created.catalog_generation,
         };
-        var probe = switch (self.beginModelConnectionProbe(probe_command)) {
+        var probe = switch (self.beginCustomProviderProbe(probe_command)) {
             .ready => |execution| execution,
             .rejected => return error.InvalidAutomationExecution,
         };
@@ -2516,26 +2516,26 @@ pub const Runtime = struct {
         // network probe during Application bootstrap. Releasing this owned
         // config before completion preserves the normal probe ownership shape.
         probe.deinit();
-        if (!self.completeModelConnectionTest(probe_command, true).accepted)
+        if (!self.completeCustomModelTest(probe_command, true).accepted)
             return error.InvalidAutomationExecution;
 
         view = self.modelsView();
-        if (view.model_connections.len != 1)
+        if (view.custom_providers.len != 1)
             return error.InvalidAutomationExecution;
-        const ready = view.model_connections[0];
+        const ready = view.custom_providers[0];
         if (!self.selectModelsDefault(.{
-            .selection = .{ .source_id = connection_id, .model_id = input.model },
+            .selection = .{ .source_id = provider_id, .model_id = input.model },
             .expected_selection_revision = view.selection_revision,
             .expected_source_generation = ready.source_generation,
             .expected_catalog_generation = ready.catalog_generation,
         }).accepted) return error.InvalidAutomationExecution;
 
-        const default_authority = self.model_connections.defaultAuthority() orelse
+        const default_authority = self.custom_providers.defaultAuthority() orelse
             return error.InvalidAutomationExecution;
-        if (default_authority.source != .model_connection or
+        if (default_authority.source != .custom_provider or
             default_authority.source_generation == 0 or
             default_authority.selection_revision == 0 or
-            !self.modelConnectionExecutionActive(connection_id) or
+            !self.customProviderExecutionActive(provider_id) or
             !self.canCreateTask()) return error.InvalidAutomationExecution;
     }
 
@@ -4053,7 +4053,7 @@ pub const Runtime = struct {
         return runtime.inspectDesiredConfiguration();
     }
 
-    /// Host-only copy used to construct an isolated connection-test Runtime.
+    /// Host-only copy used to construct an isolated custom-model probe Runtime.
     /// The bytes never cross Bridge and contain no resolved credential values.
     pub fn writeMcpDesiredConfiguration(
         self: *const Runtime,
@@ -4549,7 +4549,7 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"modelConnectionManagement\":{},\"modelConnectionSecretCapture\":{},\"modelConnectionTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":true,\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"pdf\":true,\"maxFiles\":\"{d}\",\"maxImageBytes\":\"{d}\",\"maxPdfBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":true,\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"pdf\":true,\"maxFiles\":\"{d}\",\"maxImageBytes\":\"{d}\",\"maxPdfBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -4564,9 +4564,9 @@ pub const Runtime = struct {
             background_schedule_wake,
             self.skill.managementHealth() == .ready,
             @tagName(self.skill.managementHealth()),
-            self.model_connection_capabilities.management,
-            self.model_connection_capabilities.secret_capture,
-            self.model_connection_capabilities.connection_test,
+            self.custom_provider_capabilities.management,
+            self.custom_provider_capabilities.secret_capture,
+            self.custom_provider_capabilities.model_test,
             mcp_capabilities.management,
             mcp_capabilities.host.connection_approval,
             mcp_capabilities.host.secret_capture,
@@ -4750,12 +4750,12 @@ pub const Runtime = struct {
             view.metask_selection_revision,
         }) catch return error.SnapshotTooLarge;
         try self.writeOptionalModelRef(writer, view.default_selection);
-        writer.print(",\"selectionRevision\":\"{d}\",\"operation\":\"{s}\",\"errorCode\":\"{s}\",\"connections\":[", .{
+        writer.print(",\"selectionRevision\":\"{d}\",\"operation\":\"{s}\",\"errorCode\":\"{s}\",\"customProviders\":[", .{
             view.selection_revision,
             @tagName(view.operation),
             @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
-        try self.writeModelConnections(writer, view.model_connections);
+        try self.writeCustomProviders(writer, view.custom_providers);
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
 
@@ -4773,32 +4773,29 @@ pub const Runtime = struct {
         } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     }
 
-    fn writeModelConnections(
+    fn writeCustomProviders(
         self: *Runtime,
         writer: *std.Io.Writer,
-        connections: []const models_contract.ModelConnectionView,
+        providers: []const models_contract.CustomProviderView,
     ) Error!void {
-        for (connections, 0..) |connection, index| {
+        for (providers, 0..) |provider, index| {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, connection.id);
+            try self.projectedJsonValue(writer, provider.id);
             writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, connection.display_name);
-            writer.print(",\"protocol\":\"{s}\",\"normalizedBaseUrl\":", .{@tagName(connection.protocol)}) catch
+            try self.projectedJsonValue(writer, provider.display_name);
+            writer.print(",\"protocol\":\"{s}\",\"normalizedBaseUrl\":", .{@tagName(provider.protocol)}) catch
                 return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, connection.normalized_base_url);
-            writer.print(",\"state\":\"{s}\",\"testStatus\":\"{s}\",\"credentialStatus\":\"{s}\",\"enabled\":{},\"connectionRevision\":\"{d}\",\"sourceGeneration\":\"{d}\",\"catalogGeneration\":\"{d}\",\"selectedModel\":", .{
-                @tagName(connection.state),
-                @tagName(connection.test_status),
-                @tagName(connection.credential_status),
-                connection.enabled,
-                connection.connection_revision,
-                connection.source_generation,
-                connection.catalog_generation,
+            try self.projectedJsonValue(writer, provider.normalized_base_url);
+            writer.print(",\"state\":\"{s}\",\"credentialStatus\":\"{s}\",\"enabled\":{},\"providerRevision\":\"{d}\",\"sourceGeneration\":\"{d}\",\"catalogGeneration\":\"{d}\",\"models\":[", .{
+                @tagName(provider.state),
+                @tagName(provider.credential_status),
+                provider.enabled,
+                provider.provider_revision,
+                provider.source_generation,
+                provider.catalog_generation,
             }) catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, connection.selected_model);
-            writer.writeAll(",\"models\":[") catch return error.SnapshotTooLarge;
-            for (connection.models, 0..) |model, model_index| {
+            for (provider.models, 0..) |model, model_index| {
                 if (model_index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                 writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
                 try self.projectedJsonValue(writer, model.id);
@@ -4908,7 +4905,7 @@ pub const Runtime = struct {
         self.skill.deinit();
         if (self.canonical_user_home) |home| self.allocator.free(home);
         if (self.mcp) |*mcp| mcp.deinit();
-        self.model_connections.deinit();
+        self.custom_providers.deinit();
         self.execution_state.deinit();
         self.account_projection.deinit();
         std.debug.assert(self.projection_bytes == 0);
@@ -5152,7 +5149,7 @@ pub const Runtime = struct {
                 query.execution_protocol,
                 query.execution_model,
                 self.metaskBindingCurrent(),
-                self.model_connections.metaskModelAvailable(
+                self.custom_providers.metaskModelAvailable(
                     null,
                     query.execution_protocol,
                     query.execution_model,
@@ -5314,7 +5311,7 @@ pub const Runtime = struct {
         return self.execution_state.taskModelSelectionBaseAuthorized(identity) and
             self.metaskBindingCurrent() and
             self.execution_state.metaskSourceGeneration() == expected_source_generation and
-            self.model_connections.metaskSourceModelAvailable(
+            self.custom_providers.metaskSourceModelAvailable(
                 target,
                 expected_source_generation,
                 expected_catalog_generation,
@@ -5538,16 +5535,16 @@ pub const Runtime = struct {
         if (!self.canCreateTask() or expected.source_generation == 0 or
             expected.selection_revision == 0)
             return error.ExecutionUnavailable;
-        const authority = self.model_connections.defaultAuthority() orelse
+        const authority = self.custom_providers.defaultAuthority() orelse
             return error.ExecutionUnavailable;
         if (!sameModelRef(authority.selection, expected.model_ref) or
             authority.source_generation != expected.source_generation or
             authority.selection_revision != expected.selection_revision or
             authority.protocol != expected.protocol or
             !self.execution_state.defaultAuthorityMatches(authority) or
-            !self.model_connections.defaultResolvable())
+            !self.custom_providers.defaultResolvable())
             return error.ExecutionGenerationMismatch;
-        var candidate = (self.model_connections.resolveDefault() catch |err| switch (err) {
+        var candidate = (self.custom_providers.resolveDefault() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.ExecutionUnavailable,
         }) orelse return error.ExecutionUnavailable;
@@ -6993,15 +6990,15 @@ pub const Runtime = struct {
     pub fn modelsManagement(self: *Runtime) control_ports.ModelsManagement {
         return .{
             .context = self,
-            .start_model_connections_fn = controlStartModelConnections,
-            .start_model_connections_unavailable_fn = controlStartModelConnectionsUnavailable,
-            .stop_model_connections_fn = controlStopModelConnections,
+            .start_custom_providers_fn = controlStartCustomProviders,
+            .start_custom_providers_unavailable_fn = controlStartCustomProvidersUnavailable,
+            .stop_custom_providers_fn = controlStopCustomProviders,
             .reset_model_store_fn = controlResetModelStore,
-            .create_model_connection_fn = controlCreateModelConnection,
-            .replace_model_connection_credential_fn = controlReplaceModelConnectionCredential,
-            .submit_model_connection_fn = controlSubmitModelConnection,
-            .begin_model_connection_probe_fn = controlBeginModelConnectionProbe,
-            .complete_model_connection_test_fn = controlCompleteModelConnectionTest,
+            .create_custom_provider_fn = controlCreateCustomProvider,
+            .replace_custom_provider_credential_fn = controlReplaceCustomProviderCredential,
+            .submit_custom_provider_fn = controlSubmitCustomProvider,
+            .begin_custom_provider_probe_fn = controlBeginCustomProviderProbe,
+            .complete_custom_model_test_fn = controlCompleteCustomModelTest,
             .prepare_metask_catalog_refresh_fn = controlPrepareMetaskCatalogRefresh,
             .prepare_metask_api_key_selection_fn = controlPrepareMetaskApiKeySelection,
             .complete_metask_catalog_refresh_fn = controlCompleteMetaskCatalogRefresh,
@@ -7075,7 +7072,7 @@ pub const Runtime = struct {
 
 pub const TestSupport = if (builtin.is_test) struct {
     pub fn scheduledBinding(control: *Runtime) ScheduledTaskBindingInput {
-        const authority = control.model_connections.defaultAuthority() orelse
+        const authority = control.custom_providers.defaultAuthority() orelse
             unreachable;
         return .{
             .model_ref = authority.selection,
@@ -7112,7 +7109,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         else
             1;
         try models_aggregate.TestSupport.installMetaskDefault(
-            &control.model_connections,
+            &control.custom_providers,
             "account-1",
             .{
                 .id = "key-1",
@@ -7129,7 +7126,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             catalog_generation,
         );
         control.execution_state.recordDefaultAuthorityNoFail(
-            control.model_connections.defaultAuthority().?,
+            control.custom_providers.defaultAuthority().?,
         );
         control.finishExecutionCommitNoFail();
     }
@@ -7165,7 +7162,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         try control.prepareExecutionInstall(execution.input());
         control.installExecutionNoFail(&execution);
         control.execution_state.recordDefaultAuthorityNoFail(
-            control.model_connections.defaultAuthority().?,
+            control.custom_providers.defaultAuthority().?,
         );
         control.endExecutionReplacementNoFail();
         control.finishExecutionCommitNoFail();
@@ -7215,7 +7212,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             },
         }};
         try models_aggregate.TestSupport.installMetaskDefault(
-            &control.model_connections,
+            &control.custom_providers,
             "account-1",
             api_key,
             "fixture-secret",
@@ -7247,32 +7244,32 @@ fn controlCommitAccountChange(
 ) void {
     controlOwner(context).commitAccountChangeNoFail(commit);
 }
-fn controlStartModelConnections(context: *anyopaque, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
-    try controlOwner(context).startModelConnections(directory, vault);
+fn controlStartCustomProviders(context: *anyopaque, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
+    try controlOwner(context).startCustomProviders(directory, vault);
 }
-fn controlStartModelConnectionsUnavailable(context: *anyopaque) void {
-    controlOwner(context).startModelConnectionsUnavailable();
+fn controlStartCustomProvidersUnavailable(context: *anyopaque) void {
+    controlOwner(context).startCustomProvidersUnavailable();
 }
-fn controlStopModelConnections(context: *anyopaque) void {
-    controlOwner(context).stopModelConnections();
+fn controlStopCustomProviders(context: *anyopaque) void {
+    controlOwner(context).stopCustomProviders();
 }
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
 }
-fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: models_contract.ModelConnectionSpec) models_contract.CommandResult {
-    return controlOwner(context).createModelConnectionWithCredential(secret, spec);
+fn controlCreateCustomProvider(context: *anyopaque, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
+    return controlOwner(context).createCustomProviderWithCredential(secret, spec);
 }
-fn controlReplaceModelConnectionCredential(context: *anyopaque, secret: []const u8, selection: models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult {
-    return controlOwner(context).replaceModelConnectionCredential(secret, selection);
+fn controlReplaceCustomProviderCredential(context: *anyopaque, secret: []const u8, selection: models_contract.CustomProviderSelectionCommand) models_contract.CommandResult {
+    return controlOwner(context).replaceCustomProviderCredential(secret, selection);
 }
-fn controlSubmitModelConnection(context: *anyopaque, command: models_contract.ModelConnectionCommand) models_contract.CommandResult {
-    return controlOwner(context).submitModelConnectionCommand(command);
+fn controlSubmitCustomProvider(context: *anyopaque, command: models_contract.CustomProviderCommand) models_contract.CommandResult {
+    return controlOwner(context).submitCustomProviderCommand(command);
 }
-fn controlBeginModelConnectionProbe(context: *anyopaque, command: models_contract.ModelConnectionTestCommand) models_contract.Preparation {
-    return controlOwner(context).beginModelConnectionProbe(command);
+fn controlBeginCustomProviderProbe(context: *anyopaque, command: models_contract.CustomModelTestCommand) models_contract.Preparation {
+    return controlOwner(context).beginCustomProviderProbe(command);
 }
-fn controlCompleteModelConnectionTest(context: *anyopaque, command: models_contract.ModelConnectionTestCommand, succeeded: bool) models_contract.CommandResult {
-    return controlOwner(context).completeModelConnectionTest(command, succeeded);
+fn controlCompleteCustomModelTest(context: *anyopaque, command: models_contract.CustomModelTestCommand, succeeded: bool) models_contract.CommandResult {
+    return controlOwner(context).completeCustomModelTest(command, succeeded);
 }
 fn controlPrepareMetaskCatalogRefresh(context: *anyopaque, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
     return controlOwner(context).prepareMetaskCatalogRefresh(principal_ref, authorization_generation);
@@ -8053,11 +8050,11 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
         total,
         std.math.mul(
             usize,
-            model_connection_snapshot_text_bytes,
+            custom_provider_snapshot_text_bytes,
             json_string_expansion,
         ) catch return null,
     ) catch return null;
-    total = std.math.add(usize, total, model_connection_snapshot_overhead) catch
+    total = std.math.add(usize, total, custom_provider_snapshot_overhead) catch
         return null;
     total = std.math.add(
         usize,
@@ -9873,7 +9870,7 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     ) == null);
     control.installExecutionNoFail(&replacement);
     control.execution_state.recordDefaultAuthorityNoFail(
-        control.model_connections.defaultAuthority().?,
+        control.custom_providers.defaultAuthority().?,
     );
     control.endExecutionReplacementNoFail();
     control.finishAccountCommitNoFail();
@@ -10716,7 +10713,7 @@ test "Runtime starts without execution and fails Task admission closed" {
     try std.testing.expectEqual(@as(u64, 0), control.currentRevision());
 }
 
-test "Runtime publishes a user model connection as an independent execution source" {
+test "Runtime publishes a user custom provider as an independent execution source" {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
@@ -10732,7 +10729,7 @@ test "Runtime publishes a user model connection as an independent execution sour
     defer control.deinit();
     var execution = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .model_connection,
+        .custom_provider,
         .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "gpt-5"),
         try std.testing.allocator.dupe(u8, "https://api.openai.com/v1/chat/completions"),
@@ -10741,41 +10738,41 @@ test "Runtime publishes a user model connection as an independent execution sour
         "fixture-provider",
     );
     errdefer execution.deinit();
-    var prepared_binding = try control.prepareModelConnectionBinding(
-        "connection-1",
+    var prepared_binding = try control.prepareCustomProviderBinding(
+        "provider-1",
         "gpt-5",
     );
     var prepared_binding_owned = true;
     defer if (prepared_binding_owned) prepared_binding.deinit();
     try control.beginDefaultExecutionReplacement();
     try control.prepareExecutionInstall(execution.input());
-    control.installModelConnectionExecutionNoFail(
+    control.installCustomProviderExecutionNoFail(
         &execution,
         &prepared_binding,
     );
     prepared_binding_owned = false;
     control.endExecutionReplacementNoFail();
     const view = control.accountView();
-    try std.testing.expectEqual(models_contract.Source.model_connection, control.execution_state.activeSource().?);
+    try std.testing.expectEqual(models_contract.Source.custom_provider, control.execution_state.activeSource().?);
     try std.testing.expectEqual(account_contract.AccountState.checking, view.state);
     // An active execution installed without a Models desired selection cannot
     // authorize new Task admission by itself.
     try std.testing.expect(!control.canCreateTask());
     try std.testing.expectEqualStrings(
-        "connection-1",
-        control.execution_state.selectedModelConnectionId(),
+        "provider-1",
+        control.execution_state.selectedCustomProviderId(),
     );
-    try std.testing.expect(control.modelConnectionExecutionActive("connection-1"));
-    try std.testing.expect(!control.modelConnectionExecutionActive("connection-2"));
-    try models_contract.validateModelConnectionSpec(.{
+    try std.testing.expect(control.customProviderExecutionActive("provider-1"));
+    try std.testing.expect(!control.customProviderExecutionActive("connection-2"));
+    try models_contract.validateCustomProviderSpec(.{
         .display_name = "Team OpenAI",
         .protocol = .openai_chat_completions,
         .normalized_base_url = "https://api.openai.com/v1/chat/completions",
     });
 }
 
-const TestModelConnectionVault = struct {
-    const slot = "model-connection-00000000000000000000000000000001";
+const TestCustomProviderVault = struct {
+    const slot = "custom-provider-00000000000000000000000000000001";
 
     secret: [models_contract.Limits.credential_bytes]u8 = undefined,
     secret_len: usize = 0,
@@ -10834,7 +10831,7 @@ const TestModelConnectionVault = struct {
     }
 };
 
-test "automation installs one ordinary Model Connection without publishing its credential" {
+test "automation installs one ordinary Custom Provider without publishing its credential" {
     if (!build_options.automation) return error.SkipZigTest;
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
@@ -10853,12 +10850,12 @@ test "automation installs one ordinary Model Connection without publishing its c
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestModelConnectionVault = .{};
-    try control.startModelConnections(
+    var vault: TestCustomProviderVault = .{};
+    try control.startCustomProviders(
         directory_storage[0..directory_len],
         vault.port(),
     );
-    defer control.stopModelConnections();
+    defer control.stopCustomProviders();
 
     const fixture: AutomationExecutionInput = .{
         .protocol = .anthropic_messages,
@@ -10869,20 +10866,20 @@ test "automation installs one ordinary Model Connection without publishing its c
     try control.installAutomationExecution(fixture);
 
     const view = control.modelsView();
-    try std.testing.expectEqual(@as(usize, 1), view.model_connections.len);
-    const connection = view.model_connections[0];
-    try std.testing.expectEqual(models_contract.ModelConnectionState.ready, connection.state);
-    try std.testing.expectEqual(models_contract.ModelConnectionTestStatus.connected, connection.test_status);
-    try std.testing.expect(connection.models[0].ready);
-    try std.testing.expectEqualStrings(fixture.model, connection.models[0].id);
-    try std.testing.expectEqualStrings(fixture.base_url, connection.normalized_base_url);
-    try std.testing.expectEqualStrings(connection.id, view.default_selection.?.source_id);
+    try std.testing.expectEqual(@as(usize, 1), view.custom_providers.len);
+    const provider = view.custom_providers[0];
+    try std.testing.expectEqual(models_contract.CustomProviderState.ready, provider.state);
+    try std.testing.expectEqual(models_contract.CustomModelTestStatus.connected, provider.models[0].test_status);
+    try std.testing.expect(provider.models[0].ready);
+    try std.testing.expectEqualStrings(fixture.model, provider.models[0].id);
+    try std.testing.expectEqualStrings(fixture.base_url, provider.normalized_base_url);
+    try std.testing.expectEqualStrings(provider.id, view.default_selection.?.source_id);
     try std.testing.expectEqualStrings(fixture.model, view.default_selection.?.model_id);
-    const authority = control.model_connections.defaultAuthority().?;
-    try std.testing.expectEqual(models_contract.Source.model_connection, authority.source);
+    const authority = control.custom_providers.defaultAuthority().?;
+    try std.testing.expectEqual(models_contract.Source.custom_provider, authority.source);
     try std.testing.expect(authority.source_generation != 0);
     try std.testing.expect(authority.selection_revision != 0);
-    try std.testing.expect(control.modelConnectionExecutionActive(connection.id));
+    try std.testing.expect(control.customProviderExecutionActive(provider.id));
     try std.testing.expect(control.newTaskAdmissionView().available);
     try std.testing.expect(control.executionGeneration() != 0);
 
@@ -10896,7 +10893,7 @@ test "automation installs one ordinary Model Connection without publishing its c
         error.InvalidAutomationExecution,
         control.installAutomationExecution(fixture),
     );
-    try std.testing.expectEqual(@as(usize, 1), control.modelsView().model_connections.len);
+    try std.testing.expectEqual(@as(usize, 1), control.modelsView().custom_providers.len);
     try std.testing.expectEqual(generation, control.executionGeneration());
     try std.testing.expectEqualStrings(fixture.credential, vault.secret[0..vault.secret_len]);
 }
@@ -10926,7 +10923,7 @@ test "production rejects automation execution before observing fixture input" {
         }),
     );
     try std.testing.expectEqual(@as(u64, 0), control.executionGeneration());
-    try std.testing.expectEqual(@as(usize, 0), control.modelsView().model_connections.len);
+    try std.testing.expectEqual(@as(usize, 0), control.modelsView().custom_providers.len);
 }
 
 test "automation cold restore rehydrates the persisted connection through credential replacement" {
@@ -10957,9 +10954,9 @@ test "automation cold restore rehydrates the persisted connection through creden
             .{},
         );
         defer first.deinit();
-        var first_vault: TestModelConnectionVault = .{};
-        try first.startModelConnections(directory, first_vault.port());
-        defer first.stopModelConnections();
+        var first_vault: TestCustomProviderVault = .{};
+        try first.startCustomProviders(directory, first_vault.port());
+        defer first.stopCustomProviders();
         try first.installAutomationExecution(fixture);
     }
 
@@ -10976,18 +10973,18 @@ test "automation cold restore rehydrates the persisted connection through creden
             .{},
         );
         defer restored.deinit();
-        var restored_vault: TestModelConnectionVault = .{};
-        try restored.startModelConnections(directory, restored_vault.port());
-        defer restored.stopModelConnections();
+        var restored_vault: TestCustomProviderVault = .{};
+        try restored.startCustomProviders(directory, restored_vault.port());
+        defer restored.stopCustomProviders();
         try std.testing.expectEqual(
-            models_contract.ModelConnectionCredentialStatus.missing,
-            restored.modelsView().model_connections[0].credential_status,
+            models_contract.CustomProviderCredentialStatus.missing,
+            restored.modelsView().custom_providers[0].credential_status,
         );
 
         try restored.installAutomationExecution(fixture);
         const view = restored.modelsView();
-        try std.testing.expectEqual(@as(usize, 1), view.model_connections.len);
-        try std.testing.expectEqual(models_contract.ModelConnectionState.ready, view.model_connections[0].state);
+        try std.testing.expectEqual(@as(usize, 1), view.custom_providers.len);
+        try std.testing.expectEqual(models_contract.CustomProviderState.ready, view.custom_providers[0].state);
         try std.testing.expect(view.default_selection != null);
         try std.testing.expect(restored.newTaskAdmissionView().available);
         try std.testing.expectEqualStrings(
@@ -10997,10 +10994,10 @@ test "automation cold restore rehydrates the persisted connection through creden
     }
 }
 
-fn createReadyTestModelConnection(
+fn createReadyTestCustomProvider(
     control: *Runtime,
-) !models_contract.ModelConnectionSelectionCommand {
-    try std.testing.expect(control.createModelConnectionWithCredential(
+) !models_contract.CustomProviderSelectionCommand {
+    try std.testing.expect(control.createCustomProviderWithCredential(
         "provider-secret",
         .{
             .display_name = "OpenAI",
@@ -11008,29 +11005,29 @@ fn createReadyTestModelConnection(
             .normalized_base_url = "https://api.openai.com/v1/responses",
         },
     ).accepted);
-    var view = control.model_connections.views()[0];
-    try std.testing.expect(control.submitModelConnectionCommand(.{
+    var view = control.custom_providers.views()[0];
+    try std.testing.expect(control.submitCustomProviderCommand(.{
         .add_custom_model = .{
             .source_id = view.id,
-            .expected_connection_revision = view.connection_revision,
+            .expected_provider_revision = view.provider_revision,
             .expected_catalog_generation = view.catalog_generation,
             .model = .{ .id = "gpt-5", .display_name = "GPT-5" },
         },
     }).accepted);
-    view = control.model_connections.views()[0];
-    const selection: models_contract.ModelConnectionSelectionCommand = .{
-        .source_id = TestModelConnectionVault.slot,
-        .expected_connection_revision = view.connection_revision,
+    view = control.custom_providers.views()[0];
+    const selection: models_contract.CustomProviderSelectionCommand = .{
+        .source_id = TestCustomProviderVault.slot,
+        .expected_provider_revision = view.provider_revision,
     };
-    const probe_command: models_contract.ModelConnectionTestCommand = .{
+    const probe_command: models_contract.CustomModelTestCommand = .{
         .model = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
-        .expected_connection_revision = selection.expected_connection_revision,
+        .expected_provider_revision = selection.expected_provider_revision,
         .expected_source_generation = view.source_generation,
         .expected_catalog_generation = view.catalog_generation,
     };
-    var probe = switch (control.beginModelConnectionProbe(.{
+    var probe = switch (control.beginCustomProviderProbe(.{
         .model = probe_command.model,
-        .expected_connection_revision = probe_command.expected_connection_revision,
+        .expected_provider_revision = probe_command.expected_provider_revision,
         .expected_source_generation = probe_command.expected_source_generation,
         .expected_catalog_generation = probe_command.expected_catalog_generation,
     })) {
@@ -11038,11 +11035,11 @@ fn createReadyTestModelConnection(
         .rejected => return error.TestUnexpectedResult,
     };
     defer probe.deinit();
-    try std.testing.expect(control.completeModelConnectionTest(probe_command, true).accepted);
+    try std.testing.expect(control.completeCustomModelTest(probe_command, true).accepted);
     return selection;
 }
 
-test "Product Control atomically manages and installs a Model Connection default" {
+test "Product Control atomically manages and installs a Custom Provider default" {
     test_agent_runtime.io = std.testing.io;
     var control = try Runtime.init(
         std.testing.allocator,
@@ -11060,15 +11057,15 @@ test "Product Control atomically manages and installs a Model Connection default
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestModelConnectionVault = .{};
-    try control.startModelConnections(
+    var vault: TestCustomProviderVault = .{};
+    try control.startCustomProviders(
         directory_storage[0..directory_len],
         vault.port(),
     );
-    defer control.stopModelConnections();
+    defer control.stopCustomProviders();
 
-    const selection = try createReadyTestModelConnection(&control);
-    const ready_connection = control.modelsView().model_connections[0];
+    const selection = try createReadyTestCustomProvider(&control);
+    const ready_connection = control.modelsView().custom_providers[0];
     try std.testing.expect(control.selectModelsDefault(.{
         .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
         .expected_selection_revision = control.modelsView().selection_revision,
@@ -11077,14 +11074,14 @@ test "Product Control atomically manages and installs a Model Connection default
     }).accepted);
 
     try std.testing.expectEqual(
-        models_contract.Source.model_connection,
+        models_contract.Source.custom_provider,
         control.execution_state.activeSource().?,
     );
     try std.testing.expectEqualStrings(
-        TestModelConnectionVault.slot,
-        control.execution_state.selectedModelConnectionId(),
+        TestCustomProviderVault.slot,
+        control.execution_state.selectedCustomProviderId(),
     );
-    const rejected = control.submitModelConnectionCommand(.{ .update = .{
+    const rejected = control.submitCustomProviderCommand(.{ .update = .{
         .selection = selection,
         .spec = .{
             .display_name = "Renamed",
@@ -11102,18 +11099,18 @@ test "Product Control atomically manages and installs a Model Connection default
     control.clearExecutionNoFail();
     control.endExecutionReplacementNoFail();
     control.finishExecutionCommitNoFail();
-    control.stopModelConnections();
-    try control.startModelConnections(
+    control.stopCustomProviders();
+    try control.startCustomProviders(
         directory_storage[0..directory_len],
         vault.port(),
     );
     try std.testing.expectEqual(
-        models_contract.Source.model_connection,
+        models_contract.Source.custom_provider,
         control.execution_state.activeSource().?,
     );
     try std.testing.expectEqualStrings(
-        TestModelConnectionVault.slot,
-        control.execution_state.selectedModelConnectionId(),
+        TestCustomProviderVault.slot,
+        control.execution_state.selectedCustomProviderId(),
     );
 }
 
@@ -11136,15 +11133,15 @@ test "credential replacement revokes Product Control admission after every durab
         defer tmp.cleanup();
         var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-        var vault: TestModelConnectionVault = .{};
-        try control.startModelConnections(
+        var vault: TestCustomProviderVault = .{};
+        try control.startCustomProviders(
             directory_storage[0..directory_len],
             vault.port(),
         );
-        defer control.stopModelConnections();
+        defer control.stopCustomProviders();
 
-        const selection = try createReadyTestModelConnection(&control);
-        const ready_connection = control.modelsView().model_connections[0];
+        const selection = try createReadyTestCustomProvider(&control);
+        const ready_connection = control.modelsView().custom_providers[0];
         try std.testing.expect(control.selectModelsDefault(.{
             .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
             .expected_selection_revision = control.modelsView().selection_revision,
@@ -11155,7 +11152,7 @@ test "credential replacement revokes Product Control admission after every durab
         try std.testing.expect(control.newTaskAdmissionView().active_selection_revision != 0);
 
         vault.write_fails = vault_write_fails;
-        const result = control.replaceModelConnectionCredential("next-secret", selection);
+        const result = control.replaceCustomProviderCredential("next-secret", selection);
         if (vault_write_fails) {
             try std.testing.expect(!result.accepted);
             try std.testing.expectEqual(
@@ -11200,15 +11197,15 @@ test "Account authorization loss leaves a custom Models default available" {
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestModelConnectionVault = .{};
-    try control.startModelConnections(
+    var vault: TestCustomProviderVault = .{};
+    try control.startCustomProviders(
         directory_storage[0..directory_len],
         vault.port(),
     );
-    defer control.stopModelConnections();
+    defer control.stopCustomProviders();
 
-    const connection = try createReadyTestModelConnection(&control);
-    const ready_connection = control.modelsView().model_connections[0];
+    const connection = try createReadyTestCustomProvider(&control);
+    const ready_connection = control.modelsView().custom_providers[0];
     try std.testing.expect(control.selectModelsDefault(.{
         .selection = .{ .source_id = connection.source_id, .model_id = "gpt-5" },
         .expected_selection_revision = control.modelsView().selection_revision,
@@ -11228,11 +11225,11 @@ test "Account authorization loss leaves a custom Models default available" {
         control.modelsView().providers[0].catalog_state,
     );
     try std.testing.expectEqualStrings(
-        TestModelConnectionVault.slot,
+        TestCustomProviderVault.slot,
         control.modelsView().default_selection.?.source_id,
     );
     try std.testing.expectEqual(
-        models_contract.Source.model_connection,
+        models_contract.Source.custom_provider,
         control.execution_state.activeSource().?,
     );
     try std.testing.expect(control.canCreateTask());
@@ -11277,15 +11274,15 @@ test "explicit Metask default activation restores admission from an empty global
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestModelConnectionVault = .{};
-    try control.startModelConnections(
+    var vault: TestCustomProviderVault = .{};
+    try control.startCustomProviders(
         directory_storage[0..directory_len],
         vault.port(),
     );
-    defer control.stopModelConnections();
+    defer control.stopCustomProviders();
     try TestSupport.installMetaskExecution(&control, 1);
 
-    try std.testing.expect(control.model_connections.clearDefault().accepted);
+    try std.testing.expect(control.custom_providers.clearDefault().accepted);
     control.reconcileModelsDefaultNoFail(false, false);
     control.finishExecutionCommitNoFail();
     try std.testing.expect(control.modelsView().default_selection == null);
@@ -11312,15 +11309,15 @@ test "Product Control reset clears Models admission without touching task state"
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
-    var vault: TestModelConnectionVault = .{};
+    var vault: TestCustomProviderVault = .{};
     // `testRuntime` installs a transient Models catalog to seed the live
     // Task binding. Stop that owner before starting the persistence-backed
     // Models instance; the Task keeps its own execution copy.
-    control.stopModelConnections();
-    try control.startModelConnections(directory_storage[0..directory_len], vault.port());
-    defer control.stopModelConnections();
-    const selection = try createReadyTestModelConnection(&control);
-    const connection = control.modelsView().model_connections[0];
+    control.stopCustomProviders();
+    try control.startCustomProviders(directory_storage[0..directory_len], vault.port());
+    defer control.stopCustomProviders();
+    const selection = try createReadyTestCustomProvider(&control);
+    const connection = control.modelsView().custom_providers[0];
     try std.testing.expect(control.selectModelsDefault(.{
         .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
         .expected_selection_revision = control.modelsView().selection_revision,
@@ -11344,7 +11341,7 @@ test "Product Control reset clears Models admission without touching task state"
     try std.testing.expect(vault.present);
     try std.testing.expect(control.canCreateTask());
 
-    control.model_connections.store_healthy = false;
+    control.custom_providers.store_healthy = false;
     try std.testing.expectEqual(
         models_contract.PersistenceHealth.recovery_required,
         control.modelsView().persistence_health,
@@ -11355,7 +11352,7 @@ test "Product Control reset clears Models admission without touching task state"
         std.mem.indexOf(u8, recovery_snapshot, "\"persistenceHealth\":\"recovery_required\"") != null,
     );
     try std.testing.expect(control.resetModelsStore(revision).accepted);
-    try std.testing.expectEqual(@as(usize, 0), control.modelsView().model_connections.len);
+    try std.testing.expectEqual(@as(usize, 0), control.modelsView().custom_providers.len);
     try std.testing.expect(control.modelsView().default_selection == null);
     try std.testing.expect(!control.newTaskAdmissionView().available);
     try std.testing.expect(!vault.present);
@@ -11456,7 +11453,7 @@ test "default replacement preserves Task generation and installs the next admiss
     );
     try std.testing.expect(!control.canCreateTask());
     try models_aggregate.TestSupport.installMetaskDefault(
-        &control.model_connections,
+        &control.custom_providers,
         "account-1",
         replacement_api_keys[0],
         "metawork",
@@ -11470,7 +11467,7 @@ test "default replacement preserves Task generation and installs the next admiss
     try control.prepareExecutionInstall(replacement.input());
     control.installExecutionNoFail(&replacement);
     control.execution_state.recordDefaultAuthorityNoFail(
-        control.model_connections.defaultAuthority().?,
+        control.custom_providers.defaultAuthority().?,
     );
     control.endExecutionReplacementNoFail();
     control.finishExecutionCommitNoFail();
@@ -11561,7 +11558,7 @@ test "busy Task model selection keeps only the last runtime pending model" {
         task.durable.execution_generation,
         "fixture-model-2",
     );
-    cross_source.target.source_id = "connection-1";
+    cross_source.target.source_id = "provider-1";
     try std.testing.expectError(
         error.StaleCatalog,
         control.selectTaskModel(task.durable.id, cross_source),
@@ -11605,16 +11602,16 @@ test "busy Task model selection keeps only the last runtime pending model" {
     );
 }
 
-test "user Model Connection cannot consume the current Metask catalog" {
+test "user Custom Provider cannot consume the current Metask catalog" {
     var control = try testRuntime();
     defer control.deinit();
 
-    var binding = try PreparedModelConnectionBinding.init(
+    var binding = try PreparedCustomProviderBinding.init(
         std.testing.allocator,
-        "connection-1",
+        "provider-1",
         "fixture-model",
     );
-    execution_state.testing.installModelConnectionBinding(
+    execution_state.testing.installCustomProviderBinding(
         &control.execution_state,
         &binding,
     );

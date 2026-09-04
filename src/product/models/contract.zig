@@ -1,14 +1,14 @@
 //! Product Models value contract.
 //!
 //! This leaf owns the protocol axis, frozen execution configuration, and
-//! user-managed model-connection values. It has no runtime, Account, Agent,
+//! user-managed custom-provider values. It has no runtime, Account, Agent,
 //! Application, Bridge, or persistence dependency.
 
 const std = @import("std");
 
 pub const Limits = struct {
     pub const instance_id_bytes: usize = 128;
-    pub const provider_id_bytes: usize = @tagName(Source.model_connection).len + 1 + instance_id_bytes;
+    pub const provider_id_bytes: usize = @tagName(Source.custom_provider).len + 1 + instance_id_bytes;
     pub const display_name_bytes: usize = 256;
     pub const model_id_bytes: usize = 256;
     pub const model_display_name_bytes: usize = 256;
@@ -21,8 +21,8 @@ pub const Limits = struct {
     pub const safe_diagnostic_bytes: usize = 512;
     pub const api_key_entries: usize = 256;
     pub const model_entries: usize = 512;
-    pub const model_connection_entries: usize = 8;
-    pub const model_connection_model_entries: usize = 16;
+    pub const custom_provider_entries: usize = 8;
+    pub const custom_provider_model_entries: usize = 16;
 };
 
 pub const metask_source_id = "metask";
@@ -40,7 +40,7 @@ pub const ModelRef = struct {
 
 pub const Source = enum {
     metask,
-    model_connection,
+    custom_provider,
 };
 
 /// Exact request/response wire dialect. This is not a vendor category.
@@ -164,7 +164,7 @@ pub const ModelsView = struct {
     selection_revision: u64 = 0,
     operation: ModelsOperation = .idle,
     error_code: ModelsError = .none,
-    model_connections: []const ModelConnectionView = &.{},
+    custom_providers: []const CustomProviderView = &.{},
 };
 
 pub const CatalogRefreshPreparation = struct {
@@ -205,66 +205,64 @@ pub const SourceCandidateInput = struct {
     source_generation: u64,
 };
 
-pub const ModelConnectionState = enum {
+pub const CustomProviderState = enum {
     configuring,
     ready,
     disabled,
 };
 
-pub const ModelConnectionTestStatus = enum {
+pub const CustomModelTestStatus = enum {
     untested,
     testing,
     connected,
     failed,
 };
 
-pub const ModelConnectionCredentialStatus = enum {
+pub const CustomProviderCredentialStatus = enum {
     missing,
     ready,
     invalid,
     capture_unavailable,
 };
 
-pub const ModelConnectionModelView = struct {
+pub const CustomProviderModelView = struct {
     id: []const u8,
     display_name: []const u8 = "",
     metadata: ModelMetadata = .{},
     metadata_provenance: ModelMetadataProvenance = .unknown,
-    test_status: ModelConnectionTestStatus = .untested,
+    test_status: CustomModelTestStatus = .untested,
     /// A successful probe for the current source authority exists. A later
     /// failed retry updates test_status without revoking that proof.
     ready: bool = false,
 };
 
-pub const ModelConnectionView = struct {
+pub const CustomProviderView = struct {
     id: []const u8,
     display_name: []const u8,
     protocol: Protocol,
     normalized_base_url: []const u8,
-    state: ModelConnectionState,
-    test_status: ModelConnectionTestStatus,
-    credential_status: ModelConnectionCredentialStatus,
+    state: CustomProviderState,
+    credential_status: CustomProviderCredentialStatus,
     enabled: bool,
-    models: []const ModelConnectionModelView = &.{},
-    selected_model: []const u8 = "",
-    connection_revision: u64,
+    models: []const CustomProviderModelView = &.{},
+    provider_revision: u64,
     source_generation: u64,
     catalog_generation: u64,
 };
 
-pub const ModelConnectionSpec = struct {
+pub const CustomProviderSpec = struct {
     display_name: []const u8,
     protocol: Protocol,
     normalized_base_url: []const u8,
 };
 
-pub const ModelConnectionCredentialSlot = struct {
+pub const CustomProviderCredentialSlot = struct {
     id: []const u8,
 };
 
-pub const ModelConnectionSelectionCommand = struct {
+pub const CustomProviderSelectionCommand = struct {
     source_id: []const u8,
-    expected_connection_revision: u64,
+    expected_provider_revision: u64,
 };
 
 pub const CustomModelInput = struct {
@@ -273,41 +271,41 @@ pub const CustomModelInput = struct {
     metadata: ModelMetadata = .{},
 };
 
-pub const ModelConnectionCreateCommand = struct {
-    connection_id: []const u8,
-    spec: ModelConnectionSpec,
-    credential_slot: ModelConnectionCredentialSlot,
+pub const CustomProviderCreateCommand = struct {
+    provider_id: []const u8,
+    spec: CustomProviderSpec,
+    credential_slot: CustomProviderCredentialSlot,
 };
 
-pub const ModelConnectionUpdateCommand = struct {
-    selection: ModelConnectionSelectionCommand,
-    spec: ModelConnectionSpec,
+pub const CustomProviderUpdateCommand = struct {
+    selection: CustomProviderSelectionCommand,
+    spec: CustomProviderSpec,
 };
 
-pub const ModelConnectionTestCommand = struct {
+pub const CustomModelTestCommand = struct {
     model: ModelRef,
-    expected_connection_revision: u64,
+    expected_provider_revision: u64,
     expected_source_generation: u64,
     expected_catalog_generation: u64,
 };
 
 pub const CustomModelAddCommand = struct {
     source_id: []const u8,
-    expected_connection_revision: u64,
+    expected_provider_revision: u64,
     expected_catalog_generation: u64,
     model: CustomModelInput,
 };
 
 pub const CustomModelReplaceCommand = struct {
     selection: ModelRef,
-    expected_connection_revision: u64,
+    expected_provider_revision: u64,
     expected_catalog_generation: u64,
     replacement: CustomModelInput,
 };
 
 pub const CustomModelRemoveCommand = struct {
     selection: ModelRef,
-    expected_connection_revision: u64,
+    expected_provider_revision: u64,
     expected_catalog_generation: u64,
 };
 
@@ -341,11 +339,11 @@ pub const DefaultSelectionAuthority = struct {
     protocol: Protocol,
 };
 
-pub const ModelConnectionCommand = union(enum) {
-    create: ModelConnectionCreateCommand,
-    update: ModelConnectionUpdateCommand,
-    remove: ModelConnectionSelectionCommand,
-    test_connection: ModelConnectionTestCommand,
+pub const CustomProviderCommand = union(enum) {
+    create: CustomProviderCreateCommand,
+    update: CustomProviderUpdateCommand,
+    remove: CustomProviderSelectionCommand,
+    test_model: CustomModelTestCommand,
     add_custom_model: CustomModelAddCommand,
     replace_custom_model: CustomModelReplaceCommand,
     remove_custom_model: CustomModelRemoveCommand,
@@ -356,8 +354,8 @@ pub const ModelConnectionCommand = union(enum) {
 pub const ManagementError = enum {
     authorization_unavailable,
     catalog_unavailable,
-    invalid_connection,
-    connection_not_found,
+    invalid_provider,
+    provider_not_found,
     generation_mismatch,
     model_not_found,
     capacity,
@@ -390,15 +388,15 @@ pub const CommandResult = struct {
 
 pub const CommandSink = struct {
     context: *anyopaque,
-    submit_fn: *const fn (*anyopaque, ModelConnectionCommand) CommandResult,
+    submit_fn: *const fn (*anyopaque, CustomProviderCommand) CommandResult,
 
-    pub fn submit(self: CommandSink, command: ModelConnectionCommand) CommandResult {
+    pub fn submit(self: CommandSink, command: CustomProviderCommand) CommandResult {
         return self.submit_fn(self.context, command);
     }
 };
 
 pub const DefaultBinding = struct {
-    connection_id: []const u8,
+    provider_id: []const u8,
     model_id: []const u8,
 };
 
@@ -635,8 +633,8 @@ pub const OwnedConfig = struct {
             .execution_generation = execution_generation,
         };
         validateConfigStructure(config_input) catch return error.InvalidExecutionConfig;
-        if (source == .model_connection)
-            validateModelConnectionExecutionConfig(config_input) catch
+        if (source == .custom_provider)
+            validateCustomProviderExecutionConfig(config_input) catch
                 return error.InvalidExecutionConfig;
         return .{
             .provider_id = .initOwned(allocator, provider_id),
@@ -697,7 +695,7 @@ pub const OwnedSourceCandidateTransfer = struct {
     }
 };
 
-pub fn modelConnectionProtocolAvailable(protocol: Protocol) bool {
+pub fn customProviderProtocolAvailable(protocol: Protocol) bool {
     return switch (protocol) {
         .openai_responses,
         .anthropic_messages,
@@ -707,35 +705,35 @@ pub fn modelConnectionProtocolAvailable(protocol: Protocol) bool {
     };
 }
 
-pub fn validateModelConnectionCommand(command: ModelConnectionCommand) ValidationError!void {
+pub fn validateCustomProviderCommand(command: CustomProviderCommand) ValidationError!void {
     switch (command) {
         .create => |value| {
-            try validateRequired(value.connection_id, Limits.instance_id_bytes);
-            try validateModelConnectionSpec(value.spec);
+            try validateRequired(value.provider_id, Limits.instance_id_bytes);
+            try validateCustomProviderSpec(value.spec);
             try validateRequired(value.credential_slot.id, Limits.instance_id_bytes);
         },
         .update => |value| {
             try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
-            if (value.selection.expected_connection_revision == 0)
+            if (value.selection.expected_provider_revision == 0)
                 return error.InvalidGeneration;
-            try validateModelConnectionSpec(value.spec);
+            try validateCustomProviderSpec(value.spec);
         },
         .remove => |value| {
             try validateRequired(value.source_id, Limits.instance_id_bytes);
-            if (value.expected_connection_revision == 0)
+            if (value.expected_provider_revision == 0)
                 return error.InvalidGeneration;
         },
-        .test_connection => |value| {
+        .test_model => |value| {
             try validateRequired(value.model.source_id, Limits.instance_id_bytes);
             try validateRequired(value.model.model_id, Limits.model_id_bytes);
-            if (value.expected_connection_revision == 0 or
+            if (value.expected_provider_revision == 0 or
                 value.expected_source_generation == 0 or
                 value.expected_catalog_generation == 0)
                 return error.InvalidGeneration;
         },
         .add_custom_model => |value| {
             try validateRequired(value.source_id, Limits.instance_id_bytes);
-            if (value.expected_connection_revision == 0 or
+            if (value.expected_provider_revision == 0 or
                 value.expected_catalog_generation == 0)
                 return error.InvalidGeneration;
             try validateCustomModelInput(value.model);
@@ -743,7 +741,7 @@ pub fn validateModelConnectionCommand(command: ModelConnectionCommand) Validatio
         .replace_custom_model => |value| {
             try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
             try validateRequired(value.selection.model_id, Limits.model_id_bytes);
-            if (value.expected_connection_revision == 0 or
+            if (value.expected_provider_revision == 0 or
                 value.expected_catalog_generation == 0)
                 return error.InvalidGeneration;
             try validateCustomModelInput(value.replacement);
@@ -751,7 +749,7 @@ pub fn validateModelConnectionCommand(command: ModelConnectionCommand) Validatio
         .remove_custom_model => |value| {
             try validateRequired(value.selection.source_id, Limits.instance_id_bytes);
             try validateRequired(value.selection.model_id, Limits.model_id_bytes);
-            if (value.expected_connection_revision == 0 or
+            if (value.expected_provider_revision == 0 or
                 value.expected_catalog_generation == 0)
                 return error.InvalidGeneration;
         },
@@ -766,16 +764,16 @@ pub fn validateCustomModelInput(model: CustomModelInput) ValidationError!void {
         return error.InvalidMetadata;
 }
 
-pub fn validateModelConnectionSpec(spec: ModelConnectionSpec) ValidationError!void {
+pub fn validateCustomProviderSpec(spec: CustomProviderSpec) ValidationError!void {
     try validateRequired(spec.display_name, Limits.display_name_bytes);
     try validateRequired(spec.normalized_base_url, Limits.base_url_bytes);
-    if (!modelConnectionProtocolAvailable(spec.protocol))
+    if (!customProviderProtocolAvailable(spec.protocol))
         return error.UnsupportedProtocol;
-    if (!validModelConnectionEndpoint(spec.protocol, spec.normalized_base_url))
+    if (!validCustomProviderEndpoint(spec.protocol, spec.normalized_base_url))
         return error.InvalidBaseUrl;
 }
 
-pub fn validModelConnectionEndpoint(protocol: Protocol, value: []const u8) bool {
+pub fn validCustomProviderEndpoint(protocol: Protocol, value: []const u8) bool {
     if (value.len == 0 or value.len > Limits.base_url_bytes or
         !std.unicode.utf8ValidateSlice(value)) return false;
     for (value) |byte| if (byte <= 0x20 or byte == 0x7f or byte == '\\')
@@ -798,14 +796,14 @@ pub fn validModelConnectionEndpoint(protocol: Protocol, value: []const u8) bool 
     };
 }
 
-pub fn normalizeModelConnectionEndpointAlloc(
+pub fn normalizeCustomProviderEndpointAlloc(
     allocator: std.mem.Allocator,
     protocol: Protocol,
     value: []const u8,
 ) (std.mem.Allocator.Error || ValidationError)![]u8 {
-    if (!modelConnectionProtocolAvailable(protocol))
+    if (!customProviderProtocolAvailable(protocol))
         return error.UnsupportedProtocol;
-    if (!validModelConnectionEndpoint(protocol, value))
+    if (!validCustomProviderEndpoint(protocol, value))
         return error.InvalidBaseUrl;
     const scheme_end = std.mem.indexOf(u8, value, "://") orelse
         return error.InvalidBaseUrl;
@@ -834,29 +832,22 @@ pub fn normalizeModelConnectionEndpointAlloc(
     return result;
 }
 
-pub fn validateModelConnectionView(view: ModelConnectionView) ValidationError!void {
+pub fn validateCustomProviderView(view: CustomProviderView) ValidationError!void {
     try validateRequired(view.id, Limits.instance_id_bytes);
     try validateRequired(view.display_name, Limits.display_name_bytes);
     try validateRequired(view.normalized_base_url, Limits.base_url_bytes);
-    if (!modelConnectionProtocolAvailable(view.protocol))
+    if (!customProviderProtocolAvailable(view.protocol))
         return error.UnsupportedProtocol;
-    if (!validModelConnectionEndpoint(view.protocol, view.normalized_base_url))
+    if (!validCustomProviderEndpoint(view.protocol, view.normalized_base_url))
         return error.InvalidBaseUrl;
-    if (view.connection_revision == 0 or view.source_generation == 0 or
+    if (view.provider_revision == 0 or view.source_generation == 0 or
         view.catalog_generation == 0)
         return error.InvalidGeneration;
-    if (view.models.len > Limits.model_connection_model_entries)
+    if (view.models.len > Limits.custom_provider_model_entries)
         return error.CollectionTooLarge;
-    if (view.models.len == 0) {
-        if (view.selected_model.len != 0 or
-            view.test_status != .untested or
-            view.state != .configuring)
-            return error.InconsistentState;
-    } else {
-        try validateRequired(view.selected_model, Limits.model_id_bytes);
-    }
+    if (view.models.len == 0 and view.state != .configuring)
+        return error.InconsistentState;
     var ready_models: usize = 0;
-    var selected_test_status: ?ModelConnectionTestStatus = null;
     for (view.models, 0..) |model, index| {
         try validateCustomModelInput(.{
             .id = model.id,
@@ -867,20 +858,9 @@ pub fn validateModelConnectionView(view: ModelConnectionView) ValidationError!vo
         if ((model.test_status == .connected and !model.ready) or
             (model.ready and model.test_status == .untested))
             return error.InconsistentState;
-        if (std.mem.eql(u8, model.id, view.selected_model))
-            selected_test_status = model.test_status;
         for (view.models[0..index]) |prior|
             if (std.mem.eql(u8, prior.id, model.id))
                 return error.InconsistentState;
-    }
-    var matches: usize = 0;
-    for (view.models) |model| {
-        if (std.mem.eql(u8, model.id, view.selected_model)) matches += 1;
-    }
-    if (view.models.len != 0) {
-        if (matches != 1) return error.InconsistentState;
-        if (selected_test_status.? != view.test_status)
-            return error.InconsistentState;
     }
     if (view.state == .ready and
         (view.credential_status != .ready or !view.enabled or ready_models == 0))
@@ -921,11 +901,11 @@ pub fn validateMetaskSourceCandidate(input: SourceCandidateInput) ValidationErro
         return error.InvalidBaseUrl;
 }
 
-pub fn validateModelConnectionExecutionConfig(input: ConfigInput) ValidationError!void {
+pub fn validateCustomProviderExecutionConfig(input: ConfigInput) ValidationError!void {
     try validateConfigStructure(input);
-    if (!modelConnectionProtocolAvailable(input.target.protocol))
+    if (!customProviderProtocolAvailable(input.target.protocol))
         return error.UnsupportedProtocol;
-    if (!validModelConnectionEndpoint(input.target.protocol, input.target.base_url))
+    if (!validCustomProviderEndpoint(input.target.protocol, input.target.base_url))
         return error.InvalidBaseUrl;
 }
 
@@ -1133,105 +1113,101 @@ test "source candidate keeps source and execution generations independent" {
     try std.testing.expectEqualStrings("secret", config.input().api_key);
 }
 
-test "model connection protocols have exact endpoint contracts" {
+test "custom provider protocols have exact endpoint contracts" {
     inline for (.{
         .{ Protocol.openai_responses, "https://api.openai.com/v1/responses" },
         .{ Protocol.anthropic_messages, "https://api.anthropic.com/v1/messages" },
         .{ Protocol.anthropic_messages, "http://127.0.0.1:43123/v1/messages" },
         .{ Protocol.openai_chat_completions, "https://api.openai.com/v1/chat/completions" },
         .{ Protocol.gemini_native, "https://generativelanguage.googleapis.com" },
-    }) |case| try std.testing.expect(validModelConnectionEndpoint(case[0], case[1]));
-    try validateModelConnectionSpec(.{
+    }) |case| try std.testing.expect(validCustomProviderEndpoint(case[0], case[1]));
+    try validateCustomProviderSpec(.{
         .display_name = "Local Gemini",
         .protocol = .gemini_native,
         .normalized_base_url = "http://127.0.0.1:9000",
     });
-    try std.testing.expectError(error.InvalidBaseUrl, validateModelConnectionSpec(.{
+    try std.testing.expectError(error.InvalidBaseUrl, validateCustomProviderSpec(.{
         .display_name = "Protocol path mismatch",
         .protocol = .openai_chat_completions,
         .normalized_base_url = "https://api.example.com/v1/responses",
     }));
-    try std.testing.expectError(error.InvalidBaseUrl, validateModelConnectionSpec(.{
+    try std.testing.expectError(error.InvalidBaseUrl, validateCustomProviderSpec(.{
         .display_name = "Remote HTTP is not allowed",
         .protocol = .gemini_native,
         .normalized_base_url = "http://api.example.com",
     }));
-    try std.testing.expectError(error.InvalidBaseUrl, validateModelConnectionSpec(.{
+    try std.testing.expectError(error.InvalidBaseUrl, validateCustomProviderSpec(.{
         .display_name = "Automation path must remain exact",
         .protocol = .anthropic_messages,
         .normalized_base_url = "http://127.0.0.1:43123/v1/messages?fixture=true",
     }));
 }
 
-test "model connection endpoint normalization is deterministic" {
-    const responses = try normalizeModelConnectionEndpointAlloc(
+test "custom provider endpoint normalization is deterministic" {
+    const responses = try normalizeCustomProviderEndpointAlloc(
         std.testing.allocator,
         .openai_responses,
         "HTTPS://API.OpenAI.COM/v1/responses",
     );
     defer std.testing.allocator.free(responses);
     try std.testing.expectEqualStrings("https://api.openai.com/v1/responses", responses);
-    const anthropic = try normalizeModelConnectionEndpointAlloc(
+    const anthropic = try normalizeCustomProviderEndpointAlloc(
         std.testing.allocator,
         .anthropic_messages,
         "HTTPS://API.Anthropic.COM/v1/messages",
     );
     defer std.testing.allocator.free(anthropic);
     try std.testing.expectEqualStrings("https://api.anthropic.com/v1/messages", anthropic);
-    const chat = try normalizeModelConnectionEndpointAlloc(
+    const chat = try normalizeCustomProviderEndpointAlloc(
         std.testing.allocator,
         .openai_chat_completions,
         "HTTPS://API.Example.COM/v1/chat/completions",
     );
     defer std.testing.allocator.free(chat);
     try std.testing.expectEqualStrings("https://api.example.com/v1/chat/completions", chat);
-    const gemini = try normalizeModelConnectionEndpointAlloc(
+    const gemini = try normalizeCustomProviderEndpointAlloc(
         std.testing.allocator,
         .gemini_native,
         "https://GenerativeLanguage.GoogleApis.com/",
     );
     defer std.testing.allocator.free(gemini);
     try std.testing.expectEqualStrings("https://generativelanguage.googleapis.com", gemini);
-    try std.testing.expectError(error.InvalidBaseUrl, normalizeModelConnectionEndpointAlloc(
+    try std.testing.expectError(error.InvalidBaseUrl, normalizeCustomProviderEndpointAlloc(
         std.testing.allocator,
         .openai_chat_completions,
         "https://api%2eexample.com/v1/chat/completions",
     ));
 }
 
-test "ready model connection view requires a ready credential and exact model proof" {
-    const models = [_]ModelConnectionModelView{.{
+test "ready custom provider view requires a ready credential and exact model proof" {
+    const models = [_]CustomProviderModelView{.{
         .id = "gemini-2.5-flash",
         .test_status = .connected,
         .ready = true,
     }};
-    try std.testing.expectError(error.InconsistentState, validateModelConnectionView(.{
-        .id = "connection-1",
+    try std.testing.expectError(error.InconsistentState, validateCustomProviderView(.{
+        .id = "provider-1",
         .display_name = "Gemini",
         .protocol = .gemini_native,
         .normalized_base_url = "https://generativelanguage.googleapis.com",
         .state = .ready,
-        .test_status = .connected,
         .credential_status = .capture_unavailable,
         .enabled = true,
         .models = &models,
-        .selected_model = "gemini-2.5-flash",
-        .connection_revision = 1,
+        .provider_revision = 1,
         .source_generation = 2,
         .catalog_generation = 3,
     }));
-    try validateModelConnectionView(.{
-        .id = "connection-1",
+    try validateCustomProviderView(.{
+        .id = "provider-1",
         .display_name = "Gemini",
         .protocol = .gemini_native,
         .normalized_base_url = "https://generativelanguage.googleapis.com",
         .state = .ready,
-        .test_status = .connected,
         .credential_status = .ready,
         .enabled = true,
         .models = &models,
-        .selected_model = "gemini-2.5-flash",
-        .connection_revision = 1,
+        .provider_revision = 1,
         .source_generation = 2,
         .catalog_generation = 3,
     });

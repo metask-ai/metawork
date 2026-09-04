@@ -106,7 +106,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-account-oauth", .root_module = test_modules.account_oauth },
         .{ .name = "metawork-metask-client", .root_module = test_modules.metask_client },
         .{ .name = "metawork-account-credential-store", .root_module = test_modules.account_credential_store },
-        .{ .name = "metawork-product-models-connections", .root_module = test_modules.models_connections },
+        .{ .name = "metawork-product-models-providers", .root_module = test_modules.models_providers },
         .{ .name = "metawork-product-models-ports", .root_module = test_modules.models_ports },
         .{ .name = "metawork-product-models-runtime", .root_module = test_modules.models_runtime },
         .{ .name = "metawork-product-models", .root_module = test_modules.models },
@@ -346,7 +346,7 @@ const WiredModules = struct {
     account_runtime: *std.Build.Module,
     models_metask: *std.Build.Module,
     account_credentials_runtime: *std.Build.Module,
-    models_connections: *std.Build.Module,
+    models_providers: *std.Build.Module,
     models_ports: *std.Build.Module,
     models_runtime: *std.Build.Module,
     models: *std.Build.Module,
@@ -1028,12 +1028,12 @@ fn wireAgentCore(
     account_credentials_runtime.addImport("account_oauth", account_oauth);
     account_credentials_runtime.addImport("metawork_account_contract", account_contract);
     account_credentials_runtime.addImport("metask_client", metask_client);
-    const models_connections = b.createModule(.{
-        .root_source_file = b.path("src/product/models/connections.zig"),
+    const models_providers = b.createModule(.{
+        .root_source_file = b.path("src/product/models/providers.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
-    models_connections.addImport(
+    models_providers.addImport(
         "metawork_product_models_contract",
         models_contract,
     );
@@ -1044,7 +1044,7 @@ fn wireAgentCore(
     });
     models_runtime.addImport("metawork_product_models_contract", models_contract);
     models_runtime.addImport("product_models_ports", models_ports);
-    models_runtime.addImport("product_models_connections", models_connections);
+    models_runtime.addImport("product_models_providers", models_providers);
     models_runtime.addImport("product_models_metask", models_metask);
     const models = b.createModule(.{
         .root_source_file = b.path("src/product/models.zig"),
@@ -1733,7 +1733,7 @@ fn wireAgentCore(
         .account_runtime = account_runtime,
         .models_metask = models_metask,
         .account_credentials_runtime = account_credentials_runtime,
-        .models_connections = models_connections,
+        .models_providers = models_providers,
         .models_ports = models_ports,
         .models_runtime = models_runtime,
         .models = models,

@@ -131,13 +131,13 @@ const App = struct {
         const control_storage = self.control_storage orelse
             @panic("Product Control storage is not composed");
         var configuration = self.control_configuration;
-        const model_connection_capability_available =
+        const custom_provider_capability_available =
             !self.automation.active() and
             self.platform.services() != null;
-        configuration.model_connections = .{
-            .management = model_connection_capability_available,
-            .secret_capture = model_connection_capability_available,
-            .connection_test = model_connection_capability_available,
+        configuration.custom_providers = .{
+            .management = custom_provider_capability_available,
+            .secret_capture = custom_provider_capability_available,
+            .model_test = custom_provider_capability_available,
         };
         configuration.mcp = .{
             .preparation = &preparation,

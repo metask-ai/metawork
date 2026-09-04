@@ -51,12 +51,12 @@ export const commands = {
   selectMetaskApiKey: "metawork.models.selectMetaskApiKey",
   configureMetaskSelection: "metawork.models.configureMetaskSelection",
   selectModelsDefault: "metawork.models.selectDefault",
-  modelConnectionCreate: "metawork.models.connections.create",
-  modelConnectionUpdate: "metawork.models.connections.update",
-  modelConnectionReplaceCredential:
-    "metawork.models.connections.replaceCredential",
-  modelConnectionRemove: "metawork.models.connections.remove",
-  modelConnectionTest: "metawork.models.connections.test",
+  customProviderCreate: "metawork.models.customProviders.create",
+  customProviderUpdate: "metawork.models.customProviders.update",
+  customProviderReplaceCredential:
+    "metawork.models.customProviders.replaceCredential",
+  customProviderRemove: "metawork.models.customProviders.remove",
+  customModelTest: "metawork.models.customModels.test",
   customModelAdd: "metawork.models.customModels.add",
   customModelReplace: "metawork.models.customModels.replace",
   customModelRemove: "metawork.models.customModels.remove",

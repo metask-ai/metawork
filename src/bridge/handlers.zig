@@ -100,49 +100,49 @@ pub const ModelRef = struct {
     sourceId: []const u8,
     modelId: []const u8,
 };
-pub const ModelConnectionCreate = struct {
+pub const CustomProviderCreate = struct {
     displayName: []const u8,
     protocol: []const u8,
     normalizedBaseUrl: []const u8,
     apiKey: []const u8,
 };
-pub const ModelConnectionUpdate = struct {
-    sourceId: []const u8,
-    expectedConnectionRevision: []const u8,
+pub const CustomProviderUpdate = struct {
+    providerId: []const u8,
+    expectedProviderRevision: []const u8,
     displayName: []const u8,
     protocol: []const u8,
     normalizedBaseUrl: []const u8,
 };
-pub const ModelConnectionSelection = struct {
-    sourceId: []const u8,
-    expectedConnectionRevision: []const u8,
+pub const CustomProviderSelection = struct {
+    providerId: []const u8,
+    expectedProviderRevision: []const u8,
 };
-pub const ModelConnectionCredentialReplace = struct {
-    sourceId: []const u8,
-    expectedConnectionRevision: []const u8,
+pub const CustomProviderCredentialReplace = struct {
+    providerId: []const u8,
+    expectedProviderRevision: []const u8,
     apiKey: []const u8,
 };
-pub const ModelConnectionTest = struct {
+pub const CustomModelTest = struct {
     model: ModelRef,
-    expectedConnectionRevision: []const u8,
+    expectedProviderRevision: []const u8,
     expectedSourceGeneration: []const u8,
     expectedCatalogGeneration: []const u8,
 };
 pub const CustomModelAdd = struct {
-    sourceId: []const u8,
-    expectedConnectionRevision: []const u8,
+    providerId: []const u8,
+    expectedProviderRevision: []const u8,
     expectedCatalogGeneration: []const u8,
     model: CustomModel,
 };
 pub const CustomModelReplace = struct {
     selection: ModelRef,
-    expectedConnectionRevision: []const u8,
+    expectedProviderRevision: []const u8,
     expectedCatalogGeneration: []const u8,
     replacement: CustomModel,
 };
 pub const CustomModelRemove = struct {
     selection: ModelRef,
-    expectedConnectionRevision: []const u8,
+    expectedProviderRevision: []const u8,
     expectedCatalogGeneration: []const u8,
 };
 pub const WorkspaceIdentity = struct {
@@ -666,8 +666,8 @@ test "Task creation requires an explicit nullable catalog revision" {
     );
 }
 
-test "Model Connection create accepts Provider metadata with an API key and rejects the retired model field" {
-    var provider = try parsePayload(ModelConnectionCreate,
+test "Custom Provider create accepts Provider metadata with an API key and rejects the retired model field" {
+    var provider = try parsePayload(CustomProviderCreate,
         \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses","apiKey":"secret"}
     );
     defer provider.deinit();
@@ -675,29 +675,29 @@ test "Model Connection create accepts Provider metadata with an API key and reje
     try std.testing.expectEqualStrings("secret", provider.value.apiKey);
     try std.testing.expectError(
         error.InvalidBridgePayload,
-        parsePayload(ModelConnectionCreate,
+        parsePayload(CustomProviderCreate,
             \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses"}
         ),
     );
     try std.testing.expectError(
         error.InvalidBridgePayload,
-        parsePayload(ModelConnectionCreate,
+        parsePayload(CustomProviderCreate,
             \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses","apiKey":"secret","model":{"id":"gpt-5"}}
         ),
     );
 }
 
-test "Model Connection credential replacement requires the exact API key field" {
-    var replacement = try parsePayload(ModelConnectionCredentialReplace,
-        \\{"sourceId":"connection-1","expectedConnectionRevision":"7","apiKey":"  opaque secret  "}
+test "Custom Provider credential replacement requires the exact API key field" {
+    var replacement = try parsePayload(CustomProviderCredentialReplace,
+        \\{"providerId":"provider-1","expectedProviderRevision":"7","apiKey":"  opaque secret  "}
     );
     defer replacement.deinit();
-    try std.testing.expectEqualStrings("connection-1", replacement.value.sourceId);
+    try std.testing.expectEqualStrings("provider-1", replacement.value.providerId);
     try std.testing.expectEqualStrings("  opaque secret  ", replacement.value.apiKey);
     try std.testing.expectError(
         error.InvalidBridgePayload,
-        parsePayload(ModelConnectionCredentialReplace,
-            \\{"sourceId":"connection-1","expectedConnectionRevision":"7"}
+        parsePayload(CustomProviderCredentialReplace,
+            \\{"providerId":"provider-1","expectedProviderRevision":"7"}
         ),
     );
 }

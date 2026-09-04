@@ -134,7 +134,7 @@ function currentBinding(
     snapshot.models.selectionRevision === "0"
   )
     return null;
-  const custom = snapshot.models.connections.find(
+  const custom = snapshot.models.customProviders.find(
     (connection) => connection.id === selection!.sourceId,
   );
   if (custom) {

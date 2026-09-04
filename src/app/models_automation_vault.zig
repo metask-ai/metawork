@@ -6,7 +6,7 @@ const models_ports = @import("product_models_ports");
 /// remains real, while this port prevents vertical fixtures from leaving random
 /// slots in the user's system credential store.
 pub const Vault = struct {
-    pub const slot = "model-connection-00000000000000000000000000000001";
+    pub const slot = "custom-provider-00000000000000000000000000000001";
 
     secret: [models_contract.Limits.credential_bytes]u8 =
         [_]u8{0} ** models_contract.Limits.credential_bytes,

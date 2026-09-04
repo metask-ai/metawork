@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { buildAutomationDebugArtifact } from "./build.mjs";
 
 if (process.platform !== "win32")
-  throw new Error("Model Connection readiness requires Windows");
+  throw new Error("Custom Provider readiness requires Windows");
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -24,15 +24,15 @@ const native = path.join(
 const binary = path.join(root, "zig-out", "bin", "metawork.exe");
 const commandTimeoutMs = 60_000;
 const runTimeoutMs = 60_000;
-const credential = "metawork-model-connection-readiness-key";
-const model = "metawork-model-connection-readiness-model";
-const service = "com.metask.metawork.dev.automation.account.model-connections";
+const credential = "metawork-custom-provider-readiness-key";
+const model = "metawork-custom-provider-readiness-model";
+const service = "com.metask.metawork.dev.automation.account.custom-providers";
 
-if (process.env.METAWORK_MODEL_CONNECTION_READINESS_PREBUILT !== "1")
+if (process.env.METAWORK_CUSTOM_PROVIDER_READINESS_PREBUILT !== "1")
   await buildAutomationDebugArtifact(root);
 
 const workspace = await mkdtemp(
-  path.join(tmpdir(), "metawork-model-connection-readiness-"),
+  path.join(tmpdir(), "metawork-custom-provider-readiness-"),
 );
 const appCwd = path.join(workspace, "app-cwd");
 const platformHome = path.join(workspace, "platform-home");
@@ -47,7 +47,7 @@ const appEnvironment = {
   APPDATA: platformHome,
   LOCALAPPDATA: platformHome,
   USERPROFILE: platformHome,
-  METAWORK_MODEL_CONNECTION_READINESS: "1",
+  METAWORK_CUSTOM_PROVIDER_READINESS: "1",
   METAWORK_AUTOMATION_WORKSPACE: workspace,
 };
 delete appEnvironment.METAWORK_AUTOMATION;
@@ -73,12 +73,12 @@ try {
       `readiness profile was not signed out: ${JSON.stringify(initial.account)}`,
     );
   if (
-    initial.capabilities?.modelConnectionManagement !== true ||
-    initial.capabilities?.modelConnectionSecretCapture !== true ||
-    initial.capabilities?.modelConnectionTest !== true
+    initial.capabilities?.customProviderManagement !== true ||
+    initial.capabilities?.customProviderSecretCapture !== true ||
+    initial.capabilities?.customModelTest !== true
   )
     throw new Error(
-      `Windows Host did not publish the complete Model Connection gate: ${JSON.stringify(initial.capabilities)}`,
+      `Windows Host did not publish the complete Custom Provider gate: ${JSON.stringify(initial.capabilities)}`,
     );
   if (initial.newTaskAdmission?.available !== false)
     throw new Error(
@@ -86,53 +86,50 @@ try {
     );
 
   assertAcceptedIfPresent(
-    await invokeBridge("metawork.models.connections.create", {
+    await invokeBridge("metawork.models.customProviders.create", {
       displayName: "Readiness provider",
       protocol: "openai_chat_completions",
       normalizedBaseUrl: endpoint,
       apiKey: credential,
     }),
-    "Model Connection create",
+    "Custom Provider create",
   );
 
   const created = await poll(
     async () => {
       const current = await snapshot();
-      const connection = current.models?.connections?.find(
+      const provider = current.models?.customProviders?.find(
         (item) => item.displayName === "Readiness provider",
       );
-      return connection ? { current, connection } : null;
+      return provider ? { current, provider } : null;
     },
     commandTimeoutMs,
-    "created Model Connection",
+    "created Custom Provider",
   );
-  let { connection } = created;
+  let { provider: configuredProvider } = created;
   if (
-    !isWireId(connection.connectionRevision) ||
-    connection.protocol !== "openai_chat_completions" ||
-    connection.credentialStatus !== "ready" ||
-    connection.state !== "configuring" ||
-    connection.testStatus !== "untested"
+    !isWireId(configuredProvider.providerRevision) ||
+    configuredProvider.protocol !== "openai_chat_completions" ||
+    configuredProvider.credentialStatus !== "ready" ||
+    configuredProvider.state !== "configuring"
   )
     throw new Error(
-      `created connection projection was invalid: ${JSON.stringify(connection)}`,
+      `created provider projection was invalid: ${JSON.stringify(configuredProvider)}`,
     );
-  credentialTarget = nativeCredentialTarget(service, connection.id);
+  credentialTarget = nativeCredentialTarget(service, configuredProvider.id);
 
   const registryPath = path.join(dataRoot, "account", "models.json");
   const registryBytes = await readFile(registryPath);
   if (registryBytes.includes(Buffer.from(credential)))
     throw new Error(
-      "Model Connection registry persisted the captured credential",
+      "Custom Provider registry persisted the captured credential",
     );
   const registry = JSON.parse(registryBytes.toString("utf8"));
   if (
-    registry.connections?.length !== 1 ||
-    registry.connections[0]?.id !== connection.id
+    registry.custom_providers?.length !== 1 ||
+    registry.custom_providers[0]?.id !== configuredProvider.id
   )
-    throw new Error(
-      "Model Connection registry omitted the committed connection",
-    );
+    throw new Error("Custom Provider registry omitted the committed provider");
   if (!(await listCredentialTargets()).includes(credentialTarget))
     throw new Error(
       "captured credential was not committed to Windows Credential Manager",
@@ -140,9 +137,9 @@ try {
 
   assertAcceptedIfPresent(
     await invokeBridge("metawork.models.customModels.add", {
-      sourceId: connection.id,
-      expectedConnectionRevision: connection.connectionRevision,
-      expectedCatalogGeneration: connection.catalogGeneration,
+      providerId: configuredProvider.id,
+      expectedProviderRevision: configuredProvider.providerRevision,
+      expectedCatalogGeneration: configuredProvider.catalogGeneration,
       model: { id: model, displayName: "Readiness model" },
     }),
     "Provider model add",
@@ -150,8 +147,8 @@ try {
   const configured = await poll(
     async () => {
       const current = await snapshot();
-      const item = current.models?.connections?.find(
-        (candidate) => candidate.id === connection.id,
+      const item = current.models?.customProviders?.find(
+        (candidate) => candidate.id === configuredProvider.id,
       );
       return item?.models?.some((candidate) => candidate.id === model)
         ? { current, item }
@@ -160,55 +157,60 @@ try {
     commandTimeoutMs,
     "configured Provider model",
   );
-  connection = configured.item;
+  configuredProvider = configured.item;
 
   assertAcceptedIfPresent(
-    await invokeBridge("metawork.models.connections.test", {
-      model: { sourceId: connection.id, modelId: model },
-      expectedConnectionRevision: connection.connectionRevision,
-      expectedSourceGeneration: connection.sourceGeneration,
-      expectedCatalogGeneration: connection.catalogGeneration,
+    await invokeBridge("metawork.models.customModels.test", {
+      model: { sourceId: configuredProvider.id, modelId: model },
+      expectedProviderRevision: configuredProvider.providerRevision,
+      expectedSourceGeneration: configuredProvider.sourceGeneration,
+      expectedCatalogGeneration: configuredProvider.catalogGeneration,
     }),
-    "Model Connection test",
+    "Custom Provider test",
   );
   const connected = await poll(
     async () => {
       const current = await snapshot();
-      const item = current.models?.connections?.find(
-        (candidate) => candidate.id === connection.id,
+      const item = current.models?.customProviders?.find(
+        (candidate) => candidate.id === configuredProvider.id,
       );
-      return item?.testStatus === "connected" ? { current, item } : null;
+      const configuredModel = item?.models?.find(
+        (candidate) => candidate.id === model,
+      );
+      return configuredModel?.testStatus === "connected"
+        ? { current, item }
+        : null;
     },
     commandTimeoutMs,
-    "connected Model Connection",
+    "connected Custom Provider",
   );
   if (connected.item.state !== "ready")
-    throw new Error(
-      "successful connection test did not make the generation ready",
-    );
+    throw new Error("successful model test did not make the provider ready");
 
   assertAcceptedIfPresent(
     await invokeBridge("metawork.models.selectDefault", {
-      sourceId: connection.id,
+      sourceId: configuredProvider.id,
       modelId: model,
       expectedSelectionRevision: connected.current.models.selectionRevision,
-      expectedSourceGeneration: connection.sourceGeneration,
-      expectedCatalogGeneration: connection.catalogGeneration,
+      expectedSourceGeneration: configuredProvider.sourceGeneration,
+      expectedCatalogGeneration: configuredProvider.catalogGeneration,
     }),
-    "Model Connection default selection",
+    "Custom Provider default selection",
   );
   const selected = await poll(
     async () => {
       const current = await snapshot();
-      return current.models?.defaultSelection?.sourceId === connection.id &&
+      return current.models?.defaultSelection?.sourceId ===
+        configuredProvider.id &&
         current.models?.defaultSelection?.modelId === model &&
-        current.newTaskAdmission?.activeModelRef?.sourceId === connection.id &&
+        current.newTaskAdmission?.activeModelRef?.sourceId ===
+          configuredProvider.id &&
         current.newTaskAdmission?.available === true
         ? current
         : null;
     },
     commandTimeoutMs,
-    "selected Model Connection",
+    "selected Custom Provider",
   );
   if (selected.account?.state !== "signed_out")
     throw new Error(
@@ -350,7 +352,7 @@ try {
   if (
     terminal.run.outcome !== "completed" ||
     !terminal.run.output?.response?.includes(
-      "model connection readiness complete",
+      "custom provider readiness complete",
     )
   )
     throw new Error(
@@ -369,14 +371,13 @@ try {
   if (output.includes(credential))
     throw new Error("captured credential reached shutdown output");
   process.stdout.write(
-    `Model Connection Windows readiness passed: ${JSON.stringify({
+    `Custom Provider Windows readiness passed: ${JSON.stringify({
       accountState: initial.account.state,
       completeCapabilityGate: true,
-      secureInput: secureInputEvidence,
       registryWithoutSecret: true,
       windowsCredentialTarget: "present",
-      connectionTest: "connected",
-      defaultSource: "model_connection",
+      modelTest: "connected",
+      defaultSource: "custom_provider",
       taskRun: terminal.run.outcome,
       providerRequests: provider.requests.length,
       cleanShutdown: true,
@@ -451,7 +452,7 @@ async function automate(...args) {
 }
 
 async function invokeBridge(command, payload) {
-  const id = `model-connection-readiness-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const id = `custom-provider-readiness-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const result = await automate(
     "bridge",
     JSON.stringify({ id, command, payload }),
@@ -666,7 +667,7 @@ function createProvider() {
                   {
                     index: 0,
                     delta: {
-                      content: "model connection readiness complete",
+                      content: "custom provider readiness complete",
                     },
                   },
                 ],

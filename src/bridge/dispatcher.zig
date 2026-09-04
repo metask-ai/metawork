@@ -217,7 +217,7 @@ pub const Dispatcher = struct {
 
     control: ?*product_control.Runtime,
     account_commands: account_contract.AccountCommandSink,
-    model_connection_commands: models_contract.CommandSink,
+    custom_provider_commands: models_contract.CommandSink,
     platform: Platform,
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
@@ -245,7 +245,7 @@ pub const Dispatcher = struct {
         allocator: std.mem.Allocator,
         control: *product_control.Runtime,
         account_commands: account_contract.AccountCommandSink,
-        model_connection_commands: models_contract.CommandSink,
+        custom_provider_commands: models_contract.CommandSink,
         platform: Platform,
         automation: AutomationAuthority,
         bootstrap_window_id: native_sdk.platform.WindowId,
@@ -254,7 +254,7 @@ pub const Dispatcher = struct {
         return .{
             .control = control,
             .account_commands = account_commands,
-            .model_connection_commands = model_connection_commands,
+            .custom_provider_commands = custom_provider_commands,
             .platform = platform,
             .automation = automation,
             .bootstrap_window_id = bootstrap_window_id,
@@ -334,11 +334,11 @@ pub const Dispatcher = struct {
             .{ .name = commands.models_select_metask_api_key, .function = selectMetaskApiKey },
             .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
             .{ .name = commands.models_select_default, .function = selectModelsDefault },
-            .{ .name = commands.model_connection_create, .function = modelConnectionCreate },
-            .{ .name = commands.model_connection_update, .function = modelConnectionUpdate },
-            .{ .name = commands.model_connection_replace_credential, .function = modelConnectionReplaceCredential },
-            .{ .name = commands.model_connection_remove, .function = modelConnectionRemove },
-            .{ .name = commands.model_connection_test, .function = modelConnectionTest },
+            .{ .name = commands.custom_provider_create, .function = customProviderCreate },
+            .{ .name = commands.custom_provider_update, .function = customProviderUpdate },
+            .{ .name = commands.custom_provider_replace_credential, .function = customProviderReplaceCredential },
+            .{ .name = commands.custom_provider_remove, .function = customProviderRemove },
+            .{ .name = commands.custom_model_test, .function = customModelTest },
             .{ .name = commands.custom_model_add, .function = customModelAdd },
             .{ .name = commands.custom_model_replace, .function = customModelReplace },
             .{ .name = commands.custom_model_remove, .function = customModelRemove },
@@ -1611,7 +1611,7 @@ pub const Dispatcher = struct {
         );
     }
 
-    fn modelConnectionCreate(
+    fn customProviderCreate(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
@@ -1620,11 +1620,11 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.ModelConnectionCreate, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.CustomProviderCreate, invocation.request.payload);
         defer parsed.deinit();
         const protocol = parseProtocol(parsed.value.protocol) orelse
             return error.InvalidBridgePayload;
-        const normalized_base_url = models_contract.normalizeModelConnectionEndpointAlloc(
+        const normalized_base_url = models_contract.normalizeCustomProviderEndpointAlloc(
             std.heap.c_allocator,
             protocol,
             parsed.value.normalizedBaseUrl,
@@ -1637,21 +1637,21 @@ pub const Dispatcher = struct {
             parsed.value.apiKey.len == 0 or
             parsed.value.apiKey.len > models_contract.Limits.credential_bytes)
             return error.InvalidBridgePayload;
-        const spec: models_contract.ModelConnectionSpec = .{
+        const spec: models_contract.CustomProviderSpec = .{
             .display_name = parsed.value.displayName,
             .protocol = protocol,
             .normalized_base_url = normalized_base_url,
         };
-        models_contract.validateModelConnectionSpec(spec) catch
+        models_contract.validateCustomProviderSpec(spec) catch
             return error.InvalidBridgePayload;
         const control = try self.requireProductControl();
         return encodeExecutionResult(
             output,
-            control.createModelConnectionWithCredential(parsed.value.apiKey, spec),
+            control.createCustomProviderWithCredential(parsed.value.apiKey, spec),
         );
     }
 
-    fn modelConnectionUpdate(
+    fn customProviderUpdate(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
@@ -1660,29 +1660,29 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.ModelConnectionUpdate, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.CustomProviderUpdate, invocation.request.payload);
         defer parsed.deinit();
         const protocol = parseProtocol(parsed.value.protocol) orelse
             return error.InvalidBridgePayload;
-        const normalized_base_url = models_contract.normalizeModelConnectionEndpointAlloc(
+        const normalized_base_url = models_contract.normalizeCustomProviderEndpointAlloc(
             std.heap.c_allocator,
             protocol,
             parsed.value.normalizedBaseUrl,
         ) catch return error.InvalidBridgePayload;
         defer std.heap.c_allocator.free(normalized_base_url);
-        const spec: models_contract.ModelConnectionSpec = .{
+        const spec: models_contract.CustomProviderSpec = .{
             .display_name = parsed.value.displayName,
             .protocol = protocol,
             .normalized_base_url = normalized_base_url,
         };
-        models_contract.validateModelConnectionSpec(spec) catch
+        models_contract.validateCustomProviderSpec(spec) catch
             return error.InvalidBridgePayload;
-        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+        return encodeExecutionResult(output, self.custom_provider_commands.submit(.{
             .update = .{
                 .selection = .{
-                    .source_id = parsed.value.sourceId,
-                    .expected_connection_revision = try handlers.parseWireId(
-                        parsed.value.expectedConnectionRevision,
+                    .source_id = parsed.value.providerId,
+                    .expected_provider_revision = try handlers.parseWireId(
+                        parsed.value.expectedProviderRevision,
                     ),
                 },
                 .spec = spec,
@@ -1690,7 +1690,7 @@ pub const Dispatcher = struct {
         }));
     }
 
-    fn modelConnectionReplaceCredential(
+    fn customProviderReplaceCredential(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
@@ -1700,28 +1700,28 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
-            handlers.ModelConnectionCredentialReplace,
+            handlers.CustomProviderCredentialReplace,
             invocation.request.payload,
         );
         defer parsed.deinit();
-        if (parsed.value.sourceId.len == 0 or
-            parsed.value.sourceId.len > models_contract.Limits.instance_id_bytes or
+        if (parsed.value.providerId.len == 0 or
+            parsed.value.providerId.len > models_contract.Limits.instance_id_bytes or
             parsed.value.apiKey.len == 0 or
             parsed.value.apiKey.len > models_contract.Limits.credential_bytes)
             return error.InvalidBridgePayload;
         const control = try self.requireProductControl();
         return encodeExecutionResult(
             output,
-            control.replaceModelConnectionCredential(parsed.value.apiKey, .{
-                .source_id = parsed.value.sourceId,
-                .expected_connection_revision = try handlers.parseWireId(
-                    parsed.value.expectedConnectionRevision,
+            control.replaceCustomProviderCredential(parsed.value.apiKey, .{
+                .source_id = parsed.value.providerId,
+                .expected_provider_revision = try handlers.parseWireId(
+                    parsed.value.expectedProviderRevision,
                 ),
             }),
         );
     }
 
-    fn modelConnectionRemove(
+    fn customProviderRemove(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
@@ -1730,17 +1730,17 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.ModelConnectionSelection, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.CustomProviderSelection, invocation.request.payload);
         defer parsed.deinit();
-        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+        return encodeExecutionResult(output, self.custom_provider_commands.submit(.{
             .remove = .{
-                .source_id = parsed.value.sourceId,
-                .expected_connection_revision = try handlers.parseWireId(parsed.value.expectedConnectionRevision),
+                .source_id = parsed.value.providerId,
+                .expected_provider_revision = try handlers.parseWireId(parsed.value.expectedProviderRevision),
             },
         }));
     }
 
-    fn modelConnectionTest(
+    fn customModelTest(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
         output: []u8,
@@ -1749,16 +1749,16 @@ pub const Dispatcher = struct {
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(handlers.ModelConnectionTest, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.CustomModelTest, invocation.request.payload);
         defer parsed.deinit();
-        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
-            .test_connection = .{
+        return encodeExecutionResult(output, self.custom_provider_commands.submit(.{
+            .test_model = .{
                 .model = .{
                     .source_id = parsed.value.model.sourceId,
                     .model_id = parsed.value.model.modelId,
                 },
-                .expected_connection_revision = try handlers.parseWireId(
-                    parsed.value.expectedConnectionRevision,
+                .expected_provider_revision = try handlers.parseWireId(
+                    parsed.value.expectedProviderRevision,
                 ),
                 .expected_source_generation = try handlers.parseWireId(
                     parsed.value.expectedSourceGeneration,
@@ -1781,11 +1781,11 @@ pub const Dispatcher = struct {
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.CustomModelAdd, invocation.request.payload);
         defer parsed.deinit();
-        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+        return encodeExecutionResult(output, self.custom_provider_commands.submit(.{
             .add_custom_model = .{
-                .source_id = parsed.value.sourceId,
-                .expected_connection_revision = try handlers.parseWireId(
-                    parsed.value.expectedConnectionRevision,
+                .source_id = parsed.value.providerId,
+                .expected_provider_revision = try handlers.parseWireId(
+                    parsed.value.expectedProviderRevision,
                 ),
                 .expected_catalog_generation = try handlers.parseWireId(
                     parsed.value.expectedCatalogGeneration,
@@ -1806,14 +1806,14 @@ pub const Dispatcher = struct {
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.CustomModelReplace, invocation.request.payload);
         defer parsed.deinit();
-        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+        return encodeExecutionResult(output, self.custom_provider_commands.submit(.{
             .replace_custom_model = .{
                 .selection = .{
                     .source_id = parsed.value.selection.sourceId,
                     .model_id = parsed.value.selection.modelId,
                 },
-                .expected_connection_revision = try handlers.parseWireId(
-                    parsed.value.expectedConnectionRevision,
+                .expected_provider_revision = try handlers.parseWireId(
+                    parsed.value.expectedProviderRevision,
                 ),
                 .expected_catalog_generation = try handlers.parseWireId(
                     parsed.value.expectedCatalogGeneration,
@@ -1834,14 +1834,14 @@ pub const Dispatcher = struct {
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.CustomModelRemove, invocation.request.payload);
         defer parsed.deinit();
-        return encodeExecutionResult(output, self.model_connection_commands.submit(.{
+        return encodeExecutionResult(output, self.custom_provider_commands.submit(.{
             .remove_custom_model = .{
                 .selection = .{
                     .source_id = parsed.value.selection.sourceId,
                     .model_id = parsed.value.selection.modelId,
                 },
-                .expected_connection_revision = try handlers.parseWireId(
-                    parsed.value.expectedConnectionRevision,
+                .expected_provider_revision = try handlers.parseWireId(
+                    parsed.value.expectedProviderRevision,
                 ),
                 .expected_catalog_generation = try handlers.parseWireId(
                     parsed.value.expectedCatalogGeneration,
@@ -3957,14 +3957,14 @@ fn encodeExecutionResult(
     else switch (result.error_code.?) {
         .authorization_unavailable => "authorization_unavailable",
         .catalog_unavailable => "catalog_unavailable",
-        .invalid_connection => "model_connection_invalid",
-        .connection_not_found => "model_connection_not_found",
+        .invalid_provider => "custom_provider_invalid",
+        .provider_not_found => "custom_provider_not_found",
         .generation_mismatch => "generation_mismatch",
         .model_not_found => "no_models",
         .capacity, .local_resource_exhausted => "local_resource_exhausted",
-        .persistence_unavailable => "model_connection_persistence_unavailable",
-        .capture_unavailable => "model_connection_capture_unavailable",
-        .test_unavailable => "model_connection_test_unavailable",
+        .persistence_unavailable => "custom_provider_persistence_unavailable",
+        .capture_unavailable => "custom_provider_capture_unavailable",
+        .test_unavailable => "custom_model_test_unavailable",
         .credential_write_failed => "credential_store_write_failed",
         .operation_in_progress => "operation_in_progress",
         .user_cancelled => "user_cancelled",
@@ -4771,16 +4771,16 @@ test "Execution command responses preserve the existing Bridge error vocabulary"
         try encodeExecutionResult(&output, .acceptedResult()),
     );
     inline for (.{
-        .{ models_contract.ManagementError.invalid_connection, "model_connection_invalid" },
-        .{ models_contract.ManagementError.connection_not_found, "model_connection_not_found" },
+        .{ models_contract.ManagementError.invalid_provider, "custom_provider_invalid" },
+        .{ models_contract.ManagementError.provider_not_found, "custom_provider_not_found" },
         .{ models_contract.ManagementError.generation_mismatch, "generation_mismatch" },
         .{ models_contract.ManagementError.model_not_found, "no_models" },
         .{ models_contract.ManagementError.capacity, "local_resource_exhausted" },
-        .{ models_contract.ManagementError.persistence_unavailable, "model_connection_persistence_unavailable" },
-        .{ models_contract.ManagementError.capture_unavailable, "model_connection_capture_unavailable" },
+        .{ models_contract.ManagementError.persistence_unavailable, "custom_provider_persistence_unavailable" },
+        .{ models_contract.ManagementError.capture_unavailable, "custom_provider_capture_unavailable" },
         .{ models_contract.ManagementError.credential_write_failed, "credential_store_write_failed" },
         .{ models_contract.ManagementError.operation_in_progress, "operation_in_progress" },
-        .{ models_contract.ManagementError.test_unavailable, "model_connection_test_unavailable" },
+        .{ models_contract.ManagementError.test_unavailable, "custom_model_test_unavailable" },
         .{ models_contract.ManagementError.user_cancelled, "user_cancelled" },
         .{ models_contract.ManagementError.local_resource_exhausted, "local_resource_exhausted" },
     }) |case| {
@@ -5052,16 +5052,16 @@ test "Dispatcher validates authority before domain calls and preserves committed
             return self.account_result;
         }
 
-        fn submitModelConnection(
+        fn submitCustomProvider(
             context: *anyopaque,
-            _: models_contract.ModelConnectionCommand,
+            _: models_contract.CustomProviderCommand,
         ) models_contract.CommandResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.account_calls += 1;
             return if (self.account_result.accepted)
                 .acceptedResult()
             else
-                .rejected(.invalid_connection);
+                .rejected(.invalid_provider);
         }
 
         fn refreshModels(context: *anyopaque) models_contract.CommandResult {
@@ -5106,7 +5106,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         },
         .{
             .context = &harness,
-            .submit_fn = Harness.submitModelConnection,
+            .submit_fn = Harness.submitCustomProvider,
         },
         .{
             .context = &harness,

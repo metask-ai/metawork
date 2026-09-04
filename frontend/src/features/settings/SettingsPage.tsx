@@ -24,45 +24,46 @@ type RequestedSelection = {
   selectionId: string;
   label: string;
 };
-type ModelConnectionDraft = {
+type CustomProviderDraft = {
   displayName: string;
   protocol: Protocol;
   baseUrl: string;
   apiKey: string;
 };
-type ModelConnectionSubmission = {
+type CustomProviderSubmission = {
   displayName: string;
   protocol: Protocol;
   normalizedBaseUrl: string;
   apiKey: string;
 };
-type ModelConnectionEditDraft = Omit<ModelConnectionDraft, "apiKey"> & {
-  connectionId: string;
-  expectedConnectionRevision: string;
+type CustomProviderEditDraft = Omit<CustomProviderDraft, "apiKey"> & {
+  providerId: string;
+  expectedProviderRevision: string;
 };
-type ModelConnectionEditSubmission = Omit<
-  ModelConnectionSubmission,
-  "apiKey"
-> & {
-  connectionId: string;
-  expectedConnectionRevision: string;
+type CustomProviderEditSubmission = Omit<CustomProviderSubmission, "apiKey"> & {
+  providerId: string;
+  expectedProviderRevision: string;
 };
-type ModelConnectionRemoval = {
-  connectionId: string;
-  expectedConnectionRevision: string;
+type CustomProviderRemoval = {
+  providerId: string;
+  expectedProviderRevision: string;
 };
-type ModelConnectionCredentialEdit = ModelConnectionRemoval & {
+type CustomModelRemoval = CustomProviderRemoval & {
+  expectedCatalogGeneration: string;
+  modelId: string;
+};
+type CustomProviderCredentialEdit = CustomProviderRemoval & {
   apiKey: string;
 };
 
-const modelConnectionBaseUrlExamples: Record<Protocol, string> = {
+const customProviderBaseUrlExamples: Record<Protocol, string> = {
   openai_responses: "https://api.openai.com/v1",
   anthropic_messages: "https://api.anthropic.com",
   openai_chat_completions: "https://api.openai.com/v1",
   gemini_native: "https://generativelanguage.googleapis.com",
 };
 
-const modelConnectionRequestPaths: Record<Protocol, string> = {
+const customProviderRequestPaths: Record<Protocol, string> = {
   openai_responses: "/responses",
   openai_chat_completions: "/chat/completions",
   anthropic_messages: "/v1/messages",
@@ -73,30 +74,30 @@ function trimTrailingSlashes(value: string) {
   return value.replace(/\/+$/u, "");
 }
 
-export function modelConnectionEndpointFromBaseUrl(
+export function customProviderEndpointFromBaseUrl(
   protocol: Protocol,
   baseUrl: string,
 ) {
   const normalizedBase = trimTrailingSlashes(baseUrl.trim());
-  const requestPath = modelConnectionRequestPaths[protocol];
+  const requestPath = customProviderRequestPaths[protocol];
   if (!requestPath || normalizedBase.endsWith(requestPath)) {
     return normalizedBase;
   }
   return `${normalizedBase}${requestPath}`;
 }
 
-function modelConnectionBaseUrlFromEndpoint(
+function customProviderBaseUrlFromEndpoint(
   protocol: Protocol,
   endpoint: string,
 ) {
   const normalizedEndpoint = trimTrailingSlashes(endpoint);
-  const requestPath = modelConnectionRequestPaths[protocol];
+  const requestPath = customProviderRequestPaths[protocol];
   return requestPath && normalizedEndpoint.endsWith(requestPath)
     ? normalizedEndpoint.slice(0, -requestPath.length)
     : normalizedEndpoint;
 }
 
-function newModelConnectionDraft(): ModelConnectionDraft {
+function newCustomProviderDraft(): CustomProviderDraft {
   return {
     displayName: "",
     protocol: "openai_chat_completions",
@@ -119,38 +120,38 @@ function modelLabel(
   return model.displayName.trim() || model.id;
 }
 
-function modelConnectionProtocolLabel(
+function customProviderProtocolLabel(
   protocol: Protocol,
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  return t(`settings.model_connection_protocol.${protocol}`);
+  return t(`settings.custom_provider_protocol.${protocol}`);
 }
 
-function modelConnectionCredentialLabel(
-  status: ModelsView["connections"][number]["credentialStatus"],
+function customProviderCredentialLabel(
+  status: ModelsView["customProviders"][number]["credentialStatus"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  return t(`settings.model_connection_credential.${status}`);
+  return t(`settings.custom_provider_credential.${status}`);
 }
 
-function modelConnectionStateLabel(
-  state: ModelsView["connections"][number]["state"],
+function customProviderStateLabel(
+  state: ModelsView["customProviders"][number]["state"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  return t(`settings.model_connection_state.${state}`);
+  return t(`settings.custom_provider_state.${state}`);
 }
 
-function modelConnectionTestStatusLabel(
-  status: ModelsView["connections"][number]["testStatus"],
+function customModelTestStatusLabel(
+  status: ModelsView["customProviders"][number]["models"][number]["testStatus"],
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  return t(`settings.model_connection_test_status.${status}`);
+  return t(`settings.custom_model_test_status.${status}`);
 }
 
 export function SettingsPage({
   account,
   models,
-  modelConnectionCapabilities,
+  customProviderCapabilities,
   permissionProfiles,
   focusTarget,
   initialSection = "general",
@@ -164,13 +165,14 @@ export function SettingsPage({
   onCancel,
   onSelectApiKey,
   onSelectModel,
-  onCreateModelConnection,
-  onUpdateModelConnection,
-  onReplaceModelConnectionCredential,
+  onCreateCustomProvider,
+  onUpdateCustomProvider,
+  onReplaceCustomProviderCredential,
   onAddCustomModel,
-  onRemoveModelConnection,
-  onTestModelConnection,
-  onSelectModelConnection,
+  onRemoveCustomModel,
+  onRemoveCustomProvider,
+  onTestCustomModel,
+  onSelectCustomModel,
   onBeginLogin,
   onRetryRefresh,
   onLogout,
@@ -178,10 +180,10 @@ export function SettingsPage({
 }: {
   account: AccountView;
   models: ModelsView;
-  modelConnectionCapabilities: {
+  customProviderCapabilities: {
     management: boolean;
     secretCapture: boolean;
-    connectionTest: boolean;
+    modelTest: boolean;
   };
   permissionProfiles: {
     enabled: boolean;
@@ -201,37 +203,41 @@ export function SettingsPage({
   onCancel: () => void;
   onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
-  onCreateModelConnection: (
-    input: ModelConnectionSubmission,
+  onCreateCustomProvider: (input: CustomProviderSubmission) => Promise<boolean>;
+  onUpdateCustomProvider: (
+    input: CustomProviderEditSubmission,
   ) => Promise<boolean>;
-  onUpdateModelConnection: (
-    input: ModelConnectionEditSubmission,
-  ) => Promise<boolean>;
-  onReplaceModelConnectionCredential: (
-    connectionId: string,
-    expectedConnectionRevision: string,
+  onReplaceCustomProviderCredential: (
+    providerId: string,
+    expectedProviderRevision: string,
     apiKey: string,
   ) => Promise<boolean>;
   onAddCustomModel: (
-    connectionId: string,
-    expectedConnectionRevision: string,
+    providerId: string,
+    expectedProviderRevision: string,
     expectedCatalogGeneration: string,
     modelId: string,
   ) => Promise<boolean>;
-  onRemoveModelConnection: (
-    connectionId: string,
-    expectedConnectionRevision: string,
+  onRemoveCustomModel: (
+    providerId: string,
+    expectedProviderRevision: string,
+    expectedCatalogGeneration: string,
+    modelId: string,
   ) => Promise<boolean>;
-  onTestModelConnection: (
-    connectionId: string,
-    connectionRevision: string,
+  onRemoveCustomProvider: (
+    providerId: string,
+    expectedProviderRevision: string,
+  ) => Promise<boolean>;
+  onTestCustomModel: (
+    providerId: string,
+    providerRevision: string,
     modelId: string,
     sourceGeneration: string,
     catalogGeneration: string,
   ) => void;
-  onSelectModelConnection: (
-    connectionId: string,
-    connectionRevision: string,
+  onSelectCustomModel: (
+    providerId: string,
+    providerRevision: string,
     modelId: string,
   ) => void;
   onBeginLogin: () => void;
@@ -240,10 +246,10 @@ export function SettingsPage({
   onSetDefaultPermissionProfile: (profile: PermissionProfile) => void;
 }) {
   const { locale, setLocale, t } = useI18n();
-  const modelConnectionSettingsAvailable =
-    modelConnectionCapabilities.management &&
-    modelConnectionCapabilities.secretCapture &&
-    modelConnectionCapabilities.connectionTest;
+  const customProviderSettingsAvailable =
+    customProviderCapabilities.management &&
+    customProviderCapabilities.secretCapture &&
+    customProviderCapabilities.modelTest;
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(initialSection);
@@ -256,18 +262,20 @@ export function SettingsPage({
   const [requestedProviderId, setRequestedProviderId] = useState<string | null>(
     null,
   );
-  const [modelConnectionDraft, setModelConnectionDraft] =
-    useState<ModelConnectionDraft | null>(null);
-  const [creatingModelConnection, setCreatingModelConnection] = useState(false);
+  const [customProviderDraft, setCustomProviderDraft] =
+    useState<CustomProviderDraft | null>(null);
+  const [creatingCustomProvider, setCreatingCustomProvider] = useState(false);
   const [customModelId, setCustomModelId] = useState("");
   const [addingCustomModel, setAddingCustomModel] = useState(false);
-  const [modelConnectionEdit, setModelConnectionEdit] =
-    useState<ModelConnectionEditDraft | null>(null);
-  const [modelConnectionRemoval, setModelConnectionRemoval] =
-    useState<ModelConnectionRemoval | null>(null);
-  const [modelConnectionCredentialEdit, setModelConnectionCredentialEdit] =
-    useState<ModelConnectionCredentialEdit | null>(null);
-  const [mutatingModelConnection, setMutatingModelConnection] = useState(false);
+  const [customProviderEdit, setCustomProviderEdit] =
+    useState<CustomProviderEditDraft | null>(null);
+  const [customProviderRemoval, setCustomProviderRemoval] =
+    useState<CustomProviderRemoval | null>(null);
+  const [customModelRemoval, setCustomModelRemoval] =
+    useState<CustomModelRemoval | null>(null);
+  const [customProviderCredentialEdit, setCustomProviderCredentialEdit] =
+    useState<CustomProviderCredentialEdit | null>(null);
+  const [mutatingCustomProvider, setMutatingCustomProvider] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
   const generalHeading = useRef<HTMLHeadingElement>(null);
@@ -292,18 +300,18 @@ export function SettingsPage({
       : models.defaultSelection.sourceId
     : "";
   const selectedProviderId = requestedProviderId ?? committedProviderId;
-  const selectedConnection = models.connections.find(
-    (connection) => connection.id === selectedProviderId,
+  const selectedCustomProvider = models.customProviders.find(
+    (provider) => provider.id === selectedProviderId,
   );
-  const committedConnection = models.connections.find(
-    (connection) => connection.id === committedProviderId,
+  const committedCustomProvider = models.customProviders.find(
+    (provider) => provider.id === committedProviderId,
   );
   const committedDefaultModel = models.defaultSelection
     ? committedProviderId === "metask"
       ? metaskModels.find(
           (model) => model.id === models.defaultSelection?.modelId,
         )
-      : committedConnection?.models.find(
+      : committedCustomProvider?.models.find(
           (model) => model.id === models.defaultSelection?.modelId,
         )
     : null;
@@ -311,7 +319,7 @@ export function SettingsPage({
     ? `${
         committedProviderId === "metask"
           ? "Metask"
-          : (committedConnection?.displayName ?? committedProviderId)
+          : (committedCustomProvider?.displayName ?? committedProviderId)
       } · ${
         committedDefaultModel?.displayName || models.defaultSelection.modelId
       }`
@@ -350,25 +358,25 @@ export function SettingsPage({
     modelsPersistenceReady &&
     ((authenticated &&
       (metaskCatalogState === "ready" || metaskCatalogState === "choosing")) ||
-      models.connections.some(
-        (connection) =>
-          connection.enabled &&
-          connection.credentialStatus === "ready" &&
-          connection.state !== "disabled",
+      models.customProviders.some(
+        (provider) =>
+          provider.enabled &&
+          provider.credentialStatus === "ready" &&
+          provider.state !== "disabled",
       ));
   const canChooseApi =
     modelsPersistenceReady &&
     selectedProviderId.length > 0 &&
     (providerIsMetask
       ? authenticated && !modelCatalogLoading
-      : selectedConnection?.credentialStatus === "ready");
+      : selectedCustomProvider?.credentialStatus === "ready");
   const canChooseModel =
     modelsPersistenceReady &&
     (providerIsMetask
       ? authenticated &&
         (metaskCatalogState === "ready" || metaskCatalogState === "choosing")
-      : selectedConnection?.state === "ready" &&
-        selectedConnection.credentialStatus === "ready");
+      : selectedCustomProvider?.state === "ready" &&
+        selectedCustomProvider.credentialStatus === "ready");
   const languageOptions = useMemo<SelectionMenuOption[]>(
     () => [
       { value: "en-US", label: t("app.language.en-US") },
@@ -400,42 +408,42 @@ export function SettingsPage({
           account.state !== "authenticated" ||
           (metaskCatalogState !== "ready" && metaskCatalogState !== "choosing"),
       },
-      ...models.connections.map((connection) => ({
-        value: connection.id,
-        label: connection.displayName || connection.id,
-        description: modelConnectionProtocolLabel(connection.protocol, t),
+      ...models.customProviders.map((provider) => ({
+        value: provider.id,
+        label: provider.displayName || provider.id,
+        description: customProviderProtocolLabel(provider.protocol, t),
         descriptionKind: "text" as const,
         disabled:
-          !connection.enabled ||
-          connection.credentialStatus !== "ready" ||
-          connection.state === "disabled",
+          !provider.enabled ||
+          provider.credentialStatus !== "ready" ||
+          provider.state === "disabled",
       })),
     ],
-    [account.state, metaskCatalogState, models.connections, t],
+    [account.state, metaskCatalogState, models.customProviders, t],
   );
   const apiOptions = useMemo<SelectionMenuOption[]>(() => {
     if (selectedProviderId === "metask") {
       return metaskApiKeys.map((key) => ({
         value: key.id,
         label: apiLabel(key, t),
-        description: modelConnectionProtocolLabel(key.protocol, t),
+        description: customProviderProtocolLabel(key.protocol, t),
         descriptionKind: "text",
         trailing: key.suffix ? `•••• ${key.suffix}` : undefined,
       }));
     }
-    if (!selectedConnection) return [];
+    if (!selectedCustomProvider) return [];
     return [
       {
-        value: selectedConnection.id,
+        value: selectedCustomProvider.id,
         label: t("settings.saved_api_key"),
-        description: modelConnectionCredentialLabel(
-          selectedConnection.credentialStatus,
+        description: customProviderCredentialLabel(
+          selectedCustomProvider.credentialStatus,
           t,
         ),
         descriptionKind: "text",
       },
     ];
-  }, [metaskApiKeys, selectedConnection, selectedProviderId, t]);
+  }, [metaskApiKeys, selectedCustomProvider, selectedProviderId, t]);
   const modelOptions = useMemo<SelectionMenuOption[]>(() => {
     const options =
       selectedProviderId === "metask"
@@ -443,7 +451,7 @@ export function SettingsPage({
             value: model.id,
             label: modelLabel(model, t),
           }))
-        : (selectedConnection?.models ?? []).map((model) => ({
+        : (selectedCustomProvider?.models ?? []).map((model) => ({
             value: model.id,
             label: model.displayName || model.id,
             disabled: !model.ready,
@@ -459,8 +467,14 @@ export function SettingsPage({
       });
     }
     return options;
-  }, [metaskModels, requestedModel, selectedConnection, selectedProviderId, t]);
-  const modelConnectionProtocolOptions = useMemo<SelectionMenuOption[]>(
+  }, [
+    metaskModels,
+    requestedModel,
+    selectedCustomProvider,
+    selectedProviderId,
+    t,
+  ]);
+  const customProviderProtocolOptions = useMemo<SelectionMenuOption[]>(
     () =>
       (
         [
@@ -471,19 +485,19 @@ export function SettingsPage({
         ] as const
       ).map((protocol) => ({
         value: protocol,
-        label: modelConnectionProtocolLabel(protocol, t),
+        label: customProviderProtocolLabel(protocol, t),
       })),
     [t],
   );
   const displayedApiId = providerIsMetask
     ? selectedApiId
-    : (selectedConnection?.id ?? "");
+    : (selectedCustomProvider?.id ?? "");
   const displayedModelId = providerIsMetask
     ? committedProviderId === "metask"
       ? selectedModelId
       : ""
-    : selectedConnection &&
-        models.defaultSelection?.sourceId === selectedConnection.id
+    : selectedCustomProvider &&
+        models.defaultSelection?.sourceId === selectedCustomProvider.id
       ? models.defaultSelection.modelId
       : "";
   const apiHasAlternative = apiOptions.some(
@@ -498,12 +512,6 @@ export function SettingsPage({
     displayedModelId.length > 0 &&
     modelOptions.length === 1 &&
     !modelHasAlternative;
-  const customModelNeedingTest =
-    !providerIsMetask &&
-    selectedConnection &&
-    !selectedConnection.models.some((model) => model.ready)
-      ? selectedConnection.models[0]
-      : undefined;
   const modelPlaceholder =
     providerIsMetask && modelCatalogLoading
       ? t("settings.model_loading")
@@ -587,19 +595,19 @@ export function SettingsPage({
   })();
 
   useEffect(() => {
-    if (focusTarget === "providers" && modelConnectionSettingsAvailable) {
+    if (focusTarget === "providers" && customProviderSettingsAvailable) {
       setActiveSection("providers");
     } else if (focusTarget === "models") {
       setActiveSection("models");
     } else if (focusTarget === "account") {
       setActiveSection("account");
     }
-  }, [focusTarget, modelConnectionSettingsAvailable]);
+  }, [focusTarget, customProviderSettingsAvailable]);
 
   useEffect(() => {
     if (
       (activeSection === "permissions" && !permissionProfiles.enabled) ||
-      (activeSection === "providers" && !modelConnectionSettingsAvailable)
+      (activeSection === "providers" && !customProviderSettingsAvailable)
     ) {
       setActiveSection("general");
       return;
@@ -621,7 +629,7 @@ export function SettingsPage({
   }, [
     activeSection,
     focusTarget,
-    modelConnectionSettingsAvailable,
+    customProviderSettingsAvailable,
     permissionProfiles.enabled,
     providersPage,
   ]);
@@ -633,8 +641,8 @@ export function SettingsPage({
   useEffect(() => {
     if (activeSection === "providers") return;
     setProvidersPage("list");
-    setModelConnectionDraft(null);
-    setModelConnectionCredentialEdit(null);
+    setCustomProviderDraft(null);
+    setCustomProviderCredentialEdit(null);
   }, [activeSection]);
 
   useEffect(() => {
@@ -646,44 +654,41 @@ export function SettingsPage({
   }, [confirmSignOut]);
 
   useEffect(() => {
-    if (modelConnectionCapabilities.secretCapture) return;
-    setModelConnectionDraft(null);
-    setModelConnectionCredentialEdit(null);
-    setCreatingModelConnection(false);
-  }, [modelConnectionCapabilities.secretCapture]);
+    if (customProviderCapabilities.secretCapture) return;
+    setCustomProviderDraft(null);
+    setCustomProviderCredentialEdit(null);
+    setCreatingCustomProvider(false);
+  }, [customProviderCapabilities.secretCapture]);
 
   useEffect(() => {
-    setModelConnectionEdit((current) => {
+    setCustomProviderEdit((current) => {
       if (!current) return null;
-      const connection = models.connections.find(
-        (candidate) => candidate.id === current.connectionId,
+      const provider = models.customProviders.find(
+        (candidate) => candidate.id === current.providerId,
       );
-      return connection?.connectionRevision ===
-        current.expectedConnectionRevision
+      return provider?.providerRevision === current.expectedProviderRevision
         ? current
         : null;
     });
-    setModelConnectionRemoval((current) => {
+    setCustomProviderRemoval((current) => {
       if (!current) return null;
-      const connection = models.connections.find(
-        (candidate) => candidate.id === current.connectionId,
+      const provider = models.customProviders.find(
+        (candidate) => candidate.id === current.providerId,
       );
-      return connection?.connectionRevision ===
-        current.expectedConnectionRevision
+      return provider?.providerRevision === current.expectedProviderRevision
         ? current
         : null;
     });
-    setModelConnectionCredentialEdit((current) => {
+    setCustomProviderCredentialEdit((current) => {
       if (!current) return null;
-      const connection = models.connections.find(
-        (candidate) => candidate.id === current.connectionId,
+      const provider = models.customProviders.find(
+        (candidate) => candidate.id === current.providerId,
       );
-      return connection?.connectionRevision ===
-        current.expectedConnectionRevision
+      return provider?.providerRevision === current.expectedProviderRevision
         ? current
         : null;
     });
-  }, [models.connections]);
+  }, [models.customProviders]);
 
   useEffect(() => {
     if (
@@ -716,60 +721,60 @@ export function SettingsPage({
     window.requestAnimationFrame(() => signOut.current?.focus());
   }
 
-  async function submitModelConnection() {
-    if (!modelConnectionDraft || creatingModelConnection) return;
-    const baseUrl = modelConnectionDraft.baseUrl.trim();
-    const displayName = modelConnectionDraft.displayName.trim();
-    if (!displayName || !baseUrl || !modelConnectionDraft.apiKey) return;
+  async function submitCustomProvider() {
+    if (!customProviderDraft || creatingCustomProvider) return;
+    const baseUrl = customProviderDraft.baseUrl.trim();
+    const displayName = customProviderDraft.displayName.trim();
+    if (!displayName || !baseUrl || !customProviderDraft.apiKey) return;
     const input = {
       displayName,
-      protocol: modelConnectionDraft.protocol,
-      normalizedBaseUrl: modelConnectionEndpointFromBaseUrl(
-        modelConnectionDraft.protocol,
+      protocol: customProviderDraft.protocol,
+      normalizedBaseUrl: customProviderEndpointFromBaseUrl(
+        customProviderDraft.protocol,
         baseUrl,
       ),
-      apiKey: modelConnectionDraft.apiKey,
+      apiKey: customProviderDraft.apiKey,
     };
-    setCreatingModelConnection(true);
+    setCreatingCustomProvider(true);
     try {
-      if (await onCreateModelConnection(input)) {
-        setModelConnectionDraft(null);
+      if (await onCreateCustomProvider(input)) {
+        setCustomProviderDraft(null);
         setProvidersPage("list");
       }
     } finally {
-      setCreatingModelConnection(false);
+      setCreatingCustomProvider(false);
     }
   }
 
-  async function replaceModelConnectionCredential() {
-    if (!modelConnectionCredentialEdit || mutatingModelConnection) return;
-    if (!modelConnectionCredentialEdit.apiKey) return;
-    setMutatingModelConnection(true);
+  async function replaceCustomProviderCredential() {
+    if (!customProviderCredentialEdit || mutatingCustomProvider) return;
+    if (!customProviderCredentialEdit.apiKey) return;
+    setMutatingCustomProvider(true);
     try {
       if (
-        await onReplaceModelConnectionCredential(
-          modelConnectionCredentialEdit.connectionId,
-          modelConnectionCredentialEdit.expectedConnectionRevision,
-          modelConnectionCredentialEdit.apiKey,
+        await onReplaceCustomProviderCredential(
+          customProviderCredentialEdit.providerId,
+          customProviderCredentialEdit.expectedProviderRevision,
+          customProviderCredentialEdit.apiKey,
         )
       ) {
-        setModelConnectionCredentialEdit(null);
+        setCustomProviderCredentialEdit(null);
       }
     } finally {
-      setMutatingModelConnection(false);
+      setMutatingCustomProvider(false);
     }
   }
 
   async function addCustomModel() {
     const modelId = customModelId.trim();
-    if (!selectedConnection || !modelId || addingCustomModel) return;
+    if (!selectedCustomProvider || !modelId || addingCustomModel) return;
     setAddingCustomModel(true);
     try {
       if (
         await onAddCustomModel(
-          selectedConnection.id,
-          selectedConnection.connectionRevision,
-          selectedConnection.catalogGeneration,
+          selectedCustomProvider.id,
+          selectedCustomProvider.providerRevision,
+          selectedCustomProvider.catalogGeneration,
           modelId,
         )
       ) {
@@ -780,43 +785,61 @@ export function SettingsPage({
     }
   }
 
-  async function submitModelConnectionEdit() {
-    if (!modelConnectionEdit || mutatingModelConnection) return;
-    const baseUrl = modelConnectionEdit.baseUrl.trim();
-    const displayName = modelConnectionEdit.displayName.trim();
-    if (!displayName || !baseUrl) return;
-    const input = {
-      connectionId: modelConnectionEdit.connectionId,
-      expectedConnectionRevision:
-        modelConnectionEdit.expectedConnectionRevision,
-      displayName,
-      protocol: modelConnectionEdit.protocol,
-      normalizedBaseUrl: modelConnectionEndpointFromBaseUrl(
-        modelConnectionEdit.protocol,
-        baseUrl,
-      ),
-    };
-    setMutatingModelConnection(true);
+  async function removeCustomModel() {
+    if (!customModelRemoval || mutatingCustomProvider) return;
+    setMutatingCustomProvider(true);
     try {
-      if (await onUpdateModelConnection(input)) setModelConnectionEdit(null);
+      if (
+        await onRemoveCustomModel(
+          customModelRemoval.providerId,
+          customModelRemoval.expectedProviderRevision,
+          customModelRemoval.expectedCatalogGeneration,
+          customModelRemoval.modelId,
+        )
+      ) {
+        setCustomModelRemoval(null);
+      }
     } finally {
-      setMutatingModelConnection(false);
+      setMutatingCustomProvider(false);
     }
   }
 
-  async function removeModelConnection() {
-    if (!modelConnectionRemoval || mutatingModelConnection) return;
-    setMutatingModelConnection(true);
+  async function submitCustomProviderEdit() {
+    if (!customProviderEdit || mutatingCustomProvider) return;
+    const baseUrl = customProviderEdit.baseUrl.trim();
+    const displayName = customProviderEdit.displayName.trim();
+    if (!displayName || !baseUrl) return;
+    const input = {
+      providerId: customProviderEdit.providerId,
+      expectedProviderRevision: customProviderEdit.expectedProviderRevision,
+      displayName,
+      protocol: customProviderEdit.protocol,
+      normalizedBaseUrl: customProviderEndpointFromBaseUrl(
+        customProviderEdit.protocol,
+        baseUrl,
+      ),
+    };
+    setMutatingCustomProvider(true);
+    try {
+      if (await onUpdateCustomProvider(input)) setCustomProviderEdit(null);
+    } finally {
+      setMutatingCustomProvider(false);
+    }
+  }
+
+  async function removeCustomProvider() {
+    if (!customProviderRemoval || mutatingCustomProvider) return;
+    setMutatingCustomProvider(true);
     try {
       if (
-        await onRemoveModelConnection(
-          modelConnectionRemoval.connectionId,
-          modelConnectionRemoval.expectedConnectionRevision,
+        await onRemoveCustomProvider(
+          customProviderRemoval.providerId,
+          customProviderRemoval.expectedProviderRevision,
         )
       )
-        setModelConnectionRemoval(null);
+        setCustomProviderRemoval(null);
     } finally {
-      setMutatingModelConnection(false);
+      setMutatingCustomProvider(false);
     }
   }
 
@@ -835,7 +858,7 @@ export function SettingsPage({
         if (nestedOverlay && nestedOverlay !== event.currentTarget) return;
         event.preventDefault();
         if (activeSection === "providers" && providersPage === "add") {
-          setModelConnectionDraft(null);
+          setCustomProviderDraft(null);
           setProvidersPage("list");
           return;
         }
@@ -919,10 +942,10 @@ export function SettingsPage({
             aria-current={
               activeSection === "providers" ? "location" : undefined
             }
-            hidden={!modelConnectionSettingsAvailable}
+            hidden={!customProviderSettingsAvailable}
             onClick={(event) => {
               event.preventDefault();
-              setModelConnectionDraft(null);
+              setCustomProviderDraft(null);
               setProvidersPage("list");
               setActiveSection("providers");
             }}
@@ -1333,7 +1356,7 @@ export function SettingsPage({
                       </label>
                       <p>
                         {!providerIsMetask &&
-                        selectedConnection?.models.length === 0
+                        selectedCustomProvider?.models.length === 0
                           ? t("settings.custom_model_add_help")
                           : providerIsMetask &&
                               modelCatalogLoading &&
@@ -1352,133 +1375,204 @@ export function SettingsPage({
                       </p>
                     </div>
                     <div className="settings-control-stack">
-                      {!providerIsMetask &&
-                      selectedConnection?.models.length === 0 ? (
-                        <form
-                          className="settings-custom-model-add"
-                          onSubmit={(event) => {
-                            event.preventDefault();
-                            void addCustomModel();
-                          }}
-                        >
-                          <input
-                            id="settings-model"
-                            className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
-                            autoComplete="off"
-                            maxLength={256}
-                            value={customModelId}
-                            placeholder={t(
-                              "settings.model_connection_model_id_placeholder",
-                            )}
-                            disabled={
-                              disabled || executionDisabled || addingCustomModel
-                            }
-                            onChange={(event) =>
-                              setCustomModelId(event.target.value)
-                            }
-                          />
-                          <Button
-                            type="submit"
-                            size="sm"
-                            disabled={
-                              disabled ||
-                              executionDisabled ||
-                              addingCustomModel ||
-                              !customModelId.trim()
-                            }
-                          >
-                            {addingCustomModel
-                              ? t("settings.custom_model_adding")
-                              : t("settings.custom_model_add")}
-                          </Button>
-                        </form>
-                      ) : (
-                        <>
-                          <SelectionMenu
-                            triggerId="settings-model"
-                            value={
-                              providerIsMetask
-                                ? candidateModelId || displayedModelId
-                                : displayedModelId
-                            }
-                            options={modelOptions}
-                            placeholder={modelPlaceholder}
-                            ariaLabel={t("settings.default_model")}
-                            helper={t("settings.model_menu_help")}
-                            actionLabel={t(
-                              modelIsOnlyOption
-                                ? "settings.view_selection"
-                                : displayedModelId
-                                  ? "settings.change_selection"
-                                  : "settings.choose_selection",
-                            )}
-                            disabled={
-                              disabled ||
-                              (providerIsMetask && accountDisabled) ||
-                              !canChooseModel ||
-                              modelOptions.length === 0
-                            }
-                            busy={providerIsMetask && modelBusy}
-                            leading={<Icon name="model" />}
-                            triggerClassName="settings-control"
-                            contentClassName="settings-selection-menu"
-                            onValueChange={(value) => {
-                              if (!providerIsMetask && selectedConnection) {
-                                onSelectModelConnection(
-                                  selectedConnection.id,
-                                  selectedConnection.connectionRevision,
-                                  value,
-                                );
-                                return;
-                              }
-                              const model = metaskModels.find(
-                                (candidate) => candidate.id === value,
-                              );
-                              if (!model) return;
-                              setRequestedModel({
-                                selectionId: value,
-                                label: modelLabel(model, t),
-                              });
-                              onSelectModel(value);
-                            }}
-                          />
-                          {customModelNeedingTest && selectedConnection && (
-                            <div className="settings-custom-model-test">
-                              <span>
-                                <code>{customModelNeedingTest.id}</code>
-                                <small>
-                                  {modelConnectionTestStatusLabel(
-                                    customModelNeedingTest.testStatus,
-                                    t,
-                                  )}
-                                </small>
-                              </span>
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                disabled={
-                                  disabled ||
-                                  executionDisabled ||
-                                  customModelNeedingTest.testStatus ===
-                                    "testing"
-                                }
-                                onClick={() =>
-                                  onTestModelConnection(
-                                    selectedConnection.id,
-                                    selectedConnection.connectionRevision,
-                                    customModelNeedingTest.id,
-                                    selectedConnection.sourceGeneration,
-                                    selectedConnection.catalogGeneration,
-                                  )
-                                }
-                              >
-                                {customModelNeedingTest.testStatus === "testing"
-                                  ? t("settings.model_connection_testing")
-                                  : t("settings.custom_model_test")}
-                              </Button>
+                      <SelectionMenu
+                        triggerId="settings-model"
+                        value={
+                          providerIsMetask
+                            ? candidateModelId || displayedModelId
+                            : displayedModelId
+                        }
+                        options={modelOptions}
+                        placeholder={modelPlaceholder}
+                        ariaLabel={t("settings.default_model")}
+                        helper={t("settings.model_menu_help")}
+                        actionLabel={t(
+                          modelIsOnlyOption
+                            ? "settings.view_selection"
+                            : displayedModelId
+                              ? "settings.change_selection"
+                              : "settings.choose_selection",
+                        )}
+                        disabled={
+                          disabled ||
+                          (providerIsMetask && accountDisabled) ||
+                          !canChooseModel ||
+                          modelOptions.length === 0
+                        }
+                        busy={providerIsMetask && modelBusy}
+                        leading={<Icon name="model" />}
+                        triggerClassName="settings-control"
+                        contentClassName="settings-selection-menu"
+                        onValueChange={(value) => {
+                          if (!providerIsMetask && selectedCustomProvider) {
+                            onSelectCustomModel(
+                              selectedCustomProvider.id,
+                              selectedCustomProvider.providerRevision,
+                              value,
+                            );
+                            return;
+                          }
+                          const model = metaskModels.find(
+                            (candidate) => candidate.id === value,
+                          );
+                          if (!model) return;
+                          setRequestedModel({
+                            selectionId: value,
+                            label: modelLabel(model, t),
+                          });
+                          onSelectModel(value);
+                        }}
+                      />
+                      {!providerIsMetask && selectedCustomProvider && (
+                        <div className="settings-custom-model-manager">
+                          {selectedCustomProvider.models.map((model) => (
+                            <div
+                              className="settings-custom-model-entry"
+                              key={model.id}
+                            >
+                              <div className="settings-custom-model-test">
+                                <span>
+                                  <code>{model.displayName || model.id}</code>
+                                  <small>
+                                    {customModelTestStatusLabel(
+                                      model.testStatus,
+                                      t,
+                                    )}
+                                  </small>
+                                </span>
+                                <div className="settings-custom-model-actions">
+                                  <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    disabled={
+                                      disabled ||
+                                      executionDisabled ||
+                                      !customProviderCapabilities.modelTest ||
+                                      selectedCustomProvider.credentialStatus !==
+                                        "ready" ||
+                                      model.testStatus === "testing"
+                                    }
+                                    onClick={() =>
+                                      onTestCustomModel(
+                                        selectedCustomProvider.id,
+                                        selectedCustomProvider.providerRevision,
+                                        model.id,
+                                        selectedCustomProvider.sourceGeneration,
+                                        selectedCustomProvider.catalogGeneration,
+                                      )
+                                    }
+                                  >
+                                    {model.testStatus === "testing"
+                                      ? t("settings.custom_model_testing")
+                                      : t("settings.custom_model_test")}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={
+                                      disabled ||
+                                      executionDisabled ||
+                                      mutatingCustomProvider
+                                    }
+                                    onClick={() =>
+                                      setCustomModelRemoval({
+                                        providerId: selectedCustomProvider.id,
+                                        expectedProviderRevision:
+                                          selectedCustomProvider.providerRevision,
+                                        expectedCatalogGeneration:
+                                          selectedCustomProvider.catalogGeneration,
+                                        modelId: model.id,
+                                      })
+                                    }
+                                  >
+                                    {t("common.remove")}
+                                  </Button>
+                                </div>
+                              </div>
+                              {customModelRemoval?.providerId ===
+                                selectedCustomProvider.id &&
+                                customModelRemoval.modelId === model.id && (
+                                  <div
+                                    className="settings-custom-model-confirm-remove"
+                                    role="group"
+                                    aria-label={t(
+                                      "settings.custom_model_remove_confirm",
+                                    )}
+                                  >
+                                    <p>
+                                      {t(
+                                        "settings.custom_model_remove_confirm",
+                                      )}
+                                    </p>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      disabled={mutatingCustomProvider}
+                                      onClick={() =>
+                                        setCustomModelRemoval(null)
+                                      }
+                                    >
+                                      {t("common.cancel")}
+                                    </Button>
+                                    <Button
+                                      variant="danger"
+                                      size="sm"
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingCustomProvider
+                                      }
+                                      onClick={() => void removeCustomModel()}
+                                    >
+                                      {mutatingCustomProvider
+                                        ? t("settings.custom_model_removing")
+                                        : t("common.remove")}
+                                    </Button>
+                                  </div>
+                                )}
                             </div>
-                          )}
-                        </>
+                          ))}
+                          <form
+                            className="settings-custom-model-add"
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              void addCustomModel();
+                            }}
+                          >
+                            <input
+                              className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
+                              aria-label={t("settings.custom_model_id")}
+                              autoComplete="off"
+                              maxLength={256}
+                              value={customModelId}
+                              placeholder={t(
+                                "settings.custom_provider_model_id_placeholder",
+                              )}
+                              disabled={
+                                disabled ||
+                                executionDisabled ||
+                                addingCustomModel
+                              }
+                              onChange={(event) =>
+                                setCustomModelId(event.target.value)
+                              }
+                            />
+                            <Button
+                              type="submit"
+                              size="sm"
+                              disabled={
+                                disabled ||
+                                executionDisabled ||
+                                addingCustomModel ||
+                                !customModelId.trim()
+                              }
+                            >
+                              {addingCustomModel
+                                ? t("settings.custom_model_adding")
+                                : t("settings.custom_model_add")}
+                            </Button>
+                          </form>
+                        </div>
                       )}
                       {providerIsMetask && modelHasPendingChange && (
                         <span className="settings-pending-label">
@@ -1548,619 +1642,572 @@ export function SettingsPage({
             </section>
           )}
 
-          {activeSection === "providers" &&
-            modelConnectionSettingsAvailable && (
-              <section
-                id="settings-providers"
-                className="settings-section"
-                aria-labelledby="settings-providers-title"
-              >
-                <div className="settings-section-heading">
-                  <h2
-                    id="settings-providers-title"
-                    ref={providersHeading}
-                    tabIndex={-1}
-                  >
-                    {providersPage === "add"
-                      ? t("settings.provider_add_title")
-                      : t("settings.providers")}
-                  </h2>
-                </div>
-                <div className="settings-group">
-                  <h3 className="settings-group-label">
-                    {providersPage === "add"
-                      ? t("settings.provider_details")
-                      : t("settings.providers_saved")}
-                  </h3>
-                  <div className="settings-model-connections">
-                    <div className="settings-execution-header">
-                      {providersPage === "list" ? (
-                        <p>{t("settings.providers_help")}</p>
-                      ) : (
-                        <button
-                          type="button"
-                          className="settings-subpage-back text-button focus-ring"
-                          onClick={() => {
-                            setModelConnectionDraft(null);
-                            setProvidersPage("list");
-                          }}
-                        >
-                          <Icon name="arrow-left" />
-                          {t("settings.back_to_providers")}
-                        </button>
-                      )}
-                      {providersPage === "list" &&
-                        modelConnectionCapabilities.secretCapture && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            disabled={
-                              disabled ||
-                              executionDisabled ||
-                              creatingModelConnection
-                            }
-                            onClick={() => {
-                              setModelConnectionDraft(
-                                newModelConnectionDraft(),
-                              );
-                              setProvidersPage("add");
-                            }}
-                          >
-                            {t("settings.provider_add")}
-                          </Button>
-                        )}
-                    </div>
-                    {modelConnectionDraft && (
-                      <form
-                        id="settings-model-connection-create"
-                        className="settings-model-connection-create"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          void submitModelConnection();
+          {activeSection === "providers" && customProviderSettingsAvailable && (
+            <section
+              id="settings-providers"
+              className="settings-section"
+              aria-labelledby="settings-providers-title"
+            >
+              <div className="settings-section-heading">
+                <h2
+                  id="settings-providers-title"
+                  ref={providersHeading}
+                  tabIndex={-1}
+                >
+                  {providersPage === "add"
+                    ? t("settings.provider_add_title")
+                    : t("settings.providers")}
+                </h2>
+              </div>
+              <div className="settings-group">
+                <h3 className="settings-group-label">
+                  {providersPage === "add"
+                    ? t("settings.provider_details")
+                    : t("settings.providers_saved")}
+                </h3>
+                <div className="settings-custom-providers">
+                  <div className="settings-execution-header">
+                    {providersPage === "list" ? (
+                      <p>{t("settings.providers_help")}</p>
+                    ) : (
+                      <button
+                        type="button"
+                        className="settings-subpage-back text-button focus-ring"
+                        onClick={() => {
+                          setCustomProviderDraft(null);
+                          setProvidersPage("list");
                         }}
                       >
-                        <div
-                          className="settings-model-connection-route"
-                          aria-hidden="true"
-                        >
-                          <span>
-                            {t("settings.model_connection_route.protocol")}
-                          </span>
-                          <span>
-                            {t("settings.model_connection_route.endpoint")}
-                          </span>
-                          <span>
-                            {t("settings.model_connection_route.api_key")}
-                          </span>
-                        </div>
-                        <label className="settings-model-connection-create-field">
-                          <span>{t("settings.model_connection_name")}</span>
-                          <input
-                            className="settings-model-connection-input focus-ring"
-                            autoComplete="off"
-                            maxLength={256}
-                            value={modelConnectionDraft.displayName}
-                            placeholder={t(
-                              "settings.model_connection_name_placeholder",
-                            )}
-                            disabled={
-                              disabled ||
-                              executionDisabled ||
-                              creatingModelConnection
-                            }
-                            onChange={(event) =>
-                              setModelConnectionDraft((current) =>
-                                current
-                                  ? {
-                                      ...current,
-                                      displayName: event.target.value,
-                                    }
-                                  : current,
-                              )
-                            }
-                          />
-                        </label>
-                        <div className="settings-model-connection-create-field">
-                          <span>{t("settings.model_connection_protocol")}</span>
-                          <SelectionMenu
-                            value={modelConnectionDraft.protocol}
-                            options={modelConnectionProtocolOptions}
-                            placeholder={t(
-                              "settings.model_connection_protocol",
-                            )}
-                            ariaLabel={t("settings.model_connection_protocol")}
-                            disabled={
-                              disabled ||
-                              executionDisabled ||
-                              creatingModelConnection
-                            }
-                            triggerClassName="settings-control"
-                            onValueChange={(value) => {
-                              const protocol = value as Protocol;
-                              setModelConnectionDraft((current) =>
-                                current
-                                  ? {
-                                      ...current,
-                                      protocol,
-                                    }
-                                  : current,
-                              );
-                            }}
-                          />
-                        </div>
-                        <label className="settings-model-connection-create-field settings-model-connection-create-field-wide">
-                          <span>{t("settings.model_connection_endpoint")}</span>
-                          <input
-                            className="settings-model-connection-input focus-ring"
-                            autoComplete="url"
-                            inputMode="url"
-                            maxLength={2048}
-                            value={modelConnectionDraft.baseUrl}
-                            placeholder={
-                              modelConnectionBaseUrlExamples[
-                                modelConnectionDraft.protocol
-                              ]
-                            }
-                            disabled={
-                              disabled ||
-                              executionDisabled ||
-                              creatingModelConnection
-                            }
-                            onChange={(event) =>
-                              setModelConnectionDraft((current) =>
-                                current
-                                  ? {
-                                      ...current,
-                                      baseUrl: event.target.value,
-                                    }
-                                  : current,
-                              )
-                            }
-                          />
-                        </label>
-                        <label className="settings-model-connection-create-field settings-model-connection-create-field-wide">
-                          <span>{t("settings.api_key")}</span>
-                          <input
-                            className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
-                            type="password"
-                            autoComplete="off"
-                            spellCheck={false}
-                            maxLength={4096}
-                            value={modelConnectionDraft.apiKey}
-                            placeholder={t(
-                              "settings.provider_api_key_placeholder",
-                            )}
-                            disabled={
-                              disabled ||
-                              executionDisabled ||
-                              creatingModelConnection
-                            }
-                            onChange={(event) =>
-                              setModelConnectionDraft((current) =>
-                                current
-                                  ? { ...current, apiKey: event.target.value }
-                                  : current,
-                              )
-                            }
-                          />
-                        </label>
-                        <div className="settings-model-connection-create-footer">
-                          <p>
-                            {t("settings.provider_models_configured_elsewhere")}
-                          </p>
-                          <Button
-                            type="submit"
-                            size="sm"
-                            disabled={
-                              disabled ||
-                              executionDisabled ||
-                              creatingModelConnection ||
-                              !modelConnectionDraft.displayName.trim() ||
-                              !modelConnectionDraft.baseUrl.trim() ||
-                              !modelConnectionDraft.apiKey
-                            }
-                          >
-                            {creatingModelConnection
-                              ? t("settings.model_connection_adding")
-                              : t("settings.provider_save")}
-                          </Button>
-                        </div>
-                      </form>
+                        <Icon name="arrow-left" />
+                        {t("settings.back_to_providers")}
+                      </button>
                     )}
                     {providersPage === "list" &&
-                      (!modelConnectionCapabilities.management ? (
-                        <p className="settings-model-connections-empty">
-                          {t("settings.providers_unavailable")}
+                      customProviderCapabilities.secretCapture && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={
+                            disabled ||
+                            executionDisabled ||
+                            creatingCustomProvider
+                          }
+                          onClick={() => {
+                            setCustomProviderDraft(newCustomProviderDraft());
+                            setProvidersPage("add");
+                          }}
+                        >
+                          {t("settings.provider_add")}
+                        </Button>
+                      )}
+                  </div>
+                  {customProviderDraft && (
+                    <form
+                      id="settings-custom-provider-create"
+                      className="settings-custom-provider-create"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void submitCustomProvider();
+                      }}
+                    >
+                      <div
+                        className="settings-custom-provider-route"
+                        aria-hidden="true"
+                      >
+                        <span>
+                          {t("settings.custom_provider_route.protocol")}
+                        </span>
+                        <span>
+                          {t("settings.custom_provider_route.endpoint")}
+                        </span>
+                        <span>
+                          {t("settings.custom_provider_route.api_key")}
+                        </span>
+                      </div>
+                      <label className="settings-custom-provider-create-field">
+                        <span>{t("settings.custom_provider_name")}</span>
+                        <input
+                          className="settings-custom-provider-input focus-ring"
+                          autoComplete="off"
+                          maxLength={256}
+                          value={customProviderDraft.displayName}
+                          placeholder={t(
+                            "settings.custom_provider_name_placeholder",
+                          )}
+                          disabled={
+                            disabled ||
+                            executionDisabled ||
+                            creatingCustomProvider
+                          }
+                          onChange={(event) =>
+                            setCustomProviderDraft((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    displayName: event.target.value,
+                                  }
+                                : current,
+                            )
+                          }
+                        />
+                      </label>
+                      <div className="settings-custom-provider-create-field">
+                        <span>{t("settings.custom_provider_protocol")}</span>
+                        <SelectionMenu
+                          value={customProviderDraft.protocol}
+                          options={customProviderProtocolOptions}
+                          placeholder={t("settings.custom_provider_protocol")}
+                          ariaLabel={t("settings.custom_provider_protocol")}
+                          disabled={
+                            disabled ||
+                            executionDisabled ||
+                            creatingCustomProvider
+                          }
+                          triggerClassName="settings-control"
+                          onValueChange={(value) => {
+                            const protocol = value as Protocol;
+                            setCustomProviderDraft((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    protocol,
+                                  }
+                                : current,
+                            );
+                          }}
+                        />
+                      </div>
+                      <label className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
+                        <span>{t("settings.custom_provider_endpoint")}</span>
+                        <input
+                          className="settings-custom-provider-input focus-ring"
+                          autoComplete="url"
+                          inputMode="url"
+                          maxLength={2048}
+                          value={customProviderDraft.baseUrl}
+                          placeholder={
+                            customProviderBaseUrlExamples[
+                              customProviderDraft.protocol
+                            ]
+                          }
+                          disabled={
+                            disabled ||
+                            executionDisabled ||
+                            creatingCustomProvider
+                          }
+                          onChange={(event) =>
+                            setCustomProviderDraft((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    baseUrl: event.target.value,
+                                  }
+                                : current,
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
+                        <span>{t("settings.api_key")}</span>
+                        <input
+                          className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
+                          type="password"
+                          autoComplete="off"
+                          spellCheck={false}
+                          maxLength={4096}
+                          value={customProviderDraft.apiKey}
+                          placeholder={t(
+                            "settings.provider_api_key_placeholder",
+                          )}
+                          disabled={
+                            disabled ||
+                            executionDisabled ||
+                            creatingCustomProvider
+                          }
+                          onChange={(event) =>
+                            setCustomProviderDraft((current) =>
+                              current
+                                ? { ...current, apiKey: event.target.value }
+                                : current,
+                            )
+                          }
+                        />
+                      </label>
+                      <div className="settings-custom-provider-create-footer">
+                        <p>
+                          {t("settings.provider_models_configured_elsewhere")}
                         </p>
-                      ) : models.connections.length === 0 ? (
-                        <p className="settings-model-connections-empty">
-                          {t("settings.providers_empty")}
-                        </p>
-                      ) : (
-                        <div className="settings-model-connection-list">
-                          {models.connections.map((connection) => (
-                            <div
-                              className="settings-model-connection"
-                              key={connection.id}
-                            >
-                              <div className="settings-model-connection-copy">
-                                <strong>
-                                  {connection.displayName || connection.id}
-                                </strong>
-                                <span>
-                                  {modelConnectionProtocolLabel(
-                                    connection.protocol,
-                                    t,
-                                  )}
-                                  <span aria-hidden="true"> · </span>
-                                  {modelConnectionBaseUrlFromEndpoint(
-                                    connection.protocol,
-                                    connection.normalizedBaseUrl,
-                                  )}
-                                </span>
-                                <span>
-                                  {modelConnectionCredentialLabel(
-                                    connection.credentialStatus,
-                                    t,
-                                  )}
-                                  <span aria-hidden="true"> · </span>
-                                  {modelConnectionStateLabel(
-                                    connection.state,
-                                    t,
-                                  )}
-                                  <span aria-hidden="true"> · </span>
-                                  {modelConnectionTestStatusLabel(
-                                    connection.testStatus,
-                                    t,
-                                  )}
-                                </span>
-                              </div>
-                              <div className="settings-model-connection-actions">
-                                <button
-                                  className="text-button focus-ring"
-                                  disabled={
-                                    disabled ||
-                                    executionDisabled ||
-                                    mutatingModelConnection ||
-                                    !modelConnectionCapabilities.secretCapture
-                                  }
-                                  onClick={() => {
-                                    setModelConnectionEdit(null);
-                                    setModelConnectionRemoval(null);
-                                    setModelConnectionCredentialEdit({
-                                      connectionId: connection.id,
-                                      expectedConnectionRevision:
-                                        connection.connectionRevision,
-                                      apiKey: "",
-                                    });
-                                  }}
-                                >
-                                  {t(
-                                    "settings.model_connection_replace_credential",
-                                  )}
-                                </button>
-                                <button
-                                  className="text-button focus-ring"
-                                  disabled={
-                                    disabled ||
-                                    executionDisabled ||
-                                    !modelConnectionCapabilities.connectionTest ||
-                                    connection.testStatus === "testing" ||
-                                    connection.credentialStatus !== "ready" ||
-                                    connection.selectedModel.length === 0
-                                  }
-                                  onClick={() =>
-                                    onTestModelConnection(
-                                      connection.id,
-                                      connection.connectionRevision,
-                                      connection.selectedModel,
-                                      connection.sourceGeneration,
-                                      connection.catalogGeneration,
-                                    )
-                                  }
-                                >
-                                  {connection.testStatus === "testing"
-                                    ? t("settings.model_connection_testing")
-                                    : t("settings.model_connection_test")}
-                                </button>
-                                <button
-                                  className="text-button focus-ring"
-                                  disabled={
-                                    disabled ||
-                                    executionDisabled ||
-                                    mutatingModelConnection
-                                  }
-                                  onClick={() => {
-                                    setModelConnectionCredentialEdit(null);
-                                    setModelConnectionRemoval(null);
-                                    setModelConnectionEdit({
-                                      connectionId: connection.id,
-                                      expectedConnectionRevision:
-                                        connection.connectionRevision,
-                                      displayName: connection.displayName,
-                                      protocol: connection.protocol,
-                                      baseUrl:
-                                        modelConnectionBaseUrlFromEndpoint(
-                                          connection.protocol,
-                                          connection.normalizedBaseUrl,
-                                        ),
-                                    });
-                                  }}
-                                >
-                                  {t("common.edit")}
-                                </button>
-                                <button
-                                  className="text-button settings-model-connection-remove focus-ring"
-                                  disabled={
-                                    disabled ||
-                                    executionDisabled ||
-                                    mutatingModelConnection
-                                  }
-                                  onClick={() => {
-                                    setModelConnectionCredentialEdit(null);
-                                    setModelConnectionEdit(null);
-                                    setModelConnectionRemoval({
-                                      connectionId: connection.id,
-                                      expectedConnectionRevision:
-                                        connection.connectionRevision,
-                                    });
-                                  }}
-                                >
-                                  {t("common.remove")}
-                                </button>
-                              </div>
-                              {modelConnectionCredentialEdit?.connectionId ===
-                                connection.id && (
-                                <form
-                                  className="settings-model-connection-credential-edit"
-                                  onSubmit={(event) => {
-                                    event.preventDefault();
-                                    void replaceModelConnectionCredential();
-                                  }}
-                                >
-                                  <label className="settings-model-connection-create-field">
-                                    <span>{t("settings.api_key")}</span>
-                                    <input
-                                      className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
-                                      type="password"
-                                      autoComplete="off"
-                                      spellCheck={false}
-                                      maxLength={4096}
-                                      value={
-                                        modelConnectionCredentialEdit.apiKey
-                                      }
-                                      placeholder={t(
-                                        "settings.provider_api_key_placeholder",
-                                      )}
-                                      disabled={
-                                        disabled ||
-                                        executionDisabled ||
-                                        mutatingModelConnection
-                                      }
-                                      onChange={(event) =>
-                                        setModelConnectionCredentialEdit(
-                                          (current) =>
-                                            current
-                                              ? {
-                                                  ...current,
-                                                  apiKey: event.target.value,
-                                                }
-                                              : current,
-                                        )
-                                      }
-                                    />
-                                  </label>
-                                  <div className="settings-model-connection-credential-actions">
-                                    <Button
-                                      type="button"
-                                      variant="ghost"
-                                      size="sm"
-                                      disabled={mutatingModelConnection}
-                                      onClick={() =>
-                                        setModelConnectionCredentialEdit(null)
-                                      }
-                                    >
-                                      {t("common.cancel")}
-                                    </Button>
-                                    <Button
-                                      type="submit"
-                                      size="sm"
-                                      disabled={
-                                        disabled ||
-                                        executionDisabled ||
-                                        mutatingModelConnection ||
-                                        !modelConnectionCredentialEdit.apiKey
-                                      }
-                                    >
-                                      {mutatingModelConnection
-                                        ? t("common.saving")
-                                        : t("settings.provider_save_api_key")}
-                                    </Button>
-                                  </div>
-                                </form>
-                              )}
-                              {modelConnectionEdit?.connectionId ===
-                                connection.id && (
-                                <form
-                                  className="settings-model-connection-edit"
-                                  onSubmit={(event) => {
-                                    event.preventDefault();
-                                    void submitModelConnectionEdit();
-                                  }}
-                                >
-                                  <label className="settings-model-connection-create-field">
-                                    <span>
-                                      {t("settings.model_connection_name")}
-                                    </span>
-                                    <input
-                                      className="settings-model-connection-input focus-ring"
-                                      autoComplete="off"
-                                      maxLength={256}
-                                      value={modelConnectionEdit.displayName}
-                                      disabled={
-                                        disabled ||
-                                        executionDisabled ||
-                                        mutatingModelConnection
-                                      }
-                                      onChange={(event) =>
-                                        setModelConnectionEdit((current) =>
-                                          current
-                                            ? {
-                                                ...current,
-                                                displayName: event.target.value,
-                                              }
-                                            : current,
-                                        )
-                                      }
-                                    />
-                                  </label>
-                                  <div className="settings-model-connection-create-field">
-                                    <span>
-                                      {t("settings.model_connection_protocol")}
-                                    </span>
-                                    <SelectionMenu
-                                      value={modelConnectionEdit.protocol}
-                                      options={modelConnectionProtocolOptions}
-                                      placeholder={t(
-                                        "settings.model_connection_protocol",
-                                      )}
-                                      ariaLabel={t(
-                                        "settings.model_connection_protocol",
-                                      )}
-                                      disabled={
-                                        disabled ||
-                                        executionDisabled ||
-                                        mutatingModelConnection
-                                      }
-                                      triggerClassName="settings-control"
-                                      onValueChange={(value) => {
-                                        const protocol = value as Protocol;
-                                        setModelConnectionEdit((current) =>
-                                          current
-                                            ? {
-                                                ...current,
-                                                protocol,
-                                              }
-                                            : current,
-                                        );
-                                      }}
-                                    />
-                                  </div>
-                                  <label className="settings-model-connection-create-field settings-model-connection-edit-endpoint">
-                                    <span>
-                                      {t("settings.model_connection_endpoint")}
-                                    </span>
-                                    <input
-                                      className="settings-model-connection-input focus-ring"
-                                      autoComplete="url"
-                                      inputMode="url"
-                                      maxLength={2048}
-                                      value={modelConnectionEdit.baseUrl}
-                                      disabled={
-                                        disabled ||
-                                        executionDisabled ||
-                                        mutatingModelConnection
-                                      }
-                                      onChange={(event) =>
-                                        setModelConnectionEdit((current) =>
-                                          current
-                                            ? {
-                                                ...current,
-                                                baseUrl: event.target.value,
-                                              }
-                                            : current,
-                                        )
-                                      }
-                                    />
-                                  </label>
-                                  <div className="settings-model-connection-edit-actions">
-                                    <p>
-                                      {t("settings.model_connection_edit_help")}
-                                    </p>
-                                    <Button
-                                      type="button"
-                                      variant="ghost"
-                                      size="sm"
-                                      disabled={mutatingModelConnection}
-                                      onClick={() =>
-                                        setModelConnectionEdit(null)
-                                      }
-                                    >
-                                      {t("common.cancel")}
-                                    </Button>
-                                    <Button
-                                      type="submit"
-                                      size="sm"
-                                      disabled={
-                                        disabled ||
-                                        executionDisabled ||
-                                        mutatingModelConnection ||
-                                        !modelConnectionEdit.displayName.trim() ||
-                                        !modelConnectionEdit.baseUrl.trim()
-                                      }
-                                    >
-                                      {mutatingModelConnection
-                                        ? t("common.saving")
-                                        : t("common.save")}
-                                    </Button>
-                                  </div>
-                                </form>
-                              )}
-                              {modelConnectionRemoval?.connectionId ===
-                                connection.id && (
-                                <div
-                                  className="settings-model-connection-confirm-remove"
-                                  role="group"
-                                  aria-label={t(
-                                    "settings.model_connection_remove_confirm",
-                                  )}
-                                >
-                                  <p>
-                                    {t(
-                                      "settings.model_connection_remove_confirm",
+                        <Button
+                          type="submit"
+                          size="sm"
+                          disabled={
+                            disabled ||
+                            executionDisabled ||
+                            creatingCustomProvider ||
+                            !customProviderDraft.displayName.trim() ||
+                            !customProviderDraft.baseUrl.trim() ||
+                            !customProviderDraft.apiKey
+                          }
+                        >
+                          {creatingCustomProvider
+                            ? t("settings.custom_provider_adding")
+                            : t("settings.provider_save")}
+                        </Button>
+                      </div>
+                    </form>
+                  )}
+                  {providersPage === "list" &&
+                    (!customProviderCapabilities.management ? (
+                      <p className="settings-custom-providers-empty">
+                        {t("settings.providers_unavailable")}
+                      </p>
+                    ) : models.customProviders.length === 0 ? (
+                      <p className="settings-custom-providers-empty">
+                        {t("settings.providers_empty")}
+                      </p>
+                    ) : (
+                      <div className="settings-custom-provider-list">
+                        {models.customProviders.map((provider) => (
+                          <div
+                            className="settings-custom-provider"
+                            key={provider.id}
+                          >
+                            <div className="settings-custom-provider-copy">
+                              <strong>
+                                {provider.displayName || provider.id}
+                              </strong>
+                              <span>
+                                {customProviderProtocolLabel(
+                                  provider.protocol,
+                                  t,
+                                )}
+                                <span aria-hidden="true"> · </span>
+                                {customProviderBaseUrlFromEndpoint(
+                                  provider.protocol,
+                                  provider.normalizedBaseUrl,
+                                )}
+                              </span>
+                              <span>
+                                {customProviderCredentialLabel(
+                                  provider.credentialStatus,
+                                  t,
+                                )}
+                                <span aria-hidden="true"> · </span>
+                                {customProviderStateLabel(provider.state, t)}
+                              </span>
+                            </div>
+                            <div className="settings-custom-provider-actions">
+                              <button
+                                className="text-button focus-ring"
+                                disabled={
+                                  disabled ||
+                                  executionDisabled ||
+                                  mutatingCustomProvider ||
+                                  !customProviderCapabilities.secretCapture
+                                }
+                                onClick={() => {
+                                  setCustomProviderEdit(null);
+                                  setCustomProviderRemoval(null);
+                                  setCustomProviderCredentialEdit({
+                                    providerId: provider.id,
+                                    expectedProviderRevision:
+                                      provider.providerRevision,
+                                    apiKey: "",
+                                  });
+                                }}
+                              >
+                                {t(
+                                  "settings.custom_provider_replace_credential",
+                                )}
+                              </button>
+                              <button
+                                className="text-button focus-ring"
+                                disabled={
+                                  disabled ||
+                                  executionDisabled ||
+                                  mutatingCustomProvider
+                                }
+                                onClick={() => {
+                                  setCustomProviderCredentialEdit(null);
+                                  setCustomProviderRemoval(null);
+                                  setCustomProviderEdit({
+                                    providerId: provider.id,
+                                    expectedProviderRevision:
+                                      provider.providerRevision,
+                                    displayName: provider.displayName,
+                                    protocol: provider.protocol,
+                                    baseUrl: customProviderBaseUrlFromEndpoint(
+                                      provider.protocol,
+                                      provider.normalizedBaseUrl,
+                                    ),
+                                  });
+                                }}
+                              >
+                                {t("common.edit")}
+                              </button>
+                              <button
+                                className="text-button settings-custom-provider-remove focus-ring"
+                                disabled={
+                                  disabled ||
+                                  executionDisabled ||
+                                  mutatingCustomProvider
+                                }
+                                onClick={() => {
+                                  setCustomProviderCredentialEdit(null);
+                                  setCustomProviderEdit(null);
+                                  setCustomProviderRemoval({
+                                    providerId: provider.id,
+                                    expectedProviderRevision:
+                                      provider.providerRevision,
+                                  });
+                                }}
+                              >
+                                {t("common.remove")}
+                              </button>
+                            </div>
+                            {customProviderCredentialEdit?.providerId ===
+                              provider.id && (
+                              <form
+                                className="settings-custom-provider-credential-edit"
+                                onSubmit={(event) => {
+                                  event.preventDefault();
+                                  void replaceCustomProviderCredential();
+                                }}
+                              >
+                                <label className="settings-custom-provider-create-field">
+                                  <span>{t("settings.api_key")}</span>
+                                  <input
+                                    className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
+                                    type="password"
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    maxLength={4096}
+                                    value={customProviderCredentialEdit.apiKey}
+                                    placeholder={t(
+                                      "settings.provider_api_key_placeholder",
                                     )}
-                                  </p>
+                                    disabled={
+                                      disabled ||
+                                      executionDisabled ||
+                                      mutatingCustomProvider
+                                    }
+                                    onChange={(event) =>
+                                      setCustomProviderCredentialEdit(
+                                        (current) =>
+                                          current
+                                            ? {
+                                                ...current,
+                                                apiKey: event.target.value,
+                                              }
+                                            : current,
+                                      )
+                                    }
+                                  />
+                                </label>
+                                <div className="settings-custom-provider-credential-actions">
                                   <Button
+                                    type="button"
                                     variant="ghost"
                                     size="sm"
-                                    disabled={mutatingModelConnection}
+                                    disabled={mutatingCustomProvider}
                                     onClick={() =>
-                                      setModelConnectionRemoval(null)
+                                      setCustomProviderCredentialEdit(null)
                                     }
                                   >
                                     {t("common.cancel")}
                                   </Button>
                                   <Button
-                                    variant="danger"
+                                    type="submit"
                                     size="sm"
                                     disabled={
                                       disabled ||
                                       executionDisabled ||
-                                      mutatingModelConnection
+                                      mutatingCustomProvider ||
+                                      !customProviderCredentialEdit.apiKey
                                     }
-                                    onClick={() => void removeModelConnection()}
                                   >
-                                    {mutatingModelConnection
-                                      ? t("settings.model_connection_removing")
-                                      : t("common.remove")}
+                                    {mutatingCustomProvider
+                                      ? t("common.saving")
+                                      : t("settings.provider_save_api_key")}
                                   </Button>
                                 </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      ))}
-                    {providersPage === "list" &&
-                      modelConnectionCapabilities.management &&
-                      !modelConnectionCapabilities.secretCapture && (
-                        <p className="settings-model-connections-empty">
-                          {t("settings.model_connection_capture_unavailable")}
-                        </p>
-                      )}
-                  </div>
+                              </form>
+                            )}
+                            {customProviderEdit?.providerId === provider.id && (
+                              <form
+                                className="settings-custom-provider-edit"
+                                onSubmit={(event) => {
+                                  event.preventDefault();
+                                  void submitCustomProviderEdit();
+                                }}
+                              >
+                                <label className="settings-custom-provider-create-field">
+                                  <span>
+                                    {t("settings.custom_provider_name")}
+                                  </span>
+                                  <input
+                                    className="settings-custom-provider-input focus-ring"
+                                    autoComplete="off"
+                                    maxLength={256}
+                                    value={customProviderEdit.displayName}
+                                    disabled={
+                                      disabled ||
+                                      executionDisabled ||
+                                      mutatingCustomProvider
+                                    }
+                                    onChange={(event) =>
+                                      setCustomProviderEdit((current) =>
+                                        current
+                                          ? {
+                                              ...current,
+                                              displayName: event.target.value,
+                                            }
+                                          : current,
+                                      )
+                                    }
+                                  />
+                                </label>
+                                <div className="settings-custom-provider-create-field">
+                                  <span>
+                                    {t("settings.custom_provider_protocol")}
+                                  </span>
+                                  <SelectionMenu
+                                    value={customProviderEdit.protocol}
+                                    options={customProviderProtocolOptions}
+                                    placeholder={t(
+                                      "settings.custom_provider_protocol",
+                                    )}
+                                    ariaLabel={t(
+                                      "settings.custom_provider_protocol",
+                                    )}
+                                    disabled={
+                                      disabled ||
+                                      executionDisabled ||
+                                      mutatingCustomProvider
+                                    }
+                                    triggerClassName="settings-control"
+                                    onValueChange={(value) => {
+                                      const protocol = value as Protocol;
+                                      setCustomProviderEdit((current) =>
+                                        current
+                                          ? {
+                                              ...current,
+                                              protocol,
+                                            }
+                                          : current,
+                                      );
+                                    }}
+                                  />
+                                </div>
+                                <label className="settings-custom-provider-create-field settings-custom-provider-edit-endpoint">
+                                  <span>
+                                    {t("settings.custom_provider_endpoint")}
+                                  </span>
+                                  <input
+                                    className="settings-custom-provider-input focus-ring"
+                                    autoComplete="url"
+                                    inputMode="url"
+                                    maxLength={2048}
+                                    value={customProviderEdit.baseUrl}
+                                    disabled={
+                                      disabled ||
+                                      executionDisabled ||
+                                      mutatingCustomProvider
+                                    }
+                                    onChange={(event) =>
+                                      setCustomProviderEdit((current) =>
+                                        current
+                                          ? {
+                                              ...current,
+                                              baseUrl: event.target.value,
+                                            }
+                                          : current,
+                                      )
+                                    }
+                                  />
+                                </label>
+                                <div className="settings-custom-provider-edit-actions">
+                                  <p>
+                                    {t("settings.custom_provider_edit_help")}
+                                  </p>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={mutatingCustomProvider}
+                                    onClick={() => setCustomProviderEdit(null)}
+                                  >
+                                    {t("common.cancel")}
+                                  </Button>
+                                  <Button
+                                    type="submit"
+                                    size="sm"
+                                    disabled={
+                                      disabled ||
+                                      executionDisabled ||
+                                      mutatingCustomProvider ||
+                                      !customProviderEdit.displayName.trim() ||
+                                      !customProviderEdit.baseUrl.trim()
+                                    }
+                                  >
+                                    {mutatingCustomProvider
+                                      ? t("common.saving")
+                                      : t("common.save")}
+                                  </Button>
+                                </div>
+                              </form>
+                            )}
+                            {customProviderRemoval?.providerId ===
+                              provider.id && (
+                              <div
+                                className="settings-custom-provider-confirm-remove"
+                                role="group"
+                                aria-label={t(
+                                  "settings.custom_provider_remove_confirm",
+                                )}
+                              >
+                                <p>
+                                  {t("settings.custom_provider_remove_confirm")}
+                                </p>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={mutatingCustomProvider}
+                                  onClick={() => setCustomProviderRemoval(null)}
+                                >
+                                  {t("common.cancel")}
+                                </Button>
+                                <Button
+                                  variant="danger"
+                                  size="sm"
+                                  disabled={
+                                    disabled ||
+                                    executionDisabled ||
+                                    mutatingCustomProvider
+                                  }
+                                  onClick={() => void removeCustomProvider()}
+                                >
+                                  {mutatingCustomProvider
+                                    ? t("settings.custom_provider_removing")
+                                    : t("common.remove")}
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  {providersPage === "list" &&
+                    customProviderCapabilities.management &&
+                    !customProviderCapabilities.secretCapture && (
+                      <p className="settings-custom-providers-empty">
+                        {t("settings.custom_provider_capture_unavailable")}
+                      </p>
+                    )}
                 </div>
-              </section>
-            )}
+              </div>
+            </section>
+          )}
         </div>
       </div>
     </div>

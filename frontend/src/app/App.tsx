@@ -756,14 +756,14 @@ export default function App() {
   const selectedModel = metaskProvider?.models.find(
     (model) => model.id === snapshot.models.metaskSelection?.modelId,
   );
-  const activeModelConnection = snapshot.models.connections.find(
+  const activeCustomProvider = snapshot.models.customProviders.find(
     (connection) =>
       connection.id === snapshot.models.defaultSelection?.sourceId,
   );
   const customModelId = snapshot.models.defaultSelection?.modelId ?? "";
-  const customModelConnectionSelected = activeModelConnection !== undefined;
+  const customCustomProviderSelected = activeCustomProvider !== undefined;
   const composerModelMetadata = newTaskDraftActive
-    ? customModelConnectionSelected
+    ? customCustomProviderSelected
       ? null
       : (selectedModel?.metadata ?? null)
     : (metaskProvider?.models.find(
@@ -785,33 +785,33 @@ export default function App() {
         : pdfDeclaredUnsupported
           ? ("pdf" as const)
           : null;
-  const customModelConnectionContext = activeModelConnection
-    ? `${activeModelConnection.displayName} · ${t(
-        `settings.model_connection_protocol.${activeModelConnection.protocol}`,
+  const customCustomProviderContext = activeCustomProvider
+    ? `${activeCustomProvider.displayName} · ${t(
+        `settings.custom_provider_protocol.${activeCustomProvider.protocol}`,
       )}`
     : "";
-  const customModelOptions = activeModelConnection
-    ? activeModelConnection.models
+  const customModelOptions = activeCustomProvider
+    ? activeCustomProvider.models
         .filter((model) => model.ready)
         .map((model) => {
           const displayName = model.displayName || model.id;
           return {
             selectionId: model.id,
             displayName,
-            triggerLabel: `${activeModelConnection.displayName} · ${displayName}`,
+            triggerLabel: `${activeCustomProvider.displayName} · ${displayName}`,
           };
         })
     : [];
-  const newTaskModelOptions = customModelConnectionSelected
+  const newTaskModelOptions = customCustomProviderSelected
     ? customModelOptions
     : metaskModelOptions;
-  const selectedModelLabel = customModelConnectionSelected
+  const selectedModelLabel = customCustomProviderSelected
     ? customModelOptions.find((model) => model.selectionId === customModelId)
         ?.displayName || customModelId
     : selectedModel?.displayName ||
       selectedModel?.id ||
       t("account.choose_model");
-  const selectedModelId = customModelConnectionSelected
+  const selectedModelId = customCustomProviderSelected
     ? customModelId
     : selectedModel?.id || "";
   const metaskDefaultRecoveryAvailable = Boolean(
@@ -2704,22 +2704,22 @@ export default function App() {
       modelEditable={!newTaskDraftActive && taskModelPolicy.authorityExact}
       modelSelectionDisabled={
         bridgeUnavailable ||
-        (customModelConnectionSelected ? executionBusy : accountBusy) ||
+        (customCustomProviderSelected ? executionBusy : accountBusy) ||
         (newTaskDraftActive
           ? newTaskModelOptions.length === 0 ||
-            (!customModelConnectionSelected &&
+            (!customCustomProviderSelected &&
               snapshot.models.operation === "refreshing_catalog")
           : !taskModelPolicy.catalogUsable)
       }
       modelSelectionPending={
-        (customModelConnectionSelected ? executionBusy : accountBusy) ||
-        (!newTaskDraftActive || !customModelConnectionSelected
+        (customCustomProviderSelected ? executionBusy : accountBusy) ||
+        (!newTaskDraftActive || !customCustomProviderSelected
           ? snapshot.models.operation === "refreshing_catalog"
           : false)
       }
       modelContextTitle={
-        newTaskDraftActive && customModelConnectionSelected
-          ? customModelConnectionContext
+        newTaskDraftActive && customCustomProviderSelected
+          ? customCustomProviderContext
           : newTaskDraftActive
             ? t("settings.default_model_help")
             : taskModelPolicy.authorityExact
@@ -3036,10 +3036,10 @@ export default function App() {
               defaultProfile: snapshot.permissions.defaultProfile,
               busy: permissionBusy,
             }}
-            modelConnectionCapabilities={{
-              management: snapshot.capabilities.modelConnectionManagement,
-              secretCapture: snapshot.capabilities.modelConnectionSecretCapture,
-              connectionTest: snapshot.capabilities.modelConnectionTest,
+            customProviderCapabilities={{
+              management: snapshot.capabilities.customProviderManagement,
+              secretCapture: snapshot.capabilities.customProviderSecretCapture,
+              modelTest: snapshot.capabilities.customModelTest,
             }}
             focusTarget={settingsFocus}
             disabled={bridgeUnavailable}
@@ -3070,63 +3070,73 @@ export default function App() {
                 : undefined
             }
             onSelectModel={(id) => void selectMetaskModel(id)}
-            onCreateModelConnection={(input) =>
-              runExecutionCommand(() => client.createModelConnection(input))
+            onCreateCustomProvider={(input) =>
+              runExecutionCommand(() => client.createCustomProvider(input))
             }
-            onUpdateModelConnection={(input) =>
+            onUpdateCustomProvider={(input) =>
               runExecutionCommand(() =>
-                client.updateModelConnection({
-                  sourceId: input.connectionId,
-                  expectedConnectionRevision: input.expectedConnectionRevision,
+                client.updateCustomProvider({
+                  providerId: input.providerId,
+                  expectedProviderRevision: input.expectedProviderRevision,
                   displayName: input.displayName,
                   protocol: input.protocol,
                   normalizedBaseUrl: input.normalizedBaseUrl,
                 }),
               )
             }
-            onReplaceModelConnectionCredential={(
-              connectionId,
-              revision,
-              apiKey,
-            ) =>
+            onReplaceCustomProviderCredential={(providerId, revision, apiKey) =>
               runExecutionCommand(() =>
-                client.replaceModelConnectionCredential(
-                  connectionId,
+                client.replaceCustomProviderCredential(
+                  providerId,
                   revision,
                   apiKey,
                 ),
               )
             }
             onAddCustomModel={(
-              connectionId,
-              connectionRevision,
+              providerId,
+              providerRevision,
               catalogGeneration,
               modelId,
             ) =>
               runExecutionCommand(() =>
                 client.addCustomModel({
-                  sourceId: connectionId,
-                  expectedConnectionRevision: connectionRevision,
+                  providerId,
+                  expectedProviderRevision: providerRevision,
                   expectedCatalogGeneration: catalogGeneration,
                   model: { id: modelId },
                 }),
               )
             }
-            onRemoveModelConnection={(connectionId, generation) =>
+            onRemoveCustomModel={(
+              providerId,
+              providerRevision,
+              catalogGeneration,
+              modelId,
+            ) =>
               runExecutionCommand(() =>
-                client.removeModelConnection(connectionId, generation),
+                client.removeCustomModel({
+                  selection: { sourceId: providerId, modelId },
+                  expectedProviderRevision: providerRevision,
+                  expectedCatalogGeneration: catalogGeneration,
+                }),
               )
             }
-            onTestModelConnection={(
-              connectionId,
+            onRemoveCustomProvider={(providerId, generation) =>
+              runExecutionCommand(() =>
+                client.removeCustomProvider(providerId, generation),
+              )
+            }
+            onTestCustomModel={(
+              providerId,
               revision,
               modelId,
               sourceGeneration,
               catalogGeneration,
             ) =>
               void runExecutionCommand(() =>
-                client.testModelConnection(
-                  connectionId,
+                client.testCustomModel(
+                  providerId,
                   revision,
                   modelId,
                   sourceGeneration,
@@ -3134,19 +3144,19 @@ export default function App() {
                 ),
               )
             }
-            onSelectModelConnection={(connectionId, generation, modelId) =>
+            onSelectCustomModel={(providerId, generation, modelId) =>
               void runExecutionCommand(() =>
                 client.selectModelsDefault({
-                  sourceId: connectionId,
+                  sourceId: providerId,
                   modelId,
                   expectedSelectionRevision: snapshot.models.selectionRevision,
                   expectedSourceGeneration:
-                    snapshot.models.connections.find(
-                      (connection) => connection.id === connectionId,
+                    snapshot.models.customProviders.find(
+                      (connection) => connection.id === providerId,
                     )?.sourceGeneration ?? "0",
                   expectedCatalogGeneration:
-                    snapshot.models.connections.find(
-                      (connection) => connection.id === connectionId,
+                    snapshot.models.customProviders.find(
+                      (connection) => connection.id === providerId,
                     )?.catalogGeneration ?? "0",
                 }),
               )

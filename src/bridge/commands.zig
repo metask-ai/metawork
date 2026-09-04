@@ -52,11 +52,11 @@ pub const models_reset_store = "metawork.models.resetStore";
 pub const models_select_metask_api_key = "metawork.models.selectMetaskApiKey";
 pub const models_configure_metask_selection = "metawork.models.configureMetaskSelection";
 pub const models_select_default = "metawork.models.selectDefault";
-pub const model_connection_create = "metawork.models.connections.create";
-pub const model_connection_update = "metawork.models.connections.update";
-pub const model_connection_replace_credential = "metawork.models.connections.replaceCredential";
-pub const model_connection_remove = "metawork.models.connections.remove";
-pub const model_connection_test = "metawork.models.connections.test";
+pub const custom_provider_create = "metawork.models.customProviders.create";
+pub const custom_provider_update = "metawork.models.customProviders.update";
+pub const custom_provider_replace_credential = "metawork.models.customProviders.replaceCredential";
+pub const custom_provider_remove = "metawork.models.customProviders.remove";
+pub const custom_model_test = "metawork.models.customModels.test";
 pub const custom_model_add = "metawork.models.customModels.add";
 pub const custom_model_replace = "metawork.models.customModels.replace";
 pub const custom_model_remove = "metawork.models.customModels.remove";
@@ -132,11 +132,11 @@ pub const product = [_][]const u8{
     models_select_metask_api_key,
     models_configure_metask_selection,
     models_select_default,
-    model_connection_create,
-    model_connection_update,
-    model_connection_replace_credential,
-    model_connection_remove,
-    model_connection_test,
+    custom_provider_create,
+    custom_provider_update,
+    custom_provider_replace_credential,
+    custom_provider_remove,
+    custom_model_test,
     custom_model_add,
     custom_model_replace,
     custom_model_remove,

@@ -98,7 +98,7 @@ const { SelectionMenu } = await vite.ssrLoadModule(
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
-const { SettingsPage, modelConnectionEndpointFromBaseUrl } =
+const { SettingsPage, customProviderEndpointFromBaseUrl } =
   await vite.ssrLoadModule("/src/features/settings/SettingsPage.tsx");
 const { GlobalSearch } = await vite.ssrLoadModule(
   "/src/features/search/GlobalSearch.tsx",
@@ -347,7 +347,7 @@ const readySettingsModels = {
   selectionRevision: "1",
   operation: "idle",
   errorCode: "none",
-  connections: [],
+  customProviders: [],
 };
 
 function settingsModels(provider = {}, view = {}) {
@@ -371,10 +371,10 @@ function settingsElement(account, overrides = {}) {
     createElement(SettingsPage, {
       account,
       models: readySettingsModels,
-      modelConnectionCapabilities: {
+      customProviderCapabilities: {
         management: true,
         secretCapture: false,
-        connectionTest: true,
+        modelTest: true,
       },
       permissionProfiles: {
         enabled: false,
@@ -393,20 +393,23 @@ function settingsElement(account, overrides = {}) {
       onCancel() {},
       onSelectApiKey() {},
       onSelectModel() {},
-      onCreateModelConnection() {
+      onCreateCustomProvider() {
         return Promise.resolve(false);
       },
-      onUpdateModelConnection() {
+      onUpdateCustomProvider() {
         return Promise.resolve(false);
       },
       onAddCustomModel() {
         return Promise.resolve(false);
       },
-      onRemoveModelConnection() {
+      onRemoveCustomModel() {
         return Promise.resolve(false);
       },
-      onTestModelConnection() {},
-      onSelectModelConnection() {},
+      onRemoveCustomProvider() {
+        return Promise.resolve(false);
+      },
+      onTestCustomModel() {},
+      onSelectCustomModel() {},
       onBeginLogin() {},
       onLogout() {},
       onSetDefaultPermissionProfile() {},
@@ -451,10 +454,10 @@ test("Settings exposes Providers only for the complete Host gate", () => {
 
   render(
     settingsElement(readySettingsAccount, {
-      modelConnectionCapabilities: {
+      customProviderCapabilities: {
         management: true,
         secretCapture: true,
-        connectionTest: true,
+        modelTest: true,
       },
     }),
   );
@@ -471,12 +474,12 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
   const submitted = [];
   render(
     settingsElement(readySettingsAccount, {
-      modelConnectionCapabilities: {
+      customProviderCapabilities: {
         management: true,
         secretCapture: true,
-        connectionTest: true,
+        modelTest: true,
       },
-      onCreateModelConnection(input) {
+      onCreateCustomProvider(input) {
         submitted.push(input);
         return Promise.resolve(false);
       },
@@ -527,32 +530,30 @@ test("Provider API key replacement starts empty and submits the exact user input
   const user = userEvent.setup({ document: dom.window.document });
   const replacements = [];
   renderSettings(readySettingsAccount, {
-    modelConnectionCapabilities: {
+    customProviderCapabilities: {
       management: true,
       secretCapture: true,
-      connectionTest: true,
+      modelTest: true,
     },
     models: {
       ...readySettingsModels,
-      connections: [
+      customProviders: [
         {
-          id: "connection-1",
+          id: "provider-1",
           displayName: "Team OpenAI",
           protocol: "openai_responses",
           normalizedBaseUrl: "https://api.openai.com/v1/responses",
           state: "configuring",
-          testStatus: "untested",
           credentialStatus: "ready",
           enabled: true,
           models: [],
-          selectedModel: "",
-          connectionRevision: "7",
+          providerRevision: "7",
           sourceGeneration: "3",
           catalogGeneration: "5",
         },
       ],
     },
-    onReplaceModelConnectionCredential(...input) {
+    onReplaceCustomProviderCredential(...input) {
       replacements.push(input);
       return Promise.resolve(false);
     },
@@ -568,34 +569,34 @@ test("Provider API key replacement starts empty and submits the exact user input
   await user.type(apiKey, "  exact replacement secret  ");
   await user.click(screen.getByRole("button", { name: "Save API key" }));
   assert.deepEqual(replacements, [
-    ["connection-1", "7", "  exact replacement secret  "],
+    ["provider-1", "7", "  exact replacement secret  "],
   ]);
 });
 
 test("Provider Base URLs map to all four existing protocol endpoints", () => {
   assert.equal(
-    modelConnectionEndpointFromBaseUrl(
+    customProviderEndpointFromBaseUrl(
       "openai_responses",
       "https://api.openai.com/v1/",
     ),
     "https://api.openai.com/v1/responses",
   );
   assert.equal(
-    modelConnectionEndpointFromBaseUrl(
+    customProviderEndpointFromBaseUrl(
       "openai_chat_completions",
       "https://api.openai.com/v1",
     ),
     "https://api.openai.com/v1/chat/completions",
   );
   assert.equal(
-    modelConnectionEndpointFromBaseUrl(
+    customProviderEndpointFromBaseUrl(
       "anthropic_messages",
       "https://api.anthropic.com",
     ),
     "https://api.anthropic.com/v1/messages",
   );
   assert.equal(
-    modelConnectionEndpointFromBaseUrl(
+    customProviderEndpointFromBaseUrl(
       "gemini_native",
       "https://generativelanguage.googleapis.com",
     ),
@@ -717,21 +718,20 @@ test("Settings keeps a model choice visibly pending without declaring it committ
   assert.equal(readySettingsModels.metaskSelection.modelId, "model-1");
 });
 
-test("Settings keeps Metask available while a model connection is the default", async () => {
+test("Settings keeps Metask available while a custom provider is the default", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const customSelections = [];
   const view = renderSettings(readySettingsAccount, {
     models: {
       ...readySettingsModels,
-      defaultSelection: { sourceId: "connection-1", modelId: "gpt-5" },
-      connections: [
+      defaultSelection: { sourceId: "provider-1", modelId: "gpt-5" },
+      customProviders: [
         {
-          id: "connection-1",
+          id: "provider-1",
           displayName: "Team OpenAI",
           protocol: "openai_chat_completions",
           normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
           state: "ready",
-          testStatus: "connected",
           credentialStatus: "ready",
           enabled: true,
           models: [
@@ -752,14 +752,13 @@ test("Settings keeps Metask available while a model connection is the default", 
               ready: true,
             },
           ],
-          selectedModel: "gpt-5",
-          connectionRevision: "1",
+          providerRevision: "1",
           sourceGeneration: "1",
           catalogGeneration: "1",
         },
       ],
     },
-    onSelectModelConnection(...selection) {
+    onSelectCustomModel(...selection) {
       customSelections.push(selection);
     },
   });
@@ -774,7 +773,7 @@ test("Settings keeps Metask available while a model connection is the default", 
   assert.match(defaultModel.textContent, /GPT-5/);
   await user.click(defaultModel);
   await user.click(await screen.findByRole("option", { name: /GPT-5 mini/ }));
-  assert.deepEqual(customSelections, [["connection-1", "1", "gpt-5-mini"]]);
+  assert.deepEqual(customSelections, [["provider-1", "1", "gpt-5-mini"]]);
 
   await user.click(provider);
   await user.click(await screen.findByRole("option", { name: /Metask/ }));
@@ -791,25 +790,33 @@ test("Settings keeps Metask available while a model connection is the default", 
   assert.deepEqual(view.selections.model, ["model-1"]);
 });
 
-test("Models adds the first model to an already saved provider", async () => {
+test("Models keeps adding and removing models after the first provider model", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const additions = [];
+  const removals = [];
   renderSettings(readySettingsAccount, {
     models: {
       ...readySettingsModels,
-      connections: [
+      customProviders: [
         {
-          id: "connection-empty",
-          displayName: "Empty provider",
+          id: "provider-multi",
+          displayName: "Multi-model provider",
           protocol: "openai_responses",
           normalizedBaseUrl: "https://api.openai.com/v1/responses",
           state: "configuring",
-          testStatus: "untested",
           credentialStatus: "ready",
           enabled: true,
-          models: [],
-          selectedModel: "",
-          connectionRevision: "3",
+          models: [
+            {
+              id: "model-a",
+              displayName: "Model A",
+              metadata: {},
+              metadataProvenance: "unknown",
+              testStatus: "untested",
+              ready: false,
+            },
+          ],
+          providerRevision: "3",
           sourceGeneration: "5",
           catalogGeneration: "7",
         },
@@ -819,21 +826,30 @@ test("Models adds the first model to an already saved provider", async () => {
       additions.push(input);
       return Promise.resolve(false);
     },
+    onRemoveCustomModel(...input) {
+      removals.push(input);
+      return Promise.resolve(false);
+    },
   });
 
   await user.click(screen.getByRole("combobox", { name: "Provider" }));
   await user.click(
-    await screen.findByRole("option", { name: /Empty provider/ }),
+    await screen.findByRole("option", { name: /Multi-model provider/ }),
   );
   assert.match(
     screen.getByRole("combobox", { name: "API key" }).textContent,
     /Saved API key/,
   );
 
-  const modelId = screen.getByRole("textbox", { name: "Default model" });
+  const modelId = screen.getByRole("textbox", { name: "Model ID" });
   await user.type(modelId, "gpt-5.6-sol");
   await user.click(screen.getByRole("button", { name: "Add model" }));
-  assert.deepEqual(additions, [["connection-empty", "3", "7", "gpt-5.6-sol"]]);
+  assert.deepEqual(additions, [["provider-multi", "3", "7", "gpt-5.6-sol"]]);
+
+  await user.click(screen.getByRole("button", { name: "Remove" }));
+  const removeButtons = screen.getAllByRole("button", { name: "Remove" });
+  await user.click(removeButtons[removeButtons.length - 1]);
+  assert.deepEqual(removals, [["provider-multi", "3", "7", "model-a"]]);
 });
 
 test("Settings keeps Account cancellation independent from Models loading", async () => {
