@@ -1209,7 +1209,7 @@ pub const Runtime = struct {
             job,
             task_execution.executeCompact,
             task_execution.cancelCompact,
-        ) catch |err| {
+        ) catch {
             task_execution.releaseCompactWorkerReference(
                 &task.runtime.worker_references,
                 compact,
@@ -1224,7 +1224,7 @@ pub const Runtime = struct {
             _ = task_execution.commitCompactProductTerminal(
                 effects.worker.projector,
                 compact,
-                .interrupted,
+                .failed,
                 .resource_limit,
                 .reusable,
                 .{},
@@ -1237,7 +1237,7 @@ pub const Runtime = struct {
             task.runtime.active_operation = .none;
             _ = effects.durable.commit();
             record_owned = false;
-            return err;
+            return operation_id;
         };
         job_owned = false;
         prepared = false;
@@ -2237,6 +2237,7 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (!task_state.finalizeMarkedTerminalRunsAfterEventDrain(task)) continue;
+            _ = settleActiveRunTerminal(task);
             task.durable.recent_order = self.takeRecentOrder();
             changed = true;
         }
@@ -2939,9 +2940,18 @@ pub const Runtime = struct {
         );
         errdefer execution.deinit();
         const model = try self.allocator.dupe(u8, task.durable.execution_model);
-        errdefer self.allocator.free(model);
+        var model_live = true;
+        errdefer if (model_live) self.allocator.free(model);
         const job = try self.allocator.create(recovery_job.Job);
-        errdefer self.allocator.destroy(job);
+        var job_owned = true;
+        var job_initialized = false;
+        errdefer if (job_owned) {
+            if (job_initialized) {
+                job.deinit();
+            } else {
+                self.allocator.destroy(job);
+            }
+        };
         const permission = agentSessionPermission(
             task.durable.permission_profile,
             task.durable.permission_interaction,
@@ -2974,8 +2984,10 @@ pub const Runtime = struct {
                 .permission_interaction = permission.interaction,
             },
         };
+        job_initialized = true;
         checkpoint_live = false;
         workspace_live = false;
+        model_live = false;
         task.runtime.active_operation = .{ .restore = .{ .id = attempt_id } };
         task.runtime.restore_job = job;
         task.runtime.last_restore_failure = null;
@@ -2992,9 +3004,9 @@ pub const Runtime = struct {
             std.debug.assert(previous != 0);
             job.outcome = .{ .failure = .cancelled };
             job.state.store(.cancelled, .release);
-            job.deinit();
             return err;
         };
+        job_owned = false;
         self.next_restore_attempt_id +%= 1;
         return attempt_id;
     }
@@ -3155,28 +3167,10 @@ pub const Runtime = struct {
                 task.durable.runs,
                 task.runtime.active_run_id,
             ) orelse continue;
-            if (task_state.productTerminalFacts(run)) |terminal| {
-                var terminal_durable_changed = false;
-                task.runtime.cancel_requested = false;
-                if (switch (task.runtime.active_operation) {
-                    .run => |id| id == run.id,
-                    .none, .compact, .restore => false,
-                }) {
-                    task.runtime.active_operation = .none;
-                    result.changed = true;
-                    terminal_durable_changed = true;
-                }
-                if (!run.terminal_observed) {
-                    task_policy.foldTerminalDisposition(
-                        task,
-                        terminal.session_disposition_at_completion,
-                    );
-                    run.terminal_observed = true;
-                    result.changed = true;
-                    terminal_durable_changed = true;
-                }
-                result.durable_changed = result.durable_changed or
-                    terminal_durable_changed;
+            if (task_state.productTerminalFacts(run) != null) {
+                const terminal_changed = settleActiveRunTerminal(task);
+                result.changed = terminal_changed or result.changed;
+                result.durable_changed = terminal_changed or result.durable_changed;
                 continue;
             }
             const next_phase: task_state.ActiveRunPhase = if (task.runtime.cancel_requested)
@@ -3192,6 +3186,32 @@ pub const Runtime = struct {
                 result.changed = true;
         }
         return result;
+    }
+
+    fn settleActiveRunTerminal(task: *task_state.Task) bool {
+        const run = task_state.findRun(
+            task.durable.runs,
+            task.runtime.active_run_id,
+        ) orelse return false;
+        const terminal = task_state.productTerminalFacts(run) orelse return false;
+        var changed = false;
+        task.runtime.cancel_requested = false;
+        if (switch (task.runtime.active_operation) {
+            .run => |id| id == run.id,
+            .none, .compact, .restore => false,
+        }) {
+            task.runtime.active_operation = .none;
+            changed = true;
+        }
+        if (!run.terminal_observed) {
+            task_policy.foldTerminalDisposition(
+                task,
+                terminal.session_disposition_at_completion,
+            );
+            run.terminal_observed = true;
+            changed = true;
+        }
+        return changed;
     }
 
     /// Turns the Agent-owned noninteractive permission stop observation into

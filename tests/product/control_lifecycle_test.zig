@@ -3738,6 +3738,82 @@ test "Product Control manual compact uses the active operation lane and appends 
     ) != null);
 }
 
+test "compact queue rejection persists a legal terminal record and returns its operation id" {
+    fake_core.reset();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = persistence.capability();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 3,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 3,
+            .max_runs_per_task = 1,
+            .max_compacts_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const compact_task = try workbench.createTask(productControlTaskInput());
+    const blocking_task = try workbench.createTask(productControlTaskInput());
+    const queued_task = try workbench.createTask(productControlTaskInput());
+    _ = try workbench.runTask(compact_task, .{ .text = "establish conversation" });
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    defer fake_core.releaseControlled();
+    _ = try workbench.runTask(blocking_task, .{ .text = "hold worker" });
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    _ = try workbench.runTask(queued_task, .{ .text = "fill queue" });
+
+    const operation_id = try workbench.compactTaskAtBinding(compact_task, 1);
+    try std.testing.expectEqual(@as(u64, 1), operation_id);
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"operationId\":\"1\",\"afterRunId\":\"1\",\"phase\":\"failed\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"cause\":\"resource_limit\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"activeOperation\":null",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"taskHistoryPersistenceHealth\":\"ready\"",
+    ) != null);
+    try std.testing.expect(persistence.len != 0);
+}
+
 test "Product Control compact cancellation and Task deletion wait for the Agent terminal result" {
     fake_core.reset();
     const runtime = try createTestComposition(.{

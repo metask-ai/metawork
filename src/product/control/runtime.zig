@@ -3609,7 +3609,11 @@ pub const Runtime = struct {
         const output = self.allocator.alloc(u8, task_persistence.max_store_bytes) catch
             return .failed;
         defer self.allocator.free(output);
-        const bytes = task_persistence.encode(output, scratch.state) catch
+        const bytes = task_persistence.encode(
+            output,
+            scratch.state,
+            self.taskPersistenceLimits(),
+        ) catch
             return .failed;
         if (self.containsKnownCredential(bytes)) return .failed;
         return switch (self.task_persistence.recover(bytes)) {
@@ -6012,12 +6016,23 @@ pub const Runtime = struct {
             return err;
         };
         defer scratch.deinit();
+        const persistence_limits = self.taskPersistenceLimits();
+        if (task_persistence.validateCandidate(&scratch.state, persistence_limits)) |failure| {
+            if (!builtin.is_test) std.log.err(
+                "Task history invariant rejected scope={s} entity_id={d} code={s}",
+                .{ @tagName(failure.scope), failure.entity_id, @tagName(failure.code) },
+            );
+            if (builtin.mode == .Debug and !builtin.is_test)
+                std.debug.assert(false);
+            self.markTaskPersistenceWriteFailed();
+            return error.TaskStoreEncodeFailed;
+        }
         const output = self.allocator.alloc(u8, task_persistence.max_store_bytes) catch |err| {
             self.markTaskPersistenceWriteFailed();
             return err;
         };
         defer self.allocator.free(output);
-        const bytes = task_persistence.encode(output, scratch.state) catch |err| {
+        const bytes = task_persistence.encode(output, scratch.state, persistence_limits) catch |err| {
             self.markTaskPersistenceWriteFailed();
             return err;
         };
@@ -8171,6 +8186,7 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
     }, control.skillProjectionBudget());
     product_workspace.testing.setIdentity(&control.workspace, 2, 2);
     control.task_runtime.next_task_id = 4;
+    control.task_runtime.next_recent_order = 2;
     const execution_model = try control.copyBounded(
         control.execution_state.model(),
         models_contract.Limits.model_id_bytes,
@@ -8911,6 +8927,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         const terminal_bytes = try task_persistence.encode(
             terminal_storage,
             terminal_state.value,
+            source.taskPersistenceLimits(),
         );
         var terminal_restore = try Runtime.init(
             std.testing.allocator,
@@ -8946,6 +8963,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         const failed_bytes = try task_persistence.encode(
             failed_storage,
             terminal_state.value,
+            source.taskPersistenceLimits(),
         );
         var failed_restore = try Runtime.init(
             std.testing.allocator,
@@ -8986,7 +9004,11 @@ test "Task state round trip restores product history without fabricating a Sessi
         const previous_changes = legacy_state.value.tasks[0].runs[0].file_changes;
         legacy_state.value.tasks[0].runs[0].file_change_observation = null;
         legacy_state.value.tasks[0].runs[0].file_changes = null;
-        const legacy_bytes = try task_persistence.encode(legacy_storage, legacy_state.value);
+        const legacy_bytes = try task_persistence.encode(
+            legacy_storage,
+            legacy_state.value,
+            testTaskPersistenceLimits(),
+        );
         legacy_state.value.tasks[0].runs[0].file_change_observation = previous_observation;
         legacy_state.value.tasks[0].runs[0].file_changes = previous_changes;
         var legacy_restore = try Runtime.init(
@@ -9100,7 +9122,7 @@ test "one damaged Task record does not poison surviving history" {
     var mixed_state = scratch.state;
     mixed_state.tasks = mixed_tasks;
     var bytes_storage: [64 * 1024]u8 = undefined;
-    const bytes = try task_persistence.encode(&bytes_storage, mixed_state);
+    const bytes = try task_persistence.testing.encodeUnchecked(&bytes_storage, mixed_state);
 
     var persistence = TestTaskPersistence{
         .storage = try std.testing.allocator.alloc(u8, task_persistence.max_store_bytes),
@@ -9281,6 +9303,45 @@ test "Task persistence failure publishes metadata and retries the next save" {
     try control.renameTask(3, "saved on retry");
     try std.testing.expectEqualStrings("saved on retry", control.task_runtime.tasks[0].?.durable.title);
     try std.testing.expectEqual(TaskPersistenceHealth.ready, control.task_persistence_health);
+}
+
+test "Task invariant rejection preserves the last good persistence candidate" {
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        task_persistence.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TestTaskPersistence{ .storage = persistence_storage };
+    var control = try testRuntime();
+    defer control.deinit();
+    control.task_persistence = persistence.capability(null);
+    control.task_persistence_health = .ready;
+
+    try control.commitTaskState();
+    const committed_len = persistence.len;
+    const committed = try std.testing.allocator.dupe(
+        u8,
+        persistence.storage[0..committed_len],
+    );
+    defer std.testing.allocator.free(committed);
+    const committed_count = persistence.commits;
+
+    control.task_runtime.next_recent_order = 1;
+    try std.testing.expectError(
+        error.TaskStoreEncodeFailed,
+        control.commitTaskState(),
+    );
+    try std.testing.expectEqual(committed_count, persistence.commits);
+    try std.testing.expectEqual(committed_len, persistence.len);
+    try std.testing.expectEqualSlices(
+        u8,
+        committed,
+        persistence.storage[0..persistence.len],
+    );
+    try std.testing.expectEqual(
+        TaskPersistenceHealth.write_failed,
+        control.task_persistence_health,
+    );
 }
 
 test "Task persistence failure rolls back deletion before physical release" {
@@ -12928,6 +12989,7 @@ test "default snapshot budget contains the maximum structural projection" {
     const persisted = try task_persistence.encode(
         persistence_storage,
         task_state.state,
+        control.taskPersistenceLimits(),
     );
     try std.testing.expect(persisted.len <= task_persistence.max_store_bytes);
     var raw = try task_persistence.decode(
@@ -13765,7 +13827,11 @@ test "terminal persistence degrades pending file change observation without muta
 
     const storage = try std.testing.allocator.alloc(u8, task_persistence.max_store_bytes);
     defer std.testing.allocator.free(storage);
-    const encoded = try task_persistence.encode(storage, scratch.state);
+    const encoded = try task_persistence.encode(
+        storage,
+        scratch.state,
+        testTaskPersistenceLimits(),
+    );
     var decoded = try task_persistence.decode(
         std.testing.allocator,
         encoded,
@@ -13959,7 +14025,14 @@ test "assistant credential redaction finalizes ordinary chunks without rescannin
     const revision_before_finalization = control.revision;
     control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expectEqual(assistant.list.items.len, assistant.committed_len);
-    run.commentary_ends[0] = @intCast(assistant.committed_len);
+    try std.testing.expectEqual(
+        @as(u64, @intCast(assistant.committed_len)),
+        run.commentary_ends[0],
+    );
+    try std.testing.expectEqual(
+        @as(@TypeOf(control.task_runtime.tasks[0].?.runtime.active_operation), .none),
+        control.task_runtime.tasks[0].?.runtime.active_operation,
+    );
     try std.testing.expectEqual(revision_before_finalization + 1, control.revision);
 
     var terminal_snapshot_storage: [96 * 1024]u8 = undefined;

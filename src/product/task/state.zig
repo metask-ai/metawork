@@ -799,6 +799,11 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(task: *Task) bool {
         run.output_retry_group = null;
         run.event_stream_finalized = true;
         run.assistant.committed_len = run.assistant.list.items.len;
+        if (run.assistant_output_start == null and run.commentary_count != 0) {
+            std.debug.assert(run.commentary_ends.len >= run.commentary_count);
+            run.commentary_ends[run.commentary_count - 1] =
+                @intCast(run.assistant.committed_len);
+        }
         if (run.file_change_observation == .collecting and
             run.pending_file_change_artifacts == 0)
         {
@@ -1561,6 +1566,64 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
     try std.testing.expectEqual(RunPhase.completed, terminal_projection.phase);
     try std.testing.expectEqual(RunOutcome.completed, terminal_projection.terminal.?.outcome);
     try std.testing.expect(terminal_projection.activity == null);
+}
+
+test "event drain advances the final commentary boundary with the committed suffix" {
+    var commentary_ends = [_]u64{3};
+    var runs = [_]?RunRecord{.{
+        .id = 7,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = .anthropic_messages,
+        .execution_model = "model",
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = @constCast("prompt") } },
+        .commentary_ends = &commentary_ends,
+        .commentary_count = 1,
+        .active_phase = .running,
+        .tools = &.{},
+        .terminal_diagnostic = @constCast(""),
+    }};
+    var compacts: [0]?CompactRecord = .{};
+    var ui_history: [0]?UiRecord = .{};
+    var task = Task{
+        .durable = .{
+            .id = 3,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 2,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+        },
+        .runtime = .{},
+    };
+    const run = &task.durable.runs[0].?;
+    try run.assistant.list.appendSlice(std.testing.allocator, "prefix-tail");
+    defer run.assistant.list.deinit(std.testing.allocator);
+    run.assistant.committed_len = 3;
+    run.terminal_payload = .{
+        .phase = .completed,
+        .outcome = .completed,
+        .cause = null,
+        .session_disposition_at_completion = .reusable,
+    };
+    run.terminal_publication.store(.published, .release);
+
+    try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
+    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
+    try std.testing.expectEqual(@as(usize, "prefix-tail".len), run.assistant.committed_len);
+    try std.testing.expectEqual(
+        @as(u64, "prefix-tail".len),
+        run.commentary_ends[run.commentary_count - 1],
+    );
 }
 
 test "event drain fails closed when an output segment remains unresolved" {

@@ -258,6 +258,10 @@ pub fn executeRun(context: *anyopaque) void {
         terminal.session_disposition_at_completion == .reusable;
     terminal.deinit();
     agent_run.deinit();
+    const title_reference_held =
+        run.automatic_title.state.load(.acquire) == .pending;
+    if (title_reference_held)
+        acquireAuxiliaryWorkerReference(job.worker_references);
     const checkpoint_started = checkpoint_eligible and postprocessCheckpoint(
         job.checkpoint,
         job.sessionAccess(),
@@ -267,6 +271,8 @@ pub fn executeRun(context: *anyopaque) void {
     job.releaseSessionAccess();
     job.notifier.notify();
     generateAutomaticTitle(job);
+    if (title_reference_held)
+        releaseAuxiliaryWorkerReference(job.worker_references);
     if (!checkpoint_started)
         releaseRunWorkerReference(job.worker_references, run);
     job.notifier.notify();
@@ -720,6 +726,16 @@ pub fn releaseCompactWorkerReference(
     compact: *state.CompactRecord,
 ) void {
     if (!compact.worker_reference_held.swap(false, .acq_rel)) return;
+    const previous = references.fetchSub(1, .release);
+    std.debug.assert(previous != 0);
+}
+
+fn acquireAuxiliaryWorkerReference(references: *std.atomic.Value(usize)) void {
+    const previous = references.fetchAdd(1, .acq_rel);
+    std.debug.assert(previous != 0 and previous != std.math.maxInt(usize));
+}
+
+fn releaseAuxiliaryWorkerReference(references: *std.atomic.Value(usize)) void {
     const previous = references.fetchSub(1, .release);
     std.debug.assert(previous != 0);
 }
