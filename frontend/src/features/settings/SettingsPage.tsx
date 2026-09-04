@@ -16,9 +16,10 @@ import {
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
 
-export type SettingsFocusTarget = "title" | "account" | "model_connections";
+export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection =
-  "general" | "permissions" | "account" | "models" | "model_connections";
+  "general" | "permissions" | "account" | "models" | "providers";
+type ProvidersPage = "list" | "add";
 type RequestedSelection = {
   selectionId: string;
   label: string;
@@ -26,10 +27,23 @@ type RequestedSelection = {
 type ModelConnectionDraft = {
   displayName: string;
   protocol: Protocol;
-  normalizedBaseUrl: string;
-  modelId: string;
+  baseUrl: string;
+  apiKey: string;
 };
-type ModelConnectionEditDraft = Omit<ModelConnectionDraft, "modelId"> & {
+type ModelConnectionSubmission = {
+  displayName: string;
+  protocol: Protocol;
+  normalizedBaseUrl: string;
+  apiKey: string;
+};
+type ModelConnectionEditDraft = Omit<ModelConnectionDraft, "apiKey"> & {
+  connectionId: string;
+  expectedConnectionRevision: string;
+};
+type ModelConnectionEditSubmission = Omit<
+  ModelConnectionSubmission,
+  "apiKey"
+> & {
   connectionId: string;
   expectedConnectionRevision: string;
 };
@@ -37,20 +51,57 @@ type ModelConnectionRemoval = {
   connectionId: string;
   expectedConnectionRevision: string;
 };
+type ModelConnectionCredentialEdit = ModelConnectionRemoval & {
+  apiKey: string;
+};
 
-const modelConnectionEndpointDefaults: Record<Protocol, string> = {
-  openai_responses: "https://api.openai.com/v1/responses",
-  anthropic_messages: "https://api.anthropic.com/v1/messages",
-  openai_chat_completions: "https://api.openai.com/v1/chat/completions",
+const modelConnectionBaseUrlExamples: Record<Protocol, string> = {
+  openai_responses: "https://api.openai.com/v1",
+  anthropic_messages: "https://api.anthropic.com",
+  openai_chat_completions: "https://api.openai.com/v1",
   gemini_native: "https://generativelanguage.googleapis.com",
 };
+
+const modelConnectionRequestPaths: Record<Protocol, string> = {
+  openai_responses: "/responses",
+  openai_chat_completions: "/chat/completions",
+  anthropic_messages: "/v1/messages",
+  gemini_native: "",
+};
+
+function trimTrailingSlashes(value: string) {
+  return value.replace(/\/+$/u, "");
+}
+
+export function modelConnectionEndpointFromBaseUrl(
+  protocol: Protocol,
+  baseUrl: string,
+) {
+  const normalizedBase = trimTrailingSlashes(baseUrl.trim());
+  const requestPath = modelConnectionRequestPaths[protocol];
+  if (!requestPath || normalizedBase.endsWith(requestPath)) {
+    return normalizedBase;
+  }
+  return `${normalizedBase}${requestPath}`;
+}
+
+function modelConnectionBaseUrlFromEndpoint(
+  protocol: Protocol,
+  endpoint: string,
+) {
+  const normalizedEndpoint = trimTrailingSlashes(endpoint);
+  const requestPath = modelConnectionRequestPaths[protocol];
+  return requestPath && normalizedEndpoint.endsWith(requestPath)
+    ? normalizedEndpoint.slice(0, -requestPath.length)
+    : normalizedEndpoint;
+}
 
 function newModelConnectionDraft(): ModelConnectionDraft {
   return {
     displayName: "",
     protocol: "openai_chat_completions",
-    normalizedBaseUrl: modelConnectionEndpointDefaults.openai_chat_completions,
-    modelId: "",
+    baseUrl: "",
+    apiKey: "",
   };
 }
 
@@ -113,10 +164,10 @@ export function SettingsPage({
   onCancel,
   onSelectApiKey,
   onSelectModel,
-  onActivateMetask,
   onCreateModelConnection,
   onUpdateModelConnection,
   onReplaceModelConnectionCredential,
+  onAddCustomModel,
   onRemoveModelConnection,
   onTestModelConnection,
   onSelectModelConnection,
@@ -150,14 +201,22 @@ export function SettingsPage({
   onCancel: () => void;
   onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
-  onActivateMetask: () => void;
-  onCreateModelConnection: (input: ModelConnectionDraft) => Promise<boolean>;
+  onCreateModelConnection: (
+    input: ModelConnectionSubmission,
+  ) => Promise<boolean>;
   onUpdateModelConnection: (
-    input: ModelConnectionEditDraft,
+    input: ModelConnectionEditSubmission,
   ) => Promise<boolean>;
   onReplaceModelConnectionCredential: (
     connectionId: string,
     expectedConnectionRevision: string,
+    apiKey: string,
+  ) => Promise<boolean>;
+  onAddCustomModel: (
+    connectionId: string,
+    expectedConnectionRevision: string,
+    expectedCatalogGeneration: string,
+    modelId: string,
   ) => Promise<boolean>;
   onRemoveModelConnection: (
     connectionId: string,
@@ -188,18 +247,26 @@ export function SettingsPage({
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(initialSection);
+  const [providersPage, setProvidersPage] = useState<ProvidersPage>("list");
   const [requestedApi, setRequestedApi] = useState<RequestedSelection | null>(
     null,
   );
   const [requestedModel, setRequestedModel] =
     useState<RequestedSelection | null>(null);
+  const [requestedProviderId, setRequestedProviderId] = useState<string | null>(
+    null,
+  );
   const [modelConnectionDraft, setModelConnectionDraft] =
     useState<ModelConnectionDraft | null>(null);
   const [creatingModelConnection, setCreatingModelConnection] = useState(false);
+  const [customModelId, setCustomModelId] = useState("");
+  const [addingCustomModel, setAddingCustomModel] = useState(false);
   const [modelConnectionEdit, setModelConnectionEdit] =
     useState<ModelConnectionEditDraft | null>(null);
   const [modelConnectionRemoval, setModelConnectionRemoval] =
     useState<ModelConnectionRemoval | null>(null);
+  const [modelConnectionCredentialEdit, setModelConnectionCredentialEdit] =
+    useState<ModelConnectionCredentialEdit | null>(null);
   const [mutatingModelConnection, setMutatingModelConnection] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
@@ -207,7 +274,7 @@ export function SettingsPage({
   const permissionsHeading = useRef<HTMLHeadingElement>(null);
   const accountHeading = useRef<HTMLHeadingElement>(null);
   const modelsHeading = useRef<HTMLHeadingElement>(null);
-  const modelConnectionsHeading = useRef<HTMLHeadingElement>(null);
+  const providersHeading = useRef<HTMLHeadingElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
   const metaskProvider = models.providers.find(
@@ -219,10 +286,36 @@ export function SettingsPage({
     metaskProvider?.catalogState ?? "needs_authentication";
   const selectedApiId = metaskProvider?.selectedApiKeyId ?? "";
   const selectedModelId = models.metaskSelection?.modelId ?? "";
-  const metaskDefaultSelected =
-    models.metaskSelection !== null &&
-    models.defaultSelection?.sourceId === models.metaskSelection.sourceId &&
-    models.defaultSelection?.modelId === models.metaskSelection.modelId;
+  const committedProviderId = models.defaultSelection
+    ? models.defaultSelection.sourceId.startsWith("metask:")
+      ? "metask"
+      : models.defaultSelection.sourceId
+    : "";
+  const selectedProviderId = requestedProviderId ?? committedProviderId;
+  const selectedConnection = models.connections.find(
+    (connection) => connection.id === selectedProviderId,
+  );
+  const committedConnection = models.connections.find(
+    (connection) => connection.id === committedProviderId,
+  );
+  const committedDefaultModel = models.defaultSelection
+    ? committedProviderId === "metask"
+      ? metaskModels.find(
+          (model) => model.id === models.defaultSelection?.modelId,
+        )
+      : committedConnection?.models.find(
+          (model) => model.id === models.defaultSelection?.modelId,
+        )
+    : null;
+  const currentDefaultLabel = models.defaultSelection
+    ? `${
+        committedProviderId === "metask"
+          ? "Metask"
+          : (committedConnection?.displayName ?? committedProviderId)
+      } · ${
+        committedDefaultModel?.displayName || models.defaultSelection.modelId
+      }`
+    : t("settings.default_selection_missing");
   const committedApi = metaskApiKeys.find((key) => key.id === selectedApiId);
   const committedModel = metaskModels.find(
     (model) => model.id === selectedModelId,
@@ -252,12 +345,30 @@ export function SettingsPage({
         ? t("account.authorizing.body")
         : t("account.sign_in_required.body");
   const modelsPersistenceReady = models.persistenceHealth === "ready";
-  const canChooseApi =
-    authenticated && modelsPersistenceReady && !modelCatalogLoading;
-  const canChooseModel =
-    authenticated &&
+  const providerIsMetask = selectedProviderId === "metask";
+  const canChooseProvider =
     modelsPersistenceReady &&
-    (metaskCatalogState === "ready" || metaskCatalogState === "choosing");
+    ((authenticated &&
+      (metaskCatalogState === "ready" || metaskCatalogState === "choosing")) ||
+      models.connections.some(
+        (connection) =>
+          connection.enabled &&
+          connection.credentialStatus === "ready" &&
+          connection.state !== "disabled",
+      ));
+  const canChooseApi =
+    modelsPersistenceReady &&
+    selectedProviderId.length > 0 &&
+    (providerIsMetask
+      ? authenticated && !modelCatalogLoading
+      : selectedConnection?.credentialStatus === "ready");
+  const canChooseModel =
+    modelsPersistenceReady &&
+    (providerIsMetask
+      ? authenticated &&
+        (metaskCatalogState === "ready" || metaskCatalogState === "choosing")
+      : selectedConnection?.state === "ready" &&
+        selectedConnection.credentialStatus === "ready");
   const languageOptions = useMemo<SelectionMenuOption[]>(
     () => [
       { value: "en-US", label: t("app.language.en-US") },
@@ -278,23 +389,67 @@ export function SettingsPage({
       })),
     [permissionProfiles.available, t],
   );
-  const apiOptions = useMemo<SelectionMenuOption[]>(
-    () =>
-      metaskApiKeys.map((key) => ({
+  const providerOptions = useMemo<SelectionMenuOption[]>(
+    () => [
+      {
+        value: "metask",
+        label: "Metask",
+        description: t("settings.provider_managed_description"),
+        descriptionKind: "text",
+        disabled:
+          account.state !== "authenticated" ||
+          (metaskCatalogState !== "ready" && metaskCatalogState !== "choosing"),
+      },
+      ...models.connections.map((connection) => ({
+        value: connection.id,
+        label: connection.displayName || connection.id,
+        description: modelConnectionProtocolLabel(connection.protocol, t),
+        descriptionKind: "text" as const,
+        disabled:
+          !connection.enabled ||
+          connection.credentialStatus !== "ready" ||
+          connection.state === "disabled",
+      })),
+    ],
+    [account.state, metaskCatalogState, models.connections, t],
+  );
+  const apiOptions = useMemo<SelectionMenuOption[]>(() => {
+    if (selectedProviderId === "metask") {
+      return metaskApiKeys.map((key) => ({
         value: key.id,
         label: apiLabel(key, t),
         description: modelConnectionProtocolLabel(key.protocol, t),
         descriptionKind: "text",
         trailing: key.suffix ? `•••• ${key.suffix}` : undefined,
-      })),
-    [metaskApiKeys, t],
-  );
+      }));
+    }
+    if (!selectedConnection) return [];
+    return [
+      {
+        value: selectedConnection.id,
+        label: t("settings.saved_api_key"),
+        description: modelConnectionCredentialLabel(
+          selectedConnection.credentialStatus,
+          t,
+        ),
+        descriptionKind: "text",
+      },
+    ];
+  }, [metaskApiKeys, selectedConnection, selectedProviderId, t]);
   const modelOptions = useMemo<SelectionMenuOption[]>(() => {
-    const options = metaskModels.map((model) => ({
-      value: model.id,
-      label: modelLabel(model, t),
-    }));
+    const options =
+      selectedProviderId === "metask"
+        ? metaskModels.map((model) => ({
+            value: model.id,
+            label: modelLabel(model, t),
+          }))
+        : (selectedConnection?.models ?? []).map((model) => ({
+            value: model.id,
+            label: model.displayName || model.id,
+            disabled: !model.ready,
+          }));
     if (
+      selectedProviderId === "metask" &&
       requestedModel &&
       !options.some((option) => option.value === requestedModel.selectionId)
     ) {
@@ -304,34 +459,59 @@ export function SettingsPage({
       });
     }
     return options;
-  }, [metaskModels, requestedModel, t]);
+  }, [metaskModels, requestedModel, selectedConnection, selectedProviderId, t]);
   const modelConnectionProtocolOptions = useMemo<SelectionMenuOption[]>(
     () =>
-      (["openai_chat_completions", "gemini_native"] as const).map(
-        (protocol) => ({
-          value: protocol,
-          label: modelConnectionProtocolLabel(protocol, t),
-        }),
-      ),
+      (
+        [
+          "openai_responses",
+          "openai_chat_completions",
+          "anthropic_messages",
+          "gemini_native",
+        ] as const
+      ).map((protocol) => ({
+        value: protocol,
+        label: modelConnectionProtocolLabel(protocol, t),
+      })),
     [t],
   );
+  const displayedApiId = providerIsMetask
+    ? selectedApiId
+    : (selectedConnection?.id ?? "");
+  const displayedModelId = providerIsMetask
+    ? committedProviderId === "metask"
+      ? selectedModelId
+      : ""
+    : selectedConnection &&
+        models.defaultSelection?.sourceId === selectedConnection.id
+      ? models.defaultSelection.modelId
+      : "";
   const apiHasAlternative = apiOptions.some(
-    (option) => option.value !== selectedApiId,
+    (option) => option.value !== displayedApiId,
   );
   const modelHasAlternative = modelOptions.some(
-    (option) => option.value !== selectedModelId,
+    (option) => option.value !== displayedModelId,
   );
   const apiIsOnlyOption =
-    selectedApiId.length > 0 && apiOptions.length === 1 && !apiHasAlternative;
+    displayedApiId.length > 0 && apiOptions.length === 1 && !apiHasAlternative;
   const modelIsOnlyOption =
-    selectedModelId.length > 0 &&
+    displayedModelId.length > 0 &&
     modelOptions.length === 1 &&
     !modelHasAlternative;
-  const modelPlaceholder = modelCatalogLoading
-    ? t("settings.model_loading")
-    : metaskCatalogState === "choosing" && candidateApiId.length === 0
-      ? t("settings.model_waiting_api")
-      : t("account.choose_model");
+  const customModelNeedingTest =
+    !providerIsMetask &&
+    selectedConnection &&
+    !selectedConnection.models.some((model) => model.ready)
+      ? selectedConnection.models[0]
+      : undefined;
+  const modelPlaceholder =
+    providerIsMetask && modelCatalogLoading
+      ? t("settings.model_loading")
+      : providerIsMetask &&
+          metaskCatalogState === "choosing" &&
+          candidateApiId.length === 0
+        ? t("settings.model_waiting_api")
+        : t("account.choose_model");
   const committedApiName = committedApi
     ? apiLabel(committedApi, t)
     : t("account.api_fallback");
@@ -356,6 +536,7 @@ export function SettingsPage({
   const modelHasPendingChange =
     candidateModelId.length > 0 && candidateModelId !== selectedModelId;
   const transactionStatus = (() => {
+    if (!providerIsMetask) return null;
     switch (metaskCatalogState) {
       case "needs_authentication":
         return null;
@@ -406,11 +587,10 @@ export function SettingsPage({
   })();
 
   useEffect(() => {
-    if (
-      focusTarget === "model_connections" &&
-      modelConnectionSettingsAvailable
-    ) {
-      setActiveSection("model_connections");
+    if (focusTarget === "providers" && modelConnectionSettingsAvailable) {
+      setActiveSection("providers");
+    } else if (focusTarget === "models") {
+      setActiveSection("models");
     } else if (focusTarget === "account") {
       setActiveSection("account");
     }
@@ -419,8 +599,7 @@ export function SettingsPage({
   useEffect(() => {
     if (
       (activeSection === "permissions" && !permissionProfiles.enabled) ||
-      (activeSection === "model_connections" &&
-        !modelConnectionSettingsAvailable)
+      (activeSection === "providers" && !modelConnectionSettingsAvailable)
     ) {
       setActiveSection("general");
       return;
@@ -434,8 +613,8 @@ export function SettingsPage({
         accountHeading.current?.focus();
       } else if (activeSection === "models") {
         modelsHeading.current?.focus();
-      } else if (activeSection === "model_connections") {
-        modelConnectionsHeading.current?.focus();
+      } else if (activeSection === "providers") {
+        providersHeading.current?.focus();
       }
     });
     return () => window.cancelAnimationFrame(frame);
@@ -444,10 +623,18 @@ export function SettingsPage({
     focusTarget,
     modelConnectionSettingsAvailable,
     permissionProfiles.enabled,
+    providersPage,
   ]);
 
   useEffect(() => {
     content.current?.scrollTo?.({ top: 0, behavior: "auto" });
+  }, [activeSection, providersPage]);
+
+  useEffect(() => {
+    if (activeSection === "providers") return;
+    setProvidersPage("list");
+    setModelConnectionDraft(null);
+    setModelConnectionCredentialEdit(null);
   }, [activeSection]);
 
   useEffect(() => {
@@ -461,6 +648,7 @@ export function SettingsPage({
   useEffect(() => {
     if (modelConnectionCapabilities.secretCapture) return;
     setModelConnectionDraft(null);
+    setModelConnectionCredentialEdit(null);
     setCreatingModelConnection(false);
   }, [modelConnectionCapabilities.secretCapture]);
 
@@ -476,6 +664,16 @@ export function SettingsPage({
         : null;
     });
     setModelConnectionRemoval((current) => {
+      if (!current) return null;
+      const connection = models.connections.find(
+        (candidate) => candidate.id === current.connectionId,
+      );
+      return connection?.connectionRevision ===
+        current.expectedConnectionRevision
+        ? current
+        : null;
+    });
+    setModelConnectionCredentialEdit((current) => {
       if (!current) return null;
       const connection = models.connections.find(
         (candidate) => candidate.id === current.connectionId,
@@ -504,6 +702,15 @@ export function SettingsPage({
     disabled,
   ]);
 
+  useEffect(() => {
+    if (
+      requestedProviderId !== null &&
+      committedProviderId === requestedProviderId
+    ) {
+      setRequestedProviderId(null);
+    }
+  }, [committedProviderId, requestedProviderId]);
+
   function closeSignOutConfirmation() {
     setConfirmSignOut(false);
     window.requestAnimationFrame(() => signOut.current?.focus());
@@ -511,30 +718,84 @@ export function SettingsPage({
 
   async function submitModelConnection() {
     if (!modelConnectionDraft || creatingModelConnection) return;
+    const baseUrl = modelConnectionDraft.baseUrl.trim();
+    const displayName = modelConnectionDraft.displayName.trim();
+    if (!displayName || !baseUrl || !modelConnectionDraft.apiKey) return;
     const input = {
-      ...modelConnectionDraft,
-      displayName: modelConnectionDraft.displayName.trim(),
-      normalizedBaseUrl: modelConnectionDraft.normalizedBaseUrl.trim(),
-      modelId: modelConnectionDraft.modelId.trim(),
+      displayName,
+      protocol: modelConnectionDraft.protocol,
+      normalizedBaseUrl: modelConnectionEndpointFromBaseUrl(
+        modelConnectionDraft.protocol,
+        baseUrl,
+      ),
+      apiKey: modelConnectionDraft.apiKey,
     };
-    if (!input.displayName || !input.normalizedBaseUrl || !input.modelId)
-      return;
     setCreatingModelConnection(true);
     try {
-      if (await onCreateModelConnection(input)) setModelConnectionDraft(null);
+      if (await onCreateModelConnection(input)) {
+        setModelConnectionDraft(null);
+        setProvidersPage("list");
+      }
     } finally {
       setCreatingModelConnection(false);
     }
   }
 
+  async function replaceModelConnectionCredential() {
+    if (!modelConnectionCredentialEdit || mutatingModelConnection) return;
+    if (!modelConnectionCredentialEdit.apiKey) return;
+    setMutatingModelConnection(true);
+    try {
+      if (
+        await onReplaceModelConnectionCredential(
+          modelConnectionCredentialEdit.connectionId,
+          modelConnectionCredentialEdit.expectedConnectionRevision,
+          modelConnectionCredentialEdit.apiKey,
+        )
+      ) {
+        setModelConnectionCredentialEdit(null);
+      }
+    } finally {
+      setMutatingModelConnection(false);
+    }
+  }
+
+  async function addCustomModel() {
+    const modelId = customModelId.trim();
+    if (!selectedConnection || !modelId || addingCustomModel) return;
+    setAddingCustomModel(true);
+    try {
+      if (
+        await onAddCustomModel(
+          selectedConnection.id,
+          selectedConnection.connectionRevision,
+          selectedConnection.catalogGeneration,
+          modelId,
+        )
+      ) {
+        setCustomModelId("");
+      }
+    } finally {
+      setAddingCustomModel(false);
+    }
+  }
+
   async function submitModelConnectionEdit() {
     if (!modelConnectionEdit || mutatingModelConnection) return;
+    const baseUrl = modelConnectionEdit.baseUrl.trim();
+    const displayName = modelConnectionEdit.displayName.trim();
+    if (!displayName || !baseUrl) return;
     const input = {
-      ...modelConnectionEdit,
-      displayName: modelConnectionEdit.displayName.trim(),
-      normalizedBaseUrl: modelConnectionEdit.normalizedBaseUrl.trim(),
+      connectionId: modelConnectionEdit.connectionId,
+      expectedConnectionRevision:
+        modelConnectionEdit.expectedConnectionRevision,
+      displayName,
+      protocol: modelConnectionEdit.protocol,
+      normalizedBaseUrl: modelConnectionEndpointFromBaseUrl(
+        modelConnectionEdit.protocol,
+        baseUrl,
+      ),
     };
-    if (!input.displayName || !input.normalizedBaseUrl) return;
     setMutatingModelConnection(true);
     try {
       if (await onUpdateModelConnection(input)) setModelConnectionEdit(null);
@@ -573,6 +834,11 @@ export function SettingsPage({
         );
         if (nestedOverlay && nestedOverlay !== event.currentTarget) return;
         event.preventDefault();
+        if (activeSection === "providers" && providersPage === "add") {
+          setModelConnectionDraft(null);
+          setProvidersPage("list");
+          return;
+        }
         onBack();
       }}
     >
@@ -649,20 +915,22 @@ export function SettingsPage({
           </a>
           <a
             className="focus-ring"
-            href="#settings-model-connections"
+            href="#settings-providers"
             aria-current={
-              activeSection === "model_connections" ? "location" : undefined
+              activeSection === "providers" ? "location" : undefined
             }
             hidden={!modelConnectionSettingsAvailable}
             onClick={(event) => {
               event.preventDefault();
-              setActiveSection("model_connections");
+              setModelConnectionDraft(null);
+              setProvidersPage("list");
+              setActiveSection("providers");
             }}
           >
             <span className="settings-nav-icon" aria-hidden="true">
-              <Icon name="model" />
+              <Icon name="provider" />
             </span>
-            <span>{t("settings.model_connections")}</span>
+            <span>{t("settings.providers")}</span>
           </a>
         </nav>
 
@@ -904,7 +1172,7 @@ export function SettingsPage({
                   id="settings-execution-title"
                   className="settings-group-label"
                 >
-                  {t("settings.execution_defaults")}
+                  {t("settings.default_model_for_new_tasks")}
                 </h3>
                 <div
                   className="settings-execution-group"
@@ -912,86 +1180,128 @@ export function SettingsPage({
                   aria-labelledby="settings-execution-title"
                 >
                   <div className="settings-execution-header">
+                    <span className="settings-current-default">
+                      <span>{t("settings.current_default")}</span>
+                      <strong>{currentDefaultLabel}</strong>
+                    </span>
                     <div className="settings-execution-actions">
-                      {models.metaskSelection &&
-                        authenticated &&
-                        modelsPersistenceReady &&
-                        metaskCatalogState === "ready" &&
-                        !metaskDefaultSelected && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            disabled={disabled || executionDisabled}
-                            onClick={onActivateMetask}
+                      {providerIsMetask && (
+                        <>
+                          <span className="settings-catalog-count">
+                            {t("settings.catalog_count", {
+                              apis: metaskApiKeys.length,
+                              models: metaskModels.length,
+                            })}
+                          </span>
+                          <button
+                            className="settings-refresh-button focus-ring"
+                            disabled={
+                              disabled ||
+                              accountDisabled ||
+                              !authenticated ||
+                              apiBusy
+                            }
+                            onClick={onRefresh}
                           >
-                            {t("settings.use_metask_default")}
-                          </Button>
+                            <Icon name="refresh" />
+                            {t("account.refresh_catalog")}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="settings-field settings-field-provider">
+                    <span className="settings-field-step" aria-hidden="true">
+                      01
+                    </span>
+                    <div className="settings-field-copy">
+                      <label>{t("settings.provider")}</label>
+                      <p>{t("settings.provider_help")}</p>
+                    </div>
+                    <div className="settings-control-stack">
+                      <SelectionMenu
+                        value={selectedProviderId}
+                        options={providerOptions}
+                        placeholder={t("settings.choose_provider")}
+                        ariaLabel={t("settings.provider")}
+                        helper={t("settings.provider_menu_help")}
+                        actionLabel={t(
+                          selectedProviderId
+                            ? "settings.change_selection"
+                            : "settings.choose_selection",
                         )}
-                      <span className="settings-catalog-count">
-                        {t("settings.catalog_count", {
-                          apis: metaskApiKeys.length,
-                          models: metaskModels.length,
-                        })}
-                      </span>
-                      <button
-                        className="settings-refresh-button focus-ring"
                         disabled={
-                          disabled ||
-                          accountDisabled ||
-                          !authenticated ||
-                          apiBusy
+                          disabled || executionDisabled || !canChooseProvider
                         }
-                        onClick={onRefresh}
-                      >
-                        <Icon name="refresh" />
-                        {t("account.refresh_catalog")}
-                      </button>
+                        valueLayout="detailed"
+                        leading={<Icon name="provider" />}
+                        triggerClassName="settings-control settings-control-detailed"
+                        contentClassName="settings-selection-menu"
+                        onValueChange={(value) => {
+                          setRequestedProviderId(value);
+                          setRequestedApi(null);
+                          setRequestedModel(null);
+                          setCustomModelId("");
+                        }}
+                      />
                     </div>
                   </div>
 
                   <div className="settings-field settings-field-api">
                     <span className="settings-field-step" aria-hidden="true">
-                      01
+                      02
                     </span>
                     <div className="settings-field-copy">
                       <label htmlFor="settings-api">
-                        {t("settings.default_api")}
+                        {t("settings.api_key")}
                       </label>
                       <p>
                         {t(
-                          apiIsOnlyOption
-                            ? "settings.only_api_help"
-                            : "settings.default_api_help",
+                          providerIsMetask
+                            ? apiIsOnlyOption
+                              ? "settings.only_api_help"
+                              : "settings.api_key_help"
+                            : "settings.provider_api_key_help",
                         )}
                       </p>
                     </div>
                     <div className="settings-control-stack">
                       <SelectionMenu
                         triggerId="settings-api"
-                        value={candidateApiId || selectedApiId}
+                        value={
+                          providerIsMetask
+                            ? candidateApiId || displayedApiId
+                            : displayedApiId
+                        }
                         options={apiOptions}
                         placeholder={t("account.choose_key")}
-                        ariaLabel={t("settings.default_api")}
-                        helper={t("settings.api_menu_help")}
+                        ariaLabel={t("settings.api_key")}
+                        helper={t(
+                          providerIsMetask
+                            ? "settings.api_menu_help"
+                            : "settings.provider_api_menu_help",
+                        )}
                         actionLabel={t(
                           apiIsOnlyOption
                             ? "settings.view_selection"
-                            : selectedApiId
+                            : displayedApiId
                               ? "settings.change_selection"
                               : "settings.choose_selection",
                         )}
                         disabled={
                           disabled ||
-                          accountDisabled ||
+                          (providerIsMetask && accountDisabled) ||
                           !canChooseApi ||
-                          metaskApiKeys.length === 0
+                          apiOptions.length === 0
                         }
-                        busy={apiBusy}
+                        busy={providerIsMetask && apiBusy}
                         valueLayout="detailed"
                         leading={<Icon name="account" />}
                         triggerClassName="settings-control settings-control-detailed"
                         contentClassName="settings-selection-menu"
                         onValueChange={(value) => {
+                          if (!providerIsMetask) return;
                           const api = metaskApiKeys.find(
                             (candidate) => candidate.id === value,
                           );
@@ -1004,7 +1314,7 @@ export function SettingsPage({
                           onSelectApiKey(value);
                         }}
                       />
-                      {apiHasPendingChange && (
+                      {providerIsMetask && apiHasPendingChange && (
                         <span className="settings-pending-label">
                           <span aria-hidden="true" />
                           {t("settings.switch.pending_label")}
@@ -1015,65 +1325,162 @@ export function SettingsPage({
 
                   <div className="settings-field">
                     <span className="settings-field-step" aria-hidden="true">
-                      02
+                      03
                     </span>
                     <div className="settings-field-copy">
                       <label htmlFor="settings-model">
                         {t("settings.default_model")}
                       </label>
                       <p>
-                        {modelCatalogLoading && (candidateApi || committedApi)
-                          ? t("settings.loading_models_for", {
-                              api:
-                                candidateApi?.name ||
-                                committedApi?.name ||
-                                t("account.api_fallback"),
-                            })
-                          : t(
-                              modelIsOnlyOption
-                                ? "settings.only_model_help"
-                                : "settings.default_model_help",
-                            )}
+                        {!providerIsMetask &&
+                        selectedConnection?.models.length === 0
+                          ? t("settings.custom_model_add_help")
+                          : providerIsMetask &&
+                              modelCatalogLoading &&
+                              (candidateApi || committedApi)
+                            ? t("settings.loading_models_for", {
+                                api:
+                                  candidateApi?.name ||
+                                  committedApi?.name ||
+                                  t("account.api_fallback"),
+                              })
+                            : t(
+                                modelIsOnlyOption
+                                  ? "settings.only_model_help"
+                                  : "settings.default_model_help",
+                              )}
                       </p>
                     </div>
                     <div className="settings-control-stack">
-                      <SelectionMenu
-                        triggerId="settings-model"
-                        value={candidateModelId || selectedModelId}
-                        options={modelOptions}
-                        placeholder={modelPlaceholder}
-                        ariaLabel={t("settings.default_model")}
-                        helper={t("settings.model_menu_help")}
-                        actionLabel={t(
-                          modelIsOnlyOption
-                            ? "settings.view_selection"
-                            : selectedModelId
-                              ? "settings.change_selection"
-                              : "settings.choose_selection",
-                        )}
-                        disabled={
-                          disabled ||
-                          accountDisabled ||
-                          !canChooseModel ||
-                          metaskModels.length === 0
-                        }
-                        busy={modelBusy}
-                        leading={<Icon name="model" />}
-                        triggerClassName="settings-control"
-                        contentClassName="settings-selection-menu"
-                        onValueChange={(value) => {
-                          const model = metaskModels.find(
-                            (candidate) => candidate.id === value,
-                          );
-                          if (!model) return;
-                          setRequestedModel({
-                            selectionId: value,
-                            label: modelLabel(model, t),
-                          });
-                          onSelectModel(value);
-                        }}
-                      />
-                      {modelHasPendingChange && (
+                      {!providerIsMetask &&
+                      selectedConnection?.models.length === 0 ? (
+                        <form
+                          className="settings-custom-model-add"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            void addCustomModel();
+                          }}
+                        >
+                          <input
+                            id="settings-model"
+                            className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
+                            autoComplete="off"
+                            maxLength={256}
+                            value={customModelId}
+                            placeholder={t(
+                              "settings.model_connection_model_id_placeholder",
+                            )}
+                            disabled={
+                              disabled || executionDisabled || addingCustomModel
+                            }
+                            onChange={(event) =>
+                              setCustomModelId(event.target.value)
+                            }
+                          />
+                          <Button
+                            type="submit"
+                            size="sm"
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              addingCustomModel ||
+                              !customModelId.trim()
+                            }
+                          >
+                            {addingCustomModel
+                              ? t("settings.custom_model_adding")
+                              : t("settings.custom_model_add")}
+                          </Button>
+                        </form>
+                      ) : (
+                        <>
+                          <SelectionMenu
+                            triggerId="settings-model"
+                            value={
+                              providerIsMetask
+                                ? candidateModelId || displayedModelId
+                                : displayedModelId
+                            }
+                            options={modelOptions}
+                            placeholder={modelPlaceholder}
+                            ariaLabel={t("settings.default_model")}
+                            helper={t("settings.model_menu_help")}
+                            actionLabel={t(
+                              modelIsOnlyOption
+                                ? "settings.view_selection"
+                                : displayedModelId
+                                  ? "settings.change_selection"
+                                  : "settings.choose_selection",
+                            )}
+                            disabled={
+                              disabled ||
+                              (providerIsMetask && accountDisabled) ||
+                              !canChooseModel ||
+                              modelOptions.length === 0
+                            }
+                            busy={providerIsMetask && modelBusy}
+                            leading={<Icon name="model" />}
+                            triggerClassName="settings-control"
+                            contentClassName="settings-selection-menu"
+                            onValueChange={(value) => {
+                              if (!providerIsMetask && selectedConnection) {
+                                onSelectModelConnection(
+                                  selectedConnection.id,
+                                  selectedConnection.connectionRevision,
+                                  value,
+                                );
+                                return;
+                              }
+                              const model = metaskModels.find(
+                                (candidate) => candidate.id === value,
+                              );
+                              if (!model) return;
+                              setRequestedModel({
+                                selectionId: value,
+                                label: modelLabel(model, t),
+                              });
+                              onSelectModel(value);
+                            }}
+                          />
+                          {customModelNeedingTest && selectedConnection && (
+                            <div className="settings-custom-model-test">
+                              <span>
+                                <code>{customModelNeedingTest.id}</code>
+                                <small>
+                                  {modelConnectionTestStatusLabel(
+                                    customModelNeedingTest.testStatus,
+                                    t,
+                                  )}
+                                </small>
+                              </span>
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                disabled={
+                                  disabled ||
+                                  executionDisabled ||
+                                  customModelNeedingTest.testStatus ===
+                                    "testing"
+                                }
+                                onClick={() =>
+                                  onTestModelConnection(
+                                    selectedConnection.id,
+                                    selectedConnection.connectionRevision,
+                                    customModelNeedingTest.id,
+                                    selectedConnection.sourceGeneration,
+                                    selectedConnection.catalogGeneration,
+                                  )
+                                }
+                              >
+                                {customModelNeedingTest.testStatus === "testing"
+                                  ? t("settings.model_connection_testing")
+                                  : t("settings.custom_model_test")}
+                              </Button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {providerIsMetask && modelHasPendingChange && (
                         <span className="settings-pending-label">
                           <span aria-hidden="true" />
                           {t("settings.switch.pending_label")}
@@ -1141,51 +1548,67 @@ export function SettingsPage({
             </section>
           )}
 
-          {activeSection === "model_connections" &&
+          {activeSection === "providers" &&
             modelConnectionSettingsAvailable && (
               <section
-                id="settings-model-connections"
+                id="settings-providers"
                 className="settings-section"
-                aria-labelledby="settings-model-connections-title"
+                aria-labelledby="settings-providers-title"
               >
                 <div className="settings-section-heading">
                   <h2
-                    id="settings-model-connections-title"
-                    ref={modelConnectionsHeading}
+                    id="settings-providers-title"
+                    ref={providersHeading}
                     tabIndex={-1}
                   >
-                    {t("settings.model_connections")}
+                    {providersPage === "add"
+                      ? t("settings.provider_add_title")
+                      : t("settings.providers")}
                   </h2>
                 </div>
                 <div className="settings-group">
                   <h3 className="settings-group-label">
-                    {t("settings.model_connections_saved")}
+                    {providersPage === "add"
+                      ? t("settings.provider_details")
+                      : t("settings.providers_saved")}
                   </h3>
                   <div className="settings-model-connections">
                     <div className="settings-execution-header">
-                      <p>{t("settings.model_connections_help")}</p>
-                      {modelConnectionCapabilities.secretCapture && (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={
-                            disabled ||
-                            executionDisabled ||
-                            creatingModelConnection
-                          }
-                          onClick={() =>
-                            setModelConnectionDraft((current) =>
-                              current ? null : newModelConnectionDraft(),
-                            )
-                          }
-                          aria-expanded={modelConnectionDraft !== null}
-                          aria-controls="settings-model-connection-create"
+                      {providersPage === "list" ? (
+                        <p>{t("settings.providers_help")}</p>
+                      ) : (
+                        <button
+                          type="button"
+                          className="settings-subpage-back text-button focus-ring"
+                          onClick={() => {
+                            setModelConnectionDraft(null);
+                            setProvidersPage("list");
+                          }}
                         >
-                          {modelConnectionDraft
-                            ? t("common.cancel")
-                            : t("settings.model_connection_add")}
-                        </Button>
+                          <Icon name="arrow-left" />
+                          {t("settings.back_to_providers")}
+                        </button>
                       )}
+                      {providersPage === "list" &&
+                        modelConnectionCapabilities.secretCapture && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              creatingModelConnection
+                            }
+                            onClick={() => {
+                              setModelConnectionDraft(
+                                newModelConnectionDraft(),
+                              );
+                              setProvidersPage("add");
+                            }}
+                          >
+                            {t("settings.provider_add")}
+                          </Button>
+                        )}
                     </div>
                     {modelConnectionDraft && (
                       <form
@@ -1207,7 +1630,7 @@ export function SettingsPage({
                             {t("settings.model_connection_route.endpoint")}
                           </span>
                           <span>
-                            {t("settings.model_connection_route.model")}
+                            {t("settings.model_connection_route.api_key")}
                           </span>
                         </div>
                         <label className="settings-model-connection-create-field">
@@ -1259,10 +1682,6 @@ export function SettingsPage({
                                   ? {
                                       ...current,
                                       protocol,
-                                      normalizedBaseUrl:
-                                        modelConnectionEndpointDefaults[
-                                          protocol
-                                        ],
                                     }
                                   : current,
                               );
@@ -1276,7 +1695,12 @@ export function SettingsPage({
                             autoComplete="url"
                             inputMode="url"
                             maxLength={2048}
-                            value={modelConnectionDraft.normalizedBaseUrl}
+                            value={modelConnectionDraft.baseUrl}
+                            placeholder={
+                              modelConnectionBaseUrlExamples[
+                                modelConnectionDraft.protocol
+                              ]
+                            }
                             disabled={
                               disabled ||
                               executionDisabled ||
@@ -1287,7 +1711,7 @@ export function SettingsPage({
                                 current
                                   ? {
                                       ...current,
-                                      normalizedBaseUrl: event.target.value,
+                                      baseUrl: event.target.value,
                                     }
                                   : current,
                               )
@@ -1295,14 +1719,16 @@ export function SettingsPage({
                           />
                         </label>
                         <label className="settings-model-connection-create-field settings-model-connection-create-field-wide">
-                          <span>{t("settings.model_connection_model_id")}</span>
+                          <span>{t("settings.api_key")}</span>
                           <input
                             className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
+                            type="password"
                             autoComplete="off"
-                            maxLength={256}
-                            value={modelConnectionDraft.modelId}
+                            spellCheck={false}
+                            maxLength={4096}
+                            value={modelConnectionDraft.apiKey}
                             placeholder={t(
-                              "settings.model_connection_model_id_placeholder",
+                              "settings.provider_api_key_placeholder",
                             )}
                             disabled={
                               disabled ||
@@ -1312,7 +1738,7 @@ export function SettingsPage({
                             onChange={(event) =>
                               setModelConnectionDraft((current) =>
                                 current
-                                  ? { ...current, modelId: event.target.value }
+                                  ? { ...current, apiKey: event.target.value }
                                   : current,
                               )
                             }
@@ -1320,7 +1746,7 @@ export function SettingsPage({
                         </label>
                         <div className="settings-model-connection-create-footer">
                           <p>
-                            {t("settings.model_connection_secure_capture_help")}
+                            {t("settings.provider_models_configured_elsewhere")}
                           </p>
                           <Button
                             type="submit"
@@ -1330,370 +1756,402 @@ export function SettingsPage({
                               executionDisabled ||
                               creatingModelConnection ||
                               !modelConnectionDraft.displayName.trim() ||
-                              !modelConnectionDraft.normalizedBaseUrl.trim() ||
-                              !modelConnectionDraft.modelId.trim()
+                              !modelConnectionDraft.baseUrl.trim() ||
+                              !modelConnectionDraft.apiKey
                             }
                           >
                             {creatingModelConnection
                               ? t("settings.model_connection_adding")
-                              : t("settings.model_connection_add")}
+                              : t("settings.provider_save")}
                           </Button>
                         </div>
                       </form>
                     )}
-                    {!modelConnectionCapabilities.management ? (
-                      <p className="settings-model-connections-empty">
-                        {t("settings.model_connections_unavailable")}
-                      </p>
-                    ) : models.connections.length === 0 ? (
-                      <p className="settings-model-connections-empty">
-                        {t("settings.model_connections_empty")}
-                      </p>
-                    ) : (
-                      <div className="settings-model-connection-list">
-                        {models.connections.map((connection) => (
-                          <div
-                            className="settings-model-connection"
-                            key={connection.id}
-                          >
-                            <div className="settings-model-connection-copy">
-                              <strong>
-                                {connection.displayName || connection.id}
-                              </strong>
-                              <span>
-                                {modelConnectionProtocolLabel(
-                                  connection.protocol,
-                                  t,
-                                )}
-                                <span aria-hidden="true"> · </span>
-                                {connection.normalizedBaseUrl}
-                              </span>
-                              <span>
-                                {modelConnectionCredentialLabel(
-                                  connection.credentialStatus,
-                                  t,
-                                )}
-                                <span aria-hidden="true"> · </span>
-                                {modelConnectionStateLabel(connection.state, t)}
-                                <span aria-hidden="true"> · </span>
-                                {modelConnectionTestStatusLabel(
-                                  connection.testStatus,
-                                  t,
-                                )}
-                              </span>
-                            </div>
-                            <div className="settings-model-connection-actions">
-                              <button
-                                className="text-button focus-ring"
-                                disabled={
-                                  disabled ||
-                                  executionDisabled ||
-                                  mutatingModelConnection ||
-                                  !modelConnectionCapabilities.secretCapture
-                                }
-                                onClick={() =>
-                                  void onReplaceModelConnectionCredential(
-                                    connection.id,
-                                    connection.connectionRevision,
-                                  )
-                                }
-                              >
-                                {t(
-                                  "settings.model_connection_replace_credential",
-                                )}
-                              </button>
-                              <button
-                                className="text-button focus-ring"
-                                disabled={
-                                  disabled ||
-                                  executionDisabled ||
-                                  !modelConnectionCapabilities.connectionTest ||
-                                  connection.testStatus === "testing" ||
-                                  connection.credentialStatus !== "ready" ||
-                                  connection.selectedModel.length === 0
-                                }
-                                onClick={() =>
-                                  onTestModelConnection(
-                                    connection.id,
-                                    connection.connectionRevision,
-                                    connection.selectedModel,
-                                    connection.sourceGeneration,
-                                    connection.catalogGeneration,
-                                  )
-                                }
-                              >
-                                {connection.testStatus === "testing"
-                                  ? t("settings.model_connection_testing")
-                                  : t("settings.model_connection_test")}
-                              </button>
-                              <SelectionMenu
-                                value={
-                                  models.defaultSelection?.sourceId ===
-                                  connection.id
-                                    ? models.defaultSelection.modelId
-                                    : ""
-                                }
-                                options={connection.models.map((model) => ({
-                                  value: model.id,
-                                  label: model.displayName || model.id,
-                                  disabled: !model.ready,
-                                }))}
-                                placeholder={t(
-                                  "settings.model_connection_set_default",
-                                )}
-                                ariaLabel={t(
-                                  "settings.model_connection_default_model",
-                                  {
-                                    connection:
-                                      connection.displayName || connection.id,
-                                  },
-                                )}
-                                disabled={
-                                  disabled ||
-                                  executionDisabled ||
-                                  connection.state !== "ready" ||
-                                  connection.credentialStatus !== "ready" ||
-                                  connection.models.length === 0
-                                }
-                                triggerClassName="settings-control settings-model-connection-select"
-                                onValueChange={(modelId) =>
-                                  onSelectModelConnection(
-                                    connection.id,
-                                    connection.connectionRevision,
-                                    modelId,
-                                  )
-                                }
-                              />
-                              <button
-                                className="text-button focus-ring"
-                                disabled={
-                                  disabled ||
-                                  executionDisabled ||
-                                  mutatingModelConnection ||
-                                  models.defaultSelection?.sourceId ===
-                                    connection.id
-                                }
-                                onClick={() => {
-                                  setModelConnectionRemoval(null);
-                                  setModelConnectionEdit({
-                                    connectionId: connection.id,
-                                    expectedConnectionRevision:
-                                      connection.connectionRevision,
-                                    displayName: connection.displayName,
-                                    protocol: connection.protocol,
-                                    normalizedBaseUrl:
-                                      connection.normalizedBaseUrl,
-                                  });
-                                }}
-                              >
-                                {t("common.edit")}
-                              </button>
-                              <button
-                                className="text-button settings-model-connection-remove focus-ring"
-                                disabled={
-                                  disabled ||
-                                  executionDisabled ||
-                                  mutatingModelConnection ||
-                                  models.defaultSelection?.sourceId ===
-                                    connection.id
-                                }
-                                onClick={() => {
-                                  setModelConnectionEdit(null);
-                                  setModelConnectionRemoval({
-                                    connectionId: connection.id,
-                                    expectedConnectionRevision:
-                                      connection.connectionRevision,
-                                  });
-                                }}
-                              >
-                                {t("common.remove")}
-                              </button>
-                            </div>
-                            {models.defaultSelection?.sourceId ===
-                              connection.id && (
-                              <p className="settings-model-connection-active-note">
-                                {t(
-                                  "settings.model_connection_active_mutation_help",
-                                )}
-                              </p>
-                            )}
-                            {modelConnectionEdit?.connectionId ===
-                              connection.id && (
-                              <form
-                                className="settings-model-connection-edit"
-                                onSubmit={(event) => {
-                                  event.preventDefault();
-                                  void submitModelConnectionEdit();
-                                }}
-                              >
-                                <label className="settings-model-connection-create-field">
-                                  <span>
-                                    {t("settings.model_connection_name")}
-                                  </span>
-                                  <input
-                                    className="settings-model-connection-input focus-ring"
-                                    autoComplete="off"
-                                    maxLength={256}
-                                    value={modelConnectionEdit.displayName}
-                                    disabled={
-                                      disabled ||
-                                      executionDisabled ||
-                                      mutatingModelConnection
-                                    }
-                                    onChange={(event) =>
-                                      setModelConnectionEdit((current) =>
-                                        current
-                                          ? {
-                                              ...current,
-                                              displayName: event.target.value,
-                                            }
-                                          : current,
-                                      )
-                                    }
-                                  />
-                                </label>
-                                <div className="settings-model-connection-create-field">
-                                  <span>
-                                    {t("settings.model_connection_protocol")}
-                                  </span>
-                                  <SelectionMenu
-                                    value={modelConnectionEdit.protocol}
-                                    options={modelConnectionProtocolOptions}
-                                    placeholder={t(
-                                      "settings.model_connection_protocol",
-                                    )}
-                                    ariaLabel={t(
-                                      "settings.model_connection_protocol",
-                                    )}
-                                    disabled={
-                                      disabled ||
-                                      executionDisabled ||
-                                      mutatingModelConnection
-                                    }
-                                    triggerClassName="settings-control"
-                                    onValueChange={(value) => {
-                                      const protocol = value as Protocol;
-                                      setModelConnectionEdit((current) =>
-                                        current
-                                          ? {
-                                              ...current,
-                                              protocol,
-                                              normalizedBaseUrl:
-                                                modelConnectionEndpointDefaults[
-                                                  protocol
-                                                ],
-                                            }
-                                          : current,
-                                      );
-                                    }}
-                                  />
-                                </div>
-                                <label className="settings-model-connection-create-field settings-model-connection-edit-endpoint">
-                                  <span>
-                                    {t("settings.model_connection_endpoint")}
-                                  </span>
-                                  <input
-                                    className="settings-model-connection-input focus-ring"
-                                    autoComplete="url"
-                                    inputMode="url"
-                                    maxLength={2048}
-                                    value={
-                                      modelConnectionEdit.normalizedBaseUrl
-                                    }
-                                    disabled={
-                                      disabled ||
-                                      executionDisabled ||
-                                      mutatingModelConnection
-                                    }
-                                    onChange={(event) =>
-                                      setModelConnectionEdit((current) =>
-                                        current
-                                          ? {
-                                              ...current,
-                                              normalizedBaseUrl:
-                                                event.target.value,
-                                            }
-                                          : current,
-                                      )
-                                    }
-                                  />
-                                </label>
-                                <div className="settings-model-connection-edit-actions">
-                                  <p>
-                                    {t("settings.model_connection_edit_help")}
-                                  </p>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    disabled={mutatingModelConnection}
-                                    onClick={() => setModelConnectionEdit(null)}
-                                  >
-                                    {t("common.cancel")}
-                                  </Button>
-                                  <Button
-                                    type="submit"
-                                    size="sm"
-                                    disabled={
-                                      disabled ||
-                                      executionDisabled ||
-                                      mutatingModelConnection ||
-                                      !modelConnectionEdit.displayName.trim() ||
-                                      !modelConnectionEdit.normalizedBaseUrl.trim()
-                                    }
-                                  >
-                                    {mutatingModelConnection
-                                      ? t("common.saving")
-                                      : t("common.save")}
-                                  </Button>
-                                </div>
-                              </form>
-                            )}
-                            {modelConnectionRemoval?.connectionId ===
-                              connection.id && (
-                              <div
-                                className="settings-model-connection-confirm-remove"
-                                role="group"
-                                aria-label={t(
-                                  "settings.model_connection_remove_confirm",
-                                )}
-                              >
-                                <p>
-                                  {t(
-                                    "settings.model_connection_remove_confirm",
+                    {providersPage === "list" &&
+                      (!modelConnectionCapabilities.management ? (
+                        <p className="settings-model-connections-empty">
+                          {t("settings.providers_unavailable")}
+                        </p>
+                      ) : models.connections.length === 0 ? (
+                        <p className="settings-model-connections-empty">
+                          {t("settings.providers_empty")}
+                        </p>
+                      ) : (
+                        <div className="settings-model-connection-list">
+                          {models.connections.map((connection) => (
+                            <div
+                              className="settings-model-connection"
+                              key={connection.id}
+                            >
+                              <div className="settings-model-connection-copy">
+                                <strong>
+                                  {connection.displayName || connection.id}
+                                </strong>
+                                <span>
+                                  {modelConnectionProtocolLabel(
+                                    connection.protocol,
+                                    t,
                                   )}
-                                </p>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  disabled={mutatingModelConnection}
+                                  <span aria-hidden="true"> · </span>
+                                  {modelConnectionBaseUrlFromEndpoint(
+                                    connection.protocol,
+                                    connection.normalizedBaseUrl,
+                                  )}
+                                </span>
+                                <span>
+                                  {modelConnectionCredentialLabel(
+                                    connection.credentialStatus,
+                                    t,
+                                  )}
+                                  <span aria-hidden="true"> · </span>
+                                  {modelConnectionStateLabel(
+                                    connection.state,
+                                    t,
+                                  )}
+                                  <span aria-hidden="true"> · </span>
+                                  {modelConnectionTestStatusLabel(
+                                    connection.testStatus,
+                                    t,
+                                  )}
+                                </span>
+                              </div>
+                              <div className="settings-model-connection-actions">
+                                <button
+                                  className="text-button focus-ring"
+                                  disabled={
+                                    disabled ||
+                                    executionDisabled ||
+                                    mutatingModelConnection ||
+                                    !modelConnectionCapabilities.secretCapture
+                                  }
+                                  onClick={() => {
+                                    setModelConnectionEdit(null);
+                                    setModelConnectionRemoval(null);
+                                    setModelConnectionCredentialEdit({
+                                      connectionId: connection.id,
+                                      expectedConnectionRevision:
+                                        connection.connectionRevision,
+                                      apiKey: "",
+                                    });
+                                  }}
+                                >
+                                  {t(
+                                    "settings.model_connection_replace_credential",
+                                  )}
+                                </button>
+                                <button
+                                  className="text-button focus-ring"
+                                  disabled={
+                                    disabled ||
+                                    executionDisabled ||
+                                    !modelConnectionCapabilities.connectionTest ||
+                                    connection.testStatus === "testing" ||
+                                    connection.credentialStatus !== "ready" ||
+                                    connection.selectedModel.length === 0
+                                  }
                                   onClick={() =>
-                                    setModelConnectionRemoval(null)
+                                    onTestModelConnection(
+                                      connection.id,
+                                      connection.connectionRevision,
+                                      connection.selectedModel,
+                                      connection.sourceGeneration,
+                                      connection.catalogGeneration,
+                                    )
                                   }
                                 >
-                                  {t("common.cancel")}
-                                </Button>
-                                <Button
-                                  variant="danger"
-                                  size="sm"
+                                  {connection.testStatus === "testing"
+                                    ? t("settings.model_connection_testing")
+                                    : t("settings.model_connection_test")}
+                                </button>
+                                <button
+                                  className="text-button focus-ring"
                                   disabled={
                                     disabled ||
                                     executionDisabled ||
                                     mutatingModelConnection
                                   }
-                                  onClick={() => void removeModelConnection()}
+                                  onClick={() => {
+                                    setModelConnectionCredentialEdit(null);
+                                    setModelConnectionRemoval(null);
+                                    setModelConnectionEdit({
+                                      connectionId: connection.id,
+                                      expectedConnectionRevision:
+                                        connection.connectionRevision,
+                                      displayName: connection.displayName,
+                                      protocol: connection.protocol,
+                                      baseUrl:
+                                        modelConnectionBaseUrlFromEndpoint(
+                                          connection.protocol,
+                                          connection.normalizedBaseUrl,
+                                        ),
+                                    });
+                                  }}
                                 >
-                                  {mutatingModelConnection
-                                    ? t("settings.model_connection_removing")
-                                    : t("common.remove")}
-                                </Button>
+                                  {t("common.edit")}
+                                </button>
+                                <button
+                                  className="text-button settings-model-connection-remove focus-ring"
+                                  disabled={
+                                    disabled ||
+                                    executionDisabled ||
+                                    mutatingModelConnection
+                                  }
+                                  onClick={() => {
+                                    setModelConnectionCredentialEdit(null);
+                                    setModelConnectionEdit(null);
+                                    setModelConnectionRemoval({
+                                      connectionId: connection.id,
+                                      expectedConnectionRevision:
+                                        connection.connectionRevision,
+                                    });
+                                  }}
+                                >
+                                  {t("common.remove")}
+                                </button>
                               </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {modelConnectionCapabilities.management &&
+                              {modelConnectionCredentialEdit?.connectionId ===
+                                connection.id && (
+                                <form
+                                  className="settings-model-connection-credential-edit"
+                                  onSubmit={(event) => {
+                                    event.preventDefault();
+                                    void replaceModelConnectionCredential();
+                                  }}
+                                >
+                                  <label className="settings-model-connection-create-field">
+                                    <span>{t("settings.api_key")}</span>
+                                    <input
+                                      className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
+                                      type="password"
+                                      autoComplete="off"
+                                      spellCheck={false}
+                                      maxLength={4096}
+                                      value={
+                                        modelConnectionCredentialEdit.apiKey
+                                      }
+                                      placeholder={t(
+                                        "settings.provider_api_key_placeholder",
+                                      )}
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingModelConnection
+                                      }
+                                      onChange={(event) =>
+                                        setModelConnectionCredentialEdit(
+                                          (current) =>
+                                            current
+                                              ? {
+                                                  ...current,
+                                                  apiKey: event.target.value,
+                                                }
+                                              : current,
+                                        )
+                                      }
+                                    />
+                                  </label>
+                                  <div className="settings-model-connection-credential-actions">
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      disabled={mutatingModelConnection}
+                                      onClick={() =>
+                                        setModelConnectionCredentialEdit(null)
+                                      }
+                                    >
+                                      {t("common.cancel")}
+                                    </Button>
+                                    <Button
+                                      type="submit"
+                                      size="sm"
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingModelConnection ||
+                                        !modelConnectionCredentialEdit.apiKey
+                                      }
+                                    >
+                                      {mutatingModelConnection
+                                        ? t("common.saving")
+                                        : t("settings.provider_save_api_key")}
+                                    </Button>
+                                  </div>
+                                </form>
+                              )}
+                              {modelConnectionEdit?.connectionId ===
+                                connection.id && (
+                                <form
+                                  className="settings-model-connection-edit"
+                                  onSubmit={(event) => {
+                                    event.preventDefault();
+                                    void submitModelConnectionEdit();
+                                  }}
+                                >
+                                  <label className="settings-model-connection-create-field">
+                                    <span>
+                                      {t("settings.model_connection_name")}
+                                    </span>
+                                    <input
+                                      className="settings-model-connection-input focus-ring"
+                                      autoComplete="off"
+                                      maxLength={256}
+                                      value={modelConnectionEdit.displayName}
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingModelConnection
+                                      }
+                                      onChange={(event) =>
+                                        setModelConnectionEdit((current) =>
+                                          current
+                                            ? {
+                                                ...current,
+                                                displayName: event.target.value,
+                                              }
+                                            : current,
+                                        )
+                                      }
+                                    />
+                                  </label>
+                                  <div className="settings-model-connection-create-field">
+                                    <span>
+                                      {t("settings.model_connection_protocol")}
+                                    </span>
+                                    <SelectionMenu
+                                      value={modelConnectionEdit.protocol}
+                                      options={modelConnectionProtocolOptions}
+                                      placeholder={t(
+                                        "settings.model_connection_protocol",
+                                      )}
+                                      ariaLabel={t(
+                                        "settings.model_connection_protocol",
+                                      )}
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingModelConnection
+                                      }
+                                      triggerClassName="settings-control"
+                                      onValueChange={(value) => {
+                                        const protocol = value as Protocol;
+                                        setModelConnectionEdit((current) =>
+                                          current
+                                            ? {
+                                                ...current,
+                                                protocol,
+                                              }
+                                            : current,
+                                        );
+                                      }}
+                                    />
+                                  </div>
+                                  <label className="settings-model-connection-create-field settings-model-connection-edit-endpoint">
+                                    <span>
+                                      {t("settings.model_connection_endpoint")}
+                                    </span>
+                                    <input
+                                      className="settings-model-connection-input focus-ring"
+                                      autoComplete="url"
+                                      inputMode="url"
+                                      maxLength={2048}
+                                      value={modelConnectionEdit.baseUrl}
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingModelConnection
+                                      }
+                                      onChange={(event) =>
+                                        setModelConnectionEdit((current) =>
+                                          current
+                                            ? {
+                                                ...current,
+                                                baseUrl: event.target.value,
+                                              }
+                                            : current,
+                                        )
+                                      }
+                                    />
+                                  </label>
+                                  <div className="settings-model-connection-edit-actions">
+                                    <p>
+                                      {t("settings.model_connection_edit_help")}
+                                    </p>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      disabled={mutatingModelConnection}
+                                      onClick={() =>
+                                        setModelConnectionEdit(null)
+                                      }
+                                    >
+                                      {t("common.cancel")}
+                                    </Button>
+                                    <Button
+                                      type="submit"
+                                      size="sm"
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingModelConnection ||
+                                        !modelConnectionEdit.displayName.trim() ||
+                                        !modelConnectionEdit.baseUrl.trim()
+                                      }
+                                    >
+                                      {mutatingModelConnection
+                                        ? t("common.saving")
+                                        : t("common.save")}
+                                    </Button>
+                                  </div>
+                                </form>
+                              )}
+                              {modelConnectionRemoval?.connectionId ===
+                                connection.id && (
+                                <div
+                                  className="settings-model-connection-confirm-remove"
+                                  role="group"
+                                  aria-label={t(
+                                    "settings.model_connection_remove_confirm",
+                                  )}
+                                >
+                                  <p>
+                                    {t(
+                                      "settings.model_connection_remove_confirm",
+                                    )}
+                                  </p>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={mutatingModelConnection}
+                                    onClick={() =>
+                                      setModelConnectionRemoval(null)
+                                    }
+                                  >
+                                    {t("common.cancel")}
+                                  </Button>
+                                  <Button
+                                    variant="danger"
+                                    size="sm"
+                                    disabled={
+                                      disabled ||
+                                      executionDisabled ||
+                                      mutatingModelConnection
+                                    }
+                                    onClick={() => void removeModelConnection()}
+                                  >
+                                    {mutatingModelConnection
+                                      ? t("settings.model_connection_removing")
+                                      : t("common.remove")}
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    {providersPage === "list" &&
+                      modelConnectionCapabilities.management &&
                       !modelConnectionCapabilities.secretCapture && (
                         <p className="settings-model-connections-empty">
                           {t("settings.model_connection_capture_unavailable")}

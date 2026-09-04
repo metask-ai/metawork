@@ -62,6 +62,7 @@ type IconName =
   | "warning"
   | "account"
   | "model"
+  | "provider"
   | "refresh"
   | "check"
   | "clock"
@@ -104,6 +105,7 @@ const icons: Record<IconName, LucideIcon> = {
   warning: TriangleAlert,
   account: UserRound,
   model: Layers3,
+  provider: Plug,
   refresh: RefreshCw,
   check: Check,
   clock: Clock3,

@@ -1305,20 +1305,6 @@ export default function App() {
     }
   }
 
-  function activateMetaskDefault() {
-    const selection = snapshot.models.metaskSelection;
-    if (!selection || !metaskProvider) return;
-    return runExecutionCommand(() =>
-      client.selectModelsDefault({
-        sourceId: selection.sourceId,
-        modelId: selection.modelId,
-        expectedSelectionRevision: snapshot.models.selectionRevision,
-        expectedSourceGeneration: metaskProvider.sourceGeneration,
-        expectedCatalogGeneration: metaskProvider.catalogGeneration,
-      }),
-    );
-  }
-
   async function selectModelForTask(selectionId: string) {
     const task = activeTask;
     if (!task || bridgeUnavailable) return;
@@ -1377,7 +1363,6 @@ export default function App() {
   async function selectMetaskModel(modelId: string) {
     const provider = metaskProvider;
     if (!provider) return;
-    const shouldSetDefault = snapshot.models.defaultSelection === null;
     const configured = await runExecutionCommand(() =>
       client.configureMetaskSelection({
         sourceId: `metask:${provider.selectedApiKeyId}`,
@@ -1387,7 +1372,7 @@ export default function App() {
         expectedCatalogGeneration: provider.catalogGeneration,
       }),
     );
-    if (!configured || !shouldSetDefault) return;
+    if (!configured) return;
     // `runExecutionCommand` refreshes the rendered snapshot asynchronously;
     // do not reuse the pre-configuration revisions for the second CAS.
     const current = await client.fetchSnapshot();
@@ -2716,7 +2701,7 @@ export default function App() {
       selectedModelId={
         newTaskDraftActive ? selectedModelId : displayedTaskModelId
       }
-      modelEditable={newTaskDraftActive || taskModelPolicy.authorityExact}
+      modelEditable={!newTaskDraftActive && taskModelPolicy.authorityExact}
       modelSelectionDisabled={
         bridgeUnavailable ||
         (customModelConnectionSelected ? executionBusy : accountBusy) ||
@@ -2774,24 +2759,8 @@ export default function App() {
       onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
       onConfirmAccess={() => void chooseWorkspaceForDraft()}
       onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
-      onSelectModel={(id) =>
-        newTaskDraftActive
-          ? customModelConnectionSelected && activeModelConnection
-            ? void runExecutionCommand(() =>
-                client.selectModelsDefault({
-                  sourceId: activeModelConnection.id,
-                  modelId: id,
-                  expectedSelectionRevision: snapshot.models.selectionRevision,
-                  expectedSourceGeneration:
-                    activeModelConnection.sourceGeneration,
-                  expectedCatalogGeneration:
-                    activeModelConnection.catalogGeneration,
-                }),
-              )
-            : void selectMetaskModel(id)
-          : void selectModelForTask(id)
-      }
-      onActivateMetask={() => void activateMetaskDefault()}
+      onSelectModel={(id) => void selectModelForTask(id)}
+      onOpenModels={() => openSettings("models")}
     />
   );
   const filePreviewDrawerState: FilePreviewDrawerState | null =
@@ -3101,7 +3070,6 @@ export default function App() {
                 : undefined
             }
             onSelectModel={(id) => void selectMetaskModel(id)}
-            onActivateMetask={() => void activateMetaskDefault()}
             onCreateModelConnection={(input) =>
               runExecutionCommand(() => client.createModelConnection(input))
             }
@@ -3116,9 +3084,32 @@ export default function App() {
                 }),
               )
             }
-            onReplaceModelConnectionCredential={(connectionId, revision) =>
+            onReplaceModelConnectionCredential={(
+              connectionId,
+              revision,
+              apiKey,
+            ) =>
               runExecutionCommand(() =>
-                client.replaceModelConnectionCredential(connectionId, revision),
+                client.replaceModelConnectionCredential(
+                  connectionId,
+                  revision,
+                  apiKey,
+                ),
+              )
+            }
+            onAddCustomModel={(
+              connectionId,
+              connectionRevision,
+              catalogGeneration,
+              modelId,
+            ) =>
+              runExecutionCommand(() =>
+                client.addCustomModel({
+                  sourceId: connectionId,
+                  expectedConnectionRevision: connectionRevision,
+                  expectedCatalogGeneration: catalogGeneration,
+                  model: { id: modelId },
+                }),
               )
             }
             onRemoveModelConnection={(connectionId, generation) =>

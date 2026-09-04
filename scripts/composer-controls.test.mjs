@@ -98,9 +98,8 @@ const { SelectionMenu } = await vite.ssrLoadModule(
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
-const { SettingsPage } = await vite.ssrLoadModule(
-  "/src/features/settings/SettingsPage.tsx",
-);
+const { SettingsPage, modelConnectionEndpointFromBaseUrl } =
+  await vite.ssrLoadModule("/src/features/settings/SettingsPage.tsx");
 const { GlobalSearch } = await vite.ssrLoadModule(
   "/src/features/search/GlobalSearch.tsx",
 );
@@ -400,6 +399,9 @@ function settingsElement(account, overrides = {}) {
       onUpdateModelConnection() {
         return Promise.resolve(false);
       },
+      onAddCustomModel() {
+        return Promise.resolve(false);
+      },
       onRemoveModelConnection() {
         return Promise.resolve(false);
       },
@@ -442,12 +444,9 @@ function renderSettings(account, overrides = {}) {
   };
 }
 
-test("Settings exposes Model connections only for the complete Host gate", () => {
+test("Settings exposes Providers only for the complete Host gate", () => {
   const incomplete = renderSettings(readySettingsAccount);
-  assert.equal(
-    screen.queryByRole("heading", { name: "Model connections" }),
-    null,
-  );
+  assert.equal(screen.queryByRole("link", { name: "Providers" }), null);
   incomplete.unmount();
 
   render(
@@ -459,20 +458,160 @@ test("Settings exposes Model connections only for the complete Host gate", () =>
       },
     }),
   );
-  fireEvent.click(screen.getByRole("link", { name: "Model connections" }));
-  assert.ok(screen.getByRole("heading", { name: "Model connections" }));
-  assert.ok(screen.getByRole("button", { name: "Add connection" }));
+  fireEvent.click(screen.getByRole("link", { name: "Providers" }));
+  assert.ok(screen.getByRole("heading", { name: "Providers" }));
+  assert.equal(screen.queryByRole("combobox", { name: "Default model" }), null);
+  fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
+  assert.ok(screen.getByRole("heading", { name: "Add provider" }));
+  assert.ok(screen.getByRole("button", { name: "Back to providers" }));
+});
+
+test("Provider setup keeps Base URL user-owned and submits the protocol endpoint", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const submitted = [];
+  render(
+    settingsElement(readySettingsAccount, {
+      modelConnectionCapabilities: {
+        management: true,
+        secretCapture: true,
+        connectionTest: true,
+      },
+      onCreateModelConnection(input) {
+        submitted.push(input);
+        return Promise.resolve(false);
+      },
+    }),
+  );
+
+  await user.click(screen.getByRole("link", { name: "Providers" }));
+  await user.click(screen.getByRole("button", { name: "Add provider" }));
+
+  const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
+  assert.equal(baseUrl.value, "");
+  assert.equal(baseUrl.placeholder, "https://api.openai.com/v1");
+  assert.equal(screen.queryByRole("textbox", { name: /model id/i }), null);
+  const apiKey = screen.getByLabelText("API key");
+  assert.equal(apiKey.type, "password");
+
+  await user.click(screen.getByRole("combobox", { name: "Protocol" }));
+  for (const name of [
+    "OpenAI Responses",
+    "OpenAI Chat Completions",
+    "Anthropic Messages",
+    "Gemini Native",
+  ]) {
+    assert.ok(await screen.findByRole("option", { name }));
+  }
+  await user.click(screen.getByRole("option", { name: "Anthropic Messages" }));
+  assert.equal(baseUrl.value, "");
+  assert.equal(baseUrl.placeholder, "https://api.anthropic.com");
+
+  await user.type(
+    screen.getByRole("textbox", { name: "Provider name" }),
+    "My Anthropic",
+  );
+  await user.type(baseUrl, "https://api.anthropic.com/");
+  await user.type(apiKey, "anthropic-secret");
+  await user.click(screen.getByRole("button", { name: "Save provider" }));
+  assert.deepEqual(submitted, [
+    {
+      displayName: "My Anthropic",
+      protocol: "anthropic_messages",
+      normalizedBaseUrl: "https://api.anthropic.com/v1/messages",
+      apiKey: "anthropic-secret",
+    },
+  ]);
+});
+
+test("Provider API key replacement starts empty and submits the exact user input", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const replacements = [];
+  renderSettings(readySettingsAccount, {
+    modelConnectionCapabilities: {
+      management: true,
+      secretCapture: true,
+      connectionTest: true,
+    },
+    models: {
+      ...readySettingsModels,
+      connections: [
+        {
+          id: "connection-1",
+          displayName: "Team OpenAI",
+          protocol: "openai_responses",
+          normalizedBaseUrl: "https://api.openai.com/v1/responses",
+          state: "configuring",
+          testStatus: "untested",
+          credentialStatus: "ready",
+          enabled: true,
+          models: [],
+          selectedModel: "",
+          connectionRevision: "7",
+          sourceGeneration: "3",
+          catalogGeneration: "5",
+        },
+      ],
+    },
+    onReplaceModelConnectionCredential(...input) {
+      replacements.push(input);
+      return Promise.resolve(false);
+    },
+  });
+
+  await user.click(screen.getByRole("link", { name: "Providers" }));
+  await user.click(screen.getByRole("button", { name: "Replace API key" }));
+  const apiKey = screen.getByLabelText("API key");
+  assert.equal(apiKey.type, "password");
+  assert.equal(apiKey.value, "");
+  assert.equal(apiKey.autocomplete, "off");
+
+  await user.type(apiKey, "  exact replacement secret  ");
+  await user.click(screen.getByRole("button", { name: "Save API key" }));
+  assert.deepEqual(replacements, [
+    ["connection-1", "7", "  exact replacement secret  "],
+  ]);
+});
+
+test("Provider Base URLs map to all four existing protocol endpoints", () => {
+  assert.equal(
+    modelConnectionEndpointFromBaseUrl(
+      "openai_responses",
+      "https://api.openai.com/v1/",
+    ),
+    "https://api.openai.com/v1/responses",
+  );
+  assert.equal(
+    modelConnectionEndpointFromBaseUrl(
+      "openai_chat_completions",
+      "https://api.openai.com/v1",
+    ),
+    "https://api.openai.com/v1/chat/completions",
+  );
+  assert.equal(
+    modelConnectionEndpointFromBaseUrl(
+      "anthropic_messages",
+      "https://api.anthropic.com",
+    ),
+    "https://api.anthropic.com/v1/messages",
+  );
+  assert.equal(
+    modelConnectionEndpointFromBaseUrl(
+      "gemini_native",
+      "https://generativelanguage.googleapis.com",
+    ),
+    "https://generativelanguage.googleapis.com",
+  );
 });
 
 test("Settings completes the API transaction before replacing committed defaults", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);
 
-  await user.click(screen.getByRole("combobox", { name: "Default API" }));
+  await user.click(screen.getByRole("combobox", { name: "API key" }));
   await user.click(await screen.findByRole("option", { name: /Backup/ }));
   assert.deepEqual(view.selections.api, ["key-2"]);
   assert.match(
-    screen.getByRole("combobox", { name: "Default API" }).textContent,
+    screen.getByRole("combobox", { name: "API key" }).textContent,
     /Backup.*OpenAI.*5678/,
   );
   assert.match(screen.getByText("Pending change").textContent, /Pending/);
@@ -500,7 +639,7 @@ test("Settings completes the API transaction before replacing committed defaults
     ),
   );
 
-  const api = screen.getByRole("combobox", { name: "Default API" });
+  const api = screen.getByRole("combobox", { name: "API key" });
   const model = screen.getByRole("combobox", { name: "Default model" });
   assert.match(api.textContent, /Backup.*OpenAI.*5678/);
   assert.equal(api.getAttribute("aria-busy"), "true");
@@ -552,7 +691,7 @@ test("Settings completes the API transaction before replacing committed defaults
     ),
   );
   assert.match(
-    screen.getByRole("combobox", { name: "Default API" }).textContent,
+    screen.getByRole("combobox", { name: "API key" }).textContent,
     /Backup/,
   );
   assert.match(
@@ -580,8 +719,8 @@ test("Settings keeps a model choice visibly pending without declaring it committ
 
 test("Settings keeps Metask available while a model connection is the default", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  let activations = 0;
-  renderSettings(readySettingsAccount, {
+  const customSelections = [];
+  const view = renderSettings(readySettingsAccount, {
     models: {
       ...readySettingsModels,
       defaultSelection: { sourceId: "connection-1", modelId: "gpt-5" },
@@ -604,6 +743,14 @@ test("Settings keeps Metask available while a model connection is the default", 
               testStatus: "connected",
               ready: true,
             },
+            {
+              id: "gpt-5-mini",
+              displayName: "GPT-5 mini",
+              metadata: readySettingsModels.providers[0].models[0].metadata,
+              metadataProvenance: "user_declared",
+              testStatus: "connected",
+              ready: true,
+            },
           ],
           selectedModel: "gpt-5",
           connectionRevision: "1",
@@ -612,19 +759,81 @@ test("Settings keeps Metask available while a model connection is the default", 
         },
       ],
     },
-    onActivateMetask() {
-      activations += 1;
+    onSelectModelConnection(...selection) {
+      customSelections.push(selection);
     },
   });
 
+  const provider = screen.getByRole("combobox", { name: "Provider" });
+  const apiKey = screen.getByRole("combobox", { name: "API key" });
+  const defaultModel = screen.getByRole("combobox", {
+    name: "Default model",
+  });
+  assert.match(provider.textContent, /Team OpenAI/);
+  assert.match(apiKey.textContent, /Saved API key/);
+  assert.match(defaultModel.textContent, /GPT-5/);
+  await user.click(defaultModel);
+  await user.click(await screen.findByRole("option", { name: /GPT-5 mini/ }));
+  assert.deepEqual(customSelections, [["connection-1", "1", "gpt-5-mini"]]);
+
+  await user.click(provider);
+  await user.click(await screen.findByRole("option", { name: /Metask/ }));
+  assert.match(
+    screen.getByRole("combobox", { name: "API key" }).textContent,
+    /Primary/,
+  );
   assert.match(
     screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Model One/,
+    /Choose a model/,
   );
+  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  await user.click(await screen.findByRole("option", { name: /Model One/ }));
+  assert.deepEqual(view.selections.model, ["model-1"]);
+});
+
+test("Models adds the first model to an already saved provider", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const additions = [];
+  renderSettings(readySettingsAccount, {
+    models: {
+      ...readySettingsModels,
+      connections: [
+        {
+          id: "connection-empty",
+          displayName: "Empty provider",
+          protocol: "openai_responses",
+          normalizedBaseUrl: "https://api.openai.com/v1/responses",
+          state: "configuring",
+          testStatus: "untested",
+          credentialStatus: "ready",
+          enabled: true,
+          models: [],
+          selectedModel: "",
+          connectionRevision: "3",
+          sourceGeneration: "5",
+          catalogGeneration: "7",
+        },
+      ],
+    },
+    onAddCustomModel(...input) {
+      additions.push(input);
+      return Promise.resolve(false);
+    },
+  });
+
+  await user.click(screen.getByRole("combobox", { name: "Provider" }));
   await user.click(
-    screen.getByRole("button", { name: "Set as default for new tasks" }),
+    await screen.findByRole("option", { name: /Empty provider/ }),
   );
-  assert.equal(activations, 1);
+  assert.match(
+    screen.getByRole("combobox", { name: "API key" }).textContent,
+    /Saved API key/,
+  );
+
+  const modelId = screen.getByRole("textbox", { name: "Default model" });
+  await user.type(modelId, "gpt-5.6-sol");
+  await user.click(screen.getByRole("button", { name: "Add model" }));
+  assert.deepEqual(additions, [["connection-empty", "3", "7", "gpt-5.6-sol"]]);
 });
 
 test("Settings keeps Account cancellation independent from Models loading", async () => {
@@ -644,9 +853,7 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
   );
 
   assert.equal(
-    screen
-      .getByRole("combobox", { name: "Default API" })
-      .hasAttribute("disabled"),
+    screen.getByRole("combobox", { name: "API key" }).hasAttribute("disabled"),
     true,
   );
   assert.equal(
@@ -679,7 +886,7 @@ test("Settings reports Models failure without changing Account identity", async 
   });
 
   assert.match(
-    screen.getByRole("combobox", { name: "Default API" }).textContent,
+    screen.getByRole("combobox", { name: "API key" }).textContent,
     /Primary/,
   );
   assert.match(
@@ -834,7 +1041,7 @@ function renderComposer(overrides = {}) {
       onConfirmAccess() {},
       onSelectWorkspace() {},
       onSelectModel() {},
-      onActivateMetask() {},
+      onOpenModels() {},
       ...overrides,
       draft,
       onDraftChange(value) {
@@ -881,14 +1088,14 @@ test("detached Conversation uses the ordinary send action", async () => {
   assert.equal(composer.submissions(), 1);
 });
 
-test("Composer explains a missing executable default and offers Metask recovery", async () => {
+test("Composer explains a missing executable default and opens Models", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  let activations = 0;
+  let opens = 0;
   renderComposer({
     canSubmit: false,
     defaultSelectionMissing: true,
-    onActivateMetask() {
-      activations += 1;
+    onOpenModels() {
+      opens += 1;
     },
   });
 
@@ -897,11 +1104,11 @@ test("Composer explains a missing executable default and offers Metask recovery"
     /No executable default model is selected/,
   );
   const recovery = screen.getByRole("button", {
-    name: "Set as default for new tasks",
+    name: "Open Models",
   });
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
   await user.click(recovery);
-  assert.equal(activations, 1);
+  assert.equal(opens, 1);
 });
 
 test("Composer disables default recovery while an execution command is active", () => {
@@ -910,18 +1117,14 @@ test("Composer disables default recovery while an execution command is active", 
     defaultRecoveryDisabled: true,
   });
   assert.equal(
-    screen.getByRole("button", { name: "Set as default for new tasks" })
-      .disabled,
+    screen.getByRole("button", { name: "Open Models" }).disabled,
     true,
   );
 });
 
-test("Composer does not show Metask recovery for a normal default", () => {
+test("Composer does not show Models recovery for a normal default", () => {
   renderComposer({ defaultSelectionMissing: false });
-  assert.equal(
-    screen.queryByRole("button", { name: "Set as default for new tasks" }),
-    null,
-  );
+  assert.equal(screen.queryByRole("button", { name: "Open Models" }), null);
 });
 
 test("Composer Enter handling does not submit an active IME composition", () => {

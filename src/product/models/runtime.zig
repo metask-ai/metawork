@@ -892,13 +892,10 @@ pub const Runtime = struct {
         self: *Runtime,
         secret: []const u8,
         spec: contract.ModelConnectionSpec,
-        model: contract.CustomModelInput,
     ) contract.CommandResult {
         self.assertMainThread();
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         contract.validateModelConnectionSpec(spec) catch return .rejected(.invalid_connection);
-        contract.validateCustomModelInput(model) catch
-            return .rejected(.invalid_connection);
         if (secret.len == 0 or secret.len > contract.Limits.credential_bytes)
             return .rejected(.invalid_connection);
         const vault = self.credential_vault orelse return .rejected(.capture_unavailable);
@@ -937,7 +934,6 @@ pub const Runtime = struct {
             .connection_id = slot_id,
             .spec = spec,
             .credential_slot = .{ .id = slot_id },
-            .model = model,
         }, connection_revision, source_generation, catalog_generation) catch |err| {
             self.drainCredentialCleanup();
             return .rejected(mapRegistryError(err));
@@ -1335,6 +1331,67 @@ const TestVault = struct {
     }
 };
 
+fn createTestProviderWithModel(
+    runtime: *Runtime,
+    secret: []const u8,
+    spec: contract.ModelConnectionSpec,
+    model: contract.CustomModelInput,
+) !void {
+    try std.testing.expect(runtime.createWithCredential(secret, spec).accepted);
+    const providers = runtime.views();
+    const provider = providers[providers.len - 1];
+    try std.testing.expect(runtime.submitCommand(.{ .add_custom_model = .{
+        .source_id = provider.id,
+        .expected_connection_revision = provider.connection_revision,
+        .expected_catalog_generation = provider.catalog_generation,
+        .model = model,
+    } }).accepted);
+}
+
+test "Models Runtime durably creates a Provider before its first model" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    const directory = directory_storage[0..directory_len];
+    var vault: TestVault = .{};
+
+    {
+        var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try runtime.start(directory, vault.port());
+        defer {
+            runtime.stop();
+            runtime.deinit();
+        }
+        try std.testing.expect(runtime.createWithCredential("provider-secret", .{
+            .display_name = "Provider without models",
+            .protocol = .anthropic_messages,
+            .normalized_base_url = "https://api.anthropic.com/v1/messages",
+        }).accepted);
+        const provider = runtime.views()[0];
+        try std.testing.expectEqual(contract.ModelConnectionState.configuring, provider.state);
+        try std.testing.expectEqual(@as(usize, 0), provider.models.len);
+        try std.testing.expectEqualStrings("", provider.selected_model);
+        try std.testing.expect(vault.present);
+        try std.testing.expect(runtime.defaultAuthority() == null);
+        try std.testing.expect((try runtime.resolveDefault()) == null);
+    }
+
+    {
+        var restored = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+        try restored.start(directory, vault.port());
+        defer {
+            restored.stop();
+            restored.deinit();
+        }
+        const providers = restored.views();
+        try std.testing.expectEqual(@as(usize, 1), providers.len);
+        try std.testing.expectEqual(@as(usize, 0), providers[0].models.len);
+        try std.testing.expectEqualStrings("", providers[0].selected_model);
+        try std.testing.expect(restored.defaultAuthority() == null);
+    }
+}
+
 test "Models Runtime owns durable model connections and source resolution" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1350,7 +1407,8 @@ test "Models Runtime owns durable model connections and source resolution" {
             runtime.stop();
             runtime.deinit();
         }
-        try std.testing.expect(runtime.createWithCredential(
+        try createTestProviderWithModel(
+            &runtime,
             "provider-secret",
             .{
                 .display_name = "OpenAI",
@@ -1358,7 +1416,7 @@ test "Models Runtime owns durable model connections and source resolution" {
                 .normalized_base_url = "https://api.openai.com/v1/responses",
             },
             .{ .id = "gpt-5", .display_name = "GPT-5" },
-        ).accepted);
+        );
         const view = runtime.views()[0];
         try std.testing.expectEqualStrings(TestVault.slot, view.id);
         const selection: contract.ModelConnectionSelectionCommand = .{
@@ -1467,7 +1525,8 @@ test "credential replacement revokes readiness before writing and restores fresh
         runtime.stop();
         runtime.deinit();
     }
-    try std.testing.expect(runtime.createWithCredential(
+    try createTestProviderWithModel(
+        &runtime,
         "old-secret",
         .{
             .display_name = "Provider",
@@ -1475,7 +1534,7 @@ test "credential replacement revokes readiness before writing and restores fresh
             .normalized_base_url = "https://api.example.com/v1/responses",
         },
         .{ .id = "model-1", .display_name = "Model 1" },
-    ).accepted);
+    );
     const initial = runtime.views()[0];
     const selection: contract.ModelConnectionSelectionCommand = .{
         .source_id = TestVault.slot,
@@ -1958,7 +2017,8 @@ test "Models reset rejects healthy store and scrubs known credentials during rec
         runtime.stop();
         runtime.deinit();
     }
-    try std.testing.expect(runtime.createWithCredential(
+    try createTestProviderWithModel(
+        &runtime,
         "reset-secret",
         .{
             .display_name = "Reset me",
@@ -1966,7 +2026,7 @@ test "Models reset rejects healthy store and scrubs known credentials during rec
             .normalized_base_url = "https://api.openai.com/v1/responses",
         },
         .{ .id = "gpt-5", .display_name = "GPT-5" },
-    ).accepted);
+    );
     try std.testing.expect(vault.present);
     try std.testing.expectEqual(
         contract.ManagementError.persistence_unavailable,

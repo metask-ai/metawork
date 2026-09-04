@@ -568,15 +568,14 @@ export class BridgeClient {
     displayName: string;
     protocol: Protocol;
     normalizedBaseUrl: string;
-    modelId: string;
-    modelDisplayName?: string;
+    apiKey: string;
   }) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionCreate, {
         displayName: input.displayName,
         protocol: input.protocol,
         normalizedBaseUrl: input.normalizedBaseUrl,
-        model: { id: input.modelId, displayName: input.modelDisplayName ?? "" },
+        apiKey: input.apiKey,
       }),
     );
   }
@@ -596,11 +595,13 @@ export class BridgeClient {
   async replaceModelConnectionCredential(
     sourceId: string,
     expectedConnectionRevision: string,
+    apiKey: string,
   ) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelConnectionReplaceCredential, {
         sourceId,
         expectedConnectionRevision,
+        apiKey,
       }),
     );
   }

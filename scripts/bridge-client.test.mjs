@@ -191,7 +191,7 @@ test("Models connection commands carry split source-qualified revisions", async 
     displayName: "Provider",
     protocol: "openai_responses",
     normalizedBaseUrl: "https://api.example.com/v1/responses",
-    modelId: "model-a",
+    apiKey: "create-secret",
   });
   await client.updateModelConnection({
     sourceId: "source-1",
@@ -200,7 +200,11 @@ test("Models connection commands carry split source-qualified revisions", async 
     protocol: "openai_responses",
     normalizedBaseUrl: "https://api.example.com/v1/responses",
   });
-  await client.replaceModelConnectionCredential("source-1", "3");
+  await client.replaceModelConnectionCredential(
+    "source-1",
+    "3",
+    "replacement-secret",
+  );
   await client.testModelConnection("source-1", "3", "model-a", "5", "7");
   await client.addCustomModel({
     sourceId: "source-1",
@@ -228,7 +232,7 @@ test("Models connection commands carry split source-qualified revisions", async 
         displayName: "Provider",
         protocol: "openai_responses",
         normalizedBaseUrl: "https://api.example.com/v1/responses",
-        model: { id: "model-a", displayName: "" },
+        apiKey: "create-secret",
       },
     },
     {
@@ -246,6 +250,7 @@ test("Models connection commands carry split source-qualified revisions", async 
       payload: {
         sourceId: "source-1",
         expectedConnectionRevision: "3",
+        apiKey: "replacement-secret",
       },
     },
     {

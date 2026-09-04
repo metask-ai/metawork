@@ -328,31 +328,6 @@ pub const Coordinator = struct {
         return self.management.submitModelConnectionCommand(command);
     }
 
-    /// Continuation after trusted native secret capture. The borrowed secret
-    /// never enters Bridge or a Product projection.
-    pub fn createWithCapturedCredential(
-        self: *Coordinator,
-        secret: []const u8,
-        spec: models_contract.ModelConnectionSpec,
-        model: models_contract.CustomModelInput,
-    ) models_contract.CommandResult {
-        self.assertMainThread();
-        return self.management.createModelConnectionWithCredential(
-            secret,
-            spec,
-            model,
-        );
-    }
-
-    pub fn replaceCapturedCredential(
-        self: *Coordinator,
-        secret: []const u8,
-        selection: models_contract.ModelConnectionSelectionCommand,
-    ) models_contract.CommandResult {
-        self.assertMainThread();
-        return self.management.replaceModelConnectionCredential(secret, selection);
-    }
-
     fn startProbe(
         self: *Coordinator,
         command: models_contract.ModelConnectionTestCommand,

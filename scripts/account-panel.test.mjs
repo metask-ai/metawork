@@ -182,10 +182,10 @@ function renderSettings(account, models = readyModels, options = {}) {
       cancelDisabled: false,
       onCreateModelConnection: async () => false,
       onUpdateModelConnection: async () => false,
+      onAddCustomModel: async () => false,
       onRemoveModelConnection: async () => false,
       onTestModelConnection() {},
       onSelectModelConnection() {},
-      onActivateMetask() {},
       onResetModels: async () => false,
       onSetDefaultPermissionProfile() {},
       ...callbacks,
@@ -428,7 +428,7 @@ test("Execution commands never enter the Account busy or error scope", () => {
   );
 });
 
-test("first Metask default selection refreshes canonical CAS inputs before selecting global default", () => {
+test("Metask model selection refreshes canonical CAS inputs before selecting global default", () => {
   const start = appSource.indexOf("async function selectMetaskModel");
   const end = appSource.indexOf("async function cancelAccountOperation", start);
   assert.ok(start >= 0 && end > start);

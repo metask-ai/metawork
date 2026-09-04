@@ -104,7 +104,7 @@ pub const ModelConnectionCreate = struct {
     displayName: []const u8,
     protocol: []const u8,
     normalizedBaseUrl: []const u8,
-    model: CustomModel,
+    apiKey: []const u8,
 };
 pub const ModelConnectionUpdate = struct {
     sourceId: []const u8,
@@ -116,6 +116,11 @@ pub const ModelConnectionUpdate = struct {
 pub const ModelConnectionSelection = struct {
     sourceId: []const u8,
     expectedConnectionRevision: []const u8,
+};
+pub const ModelConnectionCredentialReplace = struct {
+    sourceId: []const u8,
+    expectedConnectionRevision: []const u8,
+    apiKey: []const u8,
 };
 pub const ModelConnectionTest = struct {
     model: ModelRef,
@@ -657,6 +662,42 @@ test "Task creation requires an explicit nullable catalog revision" {
         error.InvalidBridgePayload,
         parsePayload(TaskCreate,
             \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3"}
+        ),
+    );
+}
+
+test "Model Connection create accepts Provider metadata with an API key and rejects the retired model field" {
+    var provider = try parsePayload(ModelConnectionCreate,
+        \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses","apiKey":"secret"}
+    );
+    defer provider.deinit();
+    try std.testing.expectEqualStrings("Provider", provider.value.displayName);
+    try std.testing.expectEqualStrings("secret", provider.value.apiKey);
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(ModelConnectionCreate,
+            \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses"}
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(ModelConnectionCreate,
+            \\{"displayName":"Provider","protocol":"openai_responses","normalizedBaseUrl":"https://api.example.com/v1/responses","apiKey":"secret","model":{"id":"gpt-5"}}
+        ),
+    );
+}
+
+test "Model Connection credential replacement requires the exact API key field" {
+    var replacement = try parsePayload(ModelConnectionCredentialReplace,
+        \\{"sourceId":"connection-1","expectedConnectionRevision":"7","apiKey":"  opaque secret  "}
+    );
+    defer replacement.deinit();
+    try std.testing.expectEqualStrings("connection-1", replacement.value.sourceId);
+    try std.testing.expectEqualStrings("  opaque secret  ", replacement.value.apiKey);
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(ModelConnectionCredentialReplace,
+            \\{"sourceId":"connection-1","expectedConnectionRevision":"7"}
         ),
     );
 }

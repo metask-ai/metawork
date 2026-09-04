@@ -118,7 +118,7 @@ export function ComposerFooter({
   onConfirmAccess,
   onSelectWorkspace,
   onSelectModel,
-  onActivateMetask,
+  onOpenModels,
 }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   archived: boolean;
@@ -174,7 +174,7 @@ export function ComposerFooter({
   onConfirmAccess: () => void;
   onSelectWorkspace: (workspaceId: string) => void;
   onSelectModel: (id: string) => void;
-  onActivateMetask: () => void;
+  onOpenModels: () => void;
 }) {
   const { t } = useI18n();
   const [menuDismissed, setMenuDismissed] = useState(false);
@@ -713,9 +713,9 @@ export function ComposerFooter({
                       variant="secondary"
                       size="sm"
                       disabled={defaultRecoveryDisabled}
-                      onClick={onActivateMetask}
+                      onClick={onOpenModels}
                     >
-                      {t("settings.use_metask_default")}
+                      {t("settings.open_models")}
                     </Button>
                   </span>
                 )}

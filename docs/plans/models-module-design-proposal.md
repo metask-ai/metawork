@@ -1,6 +1,6 @@
 # MetaWork Models 模块设计提案
 
-> 状态：已于 2026-09-02 获用户批准实施，非规范性真源；阶段 A 已于 `ccf1707` 完成并通过评审，A-close、阶段 R 与 B–E 按本文 Gate 推进
+> 状态：已于 2026-09-02 获用户批准实施，非规范性真源；阶段 A 已于 `ccf1707` 完成并通过评审。2026-09-04 用户明确以桌面端体验为优先，批准 Model Connection API Key 改为 Providers 表单直接输入；本文关于原生 secure capture、Renderer/Bridge 不承载该 Key 及对应阶段 R Gate 的旧决策已被规范真源取代，其余设计继续有效
 >
 > 目的：为 Account 与模型体系解耦、用户自定义模型和消费方隔离提供可实施方案
 >

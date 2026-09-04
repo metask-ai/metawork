@@ -770,11 +770,16 @@ export const enUS = {
   "settings.permissions": "Permissions",
   "settings.account": "Account",
   "settings.models": "Models",
+  "settings.providers": "Providers",
   "settings.general_basics": "Basics",
   "settings.permission_defaults": "Defaults for new tasks",
   "settings.account_profile": "Account information",
   "settings.account_security": "Security",
-  "settings.model_connections_saved": "Saved connections",
+  "settings.providers_saved": "Configured providers",
+  "settings.provider_details": "Provider details",
+  "settings.provider_add": "Add provider",
+  "settings.provider_add_title": "Add provider",
+  "settings.back_to_providers": "Back to providers",
   "settings.models_error": "Model configuration needs attention",
   "settings.models_error_help":
     "Refresh the Metask catalog or review the saved model configuration.",
@@ -809,43 +814,55 @@ export const enUS = {
   "permission.default_updated": "Permission default updated.",
   "permission.default_update_failed":
     "MetaWork could not update the permission default.",
-  "settings.execution_defaults": "Execution defaults",
+  "settings.default_model_for_new_tasks": "Default model for new tasks",
+  "settings.current_default": "Current",
+  "settings.provider": "Provider",
+  "settings.provider_help":
+    "Choose the service that provides the model and its credential authority.",
+  "settings.choose_provider": "Choose a provider",
+  "settings.provider_menu_help":
+    "Only providers with a ready credential and tested model can become the default.",
+  "settings.provider_managed_description":
+    "Managed through your Metask account",
+  "settings.api_key": "API key",
+  "settings.api_key_help":
+    "Choose which Metask API key supplies the model catalog.",
+  "settings.provider_api_key_help":
+    "This provider uses its saved API key. Replace it on the Providers page.",
+  "settings.saved_api_key": "Saved API key",
+  "settings.open_models": "Open Models",
   "settings.default_selection_missing":
     "No executable default model is selected",
-  "settings.use_metask_default": "Set as default for new tasks",
-  "settings.model_connections": "Model connections",
-  "settings.model_connections_help":
-    "Use a model service connection you manage yourself. Connections are separate from Metask sign-in and apply to new tasks only.",
-  "settings.model_connections_empty": "No user-managed model connections yet.",
-  "settings.model_connections_unavailable":
-    "Model connection management is unavailable in this build.",
+  "settings.providers_help":
+    "Manage the model services, endpoints, and API keys available to MetaWork. Choose the default model on the Models page.",
+  "settings.providers_empty": "No user-managed providers yet.",
+  "settings.providers_unavailable":
+    "Provider management is unavailable in this build.",
   "settings.model_connection_capture_unavailable":
-    "Adding or replacing an API key is unavailable until the Host provides secure secret input.",
-  "settings.model_connection_add": "Add connection",
-  "settings.model_connection_adding": "Adding…",
-  "settings.model_connection_name": "Connection name",
+    "Adding a provider or replacing an API key is unavailable while the system credential store is unavailable.",
+  "settings.model_connection_add": "Save provider",
+  "settings.model_connection_adding": "Saving provider…",
+  "settings.model_connection_name": "Provider name",
   "settings.model_connection_name_placeholder": "My OpenAI service",
   "settings.model_connection_protocol": "Protocol",
-  "settings.model_connection_endpoint": "Service endpoint",
-  "settings.model_connection_model_id": "Model ID",
+  "settings.model_connection_endpoint": "Base URL",
   "settings.model_connection_model_id_placeholder": "gpt-5",
-  "settings.model_connection_secure_capture_help":
-    "MetaWork will ask for the API key in a secure Host window after you continue.",
+  "settings.provider_api_key_placeholder": "Enter API key",
+  "settings.provider_models_configured_elsewhere":
+    "The API key is saved in the operating system credential store. Configure models from the Models page after saving.",
+  "settings.provider_save": "Save provider",
+  "settings.provider_save_api_key": "Save API key",
   "settings.model_connection_route.protocol": "Protocol",
-  "settings.model_connection_route.endpoint": "Endpoint",
-  "settings.model_connection_route.model": "Model",
-  "settings.model_connection_active_mutation_help":
-    "Choose another default connection before editing or removing this one.",
+  "settings.model_connection_route.endpoint": "Base URL",
+  "settings.model_connection_route.api_key": "API key",
   "settings.model_connection_edit_help":
-    "Changing the protocol or endpoint requires another connection test. The API key is not shown or changed here.",
+    "Changing the protocol or Base URL requires another connection test. The saved API key is never filled back in.",
   "settings.model_connection_replace_credential": "Replace API key",
   "settings.model_connection_remove_confirm":
-    "Remove this connection and its stored credential? Existing tasks keep their current binding.",
+    "Remove this provider and its stored credential? If it supplies the default model, new tasks will pause until you choose another. Existing tasks keep their current binding.",
   "settings.model_connection_removing": "Removing…",
   "settings.model_connection_test": "Test connection",
   "settings.model_connection_testing": "Testing…",
-  "settings.model_connection_set_default": "Set as default",
-  "settings.model_connection_default_model": "Default model for {connection}",
   "settings.model_connection_state.configuring": "Not tested",
   "settings.model_connection_state.ready": "Ready",
   "settings.model_connection_state.disabled": "Disabled",
@@ -865,20 +882,24 @@ export const enUS = {
   "settings.model_connection_credential.invalid": "Credential rejected",
   "settings.catalog_count": "APIs {apis} · Models {models}",
   "settings.language_help": "Changes apply immediately on this device.",
-  "settings.default_api": "Default API",
-  "settings.default_api_help":
-    "Changing API loads the model catalog owned by that Metask API.",
   "settings.only_api_help":
     "Metask currently returns only this API. Other APIs appear after the next sync.",
   "settings.api_menu_help":
     "Protocol is supplied by Metask and shown for reference.",
+  "settings.provider_api_menu_help":
+    "This provider's saved credential is managed on the Providers page.",
   "settings.default_model": "Default model",
   "settings.default_model_help":
-    "Used when you create a new task. Existing tasks keep their own model.",
+    "Choose the model used by new tasks. Existing tasks keep their own model.",
   "settings.only_model_help":
-    "This API currently provides only one available model.",
+    "This configuration currently provides only one available model.",
   "settings.model_menu_help":
-    "Choose from the models available to the selected API.",
+    "Choose from models available to the selected provider and API key.",
+  "settings.custom_model_add_help":
+    "Enter the model ID exposed by this provider. It will be tested before it can become the default.",
+  "settings.custom_model_add": "Add model",
+  "settings.custom_model_adding": "Adding…",
+  "settings.custom_model_test": "Test model",
   "settings.choose_selection": "Choose",
   "settings.change_selection": "Change",
   "settings.view_selection": "View options",
