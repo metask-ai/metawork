@@ -857,7 +857,7 @@ export const enUS = {
   "settings.custom_provider_route.api_key": "API key",
   "settings.custom_provider_edit_help":
     "Changing the protocol or Base URL requires testing its models again. The saved API key is never filled back in.",
-  "settings.custom_provider_replace_credential": "Replace API key",
+  "settings.custom_provider_replace_credential": "Update API key",
   "settings.custom_provider_remove_confirm":
     "Remove this provider and its stored credential? If it supplies the default model, new tasks will pause until you choose another. Existing tasks keep their current binding.",
   "settings.custom_provider_removing": "Removing…",

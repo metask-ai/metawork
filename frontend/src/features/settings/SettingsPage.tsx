@@ -821,7 +821,10 @@ export function SettingsPage({
     };
     setMutatingCustomProvider(true);
     try {
-      if (await onUpdateCustomProvider(input)) setCustomProviderEdit(null);
+      if (await onUpdateCustomProvider(input)) {
+        setCustomProviderCredentialEdit(null);
+        setCustomProviderEdit(null);
+      }
     } finally {
       setMutatingCustomProvider(false);
     }
@@ -1902,29 +1905,6 @@ export function SettingsPage({
                                 disabled={
                                   disabled ||
                                   executionDisabled ||
-                                  mutatingCustomProvider ||
-                                  !customProviderCapabilities.secretCapture
-                                }
-                                onClick={() => {
-                                  setCustomProviderEdit(null);
-                                  setCustomProviderRemoval(null);
-                                  setCustomProviderCredentialEdit({
-                                    providerId: provider.id,
-                                    expectedProviderRevision:
-                                      provider.providerRevision,
-                                    apiKey: "",
-                                  });
-                                }}
-                              >
-                                {t(
-                                  "settings.custom_provider_replace_credential",
-                                )}
-                              </button>
-                              <button
-                                className="text-button focus-ring"
-                                disabled={
-                                  disabled ||
-                                  executionDisabled ||
                                   mutatingCustomProvider
                                 }
                                 onClick={() => {
@@ -1965,74 +1945,6 @@ export function SettingsPage({
                                 {t("common.remove")}
                               </button>
                             </div>
-                            {customProviderCredentialEdit?.providerId ===
-                              provider.id && (
-                              <form
-                                className="settings-custom-provider-credential-edit"
-                                onSubmit={(event) => {
-                                  event.preventDefault();
-                                  void replaceCustomProviderCredential();
-                                }}
-                              >
-                                <label className="settings-custom-provider-create-field">
-                                  <span>{t("settings.api_key")}</span>
-                                  <input
-                                    className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
-                                    type="password"
-                                    autoComplete="off"
-                                    spellCheck={false}
-                                    maxLength={4096}
-                                    value={customProviderCredentialEdit.apiKey}
-                                    placeholder={t(
-                                      "settings.provider_api_key_placeholder",
-                                    )}
-                                    disabled={
-                                      disabled ||
-                                      executionDisabled ||
-                                      mutatingCustomProvider
-                                    }
-                                    onChange={(event) =>
-                                      setCustomProviderCredentialEdit(
-                                        (current) =>
-                                          current
-                                            ? {
-                                                ...current,
-                                                apiKey: event.target.value,
-                                              }
-                                            : current,
-                                      )
-                                    }
-                                  />
-                                </label>
-                                <div className="settings-custom-provider-credential-actions">
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    disabled={mutatingCustomProvider}
-                                    onClick={() =>
-                                      setCustomProviderCredentialEdit(null)
-                                    }
-                                  >
-                                    {t("common.cancel")}
-                                  </Button>
-                                  <Button
-                                    type="submit"
-                                    size="sm"
-                                    disabled={
-                                      disabled ||
-                                      executionDisabled ||
-                                      mutatingCustomProvider ||
-                                      !customProviderCredentialEdit.apiKey
-                                    }
-                                  >
-                                    {mutatingCustomProvider
-                                      ? t("common.saving")
-                                      : t("settings.provider_save_api_key")}
-                                  </Button>
-                                </div>
-                              </form>
-                            )}
                             {customProviderEdit?.providerId === provider.id && (
                               <form
                                 className="settings-custom-provider-edit"
@@ -2126,6 +2038,42 @@ export function SettingsPage({
                                     }
                                   />
                                 </label>
+                                <div className="settings-custom-provider-edit-credential">
+                                  <div className="settings-custom-provider-edit-credential-copy">
+                                    <strong>{t("settings.api_key")}</strong>
+                                    <span>
+                                      {customProviderCredentialLabel(
+                                        provider.credentialStatus,
+                                        t,
+                                      )}
+                                    </span>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    variant="secondary"
+                                    size="sm"
+                                    disabled={
+                                      disabled ||
+                                      executionDisabled ||
+                                      mutatingCustomProvider ||
+                                      !customProviderCapabilities.secretCapture ||
+                                      customProviderCredentialEdit?.providerId ===
+                                        provider.id
+                                    }
+                                    onClick={() =>
+                                      setCustomProviderCredentialEdit({
+                                        providerId: provider.id,
+                                        expectedProviderRevision:
+                                          provider.providerRevision,
+                                        apiKey: "",
+                                      })
+                                    }
+                                  >
+                                    {t(
+                                      "settings.custom_provider_replace_credential",
+                                    )}
+                                  </Button>
+                                </div>
                                 <div className="settings-custom-provider-edit-actions">
                                   <p>
                                     {t("settings.custom_provider_edit_help")}
@@ -2135,7 +2083,10 @@ export function SettingsPage({
                                     variant="ghost"
                                     size="sm"
                                     disabled={mutatingCustomProvider}
-                                    onClick={() => setCustomProviderEdit(null)}
+                                    onClick={() => {
+                                      setCustomProviderCredentialEdit(null);
+                                      setCustomProviderEdit(null);
+                                    }}
                                   >
                                     {t("common.cancel")}
                                   </Button>
@@ -2157,6 +2108,78 @@ export function SettingsPage({
                                 </div>
                               </form>
                             )}
+                            {customProviderEdit?.providerId === provider.id &&
+                              customProviderCredentialEdit?.providerId ===
+                                provider.id && (
+                                <form
+                                  className="settings-custom-provider-credential-edit"
+                                  onSubmit={(event) => {
+                                    event.preventDefault();
+                                    void replaceCustomProviderCredential();
+                                  }}
+                                >
+                                  <label className="settings-custom-provider-create-field">
+                                    <span>{t("settings.api_key")}</span>
+                                    <input
+                                      className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
+                                      type="password"
+                                      autoComplete="off"
+                                      spellCheck={false}
+                                      maxLength={4096}
+                                      value={
+                                        customProviderCredentialEdit.apiKey
+                                      }
+                                      placeholder={t(
+                                        "settings.provider_api_key_placeholder",
+                                      )}
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingCustomProvider
+                                      }
+                                      onChange={(event) =>
+                                        setCustomProviderCredentialEdit(
+                                          (current) =>
+                                            current
+                                              ? {
+                                                  ...current,
+                                                  apiKey: event.target.value,
+                                                }
+                                              : current,
+                                        )
+                                      }
+                                    />
+                                  </label>
+                                  <div className="settings-custom-provider-credential-actions">
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      disabled={mutatingCustomProvider}
+                                      onClick={() =>
+                                        setCustomProviderCredentialEdit(null)
+                                      }
+                                    >
+                                      {t("common.cancel")}
+                                    </Button>
+                                    <Button
+                                      type="submit"
+                                      variant="secondary"
+                                      size="sm"
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingCustomProvider ||
+                                        !customProviderCredentialEdit.apiKey
+                                      }
+                                    >
+                                      {mutatingCustomProvider
+                                        ? t("common.saving")
+                                        : t("settings.provider_save_api_key")}
+                                    </Button>
+                                  </div>
+                                </form>
+                              )}
                             {customProviderRemoval?.providerId ===
                               provider.id && (
                               <div

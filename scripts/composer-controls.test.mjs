@@ -526,7 +526,7 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
   ]);
 });
 
-test("Provider API key replacement starts empty and submits the exact user input", async () => {
+test("Provider API key update lives inside Edit and submits the exact user input", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const replacements = [];
   renderSettings(readySettingsAccount, {
@@ -560,7 +560,9 @@ test("Provider API key replacement starts empty and submits the exact user input
   });
 
   await user.click(screen.getByRole("link", { name: "Providers" }));
-  await user.click(screen.getByRole("button", { name: "Replace API key" }));
+  assert.equal(screen.queryByRole("button", { name: "Update API key" }), null);
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  await user.click(screen.getByRole("button", { name: "Update API key" }));
   const apiKey = screen.getByLabelText("API key");
   assert.equal(apiKey.type, "password");
   assert.equal(apiKey.value, "");

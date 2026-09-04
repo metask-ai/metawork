@@ -1266,6 +1266,31 @@ summary::-webkit-details-marker {
   background: var(--settings-frost);
 }
 
+.settings-custom-provider-edit-credential {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--settings-line);
+}
+
+.settings-custom-provider-edit-credential-copy {
+  display: grid;
+  gap: 3px;
+  margin-right: auto;
+}
+
+.settings-custom-provider-edit-credential-copy strong {
+  color: var(--settings-ink);
+  font-size: var(--text-label);
+}
+
+.settings-custom-provider-edit-credential-copy span {
+  color: var(--settings-muted);
+  font-size: 12px;
+}
+
 .settings-custom-provider-credential-edit {
   display: grid;
   grid-column: 1 / -1;
@@ -2523,11 +2548,16 @@ button.run-process-tool:hover {
   }
 
   .settings-custom-provider-edit-actions,
+  .settings-custom-provider-edit-credential,
   .settings-custom-provider-credential-actions,
   .settings-custom-provider-confirm-remove,
   .settings-custom-model-confirm-remove {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .settings-custom-provider-edit-credential {
+    align-items: stretch;
   }
 
   .settings-execution-header {

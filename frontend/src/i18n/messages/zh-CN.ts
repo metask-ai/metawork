@@ -787,7 +787,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.custom_provider_route.api_key": "API Key",
   "settings.custom_provider_edit_help":
     "修改协议或 Base URL 后需要重新测试该 Provider 的模型；已保存的 API Key 不会回填。",
-  "settings.custom_provider_replace_credential": "替换 API Key",
+  "settings.custom_provider_replace_credential": "更新 API Key",
   "settings.custom_provider_remove_confirm":
     "删除这个 Provider 及其保存的凭据？如果它提供当前默认模型，选择其他模型前新任务将暂停；已有任务仍保留当前绑定。",
   "settings.custom_provider_removing": "正在删除…",
