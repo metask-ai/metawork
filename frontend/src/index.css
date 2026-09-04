@@ -1020,43 +1020,6 @@ summary::-webkit-details-marker {
     0 10px 30px rgba(37, 34, 45, 0.025);
 }
 
-.settings-default-model {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.9fr);
-  align-items: center;
-  gap: 24px;
-  margin-top: 12px;
-  padding: 18px;
-  border: 1px solid var(--settings-line);
-  border-radius: 14px;
-  background: var(--settings-paper);
-}
-
-.settings-default-model-copy {
-  display: grid;
-  min-width: 0;
-  gap: 5px;
-}
-
-.settings-default-model-copy strong {
-  overflow: hidden;
-  color: var(--settings-ink);
-  font-size: var(--text-lead);
-  font-weight: 710;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.settings-default-model-copy span {
-  color: var(--settings-muted);
-  font-size: var(--text-control);
-  line-height: 1.5;
-}
-
-.settings-default-model-control {
-  min-width: 0;
-}
-
 .settings-model-connections {
   display: grid;
   gap: 14px;
@@ -1293,7 +1256,30 @@ summary::-webkit-details-marker {
 }
 
 .settings-execution-group > .settings-execution-header {
-  justify-content: flex-end;
+  justify-content: space-between;
+}
+
+.settings-current-default {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.settings-current-default > span {
+  color: var(--settings-muted);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.settings-current-default > strong {
+  overflow: hidden;
+  color: var(--settings-ink);
+  font-size: var(--text-control);
+  font-weight: 710;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-execution-header h3 {
@@ -1351,6 +1337,8 @@ summary::-webkit-details-marker {
   border-top: 1px solid var(--settings-line);
 }
 
+.settings-field-provider::after,
+.settings-field-provider + .settings-field-api::before,
 .settings-field-api::after,
 .settings-field-api + .settings-field::before {
   position: absolute;
@@ -1360,11 +1348,13 @@ summary::-webkit-details-marker {
   content: "";
 }
 
+.settings-field-provider::after,
 .settings-field-api::after {
   top: 50%;
   bottom: 0;
 }
 
+.settings-field-provider + .settings-field-api::before,
 .settings-field-api + .settings-field::before {
   top: 0;
   height: 50%;
@@ -2382,15 +2372,19 @@ button.run-process-tool:hover {
     grid-row: 1 / span 2;
   }
 
+  .settings-field-provider::after,
+  .settings-field-provider + .settings-field-api::before,
   .settings-field-api::after,
   .settings-field-api + .settings-field::before {
     left: 28px;
   }
 
+  .settings-field-provider::after,
   .settings-field-api::after {
     top: 30px;
   }
 
+  .settings-field-provider + .settings-field-api::before,
   .settings-field-api + .settings-field::before {
     height: 30px;
   }
@@ -2401,12 +2395,6 @@ button.run-process-tool:hover {
 
   .settings-danger-zone {
     grid-template-columns: 1fr;
-  }
-
-  .settings-default-model {
-    grid-template-columns: 1fr;
-    gap: 14px;
-    padding: 14px;
   }
 
   .settings-model-connection-create {

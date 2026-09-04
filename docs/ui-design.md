@@ -1043,10 +1043,10 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 `Models`规则：
 
 - 进入该设置 route只渲染 Host已提交的 Models projection，不触发隐藏同步；用户显式点击 `重新同步`时才刷新 Metask provider目录。已提交 intent在同步期间保持可读，`重新同步`只用于失败恢复或页面保持打开期间发生的 Metask外部变更，不能成为打开下拉框或切换默认值的前置步骤；
-- 页面顶部以单一选择器显示并修改 global default；候选以 `Provider · Model` 呈现，包含当前可用的 Metask selection 与所有 ready user-managed Provider 模型。Models 是唯一允许提交 global default 的产品页面；
-- API 列表显示 Metask 名称、protocol、尾号和可用/需要处理状态；不显示完整 secret；
+- 页面以一组连续的 `Provider → API Key → 默认模型` 控件显示并修改 global default，并在组头持续显示当前已提交的 `Provider · Model`；Provider 先限定 credential authority，API Key 再限定模型目录，只有最终选择默认模型时才提交完整 `ModelRef`。Models 是唯一允许提交 global default 的产品页面；
+- API Key 列表对 Metask 显示名称、protocol、尾号和可用/需要处理状态；对 user-managed Provider 显示由 Host 安全持有的已保存 credential authority。两者都不显示完整 secret；
 - protocol 是 Host 从 API catalog 确定的只读技术事实，只作为 API 名称下的次级元数据展示；Renderer 不提供 protocol、base URL 或 credential 编辑入口；
-- 切换 Metask API 后加载其模型目录；API 与 Metask 模型选择只准备一个可用的 Metask `ModelRef`，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；
+- 切换 Metask API 后加载其模型目录；切换 Provider 或 API Key 只准备并收窄当前候选，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；
 - 默认模型选择与 New task Composer 使用同一 Host-owned selection，不维护两份互相漂移的 Renderer preference；
 - 既有 Task 只显示解释历史所需的 protocol、模型与 generation；不显示或保存 Account identity 与 API Key 元数据；
 - 跨重启历史 Task 保持只读；设置变化不能使其静默采用当前默认值或伪造 Session；
@@ -1062,9 +1062,9 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 - 页面标题约 22–26 px，设置主文案 13–15 px，辅助文案不小于 12 px；disabled 状态只改变语义色和对比度，不缩小字号；
 - 语言、API、模型连接和模型统一使用经过键盘、焦点、碰撞和长列表验证的同一 headless Select primitive；正式设置页禁止依赖 WebView 平台主题的原生 `<select>`，也不建立另一套自绘菜单；
 - compact 选择器只显示一个短值；API 使用 detailed 选择器，以 API 名称为主信息，以 protocol 为次级说明，以脱敏尾号为尾部数据。protocol 和尾号不得表现成可编辑字段；
-- Metask API 与模型控件在同一个“Metask 模型”工作面中以带步骤标记和连接线的连续配置链呈现，明确表达 `Metask API → 该 API 的模型目录 → Metask ModelRef`；global default 使用页面顶部的独立统一选择器，不能与 Metask provider-local selection混成两个同名的“默认模型”；
+- Provider、API Key 与默认模型控件在同一个工作面中以带步骤标记和连接线的连续配置链呈现，明确表达 `Provider → credential authority → source-qualified ModelRef`；不能再附加 Metask 专属配置块或第二个同名的默认模型控件。user-managed Provider 只有一份已保存 credential 时，API Key 步骤仍明确投影该 authority，但 credential 的创建、替换和删除只能进入独立 Providers 页面；
 - API 切换开始后只冻结相关配置组；模型目录加载、选择和持久化不得冻结语言、导航、历史阅读或取消仍被 Host 接受的操作；
-- 设置页把 Metask API/model selection与 global default mutation表现为两个明确的 Models-owned transaction；前者准备 provider-local `ModelRef`，后者从所有 ready Provider 候选中提交唯一 global default。两者都校验对应 catalog/source generation与 expected revision，再 durable提交 Models state。Product后续 resolve/scrub/install失败时另行显示 desired/active mismatch与 recovery，不回滚 Models，也不把 Product failure显示成 Account mutation失败。Renderer可在 command acknowledgement前短暂回显用户请求，但收到 snapshot后必须以 Host projection为准；页面重建、失败和成功都不得依赖 Renderer临时状态恢复事务；
+- 设置页把 Provider/API Key 候选准备与 global default mutation表现为一条分阶段的 Models-owned transaction；前两步只限定 source 与 credential authority，最后一步从该 source 的 ready 模型中提交唯一 global default。Metask provider-local 准备和最终 global default提交分别校验对应 catalog/source generation与 expected revision，再 durable提交 Models state；custom Provider使用其 connection revision提交完整 `ModelRef`。Product后续 resolve/scrub/install失败时另行显示 desired/active mismatch与 recovery，不回滚 Models，也不把 Product failure显示成 Account mutation失败。Renderer可在 command acknowledgement前短暂回显用户请求，但收到 snapshot后必须以 Host projection为准；页面重建、失败和成功都不得依赖 Renderer临时状态恢复事务；
 - 常规桌面宽度下左侧分区导航切换独立的设置分区页面，右侧一次只渲染当前分区；页面标题和左侧分区导航保持稳定，当前分区内容列可独立滚动。窄窗口改为顶部横向分区导航，但仍不让导航与内容共享滚动层；
 - 浮层只在打开时使用克制的透明度与位置过渡；loading 指示只出现在真实运行的配置项，`prefers-reduced-motion` 下移除非必要动画；
 - 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。

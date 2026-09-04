@@ -750,15 +750,20 @@ export const zhCN: Record<MessageId, string> = {
   "permission.default_updated": "已更新权限默认策略。",
   "permission.default_update_failed": "MetaWork 无法更新权限默认策略。",
   "settings.default_model_for_new_tasks": "新任务默认模型",
-  "settings.default_model_managed_description": "由 Metask 管理",
-  "settings.choose_default_model": "选择默认模型",
-  "settings.default_model_menu_help":
-    "从 Metask 和已配置 Provider 提供的可用模型中选择。",
-  "settings.change_default_model": "更改默认模型",
+  "settings.current_default": "当前默认",
+  "settings.provider": "Provider",
+  "settings.provider_help": "选择提供模型及其凭据权限的服务。",
+  "settings.choose_provider": "选择 Provider",
+  "settings.provider_menu_help":
+    "只有凭据可用且模型已测试的 Provider 才能成为默认来源。",
+  "settings.provider_managed_description": "通过 Metask 账号管理",
+  "settings.api_key": "API Key",
+  "settings.api_key_help": "选择由哪个 Metask API Key 提供模型目录。",
+  "settings.provider_api_key_help":
+    "该 Provider 使用已保存的 API Key；如需替换，请前往 Provider 页面。",
+  "settings.saved_api_key": "已保存的 API Key",
   "settings.open_models": "打开模型设置",
-  "settings.metask_models": "Metask 模型",
   "settings.default_selection_missing": "未设置可执行的默认模型",
-  "settings.use_metask_default": "设为新任务默认",
   "settings.providers_help":
     "管理 MetaWork 可用的模型服务、服务地址和 API Key。默认模型请在模型页面选择。",
   "settings.providers_empty": "还没有用户管理的 Provider。",
@@ -805,19 +810,16 @@ export const zhCN: Record<MessageId, string> = {
   "settings.model_connection_credential.invalid": "凭据被拒绝",
   "settings.catalog_count": "API {apis} · 模型 {models}",
   "settings.language_help": "更改会立即应用到这台设备。",
-  "settings.metask_api": "Metask API",
-  "settings.metask_api_help": "选择由哪个 Metask API 提供模型目录。",
   "settings.only_api_help":
     "Metask 当前只返回这一个可用 API；其他 API 会在下次同步后出现。",
   "settings.api_menu_help": "协议由 Metask 提供，此处仅用于识别。",
-  "settings.default_model": "模型",
+  "settings.provider_api_menu_help":
+    "该 Provider 的已保存凭据由 Provider 页面管理。",
+  "settings.default_model": "默认模型",
   "settings.default_model_help":
-    "用于新建任务；已有任务继续使用创建时绑定的模型。",
-  "settings.metask_model": "Metask 模型",
-  "settings.metask_model_help":
-    "从这个 Metask API 选择模型；需要新任务使用它时，再在上方设为默认模型。",
-  "settings.only_model_help": "当前 API 只提供这一个可用模型。",
-  "settings.model_menu_help": "从所选 API 提供的模型中选择。",
+    "选择新任务使用的模型；已有任务继续使用创建时绑定的模型。",
+  "settings.only_model_help": "当前配置只提供这一个可用模型。",
+  "settings.model_menu_help": "从所选 Provider 与 API Key 的可用模型中选择。",
   "settings.choose_selection": "选择",
   "settings.change_selection": "更改",
   "settings.view_selection": "查看选项",

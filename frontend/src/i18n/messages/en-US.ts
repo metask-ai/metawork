@@ -815,16 +815,24 @@ export const enUS = {
   "permission.default_update_failed":
     "MetaWork could not update the permission default.",
   "settings.default_model_for_new_tasks": "Default model for new tasks",
-  "settings.default_model_managed_description": "Managed by Metask",
-  "settings.choose_default_model": "Choose a default model",
-  "settings.default_model_menu_help":
-    "Choose from ready models provided by Metask and your configured providers.",
-  "settings.change_default_model": "Change default model",
+  "settings.current_default": "Current",
+  "settings.provider": "Provider",
+  "settings.provider_help":
+    "Choose the service that provides the model and its credential authority.",
+  "settings.choose_provider": "Choose a provider",
+  "settings.provider_menu_help":
+    "Only providers with a ready credential and tested model can become the default.",
+  "settings.provider_managed_description":
+    "Managed through your Metask account",
+  "settings.api_key": "API key",
+  "settings.api_key_help":
+    "Choose which Metask API key supplies the model catalog.",
+  "settings.provider_api_key_help":
+    "This provider uses its saved API key. Replace it on the Providers page.",
+  "settings.saved_api_key": "Saved API key",
   "settings.open_models": "Open Models",
-  "settings.metask_models": "Metask models",
   "settings.default_selection_missing":
     "No executable default model is selected",
-  "settings.use_metask_default": "Set as default for new tasks",
   "settings.providers_help":
     "Manage the model services, endpoints, and API keys available to MetaWork. Choose the default model on the Models page.",
   "settings.providers_empty": "No user-managed providers yet.",
@@ -872,23 +880,19 @@ export const enUS = {
   "settings.model_connection_credential.invalid": "Credential rejected",
   "settings.catalog_count": "APIs {apis} · Models {models}",
   "settings.language_help": "Changes apply immediately on this device.",
-  "settings.metask_api": "Metask API",
-  "settings.metask_api_help":
-    "Choose which Metask API supplies the model catalog.",
   "settings.only_api_help":
     "Metask currently returns only this API. Other APIs appear after the next sync.",
   "settings.api_menu_help":
     "Protocol is supplied by Metask and shown for reference.",
-  "settings.default_model": "Model",
+  "settings.provider_api_menu_help":
+    "This provider's saved credential is managed on the Providers page.",
+  "settings.default_model": "Default model",
   "settings.default_model_help":
-    "Used when you create a new task. Existing tasks keep their own model.",
-  "settings.metask_model": "Metask model",
-  "settings.metask_model_help":
-    "Choose a model from this Metask API, then set it as the default above when you want new tasks to use it.",
+    "Choose the model used by new tasks. Existing tasks keep their own model.",
   "settings.only_model_help":
-    "This API currently provides only one available model.",
+    "This configuration currently provides only one available model.",
   "settings.model_menu_help":
-    "Choose from the models available to the selected API.",
+    "Choose from models available to the selected provider and API key.",
   "settings.choose_selection": "Choose",
   "settings.change_selection": "Change",
   "settings.view_selection": "View options",

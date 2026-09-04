@@ -458,10 +458,7 @@ test("Settings exposes Providers only for the complete Host gate", () => {
   );
   fireEvent.click(screen.getByRole("link", { name: "Providers" }));
   assert.ok(screen.getByRole("heading", { name: "Providers" }));
-  assert.equal(
-    screen.queryByRole("combobox", { name: "Default model for new tasks" }),
-    null,
-  );
+  assert.equal(screen.queryByRole("combobox", { name: "Default model" }), null);
   fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
   assert.ok(screen.getByRole("heading", { name: "Add provider" }));
   assert.ok(screen.getByRole("button", { name: "Back to providers" }));
@@ -471,11 +468,11 @@ test("Settings completes the API transaction before replacing committed defaults
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);
 
-  await user.click(screen.getByRole("combobox", { name: "Metask API" }));
+  await user.click(screen.getByRole("combobox", { name: "API key" }));
   await user.click(await screen.findByRole("option", { name: /Backup/ }));
   assert.deepEqual(view.selections.api, ["key-2"]);
   assert.match(
-    screen.getByRole("combobox", { name: "Metask API" }).textContent,
+    screen.getByRole("combobox", { name: "API key" }).textContent,
     /Backup.*OpenAI.*5678/,
   );
   assert.match(screen.getByText("Pending change").textContent, /Pending/);
@@ -503,8 +500,8 @@ test("Settings completes the API transaction before replacing committed defaults
     ),
   );
 
-  const api = screen.getByRole("combobox", { name: "Metask API" });
-  const model = screen.getByRole("combobox", { name: "Metask model" });
+  const api = screen.getByRole("combobox", { name: "API key" });
+  const model = screen.getByRole("combobox", { name: "Default model" });
   assert.match(api.textContent, /Backup.*OpenAI.*5678/);
   assert.equal(api.getAttribute("aria-busy"), "true");
   assert.match(model.textContent, /Loading models/);
@@ -522,11 +519,11 @@ test("Settings completes the API transaction before replacing committed defaults
   );
   assert.equal(
     screen
-      .getByRole("combobox", { name: "Metask model" })
+      .getByRole("combobox", { name: "Default model" })
       .hasAttribute("disabled"),
     false,
   );
-  await user.click(screen.getByRole("combobox", { name: "Metask model" }));
+  await user.click(screen.getByRole("combobox", { name: "Default model" }));
   await user.click(await screen.findByRole("option", { name: /Model Two/ }));
   assert.deepEqual(view.selections.model, ["model-2"]);
 
@@ -555,11 +552,11 @@ test("Settings completes the API transaction before replacing committed defaults
     ),
   );
   assert.match(
-    screen.getByRole("combobox", { name: "Metask API" }).textContent,
+    screen.getByRole("combobox", { name: "API key" }).textContent,
     /Backup/,
   );
   assert.match(
-    screen.getByRole("combobox", { name: "Metask model" }).textContent,
+    screen.getByRole("combobox", { name: "Default model" }).textContent,
     /Model Two/,
   );
   assert.equal(screen.queryByText("Pending change"), null);
@@ -570,12 +567,12 @@ test("Settings keeps a model choice visibly pending without declaring it committ
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);
 
-  await user.click(screen.getByRole("combobox", { name: "Metask model" }));
+  await user.click(screen.getByRole("combobox", { name: "Default model" }));
   await user.click(await screen.findByRole("option", { name: /Model Two/ }));
 
   assert.deepEqual(view.selections.model, ["model-2"]);
   assert.match(
-    screen.getByRole("combobox", { name: "Metask model" }).textContent,
+    screen.getByRole("combobox", { name: "Default model" }).textContent,
     /Model Two/,
   );
   assert.equal(readySettingsModels.metaskSelection.modelId, "model-1");
@@ -583,8 +580,8 @@ test("Settings keeps a model choice visibly pending without declaring it committ
 
 test("Settings keeps Metask available while a model connection is the default", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  let activations = 0;
-  renderSettings(readySettingsAccount, {
+  const customSelections = [];
+  const view = renderSettings(readySettingsAccount, {
     models: {
       ...readySettingsModels,
       defaultSelection: { sourceId: "connection-1", modelId: "gpt-5" },
@@ -607,6 +604,14 @@ test("Settings keeps Metask available while a model connection is the default", 
               testStatus: "connected",
               ready: true,
             },
+            {
+              id: "gpt-5-mini",
+              displayName: "GPT-5 mini",
+              metadata: readySettingsModels.providers[0].models[0].metadata,
+              metadataProvenance: "user_declared",
+              testStatus: "connected",
+              ready: true,
+            },
           ],
           selectedModel: "gpt-5",
           connectionRevision: "1",
@@ -615,18 +620,36 @@ test("Settings keeps Metask available while a model connection is the default", 
         },
       ],
     },
-    onActivateMetask() {
-      activations += 1;
+    onSelectModelConnection(...selection) {
+      customSelections.push(selection);
     },
   });
 
+  const provider = screen.getByRole("combobox", { name: "Provider" });
+  const apiKey = screen.getByRole("combobox", { name: "API key" });
   const defaultModel = screen.getByRole("combobox", {
-    name: "Default model for new tasks",
+    name: "Default model",
   });
-  assert.match(defaultModel.textContent, /Team OpenAI.*GPT-5/);
+  assert.match(provider.textContent, /Team OpenAI/);
+  assert.match(apiKey.textContent, /Saved API key/);
+  assert.match(defaultModel.textContent, /GPT-5/);
   await user.click(defaultModel);
+  await user.click(await screen.findByRole("option", { name: /GPT-5 mini/ }));
+  assert.deepEqual(customSelections, [["connection-1", "1", "gpt-5-mini"]]);
+
+  await user.click(provider);
   await user.click(await screen.findByRole("option", { name: /Metask/ }));
-  assert.equal(activations, 1);
+  assert.match(
+    screen.getByRole("combobox", { name: "API key" }).textContent,
+    /Primary/,
+  );
+  assert.match(
+    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    /Choose a model/,
+  );
+  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  await user.click(await screen.findByRole("option", { name: /Model One/ }));
+  assert.deepEqual(view.selections.model, ["model-1"]);
 });
 
 test("Settings keeps Account cancellation independent from Models loading", async () => {
@@ -646,14 +669,12 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
   );
 
   assert.equal(
-    screen
-      .getByRole("combobox", { name: "Metask API" })
-      .hasAttribute("disabled"),
+    screen.getByRole("combobox", { name: "API key" }).hasAttribute("disabled"),
     true,
   );
   assert.equal(
     screen
-      .getByRole("combobox", { name: "Metask model" })
+      .getByRole("combobox", { name: "Default model" })
       .hasAttribute("disabled"),
     true,
   );
@@ -681,11 +702,11 @@ test("Settings reports Models failure without changing Account identity", async 
   });
 
   assert.match(
-    screen.getByRole("combobox", { name: "Metask API" }).textContent,
+    screen.getByRole("combobox", { name: "API key" }).textContent,
     /Primary/,
   );
   assert.match(
-    screen.getByRole("combobox", { name: "Metask model" }).textContent,
+    screen.getByRole("combobox", { name: "Default model" }).textContent,
     /Model One/,
   );
   assert.match(

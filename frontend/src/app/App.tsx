@@ -1305,20 +1305,6 @@ export default function App() {
     }
   }
 
-  function activateMetaskDefault() {
-    const selection = snapshot.models.metaskSelection;
-    if (!selection || !metaskProvider) return;
-    return runExecutionCommand(() =>
-      client.selectModelsDefault({
-        sourceId: selection.sourceId,
-        modelId: selection.modelId,
-        expectedSelectionRevision: snapshot.models.selectionRevision,
-        expectedSourceGeneration: metaskProvider.sourceGeneration,
-        expectedCatalogGeneration: metaskProvider.catalogGeneration,
-      }),
-    );
-  }
-
   async function selectModelForTask(selectionId: string) {
     const task = activeTask;
     if (!task || bridgeUnavailable) return;
@@ -1377,7 +1363,6 @@ export default function App() {
   async function selectMetaskModel(modelId: string) {
     const provider = metaskProvider;
     if (!provider) return;
-    const shouldSetDefault = snapshot.models.defaultSelection === null;
     const configured = await runExecutionCommand(() =>
       client.configureMetaskSelection({
         sourceId: `metask:${provider.selectedApiKeyId}`,
@@ -1387,7 +1372,7 @@ export default function App() {
         expectedCatalogGeneration: provider.catalogGeneration,
       }),
     );
-    if (!configured || !shouldSetDefault) return;
+    if (!configured) return;
     // `runExecutionCommand` refreshes the rendered snapshot asynchronously;
     // do not reuse the pre-configuration revisions for the second CAS.
     const current = await client.fetchSnapshot();
@@ -3085,7 +3070,6 @@ export default function App() {
                 : undefined
             }
             onSelectModel={(id) => void selectMetaskModel(id)}
-            onActivateMetask={() => void activateMetaskDefault()}
             onCreateModelConnection={(input) =>
               runExecutionCommand(() => client.createModelConnection(input))
             }

@@ -114,7 +114,6 @@ export function SettingsPage({
   onCancel,
   onSelectApiKey,
   onSelectModel,
-  onActivateMetask,
   onCreateModelConnection,
   onUpdateModelConnection,
   onReplaceModelConnectionCredential,
@@ -151,7 +150,6 @@ export function SettingsPage({
   onCancel: () => void;
   onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
-  onActivateMetask: () => void;
   onCreateModelConnection: (input: ModelConnectionDraft) => Promise<boolean>;
   onUpdateModelConnection: (
     input: ModelConnectionEditDraft,
@@ -195,6 +193,9 @@ export function SettingsPage({
   );
   const [requestedModel, setRequestedModel] =
     useState<RequestedSelection | null>(null);
+  const [requestedProviderId, setRequestedProviderId] = useState<string | null>(
+    null,
+  );
   const [modelConnectionDraft, setModelConnectionDraft] =
     useState<ModelConnectionDraft | null>(null);
   const [creatingModelConnection, setCreatingModelConnection] = useState(false);
@@ -221,76 +222,36 @@ export function SettingsPage({
     metaskProvider?.catalogState ?? "needs_authentication";
   const selectedApiId = metaskProvider?.selectedApiKeyId ?? "";
   const selectedModelId = models.metaskSelection?.modelId ?? "";
-  const metaskDefaultSelected =
-    models.metaskSelection !== null &&
-    models.defaultSelection?.sourceId === models.metaskSelection.sourceId &&
-    models.defaultSelection?.modelId === models.metaskSelection.modelId;
-  const defaultModelTargets = useMemo(() => {
-    const targets: Array<{
-      value: string;
-      sourceId: string;
-      modelId: string;
-      connectionRevision?: string;
-      option: SelectionMenuOption;
-    }> = [];
-    if (models.metaskSelection) {
-      const selected = models.metaskSelection;
-      const selectedModel = metaskModels.find(
-        (model) => model.id === selected.modelId,
-      );
-      targets.push({
-        value: `${selected.sourceId}\u0000${selected.modelId}`,
-        sourceId: selected.sourceId,
-        modelId: selected.modelId,
-        option: {
-          value: `${selected.sourceId}\u0000${selected.modelId}`,
-          label: `Metask · ${selectedModel?.displayName || selected.modelId}`,
-          description: t("settings.default_model_managed_description"),
-          descriptionKind: "text",
-          disabled:
-            account.state !== "authenticated" ||
-            metaskCatalogState !== "ready" ||
-            selectedModel === undefined,
-        },
-      });
-    }
-    for (const connection of models.connections) {
-      for (const model of connection.models) {
-        targets.push({
-          value: `${connection.id}\u0000${model.id}`,
-          sourceId: connection.id,
-          modelId: model.id,
-          connectionRevision: connection.connectionRevision,
-          option: {
-            value: `${connection.id}\u0000${model.id}`,
-            label: `${connection.displayName || connection.id} · ${
-              model.displayName || model.id
-            }`,
-            description: modelConnectionProtocolLabel(connection.protocol, t),
-            descriptionKind: "text",
-            disabled:
-              connection.state !== "ready" ||
-              connection.credentialStatus !== "ready" ||
-              !model.ready,
-          },
-        });
-      }
-    }
-    return targets;
-  }, [
-    account.state,
-    metaskCatalogState,
-    metaskModels,
-    models.connections,
-    models.metaskSelection,
-    t,
-  ]);
-  const defaultModelValue = models.defaultSelection
-    ? `${models.defaultSelection.sourceId}\u0000${models.defaultSelection.modelId}`
+  const committedProviderId = models.defaultSelection
+    ? models.defaultSelection.sourceId.startsWith("metask:")
+      ? "metask"
+      : models.defaultSelection.sourceId
     : "";
-  const hasAvailableDefaultModel = defaultModelTargets.some(
-    (target) => target.option.disabled !== true,
+  const selectedProviderId = requestedProviderId ?? committedProviderId;
+  const selectedConnection = models.connections.find(
+    (connection) => connection.id === selectedProviderId,
   );
+  const committedConnection = models.connections.find(
+    (connection) => connection.id === committedProviderId,
+  );
+  const committedDefaultModel = models.defaultSelection
+    ? committedProviderId === "metask"
+      ? metaskModels.find(
+          (model) => model.id === models.defaultSelection?.modelId,
+        )
+      : committedConnection?.models.find(
+          (model) => model.id === models.defaultSelection?.modelId,
+        )
+    : null;
+  const currentDefaultLabel = models.defaultSelection
+    ? `${
+        committedProviderId === "metask"
+          ? "Metask"
+          : (committedConnection?.displayName ?? committedProviderId)
+      } · ${
+        committedDefaultModel?.displayName || models.defaultSelection.modelId
+      }`
+    : t("settings.default_selection_missing");
   const committedApi = metaskApiKeys.find((key) => key.id === selectedApiId);
   const committedModel = metaskModels.find(
     (model) => model.id === selectedModelId,
@@ -320,12 +281,30 @@ export function SettingsPage({
         ? t("account.authorizing.body")
         : t("account.sign_in_required.body");
   const modelsPersistenceReady = models.persistenceHealth === "ready";
-  const canChooseApi =
-    authenticated && modelsPersistenceReady && !modelCatalogLoading;
-  const canChooseModel =
-    authenticated &&
+  const providerIsMetask = selectedProviderId === "metask";
+  const canChooseProvider =
     modelsPersistenceReady &&
-    (metaskCatalogState === "ready" || metaskCatalogState === "choosing");
+    ((authenticated &&
+      (metaskCatalogState === "ready" || metaskCatalogState === "choosing")) ||
+      models.connections.some(
+        (connection) =>
+          connection.state === "ready" &&
+          connection.credentialStatus === "ready" &&
+          connection.models.some((model) => model.ready),
+      ));
+  const canChooseApi =
+    modelsPersistenceReady &&
+    selectedProviderId.length > 0 &&
+    (providerIsMetask
+      ? authenticated && !modelCatalogLoading
+      : selectedConnection?.credentialStatus === "ready");
+  const canChooseModel =
+    modelsPersistenceReady &&
+    (providerIsMetask
+      ? authenticated &&
+        (metaskCatalogState === "ready" || metaskCatalogState === "choosing")
+      : selectedConnection?.state === "ready" &&
+        selectedConnection.credentialStatus === "ready");
   const languageOptions = useMemo<SelectionMenuOption[]>(
     () => [
       { value: "en-US", label: t("app.language.en-US") },
@@ -346,23 +325,67 @@ export function SettingsPage({
       })),
     [permissionProfiles.available, t],
   );
-  const apiOptions = useMemo<SelectionMenuOption[]>(
-    () =>
-      metaskApiKeys.map((key) => ({
+  const providerOptions = useMemo<SelectionMenuOption[]>(
+    () => [
+      {
+        value: "metask",
+        label: "Metask",
+        description: t("settings.provider_managed_description"),
+        descriptionKind: "text",
+        disabled:
+          account.state !== "authenticated" ||
+          (metaskCatalogState !== "ready" && metaskCatalogState !== "choosing"),
+      },
+      ...models.connections.map((connection) => ({
+        value: connection.id,
+        label: connection.displayName || connection.id,
+        description: modelConnectionProtocolLabel(connection.protocol, t),
+        descriptionKind: "text" as const,
+        disabled:
+          connection.state !== "ready" ||
+          connection.credentialStatus !== "ready" ||
+          !connection.models.some((model) => model.ready),
+      })),
+    ],
+    [account.state, metaskCatalogState, models.connections, t],
+  );
+  const apiOptions = useMemo<SelectionMenuOption[]>(() => {
+    if (selectedProviderId === "metask") {
+      return metaskApiKeys.map((key) => ({
         value: key.id,
         label: apiLabel(key, t),
         description: modelConnectionProtocolLabel(key.protocol, t),
         descriptionKind: "text",
         trailing: key.suffix ? `•••• ${key.suffix}` : undefined,
-      })),
-    [metaskApiKeys, t],
-  );
+      }));
+    }
+    if (!selectedConnection) return [];
+    return [
+      {
+        value: selectedConnection.id,
+        label: t("settings.saved_api_key"),
+        description: modelConnectionCredentialLabel(
+          selectedConnection.credentialStatus,
+          t,
+        ),
+        descriptionKind: "text",
+      },
+    ];
+  }, [metaskApiKeys, selectedConnection, selectedProviderId, t]);
   const modelOptions = useMemo<SelectionMenuOption[]>(() => {
-    const options = metaskModels.map((model) => ({
-      value: model.id,
-      label: modelLabel(model, t),
-    }));
+    const options =
+      selectedProviderId === "metask"
+        ? metaskModels.map((model) => ({
+            value: model.id,
+            label: modelLabel(model, t),
+          }))
+        : (selectedConnection?.models ?? []).map((model) => ({
+            value: model.id,
+            label: model.displayName || model.id,
+            disabled: !model.ready,
+          }));
     if (
+      selectedProviderId === "metask" &&
       requestedModel &&
       !options.some((option) => option.value === requestedModel.selectionId)
     ) {
@@ -372,7 +395,7 @@ export function SettingsPage({
       });
     }
     return options;
-  }, [metaskModels, requestedModel, t]);
+  }, [metaskModels, requestedModel, selectedConnection, selectedProviderId, t]);
   const modelConnectionProtocolOptions = useMemo<SelectionMenuOption[]>(
     () =>
       (["openai_chat_completions", "gemini_native"] as const).map(
@@ -383,23 +406,37 @@ export function SettingsPage({
       ),
     [t],
   );
+  const displayedApiId = providerIsMetask
+    ? selectedApiId
+    : (selectedConnection?.id ?? "");
+  const displayedModelId = providerIsMetask
+    ? committedProviderId === "metask"
+      ? selectedModelId
+      : ""
+    : selectedConnection &&
+        models.defaultSelection?.sourceId === selectedConnection.id
+      ? models.defaultSelection.modelId
+      : "";
   const apiHasAlternative = apiOptions.some(
-    (option) => option.value !== selectedApiId,
+    (option) => option.value !== displayedApiId,
   );
   const modelHasAlternative = modelOptions.some(
-    (option) => option.value !== selectedModelId,
+    (option) => option.value !== displayedModelId,
   );
   const apiIsOnlyOption =
-    selectedApiId.length > 0 && apiOptions.length === 1 && !apiHasAlternative;
+    displayedApiId.length > 0 && apiOptions.length === 1 && !apiHasAlternative;
   const modelIsOnlyOption =
-    selectedModelId.length > 0 &&
+    displayedModelId.length > 0 &&
     modelOptions.length === 1 &&
     !modelHasAlternative;
-  const modelPlaceholder = modelCatalogLoading
-    ? t("settings.model_loading")
-    : metaskCatalogState === "choosing" && candidateApiId.length === 0
-      ? t("settings.model_waiting_api")
-      : t("account.choose_model");
+  const modelPlaceholder =
+    providerIsMetask && modelCatalogLoading
+      ? t("settings.model_loading")
+      : providerIsMetask &&
+          metaskCatalogState === "choosing" &&
+          candidateApiId.length === 0
+        ? t("settings.model_waiting_api")
+        : t("account.choose_model");
   const committedApiName = committedApi
     ? apiLabel(committedApi, t)
     : t("account.api_fallback");
@@ -424,6 +461,7 @@ export function SettingsPage({
   const modelHasPendingChange =
     candidateModelId.length > 0 && candidateModelId !== selectedModelId;
   const transactionStatus = (() => {
+    if (!providerIsMetask) return null;
     switch (metaskCatalogState) {
       case "needs_authentication":
         return null;
@@ -576,6 +614,15 @@ export function SettingsPage({
     account.state,
     disabled,
   ]);
+
+  useEffect(() => {
+    if (
+      requestedProviderId !== null &&
+      committedProviderId === requestedProviderId
+    ) {
+      setRequestedProviderId(null);
+    }
+  }, [committedProviderId, requestedProviderId]);
 
   function closeSignOutConfirmation() {
     setConfirmSignOut(false);
@@ -983,65 +1030,11 @@ export function SettingsPage({
               </div>
 
               <div className="settings-group">
-                <h3 className="settings-group-label">
-                  {t("settings.default_model_for_new_tasks")}
-                </h3>
-                <div className="settings-default-model">
-                  <div className="settings-default-model-copy">
-                    <strong>
-                      {defaultModelTargets.find(
-                        (target) => target.value === defaultModelValue,
-                      )?.option.label ??
-                        t("settings.default_selection_missing")}
-                    </strong>
-                    <span>{t("settings.default_model_help")}</span>
-                  </div>
-                  <SelectionMenu
-                    value={defaultModelValue}
-                    options={defaultModelTargets.map((target) => target.option)}
-                    placeholder={t("settings.choose_default_model")}
-                    ariaLabel={t("settings.default_model_for_new_tasks")}
-                    helper={t("settings.default_model_menu_help")}
-                    actionLabel={t("settings.change_default_model")}
-                    disabled={
-                      disabled ||
-                      executionDisabled ||
-                      !modelsPersistenceReady ||
-                      !hasAvailableDefaultModel
-                    }
-                    valueLayout="detailed"
-                    leading={<Icon name="model" />}
-                    triggerClassName="settings-control settings-control-detailed settings-default-model-control"
-                    contentClassName="settings-selection-menu"
-                    onValueChange={(value) => {
-                      const target = defaultModelTargets.find(
-                        (candidate) => candidate.value === value,
-                      );
-                      if (!target) return;
-                      if (target.connectionRevision) {
-                        onSelectModelConnection(
-                          target.sourceId,
-                          target.connectionRevision,
-                          target.modelId,
-                        );
-                      } else {
-                        onActivateMetask();
-                      }
-                    }}
-                  />
-                </div>
-                <p className="settings-binding-note">
-                  <Icon name="check" />
-                  {t("settings.existing_tasks_unchanged")}
-                </p>
-              </div>
-
-              <div className="settings-group">
                 <h3
                   id="settings-execution-title"
                   className="settings-group-label"
                 >
-                  {t("settings.metask_models")}
+                  {t("settings.default_model_for_new_tasks")}
                 </h3>
                 <div
                   className="settings-execution-group"
@@ -1049,86 +1042,127 @@ export function SettingsPage({
                   aria-labelledby="settings-execution-title"
                 >
                   <div className="settings-execution-header">
+                    <span className="settings-current-default">
+                      <span>{t("settings.current_default")}</span>
+                      <strong>{currentDefaultLabel}</strong>
+                    </span>
                     <div className="settings-execution-actions">
-                      {models.metaskSelection &&
-                        authenticated &&
-                        modelsPersistenceReady &&
-                        metaskCatalogState === "ready" &&
-                        !metaskDefaultSelected && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            disabled={disabled || executionDisabled}
-                            onClick={onActivateMetask}
+                      {providerIsMetask && (
+                        <>
+                          <span className="settings-catalog-count">
+                            {t("settings.catalog_count", {
+                              apis: metaskApiKeys.length,
+                              models: metaskModels.length,
+                            })}
+                          </span>
+                          <button
+                            className="settings-refresh-button focus-ring"
+                            disabled={
+                              disabled ||
+                              accountDisabled ||
+                              !authenticated ||
+                              apiBusy
+                            }
+                            onClick={onRefresh}
                           >
-                            {t("settings.use_metask_default")}
-                          </Button>
+                            <Icon name="refresh" />
+                            {t("account.refresh_catalog")}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="settings-field settings-field-provider">
+                    <span className="settings-field-step" aria-hidden="true">
+                      01
+                    </span>
+                    <div className="settings-field-copy">
+                      <label>{t("settings.provider")}</label>
+                      <p>{t("settings.provider_help")}</p>
+                    </div>
+                    <div className="settings-control-stack">
+                      <SelectionMenu
+                        value={selectedProviderId}
+                        options={providerOptions}
+                        placeholder={t("settings.choose_provider")}
+                        ariaLabel={t("settings.provider")}
+                        helper={t("settings.provider_menu_help")}
+                        actionLabel={t(
+                          selectedProviderId
+                            ? "settings.change_selection"
+                            : "settings.choose_selection",
                         )}
-                      <span className="settings-catalog-count">
-                        {t("settings.catalog_count", {
-                          apis: metaskApiKeys.length,
-                          models: metaskModels.length,
-                        })}
-                      </span>
-                      <button
-                        className="settings-refresh-button focus-ring"
                         disabled={
-                          disabled ||
-                          accountDisabled ||
-                          !authenticated ||
-                          apiBusy
+                          disabled || executionDisabled || !canChooseProvider
                         }
-                        onClick={onRefresh}
-                      >
-                        <Icon name="refresh" />
-                        {t("account.refresh_catalog")}
-                      </button>
+                        valueLayout="detailed"
+                        leading={<Icon name="provider" />}
+                        triggerClassName="settings-control settings-control-detailed"
+                        contentClassName="settings-selection-menu"
+                        onValueChange={(value) => {
+                          setRequestedProviderId(value);
+                          setRequestedApi(null);
+                          setRequestedModel(null);
+                        }}
+                      />
                     </div>
                   </div>
 
                   <div className="settings-field settings-field-api">
                     <span className="settings-field-step" aria-hidden="true">
-                      01
+                      02
                     </span>
                     <div className="settings-field-copy">
                       <label htmlFor="settings-api">
-                        {t("settings.metask_api")}
+                        {t("settings.api_key")}
                       </label>
                       <p>
                         {t(
-                          apiIsOnlyOption
-                            ? "settings.only_api_help"
-                            : "settings.metask_api_help",
+                          providerIsMetask
+                            ? apiIsOnlyOption
+                              ? "settings.only_api_help"
+                              : "settings.api_key_help"
+                            : "settings.provider_api_key_help",
                         )}
                       </p>
                     </div>
                     <div className="settings-control-stack">
                       <SelectionMenu
                         triggerId="settings-api"
-                        value={candidateApiId || selectedApiId}
+                        value={
+                          providerIsMetask
+                            ? candidateApiId || displayedApiId
+                            : displayedApiId
+                        }
                         options={apiOptions}
                         placeholder={t("account.choose_key")}
-                        ariaLabel={t("settings.metask_api")}
-                        helper={t("settings.api_menu_help")}
+                        ariaLabel={t("settings.api_key")}
+                        helper={t(
+                          providerIsMetask
+                            ? "settings.api_menu_help"
+                            : "settings.provider_api_menu_help",
+                        )}
                         actionLabel={t(
                           apiIsOnlyOption
                             ? "settings.view_selection"
-                            : selectedApiId
+                            : displayedApiId
                               ? "settings.change_selection"
                               : "settings.choose_selection",
                         )}
                         disabled={
                           disabled ||
-                          accountDisabled ||
+                          (providerIsMetask && accountDisabled) ||
                           !canChooseApi ||
-                          metaskApiKeys.length === 0
+                          apiOptions.length === 0
                         }
-                        busy={apiBusy}
+                        busy={providerIsMetask && apiBusy}
                         valueLayout="detailed"
                         leading={<Icon name="account" />}
                         triggerClassName="settings-control settings-control-detailed"
                         contentClassName="settings-selection-menu"
                         onValueChange={(value) => {
+                          if (!providerIsMetask) return;
                           const api = metaskApiKeys.find(
                             (candidate) => candidate.id === value,
                           );
@@ -1141,7 +1175,7 @@ export function SettingsPage({
                           onSelectApiKey(value);
                         }}
                       />
-                      {apiHasPendingChange && (
+                      {providerIsMetask && apiHasPendingChange && (
                         <span className="settings-pending-label">
                           <span aria-hidden="true" />
                           {t("settings.switch.pending_label")}
@@ -1152,14 +1186,16 @@ export function SettingsPage({
 
                   <div className="settings-field">
                     <span className="settings-field-step" aria-hidden="true">
-                      02
+                      03
                     </span>
                     <div className="settings-field-copy">
                       <label htmlFor="settings-model">
-                        {t("settings.metask_model")}
+                        {t("settings.default_model")}
                       </label>
                       <p>
-                        {modelCatalogLoading && (candidateApi || committedApi)
+                        {providerIsMetask &&
+                        modelCatalogLoading &&
+                        (candidateApi || committedApi)
                           ? t("settings.loading_models_for", {
                               api:
                                 candidateApi?.name ||
@@ -1169,36 +1205,48 @@ export function SettingsPage({
                           : t(
                               modelIsOnlyOption
                                 ? "settings.only_model_help"
-                                : "settings.metask_model_help",
+                                : "settings.default_model_help",
                             )}
                       </p>
                     </div>
                     <div className="settings-control-stack">
                       <SelectionMenu
                         triggerId="settings-model"
-                        value={candidateModelId || selectedModelId}
+                        value={
+                          providerIsMetask
+                            ? candidateModelId || displayedModelId
+                            : displayedModelId
+                        }
                         options={modelOptions}
                         placeholder={modelPlaceholder}
-                        ariaLabel={t("settings.metask_model")}
+                        ariaLabel={t("settings.default_model")}
                         helper={t("settings.model_menu_help")}
                         actionLabel={t(
                           modelIsOnlyOption
                             ? "settings.view_selection"
-                            : selectedModelId
+                            : displayedModelId
                               ? "settings.change_selection"
                               : "settings.choose_selection",
                         )}
                         disabled={
                           disabled ||
-                          accountDisabled ||
+                          (providerIsMetask && accountDisabled) ||
                           !canChooseModel ||
-                          metaskModels.length === 0
+                          modelOptions.length === 0
                         }
-                        busy={modelBusy}
+                        busy={providerIsMetask && modelBusy}
                         leading={<Icon name="model" />}
                         triggerClassName="settings-control"
                         contentClassName="settings-selection-menu"
                         onValueChange={(value) => {
+                          if (!providerIsMetask && selectedConnection) {
+                            onSelectModelConnection(
+                              selectedConnection.id,
+                              selectedConnection.connectionRevision,
+                              value,
+                            );
+                            return;
+                          }
                           const model = metaskModels.find(
                             (candidate) => candidate.id === value,
                           );
@@ -1210,7 +1258,7 @@ export function SettingsPage({
                           onSelectModel(value);
                         }}
                       />
-                      {modelHasPendingChange && (
+                      {providerIsMetask && modelHasPendingChange && (
                         <span className="settings-pending-label">
                           <span aria-hidden="true" />
                           {t("settings.switch.pending_label")}
@@ -1236,6 +1284,11 @@ export function SettingsPage({
                     </div>
                   )}
                 </div>
+
+                <p className="settings-binding-note">
+                  <Icon name="check" />
+                  {t("settings.existing_tasks_unchanged")}
+                </p>
 
                 {models.persistenceHealth === "recovery_required" && (
                   <ConfirmationNotice
