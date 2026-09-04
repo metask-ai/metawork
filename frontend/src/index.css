@@ -1139,46 +1139,6 @@ summary::-webkit-details-marker {
   font-size: var(--text-control);
 }
 
-.settings-secure-credential-handoff {
-  display: flex;
-  min-height: 58px;
-  padding: 10px 12px;
-  align-items: center;
-  gap: 11px;
-  border: 1px solid var(--settings-line);
-  border-radius: 11px;
-  color: var(--settings-brand-strong);
-  background: var(--settings-paper);
-}
-
-.settings-secure-credential-handoff > svg {
-  flex: 0 0 auto;
-  font-size: 17px;
-}
-
-.settings-secure-credential-handoff > span {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.settings-secure-credential-handoff strong,
-.settings-secure-credential-handoff small {
-  display: block;
-}
-
-.settings-secure-credential-handoff strong {
-  color: var(--settings-ink);
-  font-size: var(--text-control);
-  font-weight: 690;
-}
-
-.settings-secure-credential-handoff small {
-  color: var(--settings-muted);
-  font-size: var(--text-label);
-  line-height: 1.4;
-}
-
 .settings-model-connection-create-footer {
   display: flex;
   grid-column: 1 / -1;
@@ -1290,6 +1250,24 @@ summary::-webkit-details-marker {
   border: 1px solid var(--settings-line);
   border-radius: 11px;
   background: var(--settings-frost);
+}
+
+.settings-model-connection-credential-edit {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--settings-line);
+  border-radius: 11px;
+  background: var(--settings-frost);
+}
+
+.settings-model-connection-credential-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .settings-model-connection-edit-actions {
@@ -2509,11 +2487,16 @@ button.run-process-tool:hover {
   }
 
   .settings-model-connection-edit,
+  .settings-model-connection-credential-edit,
   .settings-model-connection-confirm-remove {
     grid-column: 1;
   }
 
   .settings-model-connection-edit {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-model-connection-credential-edit {
     grid-template-columns: 1fr;
   }
 
@@ -2523,6 +2506,7 @@ button.run-process-tool:hover {
   }
 
   .settings-model-connection-edit-actions,
+  .settings-model-connection-credential-actions,
   .settings-model-connection-confirm-remove {
     align-items: stretch;
     flex-direction: column;

@@ -158,29 +158,6 @@ pub const McpSecretSlot = union(enum) {
     oauth_client_secret,
 };
 
-/// Host-owned credential mutation. Its owner must complete secure capture,
-/// credential persistence, Models registry commit, and definite-failure
-/// rollback before returning. Bridge never receives either the secret or an
-/// intermediate credential slot that it could commit separately.
-pub const ModelConnectionCredentialOutcome = union(enum) {
-    submitted: models_contract.CommandResult,
-    cancelled,
-    unavailable,
-};
-pub const ModelConnectionCreateOutcome = ModelConnectionCredentialOutcome;
-
-pub const ModelConnectionHost = struct {
-    context: *anyopaque,
-    create_fn: *const fn (
-        *anyopaque,
-        models_contract.ModelConnectionSpec,
-    ) ModelConnectionCreateOutcome,
-    replace_credential_fn: *const fn (
-        *anyopaque,
-        models_contract.ModelConnectionSelectionCommand,
-    ) ModelConnectionCredentialOutcome,
-};
-
 /// Application-owned Models effects that cannot run inside Product Control.
 pub const ModelsHost = struct {
     context: *anyopaque,
@@ -245,7 +222,6 @@ pub const Dispatcher = struct {
     automation: AutomationAuthority,
     mcp_management_host: ?McpManagementHost = null,
     models_host: ?ModelsHost = null,
-    model_connection_host: ?ModelConnectionHost = null,
     bootstrap_window_id: native_sdk.platform.WindowId,
     delivery: product_delivery.Delivery,
     callbacks: callback_gate.State = .{},
@@ -297,15 +273,6 @@ pub const Dispatcher = struct {
         self.control = null;
         self.delivery.deinitOwnedBuffers();
         self.* = undefined;
-    }
-
-    /// Installs the Application-owned secure capture sequence only when the
-    /// complete Model Connection capability gate is available.
-    pub fn setModelConnectionHost(
-        self: *Dispatcher,
-        host: ?ModelConnectionHost,
-    ) void {
-        self.model_connection_host = host;
     }
 
     pub fn setModelsHost(self: *Dispatcher, host: ?ModelsHost) void {
@@ -1666,7 +1633,9 @@ pub const Dispatcher = struct {
         if (parsed.value.displayName.len == 0 or
             parsed.value.displayName.len > models_contract.Limits.display_name_bytes or
             parsed.value.normalizedBaseUrl.len == 0 or
-            parsed.value.normalizedBaseUrl.len > models_contract.Limits.base_url_bytes)
+            parsed.value.normalizedBaseUrl.len > models_contract.Limits.base_url_bytes or
+            parsed.value.apiKey.len == 0 or
+            parsed.value.apiKey.len > models_contract.Limits.credential_bytes)
             return error.InvalidBridgePayload;
         const spec: models_contract.ModelConnectionSpec = .{
             .display_name = parsed.value.displayName,
@@ -1675,19 +1644,11 @@ pub const Dispatcher = struct {
         };
         models_contract.validateModelConnectionSpec(spec) catch
             return error.InvalidBridgePayload;
-        const host = self.model_connection_host orelse
-            return encodeExecutionResult(
-                output,
-                .rejected(.capture_unavailable),
-            );
-        return encodeExecutionResult(output, switch (host.create_fn(
-            host.context,
-            spec,
-        )) {
-            .submitted => |result| result,
-            .cancelled => .rejected(.user_cancelled),
-            .unavailable => .rejected(.capture_unavailable),
-        });
+        const control = try self.requireProductControl();
+        return encodeExecutionResult(
+            output,
+            control.createModelConnectionWithCredential(parsed.value.apiKey, spec),
+        );
     }
 
     fn modelConnectionUpdate(
@@ -1739,28 +1700,25 @@ pub const Dispatcher = struct {
         defer callback.deinit();
         try self.requireManagementAuthority(invocation.source.window_id);
         var parsed = try handlers.parsePayload(
-            handlers.ModelConnectionSelection,
+            handlers.ModelConnectionCredentialReplace,
             invocation.request.payload,
         );
         defer parsed.deinit();
         if (parsed.value.sourceId.len == 0 or
-            parsed.value.sourceId.len > models_contract.Limits.instance_id_bytes)
+            parsed.value.sourceId.len > models_contract.Limits.instance_id_bytes or
+            parsed.value.apiKey.len == 0 or
+            parsed.value.apiKey.len > models_contract.Limits.credential_bytes)
             return error.InvalidBridgePayload;
-        const host = self.model_connection_host orelse
-            return encodeExecutionResult(output, .rejected(.capture_unavailable));
-        return encodeExecutionResult(output, switch (host.replace_credential_fn(
-            host.context,
-            .{
+        const control = try self.requireProductControl();
+        return encodeExecutionResult(
+            output,
+            control.replaceModelConnectionCredential(parsed.value.apiKey, .{
                 .source_id = parsed.value.sourceId,
                 .expected_connection_revision = try handlers.parseWireId(
                     parsed.value.expectedConnectionRevision,
                 ),
-            },
-        )) {
-            .submitted => |result| result,
-            .cancelled => .rejected(.user_cancelled),
-            .unavailable => .rejected(.capture_unavailable),
-        });
+            }),
+        );
     }
 
     fn modelConnectionRemove(

@@ -490,7 +490,8 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
   assert.equal(baseUrl.value, "");
   assert.equal(baseUrl.placeholder, "https://api.openai.com/v1");
   assert.equal(screen.queryByRole("textbox", { name: /model id/i }), null);
-  assert.ok(screen.getByText("Entered in a secure Host window"));
+  const apiKey = screen.getByLabelText("API key");
+  assert.equal(apiKey.type, "password");
 
   await user.click(screen.getByRole("combobox", { name: "Protocol" }));
   for (const name of [
@@ -510,15 +511,64 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
     "My Anthropic",
   );
   await user.type(baseUrl, "https://api.anthropic.com/");
-  await user.click(
-    screen.getByRole("button", { name: "Set API key and save" }),
-  );
+  await user.type(apiKey, "anthropic-secret");
+  await user.click(screen.getByRole("button", { name: "Save provider" }));
   assert.deepEqual(submitted, [
     {
       displayName: "My Anthropic",
       protocol: "anthropic_messages",
       normalizedBaseUrl: "https://api.anthropic.com/v1/messages",
+      apiKey: "anthropic-secret",
     },
+  ]);
+});
+
+test("Provider API key replacement starts empty and submits the exact user input", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const replacements = [];
+  renderSettings(readySettingsAccount, {
+    modelConnectionCapabilities: {
+      management: true,
+      secretCapture: true,
+      connectionTest: true,
+    },
+    models: {
+      ...readySettingsModels,
+      connections: [
+        {
+          id: "connection-1",
+          displayName: "Team OpenAI",
+          protocol: "openai_responses",
+          normalizedBaseUrl: "https://api.openai.com/v1/responses",
+          state: "configuring",
+          testStatus: "untested",
+          credentialStatus: "ready",
+          enabled: true,
+          models: [],
+          selectedModel: "",
+          connectionRevision: "7",
+          sourceGeneration: "3",
+          catalogGeneration: "5",
+        },
+      ],
+    },
+    onReplaceModelConnectionCredential(...input) {
+      replacements.push(input);
+      return Promise.resolve(false);
+    },
+  });
+
+  await user.click(screen.getByRole("link", { name: "Providers" }));
+  await user.click(screen.getByRole("button", { name: "Replace API key" }));
+  const apiKey = screen.getByLabelText("API key");
+  assert.equal(apiKey.type, "password");
+  assert.equal(apiKey.value, "");
+  assert.equal(apiKey.autocomplete, "off");
+
+  await user.type(apiKey, "  exact replacement secret  ");
+  await user.click(screen.getByRole("button", { name: "Save API key" }));
+  assert.deepEqual(replacements, [
+    ["connection-1", "7", "  exact replacement secret  "],
   ]);
 });
 

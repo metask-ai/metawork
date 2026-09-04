@@ -839,7 +839,7 @@ export const enUS = {
   "settings.providers_unavailable":
     "Provider management is unavailable in this build.",
   "settings.model_connection_capture_unavailable":
-    "Adding a provider or replacing an API key is unavailable until the Host provides secure secret input.",
+    "Adding a provider or replacing an API key is unavailable while the system credential store is unavailable.",
   "settings.model_connection_add": "Save provider",
   "settings.model_connection_adding": "Saving provider…",
   "settings.model_connection_name": "Provider name",
@@ -847,17 +847,16 @@ export const enUS = {
   "settings.model_connection_protocol": "Protocol",
   "settings.model_connection_endpoint": "Base URL",
   "settings.model_connection_model_id_placeholder": "gpt-5",
-  "settings.provider_secure_api_key_title": "Entered in a secure Host window",
-  "settings.provider_secure_api_key_help":
-    "MetaWork stores the key in the operating system credential store. It is never exposed to this page.",
+  "settings.provider_api_key_placeholder": "Enter API key",
   "settings.provider_models_configured_elsewhere":
-    "Add and test models from the Models page after this provider is saved.",
-  "settings.provider_set_key_and_save": "Set API key and save",
+    "The API key is saved in the operating system credential store. Configure models from the Models page after saving.",
+  "settings.provider_save": "Save provider",
+  "settings.provider_save_api_key": "Save API key",
   "settings.model_connection_route.protocol": "Protocol",
   "settings.model_connection_route.endpoint": "Base URL",
   "settings.model_connection_route.api_key": "API key",
   "settings.model_connection_edit_help":
-    "Changing the protocol or Base URL requires another connection test. The API key is not shown or changed here.",
+    "Changing the protocol or Base URL requires another connection test. The saved API key is never filled back in.",
   "settings.model_connection_replace_credential": "Replace API key",
   "settings.model_connection_remove_confirm":
     "Remove this provider and its stored credential? If it supplies the default model, new tasks will pause until you choose another. Existing tasks keep their current binding.",

@@ -769,7 +769,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.providers_empty": "还没有用户管理的 Provider。",
   "settings.providers_unavailable": "当前版本无法管理 Provider。",
   "settings.model_connection_capture_unavailable":
-    "Host 尚未提供安全的密钥输入能力，因此暂时不能添加 Provider 或替换 API Key。",
+    "系统凭据存储当前不可用，因此暂时不能添加 Provider 或替换 API Key。",
   "settings.model_connection_add": "保存 Provider",
   "settings.model_connection_adding": "正在保存 Provider…",
   "settings.model_connection_name": "Provider 名称",
@@ -777,17 +777,16 @@ export const zhCN: Record<MessageId, string> = {
   "settings.model_connection_protocol": "协议",
   "settings.model_connection_endpoint": "服务地址（Base URL）",
   "settings.model_connection_model_id_placeholder": "gpt-5",
-  "settings.provider_secure_api_key_title": "在安全的 Host 窗口中输入",
-  "settings.provider_secure_api_key_help":
-    "MetaWork 将密钥保存到操作系统凭据存储，不会向当前页面暴露密钥。",
+  "settings.provider_api_key_placeholder": "输入 API Key",
   "settings.provider_models_configured_elsewhere":
-    "保存 Provider 后，请在模型页面添加并测试模型。",
-  "settings.provider_set_key_and_save": "设置 API Key 并保存",
+    "API Key 将保存到操作系统凭据存储；模型请在保存后前往模型页面配置。",
+  "settings.provider_save": "保存 Provider",
+  "settings.provider_save_api_key": "保存 API Key",
   "settings.model_connection_route.protocol": "协议",
   "settings.model_connection_route.endpoint": "Base URL",
   "settings.model_connection_route.api_key": "API Key",
   "settings.model_connection_edit_help":
-    "修改协议或 Base URL 后需要重新测试连接；这里不会显示或修改 API Key。",
+    "修改协议或 Base URL 后需要重新测试连接；已保存的 API Key 不会回填。",
   "settings.model_connection_replace_credential": "替换 API Key",
   "settings.model_connection_remove_confirm":
     "删除这个 Provider 及其保存的凭据？如果它提供当前默认模型，选择其他模型前新任务将暂停；已有任务仍保留当前绑定。",

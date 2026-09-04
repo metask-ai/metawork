@@ -22,18 +22,6 @@ const native = path.join(
   "native.js",
 );
 const binary = path.join(root, "zig-out", "bin", "metawork.exe");
-const secureInputProbe = path.join(
-  root,
-  "scripts",
-  "probe-model-connection-secure-input-windows.ps1",
-);
-const powershell = path.join(
-  process.env.SystemRoot ?? "C:\\Windows",
-  "System32",
-  "WindowsPowerShell",
-  "v1.0",
-  "powershell.exe",
-);
 const commandTimeoutMs = 60_000;
 const runTimeoutMs = 60_000;
 const credential = "metawork-model-connection-readiness-key";
@@ -97,58 +85,15 @@ try {
       "signed-out profile admitted Task creation before a default source",
     );
 
-  const createResponse = invokeBridge("metawork.models.connections.create", {
-    displayName: "Readiness provider",
-    protocol: "openai_chat_completions",
-    normalizedBaseUrl: endpoint,
-  }).then(
-    (value) => ({ value, error: null }),
-    (error) => ({ value: null, error }),
+  assertAcceptedIfPresent(
+    await invokeBridge("metawork.models.connections.create", {
+      displayName: "Readiness provider",
+      protocol: "openai_chat_completions",
+      normalizedBaseUrl: endpoint,
+      apiKey: credential,
+    }),
+    "Model Connection create",
   );
-  const secureInputResponse = execFileAsync(
-    powershell,
-    [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      secureInputProbe,
-      "-ProcessId",
-      String(app.pid),
-      "-HoldMilliseconds",
-      "2500",
-    ],
-    {
-      env: {
-        ...process.env,
-        METAWORK_READINESS_CREDENTIAL: credential,
-      },
-      timeout: commandTimeoutMs,
-      maxBuffer: 1024 * 1024,
-    },
-  ).then(
-    (value) => ({ value, error: null }),
-    (error) => ({ value: null, error }),
-  );
-  const [createOutcome, secureInputOutcome] = await Promise.all([
-    createResponse,
-    secureInputResponse,
-  ]);
-  if (createOutcome.error) throw createOutcome.error;
-  if (secureInputOutcome.error) throw secureInputOutcome.error;
-  const secureInputEvidence = JSON.parse(
-    secureInputOutcome.value.stdout.trim(),
-  );
-  if (
-    secureInputEvidence.password !== true ||
-    secureInputEvidence.valueReadable !== false ||
-    secureInputEvidence.submitted !== true ||
-    secureInputEvidence.holdMilliseconds < 2500
-  )
-    throw new Error(
-      `secure input evidence was incomplete: ${JSON.stringify(secureInputEvidence)}`,
-    );
-  assertAcceptedIfPresent(createOutcome.value, "Model Connection create");
 
   const created = await poll(
     async () => {

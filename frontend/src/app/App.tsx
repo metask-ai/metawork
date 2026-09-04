@@ -3084,9 +3084,17 @@ export default function App() {
                 }),
               )
             }
-            onReplaceModelConnectionCredential={(connectionId, revision) =>
+            onReplaceModelConnectionCredential={(
+              connectionId,
+              revision,
+              apiKey,
+            ) =>
               runExecutionCommand(() =>
-                client.replaceModelConnectionCredential(connectionId, revision),
+                client.replaceModelConnectionCredential(
+                  connectionId,
+                  revision,
+                  apiKey,
+                ),
               )
             }
             onAddCustomModel={(

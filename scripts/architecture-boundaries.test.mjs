@@ -292,10 +292,12 @@ test("Product Models owns model connections independently of Account", () => {
   const accountPorts = read("src/product/account/ports.zig");
   const accountBinding = read("src/app/account_platform_binding.zig");
   const modelsBinding = read("src/app/models_platform_binding.zig");
-  const modelConnectionHost = read("src/app/model_connection_host.zig");
   const modelsCoordinator = read("src/app/models_coordinator.zig");
   const control = read("src/product/control/runtime.zig");
   const app = read("src/app.zig");
+  const bridgeDispatcher = read("src/bridge/dispatcher.zig");
+  const bridgeClient = read("frontend/src/bridge/client.ts");
+  const settings = read("frontend/src/features/settings/SettingsPage.tsx");
   const windowsBringup = read("scripts/run-windows-bringup.mjs");
   const identity = read("src/product_identity.zig");
 
@@ -420,27 +422,23 @@ test("Product Models owns model connections independently of Account", () => {
   );
   assert.match(modelsBinding, /product_models_ports/);
   assert.match(modelsBinding, /modelConnectionCredentialService/);
-  assert.match(modelConnectionHost, /std\.crypto\.secureZero/);
-  assert.match(modelConnectionHost, /platform\.supportsSecureInput\(\)/);
-  assert.match(modelConnectionHost, /createWithCapturedCredential/);
-  assert.doesNotMatch(
-    modelConnectionHost,
-    /builtin\.os|\.windows|\.macos/,
-    "Model Connection availability must follow the injected secure-input capability instead of a platform-name allowlist",
+  assert.doesNotMatch(app, /model_connection_host|setModelConnectionHost/);
+  assert.match(
+    bridgeDispatcher,
+    /control\.createModelConnectionWithCredential\(parsed\.value\.apiKey, spec\)/,
   );
-  assert.doesNotMatch(
-    modelConnectionHost,
-    /frontend|Renderer|ModelConnectionCreate\s*=/,
+  assert.match(
+    bridgeDispatcher,
+    /control\.replaceModelConnectionCredential\(parsed\.value\.apiKey/,
   );
-  assert.match(app, /setModelConnectionHost/);
+  assert.match(bridgeClient, /apiKey: string/);
+  assert.match(settings, /type="password"/);
+  assert.doesNotMatch(settings, /settings-secure-credential-handoff/);
   assert.match(
     app,
     /\.management = model_connection_capability_available,[\s\S]*\.secret_capture = model_connection_capability_available,[\s\S]*\.connection_test = model_connection_capability_available/,
   );
-  assert.doesNotMatch(
-    read("frontend/src/features/settings/SettingsPage.tsx"),
-    /MODEL_CONNECTION_SETTINGS_ENABLED/,
-  );
+  assert.doesNotMatch(settings, /MODEL_CONNECTION_SETTINGS_ENABLED/);
   assert.match(windowsBringup, /test-model-connection-readiness-windows\.mjs/);
   assert.match(identity, /pub fn modelConnectionCredentialService/);
   const selectDefault = control.indexOf("pub fn selectModelsDefault(");

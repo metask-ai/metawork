@@ -9,8 +9,8 @@ const product_identity = @import("metawork_product_identity");
 const model_connection_service = product_identity.modelConnectionCredentialService();
 
 /// Application-owned platform adapter for Product Models credentials.
-/// It owns no registry state and never exposes credential bytes to Bridge or
-/// Renderer.
+/// It owns no registry state. User-entered Model Connection bytes arrive only
+/// through the dedicated create/replace command and are never projected back.
 pub const Adapter = struct {
     services: native_sdk.platform.PlatformServices,
     io: std.Io,

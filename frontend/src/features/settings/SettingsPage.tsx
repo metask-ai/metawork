@@ -28,23 +28,31 @@ type ModelConnectionDraft = {
   displayName: string;
   protocol: Protocol;
   baseUrl: string;
+  apiKey: string;
 };
 type ModelConnectionSubmission = {
   displayName: string;
   protocol: Protocol;
   normalizedBaseUrl: string;
+  apiKey: string;
 };
-type ModelConnectionEditDraft = ModelConnectionDraft & {
+type ModelConnectionEditDraft = Omit<ModelConnectionDraft, "apiKey"> & {
   connectionId: string;
   expectedConnectionRevision: string;
 };
-type ModelConnectionEditSubmission = ModelConnectionSubmission & {
+type ModelConnectionEditSubmission = Omit<
+  ModelConnectionSubmission,
+  "apiKey"
+> & {
   connectionId: string;
   expectedConnectionRevision: string;
 };
 type ModelConnectionRemoval = {
   connectionId: string;
   expectedConnectionRevision: string;
+};
+type ModelConnectionCredentialEdit = ModelConnectionRemoval & {
+  apiKey: string;
 };
 
 const modelConnectionBaseUrlExamples: Record<Protocol, string> = {
@@ -93,6 +101,7 @@ function newModelConnectionDraft(): ModelConnectionDraft {
     displayName: "",
     protocol: "openai_chat_completions",
     baseUrl: "",
+    apiKey: "",
   };
 }
 
@@ -201,6 +210,7 @@ export function SettingsPage({
   onReplaceModelConnectionCredential: (
     connectionId: string,
     expectedConnectionRevision: string,
+    apiKey: string,
   ) => Promise<boolean>;
   onAddCustomModel: (
     connectionId: string,
@@ -255,6 +265,8 @@ export function SettingsPage({
     useState<ModelConnectionEditDraft | null>(null);
   const [modelConnectionRemoval, setModelConnectionRemoval] =
     useState<ModelConnectionRemoval | null>(null);
+  const [modelConnectionCredentialEdit, setModelConnectionCredentialEdit] =
+    useState<ModelConnectionCredentialEdit | null>(null);
   const [mutatingModelConnection, setMutatingModelConnection] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
@@ -622,6 +634,7 @@ export function SettingsPage({
     if (activeSection === "providers") return;
     setProvidersPage("list");
     setModelConnectionDraft(null);
+    setModelConnectionCredentialEdit(null);
   }, [activeSection]);
 
   useEffect(() => {
@@ -635,6 +648,7 @@ export function SettingsPage({
   useEffect(() => {
     if (modelConnectionCapabilities.secretCapture) return;
     setModelConnectionDraft(null);
+    setModelConnectionCredentialEdit(null);
     setCreatingModelConnection(false);
   }, [modelConnectionCapabilities.secretCapture]);
 
@@ -650,6 +664,16 @@ export function SettingsPage({
         : null;
     });
     setModelConnectionRemoval((current) => {
+      if (!current) return null;
+      const connection = models.connections.find(
+        (candidate) => candidate.id === current.connectionId,
+      );
+      return connection?.connectionRevision ===
+        current.expectedConnectionRevision
+        ? current
+        : null;
+    });
+    setModelConnectionCredentialEdit((current) => {
       if (!current) return null;
       const connection = models.connections.find(
         (candidate) => candidate.id === current.connectionId,
@@ -696,7 +720,7 @@ export function SettingsPage({
     if (!modelConnectionDraft || creatingModelConnection) return;
     const baseUrl = modelConnectionDraft.baseUrl.trim();
     const displayName = modelConnectionDraft.displayName.trim();
-    if (!displayName || !baseUrl) return;
+    if (!displayName || !baseUrl || !modelConnectionDraft.apiKey) return;
     const input = {
       displayName,
       protocol: modelConnectionDraft.protocol,
@@ -704,6 +728,7 @@ export function SettingsPage({
         modelConnectionDraft.protocol,
         baseUrl,
       ),
+      apiKey: modelConnectionDraft.apiKey,
     };
     setCreatingModelConnection(true);
     try {
@@ -713,6 +738,25 @@ export function SettingsPage({
       }
     } finally {
       setCreatingModelConnection(false);
+    }
+  }
+
+  async function replaceModelConnectionCredential() {
+    if (!modelConnectionCredentialEdit || mutatingModelConnection) return;
+    if (!modelConnectionCredentialEdit.apiKey) return;
+    setMutatingModelConnection(true);
+    try {
+      if (
+        await onReplaceModelConnectionCredential(
+          modelConnectionCredentialEdit.connectionId,
+          modelConnectionCredentialEdit.expectedConnectionRevision,
+          modelConnectionCredentialEdit.apiKey,
+        )
+      ) {
+        setModelConnectionCredentialEdit(null);
+      }
+    } finally {
+      setMutatingModelConnection(false);
     }
   }
 
@@ -1674,20 +1718,32 @@ export function SettingsPage({
                             }
                           />
                         </label>
-                        <div className="settings-model-connection-create-field settings-model-connection-create-field-wide">
+                        <label className="settings-model-connection-create-field settings-model-connection-create-field-wide">
                           <span>{t("settings.api_key")}</span>
-                          <div className="settings-secure-credential-handoff">
-                            <Icon name="shield" />
-                            <span>
-                              <strong>
-                                {t("settings.provider_secure_api_key_title")}
-                              </strong>
-                              <small>
-                                {t("settings.provider_secure_api_key_help")}
-                              </small>
-                            </span>
-                          </div>
-                        </div>
+                          <input
+                            className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
+                            type="password"
+                            autoComplete="off"
+                            spellCheck={false}
+                            maxLength={4096}
+                            value={modelConnectionDraft.apiKey}
+                            placeholder={t(
+                              "settings.provider_api_key_placeholder",
+                            )}
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              creatingModelConnection
+                            }
+                            onChange={(event) =>
+                              setModelConnectionDraft((current) =>
+                                current
+                                  ? { ...current, apiKey: event.target.value }
+                                  : current,
+                              )
+                            }
+                          />
+                        </label>
                         <div className="settings-model-connection-create-footer">
                           <p>
                             {t("settings.provider_models_configured_elsewhere")}
@@ -1700,12 +1756,13 @@ export function SettingsPage({
                               executionDisabled ||
                               creatingModelConnection ||
                               !modelConnectionDraft.displayName.trim() ||
-                              !modelConnectionDraft.baseUrl.trim()
+                              !modelConnectionDraft.baseUrl.trim() ||
+                              !modelConnectionDraft.apiKey
                             }
                           >
                             {creatingModelConnection
                               ? t("settings.model_connection_adding")
-                              : t("settings.provider_set_key_and_save")}
+                              : t("settings.provider_save")}
                           </Button>
                         </div>
                       </form>
@@ -1767,12 +1824,16 @@ export function SettingsPage({
                                     mutatingModelConnection ||
                                     !modelConnectionCapabilities.secretCapture
                                   }
-                                  onClick={() =>
-                                    void onReplaceModelConnectionCredential(
-                                      connection.id,
-                                      connection.connectionRevision,
-                                    )
-                                  }
+                                  onClick={() => {
+                                    setModelConnectionEdit(null);
+                                    setModelConnectionRemoval(null);
+                                    setModelConnectionCredentialEdit({
+                                      connectionId: connection.id,
+                                      expectedConnectionRevision:
+                                        connection.connectionRevision,
+                                      apiKey: "",
+                                    });
+                                  }}
                                 >
                                   {t(
                                     "settings.model_connection_replace_credential",
@@ -1810,6 +1871,7 @@ export function SettingsPage({
                                     mutatingModelConnection
                                   }
                                   onClick={() => {
+                                    setModelConnectionCredentialEdit(null);
                                     setModelConnectionRemoval(null);
                                     setModelConnectionEdit({
                                       connectionId: connection.id,
@@ -1835,6 +1897,7 @@ export function SettingsPage({
                                     mutatingModelConnection
                                   }
                                   onClick={() => {
+                                    setModelConnectionCredentialEdit(null);
                                     setModelConnectionEdit(null);
                                     setModelConnectionRemoval({
                                       connectionId: connection.id,
@@ -1846,6 +1909,76 @@ export function SettingsPage({
                                   {t("common.remove")}
                                 </button>
                               </div>
+                              {modelConnectionCredentialEdit?.connectionId ===
+                                connection.id && (
+                                <form
+                                  className="settings-model-connection-credential-edit"
+                                  onSubmit={(event) => {
+                                    event.preventDefault();
+                                    void replaceModelConnectionCredential();
+                                  }}
+                                >
+                                  <label className="settings-model-connection-create-field">
+                                    <span>{t("settings.api_key")}</span>
+                                    <input
+                                      className="settings-model-connection-input settings-model-connection-input-mono focus-ring"
+                                      type="password"
+                                      autoComplete="off"
+                                      spellCheck={false}
+                                      maxLength={4096}
+                                      value={
+                                        modelConnectionCredentialEdit.apiKey
+                                      }
+                                      placeholder={t(
+                                        "settings.provider_api_key_placeholder",
+                                      )}
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingModelConnection
+                                      }
+                                      onChange={(event) =>
+                                        setModelConnectionCredentialEdit(
+                                          (current) =>
+                                            current
+                                              ? {
+                                                  ...current,
+                                                  apiKey: event.target.value,
+                                                }
+                                              : current,
+                                        )
+                                      }
+                                    />
+                                  </label>
+                                  <div className="settings-model-connection-credential-actions">
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      disabled={mutatingModelConnection}
+                                      onClick={() =>
+                                        setModelConnectionCredentialEdit(null)
+                                      }
+                                    >
+                                      {t("common.cancel")}
+                                    </Button>
+                                    <Button
+                                      type="submit"
+                                      size="sm"
+                                      disabled={
+                                        disabled ||
+                                        executionDisabled ||
+                                        mutatingModelConnection ||
+                                        !modelConnectionCredentialEdit.apiKey
+                                      }
+                                    >
+                                      {mutatingModelConnection
+                                        ? t("common.saving")
+                                        : t("settings.provider_save_api_key")}
+                                    </Button>
+                                  </div>
+                                </form>
+                              )}
                               {modelConnectionEdit?.connectionId ===
                                 connection.id && (
                                 <form

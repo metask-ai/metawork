@@ -1029,7 +1029,7 @@ Providers（capability-gated）
 
 当前设置树包含独立 `Permissions` 分区，但只提供“新 Task 默认策略”；它不管理当前 Workspace、已有 Task 或 AgentCore 内部 enum。该分区只列 Host capability projection 支持的真实选项，不显示未实现的 `Standard`、假开关或“即将推出”。已有 Task 的 effective profile 只在 Task 自身 surface 展示；当前没有 idle mutation，因此保持只读。
 
-`Providers` 只有在 management、Host-owned secure capture、protocol connection test 和已开放 protocol admission 共同可用时才整体进入设置树；它与 `Models` 平级，不是 Models 的下一级。不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
+`Providers` 只有在 management、API Key 写入系统 credential storage、protocol connection test 和已开放 protocol admission 共同可用时才整体进入设置树；它与 `Models` 平级，不是 Models 的下一级。不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 
 Workspace 生命周期不属于 Settings surface。New task 路径控件负责选择、添加和重新授权 Manual Workspace；Automatic Workspace 只随 owning Task 导航。Renderer 只在当前 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
 
@@ -1076,15 +1076,15 @@ Account与 Models状态在设置中分别投影：Account只按 `checking | sign
 
 > 该入口按完整 Host capability gate 开放；支持的桌面平台只要三项运行能力同时可用即可导航。
 
-- Renderer 同时校验 `modelConnectionManagement`、`modelConnectionSecretCapture` 与 `modelConnectionTest` 三个 Host capability；只有三者均为 true 才显示整个设置入口。Host 只发布全 true 或全 false，并从实际 management、原生 secure capture 与连接测试能力生成该组事实，不读取平台名决定产品可见性；不得提供局部连接页、DOM 密码框或“稍后补齐 credential”的半成品路径；
+- Renderer 同时校验 `modelConnectionManagement`、`modelConnectionSecretCapture` 与 `modelConnectionTest` 三个 Host capability；只有三者均为 true 才显示整个设置入口。revision 1 保留 `modelConnectionSecretCapture` 字段名，但其 true 表示 create/replace API Key typed command 可用且 Models credential vault 可写，不再表示弹出原生输入窗。Host 只发布全 true 或全 false，并从实际 management、credential storage 与连接测试能力生成该组事实，不读取平台名决定产品可见性；不得提供“稍后补齐 credential”的半成品路径；
 - 页面显示 Provider 名称、protocol、脱敏服务地址、credential 状态、模型目录状态和可用动作；不显示完整 API Key，不回填秘密字段，也不显示或修改 global default；
-- `Add Provider` 打开独立全页，不使用列表内展开表单，也不成为 Models 的子页面。页面只填写 Provider 名称、protocol 与 API Base URL；API Key 通过 Host-owned secure capture 单独采集，不作为普通 Bridge 字段回传，模型不在该页配置。协议选择精确开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native；选择协议只改变 Base URL 示例和后续 endpoint 生成规则，不得自动写入或覆盖输入框；
+- `Add Provider` 打开独立全页，不使用列表内展开表单，也不成为 Models 的子页面。页面在同一个连续表单中填写 Provider 名称、protocol、API Base URL 与 API Key；API Key 使用可粘贴的 password input，不提供显示已保存值的能力，也不进入浏览器自动填充。保存时四项一起提交，模型不在该页配置。协议选择精确开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native；选择协议只改变 Base URL 示例和后续 endpoint 生成规则，不得自动写入或覆盖输入框；
 - Renderer 对 OpenAI Responses、OpenAI Chat Completions 与 Anthropic Messages 分别把用户填写的 Base URL确定性映射为 `{base_url}/responses`、`{base_url}/chat/completions` 与 `{base_url}/v1/messages`，Gemini Native 保持 Base URL并由既有消费者追加模型路径。Host 在提交时继续独立规范化 endpoint并校验 scheme/host/path/长度和控制字符；Renderer 不能把 arbitrary URL 或 query credential 直接交给 Run；
 - `Test connection` 只通过 Host/AgentCore 发起有界流式请求，不创建 Task、历史 Run 或持久 Conversation；页面分别显示 generation readiness 和最新测试状态。已成为默认连接后仍可重测，失败只显示“最近测试失败”，不能把正在使用的 ready generation、默认选择或新 Task admission 静默撤销；
 - 第一版不提供自动模型发现；Provider 保存后由 Models 页明确填写 bounded model ID并执行测试，连接没有 ready 模型时不能成为默认连接；
 - global default 只在 Models 页作为一笔 Models-owned、source-qualified desired transaction提交；Providers 页不得因当前 Provider 是默认来源而禁用编辑或删除。Product Control随后独立 reconcile active binding，处理中只关闭相关新 Task admission，不回滚已提交 desired selection；
 - Metask provider catalog与当前 custom default同时投影；custom default生效时模型设置仍可查看 Metask API/模型，并通过显式“设为新任务默认”提交同一个 global default command。Account只决定 Metask provider当前能否授权，不参与默认来源选择；
-- 编辑连接使用同一 typed 表单，秘密永不回填；secure capture 不可用时整个 Model Connection 设置入口隐藏，不提供局部编辑路径。endpoint、protocol 或 credential authority 变化推进 source generation并使该连接全部模型回到待验证状态；普通 display/metadata 编辑只推进对应 connection revision/catalog generation。Provider 可以在模型集合为空时持久存在于 configuring 状态；添加或删除模型继续使用 Models-owned custom model mutation，不把模型伪装成 Provider 身份的一部分；
+- 编辑连接使用同一 typed 表单，秘密永不回填；替换 API Key 时展开一个新的空 password input，只有用户显式保存才提交替换。credential storage 不可用时整个 Model Connection 设置入口隐藏，不提供局部编辑路径。endpoint、protocol 或 credential authority 变化推进 source generation并使该连接全部模型回到待验证状态；普通 display/metadata 编辑只推进对应 connection revision/catalog generation。Provider 可以在模型集合为空时持久存在于 configuring 状态；添加或删除模型继续使用 Models-owned custom model mutation，不把模型伪装成 Provider 身份的一部分；
 - Models按 exact connection identity与 expected connection revision校验编辑/删除，不查询 live Session、Run、job或 worker，也不以 consumer usage拒绝 mutation。若 mutation使当前 desired default不可解析，Product Control独立关闭新 admission并进入 reconciliation；既有 Task/Run保持自己的 owned binding，不静默改绑，历史仍保留；
 - Providers 页只管理 Provider 本身、credential 与连接测试，不提供默认模型、Workspace、权限策略、Task 历史或 AgentCore 内部状态。
 
