@@ -194,7 +194,6 @@ const modelsErrorCodes = [
   "none",
   "authorization_unavailable",
   "persistence_unavailable",
-  "migration_required",
   "catalog_unavailable",
   "catalog_invalid",
   "catalog_too_large",
@@ -1377,12 +1376,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
     persistenceHealth: enumValue(
       item.persistenceHealth,
       `${path}.persistenceHealth`,
-      [
-        "ready",
-        "migration_required",
-        "recovery_required",
-        "unavailable",
-      ] as const,
+      ["ready", "recovery_required", "unavailable"] as const,
     ),
     providers,
     metaskSelection,

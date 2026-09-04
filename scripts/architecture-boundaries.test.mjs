@@ -336,9 +336,9 @@ test("Product Models owns model connections independently of Account", () => {
     /\bexecution_generation\b|resolve(?:Default|Probe)Execution|prepareExecution/,
   );
   assert.match(modelsRegistry, /store_file_name = "models\.json"/);
-  assert.match(
+  assert.doesNotMatch(
     modelsRegistry,
-    /legacy_connection_store_file_name = "model-connections\.json"/,
+    /legacy_(?:connection|preference)_store_file_name|decodeLegacy|migrateLegacyStores|archiveLegacy/,
   );
   assert.doesNotMatch(accountRuntime, /ModelConnection|model_connections/);
   assert.doesNotMatch(

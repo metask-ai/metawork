@@ -717,6 +717,16 @@ export const zhCN: Record<MessageId, string> = {
   "settings.models_error": "模型配置需要处理",
   "settings.models_error_help":
     "请刷新 Metask 模型目录或检查已保存的模型配置。",
+  "settings.models_reset_message": "模型配置无法读取",
+  "settings.models_reset_detail":
+    "重置会清除模型配置和自定义连接，但不会删除账户、Task、Workspace 或对话。",
+  "settings.models_reset_action": "重置模型配置",
+  "settings.models_reset_dialog_title": "重置模型配置？",
+  "settings.models_reset_dialog_body":
+    "这会清除当前模型配置和自定义连接。之后需要重新选择 Metask API Key 和模型；账户、Task、Workspace 与对话会保留。",
+  "settings.models_reset_confirm": "重置并继续",
+  "settings.models_reset_pending": "正在重置…",
+  "settings.models_reset_failed": "模型配置重置失败，请重试。",
   "permission.profile.approval_required": "请求批准",
   "permission.profile.approval_required.help":
     "常规工作区编辑自动执行；当前策略未覆盖的操作会先征求你的决定。",
@@ -735,7 +745,8 @@ export const zhCN: Record<MessageId, string> = {
   "permission.default_updated": "已更新权限默认策略。",
   "permission.default_update_failed": "MetaWork 无法更新权限默认策略。",
   "settings.execution_defaults": "执行默认配置",
-  "settings.use_metask_default": "新任务改用 Metask",
+  "settings.default_selection_missing": "未设置可执行的默认模型",
+  "settings.use_metask_default": "设为新任务默认",
   "settings.model_connections": "模型连接",
   "settings.model_connections_help":
     "接入你自己管理的模型服务。模型连接独立于 Metask 登录，并且只影响新建任务。",

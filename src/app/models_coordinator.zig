@@ -458,6 +458,24 @@ pub const Coordinator = struct {
         return self.startCatalogJob(&lease, null);
     }
 
+    /// Resets Product-owned Models state through the snapshot CAS boundary,
+    /// then lets the normal authorization change path repopulate Metask
+    /// catalog data when an account is available. Acceptance only confirms
+    /// the durable reset; catalog readiness is observed asynchronously.
+    pub fn resetModelsStore(
+        self: *Coordinator,
+        expected_revision: u64,
+    ) models_contract.CommandResult {
+        self.assertMainThread();
+        if (self.catalog_job != null)
+            return .rejected(.operation_in_progress);
+        const result = self.management.resetModelStore(expected_revision);
+        if (!result.accepted) return result;
+        self.observed_authorization_generation = 0;
+        self.authorizationChanged();
+        return result;
+    }
+
     pub fn selectMetaskApiKey(
         self: *Coordinator,
         command: models_contract.SelectMetaskApiKeyCommand,
@@ -600,7 +618,7 @@ fn managementError(error_code: models_contract.ModelsError) models_contract.Mana
     return switch (error_code) {
         .none => unreachable,
         .authorization_unavailable => .authorization_unavailable,
-        .persistence_unavailable, .migration_required => .persistence_unavailable,
+        .persistence_unavailable => .persistence_unavailable,
         .operation_in_progress => .operation_in_progress,
         .local_resource_exhausted => .local_resource_exhausted,
         .catalog_unavailable,

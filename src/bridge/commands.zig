@@ -48,6 +48,7 @@ pub const account_begin_login = "metawork.account.beginLogin";
 pub const account_cancel_operation = "metawork.account.cancelOperation";
 pub const account_retry_refresh = "metawork.account.retryRefresh";
 pub const models_refresh_catalog = "metawork.models.refreshCatalog";
+pub const models_reset_store = "metawork.models.resetStore";
 pub const models_select_metask_api_key = "metawork.models.selectMetaskApiKey";
 pub const models_configure_metask_selection = "metawork.models.configureMetaskSelection";
 pub const models_select_default = "metawork.models.selectDefault";
@@ -127,6 +128,7 @@ pub const product = [_][]const u8{
     account_cancel_operation,
     account_retry_refresh,
     models_refresh_catalog,
+    models_reset_store,
     models_select_metask_api_key,
     models_configure_metask_selection,
     models_select_default,

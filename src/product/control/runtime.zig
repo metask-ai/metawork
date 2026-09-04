@@ -1984,6 +1984,28 @@ pub const Runtime = struct {
         self.model_connections.stop();
     }
 
+    /// Hard-resets the Models canonical store after an explicit user
+    /// confirmation. The snapshot revision is the Product CAS boundary;
+    /// Models itself owns the canonical file and credential scrub.
+    pub fn resetModelsStore(
+        self: *Runtime,
+        expected_revision: u64,
+    ) models_contract.CommandResult {
+        if (self.shutting_down)
+            return .rejected(.operation_in_progress);
+        if (expected_revision != self.revision)
+            return .rejected(.generation_mismatch);
+        if (self.executionReplacementPending())
+            return .rejected(.operation_in_progress);
+        if (self.modelsView().persistence_health != .recovery_required)
+            return .rejected(.persistence_unavailable);
+        const result = self.model_connections.resetStore();
+        if (!result.accepted) return result;
+        self.reconcileModelsDefaultNoFail(false, false);
+        self.finishExecutionCommitNoFail();
+        return result;
+    }
+
     pub fn selectModelsDefault(
         self: *Runtime,
         command: models_contract.SelectDefaultCommand,
@@ -6820,6 +6842,7 @@ pub const Runtime = struct {
             .start_model_connections_fn = controlStartModelConnections,
             .start_model_connections_unavailable_fn = controlStartModelConnectionsUnavailable,
             .stop_model_connections_fn = controlStopModelConnections,
+            .reset_model_store_fn = controlResetModelStore,
             .create_model_connection_fn = controlCreateModelConnection,
             .replace_model_connection_credential_fn = controlReplaceModelConnectionCredential,
             .submit_model_connection_fn = controlSubmitModelConnection,
@@ -7078,6 +7101,9 @@ fn controlStartModelConnectionsUnavailable(context: *anyopaque) void {
 }
 fn controlStopModelConnections(context: *anyopaque) void {
     controlOwner(context).stopModelConnections();
+}
+fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
+    return controlOwner(context).resetModelsStore(expected_revision);
 }
 fn controlCreateModelConnection(context: *anyopaque, secret: []const u8, spec: models_contract.ModelConnectionSpec, model: models_contract.CustomModelInput) models_contract.CommandResult {
     return controlOwner(context).createModelConnectionWithCredential(secret, spec, model);
@@ -11029,6 +11055,108 @@ test "Account identity and Models execution publish through separate projections
     try std.testing.expectEqual(models_contract.CatalogState.ready, models.providers[0].catalog_state);
     try std.testing.expectEqualStrings("fixture-model", models.metask_selection.?.model_id);
     try std.testing.expect(control.newTaskAdmissionView().available);
+}
+
+test "explicit Metask default activation restores admission from an empty global default" {
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        testLimits(),
+        .{},
+    );
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestModelConnectionVault = .{};
+    try control.startModelConnections(
+        directory_storage[0..directory_len],
+        vault.port(),
+    );
+    defer control.stopModelConnections();
+    try TestSupport.installMetaskExecution(&control, 1);
+
+    try std.testing.expect(control.model_connections.clearDefault().accepted);
+    control.reconcileModelsDefaultNoFail(false, false);
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(control.modelsView().default_selection == null);
+    try std.testing.expect(!control.newTaskAdmissionView().available);
+
+    const view = control.modelsView();
+    const provider = view.providers[0];
+    const selection = view.metask_selection orelse return error.TestUnexpectedResult;
+    try std.testing.expect(control.selectModelsDefault(.{
+        .selection = selection,
+        .expected_selection_revision = view.selection_revision,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    }).accepted);
+    try std.testing.expect(control.modelsView().default_selection != null);
+    try std.testing.expect(control.newTaskAdmissionView().available);
+    try std.testing.expect(control.newTaskAdmissionView().active_generation != 0);
+}
+
+test "Product Control reset clears Models admission without touching task state" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestModelConnectionVault = .{};
+    // `testRuntime` installs a transient Models catalog to seed the live
+    // Task binding. Stop that owner before starting the persistence-backed
+    // Models instance; the Task keeps its own execution copy.
+    control.stopModelConnections();
+    try control.startModelConnections(directory_storage[0..directory_len], vault.port());
+    defer control.stopModelConnections();
+    const selection = try createReadyTestModelConnection(&control);
+    const connection = control.modelsView().model_connections[0];
+    try std.testing.expect(control.selectModelsDefault(.{
+        .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+        .expected_selection_revision = control.modelsView().selection_revision,
+        .expected_source_generation = connection.source_generation,
+        .expected_catalog_generation = connection.catalog_generation,
+    }).accepted);
+    try std.testing.expect(control.canCreateTask());
+    const task_route = control.task_runtime.tasks[0].?.runtime.routeId();
+    const task_execution = control.task_runtime.tasks[0].?.runtime.executionConst().?;
+    const task_model = control.task_runtime.tasks[0].?.durable.execution_model;
+    const task_run_id = control.task_runtime.tasks[0].?.durable.runs[0].?.id;
+    const revision = control.currentRevision();
+    try std.testing.expectEqual(
+        models_contract.ManagementError.generation_mismatch,
+        control.resetModelsStore(revision - 1).error_code.?,
+    );
+    try std.testing.expectEqual(
+        models_contract.ManagementError.persistence_unavailable,
+        control.resetModelsStore(revision).error_code.?,
+    );
+    try std.testing.expect(vault.present);
+    try std.testing.expect(control.canCreateTask());
+
+    control.model_connections.store_healthy = false;
+    try std.testing.expectEqual(
+        models_contract.PersistenceHealth.recovery_required,
+        control.modelsView().persistence_health,
+    );
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const recovery_snapshot = try control.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(
+        std.mem.indexOf(u8, recovery_snapshot, "\"persistenceHealth\":\"recovery_required\"") != null,
+    );
+    try std.testing.expect(control.resetModelsStore(revision).accepted);
+    try std.testing.expectEqual(@as(usize, 0), control.modelsView().model_connections.len);
+    try std.testing.expect(control.modelsView().default_selection == null);
+    try std.testing.expect(!control.newTaskAdmissionView().available);
+    try std.testing.expect(!vault.present);
+    try std.testing.expectEqual(task_route, control.task_runtime.tasks[0].?.runtime.routeId());
+    try std.testing.expectEqual(task_execution, control.task_runtime.tasks[0].?.runtime.executionConst().?);
+    try std.testing.expectEqualStrings(task_model, control.task_runtime.tasks[0].?.durable.execution_model);
+    try std.testing.expectEqual(task_run_id, control.task_runtime.tasks[0].?.durable.runs[0].?.id);
 }
 
 test "identity replacement does not disturb live Task runtime references" {

@@ -10,8 +10,6 @@ const contract = @import("metawork_product_models_contract");
 
 pub const max_store_bytes: usize = 64 * 1024;
 pub const store_file_name = "models.json";
-pub const legacy_connection_store_file_name = "model-connections.json";
-pub const legacy_preference_store_file_name = "preferences.json";
 pub const max_pending_credential_deletions: usize =
     contract.Limits.model_connection_entries * 4;
 
@@ -108,9 +106,6 @@ pub const Registry = struct {
     default_source_id: []u8 = &.{},
     default_model_id: []u8 = &.{},
     selection_revision: u64 = 0,
-    preference_recovery_required: bool = false,
-    connections_recovery_required: bool = false,
-    default_migration_required: bool = false,
     view_storage: std.ArrayList(contract.ModelConnectionView) = .empty,
     model_view_storage: std.ArrayList(contract.ModelConnectionModelView) = .empty,
 
@@ -142,9 +137,6 @@ pub const Registry = struct {
         result.metask_source_generation = self.metask_source_generation;
         result.metask_selection_revision = self.metask_selection_revision;
         result.selection_revision = self.selection_revision;
-        result.preference_recovery_required = self.preference_recovery_required;
-        result.connections_recovery_required = self.connections_recovery_required;
-        result.default_migration_required = self.default_migration_required;
         try result.pending_credential_deletions.ensureTotalCapacity(
             self.allocator,
             self.pending_credential_deletions.items.len,
@@ -297,6 +289,28 @@ pub const Registry = struct {
         const owned = try self.allocator.dupe(u8, connection_id);
         errdefer self.allocator.free(owned);
         try self.pending_credential_deletions.append(self.allocator, owned);
+    }
+
+    /// Builds the current-format empty registry used by the explicit Models
+    /// recovery command. Every credential slot still represented by the
+    /// healthy in-memory registry is carried as a pending deletion so the
+    /// runtime can scrub Host-owned secrets after the canonical commit.
+    pub fn resetCandidate(self: *const Registry) (std.mem.Allocator.Error || Error)!Registry {
+        var result = Registry.init(self.allocator);
+        errdefer result.deinit();
+        for (self.pending_credential_deletions.items) |connection_id| {
+            try result.reserveCredentialDeletion(connection_id);
+        }
+        for (self.connections.items) |connection| {
+            var duplicate = false;
+            for (result.pending_credential_deletions.items) |pending|
+                if (std.mem.eql(u8, pending, connection.id)) {
+                    duplicate = true;
+                    break;
+                };
+            if (!duplicate) try result.reserveCredentialDeletion(connection.id);
+        }
+        return result;
     }
 
     pub fn nextCredentialDeletion(self: *const Registry) ?[]const u8 {
@@ -700,28 +714,6 @@ pub const Registry = struct {
         return self.connections.items.len;
     }
 
-    pub fn reseedLegacyConnection(
-        self: *Registry,
-        index: usize,
-        source_generation: u64,
-        catalog_generation: u64,
-    ) Error!void {
-        if (index >= self.connections.items.len or source_generation == 0 or
-            catalog_generation == 0)
-            return error.InvalidData;
-        const connection = &self.connections.items[index];
-        if (connection.source_generation != 0 or connection.catalog_generation != 0)
-            return error.InvalidData;
-        connection.source_generation = source_generation;
-        connection.catalog_generation = catalog_generation;
-        if (connection.state == .ready) {
-            for (connection.models.items) |*model| {
-                if (std.mem.eql(u8, model.id, connection.selected_model))
-                    model.ready_source_generation = source_generation;
-            }
-        }
-    }
-
     fn validDurableSelection(
         self: *const Registry,
         source_id: []const u8,
@@ -1115,189 +1107,6 @@ fn cloneConnection(
     return result;
 }
 
-const LegacyModelWire = struct {
-    id: []const u8,
-    display_name: []const u8,
-};
-
-const LegacyConnectionWire = struct {
-    id: []const u8,
-    display_name: []const u8,
-    normalized_base_url: []const u8,
-    protocol: contract.Protocol,
-    state: contract.ModelConnectionState,
-    test_status: contract.ModelConnectionTestStatus,
-    credential_status: contract.ModelConnectionCredentialStatus,
-    enabled: bool,
-    connection_generation: u64,
-    models: []const LegacyModelWire,
-    selected_model: []const u8,
-};
-
-const LegacyRegistryWire = struct {
-    default_connection_id: []const u8,
-    default_execution_generation: u64,
-    pending_credential_deletions: []const []const u8,
-    connections: []const LegacyConnectionWire,
-};
-
-pub fn encodeLegacyAlloc(
-    allocator: std.mem.Allocator,
-    registry: *const Registry,
-) (std.mem.Allocator.Error || Error)![]u8 {
-    var connection_storage: [contract.Limits.model_connection_entries]LegacyConnectionWire = undefined;
-    var model_storage: [contract.Limits.model_connection_entries][contract.Limits.model_connection_model_entries]LegacyModelWire = undefined;
-    for (registry.connections.items, 0..) |connection, connection_index| {
-        if (connection.models.items.len > contract.Limits.model_connection_model_entries)
-            return error.InvalidData;
-        for (connection.models.items, 0..) |model, model_index|
-            model_storage[connection_index][model_index] = .{
-                .id = model.id,
-                .display_name = model.display_name,
-            };
-        connection_storage[connection_index] = .{
-            .id = connection.id,
-            .display_name = connection.display_name,
-            .normalized_base_url = connection.normalized_base_url,
-            .protocol = connection.protocol,
-            .state = connection.state,
-            .test_status = selectedModelTestStatus(&connection),
-            .credential_status = connection.credential_status,
-            .enabled = connection.enabled,
-            .connection_generation = connection.connection_revision,
-            .models = model_storage[connection_index][0..connection.models.items.len],
-            .selected_model = connection.selected_model,
-        };
-    }
-    const wire: LegacyRegistryWire = .{
-        .default_connection_id = registry.default_source_id,
-        // The canonical store never writes Product binding generation. This
-        // encoder exists only for legacy-format tests and migration fixtures.
-        .default_execution_generation = if (registry.default_source_id.len == 0) 0 else 1,
-        .pending_credential_deletions = registry.pending_credential_deletions.items,
-        .connections = connection_storage[0..registry.connections.items.len],
-    };
-    const bytes = try std.json.Stringify.valueAlloc(allocator, wire, .{});
-    if (bytes.len == 0 or bytes.len > max_store_bytes) {
-        allocator.free(bytes);
-        return error.InvalidData;
-    }
-    return bytes;
-}
-
-pub fn decodeLegacy(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-) (std.mem.Allocator.Error || Error)!Registry {
-    if (input.len == 0 or input.len > max_store_bytes) return error.InvalidData;
-    var parsed = std.json.parseFromSlice(
-        LegacyRegistryWire,
-        allocator,
-        input,
-        .{ .ignore_unknown_fields = false },
-    ) catch return error.InvalidData;
-    defer parsed.deinit();
-    const wire = parsed.value;
-    if (wire.connections.len > contract.Limits.model_connection_entries or
-        wire.pending_credential_deletions.len > max_pending_credential_deletions or
-        ((wire.default_connection_id.len == 0) != (wire.default_execution_generation == 0)))
-        return error.InvalidData;
-    var result = Registry.init(allocator);
-    errdefer result.deinit();
-    for (wire.pending_credential_deletions, 0..) |connection_id, index| {
-        if (connection_id.len == 0 or
-            connection_id.len > contract.Limits.instance_id_bytes)
-            return error.InvalidData;
-        for (wire.pending_credential_deletions[0..index]) |prior|
-            if (std.mem.eql(u8, prior, connection_id)) return error.InvalidData;
-        const owned = try allocator.dupe(u8, connection_id);
-        errdefer allocator.free(owned);
-        try result.pending_credential_deletions.append(allocator, owned);
-    }
-    for (wire.connections) |connection_wire| {
-        if (connection_wire.id.len == 0 or
-            connection_wire.id.len > contract.Limits.instance_id_bytes or
-            connection_wire.connection_generation == 0 or
-            connection_wire.models.len == 0 or
-            connection_wire.models.len > contract.Limits.model_connection_model_entries)
-            return error.InvalidData;
-        contract.validateModelConnectionSpec(.{
-            .display_name = connection_wire.display_name,
-            .protocol = connection_wire.protocol,
-            .normalized_base_url = connection_wire.normalized_base_url,
-        }) catch return error.InvalidData;
-        if (result.findIndex(connection_wire.id) != null) return error.InvalidData;
-        for (result.pending_credential_deletions.items) |connection_id|
-            if (std.mem.eql(u8, connection_id, connection_wire.id))
-                return error.InvalidData;
-        var connection: OwnedConnection = .{
-            .id = try allocator.dupe(u8, connection_wire.id),
-            .display_name = try allocator.dupe(u8, connection_wire.display_name),
-            .normalized_base_url = try allocator.dupe(u8, connection_wire.normalized_base_url),
-            .protocol = connection_wire.protocol,
-            .state = connection_wire.state,
-            .credential_status = connection_wire.credential_status,
-            .enabled = connection_wire.enabled,
-            .connection_revision = connection_wire.connection_generation,
-            // Legacy connection_generation was a mixed CAS and cannot prove
-            // source or catalog authority. Bootstrap assigns fresh tokens.
-            .source_generation = 0,
-            .catalog_generation = 0,
-        };
-        errdefer connection.deinit(allocator);
-        for (connection_wire.models) |model_wire| {
-            if (model_wire.id.len == 0 or
-                model_wire.id.len > contract.Limits.model_id_bytes or
-                model_wire.display_name.len > contract.Limits.model_display_name_bytes)
-                return error.InvalidData;
-            for (connection.models.items) |model|
-                if (std.mem.eql(u8, model.id, model_wire.id)) return error.InvalidData;
-            try connection.models.append(allocator, .{
-                .id = try allocator.dupe(u8, model_wire.id),
-                .display_name = try allocator.dupe(u8, model_wire.display_name),
-                .test_status = if (std.mem.eql(
-                    u8,
-                    model_wire.id,
-                    connection_wire.selected_model,
-                )) connection_wire.test_status else .untested,
-            });
-        }
-        var selected_matches: usize = 0;
-        for (connection.models.items) |model| {
-            if (std.mem.eql(u8, model.id, connection_wire.selected_model))
-                selected_matches += 1;
-        }
-        if (selected_matches != 1) return error.InvalidData;
-        const selected_test_status = for (connection.models.items) |model| {
-            if (std.mem.eql(u8, model.id, connection_wire.selected_model))
-                break model.test_status;
-        } else unreachable;
-        if ((connection_wire.state == .ready and
-            (connection_wire.credential_status != .ready or
-                !connection_wire.enabled or
-                selected_test_status == .untested)) or
-            (connection_wire.state != .ready and
-                connection_wire.test_status == .connected))
-            return error.InvalidData;
-        connection.selected_model = try allocator.dupe(u8, connection_wire.selected_model);
-        try result.connections.append(allocator, connection);
-    }
-    if (wire.default_connection_id.len != 0) {
-        const index = result.findIndex(wire.default_connection_id) orelse
-            return error.InvalidData;
-        const connection = result.connections.items[index];
-        result.default_source_id = try allocator.dupe(u8, connection.id);
-        result.default_model_id = try allocator.dupe(u8, connection.selected_model);
-        // Replaced with a fresh opaque value before the canonical migration
-        // commit; zero keeps this legacy candidate non-authoritative.
-        result.selection_revision = 0;
-    }
-    // Legacy candidates deliberately carry zero source/catalog generations.
-    // Runtime reseeds both before the candidate can become canonical, so the
-    // canonical view validator cannot run at this intermediate boundary.
-    return result;
-}
-
 const MetaskIntentWire = struct {
     principal_ref: []const u8,
     api_key_id: []const u8,
@@ -1311,66 +1120,6 @@ const ModelRefWire = struct {
     source_id: []const u8,
     model_id: []const u8,
 };
-
-pub const legacy_preference_bytes: usize = 8 * 1024;
-
-const LegacyPreferenceWire = struct {
-    selection_owner_account_id: []const u8,
-    api_key_id: []const u8,
-    model_id: []const u8,
-    metask_source_generation: u64,
-};
-
-pub const LegacyPreference = struct {
-    allocator: std.mem.Allocator,
-    principal_ref: []u8,
-    api_key_id: []u8,
-    model_id: []u8,
-    source_generation: u64,
-
-    pub fn deinit(self: *LegacyPreference) void {
-        self.allocator.free(self.principal_ref);
-        self.allocator.free(self.api_key_id);
-        self.allocator.free(self.model_id);
-        self.* = undefined;
-    }
-};
-
-pub fn decodeLegacyPreference(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-) (std.mem.Allocator.Error || Error)!LegacyPreference {
-    if (input.len == 0 or input.len > legacy_preference_bytes) return error.InvalidData;
-    var parsed = std.json.parseFromSlice(
-        LegacyPreferenceWire,
-        allocator,
-        input,
-        .{ .ignore_unknown_fields = false },
-    ) catch return error.InvalidData;
-    defer parsed.deinit();
-    const wire = parsed.value;
-    if (wire.selection_owner_account_id.len == 0 or
-        wire.selection_owner_account_id.len > contract.Limits.principal_ref_bytes or
-        wire.api_key_id.len == 0 or wire.api_key_id.len > contract.Limits.api_key_id_bytes or
-        wire.model_id.len == 0 or wire.model_id.len > contract.Limits.model_id_bytes or
-        wire.metask_source_generation == 0 or
-        !std.unicode.utf8ValidateSlice(wire.selection_owner_account_id) or
-        !std.unicode.utf8ValidateSlice(wire.api_key_id) or
-        !std.unicode.utf8ValidateSlice(wire.model_id))
-        return error.InvalidData;
-    const principal_ref = try allocator.dupe(u8, wire.selection_owner_account_id);
-    errdefer allocator.free(principal_ref);
-    const api_key_id = try allocator.dupe(u8, wire.api_key_id);
-    errdefer allocator.free(api_key_id);
-    const model_id = try allocator.dupe(u8, wire.model_id);
-    return .{
-        .allocator = allocator,
-        .principal_ref = principal_ref,
-        .api_key_id = api_key_id,
-        .model_id = model_id,
-        .source_generation = wire.metask_source_generation,
-    };
-}
 
 const CanonicalModelWire = struct {
     id: []const u8,
@@ -1397,18 +1146,11 @@ const CanonicalConnectionWire = struct {
     selected_model: []const u8,
 };
 
-const MigrationWire = struct {
-    preference_recovery_required: bool,
-    connections_recovery_required: bool,
-    default_migration_required: bool,
-};
-
 const CanonicalWire = struct {
     schema: u32,
     metask: ?MetaskIntentWire,
     default_selection: ?ModelRefWire,
     selection_revision: u64,
-    migration: MigrationWire,
     pending_credential_deletions: []const []const u8,
     connections: []const CanonicalConnectionWire,
 };
@@ -1465,11 +1207,6 @@ pub fn encodeAlloc(
         .metask = metask,
         .default_selection = default_selection,
         .selection_revision = registry.selection_revision,
-        .migration = .{
-            .preference_recovery_required = registry.preference_recovery_required,
-            .connections_recovery_required = registry.connections_recovery_required,
-            .default_migration_required = registry.default_migration_required,
-        },
         .pending_credential_deletions = registry.pending_credential_deletions.items,
         .connections = connection_storage[0..registry.connections.items.len],
     };
@@ -1496,16 +1233,11 @@ pub fn decode(
     const wire = parsed.value;
     if (wire.schema != 1 or
         wire.connections.len > contract.Limits.model_connection_entries or
-        wire.pending_credential_deletions.len > max_pending_credential_deletions or
-        ((wire.default_selection == null) and wire.selection_revision == 0 and
-            wire.migration.default_migration_required))
+        wire.pending_credential_deletions.len > max_pending_credential_deletions)
         return error.InvalidData;
     var result = Registry.init(allocator);
     errdefer result.deinit();
     result.selection_revision = wire.selection_revision;
-    result.preference_recovery_required = wire.migration.preference_recovery_required;
-    result.connections_recovery_required = wire.migration.connections_recovery_required;
-    result.default_migration_required = wire.migration.default_migration_required;
     if (wire.metask) |metask| {
         if ((metask.protocol == null) != (metask.source_generation == 0))
             return error.InvalidData;
@@ -1716,11 +1448,6 @@ pub const FileStore = struct {
             return error.ReadFailed;
         if (read != bytes.len) return error.ReadFailed;
         return bytes;
-    }
-
-    pub fn archiveLegacy(self: *FileStore, name: []const u8, archived_name: []const u8) void {
-        if (name.len == 0 or archived_name.len == 0) return;
-        self.dir.rename(name, self.dir, archived_name, self.io) catch {};
     }
 
     pub fn commit(self: *FileStore, bytes: []const u8) FileStoreError!void {
@@ -2404,7 +2131,7 @@ test "model connection file store atomically restores registry bytes" {
     defer std.testing.allocator.free(absolute);
     var file_store = try FileStore.init(std.testing.io, absolute);
     defer file_store.deinit();
-    const canonical = "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"migration\":{\"preference_recovery_required\":false,\"connections_recovery_required\":false,\"default_migration_required\":false},\"pending_credential_deletions\":[],\"connections\":[]}";
+    const canonical = "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"connections\":[]}";
     try file_store.commit(canonical);
     const restored = (try file_store.loadAlloc(std.testing.allocator)) orelse
         return error.TestExpectedEqual;

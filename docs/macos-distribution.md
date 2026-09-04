@@ -6,7 +6,7 @@
 
 开发和打包签名彼此独立：跨平台 `scripts/dev.mjs` 独占 Apple Development 本地签名策略，setup 只复用该 owner；`scripts/package-macos.mjs` 只拥有 Developer ID、DMG、公证和发布验证。正式分发不能在 identity 缺失或歧义时回退到开发证书、自签名或 ad-hoc 签名。
 
-两条流程都直接读取 `app.zon` 中现有的 Bundle ID 与 executable name；当前分别是 `com.metask.metawork.dev` 和 `metawork`。`app.zon` 是跨平台产品 identity 与 release version 的唯一真源，Application 通过 `src/product_identity.zig` 消费同一个 Native SDK manifest module。Account 在所有平台使用同一 persistence 合同：`com.metask.metawork.dev.account` secure service 只保存 refresh token，`preferences.json` 只保存无 secret 的当前选择；旧开发命名空间不迁移、不 fallback。
+两条流程都直接读取 `app.zon` 中现有的 Bundle ID 与 executable name；当前分别是 `com.metask.metawork.dev` 和 `metawork`。`app.zon` 是跨平台产品 identity 与 release version 的唯一真源，Application 通过 `src/product_identity.zig` 消费同一个 Native SDK manifest module。Account 在所有平台使用同一 persistence 合同：`com.metask.metawork.dev.account` secure service 只保存 refresh token；模型选择由 Models 的 `models.json` 独立持久化。旧开发命名空间与 retired Models 文件都不迁移、不 fallback。
 
 ## 本地签名（非分发）
 

@@ -103,6 +103,23 @@ test("durable Metask intent remains decodable when the current catalog is unavai
   );
 });
 
+test("Models recovery-required health crosses the strict snapshot decoder", () => {
+  const recoveryRequired = clone(fixture);
+  recoveryRequired.models.availability = "unavailable";
+  recoveryRequired.models.persistenceHealth = "recovery_required";
+  recoveryRequired.models.errorCode = "persistence_unavailable";
+  recoveryRequired.newTaskAdmission = {
+    available: false,
+    reason: "model_connection_persistence_unavailable",
+    activeModelRef: null,
+    activeGeneration: "0",
+    activeSelectionRevision: "0",
+    state: "unavailable",
+  };
+
+  assert.deepEqual(decodeWorkbenchSnapshot(recoveryRequired), recoveryRequired);
+});
+
 test("attachment results enforce opaque grants and atomic typed outcomes", () => {
   const ready = {
     status: "ready",

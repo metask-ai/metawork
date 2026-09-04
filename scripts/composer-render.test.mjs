@@ -79,6 +79,8 @@ const base = {
   modelSelectionDisabled: false,
   modelSelectionPending: false,
   modelContextTitle: "Default model",
+  defaultSelectionMissing: false,
+  defaultRecoveryDisabled: false,
   actionDisabled: false,
   stopAction: null,
   stopDisabled: false,
@@ -92,6 +94,7 @@ const base = {
   onConfirmAccess() {},
   onSelectWorkspace() {},
   onSelectModel() {},
+  onActivateMetask() {},
 };
 
 test("detached Conversation recovery stays invisible until normal send", () => {

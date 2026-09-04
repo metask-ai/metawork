@@ -47,6 +47,7 @@ export const commands = {
   accountCancelOperation: "metawork.account.cancelOperation",
   accountRetryRefresh: "metawork.account.retryRefresh",
   modelsRefreshCatalog: "metawork.models.refreshCatalog",
+  modelsResetStore: "metawork.models.resetStore",
   selectMetaskApiKey: "metawork.models.selectMetaskApiKey",
   configureMetaskSelection: "metawork.models.configureMetaskSelection",
   selectModelsDefault: "metawork.models.selectDefault",
