@@ -25,7 +25,7 @@ pub const Runtime = struct {
         return false;
     }
 
-    pub fn modelConnectionReadinessActive(_: *const Runtime) bool {
+    pub fn customProviderReadinessActive(_: *const Runtime) bool {
         return false;
     }
 
@@ -68,7 +68,7 @@ test "release automation boundary is inert" {
     var runtime = Runtime.init(&env);
     defer runtime.deinit();
     try std.testing.expect(!runtime.active());
-    try std.testing.expect(!runtime.modelConnectionReadinessActive());
+    try std.testing.expect(!runtime.customProviderReadinessActive());
     try std.testing.expect(!runtime.bridgeHarnessActive());
     try std.testing.expectEqual(@as(?[]const u8, null), runtime.workspaceRoot());
     try std.testing.expectEqual(@as(?[]const u8, null), runtime.attachmentPaths());

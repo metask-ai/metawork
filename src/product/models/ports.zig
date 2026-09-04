@@ -3,7 +3,7 @@
 
 const std = @import("std");
 
-pub const credential_slot_prefix = "model-connection-";
+pub const credential_slot_prefix = "custom-provider-";
 pub const credential_slot_bytes = credential_slot_prefix.len + 32;
 
 /// Type-erased, single-owner provider completion. Application may transport

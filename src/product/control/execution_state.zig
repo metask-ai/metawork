@@ -15,7 +15,7 @@ pub const AdmissionState = enum {
 
 pub const AdmissionReason = enum {
     none,
-    model_connection_persistence_unavailable,
+    custom_provider_persistence_unavailable,
     credential_unavailable,
     invalid_candidate,
     resource_exhausted,
@@ -73,8 +73,8 @@ const ActiveExecution = struct {
 
     fn installNoFail(self: *ActiveExecution, execution: *models_contract.OwnedConfig) void {
         const input = execution.input();
-        const validation = if (execution.source == .model_connection)
-            models_contract.validateModelConnectionExecutionConfig(input)
+        const validation = if (execution.source == .custom_provider)
+            models_contract.validateCustomProviderExecutionConfig(input)
         else
             models_contract.validateConfigStructure(input);
         validation catch @panic("Product received an invalid ExecutionConfig");
@@ -145,28 +145,28 @@ const RedactionPreparation = union(enum) {
     clear: u64,
 };
 
-pub const PreparedModelConnectionBinding = struct {
+pub const PreparedCustomProviderBinding = struct {
     allocator: std.mem.Allocator,
-    connection_id: []u8,
+    provider_id: []u8,
     model_id: []u8,
 
     pub fn init(
         allocator: std.mem.Allocator,
-        connection_id: []const u8,
+        provider_id: []const u8,
         model_id: []const u8,
-    ) std.mem.Allocator.Error!PreparedModelConnectionBinding {
-        const owned_connection_id = try allocator.dupe(u8, connection_id);
+    ) std.mem.Allocator.Error!PreparedCustomProviderBinding {
+        const owned_connection_id = try allocator.dupe(u8, provider_id);
         errdefer allocator.free(owned_connection_id);
         return .{
             .allocator = allocator,
-            .connection_id = owned_connection_id,
+            .provider_id = owned_connection_id,
             .model_id = try allocator.dupe(u8, model_id),
         };
     }
 
-    pub fn deinit(self: *PreparedModelConnectionBinding) void {
+    pub fn deinit(self: *PreparedCustomProviderBinding) void {
         self.allocator.free(self.model_id);
-        self.allocator.free(self.connection_id);
+        self.allocator.free(self.provider_id);
         self.* = undefined;
     }
 };
@@ -191,7 +191,7 @@ pub const State = struct {
     default_source_generation: u64 = 0,
     replacement: ReplacementKind = .none,
     redaction_preparation: RedactionPreparation = .none,
-    custom_binding: ?PreparedModelConnectionBinding = null,
+    custom_binding: ?PreparedCustomProviderBinding = null,
     default_selection_revision: u64 = 0,
     availability_error: AdmissionReason = .none,
 
@@ -264,10 +264,10 @@ pub const State = struct {
         self.default_selection_revision = 0;
     }
 
-    pub fn installModelConnectionNoFail(
+    pub fn installCustomProviderNoFail(
         self: *State,
         execution: *models_contract.OwnedConfig,
-        prepared_binding: *PreparedModelConnectionBinding,
+        prepared_binding: *PreparedCustomProviderBinding,
         redaction: ProjectionRedaction,
     ) void {
         std.debug.assert(self.replacement != .none);
@@ -469,12 +469,12 @@ pub const State = struct {
                     self.execution.providerId(),
                 ));
             },
-            .model_connection => {
+            .custom_provider => {
                 const binding = self.custom_binding orelse unreachable;
                 std.debug.assert(std.mem.eql(
                     u8,
                     authority.selection.source_id,
-                    binding.connection_id,
+                    binding.provider_id,
                 ));
             },
         }
@@ -501,8 +501,8 @@ pub const State = struct {
                     self.execution.providerId(),
                     authority.selection.source_id,
                 ),
-            .model_connection => if (self.custom_binding) |binding|
-                std.mem.eql(u8, binding.connection_id, authority.selection.source_id)
+            .custom_provider => if (self.custom_binding) |binding|
+                std.mem.eql(u8, binding.provider_id, authority.selection.source_id)
             else
                 false,
         };
@@ -522,24 +522,24 @@ pub const State = struct {
     pub fn defaultReplacementPending(self: *const State) bool {
         return self.replacement == .default;
     }
-    pub fn modelConnectionActive(self: *const State, connection_id: []const u8) bool {
+    pub fn customProviderActive(self: *const State, provider_id: []const u8) bool {
         const binding = self.custom_binding orelse return false;
-        return std.mem.eql(u8, binding.connection_id, connection_id);
+        return std.mem.eql(u8, binding.provider_id, provider_id);
     }
-    pub fn modelConnectionSelected(self: *const State) bool {
+    pub fn customProviderSelected(self: *const State) bool {
         return self.custom_binding != null;
     }
 
     pub fn activeSource(self: *const State) ?models_contract.Source {
         if (!self.execution.ready()) return null;
-        return if (self.custom_binding == null) .metask else .model_connection;
+        return if (self.custom_binding == null) .metask else .custom_provider;
     }
 
     pub fn activeModelRef(self: *const State) ?models_contract.ModelRef {
         if (!self.execution.ready()) return null;
         return .{
             .source_id = if (self.custom_binding) |binding|
-                binding.connection_id
+                binding.provider_id
             else
                 self.execution.providerId(),
             .model_id = self.execution.model(),
@@ -558,8 +558,8 @@ pub const State = struct {
         return self.metask_source_binding_generation;
     }
 
-    pub fn selectedModelConnectionId(self: *const State) []const u8 {
-        return if (self.custom_binding) |binding| binding.connection_id else "";
+    pub fn selectedCustomProviderId(self: *const State) []const u8 {
+        return if (self.custom_binding) |binding| binding.provider_id else "";
     }
 };
 
@@ -579,9 +579,9 @@ pub const testing = if (builtin.is_test) struct {
         state.execution.credential_len = credential.len;
     }
 
-    pub fn installModelConnectionBinding(
+    pub fn installCustomProviderBinding(
         state: *State,
-        binding: *PreparedModelConnectionBinding,
+        binding: *PreparedCustomProviderBinding,
     ) void {
         std.debug.assert(state.custom_binding == null);
         state.custom_binding = binding.*;
@@ -647,7 +647,7 @@ fn testExecution(
     ) catch unreachable;
 }
 
-fn testModelConnectionExecution() !models_contract.OwnedConfig {
+fn testCustomModelExecution() !models_contract.OwnedConfig {
     const owned_model = try std.testing.allocator.dupe(u8, "gpt-5");
     errdefer std.testing.allocator.free(owned_model);
     const owned_base_url = try std.testing.allocator.dupe(
@@ -659,7 +659,7 @@ fn testModelConnectionExecution() !models_contract.OwnedConfig {
     errdefer secureFreeTest(owned_credential);
     return models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
-        .model_connection,
+        .custom_provider,
         .openai_chat_completions,
         owned_model,
         owned_base_url,
@@ -716,15 +716,15 @@ test "Metask installation owns only execution and source binding" {
     try std.testing.expect(!state.defaultAuthorityMatches(stale));
 }
 
-test "Model Connection execution never borrows Metask model authority" {
+test "Custom Provider execution never borrows Metask model authority" {
     var state = try State.init(std.testing.allocator);
     defer state.deinit();
-    var execution = try testModelConnectionExecution();
+    var execution = try testCustomModelExecution();
     var execution_owned = true;
     defer if (execution_owned) execution.deinit();
-    var binding = try PreparedModelConnectionBinding.init(
+    var binding = try PreparedCustomProviderBinding.init(
         std.testing.allocator,
-        "connection-1",
+        "provider-1",
         "gpt-5",
     );
     var binding_owned = true;
@@ -736,7 +736,7 @@ test "Model Connection execution never borrows Metask model authority" {
         execution.input(),
         TestDurableRedaction{ .calls = &durable_calls },
     );
-    state.installModelConnectionNoFail(
+    state.installCustomProviderNoFail(
         &execution,
         &binding,
         projection_redaction.capability(),
@@ -745,10 +745,10 @@ test "Model Connection execution never borrows Metask model authority" {
     binding_owned = false;
     const authority: models_contract.DefaultSelectionAuthority = .{
         .selection = .{
-            .source_id = "connection-1",
+            .source_id = "provider-1",
             .model_id = "gpt-5",
         },
-        .source = .model_connection,
+        .source = .custom_provider,
         .source_generation = 19,
         .selection_revision = 23,
         .protocol = .openai_chat_completions,
@@ -756,10 +756,10 @@ test "Model Connection execution never borrows Metask model authority" {
     state.recordDefaultAuthorityNoFail(authority);
     state.endReplacementNoFail();
 
-    try std.testing.expect(state.modelConnectionSelected());
+    try std.testing.expect(state.customProviderSelected());
     try std.testing.expect(state.defaultAuthorityMatches(authority));
     const resolved = state.executionInput().?;
-    try std.testing.expectEqualStrings("model_connection:fixture-provider", resolved.target.provider_id);
+    try std.testing.expectEqualStrings("custom_provider:fixture-provider", resolved.target.provider_id);
     try std.testing.expectEqual(models_contract.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expect(!state.taskModelSelectionBaseAuthorized(.{
         .generation = 3,

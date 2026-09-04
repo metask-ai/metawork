@@ -2,7 +2,7 @@ export const nativeAutomationTokens = Object.freeze([
   "metawork.product_delivery.emit",
   "METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL",
   "METAWORK_AUTOMATION_ATTACHMENTS",
-  "METAWORK_MODEL_CONNECTION_READINESS",
+  "METAWORK_CUSTOM_PROVIDER_READINESS",
   "metawork-agentcore-vertical-fixture-key",
   "metawork-agentcore-vertical-fixture-model",
   "automation-account",

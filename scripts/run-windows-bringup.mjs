@@ -16,7 +16,7 @@ const steps = [
   ["run-tests.mjs", []],
   ["run-lifecycle-tests.mjs", []],
   ["build.mjs", ["debug"]],
-  ["test-model-connection-readiness-windows.mjs", []],
+  ["test-custom-provider-readiness-windows.mjs", []],
   ["run-agentcore-restore-probe.mjs", ["--staged"]],
   ["run-agentcore-vertical-windows.mjs", []],
   ["build.mjs", ["release"]],
@@ -35,5 +35,5 @@ for (const [script, args] of steps) {
 }
 
 console.log(
-  "Windows integration baseline passed: staged exact GNU bundle, bundle guards, lifecycle, Model Connection readiness, staged SDK probe, Native Debug/Release, and AgentCore vertical automation.",
+  "Windows integration baseline passed: staged exact GNU bundle, bundle guards, lifecycle, Custom Provider readiness, staged SDK probe, Native Debug/Release, and AgentCore vertical automation.",
 );

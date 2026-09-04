@@ -2216,7 +2216,7 @@ test "retired Schedule data leaves Account ready and New Task admission unavaila
     try workbench.prepareExecutionInstall(execution.input());
     workbench.installExecutionNoFail(&execution);
     workbench.execution_state.recordDefaultAuthorityNoFail(
-        workbench.model_connections.defaultAuthority().?,
+        workbench.custom_providers.defaultAuthority().?,
     );
     execution_owned = false;
     workbench.endExecutionReplacementNoFail();

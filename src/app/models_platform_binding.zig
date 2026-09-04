@@ -6,10 +6,10 @@ const product_identity = @import("metawork_product_identity");
 // This exact service identity predates the Execution owner split. Keep it
 // stable so existing credentials remain addressable without making Execution
 // depend on Account's credential-store implementation.
-const model_connection_service = product_identity.modelConnectionCredentialService();
+const custom_provider_service = product_identity.customProviderCredentialService();
 
 /// Application-owned platform adapter for Product Models credentials.
-/// It owns no registry state. User-entered Model Connection bytes arrive only
+/// It owns no registry state. User-entered Custom Provider bytes arrive only
 /// through the dedicated create/replace command and are never projected back.
 pub const Adapter = struct {
     services: native_sdk.platform.PlatformServices,
@@ -70,7 +70,7 @@ pub const Adapter = struct {
         if (secret.len > native_sdk.platform.max_credential_secret_bytes)
             return error.WriteFailed;
         self.services.setCredential(.{
-            .service = model_connection_service,
+            .service = custom_provider_service,
             .account = slot,
             .secret = secret,
         }) catch return error.WriteFailed;
@@ -84,7 +84,7 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context));
         try self.assertMainThread();
         return self.services.getCredential(.{
-            .service = model_connection_service,
+            .service = custom_provider_service,
             .account = slot,
         }, output) catch |err| switch (err) {
             error.CredentialNotFound => null,
@@ -99,7 +99,7 @@ pub const Adapter = struct {
         const self: *Adapter = @ptrCast(@alignCast(context));
         try self.assertMainThread();
         self.services.deleteCredential(.{
-            .service = model_connection_service,
+            .service = custom_provider_service,
             .account = slot,
         }) catch |err| switch (err) {
             error.CredentialNotFound => {},

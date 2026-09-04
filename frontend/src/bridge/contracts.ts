@@ -13,7 +13,7 @@ export type NewTaskAdmissionState = "unavailable" | "ready" | "replacing";
 
 export type NewTaskAdmissionReason =
   | "none"
-  | "model_connection_persistence_unavailable"
+  | "custom_provider_persistence_unavailable"
   | "credential_unavailable"
   | "invalid_candidate"
   | "resource_exhausted"
@@ -56,11 +56,11 @@ export type ExecutionCommandErrorCode =
   | "no_models"
   | "local_resource_exhausted"
   | "credential_store_write_failed"
-  | "model_connection_invalid"
-  | "model_connection_not_found"
-  | "model_connection_capture_unavailable"
-  | "model_connection_persistence_unavailable"
-  | "model_connection_test_unavailable";
+  | "custom_provider_invalid"
+  | "custom_provider_not_found"
+  | "custom_provider_capture_unavailable"
+  | "custom_provider_persistence_unavailable"
+  | "custom_model_test_unavailable";
 
 export type Protocol =
   | "openai_responses"
@@ -72,36 +72,34 @@ export const permissionProfiles = ["approval_required", "full_access"] as const;
 export type PermissionProfile = (typeof permissionProfiles)[number];
 export type PermissionInteraction = "interactive" | "noninteractive";
 
-export type ModelConnectionState = "configuring" | "ready" | "disabled";
+export type CustomProviderState = "configuring" | "ready" | "disabled";
 
-export type ModelConnectionTestStatus =
+export type CustomModelTestStatus =
   "untested" | "testing" | "connected" | "failed";
 
-export type ModelConnectionCredentialStatus =
+export type CustomProviderCredentialStatus =
   "missing" | "ready" | "invalid" | "capture_unavailable";
 
 export type ModelMetadataProvenance =
   "unknown" | "user_declared" | "provider_declared" | "runtime_verified";
 
-export type ModelConnectionView = {
+export type CustomProviderView = {
   id: string;
   displayName: string;
   protocol: Protocol;
   normalizedBaseUrl: string;
-  state: ModelConnectionState;
-  testStatus: ModelConnectionTestStatus;
-  credentialStatus: ModelConnectionCredentialStatus;
+  state: CustomProviderState;
+  credentialStatus: CustomProviderCredentialStatus;
   enabled: boolean;
   models: {
     id: string;
     displayName: string;
     metadata: ModelMetadata;
     metadataProvenance: ModelMetadataProvenance;
-    testStatus: ModelConnectionTestStatus;
+    testStatus: CustomModelTestStatus;
     ready: boolean;
   }[];
-  selectedModel: string;
-  connectionRevision: string;
+  providerRevision: string;
   sourceGeneration: string;
   catalogGeneration: string;
 };
@@ -197,7 +195,7 @@ export type ModelsView = {
   selectionRevision: string;
   operation: "idle" | "refreshing_catalog";
   errorCode: ModelsErrorCode;
-  connections: ModelConnectionView[];
+  customProviders: CustomProviderView[];
 };
 
 export type NewTaskAdmissionView = {
@@ -729,9 +727,9 @@ export type WorkbenchSnapshot = {
       | "corrupt"
       | "write_failed"
       | "outcome_unknown";
-    modelConnectionManagement: boolean;
-    modelConnectionSecretCapture: boolean;
-    modelConnectionTest: boolean;
+    customProviderManagement: boolean;
+    customProviderSecretCapture: boolean;
+    customModelTest: boolean;
     mcpManagement: boolean;
     mcpConnectionApproval: boolean;
     mcpSecretCapture: boolean;

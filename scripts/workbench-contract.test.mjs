@@ -110,7 +110,7 @@ test("Models recovery-required health crosses the strict snapshot decoder", () =
   recoveryRequired.models.errorCode = "persistence_unavailable";
   recoveryRequired.newTaskAdmission = {
     available: false,
-    reason: "model_connection_persistence_unavailable",
+    reason: "custom_provider_persistence_unavailable",
     activeModelRef: null,
     activeGeneration: "0",
     activeSelectionRevision: "0",
@@ -869,12 +869,12 @@ test("Execution command acknowledgements stay outside the Account error domain",
   assert.deepEqual(
     decodeExecutionCommandResult({
       accepted: false,
-      errorCode: "model_connection_persistence_unavailable",
+      errorCode: "custom_provider_persistence_unavailable",
       attemptId: null,
     }),
     {
       accepted: false,
-      errorCode: "model_connection_persistence_unavailable",
+      errorCode: "custom_provider_persistence_unavailable",
       attemptId: null,
     },
   );
@@ -882,7 +882,7 @@ test("Execution command acknowledgements stay outside the Account error domain",
     () =>
       decodeAccountCommandResult({
         accepted: false,
-        errorCode: "model_connection_persistence_unavailable",
+        errorCode: "custom_provider_persistence_unavailable",
         attemptId: null,
       }),
     /unexpected value/,
@@ -891,7 +891,7 @@ test("Execution command acknowledgements stay outside the Account error domain",
     () =>
       decodeExecutionCommandResult({
         accepted: false,
-        errorCode: "model_connection_invalid",
+        errorCode: "custom_provider_invalid",
         attemptId: "41",
       }),
     /expected null/,
@@ -1014,7 +1014,7 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
   );
 });
 
-test("Model Connection readiness survives an isolated failed retest", () => {
+test("Custom Provider readiness survives an isolated failed retest", () => {
   const snapshot = clone(fixture);
   snapshot.account = {
     state: "signed_out",
@@ -1030,21 +1030,19 @@ test("Model Connection readiness survives an isolated failed retest", () => {
     availability: "ready",
     providers: [],
     metaskSelection: null,
-    defaultSelection: { sourceId: "connection-1", modelId: "gpt-5" },
-    connections: [
+    defaultSelection: { sourceId: "provider-1", modelId: "gpt-5" },
+    customProviders: [
       {
-        id: "connection-1",
+        id: "provider-1",
         displayName: "OpenAI",
         protocol: "openai_chat_completions",
         normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
         state: "ready",
-        testStatus: "failed",
         credentialStatus: "ready",
         enabled: true,
-        connectionRevision: "1",
+        providerRevision: "1",
         sourceGeneration: "2",
         catalogGeneration: "3",
-        selectedModel: "gpt-5",
         models: [
           {
             id: "gpt-5",
@@ -1061,7 +1059,7 @@ test("Model Connection readiness survives an isolated failed retest", () => {
   snapshot.newTaskAdmission = {
     available: true,
     reason: "none",
-    activeModelRef: { sourceId: "connection-1", modelId: "gpt-5" },
+    activeModelRef: { sourceId: "provider-1", modelId: "gpt-5" },
     activeGeneration: "9",
     activeSelectionRevision: snapshot.models.selectionRevision,
     state: "ready",
@@ -1069,18 +1067,17 @@ test("Model Connection readiness survives an isolated failed retest", () => {
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(snapshot));
 
   const neverVerified = clone(snapshot);
-  neverVerified.models.connections[0].models[0].ready = false;
+  neverVerified.models.customProviders[0].models[0].ready = false;
   assert.throws(
     () => decodeWorkbenchSnapshot(neverVerified),
-    /ready connection must be verified/,
+    /ready provider must be verified/,
   );
 
   const impossibleConnected = clone(snapshot);
-  impossibleConnected.models.connections[0].state = "configuring";
-  impossibleConnected.models.connections[0].testStatus = "connected";
+  impossibleConnected.models.customProviders[0].state = "configuring";
   assert.throws(
     () => decodeWorkbenchSnapshot(impossibleConnected),
-    /only a ready connection can retain model readiness/,
+    /only a ready provider can retain model readiness/,
   );
 });
 

@@ -29,7 +29,7 @@ Account 不拥有：
 
 - provider、API Key/model catalog、模型 metadata、Provider-local/global selection、source generation 或模型配置持久化；
 - `Protocol`、`ModelRef`、source candidate、`ExecutionConfig`、默认来源、active binding、Task admission 或 consumer recovery；
-- user-managed Model Connection、credential vault、probe、connection generation 或 readiness；
+- user-managed Custom Provider、credential vault、model probe、provider/source generation 或 readiness；
 - Native SDK、HTTP client、窗口、WebView、socket、平台 timer 或 credential-store 具体实现；
 - AgentCore、Bridge、Renderer 或任一消费方状态。
 
@@ -131,7 +131,7 @@ Account durable authority 只有系统安全存储中的 Metask refresh token：
 
 - credential service identity 为产品 Bundle ID 加 `.account`，automation 构建使用独立 `.automation.account`；
 - 固定 account name 为 `metask-refresh-token`；
-- Account 不读写 `preferences.json`、`model-connections.json` 或 `models.json`；这些格式归 Models；
+- Account 不读写 `preferences.json` 或 `models.json`；这些格式归 Models；
 - production 与 automation 的 credential service 隔离，不得相互恢复。
 - Account Runtime 和平台 binding 不拥有数据目录、路径创建或文件权限；Models 等其他 owner 的持久化路径不得作为 Account 初始化前置条件。
 

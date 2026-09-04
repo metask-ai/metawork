@@ -25,7 +25,7 @@ const ProbeJob = struct {
     notifier: ProbeNotifier,
     source_id: []u8,
     model_id: []u8,
-    expected_connection_revision: u64,
+    expected_provider_revision: u64,
     expected_source_generation: u64,
     expected_catalog_generation: u64,
     execution: ?models_contract.OwnedConfig = null,
@@ -39,7 +39,7 @@ const ProbeJob = struct {
         io: std.Io,
         completion_transport: agent.CompletionTransport,
         notifier: ProbeNotifier,
-        command_value: models_contract.ModelConnectionTestCommand,
+        command_value: models_contract.CustomModelTestCommand,
     ) std.mem.Allocator.Error!*ProbeJob {
         const self = try allocator.create(ProbeJob);
         errdefer allocator.destroy(self);
@@ -57,7 +57,7 @@ const ProbeJob = struct {
             .notifier = notifier,
             .source_id = source_id,
             .model_id = model_id,
-            .expected_connection_revision = command_value.expected_connection_revision,
+            .expected_provider_revision = command_value.expected_provider_revision,
             .expected_source_generation = command_value.expected_source_generation,
             .expected_catalog_generation = command_value.expected_catalog_generation,
         };
@@ -103,13 +103,13 @@ const ProbeJob = struct {
         self.cancellation.request();
     }
 
-    fn command(self: *const ProbeJob) models_contract.ModelConnectionTestCommand {
+    fn command(self: *const ProbeJob) models_contract.CustomModelTestCommand {
         return .{
             .model = .{
                 .source_id = self.source_id,
                 .model_id = self.model_id,
             },
-            .expected_connection_revision = self.expected_connection_revision,
+            .expected_provider_revision = self.expected_provider_revision,
             .expected_source_generation = self.expected_source_generation,
             .expected_catalog_generation = self.expected_catalog_generation,
         };
@@ -319,18 +319,18 @@ pub const Coordinator = struct {
 
     fn submitCommand(
         context: *anyopaque,
-        command: models_contract.ModelConnectionCommand,
+        command: models_contract.CustomProviderCommand,
     ) models_contract.CommandResult {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
-        if (command == .test_connection)
-            return self.startProbe(command.test_connection);
-        return self.management.submitModelConnectionCommand(command);
+        if (command == .test_model)
+            return self.startProbe(command.test_model);
+        return self.management.submitCustomProviderCommand(command);
     }
 
     fn startProbe(
         self: *Coordinator,
-        command: models_contract.ModelConnectionTestCommand,
+        command: models_contract.CustomModelTestCommand,
     ) models_contract.CommandResult {
         const notifier = self.probe_notifier orelse
             return .rejected(.test_unavailable);
@@ -345,7 +345,7 @@ pub const Coordinator = struct {
             notifier,
             command,
         ) catch return .rejected(.local_resource_exhausted);
-        var execution = switch (self.management.beginModelConnectionProbe(
+        var execution = switch (self.management.beginCustomProviderProbe(
             job.command(),
         )) {
             .ready => |value| value,
@@ -356,7 +356,7 @@ pub const Coordinator = struct {
         };
         job.installExecution(&execution);
         job.start() catch {
-            _ = self.management.completeModelConnectionTest(job.command(), false);
+            _ = self.management.completeCustomModelTest(job.command(), false);
             job.deinit();
             return .rejected(.local_resource_exhausted);
         };
@@ -370,13 +370,13 @@ pub const Coordinator = struct {
         vault: models_ports.CredentialVault,
     ) void {
         self.assertMainThread();
-        self.management.startModelConnections(directory, vault) catch
-            self.management.startModelConnectionsUnavailable();
+        self.management.startCustomProviders(directory, vault) catch
+            self.management.startCustomProvidersUnavailable();
     }
 
     pub fn startUnavailable(self: *Coordinator) void {
         self.assertMainThread();
-        self.management.startModelConnectionsUnavailable();
+        self.management.startCustomProvidersUnavailable();
     }
 
     pub fn authorizationChanged(self: *Coordinator) void {
@@ -559,7 +559,7 @@ pub const Coordinator = struct {
         if (self.probe_job) |job| {
             if (!job.finished.load(.acquire)) return;
             job.join();
-            _ = self.management.completeModelConnectionTest(
+            _ = self.management.completeCustomModelTest(
                 job.command(),
                 job.succeeded,
             );
@@ -581,7 +581,7 @@ pub const Coordinator = struct {
             job.join();
             self.drain();
         }
-        self.management.stopModelConnections();
+        self.management.stopCustomProviders();
     }
 
     fn assertMainThread(self: *const Coordinator) void {

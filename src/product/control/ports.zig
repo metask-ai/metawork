@@ -42,46 +42,46 @@ pub const AccountCommitSink = struct {
 /// Control keeps registry/default-selection transactions behind these calls.
 pub const ModelsManagement = struct {
     context: *anyopaque,
-    start_model_connections_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
-    start_model_connections_unavailable_fn: *const fn (*anyopaque) void,
-    stop_model_connections_fn: *const fn (*anyopaque) void,
+    start_custom_providers_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
+    start_custom_providers_unavailable_fn: *const fn (*anyopaque) void,
+    stop_custom_providers_fn: *const fn (*anyopaque) void,
     reset_model_store_fn: *const fn (*anyopaque, u64) models_contract.CommandResult,
-    create_model_connection_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSpec) models_contract.CommandResult,
-    replace_model_connection_credential_fn: *const fn (*anyopaque, []const u8, models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult,
-    submit_model_connection_fn: *const fn (*anyopaque, models_contract.ModelConnectionCommand) models_contract.CommandResult,
-    begin_model_connection_probe_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand) models_contract.Preparation,
-    complete_model_connection_test_fn: *const fn (*anyopaque, models_contract.ModelConnectionTestCommand, bool) models_contract.CommandResult,
+    create_custom_provider_fn: *const fn (*anyopaque, []const u8, models_contract.CustomProviderSpec) models_contract.CommandResult,
+    replace_custom_provider_credential_fn: *const fn (*anyopaque, []const u8, models_contract.CustomProviderSelectionCommand) models_contract.CommandResult,
+    submit_custom_provider_fn: *const fn (*anyopaque, models_contract.CustomProviderCommand) models_contract.CommandResult,
+    begin_custom_provider_probe_fn: *const fn (*anyopaque, models_contract.CustomModelTestCommand) models_contract.Preparation,
+    complete_custom_model_test_fn: *const fn (*anyopaque, models_contract.CustomModelTestCommand, bool) models_contract.CommandResult,
     prepare_metask_catalog_refresh_fn: *const fn (*anyopaque, []const u8, u64) models_contract.CatalogRefreshPrepareResult,
     prepare_metask_api_key_selection_fn: *const fn (*anyopaque, []const u8, u64, models_contract.SelectMetaskApiKeyCommand) models_contract.CatalogSelectionPrepareResult,
     complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_ports.OwnedCatalogCompletion) models_contract.ModelsError,
     fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
     metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
-    pub fn startModelConnections(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
-        try self.start_model_connections_fn(self.context, directory, vault);
+    pub fn startCustomProviders(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
+        try self.start_custom_providers_fn(self.context, directory, vault);
     }
-    pub fn startModelConnectionsUnavailable(self: ModelsManagement) void {
-        self.start_model_connections_unavailable_fn(self.context);
+    pub fn startCustomProvidersUnavailable(self: ModelsManagement) void {
+        self.start_custom_providers_unavailable_fn(self.context);
     }
-    pub fn stopModelConnections(self: ModelsManagement) void {
-        self.stop_model_connections_fn(self.context);
+    pub fn stopCustomProviders(self: ModelsManagement) void {
+        self.stop_custom_providers_fn(self.context);
     }
     pub fn resetModelStore(self: ModelsManagement, expected_revision: u64) models_contract.CommandResult {
         return self.reset_model_store_fn(self.context, expected_revision);
     }
-    pub fn createModelConnectionWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.ModelConnectionSpec) models_contract.CommandResult {
-        return self.create_model_connection_fn(self.context, secret, spec);
+    pub fn createCustomProviderWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
+        return self.create_custom_provider_fn(self.context, secret, spec);
     }
-    pub fn replaceModelConnectionCredential(self: ModelsManagement, secret: []const u8, selection: models_contract.ModelConnectionSelectionCommand) models_contract.CommandResult {
-        return self.replace_model_connection_credential_fn(self.context, secret, selection);
+    pub fn replaceCustomProviderCredential(self: ModelsManagement, secret: []const u8, selection: models_contract.CustomProviderSelectionCommand) models_contract.CommandResult {
+        return self.replace_custom_provider_credential_fn(self.context, secret, selection);
     }
-    pub fn submitModelConnectionCommand(self: ModelsManagement, command: models_contract.ModelConnectionCommand) models_contract.CommandResult {
-        return self.submit_model_connection_fn(self.context, command);
+    pub fn submitCustomProviderCommand(self: ModelsManagement, command: models_contract.CustomProviderCommand) models_contract.CommandResult {
+        return self.submit_custom_provider_fn(self.context, command);
     }
-    pub fn beginModelConnectionProbe(self: ModelsManagement, command: models_contract.ModelConnectionTestCommand) models_contract.Preparation {
-        return self.begin_model_connection_probe_fn(self.context, command);
+    pub fn beginCustomProviderProbe(self: ModelsManagement, command: models_contract.CustomModelTestCommand) models_contract.Preparation {
+        return self.begin_custom_provider_probe_fn(self.context, command);
     }
-    pub fn completeModelConnectionTest(self: ModelsManagement, command: models_contract.ModelConnectionTestCommand, succeeded: bool) models_contract.CommandResult {
-        return self.complete_model_connection_test_fn(self.context, command, succeeded);
+    pub fn completeCustomModelTest(self: ModelsManagement, command: models_contract.CustomModelTestCommand, succeeded: bool) models_contract.CommandResult {
+        return self.complete_custom_model_test_fn(self.context, command, succeeded);
     }
     pub fn prepareMetaskCatalogRefresh(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
         return self.prepare_metask_catalog_refresh_fn(self.context, principal_ref, authorization_generation);

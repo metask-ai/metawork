@@ -564,14 +564,14 @@ export class BridgeClient {
     );
   }
 
-  async createModelConnection(input: {
+  async createCustomProvider(input: {
     displayName: string;
     protocol: Protocol;
     normalizedBaseUrl: string;
     apiKey: string;
   }) {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.modelConnectionCreate, {
+      await this.invoke(commands.customProviderCreate, {
         displayName: input.displayName,
         protocol: input.protocol,
         normalizedBaseUrl: input.normalizedBaseUrl,
@@ -580,55 +580,55 @@ export class BridgeClient {
     );
   }
 
-  async updateModelConnection(input: {
-    sourceId: string;
-    expectedConnectionRevision: string;
+  async updateCustomProvider(input: {
+    providerId: string;
+    expectedProviderRevision: string;
     displayName: string;
     protocol: Protocol;
     normalizedBaseUrl: string;
   }) {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.modelConnectionUpdate, input),
+      await this.invoke(commands.customProviderUpdate, input),
     );
   }
 
-  async replaceModelConnectionCredential(
-    sourceId: string,
-    expectedConnectionRevision: string,
+  async replaceCustomProviderCredential(
+    providerId: string,
+    expectedProviderRevision: string,
     apiKey: string,
   ) {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.modelConnectionReplaceCredential, {
-        sourceId,
-        expectedConnectionRevision,
+      await this.invoke(commands.customProviderReplaceCredential, {
+        providerId,
+        expectedProviderRevision,
         apiKey,
       }),
     );
   }
 
-  async removeModelConnection(
-    sourceId: string,
-    expectedConnectionRevision: string,
+  async removeCustomProvider(
+    providerId: string,
+    expectedProviderRevision: string,
   ) {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.modelConnectionRemove, {
-        sourceId,
-        expectedConnectionRevision,
+      await this.invoke(commands.customProviderRemove, {
+        providerId,
+        expectedProviderRevision,
       }),
     );
   }
 
-  async testModelConnection(
+  async testCustomModel(
     sourceId: string,
-    expectedConnectionRevision: string,
+    expectedProviderRevision: string,
     modelId: string,
     expectedSourceGeneration: string,
     expectedCatalogGeneration: string,
   ) {
     return decodeExecutionCommandResult(
-      await this.invoke(commands.modelConnectionTest, {
+      await this.invoke(commands.customModelTest, {
         model: { sourceId, modelId },
-        expectedConnectionRevision,
+        expectedProviderRevision,
         expectedSourceGeneration,
         expectedCatalogGeneration,
       }),
@@ -636,8 +636,8 @@ export class BridgeClient {
   }
 
   async addCustomModel(input: {
-    sourceId: string;
-    expectedConnectionRevision: string;
+    providerId: string;
+    expectedProviderRevision: string;
     expectedCatalogGeneration: string;
     model: { id: string; displayName?: string; metadata?: ModelMetadata };
   }) {
@@ -648,7 +648,7 @@ export class BridgeClient {
 
   async replaceCustomModel(input: {
     selection: { sourceId: string; modelId: string };
-    expectedConnectionRevision: string;
+    expectedProviderRevision: string;
     expectedCatalogGeneration: string;
     replacement: { id: string; displayName?: string; metadata?: ModelMetadata };
   }) {
@@ -659,7 +659,7 @@ export class BridgeClient {
 
   async removeCustomModel(input: {
     selection: { sourceId: string; modelId: string };
-    expectedConnectionRevision: string;
+    expectedProviderRevision: string;
     expectedCatalogGeneration: string;
   }) {
     return decodeExecutionCommandResult(

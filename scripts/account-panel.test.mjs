@@ -72,7 +72,7 @@ const unavailableModels = {
   selectionRevision: "0",
   operation: "idle",
   errorCode: "authorization_unavailable",
-  connections: [],
+  customProviders: [],
 };
 
 const readyAccount = {
@@ -164,7 +164,7 @@ function renderSettings(account, models = readyModels, options = {}) {
       account,
       models,
       initialSection: options.initialSection ?? "general",
-      modelConnectionCapabilities: {
+      customProviderCapabilities: {
         management: false,
         secretCapture: false,
         connectionTest: false,
@@ -180,12 +180,12 @@ function renderSettings(account, models = readyModels, options = {}) {
       accountDisabled: false,
       executionDisabled: false,
       cancelDisabled: false,
-      onCreateModelConnection: async () => false,
-      onUpdateModelConnection: async () => false,
+      onCreateCustomProvider: async () => false,
+      onUpdateCustomProvider: async () => false,
       onAddCustomModel: async () => false,
-      onRemoveModelConnection: async () => false,
-      onTestModelConnection() {},
-      onSelectModelConnection() {},
+      onRemoveCustomProvider: async () => false,
+      onTestCustomModel() {},
+      onSelectCustomProvider() {},
       onResetModels: async () => false,
       onSetDefaultPermissionProfile() {},
       ...callbacks,
@@ -215,7 +215,7 @@ test("checking signed-out and authorizing request the Account onboarding surface
     requiresAccountGate(
       { state: "checking" },
       {
-        defaultSelection: { sourceId: "connection-1", modelId: "model-1" },
+        defaultSelection: { sourceId: "provider-1", modelId: "model-1" },
       },
     ),
     false,
@@ -420,7 +420,7 @@ test("Models without a persistence capability do not offer destructive reset", (
 test("Execution commands never enter the Account busy or error scope", () => {
   assert.doesNotMatch(
     appSource,
-    /runAccountCommand\(\(\) =>\s*client\.(?:refreshModelsCatalog|selectMetaskApiKey|configureMetaskSelection|selectModelsDefault|createModelConnection|updateModelConnection|replaceModelConnectionCredential|removeModelConnection|testModelConnection)/,
+    /runAccountCommand\(\(\) =>\s*client\.(?:refreshModelsCatalog|selectMetaskApiKey|configureMetaskSelection|selectModelsDefault|createCustomProvider|updateCustomProvider|replaceCustomProviderCredential|removeCustomProvider|testCustomModel)/,
   );
   assert.match(
     appSource,
@@ -492,7 +492,7 @@ test("authenticated settings project current catalog defaults", () => {
   assert.match(accountMarkup, /Sign out on this device/);
   assert.match(modelsMarkup, /Primary/);
   assert.match(modelsMarkup, /Model One/);
-  assert.doesNotMatch(modelsMarkup, /<section[^>]*settings-model-connections/);
+  assert.doesNotMatch(modelsMarkup, /<section[^>]*settings-custom-providers/);
 });
 
 test("catalog failure remains an authenticated retryable settings state", () => {

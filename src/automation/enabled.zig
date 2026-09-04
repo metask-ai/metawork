@@ -11,8 +11,8 @@ const bridge = @import("metawork_bridge");
 pub const enabled = true;
 
 const activation_env = "METAWORK_AUTOMATION";
-const model_connection_readiness_env =
-    "METAWORK_MODEL_CONNECTION_READINESS";
+const custom_provider_readiness_env =
+    "METAWORK_CUSTOM_PROVIDER_READINESS";
 const workspace_env = "METAWORK_AUTOMATION_WORKSPACE";
 const attachments_env = "METAWORK_AUTOMATION_ATTACHMENTS";
 const inline_origin = "zero://inline";
@@ -49,18 +49,18 @@ pub const Runtime = struct {
     }
 
     /// Enables only the automation transport and an injected Workspace for
-    /// the real Windows Model Connection readiness harness. Unlike `active`,
+    /// the real Windows Custom Provider readiness harness. Unlike `active`,
     /// this mode does not install fixture Account/Models state and therefore
     /// exercises normal platform services, secure input and credential vaults.
-    pub fn modelConnectionReadinessActive(self: *const Runtime) bool {
+    pub fn customProviderReadinessActive(self: *const Runtime) bool {
         const env_map = self.env_map orelse return false;
-        const value = env_map.get(model_connection_readiness_env) orelse
+        const value = env_map.get(custom_provider_readiness_env) orelse
             return false;
         return std.mem.eql(u8, value, "1");
     }
 
     pub fn bridgeHarnessActive(self: *const Runtime) bool {
-        return self.active() or self.modelConnectionReadinessActive();
+        return self.active() or self.customProviderReadinessActive();
     }
 
     pub fn executionFixture(self: *const Runtime) ?ExecutionFixture {
@@ -196,20 +196,20 @@ test "automation attachments are an explicit activation-scoped capability" {
     );
 }
 
-test "Model Connection readiness opens only harness transport and Workspace" {
+test "Custom Provider readiness opens only harness transport and Workspace" {
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
-    try env.put(model_connection_readiness_env, "1");
-    try env.put(workspace_env, "/tmp/metawork-model-connection-readiness");
+    try env.put(custom_provider_readiness_env, "1");
+    try env.put(workspace_env, "/tmp/metawork-custom-provider-readiness");
     var runtime = Runtime.init(&env);
     defer runtime.deinit();
 
     try std.testing.expect(!runtime.active());
-    try std.testing.expect(runtime.modelConnectionReadinessActive());
+    try std.testing.expect(runtime.customProviderReadinessActive());
     try std.testing.expect(runtime.bridgeHarnessActive());
     try std.testing.expect(runtime.executionFixture() == null);
     try std.testing.expectEqualStrings(
-        "/tmp/metawork-model-connection-readiness",
+        "/tmp/metawork-custom-provider-readiness",
         runtime.workspaceRoot().?,
     );
     const policy = runtime.productPolicy(

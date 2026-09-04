@@ -114,11 +114,11 @@ test("artifact identities preserve development and isolate automation namespaces
   );
   assert.match(
     identity,
-    /development_model_connection_credential_service =[\s\S]*development_account_credential_service \+\+ "\.model-connections"/,
+    /development_custom_provider_credential_service =[\s\S]*development_account_credential_service \+\+ "\.custom-providers"/,
   );
   assert.match(
     identity,
-    /automation_model_connection_credential_service =[\s\S]*automation_account_credential_service \+\+ "\.model-connections"/,
+    /automation_custom_provider_credential_service =[\s\S]*automation_account_credential_service \+\+ "\.custom-providers"/,
   );
   assert.match(
     identity,
@@ -179,7 +179,7 @@ test("Product Models contract has one protocol axis and no ProviderKind", () => 
     "frontend/src/bridge/decode-contracts.ts",
   ];
   const retiredIdentifiers =
-    /\bProviderKind\b|\bModelConnectionProtocol\b|\bprovider_kind\b|\bproviderKindForProtocol\b|\bprotocolForProviderKind\b/u;
+    /\bProviderKind\b|\bCustomProviderProtocol\b|\bprovider_kind\b|\bproviderKindForProtocol\b|\bprotocolForProviderKind\b/u;
 
   for (const file of productProtocolOwners) {
     assert.doesNotMatch(
@@ -213,7 +213,7 @@ test("Product Models contract has one protocol axis and no ProviderKind", () => 
       "metawork_product_models",
       "product_models_runtime",
       "product_models_ports",
-      "product_models_connections",
+      "product_models_providers",
     ],
   );
   assert.doesNotMatch(
@@ -281,12 +281,12 @@ test("Product maps admitted protocols to Agent at one exhaustive boundary", () =
   );
 });
 
-test("Product Models owns model connections independently of Account", () => {
+test("Product Models owns custom providers independently of Account", () => {
   const build = read("build.zig");
   const modelsRoot = read("src/product/models.zig");
   const modelsContract = read("src/product/models/contract.zig");
   const modelsRuntime = read("src/product/models/runtime.zig");
-  const modelsRegistry = read("src/product/models/connections.zig");
+  const modelsRegistry = read("src/product/models/providers.zig");
   const accountContract = read("src/product/account/contract.zig");
   const accountRuntime = read("src/product/account/runtime.zig");
   const accountPorts = read("src/product/account/ports.zig");
@@ -305,7 +305,7 @@ test("Product Models owns model connections independently of Account", () => {
     [
       "src/product/models.zig",
       "src/product/models/contract.zig",
-      "src/product/models/connections.zig",
+      "src/product/models/providers.zig",
       "src/product/models/ports.zig",
       "src/product/models/runtime.zig",
       "src/product/models/metask.zig",
@@ -331,7 +331,7 @@ test("Product Models owns model connections independently of Account", () => {
     ["product_control_ports", "product_control_runtime"],
     ["models_metask"],
   );
-  assert.match(modelsContract, /pub const ModelConnectionCommand = union/);
+  assert.match(modelsContract, /pub const CustomProviderCommand = union/);
   assert.match(modelsRuntime, /registry: registry_impl\.Registry/);
   assert.doesNotMatch(
     modelsRuntime,
@@ -342,10 +342,10 @@ test("Product Models owns model connections independently of Account", () => {
     modelsRegistry,
     /legacy_(?:connection|preference)_store_file_name|decodeLegacy|migrateLegacyStores|archiveLegacy/,
   );
-  assert.doesNotMatch(accountRuntime, /ModelConnection|model_connections/);
+  assert.doesNotMatch(accountRuntime, /CustomProvider|custom_providers/);
   assert.doesNotMatch(
     accountPorts,
-    /ModelConnection|CredentialVault|model_connection/,
+    /CustomProvider|CredentialVault|custom_provider/,
   );
   const accountView = accountContract.match(
     /pub const AccountView = struct \{([\s\S]*?)\n\};/,
@@ -355,8 +355,8 @@ test("Product Models owns model connections independently of Account", () => {
   )?.[1];
   assert.ok(accountView, "AccountView must remain inspectable");
   assert.ok(accountCommand, "AccountCommand must remain inspectable");
-  assert.doesNotMatch(accountView, /ModelConnection|model_connection/);
-  assert.doesNotMatch(accountCommand, /ModelConnection|model_connection/);
+  assert.doesNotMatch(accountView, /CustomProvider|custom_provider/);
+  assert.doesNotMatch(accountCommand, /CustomProvider|custom_provider/);
   assertNoImports(
     ["src/product/account.zig", ...zigFiles("src/product/account/")],
     [
@@ -364,7 +364,7 @@ test("Product Models owns model connections independently of Account", () => {
       "metawork_product_models_contract",
       "product_models_ports",
       "product_models_runtime",
-      "product_models_connections",
+      "product_models_providers",
       "product_models_metask",
     ],
   );
@@ -383,13 +383,13 @@ test("Product Models owns model connections independently of Account", () => {
       "models_contract",
       "models_ports",
       "models_runtime",
-      "models_connections",
+      "models_providers",
       "models_metask",
     ],
   );
   assertNoModuleTargets(
     build,
-    ["models", "models_runtime", "models_connections", "models_metask"],
+    ["models", "models_runtime", "models_providers", "models_metask"],
     [
       "account",
       "account_contract",
@@ -407,43 +407,43 @@ test("Product Models owns model connections independently of Account", () => {
     () =>
       assertNoModuleTargets(
         `${build}\nmodels_runtime.addImport("consumer", product_task);`,
-        ["models", "models_runtime", "models_connections", "models_metask"],
+        ["models", "models_runtime", "models_providers", "models_metask"],
         ["product_task"],
       ),
     /models_runtime imports forbidden build module product_task as consumer/,
   );
   assert.doesNotMatch(
     accountContract,
-    /model_connection_(?:invalid|not_found|capture_unavailable|persistence_unavailable|test_unavailable)/,
+    /custom_provider_(?:invalid|not_found|capture_unavailable|persistence_unavailable|test_unavailable)/,
   );
   assert.doesNotMatch(
     accountBinding,
-    /CredentialVault|model_connection|executionPorts/,
+    /CredentialVault|custom_provider|executionPorts/,
   );
   assert.match(modelsBinding, /product_models_ports/);
-  assert.match(modelsBinding, /modelConnectionCredentialService/);
-  assert.doesNotMatch(app, /model_connection_host|setModelConnectionHost/);
+  assert.match(modelsBinding, /customProviderCredentialService/);
+  assert.doesNotMatch(app, /custom_provider_host|setCustomProviderHost/);
   assert.match(
     bridgeDispatcher,
-    /control\.createModelConnectionWithCredential\(parsed\.value\.apiKey, spec\)/,
+    /control\.createCustomProviderWithCredential\(parsed\.value\.apiKey, spec\)/,
   );
   assert.match(
     bridgeDispatcher,
-    /control\.replaceModelConnectionCredential\(parsed\.value\.apiKey/,
+    /control\.replaceCustomProviderCredential\(parsed\.value\.apiKey/,
   );
   assert.match(bridgeClient, /apiKey: string/);
   assert.match(settings, /type="password"/);
   assert.doesNotMatch(settings, /settings-secure-credential-handoff/);
   assert.match(
     app,
-    /\.management = model_connection_capability_available,[\s\S]*\.secret_capture = model_connection_capability_available,[\s\S]*\.connection_test = model_connection_capability_available/,
+    /\.management = custom_provider_capability_available,[\s\S]*\.secret_capture = custom_provider_capability_available,[\s\S]*\.model_test = custom_provider_capability_available/,
   );
-  assert.doesNotMatch(settings, /MODEL_CONNECTION_SETTINGS_ENABLED/);
-  assert.match(windowsBringup, /test-model-connection-readiness-windows\.mjs/);
-  assert.match(identity, /pub fn modelConnectionCredentialService/);
+  assert.doesNotMatch(settings, /CUSTOM_PROVIDER_SETTINGS_ENABLED/);
+  assert.match(windowsBringup, /test-custom-provider-readiness-windows\.mjs/);
+  assert.match(identity, /pub fn customProviderCredentialService/);
   const selectDefault = control.indexOf("pub fn selectModelsDefault(");
   const registryCommit = control.indexOf(
-    "self.model_connections.selectDefault(command)",
+    "self.custom_providers.selectDefault(command)",
     selectDefault,
   );
   const reconcile = control.indexOf(
@@ -772,7 +772,7 @@ test("Product Control is the only composition owner identity", () => {
   assert.match(build, /src\/product\/control\/execution_state\.zig/);
   assert.match(build, /src\/product\/models\.zig/);
   assert.match(build, /src\/product\/models\/contract\.zig/);
-  assert.match(build, /src\/product\/models\/connections\.zig/);
+  assert.match(build, /src\/product\/models\/providers\.zig/);
   assert.match(build, /src\/product\/models\/runtime\.zig/);
   assert.match(build, /src\/product\/control\/executor\.zig/);
   assert.match(build, /src\/product\/control\/file_preview\.zig/);
@@ -854,11 +854,11 @@ test("Product Control is the only composition owner identity", () => {
   );
   assert.match(
     runtime,
-    /pub const PreparedModelConnectionBinding\s*=\s*[\s\S]*execution_state\.PreparedModelConnectionBinding/,
+    /pub const PreparedCustomProviderBinding\s*=\s*[\s\S]*execution_state\.PreparedCustomProviderBinding/,
   );
   assert.doesNotMatch(
     ports,
-    /PreparedModelConnectionBinding|execution_state\.State|AccountProjection|ActiveExecution/,
+    /PreparedCustomProviderBinding|execution_state\.State|AccountProjection|ActiveExecution/,
   );
   assert.doesNotMatch(
     control,
@@ -1155,7 +1155,7 @@ test("Application coordinators consume scoped Product Control capabilities", () 
   );
   assert.doesNotMatch(
     accountCoordinator,
-    /ModelConnection|model_connection|startModelConnections|stopModelConnections/,
+    /CustomProvider|custom_provider|startCustomProviders|stopCustomProviders/,
   );
   assert.doesNotMatch(
     agentEvents,

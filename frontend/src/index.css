@@ -1020,7 +1020,7 @@ summary::-webkit-details-marker {
     0 10px 30px rgba(37, 34, 45, 0.025);
 }
 
-.settings-model-connections {
+.settings-custom-providers {
   display: grid;
   gap: 14px;
   margin-top: 12px;
@@ -1030,7 +1030,7 @@ summary::-webkit-details-marker {
   background: var(--settings-paper);
 }
 
-.settings-model-connections .settings-execution-header p {
+.settings-custom-providers .settings-execution-header p {
   margin: 5px 0 0;
   color: var(--settings-muted);
   font-size: 12px;
@@ -1043,13 +1043,13 @@ summary::-webkit-details-marker {
   gap: 6px;
 }
 
-.settings-model-connections-empty {
+.settings-custom-providers-empty {
   margin: 0;
   color: var(--settings-muted);
   font-size: 13px;
 }
 
-.settings-model-connection-create {
+.settings-custom-provider-create {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 13px 14px;
@@ -1059,7 +1059,7 @@ summary::-webkit-details-marker {
   background: var(--settings-frost);
 }
 
-.settings-model-connection-route {
+.settings-custom-provider-route {
   position: relative;
   display: grid;
   grid-column: 1 / -1;
@@ -1074,7 +1074,7 @@ summary::-webkit-details-marker {
   text-transform: uppercase;
 }
 
-.settings-model-connection-route::before {
+.settings-custom-provider-route::before {
   position: absolute;
   top: 50%;
   right: 12%;
@@ -1084,30 +1084,30 @@ summary::-webkit-details-marker {
   content: "";
 }
 
-.settings-model-connection-route span {
+.settings-custom-provider-route span {
   position: relative;
   justify-self: center;
   padding: 0 7px;
   background: var(--settings-frost);
 }
 
-.settings-model-connection-create-field {
+.settings-custom-provider-create-field {
   display: grid;
   min-width: 0;
   gap: 6px;
 }
 
-.settings-model-connection-create-field > span {
+.settings-custom-provider-create-field > span {
   color: var(--settings-muted);
   font-size: var(--text-label);
   font-weight: 660;
 }
 
-.settings-model-connection-create-field-wide {
+.settings-custom-provider-create-field-wide {
   grid-column: 1 / -1;
 }
 
-.settings-model-connection-input {
+.settings-custom-provider-input {
   width: 100%;
   min-height: 44px;
   padding: 0 13px;
@@ -1121,25 +1121,25 @@ summary::-webkit-details-marker {
   box-shadow: 0 1px 2px rgba(37, 34, 45, 0.035);
 }
 
-.settings-model-connection-input:hover:not(:disabled) {
+.settings-custom-provider-input:hover:not(:disabled) {
   border-color: var(--ui-action-primary);
 }
 
-.settings-model-connection-input:disabled {
+.settings-custom-provider-input:disabled {
   color: var(--settings-muted);
   background: var(--settings-frost);
 }
 
-.settings-model-connection-input::placeholder {
+.settings-custom-provider-input::placeholder {
   color: var(--settings-muted);
 }
 
-.settings-model-connection-input-mono {
+.settings-custom-provider-input-mono {
   font-family: var(--font-mono);
   font-size: var(--text-control);
 }
 
-.settings-model-connection-create-footer {
+.settings-custom-provider-create-footer {
   display: flex;
   grid-column: 1 / -1;
   align-items: center;
@@ -1148,7 +1148,7 @@ summary::-webkit-details-marker {
   padding-top: 2px;
 }
 
-.settings-model-connection-create-footer p {
+.settings-custom-provider-create-footer p {
   max-width: 520px;
   margin: 0;
   color: var(--settings-muted);
@@ -1164,7 +1164,21 @@ summary::-webkit-details-marker {
   gap: 10px;
 }
 
-.settings-custom-model-add .settings-model-connection-input {
+.settings-custom-model-manager,
+.settings-custom-model-entry {
+  display: grid;
+  width: 100%;
+  gap: 8px;
+}
+
+.settings-custom-model-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-custom-model-add .settings-custom-provider-input {
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -1197,12 +1211,12 @@ summary::-webkit-details-marker {
   font-size: var(--text-label);
 }
 
-.settings-model-connection-list {
+.settings-custom-provider-list {
   display: grid;
   gap: 8px;
 }
 
-.settings-model-connection {
+.settings-custom-provider {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -1211,25 +1225,25 @@ summary::-webkit-details-marker {
   border-top: 1px solid var(--settings-line);
 }
 
-.settings-model-connection-copy {
+.settings-custom-provider-copy {
   display: grid;
   min-width: 0;
   gap: 3px;
 }
 
-.settings-model-connection-copy strong,
-.settings-model-connection-copy span {
+.settings-custom-provider-copy strong,
+.settings-custom-provider-copy span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.settings-model-connection-copy span {
+.settings-custom-provider-copy span {
   color: var(--settings-muted);
   font-size: 12px;
 }
 
-.settings-model-connection-actions {
+.settings-custom-provider-actions {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
@@ -1237,11 +1251,11 @@ summary::-webkit-details-marker {
   justify-content: flex-end;
 }
 
-.settings-model-connection-remove {
+.settings-custom-provider-remove {
   color: var(--ui-content-error);
 }
 
-.settings-model-connection-edit {
+.settings-custom-provider-edit {
   display: grid;
   grid-column: 1 / -1;
   grid-template-columns: minmax(0, 0.8fr) minmax(190px, 0.7fr) minmax(0, 1.5fr);
@@ -1252,7 +1266,32 @@ summary::-webkit-details-marker {
   background: var(--settings-frost);
 }
 
-.settings-model-connection-credential-edit {
+.settings-custom-provider-edit-credential {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--settings-line);
+}
+
+.settings-custom-provider-edit-credential-copy {
+  display: grid;
+  gap: 3px;
+  margin-right: auto;
+}
+
+.settings-custom-provider-edit-credential-copy strong {
+  color: var(--settings-ink);
+  font-size: var(--text-label);
+}
+
+.settings-custom-provider-edit-credential-copy span {
+  color: var(--settings-muted);
+  font-size: 12px;
+}
+
+.settings-custom-provider-credential-edit {
   display: grid;
   grid-column: 1 / -1;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1264,13 +1303,13 @@ summary::-webkit-details-marker {
   background: var(--settings-frost);
 }
 
-.settings-model-connection-credential-actions {
+.settings-custom-provider-credential-actions {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.settings-model-connection-edit-actions {
+.settings-custom-provider-edit-actions {
   display: flex;
   grid-column: 1 / -1;
   align-items: center;
@@ -1278,14 +1317,15 @@ summary::-webkit-details-marker {
   gap: 8px;
 }
 
-.settings-model-connection-edit-actions p {
+.settings-custom-provider-edit-actions p {
   margin: 0 auto 0 0;
   color: var(--settings-muted);
   font-size: var(--text-label);
   line-height: 1.45;
 }
 
-.settings-model-connection-confirm-remove {
+.settings-custom-provider-confirm-remove,
+.settings-custom-model-confirm-remove {
   display: flex;
   grid-column: 1 / -1;
   align-items: center;
@@ -1296,7 +1336,8 @@ summary::-webkit-details-marker {
   background: var(--ui-action-danger-surface);
 }
 
-.settings-model-connection-confirm-remove p {
+.settings-custom-provider-confirm-remove p,
+.settings-custom-model-confirm-remove p {
   margin: 0 auto 0 0;
   color: var(--settings-ink);
   font-size: var(--text-label);
@@ -2372,11 +2413,11 @@ button.run-process-tool:hover {
     grid-template-columns: 36px minmax(150px, 0.7fr) minmax(250px, 1.3fr);
   }
 
-  .settings-model-connection-edit {
+  .settings-custom-provider-edit {
     grid-template-columns: 1fr 1fr;
   }
 
-  .settings-model-connection-edit-endpoint {
+  .settings-custom-provider-edit-endpoint {
     grid-column: 1 / -1;
   }
 }
@@ -2456,60 +2497,67 @@ button.run-process-tool:hover {
     grid-template-columns: 1fr;
   }
 
-  .settings-model-connection-create {
+  .settings-custom-provider-create {
     grid-template-columns: 1fr;
     padding: 14px;
   }
 
-  .settings-model-connection-create-field-wide,
-  .settings-model-connection-create-footer,
-  .settings-model-connection-route {
+  .settings-custom-provider-create-field-wide,
+  .settings-custom-provider-create-footer,
+  .settings-custom-provider-route {
     grid-column: 1;
   }
 
-  .settings-model-connection-create-footer {
+  .settings-custom-provider-create-footer {
     align-items: stretch;
     flex-direction: column;
   }
 
   .settings-custom-model-add,
-  .settings-custom-model-test {
+  .settings-custom-model-test,
+  .settings-custom-model-confirm-remove {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .settings-model-connection {
+  .settings-custom-provider {
     grid-template-columns: 1fr;
   }
 
-  .settings-model-connection-actions {
+  .settings-custom-provider-actions {
     justify-content: flex-start;
   }
 
-  .settings-model-connection-edit,
-  .settings-model-connection-credential-edit,
-  .settings-model-connection-confirm-remove {
+  .settings-custom-provider-edit,
+  .settings-custom-provider-credential-edit,
+  .settings-custom-provider-confirm-remove {
     grid-column: 1;
   }
 
-  .settings-model-connection-edit {
+  .settings-custom-provider-edit {
     grid-template-columns: 1fr;
   }
 
-  .settings-model-connection-credential-edit {
+  .settings-custom-provider-credential-edit {
     grid-template-columns: 1fr;
   }
 
-  .settings-model-connection-edit-endpoint,
-  .settings-model-connection-edit-actions {
+  .settings-custom-provider-edit-endpoint,
+  .settings-custom-provider-edit-actions {
     grid-column: 1;
   }
 
-  .settings-model-connection-edit-actions,
-  .settings-model-connection-credential-actions,
-  .settings-model-connection-confirm-remove {
+  .settings-custom-provider-edit-actions,
+  .settings-custom-provider-edit-credential,
+  .settings-custom-provider-credential-actions,
+  .settings-custom-provider-confirm-remove,
+  .settings-custom-model-confirm-remove {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .settings-custom-provider-edit-credential {
+    align-items: stretch;
   }
 
   .settings-execution-header {

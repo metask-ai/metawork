@@ -9,10 +9,10 @@ import {
   type NewTaskAdmissionView,
   type ModelMetadata,
   type ModelMetadataProvenance,
-  type ModelConnectionCredentialStatus,
+  type CustomProviderCredentialStatus,
   type Protocol,
-  type ModelConnectionState,
-  type ModelConnectionTestStatus,
+  type CustomProviderState,
+  type CustomModelTestStatus,
   type HostSignal,
   type PendingUi,
   type PermissionHistory,
@@ -210,11 +210,11 @@ const executionCommandErrorCodes = [
   "no_models",
   "local_resource_exhausted",
   "credential_store_write_failed",
-  "model_connection_invalid",
-  "model_connection_not_found",
-  "model_connection_capture_unavailable",
-  "model_connection_persistence_unavailable",
-  "model_connection_test_unavailable",
+  "custom_provider_invalid",
+  "custom_provider_not_found",
+  "custom_provider_capture_unavailable",
+  "custom_provider_persistence_unavailable",
+  "custom_model_test_unavailable",
 ] as const;
 const rendererBridgeConnectErrors = [
   "identity_mismatch",
@@ -229,7 +229,7 @@ const protocols = [
 const newTaskAdmissionStates = ["unavailable", "ready", "replacing"] as const;
 const newTaskAdmissionReasons = [
   "none",
-  "model_connection_persistence_unavailable",
+  "custom_provider_persistence_unavailable",
   "credential_unavailable",
   "invalid_candidate",
   "resource_exhausted",
@@ -237,14 +237,14 @@ const newTaskAdmissionReasons = [
   "schedule_persistence_failed",
   "schedule_persistence_outcome_unknown",
 ] as const;
-const modelConnectionProtocols = [
+const customProviderProtocols = [
   "openai_responses",
   "anthropic_messages",
   "openai_chat_completions",
   "gemini_native",
 ] as const;
-const modelConnectionStates = ["configuring", "ready", "disabled"] as const;
-const modelConnectionTestStatuses = [
+const customProviderStates = ["configuring", "ready", "disabled"] as const;
+const customModelTestStatuses = [
   "untested",
   "testing",
   "connected",
@@ -256,7 +256,7 @@ const modelMetadataProvenances = [
   "provider_declared",
   "runtime_verified",
 ] as const;
-const modelConnectionCredentialStatuses = [
+const customProviderCredentialStatuses = [
   "missing",
   "ready",
   "invalid",
@@ -1067,25 +1067,23 @@ function decodeRequiredModelRef(value: unknown, path: string) {
   return result;
 }
 
-function decodeModelConnections(value: unknown, path: string) {
-  const modelConnections = arrayValue(value, path, (value, itemPath) => {
-    const connection = object(value, itemPath, [
+function decodeCustomProviders(value: unknown, path: string) {
+  const customProviders = arrayValue(value, path, (value, itemPath) => {
+    const provider = object(value, itemPath, [
       "id",
       "displayName",
       "protocol",
       "normalizedBaseUrl",
       "state",
-      "testStatus",
       "credentialStatus",
       "enabled",
-      "connectionRevision",
+      "providerRevision",
       "sourceGeneration",
       "catalogGeneration",
-      "selectedModel",
       "models",
     ]);
     const models = arrayValue(
-      connection.models,
+      provider.models,
       `${itemPath}.models`,
       (modelValue, modelPath) => {
         const model = object(modelValue, modelPath, [
@@ -1114,97 +1112,76 @@ function decodeModelConnections(value: unknown, path: string) {
           testStatus: enumValue(
             model.testStatus,
             `${modelPath}.testStatus`,
-            modelConnectionTestStatuses,
-          ) as ModelConnectionTestStatus,
+            customModelTestStatuses,
+          ) as CustomModelTestStatus,
           ready: booleanValue(model.ready, `${modelPath}.ready`),
         };
       },
     );
     return {
-      id: stringValue(connection.id, `${itemPath}.id`),
-      displayName: stringValue(
-        connection.displayName,
-        `${itemPath}.displayName`,
-      ),
+      id: stringValue(provider.id, `${itemPath}.id`),
+      displayName: stringValue(provider.displayName, `${itemPath}.displayName`),
       protocol: enumValue(
-        connection.protocol,
+        provider.protocol,
         `${itemPath}.protocol`,
-        modelConnectionProtocols,
+        customProviderProtocols,
       ) as Protocol,
       normalizedBaseUrl: stringValue(
-        connection.normalizedBaseUrl,
+        provider.normalizedBaseUrl,
         `${itemPath}.normalizedBaseUrl`,
       ),
       state: enumValue(
-        connection.state,
+        provider.state,
         `${itemPath}.state`,
-        modelConnectionStates,
-      ) as ModelConnectionState,
-      testStatus: enumValue(
-        connection.testStatus,
-        `${itemPath}.testStatus`,
-        modelConnectionTestStatuses,
-      ) as ModelConnectionTestStatus,
+        customProviderStates,
+      ) as CustomProviderState,
       credentialStatus: enumValue(
-        connection.credentialStatus,
+        provider.credentialStatus,
         `${itemPath}.credentialStatus`,
-        modelConnectionCredentialStatuses,
-      ) as ModelConnectionCredentialStatus,
-      enabled: booleanValue(connection.enabled, `${itemPath}.enabled`),
-      connectionRevision: wireId(
-        connection.connectionRevision,
-        `${itemPath}.connectionRevision`,
+        customProviderCredentialStatuses,
+      ) as CustomProviderCredentialStatus,
+      enabled: booleanValue(provider.enabled, `${itemPath}.enabled`),
+      providerRevision: wireId(
+        provider.providerRevision,
+        `${itemPath}.providerRevision`,
       ),
       sourceGeneration: wireId(
-        connection.sourceGeneration,
+        provider.sourceGeneration,
         `${itemPath}.sourceGeneration`,
       ),
       catalogGeneration: wireId(
-        connection.catalogGeneration,
+        provider.catalogGeneration,
         `${itemPath}.catalogGeneration`,
-      ),
-      selectedModel: stringValue(
-        connection.selectedModel,
-        `${itemPath}.selectedModel`,
       ),
       models,
     };
   });
   if (
-    new Set(modelConnections.map((connection) => connection.id)).size !==
-    modelConnections.length
+    new Set(customProviders.map((provider) => provider.id)).size !==
+    customProviders.length
   )
-    fail(path, "connection identities must be unique");
-  for (const [index, connection] of modelConnections.entries()) {
-    const connectionPath = `${path}[${index}]`;
+    fail(path, "provider identities must be unique");
+  for (const [index, provider] of customProviders.entries()) {
+    const providerPath = `${path}[${index}]`;
     if (
-      new Set(connection.models.map((model) => model.id)).size !==
-      connection.models.length
+      new Set(provider.models.map((model) => model.id)).size !==
+      provider.models.length
     )
-      fail(`${connectionPath}.models`, "model identities must be unique");
+      fail(`${providerPath}.models`, "model identities must be unique");
     if (
-      connection.selectedModel.length > 0 &&
-      connection.models.filter((model) => model.id === connection.selectedModel)
-        .length !== 1
+      provider.state === "ready" &&
+      (provider.credentialStatus !== "ready" ||
+        !provider.enabled ||
+        !provider.models.some((model) => model.ready))
     )
-      fail(connectionPath, "the selected model must belong to the connection");
+      fail(providerPath, "a ready provider must be verified and usable");
     if (
-      connection.state === "ready" &&
-      (connection.credentialStatus !== "ready" ||
-        !connection.enabled ||
-        !connection.models.some((model) => model.ready))
+      provider.state !== "ready" &&
+      provider.models.some((model) => model.ready)
     )
-      fail(connectionPath, "a ready connection must be verified and usable");
-    if (
-      connection.state !== "ready" &&
-      connection.models.some((model) => model.ready)
-    )
-      fail(
-        connectionPath,
-        "only a ready connection can retain model readiness",
-      );
+      fail(providerPath, "only a ready provider can retain model readiness");
   }
-  return modelConnections;
+  return customProviders;
 }
 
 function decodeModels(value: unknown, path: string): ModelsView {
@@ -1218,7 +1195,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
     "selectionRevision",
     "operation",
     "errorCode",
-    "connections",
+    "customProviders",
   ]);
   const providers = arrayValue(
     item.providers,
@@ -1394,9 +1371,9 @@ function decodeModels(value: unknown, path: string): ModelsView {
       "refreshing_catalog",
     ] as const),
     errorCode: enumValue(item.errorCode, `${path}.errorCode`, modelsErrorCodes),
-    connections: decodeModelConnections(
-      item.connections,
-      `${path}.connections`,
+    customProviders: decodeCustomProviders(
+      item.customProviders,
+      `${path}.customProviders`,
     ),
   };
 }
@@ -3259,9 +3236,9 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "backgroundScheduleWake",
     "localSkillManagement",
     "skillManagementHealth",
-    "modelConnectionManagement",
-    "modelConnectionSecretCapture",
-    "modelConnectionTest",
+    "customProviderManagement",
+    "customProviderSecretCapture",
+    "customModelTest",
     "mcpManagement",
     "mcpConnectionApproval",
     "mcpSecretCapture",
@@ -3380,17 +3357,17 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "outcome_unknown",
       ] as const,
     ),
-    modelConnectionManagement: booleanValue(
-      capabilityItem.modelConnectionManagement,
-      "$.capabilities.modelConnectionManagement",
+    customProviderManagement: booleanValue(
+      capabilityItem.customProviderManagement,
+      "$.capabilities.customProviderManagement",
     ),
-    modelConnectionSecretCapture: booleanValue(
-      capabilityItem.modelConnectionSecretCapture,
-      "$.capabilities.modelConnectionSecretCapture",
+    customProviderSecretCapture: booleanValue(
+      capabilityItem.customProviderSecretCapture,
+      "$.capabilities.customProviderSecretCapture",
     ),
-    modelConnectionTest: booleanValue(
-      capabilityItem.modelConnectionTest,
-      "$.capabilities.modelConnectionTest",
+    customModelTest: booleanValue(
+      capabilityItem.customModelTest,
+      "$.capabilities.customModelTest",
     ),
     mcpManagement: booleanValue(
       capabilityItem.mcpManagement,

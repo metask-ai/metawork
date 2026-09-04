@@ -5397,7 +5397,7 @@ fn checkpointIdentityEqual(left: anytype, right: @TypeOf(left)) bool {
 }
 
 test "Task execution owns the service reference and protocol across clone and transfer" {
-    var provider_id = "model_connection:service-a".*;
+    var provider_id = "custom_provider:service-a".*;
     var owned = try owned_task_execution.OwnedTaskExecution.clone(std.testing.allocator, .{
         .target = .{
             .provider_id = &provider_id,
@@ -5413,7 +5413,7 @@ test "Task execution owns the service reference and protocol across clone and tr
     owned.deinit();
     defer transferred.deinit();
     const resolved = transferred.input();
-    try std.testing.expectEqualStrings("model_connection:service-a", resolved.target.provider_id);
+    try std.testing.expectEqualStrings("custom_provider:service-a", resolved.target.provider_id);
     try std.testing.expectEqual(models_contract.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expectEqual(@as(u64, 7), resolved.execution_generation);
 }

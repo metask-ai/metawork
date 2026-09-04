@@ -178,7 +178,7 @@ test("Task model selection carries source-qualified authority", async () => {
   ]);
 });
 
-test("Models connection commands carry split source-qualified revisions", async () => {
+test("Custom Provider and model commands carry split source-qualified revisions", async () => {
   const calls = [];
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
@@ -187,47 +187,47 @@ test("Models connection commands carry split source-qualified revisions", async 
     }),
   });
 
-  await client.createModelConnection({
+  await client.createCustomProvider({
     displayName: "Provider",
     protocol: "openai_responses",
     normalizedBaseUrl: "https://api.example.com/v1/responses",
     apiKey: "create-secret",
   });
-  await client.updateModelConnection({
-    sourceId: "source-1",
-    expectedConnectionRevision: "2",
+  await client.updateCustomProvider({
+    providerId: "source-1",
+    expectedProviderRevision: "2",
     displayName: "Provider 2",
     protocol: "openai_responses",
     normalizedBaseUrl: "https://api.example.com/v1/responses",
   });
-  await client.replaceModelConnectionCredential(
+  await client.replaceCustomProviderCredential(
     "source-1",
     "3",
     "replacement-secret",
   );
-  await client.testModelConnection("source-1", "3", "model-a", "5", "7");
+  await client.testCustomModel("source-1", "3", "model-a", "5", "7");
   await client.addCustomModel({
-    sourceId: "source-1",
-    expectedConnectionRevision: "3",
+    providerId: "source-1",
+    expectedProviderRevision: "3",
     expectedCatalogGeneration: "7",
     model: { id: "model-b" },
   });
   await client.replaceCustomModel({
     selection: { sourceId: "source-1", modelId: "model-b" },
-    expectedConnectionRevision: "11",
+    expectedProviderRevision: "11",
     expectedCatalogGeneration: "13",
     replacement: { id: "model-c" },
   });
   await client.removeCustomModel({
     selection: { sourceId: "source-1", modelId: "model-c" },
-    expectedConnectionRevision: "17",
+    expectedProviderRevision: "17",
     expectedCatalogGeneration: "19",
   });
-  await client.removeModelConnection("source-1", "23");
+  await client.removeCustomProvider("source-1", "23");
 
   assert.deepEqual(calls, [
     {
-      command: "metawork.models.connections.create",
+      command: "metawork.models.customProviders.create",
       payload: {
         displayName: "Provider",
         protocol: "openai_responses",
@@ -236,28 +236,28 @@ test("Models connection commands carry split source-qualified revisions", async 
       },
     },
     {
-      command: "metawork.models.connections.update",
+      command: "metawork.models.customProviders.update",
       payload: {
-        sourceId: "source-1",
-        expectedConnectionRevision: "2",
+        providerId: "source-1",
+        expectedProviderRevision: "2",
         displayName: "Provider 2",
         protocol: "openai_responses",
         normalizedBaseUrl: "https://api.example.com/v1/responses",
       },
     },
     {
-      command: "metawork.models.connections.replaceCredential",
+      command: "metawork.models.customProviders.replaceCredential",
       payload: {
-        sourceId: "source-1",
-        expectedConnectionRevision: "3",
+        providerId: "source-1",
+        expectedProviderRevision: "3",
         apiKey: "replacement-secret",
       },
     },
     {
-      command: "metawork.models.connections.test",
+      command: "metawork.models.customModels.test",
       payload: {
         model: { sourceId: "source-1", modelId: "model-a" },
-        expectedConnectionRevision: "3",
+        expectedProviderRevision: "3",
         expectedSourceGeneration: "5",
         expectedCatalogGeneration: "7",
       },
@@ -265,8 +265,8 @@ test("Models connection commands carry split source-qualified revisions", async 
     {
       command: "metawork.models.customModels.add",
       payload: {
-        sourceId: "source-1",
-        expectedConnectionRevision: "3",
+        providerId: "source-1",
+        expectedProviderRevision: "3",
         expectedCatalogGeneration: "7",
         model: { id: "model-b" },
       },
@@ -275,7 +275,7 @@ test("Models connection commands carry split source-qualified revisions", async 
       command: "metawork.models.customModels.replace",
       payload: {
         selection: { sourceId: "source-1", modelId: "model-b" },
-        expectedConnectionRevision: "11",
+        expectedProviderRevision: "11",
         expectedCatalogGeneration: "13",
         replacement: { id: "model-c" },
       },
@@ -284,13 +284,13 @@ test("Models connection commands carry split source-qualified revisions", async 
       command: "metawork.models.customModels.remove",
       payload: {
         selection: { sourceId: "source-1", modelId: "model-c" },
-        expectedConnectionRevision: "17",
+        expectedProviderRevision: "17",
         expectedCatalogGeneration: "19",
       },
     },
     {
-      command: "metawork.models.connections.remove",
-      payload: { sourceId: "source-1", expectedConnectionRevision: "23" },
+      command: "metawork.models.customProviders.remove",
+      payload: { providerId: "source-1", expectedProviderRevision: "23" },
     },
   ]);
 });

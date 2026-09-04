@@ -106,7 +106,7 @@ test("generation, protocol, and installed source are exact", () => {
     taskModelSelectionPolicy(
       models(),
       admission({
-        activeModelRef: { sourceId: "connection-1", modelId: "gpt-5" },
+        activeModelRef: { sourceId: "provider-1", modelId: "gpt-5" },
       }),
       task(),
     ).authorityExact,
