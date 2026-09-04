@@ -3608,22 +3608,99 @@ fn redactTaskProjection(
         ) or run.output_continued_redacted;
         for (run.tools) |*tool_entry| {
             const tool = &(tool_entry.* orelse continue);
-            const id_redacted = effects.redact(tool.id, credential);
-            const name_redacted = effects.redact(tool.name, credential);
-            const input_redacted = effects.redact(tool.input, credential);
-            const progress_redacted = effects.redact(tool.progress, credential);
-            const content_redacted = effects.redact(tool.content, credential);
-            tool.redacted = id_redacted or name_redacted or input_redacted or
-                progress_redacted or content_redacted or tool.redacted;
+            var redacted = effects.redact(tool.id, credential);
+            redacted = effects.redact(tool.name, credential) or redacted;
+            redacted = effects.redact(tool.input, credential) or redacted;
+            redacted = effects.redact(tool.progress, credential) or redacted;
+            redacted = effects.redact(tool.content, credential) or redacted;
+            if (tool.file_refs) |references| for (references) |*reference_entry| {
+                const reference = &(reference_entry.* orelse continue);
+                redacted = effects.redact(reference.id, credential) or redacted;
+                redacted = effects.redact(reference.title, credential) or redacted;
+                redacted = effects.redact(reference.display_path, credential) or redacted;
+                redacted = effects.redact(reference.kind, credential) or redacted;
+                redacted = effects.redact(reference.locator, credential) or redacted;
+            };
+            tool.redacted = redacted or tool.redacted;
+        }
+        if (run.permission_provenance) |*permission|
+            _ = redactPermissionSummary(permission, credential, effects);
+        for (run.file_changes) |*change_entry| {
+            const change = &(change_entry.* orelse continue);
+            var redacted = effects.redact(change.id, credential);
+            redacted = effects.redact(change.display_path, credential) or redacted;
+            if (change.from_display_path) |from|
+                redacted = effects.redact(from, credential) or redacted;
+            change.redacted = redacted or change.redacted;
+        }
+        if (task_state.terminalPayload(run)) |terminal| {
+            const mutable = @constCast(terminal);
+            mutable.diagnostic_redacted = effects.redact(
+                run.terminal_diagnostic[0..mutable.diagnostic_len],
+                credential,
+            ) or mutable.diagnostic_redacted;
+        }
+        if (run.automatic_title.state.load(.acquire) == .ready and
+            run.automatic_title.generated)
+        {
+            run.automatic_title.generated_redacted = effects.redact(
+                run.automatic_title.result[0..run.automatic_title.result_len],
+                credential,
+            ) or run.automatic_title.generated_redacted;
+        }
+    }
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        if (task_state.compactTerminalPayload(compact)) |terminal| {
+            const mutable = @constCast(terminal);
+            mutable.diagnostic_redacted = effects.redact(
+                compact.terminal_diagnostic[0..mutable.diagnostic_len],
+                credential,
+            ) or mutable.diagnostic_redacted;
         }
     }
     for (task.durable.ui_history) |*entry| {
         const record = &(entry.* orelse continue);
-        record.redacted = effects.redact(
+        var redacted = effects.redact(
             record.detail[0..record.detail_len],
             credential,
-        ) or record.redacted;
+        );
+        redacted = effects.redact(
+            record.agent_request_id[0..record.agent_request_id_len],
+            credential,
+        ) or redacted;
+        if (record.permission) |*permission|
+            redacted = redactPermissionSummary(
+                permission,
+                credential,
+                effects,
+            ) or redacted;
+        record.redacted = redacted or record.redacted;
     }
+}
+
+fn redactPermissionSummary(
+    permission: *task_state.PermissionSummary,
+    credential: []const u8,
+    effects: RedactionEffects,
+) bool {
+    var changed = effects.redact(
+        permission.request_id[0..permission.request_id_len],
+        credential,
+    );
+    changed = effects.redact(
+        permission.matched_rule_id[0..permission.matched_rule_id_len],
+        credential,
+    ) or changed;
+    changed = effects.redact(
+        permission.tool_name[0..permission.tool_name_len],
+        credential,
+    ) or changed;
+    changed = effects.redact(
+        permission.tool_binding[0..permission.tool_binding_len],
+        credential,
+    ) or changed;
+    return changed;
 }
 
 fn writePendingUiProjection(

@@ -1611,12 +1611,24 @@ pub const Runtime = struct {
                         continue;
                     }
                     switch (read.state) {
-                        .ready => sink.complete_fn(sink.context, .{ .ready = .{
-                            .completion_id = read.completion_id,
-                            .content = read.content,
-                            .complete = read.complete,
-                            .redacted = read.redacted,
-                        } }),
+                        .ready => {
+                            // Artifacts are sanitized when written, but a
+                            // credential can become known after that durable
+                            // boundary. The lane owns this mutable buffer
+                            // through the synchronous sink call and securely
+                            // zeros it on release, so scrub the temporary copy
+                            // again against every credential that is live now.
+                            const content = read.content;
+                            const read_redacted = self.redactWithKnownCredentialsNoFail(
+                                content,
+                            );
+                            sink.complete_fn(sink.context, .{ .ready = .{
+                                .completion_id = read.completion_id,
+                                .content = content,
+                                .complete = read.complete,
+                                .redacted = read.redacted or read_redacted,
+                            } });
+                        },
                         .missing => sink.complete_fn(sink.context, .{ .unavailable = .{
                             .completion_id = read.completion_id,
                             .reason = .missing,
@@ -6350,74 +6362,6 @@ pub const Runtime = struct {
         );
     }
 
-    fn redactTaskProjectionNoFail(
-        _: *Runtime,
-        task: *TestTask,
-        credential: []const u8,
-    ) void {
-        if (credential.len == 0) return;
-        task.durable.title_redacted = redactFixedWidthNoFail(task.durable.title, credential) or
-            task.durable.title_redacted;
-        _ = redactFixedWidthNoFail(task.durable.workspace_root, credential);
-        _ = redactFixedWidthNoFail(task.durable.execution_model, credential);
-        for (task.durable.runs) |*run_entry| {
-            const run = &(run_entry.* orelse continue);
-            switch (run.input) {
-                .text => |*text| {
-                    text.redacted = redactFixedWidthNoFail(
-                        text.value,
-                        credential,
-                    ) or text.redacted;
-                },
-                .skill => |*skill| {
-                    var redacted = redactFixedWidthNoFail(
-                        skill.skill_id,
-                        credential,
-                    );
-                    redacted = redactFixedWidthNoFail(
-                        skill.catalog_revision,
-                        credential,
-                    ) or redacted;
-                    redacted = redactFixedWidthNoFail(
-                        skill.invocation_name,
-                        credential,
-                    ) or redacted;
-                    redacted = redactFixedWidthNoFail(
-                        skill.display_name,
-                        credential,
-                    ) or redacted;
-                    for (skill.argument_values) |value|
-                        redacted = redactFixedWidthNoFail(
-                            value,
-                            credential,
-                        ) or redacted;
-                    skill.redacted = redacted or skill.redacted;
-                },
-            }
-            run.assistant_redacted = redactFixedWidthNoFail(
-                run.assistant.list.items,
-                credential,
-            ) or run.assistant_redacted;
-            for (run.tools) |*tool_entry| {
-                const tool = &(tool_entry.* orelse continue);
-                const id_redacted = redactFixedWidthNoFail(tool.id, credential);
-                const name_redacted = redactFixedWidthNoFail(tool.name, credential);
-                const input_redacted = redactFixedWidthNoFail(tool.input, credential);
-                const progress_redacted = redactFixedWidthNoFail(tool.progress, credential);
-                const content_redacted = redactFixedWidthNoFail(tool.content, credential);
-                tool.redacted = id_redacted or name_redacted or input_redacted or
-                    progress_redacted or content_redacted or tool.redacted;
-            }
-        }
-        for (task.durable.ui_history) |*record_entry| {
-            const record = &(record_entry.* orelse continue);
-            record.redacted = redactFixedWidthNoFail(
-                record.detail[0..record.detail_len],
-                credential,
-            ) or record.redacted;
-        }
-    }
-
     fn checkpointMutationPending(
         self: *const Runtime,
         task: *const TestTask,
@@ -6728,6 +6672,21 @@ pub const Runtime = struct {
         const current = self.execution_state.credential();
         if (containsKnownSecret(value, current)) return true;
         return self.task_runtime.containsExecutionCredential(value);
+    }
+
+    fn redactWithKnownCredentialsNoFail(
+        self: *const Runtime,
+        value: []u8,
+    ) bool {
+        var changed = redactFixedWidthNoFail(
+            value,
+            self.execution_state.credential(),
+        );
+        changed = self.task_runtime.redactWithExecutionCredentialsNoFail(
+            value,
+            redactFixedWidthNoFail,
+        ) or changed;
+        return changed;
     }
 
     fn matchedKnownCredentialLen(
@@ -11648,6 +11607,16 @@ test "released Task credential is permanently scrubbed from every product projec
         "answer SECRET-KEY",
         control.limits.max_assistant_message_bytes,
     );
+    try control.appendTrackedText(
+        &run.output_segment,
+        "segment SECRET-KEY",
+        control.limits.max_assistant_message_bytes,
+    );
+    try control.appendTrackedText(
+        &run.output_continued,
+        "continued SECRET-KEY",
+        control.limits.max_assistant_message_bytes,
+    );
     run.tools[0] = .{
         .route_digest = toolRouteDigest("SECRET-KEY"),
         .id = try control.copyBounded("id SECRET-KEY", control.limits.max_tool_field_bytes),
@@ -11658,6 +11627,35 @@ test "released Task credential is permanently scrubbed from every product projec
         .content = try control.copyBounded("content SECRET-KEY", control.limits.max_tool_field_bytes),
         .state = .completed,
     };
+    const file_refs = try control.allocator.alloc(?task_test_state.FileReferenceView, 1);
+    file_refs[0] = .{
+        .id = try control.copyBounded("ref SECRET-KEY", control.limits.max_tool_field_bytes),
+        .title = try control.copyBounded("title SECRET-KEY", control.limits.max_tool_field_bytes),
+        .display_path = try control.copyBounded("path SECRET-KEY", control.limits.max_tool_field_bytes),
+        .kind = try control.copyBounded("kind SECRET-KEY", control.limits.max_tool_field_bytes),
+        .locator_kind = .workspace_path,
+        .locator = try control.copyBounded("src/SECRET-KEY.zig", control.limits.max_tool_field_bytes),
+    };
+    run.tools[0].?.file_refs = file_refs;
+    run.file_changes[0] = .{
+        .route_digest = [_]u8{0x7a} ** task_test_state.file_change_route_digest_bytes,
+        .id = try control.copyBounded("change SECRET-KEY", control.limits.max_tool_field_bytes),
+        .order = 2,
+        .kind = .moved,
+        .status = .applied,
+        .display_path = try control.copyBounded("to SECRET-KEY", control.limits.max_tool_field_bytes),
+        .from_display_path = try control.copyBounded("from SECRET-KEY", control.limits.max_tool_field_bytes),
+        .before_bytes = 1,
+        .after_bytes = 2,
+        .diff_complete = true,
+    };
+    run.automatic_title.state.store(.ready, .release);
+    @memcpy(
+        run.automatic_title.result[0.."automatic SECRET-KEY".len],
+        "automatic SECRET-KEY",
+    );
+    run.automatic_title.result_len = "automatic SECRET-KEY".len;
+    run.automatic_title.generated = true;
     product_workspace.testing.overwriteProjectedRoot(
         &control.workspace,
         1,
@@ -11671,6 +11669,11 @@ test "released Task credential is permanently scrubbed from every product projec
     };
     @memcpy(task.durable.ui_history[0].?.detail[0.."SECRET-KEY".len], "SECRET-KEY");
     task.durable.ui_history[0].?.detail_len = "SECRET-KEY".len;
+    @memcpy(
+        task.durable.ui_history[0].?.agent_request_id[0.."request SECRET-KEY".len],
+        "request SECRET-KEY",
+    );
+    task.durable.ui_history[0].?.agent_request_id_len = "request SECRET-KEY".len;
     task.durable.ui_history_count = 1;
     const compact_slot = try control.reserveCompactRecord(task, 9, run.id);
     const compact = &task.durable.compacts[compact_slot].?;
@@ -11690,6 +11693,32 @@ test "released Task credential is permanently scrubbed from every product projec
         "",
         false,
     ));
+    @memcpy(run.terminal_diagnostic[0.."run SECRET-KEY".len], "run SECRET-KEY");
+    @constCast(terminalPayload(run).?).diagnostic_len = "run SECRET-KEY".len;
+    try std.testing.expect(commitCompactProductTerminal(
+        compact,
+        .compacted,
+        null,
+        .reusable,
+        .{},
+        1,
+        1,
+        "",
+        false,
+    ));
+    @memcpy(
+        compact.terminal_diagnostic[0.."compact SECRET-KEY".len],
+        "compact SECRET-KEY",
+    );
+    @constCast(compactTerminalPayload(compact).?).diagnostic_len =
+        "compact SECRET-KEY".len;
+    control.redactAllProductProjectionsNoFail("SECRET-KEY");
+    try std.testing.expect(run.automatic_title.generated_redacted);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        run.automatic_title.result[0..run.automatic_title.result_len],
+        "SECRET-KEY",
+    ) == null);
     run.event_stream_finalized = true;
     control.releaseTaskAttachmentNoFail(task, .cold_start);
     task.runtime.active_run_id = 0;
@@ -11698,6 +11727,16 @@ test "released Task credential is permanently scrubbed from every product projec
     try std.testing.expectEqual(@as(usize, 0), run.redaction_secret.len);
     try std.testing.expectEqual(@as(usize, 0), compact.redaction_secret.len);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.execution_model, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, run.output_segment.list.items, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, run.output_continued.list.items, "SECRET-KEY") == null);
+    const scrubbed_ref = run.tools[0].?.file_refs.?[0].?;
+    try std.testing.expect(std.mem.indexOf(u8, scrubbed_ref.locator, "SECRET-KEY") == null);
+    try std.testing.expect(run.tools[0].?.redacted);
+    try std.testing.expect(std.mem.indexOf(u8, run.file_changes[0].?.display_path, "SECRET-KEY") == null);
+    try std.testing.expect(run.file_changes[0].?.redacted);
+    try std.testing.expect(terminalPayload(run).?.diagnostic_redacted);
+    try std.testing.expect(compactTerminalPayload(compact).?.diagnostic_redacted);
+    try std.testing.expect(task.durable.ui_history[0].?.redacted);
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
@@ -13783,6 +13822,111 @@ test "Runtime stores credential-safe file change diffs outside task history" {
     }
     try std.testing.expectEqual(@as(usize, 1), capture.calls);
     try std.testing.expectEqual(FileChangeDiffReason.not_recorded, capture.unavailable.?);
+}
+
+test "Runtime re-scrubs file change diffs with credentials learned after write" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var store = try file_change_store.FileStore.init(
+        std.testing.io,
+        root_storage[0..root_len],
+    );
+    defer store.deinit();
+    var control = try testRuntimeWith(.{
+        .file_change_store = .{ .file_store = &store },
+    });
+    defer control.deinit();
+
+    const late_credential = "LATE-CREDENTIAL";
+    const encoded =
+        "{\"file_changes\":{\"id\":\"tool-late-diff\",\"name\":\"Edit\",\"changes\":[{\"locator\":{\"workspace_path\":\"src/main.zig\"},\"kind\":\"modified\",\"status\":\"applied\",\"tool\":\"Edit\",\"tool_use_id\":\"tool-late-diff\",\"agent_depth\":0,\"before_bytes\":3,\"after_bytes\":4,\"unified_diff\":\"@@ -1 +1 @@\\n-old\\n+前缀LATE-CREDENTIAL后缀\\n\",\"diff_complete\":true}],\"overflow\":false,\"lost\":false}}";
+    var envelope = try testEnvelope(3, 7, encoded);
+    defer envelope.deinit();
+    try control.applyEvent(&envelope);
+
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    for (0..1_000) |_| {
+        control.drainFileChangeCompletions(.{
+            .context = &control,
+            .complete_fn = discardFileChangeDiffCompletion,
+        });
+        if (run.pending_file_change_artifacts == 0) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(@as(u32, 0), run.pending_file_change_artifacts);
+    const change = &run.file_changes[0].?;
+    try std.testing.expect(!change.redacted);
+    const artifact = change.artifact orelse return error.TestUnexpectedResult;
+    const identity: file_change_store.Identity = .{
+        .task_id = 3,
+        .run_generation = artifact.run_generation,
+        .change_order = artifact.change_order,
+        .digest = artifact.digest,
+        .byte_size = artifact.byte_size,
+    };
+    const stored = try store.readAlloc(
+        std.testing.allocator,
+        identity,
+        control.limits.max_file_change_diff_bytes,
+    );
+    defer std.testing.allocator.free(stored);
+    try std.testing.expect(std.mem.indexOf(u8, stored, late_credential) != null);
+
+    // This mirrors a later credential installation. The immutable artifact is
+    // intentionally left untouched; the read boundary must protect it using
+    // the complete set of credentials that is live at read time.
+    execution_state.testing.setCredentialBytes(
+        &control.execution_state,
+        late_credential,
+    );
+    control.redactAllProductProjectionsNoFail(late_credential);
+
+    const Capture = struct {
+        calls: usize = 0,
+        content: [1024]u8 = undefined,
+        content_len: usize = 0,
+        redacted: bool = false,
+
+        fn receive(context: *anyopaque, result: FileChangeDiffResult) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            switch (result) {
+                .ready => |ready| {
+                    std.debug.assert(ready.content.len <= self.content.len);
+                    @memcpy(self.content[0..ready.content.len], ready.content);
+                    self.content_len = ready.content.len;
+                    self.redacted = ready.redacted;
+                },
+                .unavailable => unreachable,
+            }
+        }
+    };
+    var capture = Capture{};
+    switch (control.beginFileChangeDiff(21, 3, 7, change.id)) {
+        .queued => {},
+        .immediate => return error.TestUnexpectedResult,
+    }
+    for (0..1_000) |_| {
+        control.drainFileChangeCompletions(.{
+            .context = &capture,
+            .complete_fn = Capture.receive,
+        });
+        if (capture.calls != 0) break;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    const safe = capture.content[0..capture.content_len];
+    try std.testing.expect(capture.redacted);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(safe));
+    try std.testing.expect(std.mem.indexOf(u8, safe, late_credential) == null);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "前缀") != null);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "后缀") != null);
+
+    var snapshot_storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, late_credential) == null);
 }
 
 test "Runtime cleans file change orphans only from healthy task history" {
