@@ -208,7 +208,12 @@ pub const Runtime = struct {
         };
         return .{
             .availability = if (self.store_healthy) .ready else .unavailable,
-            .persistence_health = if (self.store_healthy) .ready else .unavailable,
+            .persistence_health = if (self.store_healthy)
+                .ready
+            else if (self.store != null)
+                .recovery_required
+            else
+                .unavailable,
             .providers = self.provider_views[0..],
             .metask_selection = metask_selection,
             .metask_selection_revision = if (intent) |value| value.selection_revision else 0,
@@ -861,6 +866,8 @@ pub const Runtime = struct {
     /// pending deletions and scrubbed after the durable empty commit.
     pub fn resetStore(self: *Runtime) contract.CommandResult {
         self.assertMainThread();
+        if (self.store == null or self.store_healthy)
+            return .rejected(.persistence_unavailable);
         if (self.catalog_attempt != null)
             return .rejected(.operation_in_progress);
         var candidate = self.registry.resetCandidate() catch |err|
@@ -869,8 +876,7 @@ pub const Runtime = struct {
         const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err|
             return .rejected(mapRegistryError(err));
         defer self.allocator.free(encoded);
-        const store = if (self.store) |*value| value else
-            return .rejected(.persistence_unavailable);
+        const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
         store.commit(encoded) catch |err| {
             if (err == error.PersistenceOutcomeUnknown) self.store_healthy = false;
             return .rejected(.persistence_unavailable);
@@ -1871,6 +1877,7 @@ test "Models bootstrap initializes canonical store and ignores retired files" {
 test "Models bootstrap rejects retired and damaged canonical shapes" {
     const inputs = [_][]const u8{
         "{\"default_connection_id\":null,\"default_execution_generation\":0,\"pending_credential_deletions\":[],\"connections\":[]}",
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"migration\":{\"legacy_marker\":true},\"pending_credential_deletions\":[],\"connections\":[]}",
         "not-json",
     };
     for (inputs) |input| {
@@ -1890,6 +1897,10 @@ test "Models bootstrap rejects retired and damaged canonical shapes" {
 
         try std.testing.expect(!runtime.store_healthy);
         try std.testing.expectEqual(contract.CatalogState.unavailable, runtime.view().availability);
+        try std.testing.expectEqual(
+            contract.PersistenceHealth.recovery_required,
+            runtime.view().persistence_health,
+        );
         const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
             return error.TestExpectedEqual;
         defer std.testing.allocator.free(bytes);
@@ -1905,7 +1916,7 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
     try writeTestFile(
         &tmp.dir,
         registry_impl.store_file_name,
-        "{\"migration\":{\"execution_generation\":7}}",
+        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"migration\":{\"legacy_marker\":true},\"pending_credential_deletions\":[],\"connections\":[]}",
     );
 
     var vault: TestVault = .{};
@@ -1916,8 +1927,13 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
         runtime.deinit();
     }
     try std.testing.expect(!runtime.store_healthy);
+    try std.testing.expectEqual(
+        contract.PersistenceHealth.recovery_required,
+        runtime.view().persistence_health,
+    );
     try std.testing.expect(runtime.resetStore().accepted);
     try std.testing.expect(runtime.store_healthy);
+    try std.testing.expectEqual(contract.PersistenceHealth.ready, runtime.view().persistence_health);
     try std.testing.expectEqual(@as(usize, 0), runtime.views().len);
     try std.testing.expect(runtime.view().metask_selection == null);
     try std.testing.expect(runtime.view().default_selection == null);
@@ -1930,7 +1946,7 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
     );
 }
 
-test "Models reset scrubs custom credentials and clears selections" {
+test "Models reset rejects healthy store and scrubs known credentials during recovery" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1952,11 +1968,40 @@ test "Models reset scrubs custom credentials and clears selections" {
         .{ .id = "gpt-5", .display_name = "GPT-5" },
     ).accepted);
     try std.testing.expect(vault.present);
+    try std.testing.expectEqual(
+        contract.ManagementError.persistence_unavailable,
+        runtime.resetStore().error_code.?,
+    );
+    try std.testing.expect(vault.present);
+    try std.testing.expectEqual(@as(usize, 1), runtime.views().len);
+
+    // An outcome-unknown write leaves the last trusted in-memory registry
+    // available for explicit recovery, including credential cleanup.
+    runtime.store_healthy = false;
+    try std.testing.expectEqual(
+        contract.PersistenceHealth.recovery_required,
+        runtime.view().persistence_health,
+    );
     try std.testing.expect(runtime.resetStore().accepted);
     try std.testing.expect(!vault.present);
     try std.testing.expectEqual(@as(usize, 0), runtime.views().len);
     try std.testing.expect(runtime.view().default_selection == null);
     try std.testing.expect(runtime.registry.nextCredentialDeletion() == null);
+}
+
+test "Models reset rejects unavailable persistence capability" {
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    runtime.startUnavailable();
+    defer runtime.deinit();
+
+    try std.testing.expectEqual(
+        contract.PersistenceHealth.unavailable,
+        runtime.view().persistence_health,
+    );
+    try std.testing.expectEqual(
+        contract.ManagementError.persistence_unavailable,
+        runtime.resetStore().error_code.?,
+    );
 }
 
 fn writeTestFile(dir: *std.Io.Dir, name: []const u8, bytes: []const u8) !void {

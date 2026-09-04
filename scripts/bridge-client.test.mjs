@@ -761,3 +761,45 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
     },
   ]);
 });
+
+test("Models recovery and global default commands preserve their exact revision payloads", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { accepted: true, errorCode: "none", attemptId: null };
+    }),
+  });
+
+  assert.deepEqual(await client.resetModelsStore("41"), {
+    accepted: true,
+    errorCode: "none",
+    attemptId: null,
+  });
+  assert.deepEqual(
+    await client.selectModelsDefault({
+      sourceId: "metask:key-1",
+      modelId: "model-1",
+      expectedSelectionRevision: "43",
+      expectedSourceGeneration: "47",
+      expectedCatalogGeneration: "53",
+    }),
+    { accepted: true, errorCode: "none", attemptId: null },
+  );
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.models.resetStore",
+      payload: { expectedRevision: "41" },
+    },
+    {
+      command: "metawork.models.selectDefault",
+      payload: {
+        sourceId: "metask:key-1",
+        modelId: "model-1",
+        expectedSelectionRevision: "43",
+        expectedSourceGeneration: "47",
+        expectedCatalogGeneration: "53",
+      },
+    },
+  ]);
+});
