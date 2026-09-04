@@ -1003,6 +1003,10 @@ test("Product Workspace owns the bounded registry without owning the shared comm
     workspaceRoot,
     /pub const AutomaticRoot = runtime_impl\.AutomaticRoot/,
   );
+  assert.match(
+    workspaceRoot,
+    /pub const PreparedAutomaticWorkspace = runtime_impl\.PreparedAutomaticWorkspace/,
+  );
   assert.doesNotMatch(
     workspaceRoot,
     /AutomaticAllocator|AutomaticAllocation|AutomaticError|automatic_root_impl/,
@@ -1019,9 +1023,24 @@ test("Product Workspace owns the bounded registry without owning the shared comm
     workspaceRuntime,
     /automatic_allocator: \?automatic_root\.Allocator/,
   );
-  assert.match(workspaceRuntime, /pub fn allocateAutomatic/);
-  assert.match(workspaceRuntime, /pub fn finishAutomaticAllocation/);
-  assert.match(workspaceRuntime, /pub fn rollbackAutomaticAllocation/);
+  assert.match(workspaceRuntime, /pub fn prepareAutomatic/);
+  assert.match(workspaceRuntime, /pub fn completeAutomatic/);
+  assert.match(workspaceRuntime, /pub fn rollbackPreparedAutomatic/);
+  assert.match(workspaceRuntime, /pub fn abandonPreparedAutomatic/);
+  assert.doesNotMatch(
+    control,
+    /@typeInfo[\s\S]{0,200}(?:allocateAutomatic|AutomaticAllocation)/,
+  );
+  const preparedTaskSource = control.slice(
+    control.indexOf("fn prepareTaskInWorkspaceInternal("),
+    control.indexOf("fn createAutomaticTask("),
+  );
+  const scheduledAdmissionSource = control.slice(
+    control.indexOf("fn prepareScheduledAdmission("),
+    control.indexOf("pub fn restoreTaskConversation("),
+  );
+  assert.doesNotMatch(preparedTaskSource, /syncLifecycle\(\)/);
+  assert.doesNotMatch(scheduledAdmissionSource, /syncLifecycle\(\)/);
   assert.doesNotMatch(
     workspaceRuntime,
     /commitTaskState|TaskPersistence|FileStore|Executor|std\.Thread|@import\("(?:metawork_product_control|metawork_product_task|metawork_product_skill|metawork_product_mcp|metawork_product_schedule|metawork_agent|metawork_app|metawork_bridge|metawork_account)"\)/,
@@ -1559,6 +1578,11 @@ test("Product Task kernels have one physical home without taking the executor", 
   assert.match(taskState, /pub fn applyEvent\(/);
   assert.match(taskState, /pub fn markTerminalRunsBeforeEventDrain\(/);
   assert.match(taskState, /pub fn finalizeMarkedTerminalRunsAfterEventDrain\(/);
+  assert.match(taskState, /pub fn compactProjectionFacts\(/);
+  for (const consumer of [taskPolicy, taskPersistence, taskView]) {
+    assert.match(consumer, /task_state\.compactProjectionFacts\(/);
+    assert.doesNotMatch(consumer, /task_state\.compactTerminalPayload\(/);
+  }
   assert.match(taskState, /@import\("metawork_agent"\)/);
   assert.doesNotMatch(
     taskState,

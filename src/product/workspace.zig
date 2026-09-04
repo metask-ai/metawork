@@ -24,6 +24,7 @@ pub const OpenAuthority = runtime_impl.OpenAuthority;
 pub const OpenPreparation = runtime_impl.OpenPreparation;
 pub const RemovalPreparation = runtime_impl.RemovalPreparation;
 pub const OrderPreparation = runtime_impl.OrderPreparation;
+pub const PreparedAutomaticWorkspace = runtime_impl.PreparedAutomaticWorkspace;
 pub const RemovedAutomatic = runtime_impl.RemovedAutomatic;
 pub const Projection = view_impl.Projection;
 pub const ViewProvider = view_impl.Provider;

@@ -808,11 +808,8 @@ pub fn projectTask(
     var compact_index: usize = 0;
     for (task.durable.compacts) |*entry| {
         const compact = &(entry.* orelse continue);
-        const terminal = task_state.compactTerminalPayload(compact);
-        const phase = if (terminal) |payload|
-            payload.phase
-        else
-            task_state.activeCompactPhase(compact);
+        const projection = task_state.compactProjectionFacts(compact);
+        const terminal = projection.terminal;
         const diagnostic = if (terminal) |payload|
             compact.terminal_diagnostic[0..payload.diagnostic_len]
         else
@@ -820,7 +817,7 @@ pub fn projectTask(
         compacts[compact_index] = .{
             .id = compact.id,
             .after_run_id = compact.after_run_id,
-            .phase = @tagName(phase),
+            .phase = @tagName(projection.phase),
             .cause = if (terminal) |payload|
                 if (payload.cause) |cause| @tagName(cause) else null
             else

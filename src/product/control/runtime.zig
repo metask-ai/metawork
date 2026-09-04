@@ -464,10 +464,6 @@ const TaskWorkspaceOrderContext = struct {
     preparation: *product_workspace.OrderPreparation,
 };
 
-const WorkspaceAutomaticAllocation = @typeInfo(
-    @typeInfo(@TypeOf(product_workspace.Runtime.allocateAutomatic)).@"fn".return_type.?,
-).error_union.payload;
-
 const PreparedTaskCreate = struct {
     task: task_runtime.PreparedCreate,
     order: product_workspace.OrderPreparation,
@@ -488,10 +484,41 @@ const PreparedTaskCreate = struct {
     }
 };
 
+const PreparedAutomaticBinding = struct {
+    workspace: product_workspace.PreparedAutomaticWorkspace,
+
+    fn id(self: *const PreparedAutomaticBinding) u64 {
+        return self.workspace.id();
+    }
+
+    fn facts(self: *const PreparedAutomaticBinding, control: *const Runtime) product_workspace.Facts {
+        return control.workspace.preparedAutomaticFacts(&self.workspace);
+    }
+
+    fn complete(self: *PreparedAutomaticBinding, control: *Runtime) void {
+        control.workspace.completeAutomatic(&self.workspace);
+    }
+
+    fn rollback(self: *PreparedAutomaticBinding, control: *Runtime) void {
+        control.unregisterPreparedAutomaticSkillNoFail(self.id());
+        _ = control.workspace.rollbackPreparedAutomatic(
+            &self.workspace,
+            control.workspaceStorage(),
+        );
+    }
+
+    fn abandon(self: *PreparedAutomaticBinding, control: *Runtime) void {
+        control.unregisterPreparedAutomaticSkillNoFail(self.id());
+        control.workspace.abandonPreparedAutomatic(
+            &self.workspace,
+            control.workspaceStorage(),
+        );
+    }
+};
+
 const PreparedScheduledAdmission = struct {
     control: *Runtime,
-    allocation: WorkspaceAutomaticAllocation,
-    workspace_id: u64,
+    workspace: PreparedAutomaticBinding,
     task: PreparedTaskCreate,
     run: task_runtime.PreparedRun,
     active: bool = true,
@@ -504,8 +531,15 @@ const PreparedScheduledAdmission = struct {
         std.debug.assert(self.active);
         self.run.rollback();
         self.task.rollback(self.control);
-        self.control.releaseAutomaticWorkspaceNoFail(self.workspace_id);
-        _ = self.control.workspace.rollbackAutomaticAllocation(&self.allocation);
+        self.workspace.rollback(self.control);
+        self.active = false;
+    }
+
+    fn abandon(self: *PreparedScheduledAdmission) void {
+        std.debug.assert(self.active);
+        self.run.rollback();
+        self.task.rollback(self.control);
+        self.workspace.abandon(self.control);
         self.active = false;
     }
 
@@ -514,7 +548,7 @@ const PreparedScheduledAdmission = struct {
     ) error{ ExecutorShuttingDown, QueueFull }!u64 {
         std.debug.assert(self.active);
         const task_id = self.task.complete(self.control);
-        self.control.workspace.finishAutomaticAllocation(&self.allocation);
+        self.workspace.complete(self.control);
         self.active = false;
         _ = try self.run.submit();
         return task_id;
@@ -2536,6 +2570,13 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        return self.openWorkspaceInternal(input);
+    }
+
+    fn openWorkspaceInternal(
+        self: *Runtime,
+        input: TaskCreateInput,
+    ) Error!u64 {
         var preparation = try self.workspace.prepareOpen(
             input.workspace_root,
             switch (input.trust) {
@@ -2887,14 +2928,15 @@ pub const Runtime = struct {
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
-        const workspace_id = try self.openWorkspace(input);
-        return self.createTaskInWorkspace(
+        const workspace_id = try self.openWorkspaceInternal(input);
+        return self.createTaskInWorkspaceInternal(
             workspace_id,
             (self.workspace.facts(workspace_id) orelse return error.UnknownWorkspace).epoch,
             self.execution_state.generation(),
             null,
             null,
             .{ .interactive = input.permission_profile },
+            false,
         );
     }
 
@@ -2907,6 +2949,8 @@ pub const Runtime = struct {
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
     ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
         return self.createTaskInWorkspaceInternal(
             workspace_id,
             expected_workspace_epoch,
@@ -2926,14 +2970,17 @@ pub const Runtime = struct {
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
     ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
         return switch (request) {
-            .manual => |manual| self.createTaskInWorkspace(
+            .manual => |manual| self.createTaskInWorkspaceInternal(
                 manual.workspace_id,
                 manual.expected_epoch,
                 expected_execution_generation,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
                 permission,
+                false,
             ),
             .automatic => self.createAutomaticTask(
                 expected_execution_generation,
@@ -2983,7 +3030,6 @@ pub const Runtime = struct {
         allow_unowned_automatic: bool,
     ) Error!PreparedTaskCreate {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        self.syncLifecycle();
         if (self.mcp) |*mcp|
             if (mcp.blocksNewTaskAdmission())
                 return error.CatalogLoading;
@@ -3114,7 +3160,6 @@ pub const Runtime = struct {
         permission: TaskPermissionRequest,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        self.syncLifecycle();
         if (self.executionReplacementPending())
             return error.ExecutionInUse;
         if (!self.canCreateTask())
@@ -3127,10 +3172,9 @@ pub const Runtime = struct {
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
         if (!self.workspace.automaticCapacityAvailable())
             return error.WorkspaceCapacity;
-        var allocation = try self.workspace.allocateAutomatic();
-        errdefer _ = self.workspace.rollbackAutomaticAllocation(&allocation);
-        const workspace = try self.registerAutomaticWorkspace(allocation.path());
-        errdefer self.releaseAutomaticWorkspaceNoFail(workspace.id);
+        var automatic = try self.prepareAutomaticWorkspace();
+        errdefer if (automatic.workspace.isActive()) automatic.rollback(self);
+        const workspace = automatic.facts(self);
         const task_id = try self.createTaskInWorkspaceInternal(
             workspace.id,
             workspace.epoch,
@@ -3141,7 +3185,7 @@ pub const Runtime = struct {
             true,
         );
         self.workspace.setAutomaticOwner(workspace.id, task_id);
-        self.workspace.finishAutomaticAllocation(&allocation);
+        automatic.complete(self);
         return task_id;
     }
 
@@ -3152,15 +3196,10 @@ pub const Runtime = struct {
         if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
         if (!self.workspace.automaticCapacityAvailable())
             return error.WorkspaceCapacity;
-        var allocation = try self.workspace.allocateAutomatic();
-        var allocation_live = true;
-        errdefer if (allocation_live) {
-            _ = self.workspace.rollbackAutomaticAllocation(&allocation);
-        };
-        const workspace = try self.registerAutomaticWorkspace(allocation.path());
-        var workspace_live = true;
-        errdefer if (workspace_live)
-            self.releaseAutomaticWorkspaceNoFail(workspace.id);
+        var automatic = try self.prepareAutomaticWorkspace();
+        var automatic_live = true;
+        errdefer if (automatic_live) automatic.rollback(self);
+        const workspace = automatic.facts(self);
         var task = try self.prepareTaskInWorkspaceInternal(
             workspace.id,
             workspace.epoch,
@@ -3196,12 +3235,10 @@ pub const Runtime = struct {
         );
         errdefer run.rollback();
         task_live = false;
-        workspace_live = false;
-        allocation_live = false;
+        automatic_live = false;
         return .{
             .control = self,
-            .allocation = allocation,
-            .workspace_id = workspace.id,
+            .workspace = automatic,
             .task = task,
             .run = run,
         };
@@ -5335,7 +5372,10 @@ pub const Runtime = struct {
                 } };
             },
             .outcome_unknown => {
-                prepared.rollback();
+                // The canonical replace may already reference this automatic
+                // directory. Roll back only the in-memory candidate and
+                // preserve the physical root until recovery proves its fate.
+                prepared.abandon();
                 return .{ .rejected = .{
                     .cause = error.TaskPersistenceOutcomeUnknown,
                     .reason = .task_start_failed,
@@ -5860,7 +5900,10 @@ pub const Runtime = struct {
         checkpoint_override: ?task_persistence.CheckpointPersistenceOverride,
     ) task_runtime.DurableCommit {
         const self: *Runtime = @ptrCast(@alignCast(context));
-        self.commitTaskStateWithCheckpoint(checkpoint_override) catch return .failed;
+        self.commitTaskStateWithCheckpoint(checkpoint_override) catch |err| return switch (err) {
+            error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
+            else => .failed,
+        };
         return .committed;
     }
 
@@ -6190,25 +6233,40 @@ pub const Runtime = struct {
     /// after those facts were recorded. Every Task-owned secret release must
     /// pass through this function so the final live copy scrubs all retained
     /// projections before secure-zero makes the credential unavailable.
-    fn registerAutomaticWorkspace(
-        self: *Runtime,
-        canonical_root: []const u8,
-    ) Error!product_workspace.Facts {
-        if (!self.workspace.automaticRootContains(canonical_root))
-            return error.InvalidWorkspace;
-        const skill_root = try self.allocator.dupe(u8, canonical_root);
-        errdefer self.allocator.free(skill_root);
-        const workspace = try self.workspace.registerAutomatic(
-            canonical_root,
+    fn prepareAutomaticWorkspace(self: *Runtime) Error!PreparedAutomaticBinding {
+        var preparation = try self.workspace.prepareAutomatic(
             self.execution_state.credential(),
             self.workspaceStorage(),
         );
+        errdefer if (preparation.isActive()) {
+            _ = self.workspace.rollbackPreparedAutomatic(
+                &preparation,
+                self.workspaceStorage(),
+            );
+        };
+        const workspace = self.workspace.preparedAutomaticFacts(&preparation);
+        const skill_root = try self.allocator.dupe(u8, workspace.canonical_root);
+        errdefer self.allocator.free(skill_root);
         self.skill.registerWorkspaceOwned(.{
             .id = workspace.id,
             .epoch = workspace.epoch,
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
-        return workspace;
+        return .{ .workspace = preparation };
+    }
+
+    fn unregisterPreparedAutomaticSkillNoFail(
+        self: *Runtime,
+        workspace_id: u64,
+    ) void {
+        const workspace = self.workspace.facts(workspace_id) orelse unreachable;
+        std.debug.assert(workspace.kind == .automatic);
+        std.debug.assert(!self.workspaceHasTasks(workspace_id));
+        std.debug.assert(!self.skill.hasWorkspaceJob(workspace_id));
+        std.debug.assert(self.skill.unregisterWorkspace(
+            workspace_id,
+            self.skillProjectionBudget(),
+        ));
     }
 
     fn releaseAutomaticWorkspaceNoFail(
@@ -8635,15 +8693,16 @@ test "automatic Workspace root is optional and reserved from user registration" 
             .trust = .explicitly_trusted,
         }),
     );
-    var allocation = try control.workspace.allocateAutomatic();
+    var automatic = try control.prepareAutomaticWorkspace();
+    const automatic_facts = automatic.facts(&control);
     try std.testing.expectError(
         error.InvalidWorkspace,
         control.openWorkspace(.{
-            .workspace_root = allocation.path(),
+            .workspace_root = automatic_facts.canonical_root,
             .trust = .explicitly_trusted,
         }),
     );
-    try std.testing.expect(control.workspace.rollbackAutomaticAllocation(&allocation));
+    automatic.rollback(&control);
 }
 
 test "Workspace registry owns empty selection recent use authorization and capacity" {
@@ -13047,6 +13106,7 @@ test "default snapshot budget contains the maximum structural projection" {
                     },
                     .session_disposition_at_completion = .reusable,
                 },
+                .terminal_observed = true,
                 .terminal_diagnostic = try control.allocTrackedCapacity(
                     limits.max_terminal_diagnostic_bytes,
                 ),

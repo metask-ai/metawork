@@ -561,14 +561,11 @@ fn writeCompact(
     writer: *std.Io.Writer,
     compact: *const task_state.CompactRecord,
 ) Error!void {
-    const terminal = task_state.compactTerminalPayload(compact);
-    const phase = if (terminal) |payload|
-        payload.phase
-    else
-        task_state.activeCompactPhase(compact);
+    const projection = task_state.compactProjectionFacts(compact);
+    const terminal = projection.terminal;
     writer.print(
         "{{\"operationId\":\"{d}\",\"afterRunId\":\"{d}\",\"phase\":\"{s}\",\"cause\":",
-        .{ compact.id, compact.after_run_id, @tagName(phase) },
+        .{ compact.id, compact.after_run_id, @tagName(projection.phase) },
     ) catch return error.SnapshotTooLarge;
     if (if (terminal) |payload| payload.cause else null) |cause|
         jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge

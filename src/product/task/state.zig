@@ -636,6 +636,11 @@ pub const RunProjectionFacts = struct {
     terminal: ?ProductTerminalFacts,
 };
 
+pub const CompactProjectionFacts = struct {
+    phase: CompactPhase,
+    terminal: ?*const CompactTerminalPayload,
+};
+
 pub fn terminalPayload(run: *const RunRecord) ?*const TerminalPayload {
     while (true) switch (run.terminal_publication.load(.acquire)) {
         .open => return null,
@@ -721,6 +726,21 @@ pub fn activeCompactPhase(compact: *const CompactRecord) CompactPhase {
     return switch (compact.agent_handoff.load(.acquire)) {
         .queued, .starting => .queued,
         .running, .finishing => .compacting,
+    };
+}
+
+/// Compact terminal publication belongs to the worker. It becomes a Product
+/// fact only after the main thread folds the terminal disposition and marks
+/// the record observed in the same lifecycle reconciliation step.
+pub fn compactProjectionFacts(compact: *const CompactRecord) CompactProjectionFacts {
+    if (!compact.terminal_observed) return .{
+        .phase = activeCompactPhase(compact),
+        .terminal = null,
+    };
+    const terminal = compactTerminalPayload(compact) orelse unreachable;
+    return .{
+        .phase = terminal.phase,
+        .terminal = terminal,
     };
 }
 
@@ -1500,6 +1520,39 @@ fn validRunStateTransition(
         },
         else => next != .starting or current == .starting,
     };
+}
+
+test "compact projection withholds worker terminal until main-thread observation" {
+    var compact = CompactRecord{
+        .id = 9,
+        .after_run_id = 7,
+        .terminal_diagnostic = @constCast(""),
+    };
+    compact.agent_handoff.store(.running, .release);
+    compact.terminal_payload = .{
+        .phase = .compacted,
+        .cause = null,
+        .before_context_tokens = 120,
+        .after_context_tokens = 40,
+        .usage = .{ .input_tokens = 3, .output_tokens = 5 },
+        .session_disposition_at_completion = .reusable,
+    };
+    compact.terminal_publication.store(.published, .release);
+
+    const before_observation = compactProjectionFacts(&compact);
+    try std.testing.expectEqual(CompactPhase.compacting, before_observation.phase);
+    try std.testing.expect(before_observation.terminal == null);
+
+    compact.pending_interruption.store(.user_cancel, .release);
+    try std.testing.expectEqual(
+        CompactPhase.stopping,
+        compactProjectionFacts(&compact).phase,
+    );
+
+    compact.terminal_observed = true;
+    const observed = compactProjectionFacts(&compact);
+    try std.testing.expectEqual(CompactPhase.compacted, observed.phase);
+    try std.testing.expectEqual(@as(u64, 120), observed.terminal.?.before_context_tokens);
 }
 
 test "event drain withholds terminal facts and assistant suffix until finalization" {
