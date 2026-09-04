@@ -1023,7 +1023,7 @@ Models
 
 当前设置树包含独立 `Permissions` 分区，但只提供“新 Task 默认策略”；它不管理当前 Workspace、已有 Task 或 AgentCore 内部 enum。该分区只列 Host capability projection 支持的真实选项，不显示未实现的 `Standard`、假开关或“即将推出”。已有 Task 的 effective profile 只在 Task 自身 surface 展示；当前没有 idle mutation，因此保持只读。
 
-`Model connections` 只有在 management、Host-owned secure capture、protocol connection test、默认 execution transaction 和已开放 protocol admission 共同通过产品 gate 时才整体进入设置树；不能只显示不可完成的空壳或“能力不可用”页面。Windows 当前由 Host 在三项运行能力同时可用时开放；macOS 在原生 modal reentrancy、VoiceOver 明文检查与 shutdown Gate 完成前保持整体隐藏。
+`Model connections` 只有在 management、Host-owned secure capture、protocol connection test、默认 execution transaction 和已开放 protocol admission 共同可用时才整体进入设置树；不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 
 Workspace 生命周期不属于 Settings surface。New task 路径控件负责选择、添加和重新授权 Manual Workspace；Automatic Workspace 只随 owning Task 导航。Renderer 只在当前 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
 
@@ -1067,9 +1067,9 @@ Account与 Models状态在设置中分别投影：Account只按 `checking | sign
 
 `Model connections` 规则：
 
-> 该入口按完整 Host capability gate 开放：当前 Windows 实现满足 gate 时可以导航，macOS 在独立平台验收完成前保持关闭。
+> 该入口按完整 Host capability gate 开放；支持的桌面平台只要三项运行能力同时可用即可导航。
 
-- Renderer 同时校验 `modelConnectionManagement`、`modelConnectionSecretCapture` 与 `modelConnectionTest` 三个 Host capability；只有三者均为 true 才显示整个设置入口。Host 在 Windows 只发布全 true 或全 false，在 macOS Gate 完成前只发布全 false；不得提供局部连接页、DOM 密码框或“稍后补齐 credential”的半成品路径；
+- Renderer 同时校验 `modelConnectionManagement`、`modelConnectionSecretCapture` 与 `modelConnectionTest` 三个 Host capability；只有三者均为 true 才显示整个设置入口。Host 只发布全 true 或全 false，并从实际 management、原生 secure capture 与连接测试能力生成该组事实，不读取平台名决定产品可见性；不得提供局部连接页、DOM 密码框或“稍后补齐 credential”的半成品路径；
 - 页面显示连接名称、protocol、脱敏服务地址、credential 状态、模型目录状态和可用动作；不显示完整 API Key，不回填秘密字段；
 - `Add connection` 先选择协议，再填写连接名称、API Base URL 和模型 ID；API Key 通过 Host-owned secure capture 单独采集，不作为普通 Bridge 字段回传。协议选择精确开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native，Host 对四者分别执行已登记的 endpoint 和 codec admission；
 - Host 在提交时规范化 endpoint、校验 scheme/host/path/长度和控制字符，并根据 protocol 生成 AgentCore 所需的 normalized base URL；Renderer 不能把 arbitrary URL 或 query credential 直接交给 Run；

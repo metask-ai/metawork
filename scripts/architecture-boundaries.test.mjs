@@ -425,6 +425,11 @@ test("Product Models owns model connections independently of Account", () => {
   assert.match(modelConnectionHost, /createWithCapturedCredential/);
   assert.doesNotMatch(
     modelConnectionHost,
+    /builtin\.os|\.windows|\.macos/,
+    "Model Connection availability must follow the injected secure-input capability instead of a platform-name allowlist",
+  );
+  assert.doesNotMatch(
+    modelConnectionHost,
     /frontend|Renderer|ModelConnectionCreate\s*=/,
   );
   assert.match(app, /setModelConnectionHost/);

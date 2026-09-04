@@ -4,7 +4,6 @@
 //! credential through the native platform seam, submits it synchronously to
 //! Models, and clears its only plaintext buffer on every terminal path.
 
-const builtin = @import("builtin");
 const std = @import("std");
 const bridge = @import("metawork_bridge");
 const models_contract = @import("metawork_product_models_contract");
@@ -55,8 +54,7 @@ pub const Host = struct {
     }
 
     pub fn available(self: *const Host) bool {
-        return builtin.os.tag == .windows and
-            self.capture_available_fn(self.capture_context);
+        return self.capture_available_fn(self.capture_context);
     }
 
     pub fn bridgeHost(self: *Host) ?bridge.ModelConnectionHost {
@@ -278,7 +276,6 @@ const test_spec: models_contract.ModelConnectionSpec = .{
 };
 
 test "Model Connection host clears captured plaintext after submission" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
     var context: TestContext = .{};
     var host = context.host();
     var storage: [32]u8 = @splat(0xa5);
@@ -298,7 +295,6 @@ test "Model Connection host clears captured plaintext after submission" {
 }
 
 test "Model Connection host clears capture on cancellation and unavailability" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
     var context: TestContext = .{ .capture = .cancelled };
     var host = context.host();
     var storage: [32]u8 = @splat(0xa5);
@@ -333,7 +329,6 @@ test "Model Connection host clears capture on cancellation and unavailability" {
 }
 
 test "Model Connection host clears plaintext after Models rejects create" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
     var context: TestContext = .{ .reject_create = true };
     var host = context.host();
     var storage: [32]u8 = @splat(0xa5);
@@ -349,7 +344,6 @@ test "Model Connection host clears plaintext after Models rejects create" {
 }
 
 test "Model Connection host clears replacement plaintext after submission" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
     var context: TestContext = .{};
     var host = context.host();
     var storage: [32]u8 = @splat(0xa5);
