@@ -6,6 +6,33 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09-04
+
+### Added
+
+- 新增由 Product Models 管理的 Custom Provider、用户自定义模型与全局默认选择；支持直接录入 API Key 和独立模型测试，无需 Metask 登录，并完成 Windows/macOS connection readiness 验证。
+- 新增 PNG、JPEG、WebP 与 PDF 多模态输入，贯通原生文件选择、Host staging、Run admission、Agent 输入和脱敏历史。
+- 新增 typed File Changes，提供有界持久化、artifact reconciliation、路径重新校验和按 Run 查看变更的抽屉。
+- 新增 Task Permission Profile 首个切片，支持 `approval_required` 与 `full_access`；Scheduled Task 固定非交互执行策略并持久化 source-qualified model binding。
+- 新增 backend-neutral SQL contract 与直接 SQLite backend，覆盖 migration、transaction、lifecycle 和 crash recovery；尚未接入正式 Product persistence。
+
+### Changed
+
+- AgentCore hard cut 到 ABI v1 revision 16；Host 使用显式模型协议，并接入 OpenAI Responses、图片与 PDF input part。
+- Native SDK 升级至 `0.10.1`。
+- 将模型与执行 authority 从 Account 解耦，由 Product Models 独占 Provider、catalog、selection 和 execution source；删除 `ModelConnection` 与 `ProviderKind` 旧模型。
+- 重组 Settings 为独立导航页面，分离 Provider 配置、模型管理、默认模型与 Account 登录状态。
+- 收紧 Product Task 的 worker lease、durability preparation、checkpoint outcome 与 lifecycle transaction 边界。
+
+### Fixed
+
+- 修复 Account OAuth callback、token refresh、cold restore 与 Bridge validation 的生命周期缺口。
+- 修复模型默认值与 canonical store 恢复，以及 Provider registry 变更时在途模型测试未正确收口的问题。
+- 修复 Task 持久化失败后的可用性、未知 checkpoint outcome、late credential 清洗与 recovery artifact 回收。
+- 修复 File Changes diff 重读、terminal persistence 与 execution source replacement 的原子性问题。
+- 修复 Scheduled Task 未可靠清除 credential、缺少 Task persistence 时仍可能进入 admission，以及 permission-required 后台停止未完整收口的问题。
+- 移除选择 Manual Workspace 后重复出现的 trust 确认。
+
 ## [0.1.5] - 2026-08-29
 
 ### Added
@@ -134,7 +161,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.5...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/metask-ai/metawork/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/metask-ai/metawork/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/metask-ai/metawork/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/metask-ai/metawork/compare/v0.1.2...v0.1.3
