@@ -863,6 +863,14 @@ pub const RecoverySync = struct {
     mcp_refresh_needed: bool = false,
 };
 
+pub const LifecycleEffects = struct {
+    max_title_bytes: usize,
+    text: TextProjection,
+    recovery: RecoveryEffects,
+    release: ReleaseEffects,
+    checkpoint: CheckpointEffects,
+};
+
 pub const ProjectionAuthorityQuery = struct {
     task_id: u64,
     workspace_id: u64,
@@ -2546,7 +2554,10 @@ pub const Runtime = struct {
                     },
                     .outcome_unknown => {
                         task.durable.checkpoint_attempt = .outcome_unknown;
-                        postprocess.state.store(.store_outcome_unknown, .release);
+                        candidate.record.deinit(self.allocator);
+                        postprocess.payload = .none;
+                        postprocess.state.store(.settled, .release);
+                        releaseCheckpointLease(postprocess);
                         return true;
                     },
                 }
@@ -2560,12 +2571,6 @@ pub const Runtime = struct {
                 postprocess.state.store(.settled, .release);
                 releaseCheckpointLease(postprocess);
                 if (old_identity) |identity| effects.delete(identity);
-                return true;
-            },
-            .store_outcome_unknown => {
-                if (task.durable.checkpoint_attempt == .outcome_unknown)
-                    return false;
-                task.durable.checkpoint_attempt = .outcome_unknown;
                 return true;
             },
         }
@@ -3152,7 +3157,6 @@ pub const Runtime = struct {
     ) void {
         switch (postprocess.payload) {
             .candidate => |*candidate| candidate.record.deinit(self.allocator),
-            .store_outcome_unknown => |*candidate| candidate.record.deinit(self.allocator),
             .none, .failure => {},
         }
         postprocess.payload = .none;
@@ -3499,6 +3503,34 @@ pub const Runtime = struct {
             job.deinit();
             result.changed = true;
         }
+        return result;
+    }
+
+    /// The only production entry point that settles asynchronous Task-owned
+    /// lifecycle state on the composition thread.
+    pub fn reconcileLifecycle(
+        self: *Runtime,
+        effects: LifecycleEffects,
+    ) RecoverySync {
+        var result: RecoverySync = .{};
+        const titles = self.syncAutomaticTitles(
+            effects.max_title_bytes,
+            effects.text,
+        );
+        result.changed = titles.changed;
+        result.durable_changed = titles.durable_changed;
+
+        const recovery = self.syncRecoveryCompletions(effects.recovery);
+        result.changed = recovery.changed or result.changed;
+        result.durable_changed = recovery.durable_changed or result.durable_changed;
+        result.mcp_refresh_needed = recovery.mcp_refresh_needed;
+
+        result.changed = self.syncCloseCompletions(effects.release) or result.changed;
+        result.changed = self.requestPermissionStops() or result.changed;
+        const operations = self.syncOperationRecords();
+        result.changed = operations.changed or result.changed;
+        result.durable_changed = operations.durable_changed or result.durable_changed;
+        result.changed = self.syncCheckpointPostprocesses(effects.checkpoint) or result.changed;
         return result;
     }
 };

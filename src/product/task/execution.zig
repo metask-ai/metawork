@@ -652,8 +652,8 @@ fn postprocessCheckpoint(
             ) catch |err| {
                 if (err == error.PersistenceOutcomeUnknown) {
                     resources.store_health.store(.outcome_unknown, .release);
-                    postprocess.payload = .{ .store_outcome_unknown = candidate };
-                    postprocess.state.store(.store_outcome_unknown, .release);
+                    candidate.record.deinit(resources.allocator);
+                    publishCheckpointFailure(postprocess, .outcome_unknown);
                     return true;
                 }
                 candidate.record.deinit(resources.allocator);

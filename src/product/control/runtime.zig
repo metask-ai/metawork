@@ -3832,27 +3832,15 @@ pub const Runtime = struct {
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
         changed = self.syncMcpHealthNoFail() or changed;
-        var durable_changed = false;
-        var mcp_refresh_needed = false;
-        const title_sync = self.task_runtime.syncAutomaticTitles(
-            self.limits.max_task_title_bytes,
-            self.taskRuntimeTextProjection(),
-        );
-        changed = title_sync.changed or changed;
-        durable_changed = title_sync.durable_changed or durable_changed;
-        const recovery_sync = self.task_runtime.syncRecoveryCompletions(
-            self.taskRuntimeRecoveryEffects(),
-        );
-        changed = recovery_sync.changed or changed;
-        durable_changed = recovery_sync.durable_changed or durable_changed;
-        mcp_refresh_needed = recovery_sync.mcp_refresh_needed;
-        changed = self.task_runtime.syncCloseCompletions(
-            self.taskRuntimeReleaseEffects(),
-        ) or changed;
-        changed = self.task_runtime.requestPermissionStops() or changed;
-        const task_sync = self.task_runtime.syncOperationRecords();
+        const task_sync = self.task_runtime.reconcileLifecycle(.{
+            .max_title_bytes = self.limits.max_task_title_bytes,
+            .text = self.taskRuntimeTextProjection(),
+            .recovery = self.taskRuntimeRecoveryEffects(),
+            .release = self.taskRuntimeReleaseEffects(),
+            .checkpoint = self.taskRuntimeCheckpointEffects(),
+        });
         changed = task_sync.changed or changed;
-        durable_changed = task_sync.durable_changed or durable_changed;
+        var durable_changed = task_sync.durable_changed;
         if (self.finalizeWorkspaceRemovalsNoFail()) {
             changed = true;
             durable_changed = true;
@@ -3864,15 +3852,12 @@ pub const Runtime = struct {
         )) changed = true;
         if (self.schedule.takeChanged()) changed = true;
         if (durable_changed) self.commitTaskStateNoFail();
-        if (self.task_runtime.syncCheckpointPostprocesses(
-            self.taskRuntimeCheckpointEffects(),
-        )) changed = true;
         if (self.task_runtime.syncDeletions(
             self.checkpoint_store_health.load(.acquire) != .unavailable,
             self.taskRuntimeDeletionEffects(),
         ).changed) changed = true;
         if (changed) self.bumpRevision();
-        if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        if (task_sync.mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
     }
 
     /// Consumes the canonical Agent event stream and owns the complete product

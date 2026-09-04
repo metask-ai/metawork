@@ -1560,7 +1560,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
         std.testing.allocator,
         std.testing.io,
         runtime,
-        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_compacts_per_task = 1, .max_tools_per_run = 1 },
         configuration,
     );
     var initialized = true;
@@ -1603,6 +1603,20 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     try workbench.renameTask(task_id, "Still usable");
     persistence.result = .committed;
     try workbench.renameTask(task_id, "Saved after retry");
+    fake_core.setCheckpointGeneration(1);
+    const continuation_id = try workbench.runTask(task_id, .{
+        .text = "continue after unknown descriptor",
+    });
+    try std.testing.expectEqual(@as(u64, 2), continuation_id);
+    try waitSetTaskArchived(&workbench, task_id);
+    try workbench.setTaskArchived(task_id, false);
+    const compact_id = try workbench.compactTaskAtBinding(task_id, 1);
+    try std.testing.expectEqual(@as(u64, 1), compact_id);
+    try waitTaskSnapshot(
+        &workbench,
+        "\"operationId\":\"1\"",
+        "\"phase\":\"compacted\"",
+    );
     const healed_snapshot = try workbench.writeSnapshot(&snapshot);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -1610,9 +1624,13 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
         "\"taskHistoryPersistenceHealth\":\"ready\"",
     ) != null);
 
+    try workbench.setTaskArchived(task_id, true);
+    try workbench.deleteTask(task_id);
+    try waitControlSnapshot(&workbench, "\"tasks\":[]");
+
     workbench.deinit();
     initialized = false;
-    try checkpoint_store.verify(identity);
+    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(identity));
 }
 
 test "untrusted Task history preserves checkpoint orphans without blocking a new interactive Task" {

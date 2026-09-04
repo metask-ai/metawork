@@ -39,6 +39,7 @@ pub const ReleaseEffects = runtime.ReleaseEffects;
 pub const RecoveryAuthorityQuery = runtime.RecoveryAuthorityQuery;
 pub const RecoveryExternalAuthority = runtime.RecoveryExternalAuthority;
 pub const RecoveryEffects = runtime.RecoveryEffects;
+pub const LifecycleEffects = runtime.LifecycleEffects;
 
 pub const Protocol = state.Protocol;
 pub const PermissionProfile = state.PermissionProfile;

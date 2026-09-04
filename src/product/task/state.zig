@@ -447,7 +447,6 @@ pub const CheckpointPostprocessState = enum(u8) {
     exporting,
     failure_ready,
     candidate_ready,
-    store_outcome_unknown,
     settled,
 };
 
@@ -463,7 +462,6 @@ pub const CheckpointPostprocessPayload = union(enum) {
     none,
     failure: CheckpointAttempt,
     candidate: CheckpointCandidate,
-    store_outcome_unknown: CheckpointCandidate,
 };
 
 pub const CheckpointPostprocess = struct {
