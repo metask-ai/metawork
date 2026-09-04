@@ -787,7 +787,8 @@ export const enUS = {
     "This clears the current model configuration and custom connections. You will choose a Metask API key and model again; your account, Tasks, Workspaces, and conversations stay intact.",
   "settings.models_reset_confirm": "Reset and continue",
   "settings.models_reset_pending": "Resetting…",
-  "settings.models_reset_failed": "Could not reset model configuration. Try again.",
+  "settings.models_reset_failed":
+    "Could not reset model configuration. Try again.",
   "permission.profile.approval_required": "Request approval",
   "permission.profile.approval_required.help":
     "Routine workspace edits run automatically. MetaWork asks before operations the current policy does not cover.",
@@ -809,6 +810,8 @@ export const enUS = {
   "permission.default_update_failed":
     "MetaWork could not update the permission default.",
   "settings.execution_defaults": "Execution defaults",
+  "settings.default_selection_missing":
+    "No executable default model is selected",
   "settings.use_metask_default": "Set as default for new tasks",
   "settings.model_connections": "Model connections",
   "settings.model_connections_help":

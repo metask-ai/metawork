@@ -814,6 +814,16 @@ export default function App() {
   const selectedModelId = customModelConnectionSelected
     ? customModelId
     : selectedModel?.id || "";
+  const metaskDefaultRecoveryAvailable = Boolean(
+    newTaskDraftActive &&
+    snapshot.models.persistenceHealth === "ready" &&
+    snapshot.models.defaultSelection === null &&
+    snapshot.models.metaskSelection !== null &&
+    metaskProvider?.catalogState === "ready" &&
+    snapshot.models.metaskSelection.sourceId ===
+      `metask:${metaskProvider.selectedApiKeyId}` &&
+    selectedModel,
+  );
   const taskModelId = activeTask?.binding.model ?? "";
   const pendingTaskModelId = activeTask
     ? (pendingTaskModels[activeTask.id] ?? null)
@@ -1378,13 +1388,26 @@ export default function App() {
       }),
     );
     if (!configured || !shouldSetDefault) return;
+    // `runExecutionCommand` refreshes the rendered snapshot asynchronously;
+    // do not reuse the pre-configuration revisions for the second CAS.
+    const current = await client.fetchSnapshot();
+    const currentProvider = current.models.providers.find(
+      (candidate) => candidate.id === "metask",
+    );
+    const currentSelection = current.models.metaskSelection;
+    if (
+      !currentProvider ||
+      !currentSelection ||
+      currentSelection.modelId !== modelId
+    )
+      return;
     await runExecutionCommand(() =>
       client.selectModelsDefault({
-        sourceId: `metask:${provider.selectedApiKeyId}`,
+        sourceId: currentSelection.sourceId,
         modelId,
-        expectedSelectionRevision: snapshot.models.selectionRevision,
-        expectedSourceGeneration: provider.sourceGeneration,
-        expectedCatalogGeneration: provider.catalogGeneration,
+        expectedSelectionRevision: current.models.selectionRevision,
+        expectedSourceGeneration: currentProvider.sourceGeneration,
+        expectedCatalogGeneration: currentProvider.catalogGeneration,
       }),
     );
   }
@@ -2718,6 +2741,8 @@ export default function App() {
               ? t("settings.task_model_help")
               : t("settings.task_binding_model")
       }
+      defaultSelectionMissing={metaskDefaultRecoveryAvailable}
+      defaultRecoveryDisabled={bridgeUnavailable || executionBusy}
       actionDisabled={workbenchMutationDisabled || workspaceBusy}
       stopAction={
         activeTask?.activeOperation?.kind === "run" ||
@@ -2766,6 +2791,7 @@ export default function App() {
             : void selectMetaskModel(id)
           : void selectModelForTask(id)
       }
+      onActivateMetask={() => void activateMetaskDefault()}
     />
   );
   const filePreviewDrawerState: FilePreviewDrawerState | null =
@@ -3054,6 +3080,11 @@ export default function App() {
             onBack={closeSettings}
             onRefresh={() =>
               void runExecutionCommand(() => client.refreshModelsCatalog())
+            }
+            onResetModels={() =>
+              runExecutionCommand(() =>
+                client.resetModelsStore(snapshot.revision),
+              )
             }
             onCancel={() => void cancelAccountOperation()}
             onSelectApiKey={(id) =>

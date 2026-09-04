@@ -251,12 +251,12 @@ export function SettingsPage({
       : account.state === "authorizing"
         ? t("account.authorizing.body")
         : t("account.sign_in_required.body");
-  const preferenceRecovery = models.persistenceHealth === "recovery_required";
+  const modelsPersistenceReady = models.persistenceHealth === "ready";
   const canChooseApi =
-    authenticated && !preferenceRecovery && !modelCatalogLoading;
+    authenticated && modelsPersistenceReady && !modelCatalogLoading;
   const canChooseModel =
     authenticated &&
-    !preferenceRecovery &&
+    modelsPersistenceReady &&
     (metaskCatalogState === "ready" || metaskCatalogState === "choosing");
   const languageOptions = useMemo<SelectionMenuOption[]>(
     () => [
@@ -915,6 +915,7 @@ export function SettingsPage({
                     <div className="settings-execution-actions">
                       {models.metaskSelection &&
                         authenticated &&
+                        modelsPersistenceReady &&
                         metaskCatalogState === "ready" &&
                         !metaskDefaultSelected && (
                           <Button
@@ -1104,7 +1105,7 @@ export function SettingsPage({
                   {t("settings.existing_tasks_unchanged")}
                 </p>
 
-                {models.persistenceHealth !== "ready" && (
+                {models.persistenceHealth === "recovery_required" && (
                   <ConfirmationNotice
                     className="task-persistence-error settings-model-reset-notice"
                     message={t("settings.models_reset_message")}

@@ -821,6 +821,8 @@ function renderComposer(overrides = {}) {
       modelSelectionDisabled: false,
       modelSelectionPending: false,
       modelContextTitle: "",
+      defaultSelectionMissing: false,
+      defaultRecoveryDisabled: false,
       actionDisabled: false,
       onSubmit() {
         submissions += 1;
@@ -877,6 +879,49 @@ test("detached Conversation uses the ordinary send action", async () => {
   );
   await user.click(screen.getByRole("button", { name: "Send" }));
   assert.equal(composer.submissions(), 1);
+});
+
+test("Composer explains a missing executable default and offers Metask recovery", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  let activations = 0;
+  renderComposer({
+    canSubmit: false,
+    defaultSelectionMissing: true,
+    onActivateMetask() {
+      activations += 1;
+    },
+  });
+
+  assert.match(
+    screen.getByRole("status").textContent,
+    /No executable default model is selected/,
+  );
+  const recovery = screen.getByRole("button", {
+    name: "Set as default for new tasks",
+  });
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  await user.click(recovery);
+  assert.equal(activations, 1);
+});
+
+test("Composer disables default recovery while an execution command is active", () => {
+  renderComposer({
+    defaultSelectionMissing: true,
+    defaultRecoveryDisabled: true,
+  });
+  assert.equal(
+    screen.getByRole("button", { name: "Set as default for new tasks" })
+      .disabled,
+    true,
+  );
+});
+
+test("Composer does not show Metask recovery for a normal default", () => {
+  renderComposer({ defaultSelectionMissing: false });
+  assert.equal(
+    screen.queryByRole("button", { name: "Set as default for new tasks" }),
+    null,
+  );
 });
 
 test("Composer Enter handling does not submit an active IME composition", () => {

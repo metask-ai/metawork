@@ -186,6 +186,7 @@ function renderSettings(account, models = readyModels, options = {}) {
       onTestModelConnection() {},
       onSelectModelConnection() {},
       onActivateMetask() {},
+      onResetModels: async () => false,
       onSetDefaultPermissionProfile() {},
       ...callbacks,
       ...options,
@@ -379,7 +380,7 @@ test("refresh scheduling failure exposes the explicit Account retry", () => {
   assert.match(markup, />Retry sign-in refresh</);
 });
 
-test("Models preference recovery preserves Account identity and freezes selectors", () => {
+test("Models canonical recovery preserves Account identity and freezes selectors", () => {
   const accountMarkup = renderSettings(readyAccount, readyModels, {
     initialSection: "account",
   });
@@ -388,7 +389,7 @@ test("Models preference recovery preserves Account identity and freezes selector
     {
       ...readyModels,
       persistenceHealth: "recovery_required",
-      errorCode: "migration_required",
+      errorCode: "persistence_unavailable",
     },
     { initialSection: "models" },
   );
@@ -397,6 +398,23 @@ test("Models preference recovery preserves Account identity and freezes selector
   assert.doesNotMatch(modelsMarkup, />Sign in with Metask</);
   assert.match(modelsMarkup, /id="settings-api"[^>]*disabled/);
   assert.match(modelsMarkup, /id="settings-model"[^>]*disabled/);
+  assert.match(modelsMarkup, />Reset model configuration</);
+});
+
+test("Models without a persistence capability do not offer destructive reset", () => {
+  const markup = renderSettings(
+    readyAccount,
+    {
+      ...readyModels,
+      availability: "unavailable",
+      persistenceHealth: "unavailable",
+      errorCode: "persistence_unavailable",
+    },
+    { initialSection: "models" },
+  );
+  assert.doesNotMatch(markup, />Reset model configuration</);
+  assert.match(markup, /id="settings-api"[^>]*disabled/);
+  assert.match(markup, /id="settings-model"[^>]*disabled/);
 });
 
 test("Execution commands never enter the Account busy or error scope", () => {
@@ -407,6 +425,29 @@ test("Execution commands never enter the Account busy or error scope", () => {
   assert.match(
     appSource,
     /runExecutionCommand\(\(\) =>\s*client\.selectModelsDefault/,
+  );
+});
+
+test("first Metask default selection refreshes canonical CAS inputs before selecting global default", () => {
+  const start = appSource.indexOf("async function selectMetaskModel");
+  const end = appSource.indexOf("async function cancelAccountOperation", start);
+  assert.ok(start >= 0 && end > start);
+  const selectionFlow = appSource.slice(start, end);
+  const configure = selectionFlow.indexOf("client.configureMetaskSelection");
+  const refresh = selectionFlow.indexOf("client.fetchSnapshot()");
+  const selectDefault = selectionFlow.indexOf("client.selectModelsDefault");
+  assert.ok(configure >= 0 && refresh > configure && selectDefault > refresh);
+  assert.match(
+    selectionFlow,
+    /expectedSelectionRevision:\s*current\.models\.selectionRevision/,
+  );
+  assert.match(
+    selectionFlow,
+    /expectedSourceGeneration:\s*currentProvider\.sourceGeneration/,
+  );
+  assert.match(
+    selectionFlow,
+    /expectedCatalogGeneration:\s*currentProvider\.catalogGeneration/,
   );
 });
 
