@@ -1170,6 +1170,17 @@ test("Task deletion exposes one product-level progress and retry fact", () => {
 });
 
 test("Compact projection is append-only and mutually exclusive with Run work", () => {
+  const accepted = decodeTaskCompactResult(
+    {
+      accepted: true,
+      taskId: "3",
+      operationId: "11",
+      reason: null,
+    },
+    "3",
+  );
+  assert.equal(accepted.operationId, "11");
+
   const compacted = clone(fixture);
   const task = compacted.tasks[0];
   task.activeOperation = null;
@@ -1196,6 +1207,19 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   active.tasks[0].compacts[0].afterContextTokens = "0";
   active.tasks[0].activeOperation = { kind: "compact", id: "11" };
   assert.deepEqual(decodeWorkbenchSnapshot(active), active);
+
+  const queueFailure = clone(compacted);
+  queueFailure.tasks[0].compacts[0].phase = "failed";
+  queueFailure.tasks[0].compacts[0].cause = "resource_limit";
+  queueFailure.tasks[0].compacts[0].beforeContextTokens = "0";
+  queueFailure.tasks[0].compacts[0].afterContextTokens = "0";
+  queueFailure.tasks[0].compacts[0].usage = {
+    input: "0",
+    output: "0",
+    cacheRead: "0",
+    cacheCreation: "0",
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(queueFailure), queueFailure);
 
   const archivedActive = clone(active);
   archivedActive.tasks[0].archived = true;

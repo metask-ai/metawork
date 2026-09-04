@@ -52,6 +52,28 @@ pub const Commit = enum {
     outcome_unknown,
 };
 
+pub const RecoveryFault = enum {
+    none,
+    install_failed,
+    interrupted_after_quarantine,
+};
+
+pub const InvariantScope = enum {
+    state,
+    task,
+};
+
+pub const InvariantCode = enum {
+    invalid_workbench_state,
+    invalid_task_record,
+};
+
+pub const ValidationFailure = struct {
+    scope: InvariantScope,
+    entity_id: u64,
+    code: InvariantCode,
+};
+
 /// Application-bound durable effect and startup restore facts. The Product
 /// Task persistence kernel owns the requirement; the concrete file resource
 /// and commit execution remain outside this module.
@@ -104,6 +126,7 @@ pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
     lock_file: std.Io.File,
+    recovery_fault: RecoveryFault = .none,
 
     pub fn init(io: std.Io, absolute_directory: []const u8) FileStoreError!FileStore {
         if (!std.fs.path.isAbsolute(absolute_directory))
@@ -136,7 +159,10 @@ pub const FileStore = struct {
             file_name,
             .{ .follow_symlinks = false, .resolve_beneath = true },
         ) catch |err| switch (err) {
-            error.FileNotFound => return null,
+            error.FileNotFound => return if (self.hasRecoveryArtifact())
+                error.ReadFailed
+            else
+                null,
             else => return error.ReadFailed,
         };
         if (builtin.os.tag == .windows) file.flags.nonblocking = true;
@@ -187,42 +213,127 @@ pub const FileStore = struct {
         if (!self.syncCommit()) return error.PersistenceOutcomeUnknown;
     }
 
-    /// Preserves the current canonical bytes under a unique quarantine name
-    /// before installing the Product-provided replacement. No recovery path
-    /// decodes, migrates, overwrites, or deletes the quarantined artifact.
+    /// Fully stages and syncs the replacement before moving the current
+    /// canonical into quarantine. A definite install failure restores the
+    /// canonical; an interrupted/indeterminate window leaves recovery
+    /// artifacts that make the next load fail closed instead of masquerading
+    /// as an empty first launch.
     pub fn recover(self: *FileStore, bytes: []const u8) FileStoreError!void {
         if (bytes.len == 0 or bytes.len > max_store_bytes)
             return error.WriteFailed;
-        try self.quarantineCanonical();
-        return self.commit(bytes);
-    }
-
-    fn quarantineCanonical(self: *FileStore) FileStoreError!void {
         var random: [8]u8 = undefined;
         std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
         const random_hex = std.fmt.bytesToHex(random, .lower);
+        var temp_name_storage: [80]u8 = undefined;
+        var temp_name_writer = std.Io.Writer.fixed(&temp_name_storage);
+        temp_name_writer.print(
+            ".workbench-history.recovery.{s}.tmp",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const temp_name = temp_name_writer.buffered();
         var quarantine_name_storage: [80]u8 = undefined;
         var name_writer = std.Io.Writer.fixed(&quarantine_name_storage);
         name_writer.print(
             ".workbench-history.recovery.{s}.bak",
             .{random_hex},
         ) catch return error.WriteFailed;
+        const quarantine_name = name_writer.buffered();
+
+        const replacement = self.dir.createFile(
+            self.io,
+            temp_name,
+            .{
+                .exclusive = true,
+                .permissions = privateFilePermissions(),
+                .resolve_beneath = true,
+            },
+        ) catch return error.WriteFailed;
+        var replacement_open = true;
+        var temp_exists = true;
+        defer {
+            if (replacement_open) replacement.close(self.io);
+            if (temp_exists) self.dir.deleteFile(self.io, temp_name) catch {};
+        }
+        replacement.writeStreamingAll(self.io, bytes) catch
+            return error.WriteFailed;
+        replacement.sync(self.io) catch return error.WriteFailed;
+        replacement.close(self.io);
+        replacement_open = false;
+        if (!self.syncPath(temp_name)) return error.WriteFailed;
+
+        var quarantined = true;
         self.dir.rename(
             file_name,
             self.dir,
-            name_writer.buffered(),
+            quarantine_name,
             self.io,
         ) catch |err| switch (err) {
-            error.FileNotFound => {},
+            error.FileNotFound => quarantined = false,
             else => return error.WriteFailed,
         };
+        if (quarantined and !self.syncPath(quarantine_name)) {
+            if (!self.restoreCanonical(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+            return error.WriteFailed;
+        }
+
+        if (self.recovery_fault == .interrupted_after_quarantine) {
+            // Test-only fault semantics mirror process death: defers do not
+            // get a chance to unlink the already durable staged replacement.
+            temp_exists = false;
+            return error.PersistenceOutcomeUnknown;
+        }
+
+        const install_failed = self.recovery_fault == .install_failed;
+        if (install_failed) {
+            if (quarantined and !self.restoreCanonical(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+            return error.WriteFailed;
+        }
+        self.dir.rename(temp_name, self.dir, file_name, self.io) catch {
+            if (quarantined and !self.restoreCanonical(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+            return error.WriteFailed;
+        };
+        temp_exists = false;
+        if (!self.syncPath(file_name)) return error.PersistenceOutcomeUnknown;
     }
 
-    fn syncCommit(self: *FileStore) bool {
+    fn restoreCanonical(self: *FileStore, quarantine_name: []const u8) bool {
+        self.dir.rename(
+            quarantine_name,
+            self.dir,
+            file_name,
+            self.io,
+        ) catch return false;
+        return self.syncPath(file_name);
+    }
+
+    fn hasRecoveryArtifact(self: *FileStore) bool {
+        var iterable = self.dir.openDir(
+            self.io,
+            ".",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch return true;
+        defer iterable.close(self.io);
+        var iterator = iterable.iterate();
+        while (iterator.next(self.io) catch return true) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.startsWith(
+                u8,
+                entry.name,
+                ".workbench-history.recovery.",
+            ) and (std.mem.endsWith(u8, entry.name, ".tmp") or
+                std.mem.endsWith(u8, entry.name, ".bak"))) return true;
+        }
+        return false;
+    }
+
+    fn syncPath(self: *FileStore, name: []const u8) bool {
         if (builtin.os.tag == .windows) {
             const file = self.dir.openFile(
                 self.io,
-                file_name,
+                name,
                 .{
                     .mode = .read_write,
                     .allow_directory = false,
@@ -240,6 +351,10 @@ pub const FileStore = struct {
         };
         directory_file.sync(self.io) catch return false;
         return true;
+    }
+
+    fn syncCommit(self: *FileStore) bool {
+        return self.syncPath(file_name);
     }
 };
 
@@ -693,11 +808,8 @@ pub fn projectTask(
     var compact_index: usize = 0;
     for (task.durable.compacts) |*entry| {
         const compact = &(entry.* orelse continue);
-        const terminal = task_state.compactTerminalPayload(compact);
-        const phase = if (terminal) |payload|
-            payload.phase
-        else
-            task_state.activeCompactPhase(compact);
+        const projection = task_state.compactProjectionFacts(compact);
+        const terminal = projection.terminal;
         const diagnostic = if (terminal) |payload|
             compact.terminal_diagnostic[0..payload.diagnostic_len]
         else
@@ -705,7 +817,7 @@ pub fn projectTask(
         compacts[compact_index] = .{
             .id = compact.id,
             .after_run_id = compact.after_run_id,
-            .phase = @tagName(phase),
+            .phase = @tagName(projection.phase),
             .cause = if (terminal) |payload|
                 if (payload.cause) |cause| @tagName(cause) else null
             else
@@ -1845,7 +1957,6 @@ fn deinitRestoredCompact(
     projection: RestoreProjection,
     compact: *task_state.CompactRecord,
 ) void {
-    std.debug.assert(!compact.worker_reference_held.load(.acquire));
     projection.free(compact.terminal_diagnostic);
     compact.* = undefined;
 }
@@ -1858,7 +1969,29 @@ const MetaWire = struct {
     next_task_recent_order: u64,
 };
 
-pub fn encode(output: []u8, state: StateWire) Error![]const u8 {
+pub fn validateCandidate(state: *const StateWire, limits: Limits) ?ValidationFailure {
+    for (state.tasks) |task| {
+        validateTask(task, limits) catch return .{
+            .scope = .task,
+            .entity_id = task.id,
+            .code = .invalid_task_record,
+        };
+    }
+    validate(state, limits) catch return .{
+        .scope = .state,
+        .entity_id = 0,
+        .code = .invalid_workbench_state,
+    };
+    return null;
+}
+
+pub fn encode(output: []u8, state: StateWire, limits: Limits) Error![]const u8 {
+    if (validateCandidate(&state, limits) != null)
+        return error.TaskStoreEncodeFailed;
+    return encodeUncheckedImpl(output, state);
+}
+
+fn encodeUncheckedImpl(output: []u8, state: StateWire) Error![]const u8 {
     if (output.len == 0) return error.TaskStoreEncodeFailed;
     var offset: usize = 0;
     appendRecord(output, &offset, record_meta, 0, 0, MetaWire{
@@ -1896,12 +2029,22 @@ pub fn decode(
         recovered.deinit();
         return error.TaskStoreCorrupt;
     }
-    validate(&recovered.value, limits) catch {
+    if (validateCandidate(&recovered.value, limits) != null) {
         recovered.deinit();
         return error.TaskStoreCorrupt;
-    };
+    }
     return recovered;
 }
+
+pub const testing = if (builtin.is_test) struct {
+    pub fn setRecoveryFault(store: *FileStore, fault: RecoveryFault) void {
+        store.recovery_fault = fault;
+    }
+
+    pub fn encodeUnchecked(output: []u8, state: StateWire) Error![]const u8 {
+        return encodeUncheckedImpl(output, state);
+    }
+} else struct {};
 
 pub fn decodeRecovering(
     allocator: std.mem.Allocator,
@@ -2848,7 +2991,7 @@ test "task store hard cut rejects the retired provider binding" {
         .next_task_recent_order = 2,
         .workspaces = &workspaces,
         .tasks = &tasks,
-    });
+    }, testLimits());
     const protocol_field = "\"protocol\"";
     const provider_field = "\"provider\"";
     const field_index = std.mem.indexOf(u8, encoded, protocol_field) orelse
@@ -2942,7 +3085,7 @@ test "task store preserves history bound to an older Workspace epoch" {
         .next_task_recent_order = 2,
         .workspaces = &workspaces,
         .tasks = &tasks,
-    });
+    }, testLimits());
     var parsed = try decode(std.testing.allocator, state, testLimits());
     defer parsed.deinit();
     try std.testing.expectEqual(@as(u64, 2), parsed.value.workspaces[0].epoch);
@@ -2985,7 +3128,7 @@ test "damaged metadata does not block valid Task recovery" {
         .next_task_recent_order = 2,
         .workspaces = &workspaces,
         .tasks = &tasks,
-    });
+    }, testLimits());
     const metadata_payload_start = frame_header_bytes;
     bytes[metadata_payload_start] ^= 0xff;
 
@@ -3033,7 +3176,7 @@ test "damaged current-format frames recover an empty projection" {
         .next_task_recent_order = 2,
         .workspaces = &workspaces,
         .tasks = &tasks,
-    });
+    }, testLimits());
     var cursor: usize = 0;
     while (cursor < encoded.len) {
         try std.testing.expectEqualStrings(frame_magic, encoded[cursor .. cursor + 4]);
@@ -3112,7 +3255,7 @@ test "one damaged Task frame does not poison surviving history" {
         .next_task_recent_order = 3,
         .workspaces = &workspaces,
         .tasks = &tasks,
-    });
+    }, testLimits());
     var task_frame_count: usize = 0;
     var cursor: usize = 0;
     while (cursor < encoded.len) {
@@ -3182,7 +3325,7 @@ test "corrupt Task identity cannot manufacture a global failure" {
         .next_task_recent_order = 2,
         .workspaces = &workspaces,
         .tasks = &tasks,
-    });
+    }, testLimits());
     var cursor: usize = 0;
     while (cursor < encoded.len) {
         const kind = encoded[cursor + 5];
@@ -3305,7 +3448,7 @@ test "task store round-trips per-run execution generations across binding adopti
         .next_task_recent_order = 2,
         .workspaces = &workspaces,
         .tasks = &tasks,
-    });
+    }, testLimits());
     var decoded = try decode(std.testing.allocator, bytes, testLimits());
     defer decoded.deinit();
     try std.testing.expectEqualStrings(
@@ -3512,7 +3655,11 @@ test "task store rejects states that would violate the product contract" {
     mixed_tasks[1].id = 0;
     state.tasks = &mixed_tasks;
     var mixed_output: [64 * 1024]u8 = undefined;
-    const mixed_bytes = try encode(&mixed_output, state);
+    try std.testing.expectError(
+        error.TaskStoreEncodeFailed,
+        encode(&mixed_output, state, testLimits()),
+    );
+    const mixed_bytes = try testing.encodeUnchecked(&mixed_output, state);
     var recovered = try decodeRecovering(
         std.testing.allocator,
         mixed_bytes,
@@ -3622,6 +3769,61 @@ test "task file store recovery quarantines the previous canonical bytes" {
         try quarantine.readPositionalAll(std.testing.io, &quarantine_bytes, 0),
     );
     try std.testing.expectEqualStrings(previous, &quarantine_bytes);
+}
+
+test "task file store recovery restores canonical after definite install failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var absolute_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const absolute_len = try tmp.dir.realPath(std.testing.io, &absolute_storage);
+    var store = try FileStore.init(
+        std.testing.io,
+        absolute_storage[0..absolute_len],
+    );
+    defer store.deinit();
+    const previous = "{\"schema_version\":7}";
+    try store.commit(previous);
+    testing.setRecoveryFault(&store, .install_failed);
+    try std.testing.expectError(
+        error.WriteFailed,
+        store.recover("{\"schema_version\":1}"),
+    );
+    const restored = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(previous, restored);
+}
+
+test "interrupted task file store recovery never appears as first launch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var absolute_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const absolute_len = try tmp.dir.realPath(std.testing.io, &absolute_storage);
+    {
+        var store = try FileStore.init(
+            std.testing.io,
+            absolute_storage[0..absolute_len],
+        );
+        defer store.deinit();
+        try store.commit("{\"schema_version\":7}");
+        testing.setRecoveryFault(&store, .interrupted_after_quarantine);
+        try std.testing.expectError(
+            error.PersistenceOutcomeUnknown,
+            store.recover("{\"schema_version\":1}"),
+        );
+        try std.testing.expectError(
+            error.ReadFailed,
+            store.loadAlloc(std.testing.allocator),
+        );
+    }
+    var reopened = try FileStore.init(
+        std.testing.io,
+        absolute_storage[0..absolute_len],
+    );
+    defer reopened.deinit();
+    try std.testing.expectError(
+        error.ReadFailed,
+        reopened.loadAlloc(std.testing.allocator),
+    );
 }
 
 test "task file store ignores the retired pre-release file" {

@@ -11,6 +11,7 @@ const checkpoint_record = @import("product_task_checkpoint_record");
 const task_attachment = @import("product_task_attachment");
 const task_deletion = @import("product_task_deletion");
 const task_recovery = @import("product_task_recovery");
+const worker_lease = @import("product_task_worker_lease");
 
 pub const automatic_title_result_capacity: usize = 512;
 pub const ui_record_detail_capacity: usize = 512;
@@ -446,7 +447,6 @@ pub const CheckpointPostprocessState = enum(u8) {
     exporting,
     failure_ready,
     candidate_ready,
-    store_outcome_unknown,
     settled,
 };
 
@@ -462,13 +462,13 @@ pub const CheckpointPostprocessPayload = union(enum) {
     none,
     failure: CheckpointAttempt,
     candidate: CheckpointCandidate,
-    store_outcome_unknown: CheckpointCandidate,
 };
 
 pub const CheckpointPostprocess = struct {
     state: std.atomic.Value(CheckpointPostprocessState) = .init(.none),
     cancelled: std.atomic.Value(bool) = .init(false),
     payload: CheckpointPostprocessPayload = .none,
+    lease: ?worker_lease.WorkerLease = null,
 };
 
 pub const RunRecord = struct {
@@ -534,7 +534,6 @@ pub const RunRecord = struct {
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
     next_activity_order: u64 = 1,
-    worker_reference_held: std.atomic.Value(bool) = .init(false),
     agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
     pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
     run_control: agent.RunControl = undefined,
@@ -553,7 +552,6 @@ pub const CompactRecord = struct {
     terminal_observed: bool = false,
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
-    worker_reference_held: std.atomic.Value(bool) = .init(false),
     checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
 };
@@ -636,6 +634,11 @@ pub const RunProjectionFacts = struct {
     phase: RunPhase,
     activity: ?RunActivity,
     terminal: ?ProductTerminalFacts,
+};
+
+pub const CompactProjectionFacts = struct {
+    phase: CompactPhase,
+    terminal: ?*const CompactTerminalPayload,
 };
 
 pub fn terminalPayload(run: *const RunRecord) ?*const TerminalPayload {
@@ -726,6 +729,21 @@ pub fn activeCompactPhase(compact: *const CompactRecord) CompactPhase {
     };
 }
 
+/// Compact terminal publication belongs to the worker. It becomes a Product
+/// fact only after the main thread folds the terminal disposition and marks
+/// the record observed in the same lifecycle reconciliation step.
+pub fn compactProjectionFacts(compact: *const CompactRecord) CompactProjectionFacts {
+    if (!compact.terminal_observed) return .{
+        .phase = activeCompactPhase(compact),
+        .terminal = null,
+    };
+    const terminal = compactTerminalPayload(compact) orelse unreachable;
+    return .{
+        .phase = terminal.phase,
+        .terminal = terminal,
+    };
+}
+
 pub fn isTerminalPhase(phase: RunPhase) bool {
     return switch (phase) {
         .queued, .running, .waiting_ui, .stopping => false,
@@ -799,6 +817,11 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(task: *Task) bool {
         run.output_retry_group = null;
         run.event_stream_finalized = true;
         run.assistant.committed_len = run.assistant.list.items.len;
+        if (run.assistant_output_start == null and run.commentary_count != 0) {
+            std.debug.assert(run.commentary_ends.len >= run.commentary_count);
+            run.commentary_ends[run.commentary_count - 1] =
+                @intCast(run.assistant.committed_len);
+        }
         if (run.file_change_observation == .collecting and
             run.pending_file_change_artifacts == 0)
         {
@@ -1499,6 +1522,39 @@ fn validRunStateTransition(
     };
 }
 
+test "compact projection withholds worker terminal until main-thread observation" {
+    var compact = CompactRecord{
+        .id = 9,
+        .after_run_id = 7,
+        .terminal_diagnostic = @constCast(""),
+    };
+    compact.agent_handoff.store(.running, .release);
+    compact.terminal_payload = .{
+        .phase = .compacted,
+        .cause = null,
+        .before_context_tokens = 120,
+        .after_context_tokens = 40,
+        .usage = .{ .input_tokens = 3, .output_tokens = 5 },
+        .session_disposition_at_completion = .reusable,
+    };
+    compact.terminal_publication.store(.published, .release);
+
+    const before_observation = compactProjectionFacts(&compact);
+    try std.testing.expectEqual(CompactPhase.compacting, before_observation.phase);
+    try std.testing.expect(before_observation.terminal == null);
+
+    compact.pending_interruption.store(.user_cancel, .release);
+    try std.testing.expectEqual(
+        CompactPhase.stopping,
+        compactProjectionFacts(&compact).phase,
+    );
+
+    compact.terminal_observed = true;
+    const observed = compactProjectionFacts(&compact);
+    try std.testing.expectEqual(CompactPhase.compacted, observed.phase);
+    try std.testing.expectEqual(@as(u64, 120), observed.terminal.?.before_context_tokens);
+}
+
 test "event drain withholds terminal facts and assistant suffix until finalization" {
     var commentary_ends: [0]u64 = .{};
     var runs = [_]?RunRecord{.{
@@ -1561,6 +1617,64 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
     try std.testing.expectEqual(RunPhase.completed, terminal_projection.phase);
     try std.testing.expectEqual(RunOutcome.completed, terminal_projection.terminal.?.outcome);
     try std.testing.expect(terminal_projection.activity == null);
+}
+
+test "event drain advances the final commentary boundary with the committed suffix" {
+    var commentary_ends = [_]u64{3};
+    var runs = [_]?RunRecord{.{
+        .id = 7,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = .anthropic_messages,
+        .execution_model = "model",
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = @constCast("prompt") } },
+        .commentary_ends = &commentary_ends,
+        .commentary_count = 1,
+        .active_phase = .running,
+        .tools = &.{},
+        .terminal_diagnostic = @constCast(""),
+    }};
+    var compacts: [0]?CompactRecord = .{};
+    var ui_history: [0]?UiRecord = .{};
+    var task = Task{
+        .durable = .{
+            .id = 3,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 2,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+        },
+        .runtime = .{},
+    };
+    const run = &task.durable.runs[0].?;
+    try run.assistant.list.appendSlice(std.testing.allocator, "prefix-tail");
+    defer run.assistant.list.deinit(std.testing.allocator);
+    run.assistant.committed_len = 3;
+    run.terminal_payload = .{
+        .phase = .completed,
+        .outcome = .completed,
+        .cause = null,
+        .session_disposition_at_completion = .reusable,
+    };
+    run.terminal_publication.store(.published, .release);
+
+    try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
+    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
+    try std.testing.expectEqual(@as(usize, "prefix-tail".len), run.assistant.committed_len);
+    try std.testing.expectEqual(
+        @as(u64, "prefix-tail".len),
+        run.commentary_ends[run.commentary_count - 1],
+    );
 }
 
 test "event drain fails closed when an output segment remains unresolved" {

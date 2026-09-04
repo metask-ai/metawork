@@ -227,10 +227,9 @@ pub const FileStore = struct {
         while (root_iterator.next(self.io) catch return error.DirectoryUnavailable) |entry| {
             if (entry.kind == .file and std.mem.eql(u8, entry.name, lock_file_name))
                 continue;
-            if (entry.kind != .directory or task_count == max_task_directories)
-                return error.ResourceLimit;
-            const task_id = parseTaskDirectory(entry.name) orelse
-                return error.InvalidIdentity;
+            if (entry.kind != .directory) continue;
+            const task_id = parseTaskDirectory(entry.name) orelse continue;
+            if (task_count == max_task_directories) return error.ResourceLimit;
             task_count += 1;
             try task_ids.append(allocator, task_id);
             var task_dir = self.root.openDir(self.io, entry.name, .{
@@ -241,18 +240,21 @@ pub const FileStore = struct {
             var iterator = task_dir.iterate();
             var task_entries: usize = 0;
             while (iterator.next(self.io) catch return error.DirectoryUnavailable) |blob_entry| {
-                if (blob_entry.kind != .file or
-                    task_entries == max_blobs_per_task or
-                    entries.items.len == capacity)
-                    return error.ResourceLimit;
-                task_entries += 1;
-                try entries.append(allocator, try parseStoredEntry(
+                if (blob_entry.kind != .file) continue;
+                const stored = parseStoredEntry(
                     self.io,
                     task_dir,
                     task_id,
                     blob_entry.name,
                     max_bytes,
-                ));
+                ) catch |err| switch (err) {
+                    error.InvalidIdentity, error.ResourceLimit => continue,
+                    else => return err,
+                };
+                if (task_entries == max_blobs_per_task or
+                    entries.items.len == capacity) return error.ResourceLimit;
+                task_entries += 1;
+                try entries.append(allocator, stored);
             }
         }
         for (entries.items) |stored| {
@@ -514,6 +516,22 @@ test "file change store cleans only unreferenced blobs and empty task directorie
     const retained = try store.put(7, 2, 3, "retained", 1024);
     const orphan = try store.put(7, 2, 4, "orphan", 1024);
     const other_task = try store.put(8, 1, 1, "other", 1024);
+    try store.root.writeFile(std.testing.io, .{
+        .sub_path = "foreign-root.txt",
+        .data = "leave me",
+    });
+    var foreign_dir = try store.root.createDirPathOpen(
+        std.testing.io,
+        "foreign-directory",
+        .{},
+    );
+    foreign_dir.close(std.testing.io);
+    var task_dir = try store.root.openDir(std.testing.io, "7", .{});
+    try task_dir.writeFile(std.testing.io, .{
+        .sub_path = "foreign-artifact.txt",
+        .data = "leave me too",
+    });
+    task_dir.close(std.testing.io);
     try store.cleanupOrphans(std.testing.allocator, &.{retained}, 1024);
 
     const restored = try store.readAlloc(std.testing.allocator, retained, 1024);
@@ -527,4 +545,18 @@ test "file change store cleans only unreferenced blobs and empty task directorie
         error.BlobMissing,
         store.readAlloc(std.testing.allocator, other_task, 1024),
     );
+    var foreign_root = try store.root.openFile(
+        std.testing.io,
+        "foreign-root.txt",
+        .{ .follow_symlinks = false },
+    );
+    foreign_root.close(std.testing.io);
+    var foreign_artifact_dir = try store.root.openDir(std.testing.io, "7", .{});
+    var foreign_artifact = try foreign_artifact_dir.openFile(
+        std.testing.io,
+        "foreign-artifact.txt",
+        .{ .follow_symlinks = false },
+    );
+    foreign_artifact.close(std.testing.io);
+    foreign_artifact_dir.close(std.testing.io);
 }

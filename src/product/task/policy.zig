@@ -396,7 +396,9 @@ pub fn hasActiveOperation(task: *const task_state.Task) bool {
         else
             false,
         .compact => |id| if (task_state.findCompact(task.durable.compacts, id)) |compact|
-            task_state.compactTerminalPayload(compact) == null
+            !task_state.isTerminalCompactPhase(
+                task_state.compactProjectionFacts(compact).phase,
+            )
         else
             false,
         .restore => true,
@@ -418,7 +420,7 @@ pub fn latestCompactId(task: *const task_state.Task) u64 {
     var latest: u64 = 0;
     for (task.durable.compacts) |*entry| {
         const compact = &(entry.* orelse continue);
-        if (task_state.compactTerminalPayload(compact) == null) continue;
+        if (task_state.compactProjectionFacts(compact).terminal == null) continue;
         latest = @max(latest, compact.id);
     }
     return latest;
@@ -660,4 +662,49 @@ test "Run outcome phases remain truthful" {
     try std.testing.expectEqual(task_state.RunPhase.cancelled, phaseForOutcome(.cancelled));
     try std.testing.expectEqual(task_state.RunPhase.interrupted, phaseForOutcome(.interrupted));
     try std.testing.expectEqual(task_state.RunPhase.failed, phaseForOutcome(.dependency_contract_failure));
+}
+
+test "unobserved Compact terminal remains active and cannot anchor a checkpoint" {
+    var runs: [0]?task_state.RunRecord = .{};
+    var compacts = [_]?task_state.CompactRecord{.{
+        .id = 11,
+        .after_run_id = 7,
+        .agent_handoff = .init(.running),
+        .terminal_publication = .init(.published),
+        .terminal_payload = .{
+            .phase = .compacted,
+            .cause = null,
+            .before_context_tokens = 100,
+            .after_context_tokens = 40,
+            .usage = .{},
+            .session_disposition_at_completion = .reusable,
+        },
+        .terminal_diagnostic = @constCast(""),
+    }};
+    var ui_history: [0]?task_state.UiRecord = .{};
+    var task = task_state.Task{
+        .durable = .{
+            .id = 3,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 2,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+        },
+        .runtime = .{ .active_operation = .{ .compact = 11 } },
+    };
+
+    try std.testing.expect(hasActiveOperation(&task));
+    try std.testing.expectEqual(@as(u64, 0), latestCompactId(&task));
+
+    task.durable.compacts[0].?.terminal_observed = true;
+    try std.testing.expect(!hasActiveOperation(&task));
+    try std.testing.expectEqual(@as(u64, 11), latestCompactId(&task));
 }

@@ -128,17 +128,20 @@ pub const Error = StorageError || error{
     UnknownWorkspace,
 };
 
-/// Linear directory allocation borrowed from the Runtime's automatic root.
-/// Product Control may only finish or roll it back through the originating
-/// Runtime; the concrete allocator never crosses the aggregate boundary.
-pub const AutomaticAllocation = struct {
-    inner: automatic_root.Allocation,
-    root_identity: *const anyopaque,
+/// Linear preparation for one automatic Workspace record and its private
+/// directory allocation. The concrete allocator remains owned by Runtime.
+pub const PreparedAutomaticWorkspace = struct {
+    index: usize,
+    workspace_id: u64,
     active: bool = true,
 
-    pub fn path(self: *const AutomaticAllocation) []const u8 {
+    pub fn id(self: *const PreparedAutomaticWorkspace) u64 {
         std.debug.assert(self.active);
-        return self.inner.path();
+        return self.workspace_id;
+    }
+
+    pub fn isActive(self: *const PreparedAutomaticWorkspace) bool {
+        return self.active;
     }
 };
 
@@ -251,6 +254,7 @@ pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     records: []?Record,
+    pending_automatic: []?automatic_root.Allocation,
     max_manual: usize,
     max_automatic: usize,
     max_workspace_bytes: usize,
@@ -269,11 +273,15 @@ pub const Runtime = struct {
         const capacity = std.math.add(usize, max_manual, max_automatic) catch
             return error.ProjectionCapacity;
         const records = try allocator.alloc(?Record, capacity);
+        errdefer allocator.free(records);
         @memset(records, null);
+        const pending_automatic = try allocator.alloc(?automatic_root.Allocation, capacity);
+        @memset(pending_automatic, null);
         return .{
             .allocator = allocator,
             .io = io,
             .records = records,
+            .pending_automatic = pending_automatic,
             .max_manual = max_manual,
             .max_automatic = max_automatic,
             .max_workspace_bytes = max_workspace_bytes,
@@ -285,11 +293,14 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime, storage: Storage) void {
-        for (self.records) |*entry| {
+        for (self.records, self.pending_automatic) |*entry, *pending| {
+            if (pending.*) |*allocation| allocation.deinit();
+            pending.* = null;
             var record = entry.* orelse continue;
             deinitRecord(&record, storage);
             entry.* = null;
         }
+        self.allocator.free(self.pending_automatic);
         self.allocator.free(self.records);
         if (self.automatic_allocator) |*allocator| allocator.deinit();
         self.* = undefined;
@@ -297,6 +308,8 @@ pub const Runtime = struct {
 
     pub fn deinitEmpty(self: *Runtime) void {
         std.debug.assert(self.historyCount() == 0);
+        for (self.pending_automatic) |entry| std.debug.assert(entry == null);
+        self.allocator.free(self.pending_automatic);
         self.allocator.free(self.records);
         if (self.automatic_allocator) |*allocator| allocator.deinit();
         self.* = undefined;
@@ -314,42 +327,6 @@ pub const Runtime = struct {
     pub fn automaticRootContains(self: *const Runtime, path: []const u8) bool {
         const allocator = if (self.automatic_allocator) |*value| value else return false;
         return allocator.containsCanonicalPath(path);
-    }
-
-    pub fn allocateAutomatic(self: *Runtime) Error!AutomaticAllocation {
-        const allocator = if (self.automatic_allocator) |*value| value else return error.WorkspaceUnavailable;
-        const allocation = allocator.allocate() catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidAutomaticRoot => return error.InvalidWorkspace,
-            error.RootUnavailable, error.AllocationUnavailable => return error.WorkspaceUnavailable,
-        };
-        return .{
-            .inner = allocation,
-            .root_identity = &allocator.root,
-        };
-    }
-
-    pub fn finishAutomaticAllocation(
-        self: *Runtime,
-        allocation: *AutomaticAllocation,
-    ) void {
-        std.debug.assert(allocation.active);
-        const allocator = if (self.automatic_allocator) |*value| value else unreachable;
-        std.debug.assert(allocation.root_identity == @as(*const anyopaque, @ptrCast(&allocator.root)));
-        allocation.inner.deinit();
-        allocation.active = false;
-    }
-
-    pub fn rollbackAutomaticAllocation(
-        self: *Runtime,
-        allocation: *AutomaticAllocation,
-    ) bool {
-        std.debug.assert(allocation.active);
-        const allocator = if (self.automatic_allocator) |*value| value else unreachable;
-        std.debug.assert(allocation.root_identity == @as(*const anyopaque, @ptrCast(&allocator.root)));
-        const deleted = allocator.rollback(&allocation.inner);
-        allocation.active = false;
-        return deleted;
     }
 
     pub fn slotCount(self: *const Runtime) usize {
@@ -630,7 +607,8 @@ pub const Runtime = struct {
             return error.WorkspaceCapacity;
         if (slot == null) slot = findEmpty(self.records);
         const target = slot orelse return error.WorkspaceCapacity;
-        if (self.next_id == 0) return error.WorkspaceIdentityExhausted;
+        if (self.next_id == 0 or self.next_id == std.math.maxInt(u64))
+            return error.WorkspaceIdentityExhausted;
 
         const owned_root = try storage.copy(canonical, self.max_workspace_bytes);
         errdefer storage.free(owned_root);
@@ -650,7 +628,7 @@ pub const Runtime = struct {
         errdefer if (owned_temporary) |root| storage.free(root);
 
         const previous_next_id = self.next_id;
-        self.next_id +%= 1;
+        self.next_id += 1;
         self.records[target] = .{
             .id = previous_next_id,
             .canonical_root = owned_root,
@@ -827,20 +805,29 @@ pub const Runtime = struct {
         preparation.active = false;
     }
 
-    pub fn registerAutomatic(
+    pub fn prepareAutomatic(
         self: *Runtime,
-        canonical_root: []const u8,
         sensitive: []const u8,
         storage: Storage,
-    ) Error!Facts {
+    ) Error!PreparedAutomaticWorkspace {
+        const allocator = if (self.automatic_allocator) |*value| value else return error.WorkspaceUnavailable;
+        if (self.count(.automatic) >= self.max_automatic) return error.WorkspaceCapacity;
+        const target = findEmpty(self.records) orelse return error.WorkspaceCapacity;
+        std.debug.assert(self.pending_automatic[target] == null);
+        var allocation = allocator.allocate() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidAutomaticRoot => return error.InvalidWorkspace,
+            error.RootUnavailable, error.AllocationUnavailable => return error.WorkspaceUnavailable,
+        };
+        errdefer _ = allocator.rollback(&allocation);
+        const canonical_root = allocation.path();
         if (!std.fs.path.isAbsolute(canonical_root) or
             canonical_root.len > self.max_workspace_bytes or
             !std.unicode.utf8ValidateSlice(canonical_root) or
             self.findIndexByRoot(canonical_root) != null)
             return error.InvalidWorkspace;
-        if (self.count(.automatic) >= self.max_automatic) return error.WorkspaceCapacity;
-        const target = findEmpty(self.records) orelse return error.WorkspaceCapacity;
-        if (self.next_id == 0) return error.WorkspaceIdentityExhausted;
+        if (self.next_id == 0 or self.next_id == std.math.maxInt(u64))
+            return error.WorkspaceIdentityExhausted;
         const owned_root = try storage.copy(canonical_root, self.max_workspace_bytes);
         errdefer storage.free(owned_root);
         const projected_root = try storage.project(
@@ -858,7 +845,7 @@ pub const Runtime = struct {
         const temporary = try storage.copy(canonical_root, self.max_workspace_bytes);
         errdefer storage.free(temporary);
         const id = self.next_id;
-        self.next_id +%= 1;
+        self.next_id += 1;
         self.records[target] = .{
             .id = id,
             .kind = .automatic,
@@ -872,7 +859,63 @@ pub const Runtime = struct {
             .visible = false,
             .recent_order = 0,
         };
-        return factsFromRecord(&self.records[target].?);
+        self.pending_automatic[target] = allocation;
+        return .{ .index = target, .workspace_id = id };
+    }
+
+    pub fn preparedAutomaticFacts(
+        self: *const Runtime,
+        preparation: *const PreparedAutomaticWorkspace,
+    ) Facts {
+        std.debug.assert(preparation.active and preparation.index < self.records.len);
+        const record = &self.records[preparation.index].?;
+        std.debug.assert(record.id == preparation.workspace_id and record.kind == .automatic);
+        std.debug.assert(self.pending_automatic[preparation.index] != null);
+        return factsFromRecord(record);
+    }
+
+    pub fn completeAutomatic(self: *Runtime, preparation: *PreparedAutomaticWorkspace) void {
+        std.debug.assert(preparation.active and preparation.index < self.records.len);
+        const record = &self.records[preparation.index].?;
+        std.debug.assert(record.id == preparation.workspace_id and record.kind == .automatic);
+        var allocation = self.pending_automatic[preparation.index].?;
+        self.pending_automatic[preparation.index] = null;
+        allocation.deinit();
+        preparation.active = false;
+    }
+
+    pub fn rollbackPreparedAutomatic(
+        self: *Runtime,
+        preparation: *PreparedAutomaticWorkspace,
+        storage: Storage,
+    ) bool {
+        std.debug.assert(preparation.active and preparation.index < self.records.len);
+        var record = self.records[preparation.index].?;
+        std.debug.assert(record.id == preparation.workspace_id and record.kind == .automatic);
+        var allocation = self.pending_automatic[preparation.index].?;
+        self.records[preparation.index] = null;
+        self.pending_automatic[preparation.index] = null;
+        deinitRecord(&record, storage);
+        const allocator = if (self.automatic_allocator) |*value| value else unreachable;
+        const deleted = allocator.rollback(&allocation);
+        preparation.active = false;
+        return deleted;
+    }
+
+    pub fn abandonPreparedAutomatic(
+        self: *Runtime,
+        preparation: *PreparedAutomaticWorkspace,
+        storage: Storage,
+    ) void {
+        std.debug.assert(preparation.active and preparation.index < self.records.len);
+        var record = self.records[preparation.index].?;
+        std.debug.assert(record.id == preparation.workspace_id and record.kind == .automatic);
+        var allocation = self.pending_automatic[preparation.index].?;
+        self.records[preparation.index] = null;
+        self.pending_automatic[preparation.index] = null;
+        deinitRecord(&record, storage);
+        allocation.deinit();
+        preparation.active = false;
     }
 
     pub fn setAutomaticOwner(self: *Runtime, id: u64, task_id: u64) void {
@@ -884,6 +927,7 @@ pub const Runtime = struct {
 
     pub fn releaseAutomatic(self: *Runtime, id: u64, storage: Storage) void {
         const index = self.findIndex(id) orelse unreachable;
+        std.debug.assert(self.pending_automatic[index] == null);
         var record = self.records[index].?;
         std.debug.assert(record.kind == .automatic);
         self.records[index] = null;
@@ -892,6 +936,7 @@ pub const Runtime = struct {
 
     pub fn takeAutomatic(self: *Runtime, id: u64) ?RemovedAutomatic {
         const index = self.findIndex(id) orelse return null;
+        std.debug.assert(self.pending_automatic[index] == null);
         const record = self.records[index].?;
         if (record.kind != .automatic) return null;
         self.records[index] = null;
@@ -960,7 +1005,9 @@ pub const Runtime = struct {
     }
 
     pub fn reset(self: *Runtime, storage: Storage) void {
-        for (self.records) |*entry| {
+        for (self.records, self.pending_automatic) |*entry, *pending| {
+            if (pending.*) |*allocation| allocation.deinit();
+            pending.* = null;
             var record = entry.* orelse continue;
             deinitRecord(&record, storage);
             entry.* = null;
@@ -997,15 +1044,18 @@ pub const Runtime = struct {
     }
 
     pub fn removeAt(self: *Runtime, index: usize, storage: Storage) void {
+        std.debug.assert(self.pending_automatic[index] == null);
         var record = self.records[index] orelse return;
         self.records[index] = null;
         deinitRecord(&record, storage);
     }
 
     fn takeRecentOrder(self: *Runtime) Error!u64 {
-        if (self.next_recent_order == 0) return error.WorkspaceOrderExhausted;
+        if (self.next_recent_order == 0 or
+            self.next_recent_order == std.math.maxInt(u64))
+            return error.WorkspaceOrderExhausted;
         const result = self.next_recent_order;
-        self.next_recent_order +%= 1;
+        self.next_recent_order += 1;
         return result;
     }
 
@@ -1191,6 +1241,81 @@ fn testStorageFree(_: *anyopaque, value: []u8) void {
 
 fn testStorageRedact(_: *anyopaque, _: []u8, _: *usize, _: []const u8) bool {
     return false;
+}
+
+test "automatic Workspace preparation owns capacity and settles its private allocation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const canonical_len = try tmp.dir.realPath(std.testing.io, &canonical_storage);
+    var root = try AutomaticRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        canonical_storage[0..canonical_len],
+    );
+    defer root.deinit();
+    var context: u8 = 0;
+    const storage: Storage = .{
+        .context = &context,
+        .copy_fn = testStorageCopy,
+        .project_fn = testStorageProject,
+        .free_fn = testStorageFree,
+        .redact_fn = testStorageRedact,
+    };
+    var runtime = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        0,
+        1,
+        std.Io.Dir.max_path_bytes,
+        &root,
+    );
+    defer runtime.deinit(storage);
+
+    var rolled_back = try runtime.prepareAutomatic("", storage);
+    const rolled_back_facts = runtime.preparedAutomaticFacts(&rolled_back);
+    const rolled_back_key = try std.testing.allocator.dupe(
+        u8,
+        std.fs.path.basename(rolled_back_facts.canonical_root),
+    );
+    defer std.testing.allocator.free(rolled_back_key);
+    try std.testing.expect(!runtime.automaticCapacityAvailable());
+    try std.testing.expectError(
+        error.WorkspaceCapacity,
+        runtime.prepareAutomatic("", storage),
+    );
+    try std.testing.expect(runtime.rollbackPreparedAutomatic(&rolled_back, storage));
+    try std.testing.expect(runtime.automaticCapacityAvailable());
+    try std.testing.expectError(
+        error.FileNotFound,
+        runtime.automatic_allocator.?.root.dir.openDir(
+            std.testing.io,
+            rolled_back_key,
+            .{},
+        ),
+    );
+
+    var abandoned = try runtime.prepareAutomatic("", storage);
+    const abandoned_facts = runtime.preparedAutomaticFacts(&abandoned);
+    const abandoned_key = try std.testing.allocator.dupe(
+        u8,
+        std.fs.path.basename(abandoned_facts.canonical_root),
+    );
+    defer std.testing.allocator.free(abandoned_key);
+    runtime.abandonPreparedAutomatic(&abandoned, storage);
+    const abandoned_dir = try runtime.automatic_allocator.?.root.dir.openDir(
+        std.testing.io,
+        abandoned_key,
+        .{},
+    );
+    abandoned_dir.close(std.testing.io);
+
+    var completed = try runtime.prepareAutomatic("", storage);
+    const completed_id = completed.id();
+    runtime.completeAutomatic(&completed);
+    try std.testing.expect(!runtime.automaticCapacityAvailable());
+    runtime.releaseAutomatic(completed_id, storage);
+    try std.testing.expect(runtime.automaticCapacityAvailable());
 }
 
 test "typed authorities invalidate stale Workspace consumers" {

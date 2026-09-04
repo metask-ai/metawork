@@ -161,6 +161,7 @@ test "Task Session Binding is terminal after Runtime shutdown relinquish" {
 
 const TaskPersistenceProbe = struct {
     result: product_task.history.Commit = .committed,
+    store_on_outcome_unknown: bool = false,
     storage: ?[]u8 = null,
     len: usize = 0,
     commits: usize = 0,
@@ -168,7 +169,9 @@ const TaskPersistenceProbe = struct {
     fn commit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.commits += 1;
-        if (self.result == .committed) if (self.storage) |storage| {
+        if (self.result == .committed or
+            (self.result == .outcome_unknown and self.store_on_outcome_unknown)) if (self.storage) |storage|
+        {
             if (bytes.len > storage.len) return .failed;
             @memcpy(storage[0..bytes.len], bytes);
             self.len = bytes.len;
@@ -181,6 +184,7 @@ const TaskPersistenceProbe = struct {
             .context = self,
             .enabled = true,
             .commit_fn = commit,
+            .recover_fn = commit,
         };
     }
 
@@ -1556,7 +1560,7 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
         std.testing.allocator,
         std.testing.io,
         runtime,
-        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_compacts_per_task = 1, .max_tools_per_run = 1 },
         configuration,
     );
     var initialized = true;
@@ -1599,6 +1603,20 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     try workbench.renameTask(task_id, "Still usable");
     persistence.result = .committed;
     try workbench.renameTask(task_id, "Saved after retry");
+    fake_core.setCheckpointGeneration(1);
+    const continuation_id = try workbench.runTask(task_id, .{
+        .text = "continue after unknown descriptor",
+    });
+    try std.testing.expectEqual(@as(u64, 2), continuation_id);
+    try waitSetTaskArchived(&workbench, task_id);
+    try workbench.setTaskArchived(task_id, false);
+    const compact_id = try workbench.compactTaskAtBinding(task_id, 1);
+    try std.testing.expectEqual(@as(u64, 1), compact_id);
+    try waitTaskSnapshot(
+        &workbench,
+        "\"operationId\":\"1\"",
+        "\"phase\":\"compacted\"",
+    );
     const healed_snapshot = try workbench.writeSnapshot(&snapshot);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -1606,9 +1624,279 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
         "\"taskHistoryPersistenceHealth\":\"ready\"",
     ) != null);
 
+    try workbench.setTaskArchived(task_id, true);
+    try workbench.deleteTask(task_id);
+    try waitControlSnapshot(&workbench, "\"tasks\":[]");
+
     workbench.deinit();
     initialized = false;
-    try checkpoint_store.verify(identity);
+    try std.testing.expectError(error.BlobMissing, checkpoint_store.verify(identity));
+}
+
+test "recovery enqueue failure releases the job lease and remains retryable" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var checkpoint_tmp = std.testing.tmpDir(.{});
+    defer checkpoint_tmp.cleanup();
+    var checkpoint_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const checkpoint_root_len = try checkpoint_tmp.dir.realPath(
+        std.testing.io,
+        &checkpoint_root_storage,
+    );
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
+        std.testing.io,
+        checkpoint_root_storage[0..checkpoint_root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+
+    var runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    };
+    var first_configuration = productControlConfiguration();
+    first_configuration.directories.canonical_user_home = home;
+    first_configuration.task_persistence = persistence.capability();
+    first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var first = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        first_configuration,
+    );
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    try installControlExecution(&first);
+    const task_id = try first.createTask(productControlTaskInput());
+    _ = try first.runTask(task_id, .{ .text = "prepare recovery queue failure" });
+    try waitCheckpointRecord(&first, &persistence);
+    const restart_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(restart_history);
+    first.shutdownExecutor();
+    first.deinit();
+    first_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    fake_core.lock();
+    fake_core.session_created = 0;
+    fake_core.checkpoint_restores = 0;
+    fake_core.restore_last_run_id = 1;
+    fake_core.restore_last_compact_id = 0;
+    fake_core.unlock();
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 3,
+    });
+    runtime_live = true;
+    var restart_configuration = productControlConfiguration();
+    restart_configuration.directories.canonical_user_home = home;
+    restart_configuration.task_persistence = persistence.capabilityRestored(restart_history);
+    restart_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var restored = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 3,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        restart_configuration,
+    );
+    defer restored.deinit();
+    try installControlExecution(&restored);
+    const workspace_id = try restored.openWorkspace(productControlTaskInput());
+    const blocker_one = try restored.createTask(productControlTaskInput());
+    const blocker_two = try restored.createTask(productControlTaskInput());
+    try restored.renameTask(blocker_one, "restore blocker one");
+    try restored.renameTask(blocker_two, "restore blocker two");
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    var blockers_released = false;
+    defer if (!blockers_released) fake_core.releaseControlled();
+    _ = try restored.runTask(blocker_one, .{ .text = "occupy recovery worker" });
+    try waitTaskSnapshot(
+        &restored,
+        "\"title\":\"restore blocker one\"",
+        "\"currentRunPhase\":\"running\"",
+    );
+    _ = try restored.runTask(blocker_two, .{ .text = "fill recovery queue" });
+
+    const revision_before_rejection = restored.currentRevision();
+    try std.testing.expectError(
+        error.QueueFull,
+        restored.restoreTaskConversation(
+            task_id,
+            try restored.taskBindingEpoch(task_id),
+        ),
+    );
+    try std.testing.expectEqual(revision_before_rejection, restored.currentRevision());
+    const recovered_task = &restored.task_runtime.tasks[0].?;
+    try std.testing.expectEqual(task_id, recovered_task.durable.id);
+    try std.testing.expect(recovered_task.runtime.active_operation == .none);
+    try std.testing.expect(recovered_task.runtime.restore_job == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        recovered_task.runtime.worker_leases.liveCount(),
+    );
+
+    fake_core.releaseControlled();
+    blockers_released = true;
+    try waitTaskSnapshot(
+        &restored,
+        "\"title\":\"restore blocker two\"",
+        "\"lastRunOutcome\":\"completed\"",
+    );
+    try std.testing.expectEqual(
+        workspace_id,
+        try restored.taskWorkspaceId(task_id),
+    );
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+}
+
+test "terminal drain candidate restarts without a stale active operation" {
+    fake_core.reset();
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    var runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    };
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = persistence.capability();
+    var first = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    try installControlExecution(&first);
+    const task_id = try first.createTask(productControlTaskInput());
+    _ = try first.runTask(task_id, .{ .text = "persist terminal boundary" });
+    const run = &first.task_runtime.tasks[0].?.durable.runs[0].?;
+    for (0..10_000) |_| {
+        if (product_task.testing.state_module.terminalPayload(run) != null) break;
+        std.Thread.yield() catch {};
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(!run.event_stream_finalized);
+    try first.drainAgentEvents();
+    try std.testing.expect(run.event_stream_finalized);
+    try std.testing.expect(first.task_runtime.tasks[0].?.runtime.active_operation == .none);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence_storage[0..persistence.len],
+        "\"phase\":\"completed\"",
+    ) != null);
+    const terminal_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(terminal_history);
+
+    first.shutdownExecutor();
+    first.deinit();
+    first_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
+    var restart_configuration = productControlConfiguration();
+    restart_configuration.directories.canonical_user_home = home;
+    restart_configuration.task_persistence = persistence.capabilityRestored(terminal_history);
+    var restarted = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        restart_configuration,
+    );
+    defer restarted.deinit();
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try restarted.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"completed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"activeOperation\":null") != null);
 }
 
 test "untrusted Task history preserves checkpoint orphans without blocking a new interactive Task" {
@@ -2088,6 +2376,7 @@ test "scheduled admission rejects an unconfigured Task persistence capability" {
     const run_calls = fake_core.run_calls;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 0), run_calls);
+    try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
@@ -2181,6 +2470,167 @@ test "scheduled durable admission failure does not block an interactive Product 
         continued,
         "\"taskHistoryPersistenceHealth\":\"write_failed\"",
     ) != null);
+}
+
+fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    const persisted_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persisted_storage);
+    var task_persistence: TaskPersistenceProbe = .{
+        .result = .outcome_unknown,
+        .store_on_outcome_unknown = store_candidate,
+        .storage = persisted_storage,
+    };
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .schedule_timer = schedule_support.timer(),
+            .schedule_persistence = schedule_support.persistence(),
+            .task_persistence = task_persistence.capability(),
+        },
+    );
+    var workbench_live = true;
+    defer if (workbench_live) workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const schedule_id = try workbench.createScheduledTask(.{
+        .title = "Unknown durable admission",
+        .binding = scheduledBinding(&workbench),
+        .permission_profile = .approval_required,
+        .input = "Do not enqueue an uncertain admission",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    try std.testing.expectError(
+        error.TaskPersistenceOutcomeUnknown,
+        workbench.runScheduledTaskNow(schedule_id, 1),
+    );
+
+    fake_core.lock();
+    const run_calls = fake_core.run_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), run_calls);
+    try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(tmp.dir));
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const unknown_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        unknown_snapshot,
+        "\"taskHistoryPersistenceHealth\":\"outcome_unknown\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, unknown_snapshot, "\"tasks\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        unknown_snapshot,
+        "\"result\":\"rejected\",\"taskId\":null,\"reason\":\"task_start_failed\"",
+    ) != null);
+    if (store_candidate) {
+        try std.testing.expect(task_persistence.len > 0);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            persisted_storage[0..task_persistence.len],
+            "Unknown durable admission",
+        ) != null);
+    } else {
+        try std.testing.expectEqual(@as(usize, 0), task_persistence.len);
+    }
+    const landed_history = if (store_candidate)
+        try std.testing.allocator.dupe(
+            u8,
+            persisted_storage[0..task_persistence.len],
+        )
+    else
+        null;
+    defer if (landed_history) |bytes| std.testing.allocator.free(bytes);
+
+    workbench.deinit();
+    workbench_live = false;
+
+    task_persistence.result = .committed;
+    var restored_automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer restored_automatic_root.deinit();
+    var restart_configuration = productControlConfiguration();
+    restart_configuration.directories.automatic_workspace_root = &restored_automatic_root;
+    restart_configuration.task_persistence = if (store_candidate)
+        task_persistence.capabilityRestored(landed_history.?)
+    else
+        task_persistence.capability();
+    var restarted = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        restart_configuration,
+    );
+    defer restarted.deinit();
+    const restarted_snapshot = try restarted.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        restarted_snapshot,
+        "\"taskHistoryPersistenceHealth\":\"ready\"",
+    ) != null);
+    if (store_candidate) {
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            restarted_snapshot,
+            "Unknown durable admission",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(u8, restarted_snapshot, "\"tasks\":[]") == null);
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, restarted_snapshot, "\"tasks\":[]") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(tmp.dir));
+}
+
+test "scheduled admission outcome unknown preserves its root across landed and not-landed restarts" {
+    try expectScheduledAdmissionOutcomeUnknownRecovery(false);
+    try expectScheduledAdmissionOutcomeUnknownRecovery(true);
 }
 
 test "interactive Product Task remains accepted when history commit outcome is unknown" {
@@ -2746,6 +3196,24 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         root_storage[0..root_len],
     );
     defer automatic_root.deinit();
+    var checkpoint_tmp = std.testing.tmpDir(.{});
+    defer checkpoint_tmp.cleanup();
+    var checkpoint_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const checkpoint_root_len = try checkpoint_tmp.dir.realPath(
+        std.testing.io,
+        &checkpoint_root_storage,
+    );
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
+        std.testing.io,
+        checkpoint_root_storage[0..checkpoint_root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -2761,6 +3229,8 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         .{
             .directories = .{ .automatic_workspace_root = &automatic_root },
             .completion_factory = .{ .create_fn = fixture.createCompletion },
+            .task_persistence = persistence.capability(),
+            .checkpoint_store = .{ .file_store = &checkpoint_store },
         },
     );
     defer workbench.deinit();
@@ -2854,6 +3324,9 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     );
 
     fake_core.setCompletionTitle("Generated task title");
+    fake_core.controlNextCompletion();
+    var completion_released = false;
+    defer if (!completion_released) fake_core.releaseCompletion();
     fake_core.setSessionPlan(.controlled);
     _ = try workbench.runTask(first_task, .{ .text = "automatic text run" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
@@ -2869,12 +3342,12 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         ) != null,
     );
     fake_core.releaseControlled();
+    fake_core.waitCompletionEntered();
     try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
-    try waitControlSnapshot(&workbench, "\"title\":\"Generated task title\"");
-    var title_snapshot: [128 * 1024]u8 = undefined;
-    const title_snapshot_bytes = try workbench.writeSnapshot(&title_snapshot);
-    try std.testing.expect(
-        std.mem.indexOf(u8, title_snapshot_bytes, "\"title\":\"Generated task title\"") != null,
+    try waitHistoryNeedle(
+        &workbench,
+        &persistence,
+        "\"checkpoint_anchor\":\"available\"",
     );
     fake_core.lock();
     const completion_requests = fake_core.completion_requests;
@@ -2882,6 +3355,16 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     try std.testing.expectEqual(@as(usize, 1), completion_requests);
     try waitSetTaskArchived(&workbench, first_task);
     try workbench.deleteTask(first_task);
+    var deleting_snapshot_storage: [128 * 1024]u8 = undefined;
+    const deleting_snapshot = try workbench.writeSnapshot(&deleting_snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        deleting_snapshot,
+        "\"deletionStatus\":\"deleting\"",
+    ) != null);
+    try std.testing.expectEqual(first_workspace, try workbench.taskWorkspaceId(first_task));
+    fake_core.releaseCompletion();
+    completion_released = true;
     try waitTaskDeleted(&workbench, first_task);
     try std.testing.expectError(
         error.UnknownWorkspace,
@@ -3736,6 +4219,82 @@ test "Product Control manual compact uses the active operation lane and appends 
         snapshot,
         "\"beforeContextTokens\":\"100\",\"afterContextTokens\":\"40\"",
     ) != null);
+}
+
+test "compact queue rejection persists a legal terminal record and returns its operation id" {
+    fake_core.reset();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = persistence.capability();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 3,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 3,
+            .max_runs_per_task = 1,
+            .max_compacts_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const compact_task = try workbench.createTask(productControlTaskInput());
+    const blocking_task = try workbench.createTask(productControlTaskInput());
+    const queued_task = try workbench.createTask(productControlTaskInput());
+    _ = try workbench.runTask(compact_task, .{ .text = "establish conversation" });
+    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    defer fake_core.releaseControlled();
+    _ = try workbench.runTask(blocking_task, .{ .text = "hold worker" });
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    _ = try workbench.runTask(queued_task, .{ .text = "fill queue" });
+
+    const operation_id = try workbench.compactTaskAtBinding(compact_task, 1);
+    try std.testing.expectEqual(@as(u64, 1), operation_id);
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"operationId\":\"1\",\"afterRunId\":\"1\",\"phase\":\"failed\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"cause\":\"resource_limit\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"activeOperation\":null",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"taskHistoryPersistenceHealth\":\"ready\"",
+    ) != null);
+    try std.testing.expect(persistence.len != 0);
 }
 
 test "Product Control compact cancellation and Task deletion wait for the Agent terminal result" {

@@ -12,6 +12,10 @@ const view = @import("product_task_view");
 const execution_binding = @import("product_task_execution_binding");
 
 pub const Runtime = runtime.Runtime;
+pub const PreparedCreate = runtime.PreparedCreate;
+pub const PreparedRun = runtime.PreparedRun;
+pub const PreparedCompact = runtime.PreparedCompact;
+pub const PreparedUiResponse = runtime.PreparedUiResponse;
 pub const TerminalSummary = runtime.TerminalSummary;
 pub const RunInput = runtime.RunInput;
 pub const MultimodalAttachment = runtime.MultimodalAttachment;
@@ -27,7 +31,6 @@ pub const RecoveryAdmissionEffects = runtime.RecoveryAdmissionEffects;
 pub const ProjectedText = runtime.ProjectedText;
 pub const TextProjection = runtime.TextProjection;
 pub const DurableCommit = runtime.DurableCommit;
-pub const DurableEffect = runtime.DurableEffect;
 pub const CheckpointEffects = runtime.CheckpointEffects;
 pub const SessionReleaseOutcome = runtime.SessionReleaseOutcome;
 pub const DeletionEffects = runtime.DeletionEffects;
@@ -36,6 +39,7 @@ pub const ReleaseEffects = runtime.ReleaseEffects;
 pub const RecoveryAuthorityQuery = runtime.RecoveryAuthorityQuery;
 pub const RecoveryExternalAuthority = runtime.RecoveryExternalAuthority;
 pub const RecoveryEffects = runtime.RecoveryEffects;
+pub const LifecycleEffects = runtime.LifecycleEffects;
 
 pub const Protocol = state.Protocol;
 pub const PermissionProfile = state.PermissionProfile;

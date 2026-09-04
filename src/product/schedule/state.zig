@@ -377,7 +377,8 @@ pub const Store = struct {
         now_unix_seconds: u64,
     ) Error!u64 {
         const slot = self.emptySlot() orelse return error.ScheduledTaskCapacity;
-        if (self.next_id == 0) return error.ScheduledTaskIdentityExhausted;
+        if (self.next_id == 0 or self.next_id == std.math.maxInt(u64))
+            return error.ScheduledTaskIdentityExhausted;
         const next_run = (try definition.recurrence.firstAtOrAfter(
             now_unix_seconds,
         )) orelse return error.InvalidSchedule;
@@ -389,7 +390,7 @@ pub const Store = struct {
         );
         errdefer self.deinitItem(&item);
         const id = self.next_id;
-        self.next_id +%= 1;
+        self.next_id += 1;
         self.items[slot] = item;
         return id;
     }

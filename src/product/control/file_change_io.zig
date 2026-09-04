@@ -58,7 +58,10 @@ pub const ReadCompletion = struct {
     completion_id: u64,
     identity: store.Identity,
     state: ReadState,
-    content: []const u8,
+    /// Mutable lane-owned read buffer. The main-thread consumer may scrub it
+    /// in place before the synchronous sink call; `release` then secure-zeros
+    /// and frees it.
+    content: []u8,
     complete: bool,
     redacted: bool,
 };
