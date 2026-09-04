@@ -191,15 +191,6 @@ pub const TextProjection = struct {
     }
 };
 
-pub const DurableEffect = struct {
-    context: *anyopaque,
-    commit_fn: *const fn (*anyopaque) DurableCommit,
-
-    fn commit(self: DurableEffect) DurableCommit {
-        return self.commit_fn(self.context);
-    }
-};
-
 pub const AttachmentKind = task_state.AttachmentKind;
 pub const AttachmentFormat = task_state.AttachmentFormat;
 pub const MultimodalAttachment = struct {
@@ -316,7 +307,6 @@ pub const WorkspaceOrderEffect = struct {
 
 pub const OperationEffects = struct {
     text: TextProjection,
-    durable: DurableEffect,
     release: ReleaseEffects,
     executor: ExecutorPort,
     worker: WorkerResources,
@@ -485,7 +475,6 @@ pub const CreateTaskInput = struct {
     max_ui_history: usize,
     workspace_order: WorkspaceOrderEffect,
     text: TextProjection,
-    durable: DurableEffect,
     release: ReleaseEffects,
 };
 
@@ -516,6 +505,249 @@ pub const ReleaseEffects = struct {
 
     fn releaseProjectionBytes(self: ReleaseEffects, bytes: usize) void {
         self.release_projection_bytes_fn(self.context, bytes);
+    }
+};
+
+pub const PreparedCreate = struct {
+    runtime: *Runtime,
+    slot: usize,
+    task_id: u64,
+    previous_next_recent_order: u64,
+    release: ReleaseEffects,
+    active: bool = true,
+
+    pub fn id(self: *const PreparedCreate) u64 {
+        return self.task_id;
+    }
+
+    pub fn complete(self: *PreparedCreate) u64 {
+        std.debug.assert(self.active);
+        self.active = false;
+        return self.task_id;
+    }
+
+    pub fn rollback(self: *PreparedCreate) void {
+        std.debug.assert(self.active);
+        var removed = self.runtime.tasks[self.slot].?;
+        self.runtime.tasks[self.slot] = null;
+        self.runtime.next_task_id = self.task_id;
+        self.runtime.next_recent_order = self.previous_next_recent_order;
+        deinitTask(self.runtime, &removed, self.release);
+        self.active = false;
+    }
+};
+
+pub const PreparedRun = struct {
+    runtime: *Runtime,
+    task: *task_state.Task,
+    slot: usize,
+    run_id: u64,
+    job: *task_execution.RunJob,
+    workspace: WorkspaceOrderEffect,
+    effects: OperationEffects,
+    previous_active_run_id: u64,
+    previous_active_operation: task_state.ActiveOperation,
+    previous_recent_order: u64,
+    previous_next_recent_order: u64,
+    previous_title: []u8,
+    previous_title_redacted: bool,
+    provisional_title_applied: bool,
+    active: bool = true,
+
+    pub fn id(self: *const PreparedRun) u64 {
+        return self.run_id;
+    }
+
+    pub fn rollback(self: *PreparedRun) void {
+        std.debug.assert(self.active);
+        task_execution.cancelPreparedRunOrPanic(self.job.sessionAccess(), self.run_id);
+        self.job.destroy();
+        self.task.runtime.active_run_id = self.previous_active_run_id;
+        self.task.runtime.active_operation = self.previous_active_operation;
+        self.task.durable.recent_order = self.previous_recent_order;
+        self.runtime.next_recent_order = self.previous_next_recent_order;
+        self.workspace.rollback();
+        self.task.durable.next_run_generation -= 1;
+        if (self.provisional_title_applied) {
+            self.effects.text.discardCandidate(self.task.durable.title);
+            self.effects.text.restorePrevious(self.previous_title.len);
+            self.task.durable.title = self.previous_title;
+            self.task.durable.title_redacted = self.previous_title_redacted;
+        }
+        discardRun(self.runtime, self.task, self.slot, self.effects.release);
+        self.active = false;
+    }
+
+    pub fn submit(
+        self: *PreparedRun,
+    ) error{ ExecutorShuttingDown, QueueFull }!u64 {
+        std.debug.assert(self.active);
+        if (self.provisional_title_applied)
+            self.effects.text.discardPrevious(self.previous_title);
+        self.effects.run_acceptance.accept();
+        _ = self.task.runtime.worker_references.fetchAdd(1, .acq_rel);
+        const run_record = &self.task.durable.runs[self.slot].?;
+        run_record.worker_reference_held.store(true, .release);
+        self.effects.executor.enqueue(
+            run_record,
+            self.job,
+            task_execution.executeRun,
+            task_execution.cancelRun,
+        ) catch |err| {
+            task_execution.publishAutomaticTitleFallback(run_record);
+            task_execution.releaseRunWorkerReference(
+                &self.task.runtime.worker_references,
+                run_record,
+            );
+            task_execution.cancelPreparedRunOrPanic(self.job.sessionAccess(), self.run_id);
+            self.job.destroy();
+            _ = task_execution.commitRunTerminal(
+                self.effects.worker.projector,
+                run_record,
+                .interrupted,
+                .interrupted,
+                .queue_capacity_failure,
+                .reusable,
+                "",
+                false,
+            );
+            run_record.terminal_observed = true;
+            run_record.event_stream_finalized = true;
+            self.task.runtime.active_operation = .none;
+            self.active = false;
+            return err;
+        };
+        self.active = false;
+        return self.run_id;
+    }
+};
+
+pub const PreparedCompact = struct {
+    runtime: *Runtime,
+    task: *task_state.Task,
+    slot: usize,
+    operation_id: u64,
+    job: *task_execution.CompactJob,
+    effects: OperationEffects,
+    previous_active_operation: task_state.ActiveOperation,
+    previous_recent_order: u64,
+    previous_next_recent_order: u64,
+    active: bool = true,
+
+    pub fn id(self: *const PreparedCompact) u64 {
+        return self.operation_id;
+    }
+
+    pub fn rollback(self: *PreparedCompact) void {
+        std.debug.assert(self.active);
+        task_execution.cancelPreparedCompactOrPanic(
+            self.job.sessionAccess(),
+            self.operation_id,
+        );
+        self.job.destroy();
+        self.task.runtime.active_operation = self.previous_active_operation;
+        self.task.durable.recent_order = self.previous_recent_order;
+        self.runtime.next_recent_order = self.previous_next_recent_order;
+        discardCompact(self.runtime, self.task, self.slot, self.effects.release);
+        self.active = false;
+    }
+
+    pub fn submit(
+        self: *PreparedCompact,
+    ) error{ ExecutorShuttingDown, QueueFull }!u64 {
+        std.debug.assert(self.active);
+        _ = self.task.runtime.worker_references.fetchAdd(1, .acq_rel);
+        const compact = &self.task.durable.compacts[self.slot].?;
+        compact.worker_reference_held.store(true, .release);
+        self.effects.executor.enqueue(
+            compact,
+            self.job,
+            task_execution.executeCompact,
+            task_execution.cancelCompact,
+        ) catch |err| {
+            task_execution.releaseCompactWorkerReference(
+                &self.task.runtime.worker_references,
+                compact,
+            );
+            task_execution.cancelPreparedCompactOrPanic(
+                self.job.sessionAccess(),
+                self.operation_id,
+            );
+            self.job.destroy();
+            _ = task_execution.commitCompactProductTerminal(
+                self.effects.worker.projector,
+                compact,
+                .failed,
+                .resource_limit,
+                .reusable,
+                .{},
+                0,
+                0,
+                "",
+                false,
+            );
+            compact.terminal_observed = true;
+            self.task.runtime.active_operation = .none;
+            self.active = false;
+            return err;
+        };
+        self.active = false;
+        return self.operation_id;
+    }
+};
+
+pub const PreparedUiResponse = struct {
+    runtime: *Runtime,
+    task: *task_state.Task,
+    run: *task_state.RunRecord,
+    access: task_agent_session.Access,
+    run_id: u64,
+    request_id: u64,
+    response: UiResponse,
+    history_slot: usize,
+    previous_history_record: ?task_state.UiRecord,
+    previous_history_next: usize,
+    previous_history_count: usize,
+    previous_pending_request_id: u64,
+    previous_pending_order: u64,
+    previous_activity_order: u64,
+    previous_recent_order: u64,
+    previous_next_recent_order: u64,
+    active: bool = true,
+
+    pub fn rollback(self: *PreparedUiResponse) void {
+        std.debug.assert(self.active);
+        rollbackUiRecord(
+            self.task,
+            self.run,
+            self.history_slot,
+            self.previous_history_record,
+            self.previous_history_next,
+            self.previous_history_count,
+            self.previous_pending_request_id,
+            self.previous_pending_order,
+            self.previous_activity_order,
+            self.previous_recent_order,
+        );
+        self.runtime.next_recent_order = self.previous_next_recent_order;
+        self.access.deinit();
+        self.active = false;
+    }
+
+    pub fn deliver(
+        self: *PreparedUiResponse,
+    ) (agent.Error || std.mem.Allocator.Error)!void {
+        std.debug.assert(self.active);
+        self.access.respondPermission(
+            self.run_id,
+            self.request_id,
+            permissionChoice(self.response.permission),
+        ) catch |err| {
+            self.rollback();
+            return err;
+        };
+        self.access.deinit();
+        self.active = false;
     }
 };
 
@@ -623,13 +855,17 @@ pub const RecoveryEffects = struct {
         *anyopaque,
         RecoveryAuthorityQuery,
     ) RecoveryExternalAuthority,
-    durable: DurableEffect,
+    commit_binding_fn: *const fn (*anyopaque) DurableCommit,
 
     fn authority(
         self: RecoveryEffects,
         query: RecoveryAuthorityQuery,
     ) RecoveryExternalAuthority {
         return self.authority_fn(self.context, query);
+    }
+
+    fn commitBinding(self: RecoveryEffects) DurableCommit {
+        return self.commit_binding_fn(self.context);
     }
 };
 
@@ -798,7 +1034,7 @@ pub const Runtime = struct {
     pub fn openTask(
         self: *Runtime,
         input: CreateTaskInput,
-    ) CreateTaskError!u64 {
+    ) CreateTaskError!PreparedCreate {
         const execution_model = (try input.text.project(
             input.model,
             input.max_model_id_bytes,
@@ -892,7 +1128,6 @@ pub const Runtime = struct {
             input.max_runs,
             input.max_compacts,
             input.max_ui_history,
-            input.durable,
             input.release,
         ) catch |err| {
             input.workspace_order.rollback();
@@ -903,16 +1138,16 @@ pub const Runtime = struct {
 
     /// Takes every owned field in `candidate` on entry. Failure closes the
     /// fresh Session and releases all candidate resources; success publishes a
-    /// fully formed Task only after the shared durable commit succeeds.
+    /// fully formed Task as a prepared candidate for the composition-owned
+    /// durable decision.
     pub fn create(
         self: *Runtime,
         candidate: *CreateCandidate,
         max_runs: usize,
         max_compacts: usize,
         max_ui_history: usize,
-        durable: DurableEffect,
         release: ReleaseEffects,
-    ) CreateError!u64 {
+    ) CreateError!PreparedCreate {
         var owned = candidate.*;
         candidate.* = undefined;
         var owned_live = true;
@@ -964,17 +1199,13 @@ pub const Runtime = struct {
         ui_history_owned = false;
         owned_live = false;
         owned = undefined;
-        const outcome = durable.commit();
-        if (outcome == .committed) return task_id;
-        var removed = self.tasks[slot].?;
-        self.tasks[slot] = null;
-        self.next_task_id = task_id;
-        self.next_recent_order = previous_next_recent_order;
-        deinitTask(self, &removed, release);
-        if (outcome == .outcome_unknown) {
-            return error.TaskPersistenceOutcomeUnknown;
-        }
-        return error.TaskPersistenceFailed;
+        return .{
+            .runtime = self,
+            .slot = slot,
+            .task_id = task_id,
+            .previous_next_recent_order = previous_next_recent_order,
+            .release = release,
+        };
     }
 
     pub fn startRun(
@@ -984,7 +1215,7 @@ pub const Runtime = struct {
         input: RunInput,
         workspace: WorkspaceOrderEffect,
         effects: OperationEffects,
-    ) RunError!u64 {
+    ) RunError!PreparedRun {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
@@ -1056,73 +1287,27 @@ pub const Runtime = struct {
         task.runtime.cancel_requested = false;
         task.durable.recent_order = self.takeRecentOrder();
         workspace.apply();
-        effects.run_acceptance.accept();
-        const commit_outcome = effects.durable.commit();
-        if (commit_outcome != .committed) {
-            task.runtime.active_run_id = previous_active_run_id;
-            task.runtime.active_operation = previous_active_operation;
-            task.durable.recent_order = previous_recent_order;
-            self.next_recent_order = previous_next_recent_order;
-            workspace.rollback();
-            task.durable.next_run_generation -= 1;
-            if (provisional_title_applied) {
-                effects.text.discardCandidate(task.durable.title);
-                effects.text.restorePrevious(previous_title.len);
-                task.durable.title = previous_title;
-                task.durable.title_redacted = previous_title_redacted;
-            }
-            if (commit_outcome == .outcome_unknown) {
-                return error.TaskPersistenceOutcomeUnknown;
-            }
-            return error.TaskPersistenceFailed;
-        }
-        if (provisional_title_applied)
-            effects.text.discardPrevious(previous_title);
-
         job.access = access.take();
         access_live = false;
-        _ = task.runtime.worker_references.fetchAdd(1, .acq_rel);
-        run_record.worker_reference_held.store(true, .release);
-        effects.executor.enqueue(
-            run_record,
-            job,
-            task_execution.executeRun,
-            task_execution.cancelRun,
-        ) catch |err| {
-            task_execution.publishAutomaticTitleFallback(run_record);
-            task_execution.releaseRunWorkerReference(
-                &task.runtime.worker_references,
-                run_record,
-            );
-            task_execution.cancelPreparedRunOrPanic(job.sessionAccess(), run_id);
-            prepared = false;
-            job.destroy();
-            job_owned = false;
-            _ = task_execution.commitRunTerminal(
-                effects.worker.projector,
-                run_record,
-                .interrupted,
-                .interrupted,
-                .queue_capacity_failure,
-                .reusable,
-                "",
-                false,
-            );
-            run_record.terminal_observed = true;
-            run_record.event_stream_finalized = true;
-            task.runtime.active_operation = .none;
-            _ = effects.durable.commit();
-            record_owned = false;
-            // Admission already consumed the prepared Agent input and any
-            // attachment grants. Preserve that linearization point: queue
-            // failure is an accepted, interrupted Run, not a submit failure
-            // whose draft can be replayed.
-            return if (effects.run_acceptance.irreversible) run_id else err;
-        };
-        job_owned = false;
         prepared = false;
+        job_owned = false;
         record_owned = false;
-        return run_id;
+        return .{
+            .runtime = self,
+            .task = task,
+            .slot = slot,
+            .run_id = run_id,
+            .job = job,
+            .workspace = workspace,
+            .effects = effects,
+            .previous_active_run_id = previous_active_run_id,
+            .previous_active_operation = previous_active_operation,
+            .previous_recent_order = previous_recent_order,
+            .previous_next_recent_order = previous_next_recent_order,
+            .previous_title = previous_title,
+            .previous_title_redacted = previous_title_redacted,
+            .provisional_title_applied = provisional_title_applied,
+        };
     }
 
     pub fn startCompact(
@@ -1130,7 +1315,7 @@ pub const Runtime = struct {
         task_id: u64,
         expected_binding_epoch: u64,
         effects: OperationEffects,
-    ) CompactError!u64 {
+    ) CompactError!PreparedCompact {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
@@ -1190,59 +1375,22 @@ pub const Runtime = struct {
         const previous_next_recent_order = self.next_recent_order;
         task.runtime.active_operation = .{ .compact = operation_id };
         task.durable.recent_order = self.takeRecentOrder();
-        const commit_outcome = effects.durable.commit();
-        if (commit_outcome != .committed) {
-            task.runtime.active_operation = previous_active_operation;
-            task.durable.recent_order = previous_recent_order;
-            self.next_recent_order = previous_next_recent_order;
-            if (commit_outcome == .outcome_unknown) {
-                return error.TaskPersistenceOutcomeUnknown;
-            }
-            return error.TaskPersistenceFailed;
-        }
         job.access = access.take();
         access_live = false;
-        _ = task.runtime.worker_references.fetchAdd(1, .acq_rel);
-        compact.worker_reference_held.store(true, .release);
-        effects.executor.enqueue(
-            compact,
-            job,
-            task_execution.executeCompact,
-            task_execution.cancelCompact,
-        ) catch {
-            task_execution.releaseCompactWorkerReference(
-                &task.runtime.worker_references,
-                compact,
-            );
-            task_execution.cancelPreparedCompactOrPanic(
-                job.sessionAccess(),
-                operation_id,
-            );
-            prepared = false;
-            job.destroy();
-            job_owned = false;
-            _ = task_execution.commitCompactProductTerminal(
-                effects.worker.projector,
-                compact,
-                .failed,
-                .resource_limit,
-                .reusable,
-                .{},
-                0,
-                0,
-                "",
-                false,
-            );
-            compact.terminal_observed = true;
-            task.runtime.active_operation = .none;
-            _ = effects.durable.commit();
-            record_owned = false;
-            return operation_id;
-        };
-        job_owned = false;
         prepared = false;
+        job_owned = false;
         record_owned = false;
-        return operation_id;
+        return .{
+            .runtime = self,
+            .task = task,
+            .slot = slot,
+            .operation_id = operation_id,
+            .job = job,
+            .effects = effects,
+            .previous_active_operation = previous_active_operation,
+            .previous_recent_order = previous_recent_order,
+            .previous_next_recent_order = previous_next_recent_order,
+        };
     }
 
     pub fn cancelCompact(
@@ -1290,7 +1438,6 @@ pub const Runtime = struct {
             if (record) |value| pushUiRecord(task, value);
             task.runtime.cancel_requested = false;
             task.durable.recent_order = self.takeRecentOrder();
-            observeBestEffortCommit(self, effects.durable.commit());
             return true;
         }
         const stopping = switch (dispatch) {
@@ -1302,7 +1449,6 @@ pub const Runtime = struct {
         task.runtime.cancel_requested = true;
         _ = task_state.setActivePhase(run_record, .stopping);
         task.durable.recent_order = self.takeRecentOrder();
-        observeBestEffortCommit(self, effects.durable.commit());
         return true;
     }
 
@@ -1312,13 +1458,11 @@ pub const Runtime = struct {
         run_id: u64,
         request_id: u64,
         response: UiResponse,
-        effects: OperationEffects,
-    ) ControlError!void {
+    ) ControlError!PreparedUiResponse {
         const task = self.find(task_id) orelse return error.UnknownTask;
         const run_record = task_state.findRun(task.durable.runs, run_id) orelse
             return error.NoSuchRun;
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
-        defer access.deinit();
         const record = prepareUiRecord(
             self,
             &access,
@@ -1338,46 +1482,23 @@ pub const Runtime = struct {
         const previous_next_recent_order = self.next_recent_order;
         pushUiRecord(task, record);
         task.durable.recent_order = self.takeRecentOrder();
-        const commit_outcome = effects.durable.commit();
-        if (commit_outcome != .committed) {
-            rollbackUiRecord(
-                task,
-                run_record,
-                history_slot,
-                previous_history_record,
-                previous_history_next,
-                previous_history_count,
-                previous_pending_request_id,
-                previous_pending_order,
-                previous_activity_order,
-                previous_recent_order,
-            );
-            self.next_recent_order = previous_next_recent_order;
-            if (commit_outcome == .outcome_unknown) {
-                return error.TaskPersistenceOutcomeUnknown;
-            }
-            return error.TaskPersistenceFailed;
-        }
-        access.respondPermission(
-            run_id,
-            request_id,
-            permissionChoice(response.permission),
-        ) catch |err| {
-            rollbackUiRecord(
-                task,
-                run_record,
-                history_slot,
-                previous_history_record,
-                previous_history_next,
-                previous_history_count,
-                previous_pending_request_id,
-                previous_pending_order,
-                previous_activity_order,
-                previous_recent_order,
-            );
-            self.next_recent_order = previous_next_recent_order;
-            observeBestEffortCommit(self, effects.durable.commit());
-            return err;
+        return .{
+            .runtime = self,
+            .task = task,
+            .run = run_record,
+            .access = access.take(),
+            .run_id = run_id,
+            .request_id = request_id,
+            .response = response,
+            .history_slot = history_slot,
+            .previous_history_record = previous_history_record,
+            .previous_history_next = previous_history_next,
+            .previous_history_count = previous_history_count,
+            .previous_pending_request_id = previous_pending_request_id,
+            .previous_pending_order = previous_pending_order,
+            .previous_activity_order = previous_activity_order,
+            .previous_recent_order = previous_recent_order,
+            .previous_next_recent_order = previous_next_recent_order,
         };
     }
 
@@ -1388,7 +1509,6 @@ pub const Runtime = struct {
         model: []const u8,
         checkpoint_health: *const std.atomic.Value(checkpoint_store.Health),
         text: TextProjection,
-        durable: DurableEffect,
         max_model_id_bytes: usize,
     ) ModelError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
@@ -1419,24 +1539,6 @@ pub const Runtime = struct {
             return err;
         };
         task.durable.execution_model = projected.value;
-        const outcome = durable.commit();
-        if (outcome != .committed) {
-            const coherent = if (outcome == .outcome_unknown)
-                false
-            else blk: {
-                access.setModel(expected_model) catch break :blk false;
-                break :blk true;
-            };
-            text.discardCandidate(task.durable.execution_model);
-            text.restorePrevious(previous.len);
-            task.durable.execution_model = previous;
-            if (!coherent) poisonAttachment(task);
-            if (outcome == .outcome_unknown) {
-                return error.TaskPersistenceOutcomeUnknown;
-            }
-            if (!coherent) return error.TaskClosing;
-            return error.TaskPersistenceFailed;
-        }
         text.discardPrevious(previous);
         return true;
     }
@@ -1538,7 +1640,6 @@ pub const Runtime = struct {
         };
         if (cancelled_ui) |record| pushUiRecord(task, record);
         task.durable.recent_order = self.takeRecentOrder();
-        observeBestEffortCommit(self, effects.durable.commit());
         return true;
     }
 
@@ -1704,7 +1805,6 @@ pub const Runtime = struct {
         title: []const u8,
         max_title_bytes: usize,
         text: TextProjection,
-        durable: DurableEffect,
     ) MutationError!void {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.deletion == .deleting) return error.TaskBusy;
@@ -1725,29 +1825,9 @@ pub const Runtime = struct {
             sensitive,
             previous_title.len,
         );
-        const previous_redacted = task.durable.title_redacted;
-        const previous_recent_order = task.durable.recent_order;
-        const previous_next_recent_order = self.next_recent_order;
         task.durable.title = projected.value;
         task.durable.title_redacted = projected.redacted;
         task.durable.recent_order = self.takeRecentOrder();
-        switch (durable.commit()) {
-            .committed => {},
-            .failed => {
-                text.discardCandidate(task.durable.title);
-                text.restorePrevious(previous_title.len);
-                task.durable.title = previous_title;
-                task.durable.title_redacted = previous_redacted;
-                task.durable.recent_order = previous_recent_order;
-                self.next_recent_order = previous_next_recent_order;
-                return error.TaskPersistenceFailed;
-            },
-            .outcome_unknown => {
-                text.discardPrevious(previous_title);
-                markAutomaticTitleUserOverride(task);
-                return error.TaskPersistenceOutcomeUnknown;
-            },
-        }
         text.discardPrevious(previous_title);
         markAutomaticTitleUserOverride(task);
     }
@@ -1756,7 +1836,6 @@ pub const Runtime = struct {
         self: *Runtime,
         task_id: u64,
         archived: bool,
-        durable: DurableEffect,
     ) MutationError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.deletion == .deleting or
@@ -1764,25 +1843,9 @@ pub const Runtime = struct {
             task_policy.hasActiveOperation(task))
             return error.TaskBusy;
         if (task.durable.archived == archived) return false;
-        const previous_recent_order = task.durable.recent_order;
-        const previous_next_recent_order = self.next_recent_order;
-        const previous_deletion = task.deletion;
         task.durable.archived = archived;
         if (!archived and task.deletion == .failed) task.deletion = .idle;
         task.durable.recent_order = self.takeRecentOrder();
-        switch (durable.commit()) {
-            .committed => {},
-            .failed => {
-                task.durable.archived = !archived;
-                task.deletion = previous_deletion;
-                task.durable.recent_order = previous_recent_order;
-                self.next_recent_order = previous_next_recent_order;
-                return error.TaskPersistenceFailed;
-            },
-            .outcome_unknown => {
-                return error.TaskPersistenceOutcomeUnknown;
-            },
-        }
         return true;
     }
 
@@ -2353,7 +2416,7 @@ pub const Runtime = struct {
         self: *Runtime,
         store: *checkpoint_store.FileStore,
         health: *std.atomic.Value(checkpoint_store.Health),
-        durable: DurableEffect,
+        effects: CheckpointEffects,
     ) void {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
@@ -2371,7 +2434,7 @@ pub const Runtime = struct {
                 const previous_anchor = task.durable.checkpoint_anchor;
                 task.durable.checkpoint = null;
                 task.durable.checkpoint_anchor = anchor;
-                if (durable.commit() != .committed) {
+                if (effects.commit(null) != .committed) {
                     task.durable.checkpoint = removed;
                     task.durable.checkpoint_anchor = previous_anchor;
                     return;
@@ -3379,7 +3442,7 @@ pub const Runtime = struct {
                     task.durable.execution_generation =
                         job.attempt.target_execution_generation;
                     task.durable.binding_epoch = next_epoch;
-                    switch (effects.durable.commit()) {
+                    switch (effects.commitBinding()) {
                         .committed => {},
                         .failed, .outcome_unknown => |outcome| {
                             task.durable.execution_generation = previous_generation;
@@ -4831,27 +4894,6 @@ fn applyPendingModel(
         return err;
     };
     task.durable.execution_model = replacement.value;
-    const outcome = effects.durable.commit();
-    if (outcome != .committed) {
-        const coherent = if (outcome == .outcome_unknown)
-            false
-        else blk: {
-            access.setModel(previous) catch break :blk false;
-            break :blk true;
-        };
-        effects.text.discardCandidate(task.durable.execution_model);
-        effects.text.restorePrevious(previous.len);
-        task.durable.execution_model = previous;
-        if (!coherent) {
-            if (task.runtime.attached()) |attached|
-                attached.health = .session_poisoned;
-        }
-        if (outcome == .outcome_unknown) {
-            return error.TaskPersistenceOutcomeUnknown;
-        }
-        if (!coherent) return error.TaskClosing;
-        return error.TaskPersistenceFailed;
-    }
     task.runtime.pending_model = null;
     effects.text.discardPrevious(previous);
     self.allocator.free(pending);
@@ -4958,7 +5000,6 @@ fn cancelCompactRecord(
         return .already_terminal;
     if (effects.executor.cancel(compact)) {
         task.durable.recent_order = self.takeRecentOrder();
-        observeBestEffortCommit(self, effects.durable.commit());
         return .queued_aborted;
     }
     var access = task.runtime.acquireAccess() catch return .session_closing;
@@ -4971,11 +5012,8 @@ fn cancelCompactRecord(
         error.SessionClosing => return .session_closing,
     };
     task.durable.recent_order = self.takeRecentOrder();
-    observeBestEffortCommit(self, effects.durable.commit());
     return if (prior == null) .requested else .already_requested;
 }
-
-fn observeBestEffortCommit(_: *Runtime, _: DurableCommit) void {}
 
 fn poisonAttachment(task: *task_state.Task) void {
     if (task.runtime.attached()) |attached|

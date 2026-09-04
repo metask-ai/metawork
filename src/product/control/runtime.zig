@@ -464,6 +464,59 @@ const TaskWorkspaceOrderContext = struct {
     preparation: *product_workspace.OrderPreparation,
 };
 
+const PreparedTaskCreate = struct {
+    task: task_runtime.PreparedCreate,
+    order: product_workspace.OrderPreparation,
+
+    fn id(self: *const PreparedTaskCreate) u64 {
+        return self.task.id();
+    }
+
+    fn complete(self: *PreparedTaskCreate, control: *Runtime) u64 {
+        const task_id = self.task.complete();
+        if (self.order.isActive()) control.workspace.commitOrder(&self.order);
+        return task_id;
+    }
+
+    fn rollback(self: *PreparedTaskCreate, control: *Runtime) void {
+        self.task.rollback();
+        if (self.order.isActive()) control.workspace.rollbackOrder(&self.order);
+    }
+};
+
+const PreparedScheduledAdmission = struct {
+    control: *Runtime,
+    allocation: product_workspace.AutomaticAllocation,
+    workspace_id: u64,
+    task: PreparedTaskCreate,
+    run: task_runtime.PreparedRun,
+    active: bool = true,
+
+    fn taskId(self: *const PreparedScheduledAdmission) u64 {
+        return self.task.id();
+    }
+
+    fn rollback(self: *PreparedScheduledAdmission) void {
+        std.debug.assert(self.active);
+        self.run.rollback();
+        self.task.rollback(self.control);
+        self.control.releaseAutomaticWorkspaceNoFail(self.workspace_id);
+        _ = self.control.workspace.rollbackAutomaticAllocation(&self.allocation);
+        self.active = false;
+    }
+
+    fn submit(
+        self: *PreparedScheduledAdmission,
+    ) error{ ExecutorShuttingDown, QueueFull }!u64 {
+        std.debug.assert(self.active);
+        const task_id = self.task.complete(self.control);
+        self.control.workspace.finishAutomaticAllocation(&self.allocation);
+        self.active = false;
+        _ = try self.run.submit();
+        return task_id;
+    }
+};
+
 fn copyWorkspaceStorage(
     context: *anyopaque,
     value: []const u8,
@@ -2845,7 +2898,6 @@ pub const Runtime = struct {
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
             permission,
-            self.taskRuntimeDurableEffect(),
             false,
         );
     }
@@ -2872,7 +2924,6 @@ pub const Runtime = struct {
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
                 permission,
-                self.taskRuntimeDurableEffect(),
             ),
         };
     }
@@ -2885,9 +2936,36 @@ pub const Runtime = struct {
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
-        durable: task_runtime.DurableEffect,
         allow_unowned_automatic: bool,
     ) Error!u64 {
+        var prepared = try self.prepareTaskInWorkspaceInternal(
+            workspace_id,
+            expected_workspace_epoch,
+            expected_execution_generation,
+            expected_skill_catalog_revision,
+            expected_skill_selection_revision,
+            permission,
+            allow_unowned_automatic,
+        );
+        self.commitTaskStateBestEffort() catch |err| {
+            prepared.rollback(self);
+            return err;
+        };
+        const task_id = prepared.complete(self);
+        self.bumpRevision();
+        return task_id;
+    }
+
+    fn prepareTaskInWorkspaceInternal(
+        self: *Runtime,
+        workspace_id: u64,
+        expected_workspace_epoch: u64,
+        expected_execution_generation: u64,
+        expected_skill_catalog_revision: ?[]const u8,
+        expected_skill_selection_revision: ?u64,
+        permission: TaskPermissionRequest,
+        allow_unowned_automatic: bool,
+    ) Error!PreparedTaskCreate {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
         if (self.mcp) |*mcp|
@@ -2967,7 +3045,7 @@ pub const Runtime = struct {
             .workspace = &self.workspace,
             .preparation = &order_preparation,
         };
-        const task_id = self.task_runtime.openTask(.{
+        const prepared = self.task_runtime.openTask(.{
             .agent_runtime = self.agent_runtime,
             .execution = execution_input,
             .protocol = execution_input.target.protocol,
@@ -3000,7 +3078,6 @@ pub const Runtime = struct {
                 .rollback_fn = rollbackTaskWorkspaceOrder,
             },
             .text = self.taskRuntimeTextProjection(),
-            .durable = durable,
             .release = self.taskRuntimeReleaseEffects(),
         }) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
@@ -3010,10 +3087,7 @@ pub const Runtime = struct {
             },
             else => return err,
         };
-        if (order_preparation.isActive())
-            self.workspace.commitOrder(&order_preparation);
-        self.bumpRevision();
-        return task_id;
+        return .{ .task = prepared, .order = order_preparation };
     }
 
     fn createAutomaticTask(
@@ -3022,7 +3096,6 @@ pub const Runtime = struct {
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
-        durable: task_runtime.DurableEffect,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -3049,12 +3122,73 @@ pub const Runtime = struct {
             null,
             null,
             permission,
-            durable,
             true,
         );
         self.workspace.setAutomaticOwner(workspace.id, task_id);
         self.workspace.finishAutomaticAllocation(&allocation);
         return task_id;
+    }
+
+    fn prepareScheduledAdmission(
+        self: *Runtime,
+        input: product_schedule.TaskLaunch,
+    ) Error!PreparedScheduledAdmission {
+        if (!self.task_runtime.hasCapacity()) return error.TaskCapacity;
+        if (!self.workspace.automaticCapacityAvailable())
+            return error.WorkspaceCapacity;
+        var allocation = try self.workspace.allocateAutomatic();
+        var allocation_live = true;
+        errdefer if (allocation_live) {
+            _ = self.workspace.rollbackAutomaticAllocation(&allocation);
+        };
+        const workspace = try self.registerAutomaticWorkspace(allocation.path());
+        var workspace_live = true;
+        errdefer if (workspace_live)
+            self.releaseAutomaticWorkspaceNoFail(workspace.id);
+        var task = try self.prepareTaskInWorkspaceInternal(
+            workspace.id,
+            workspace.epoch,
+            self.execution_state.generation(),
+            null,
+            null,
+            .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
+            true,
+        );
+        var task_live = true;
+        errdefer if (task_live) task.rollback(self);
+        self.workspace.setAutomaticOwner(workspace.id, task.id());
+        try self.task_runtime.renameTask(
+            task.id(),
+            input.title,
+            self.limits.max_task_title_bytes,
+            self.taskRuntimeTextProjection(),
+        );
+        const binding_epoch = self.task_runtime.taskBindingEpoch(task.id()) orelse
+            unreachable;
+        var run = try self.task_runtime.startRun(
+            task.id(),
+            binding_epoch,
+            .{ .text = input.input },
+            .{
+                .context = self,
+                .manual = false,
+                .recent_order = 0,
+                .apply_fn = ignoreTaskWorkspaceOrder,
+                .rollback_fn = ignoreTaskWorkspaceOrder,
+            },
+            self.taskRuntimeOperationEffects(),
+        );
+        errdefer run.rollback();
+        task_live = false;
+        workspace_live = false;
+        allocation_live = false;
+        return .{
+            .control = self,
+            .allocation = allocation,
+            .workspace_id = workspace.id,
+            .task = task,
+            .run = run,
+        };
     }
 
     /// Admits an explicit attachment reconstruction. Success means only that
@@ -3178,17 +3312,16 @@ pub const Runtime = struct {
             input.target.model_id,
             &self.checkpoint_store_health,
             self.taskRuntimeTextProjection(),
-            self.taskRuntimeDurableEffect(),
             models_contract.Limits.model_id_bytes,
         ) catch |err| {
-            if (err == error.TaskPersistenceOutcomeUnknown or
-                err == error.TaskClosing)
+            if (err == error.TaskClosing)
                 _ = self.task_runtime.beginDetach(
                     task_id,
                     self.taskRuntimeOperationEffects(),
                 ) catch {};
             return err;
         };
+        self.commitTaskStateNoFail();
         self.bumpRevision();
     }
 
@@ -3197,21 +3330,6 @@ pub const Runtime = struct {
         task_id: u64,
         expected_binding_epoch: u64,
         input: TaskRunInput,
-    ) Error!u64 {
-        return self.runTaskAtBindingWithDurable(
-            task_id,
-            expected_binding_epoch,
-            input,
-            self.taskRuntimeDurableEffect(),
-        );
-    }
-
-    fn runTaskAtBindingWithDurable(
-        self: *Runtime,
-        task_id: u64,
-        expected_binding_epoch: u64,
-        input: TaskRunInput,
-        durable: task_runtime.DurableEffect,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
@@ -3291,7 +3409,7 @@ pub const Runtime = struct {
             .workspace = &self.workspace,
             .preparation = &order_preparation,
         };
-        var operation_effects = self.taskRuntimeOperationEffectsWithDurable(durable);
+        var operation_effects = self.taskRuntimeOperationEffects();
         if (attachment_borrow != null) {
             acceptance_context = .{
                 .borrow = &attachment_borrow.?,
@@ -3303,7 +3421,7 @@ pub const Runtime = struct {
                 .irreversible = true,
             };
         }
-        const run_id = try self.task_runtime.startRun(
+        var prepared = try self.task_runtime.startRun(
             task_id,
             expected_binding_epoch,
             task_input,
@@ -3316,6 +3434,19 @@ pub const Runtime = struct {
             },
             operation_effects,
         );
+        self.commitTaskStateBestEffort() catch |err| {
+            prepared.rollback();
+            return err;
+        };
+        const run_id = prepared.submit() catch |err| {
+            self.commitTaskStateNoFail();
+            if (order_preparation.isActive())
+                self.workspace.commitOrder(&order_preparation);
+            self.bumpRevision();
+            if (operation_effects.run_acceptance.irreversible)
+                return prepared.id();
+            return err;
+        };
         if (order_preparation.isActive())
             self.workspace.commitOrder(&order_preparation);
         self.bumpRevision();
@@ -3337,11 +3468,20 @@ pub const Runtime = struct {
             task_id,
             self.taskRuntimeProjectionEffects(),
         )) return error.TaskClosing;
-        const operation_id = try self.task_runtime.startCompact(
+        var prepared = try self.task_runtime.startCompact(
             task_id,
             expected_binding_epoch,
             self.taskRuntimeOperationEffects(),
         );
+        self.commitTaskStateBestEffort() catch |err| {
+            prepared.rollback();
+            return err;
+        };
+        const operation_id = prepared.submit() catch {
+            self.commitTaskStateNoFail();
+            self.bumpRevision();
+            return prepared.id();
+        };
         self.bumpRevision();
         return operation_id;
     }
@@ -3358,6 +3498,7 @@ pub const Runtime = struct {
             .user_cancel,
             self.taskRuntimeOperationEffects(),
         );
+        self.commitTaskStateNoFail();
         self.syncLifecycle();
         self.bumpRevision();
     }
@@ -3395,7 +3536,10 @@ pub const Runtime = struct {
             task_id,
             run_id,
             self.taskRuntimeOperationEffects(),
-        )) self.bumpRevision();
+        )) {
+            self.commitTaskStateNoFail();
+            self.bumpRevision();
+        }
         self.syncLifecycle();
     }
 
@@ -3407,13 +3551,20 @@ pub const Runtime = struct {
         response: UiResponse,
     ) Error!void {
         self.syncLifecycle();
-        try self.task_runtime.respondUi(
+        var prepared = try self.task_runtime.respondUi(
             task_id,
             run_id,
             request_id,
             response,
-            self.taskRuntimeOperationEffects(),
         );
+        self.commitTaskStateBestEffort() catch |err| {
+            prepared.rollback();
+            return err;
+        };
+        prepared.deliver() catch |err| {
+            self.commitTaskStateNoFail();
+            return err;
+        };
         self.bumpRevision();
     }
 
@@ -3422,27 +3573,21 @@ pub const Runtime = struct {
         if (try self.task_runtime.beginDetach(
             task_id,
             self.taskRuntimeOperationEffects(),
-        )) self.bumpRevision();
+        )) {
+            self.commitTaskStateNoFail();
+            self.bumpRevision();
+        }
     }
 
     pub fn renameTask(self: *Runtime, task_id: u64, title: []const u8) Error!void {
-        return self.renameTaskWithDurable(task_id, title, self.taskRuntimeDurableEffect());
-    }
-
-    fn renameTaskWithDurable(
-        self: *Runtime,
-        task_id: u64,
-        title: []const u8,
-        durable: task_runtime.DurableEffect,
-    ) Error!void {
         self.syncLifecycle();
         try self.task_runtime.renameTask(
             task_id,
             title,
             self.limits.max_task_title_bytes,
             self.taskRuntimeTextProjection(),
-            durable,
         );
+        self.commitTaskStateNoFail();
         self.bumpRevision();
     }
 
@@ -3554,11 +3699,10 @@ pub const Runtime = struct {
 
     pub fn setTaskArchived(self: *Runtime, task_id: u64, archived: bool) Error!void {
         self.syncLifecycle();
-        if (try self.task_runtime.setArchived(
-            task_id,
-            archived,
-            self.taskRuntimeDurableEffect(),
-        )) self.bumpRevision();
+        if (try self.task_runtime.setArchived(task_id, archived)) {
+            self.commitTaskStateNoFail();
+            self.bumpRevision();
+        }
     }
 
     pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
@@ -5173,36 +5317,41 @@ pub const Runtime = struct {
             .reason = scheduledFailure(err),
             .task_id = 0,
         } };
-        const required = self.taskRuntimeRequiredDurableEffect();
-        const task_id = self.createAutomaticTask(
-            self.execution_state.generation(),
-            null,
-            null,
-            .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
-            required,
-        ) catch |err| return .{ .rejected = .{
+        var prepared = self.prepareScheduledAdmission(input) catch |err| return .{ .rejected = .{
             .cause = err,
             .reason = scheduledFailure(err),
             .task_id = 0,
         } };
-        self.renameTaskWithDurable(task_id, input.title, required) catch |err|
+        const task_id = prepared.taskId();
+        switch (self.commitPreparedScheduleCandidate()) {
+            .committed => {},
+            .failed => {
+                prepared.rollback();
+                return .{ .rejected = .{
+                    .cause = error.TaskPersistenceFailed,
+                    .reason = .task_start_failed,
+                    .task_id = 0,
+                } };
+            },
+            .outcome_unknown => {
+                prepared.rollback();
+                return .{ .rejected = .{
+                    .cause = error.TaskPersistenceOutcomeUnknown,
+                    .reason = .task_start_failed,
+                    .task_id = 0,
+                } };
+            },
+        }
+        _ = prepared.submit() catch |err| {
+            self.commitTaskStateNoFail();
+            self.bumpRevision();
             return .{ .rejected = .{
                 .cause = err,
-                .reason = .task_start_failed,
+                .reason = scheduledFailure(err),
                 .task_id = task_id,
             } };
-        const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
-            unreachable;
-        _ = self.runTaskAtBindingWithDurable(
-            task_id,
-            binding_epoch,
-            .{ .text = input.input },
-            required,
-        ) catch |err| return .{ .rejected = .{
-            .cause = err,
-            .reason = scheduledFailure(err),
-            .task_id = task_id,
-        } };
+        };
+        self.bumpRevision();
         return .{ .submitted = task_id };
     }
 
@@ -5534,7 +5683,7 @@ pub const Runtime = struct {
         self.task_runtime.reconcileCheckpointStoreNoFail(
             store,
             &self.checkpoint_store_health,
-            self.taskRuntimeDurableEffect(),
+            self.taskRuntimeCheckpointEffects(),
         );
     }
 
@@ -5697,22 +5846,7 @@ pub const Runtime = struct {
         return .committed;
     }
 
-    fn taskRuntimeDurableEffect(self: *Runtime) task_runtime.DurableEffect {
-        return .{ .context = self, .commit_fn = commitTaskRuntimeCandidateBestEffort };
-    }
-
-    fn commitTaskRuntimeCandidateBestEffort(context: *anyopaque) task_runtime.DurableCommit {
-        const self: *Runtime = @ptrCast(@alignCast(context));
-        self.commitTaskStateBestEffort() catch return .failed;
-        return .committed;
-    }
-
-    fn taskRuntimeRequiredDurableEffect(self: *Runtime) task_runtime.DurableEffect {
-        return .{ .context = self, .commit_fn = commitRequiredTaskRuntimeCandidate };
-    }
-
-    fn commitRequiredTaskRuntimeCandidate(context: *anyopaque) task_runtime.DurableCommit {
-        const self: *Runtime = @ptrCast(@alignCast(context));
+    fn commitPreparedScheduleCandidate(self: *Runtime) task_runtime.DurableCommit {
         self.commitTaskState() catch |err| return switch (err) {
             error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
             else => .failed,
@@ -5837,6 +5971,8 @@ pub const Runtime = struct {
         value.workspace.rollbackOrder(value.preparation);
     }
 
+    fn ignoreTaskWorkspaceOrder(_: *anyopaque, _: u64) void {}
+
     fn consumeAttachmentBorrow(context: ?*anyopaque) void {
         const acceptance: *AttachmentRunAcceptanceContext = @ptrCast(@alignCast(context.?));
         acceptance.borrow.consume();
@@ -5844,18 +5980,8 @@ pub const Runtime = struct {
     }
 
     fn taskRuntimeOperationEffects(self: *Runtime) task_runtime.OperationEffects {
-        return self.taskRuntimeOperationEffectsWithDurable(
-            self.taskRuntimeDurableEffect(),
-        );
-    }
-
-    fn taskRuntimeOperationEffectsWithDurable(
-        self: *Runtime,
-        durable: task_runtime.DurableEffect,
-    ) task_runtime.OperationEffects {
         return .{
             .text = self.taskRuntimeTextProjection(),
-            .durable = durable,
             .release = self.taskRuntimeReleaseEffects(),
             .executor = .{
                 .context = self,
@@ -5956,7 +6082,7 @@ pub const Runtime = struct {
         return .{
             .context = self,
             .authority_fn = taskRuntimeRecoveryAuthority,
-            .durable = self.taskRuntimeDurableEffect(),
+            .commit_binding_fn = commitTaskRuntimeCandidate,
         };
     }
 

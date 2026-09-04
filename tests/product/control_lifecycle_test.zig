@@ -161,6 +161,7 @@ test "Task Session Binding is terminal after Runtime shutdown relinquish" {
 
 const TaskPersistenceProbe = struct {
     result: product_task.history.Commit = .committed,
+    store_on_outcome_unknown: bool = false,
     storage: ?[]u8 = null,
     len: usize = 0,
     commits: usize = 0,
@@ -168,7 +169,9 @@ const TaskPersistenceProbe = struct {
     fn commit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.commits += 1;
-        if (self.result == .committed) if (self.storage) |storage| {
+        if (self.result == .committed or
+            (self.result == .outcome_unknown and self.store_on_outcome_unknown)) if (self.storage) |storage|
+        {
             if (bytes.len > storage.len) return .failed;
             @memcpy(storage[0..bytes.len], bytes);
             self.len = bytes.len;
@@ -181,6 +184,7 @@ const TaskPersistenceProbe = struct {
             .context = self,
             .enabled = true,
             .commit_fn = commit,
+            .recover_fn = commit,
         };
     }
 
@@ -2181,6 +2185,123 @@ test "scheduled durable admission failure does not block an interactive Product 
         continued,
         "\"taskHistoryPersistenceHealth\":\"write_failed\"",
     ) != null);
+}
+
+fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var schedule_support: TestScheduleSupport = .{};
+    const persisted_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persisted_storage);
+    var task_persistence: TaskPersistenceProbe = .{
+        .result = .outcome_unknown,
+        .store_on_outcome_unknown = store_candidate,
+        .storage = persisted_storage,
+    };
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_scheduled_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .schedule_timer = schedule_support.timer(),
+            .schedule_persistence = schedule_support.persistence(),
+            .task_persistence = task_persistence.capability(),
+        },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const schedule_id = try workbench.createScheduledTask(.{
+        .title = "Unknown durable admission",
+        .binding = scheduledBinding(&workbench),
+        .permission_profile = .approval_required,
+        .input = "Do not enqueue an uncertain admission",
+        .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
+    });
+    try std.testing.expectError(
+        error.TaskPersistenceOutcomeUnknown,
+        workbench.runScheduledTaskNow(schedule_id, 1),
+    );
+
+    fake_core.lock();
+    const run_calls = fake_core.run_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), run_calls);
+    try std.testing.expectEqual(@as(usize, 0), try directoryEntryCount(tmp.dir));
+    var snapshot_storage: [128 * 1024]u8 = undefined;
+    const unknown_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        unknown_snapshot,
+        "\"taskHistoryPersistenceHealth\":\"outcome_unknown\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, unknown_snapshot, "\"tasks\":[]") != null);
+    if (store_candidate) {
+        try std.testing.expect(task_persistence.len > 0);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            persisted_storage[0..task_persistence.len],
+            "Unknown durable admission",
+        ) != null);
+    } else {
+        try std.testing.expectEqual(@as(usize, 0), task_persistence.len);
+    }
+
+    task_persistence.result = .committed;
+    const revision = workbench.currentRevision();
+    try std.testing.expectEqual(
+        product_control.PersistenceRecoveryOutcome.recovered,
+        workbench.recoverTaskHistory(revision),
+    );
+    const recovered_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        recovered_snapshot,
+        "\"taskHistoryPersistenceHealth\":\"ready\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, recovered_snapshot, "\"tasks\":[]") != null);
+    try std.testing.expect(task_persistence.len > 0);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persisted_storage[0..task_persistence.len],
+        "Unknown durable admission",
+    ) == null);
+}
+
+test "scheduled admission outcome unknown rolls back and recovers whether candidate bytes landed" {
+    try expectScheduledAdmissionOutcomeUnknownRecovery(false);
+    try expectScheduledAdmissionOutcomeUnknownRecovery(true);
 }
 
 test "interactive Product Task remains accepted when history commit outcome is unknown" {

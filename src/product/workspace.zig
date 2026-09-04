@@ -25,6 +25,7 @@ pub const OpenPreparation = runtime_impl.OpenPreparation;
 pub const RemovalPreparation = runtime_impl.RemovalPreparation;
 pub const OrderPreparation = runtime_impl.OrderPreparation;
 pub const RemovedAutomatic = runtime_impl.RemovedAutomatic;
+pub const AutomaticAllocation = runtime_impl.AutomaticAllocation;
 pub const Projection = view_impl.Projection;
 pub const ViewProvider = view_impl.Provider;
 pub const ViewError = view_impl.Error;
