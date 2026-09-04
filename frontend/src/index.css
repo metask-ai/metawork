@@ -1020,6 +1020,43 @@ summary::-webkit-details-marker {
     0 10px 30px rgba(37, 34, 45, 0.025);
 }
 
+.settings-default-model {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.9fr);
+  align-items: center;
+  gap: 24px;
+  margin-top: 12px;
+  padding: 18px;
+  border: 1px solid var(--settings-line);
+  border-radius: 14px;
+  background: var(--settings-paper);
+}
+
+.settings-default-model-copy {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.settings-default-model-copy strong {
+  overflow: hidden;
+  color: var(--settings-ink);
+  font-size: var(--text-lead);
+  font-weight: 710;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-default-model-copy span {
+  color: var(--settings-muted);
+  font-size: var(--text-control);
+  line-height: 1.5;
+}
+
+.settings-default-model-control {
+  min-width: 0;
+}
+
 .settings-model-connections {
   display: grid;
   gap: 14px;
@@ -1035,6 +1072,12 @@ summary::-webkit-details-marker {
   color: var(--settings-muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.settings-subpage-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .settings-model-connections-empty {
@@ -1182,10 +1225,6 @@ summary::-webkit-details-marker {
   font-size: 12px;
 }
 
-.settings-model-connection-select {
-  flex: 0 0 190px;
-}
-
 .settings-model-connection-actions {
   align-items: center;
   display: flex;
@@ -1196,14 +1235,6 @@ summary::-webkit-details-marker {
 
 .settings-model-connection-remove {
   color: var(--ui-content-error);
-}
-
-.settings-model-connection-active-note {
-  grid-column: 1 / -1;
-  margin: -7px 0 0;
-  color: var(--settings-muted);
-  font-size: var(--text-label);
-  line-height: 1.45;
 }
 
 .settings-model-connection-edit {
@@ -2372,6 +2403,12 @@ button.run-process-tool:hover {
     grid-template-columns: 1fr;
   }
 
+  .settings-default-model {
+    grid-template-columns: 1fr;
+    gap: 14px;
+    padding: 14px;
+  }
+
   .settings-model-connection-create {
     grid-template-columns: 1fr;
     padding: 14px;
@@ -2396,7 +2433,6 @@ button.run-process-tool:hover {
     justify-content: flex-start;
   }
 
-  .settings-model-connection-active-note,
   .settings-model-connection-edit,
   .settings-model-connection-confirm-remove {
     grid-column: 1;

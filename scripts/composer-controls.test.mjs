@@ -442,12 +442,9 @@ function renderSettings(account, overrides = {}) {
   };
 }
 
-test("Settings exposes Model connections only for the complete Host gate", () => {
+test("Settings exposes Providers only for the complete Host gate", () => {
   const incomplete = renderSettings(readySettingsAccount);
-  assert.equal(
-    screen.queryByRole("heading", { name: "Model connections" }),
-    null,
-  );
+  assert.equal(screen.queryByRole("link", { name: "Providers" }), null);
   incomplete.unmount();
 
   render(
@@ -459,20 +456,26 @@ test("Settings exposes Model connections only for the complete Host gate", () =>
       },
     }),
   );
-  fireEvent.click(screen.getByRole("link", { name: "Model connections" }));
-  assert.ok(screen.getByRole("heading", { name: "Model connections" }));
-  assert.ok(screen.getByRole("button", { name: "Add connection" }));
+  fireEvent.click(screen.getByRole("link", { name: "Providers" }));
+  assert.ok(screen.getByRole("heading", { name: "Providers" }));
+  assert.equal(
+    screen.queryByRole("combobox", { name: "Default model for new tasks" }),
+    null,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
+  assert.ok(screen.getByRole("heading", { name: "Add provider" }));
+  assert.ok(screen.getByRole("button", { name: "Back to providers" }));
 });
 
 test("Settings completes the API transaction before replacing committed defaults", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);
 
-  await user.click(screen.getByRole("combobox", { name: "Default API" }));
+  await user.click(screen.getByRole("combobox", { name: "Metask API" }));
   await user.click(await screen.findByRole("option", { name: /Backup/ }));
   assert.deepEqual(view.selections.api, ["key-2"]);
   assert.match(
-    screen.getByRole("combobox", { name: "Default API" }).textContent,
+    screen.getByRole("combobox", { name: "Metask API" }).textContent,
     /Backup.*OpenAI.*5678/,
   );
   assert.match(screen.getByText("Pending change").textContent, /Pending/);
@@ -500,8 +503,8 @@ test("Settings completes the API transaction before replacing committed defaults
     ),
   );
 
-  const api = screen.getByRole("combobox", { name: "Default API" });
-  const model = screen.getByRole("combobox", { name: "Default model" });
+  const api = screen.getByRole("combobox", { name: "Metask API" });
+  const model = screen.getByRole("combobox", { name: "Metask model" });
   assert.match(api.textContent, /Backup.*OpenAI.*5678/);
   assert.equal(api.getAttribute("aria-busy"), "true");
   assert.match(model.textContent, /Loading models/);
@@ -519,11 +522,11 @@ test("Settings completes the API transaction before replacing committed defaults
   );
   assert.equal(
     screen
-      .getByRole("combobox", { name: "Default model" })
+      .getByRole("combobox", { name: "Metask model" })
       .hasAttribute("disabled"),
     false,
   );
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  await user.click(screen.getByRole("combobox", { name: "Metask model" }));
   await user.click(await screen.findByRole("option", { name: /Model Two/ }));
   assert.deepEqual(view.selections.model, ["model-2"]);
 
@@ -552,11 +555,11 @@ test("Settings completes the API transaction before replacing committed defaults
     ),
   );
   assert.match(
-    screen.getByRole("combobox", { name: "Default API" }).textContent,
+    screen.getByRole("combobox", { name: "Metask API" }).textContent,
     /Backup/,
   );
   assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    screen.getByRole("combobox", { name: "Metask model" }).textContent,
     /Model Two/,
   );
   assert.equal(screen.queryByText("Pending change"), null);
@@ -567,12 +570,12 @@ test("Settings keeps a model choice visibly pending without declaring it committ
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);
 
-  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  await user.click(screen.getByRole("combobox", { name: "Metask model" }));
   await user.click(await screen.findByRole("option", { name: /Model Two/ }));
 
   assert.deepEqual(view.selections.model, ["model-2"]);
   assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    screen.getByRole("combobox", { name: "Metask model" }).textContent,
     /Model Two/,
   );
   assert.equal(readySettingsModels.metaskSelection.modelId, "model-1");
@@ -617,13 +620,12 @@ test("Settings keeps Metask available while a model connection is the default", 
     },
   });
 
-  assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
-    /Model One/,
-  );
-  await user.click(
-    screen.getByRole("button", { name: "Set as default for new tasks" }),
-  );
+  const defaultModel = screen.getByRole("combobox", {
+    name: "Default model for new tasks",
+  });
+  assert.match(defaultModel.textContent, /Team OpenAI.*GPT-5/);
+  await user.click(defaultModel);
+  await user.click(await screen.findByRole("option", { name: /Metask/ }));
   assert.equal(activations, 1);
 });
 
@@ -645,13 +647,13 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
 
   assert.equal(
     screen
-      .getByRole("combobox", { name: "Default API" })
+      .getByRole("combobox", { name: "Metask API" })
       .hasAttribute("disabled"),
     true,
   );
   assert.equal(
     screen
-      .getByRole("combobox", { name: "Default model" })
+      .getByRole("combobox", { name: "Metask model" })
       .hasAttribute("disabled"),
     true,
   );
@@ -679,11 +681,11 @@ test("Settings reports Models failure without changing Account identity", async 
   });
 
   assert.match(
-    screen.getByRole("combobox", { name: "Default API" }).textContent,
+    screen.getByRole("combobox", { name: "Metask API" }).textContent,
     /Primary/,
   );
   assert.match(
-    screen.getByRole("combobox", { name: "Default model" }).textContent,
+    screen.getByRole("combobox", { name: "Metask model" }).textContent,
     /Model One/,
   );
   assert.match(
@@ -834,7 +836,7 @@ function renderComposer(overrides = {}) {
       onConfirmAccess() {},
       onSelectWorkspace() {},
       onSelectModel() {},
-      onActivateMetask() {},
+      onOpenModels() {},
       ...overrides,
       draft,
       onDraftChange(value) {
@@ -881,14 +883,14 @@ test("detached Conversation uses the ordinary send action", async () => {
   assert.equal(composer.submissions(), 1);
 });
 
-test("Composer explains a missing executable default and offers Metask recovery", async () => {
+test("Composer explains a missing executable default and opens Models", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  let activations = 0;
+  let opens = 0;
   renderComposer({
     canSubmit: false,
     defaultSelectionMissing: true,
-    onActivateMetask() {
-      activations += 1;
+    onOpenModels() {
+      opens += 1;
     },
   });
 
@@ -897,11 +899,11 @@ test("Composer explains a missing executable default and offers Metask recovery"
     /No executable default model is selected/,
   );
   const recovery = screen.getByRole("button", {
-    name: "Set as default for new tasks",
+    name: "Open Models",
   });
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
   await user.click(recovery);
-  assert.equal(activations, 1);
+  assert.equal(opens, 1);
 });
 
 test("Composer disables default recovery while an execution command is active", () => {
@@ -910,18 +912,14 @@ test("Composer disables default recovery while an execution command is active", 
     defaultRecoveryDisabled: true,
   });
   assert.equal(
-    screen.getByRole("button", { name: "Set as default for new tasks" })
-      .disabled,
+    screen.getByRole("button", { name: "Open Models" }).disabled,
     true,
   );
 });
 
-test("Composer does not show Metask recovery for a normal default", () => {
+test("Composer does not show Models recovery for a normal default", () => {
   renderComposer({ defaultSelectionMissing: false });
-  assert.equal(
-    screen.queryByRole("button", { name: "Set as default for new tasks" }),
-    null,
-  );
+  assert.equal(screen.queryByRole("button", { name: "Open Models" }), null);
 });
 
 test("Composer Enter handling does not submit an active IME composition", () => {

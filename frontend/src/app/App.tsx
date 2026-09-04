@@ -2716,7 +2716,7 @@ export default function App() {
       selectedModelId={
         newTaskDraftActive ? selectedModelId : displayedTaskModelId
       }
-      modelEditable={newTaskDraftActive || taskModelPolicy.authorityExact}
+      modelEditable={!newTaskDraftActive && taskModelPolicy.authorityExact}
       modelSelectionDisabled={
         bridgeUnavailable ||
         (customModelConnectionSelected ? executionBusy : accountBusy) ||
@@ -2774,24 +2774,8 @@ export default function App() {
       onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
       onConfirmAccess={() => void chooseWorkspaceForDraft()}
       onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
-      onSelectModel={(id) =>
-        newTaskDraftActive
-          ? customModelConnectionSelected && activeModelConnection
-            ? void runExecutionCommand(() =>
-                client.selectModelsDefault({
-                  sourceId: activeModelConnection.id,
-                  modelId: id,
-                  expectedSelectionRevision: snapshot.models.selectionRevision,
-                  expectedSourceGeneration:
-                    activeModelConnection.sourceGeneration,
-                  expectedCatalogGeneration:
-                    activeModelConnection.catalogGeneration,
-                }),
-              )
-            : void selectMetaskModel(id)
-          : void selectModelForTask(id)
-      }
-      onActivateMetask={() => void activateMetaskDefault()}
+      onSelectModel={(id) => void selectModelForTask(id)}
+      onOpenModels={() => openSettings("models")}
     />
   );
   const filePreviewDrawerState: FilePreviewDrawerState | null =

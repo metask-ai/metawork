@@ -770,11 +770,16 @@ export const enUS = {
   "settings.permissions": "Permissions",
   "settings.account": "Account",
   "settings.models": "Models",
+  "settings.providers": "Providers",
   "settings.general_basics": "Basics",
   "settings.permission_defaults": "Defaults for new tasks",
   "settings.account_profile": "Account information",
   "settings.account_security": "Security",
-  "settings.model_connections_saved": "Saved connections",
+  "settings.providers_saved": "Configured providers",
+  "settings.provider_details": "Provider details",
+  "settings.provider_add": "Add provider",
+  "settings.provider_add_title": "Add provider",
+  "settings.back_to_providers": "Back to providers",
   "settings.models_error": "Model configuration needs attention",
   "settings.models_error_help":
     "Refresh the Metask catalog or review the saved model configuration.",
@@ -809,43 +814,45 @@ export const enUS = {
   "permission.default_updated": "Permission default updated.",
   "permission.default_update_failed":
     "MetaWork could not update the permission default.",
-  "settings.execution_defaults": "Execution defaults",
+  "settings.default_model_for_new_tasks": "Default model for new tasks",
+  "settings.default_model_managed_description": "Managed by Metask",
+  "settings.choose_default_model": "Choose a default model",
+  "settings.default_model_menu_help":
+    "Choose from ready models provided by Metask and your configured providers.",
+  "settings.change_default_model": "Change default model",
+  "settings.open_models": "Open Models",
+  "settings.metask_models": "Metask models",
   "settings.default_selection_missing":
     "No executable default model is selected",
   "settings.use_metask_default": "Set as default for new tasks",
-  "settings.model_connections": "Model connections",
-  "settings.model_connections_help":
-    "Use a model service connection you manage yourself. Connections are separate from Metask sign-in and apply to new tasks only.",
-  "settings.model_connections_empty": "No user-managed model connections yet.",
-  "settings.model_connections_unavailable":
-    "Model connection management is unavailable in this build.",
+  "settings.providers_help":
+    "Manage the model services, endpoints, and API keys available to MetaWork. Choose the default model on the Models page.",
+  "settings.providers_empty": "No user-managed providers yet.",
+  "settings.providers_unavailable":
+    "Provider management is unavailable in this build.",
   "settings.model_connection_capture_unavailable":
-    "Adding or replacing an API key is unavailable until the Host provides secure secret input.",
-  "settings.model_connection_add": "Add connection",
-  "settings.model_connection_adding": "Adding…",
-  "settings.model_connection_name": "Connection name",
+    "Adding a provider or replacing an API key is unavailable until the Host provides secure secret input.",
+  "settings.model_connection_add": "Save provider",
+  "settings.model_connection_adding": "Saving provider…",
+  "settings.model_connection_name": "Provider name",
   "settings.model_connection_name_placeholder": "My OpenAI service",
   "settings.model_connection_protocol": "Protocol",
   "settings.model_connection_endpoint": "Service endpoint",
   "settings.model_connection_model_id": "Model ID",
   "settings.model_connection_model_id_placeholder": "gpt-5",
   "settings.model_connection_secure_capture_help":
-    "MetaWork will ask for the API key in a secure Host window after you continue.",
+    "After you save, MetaWork will ask for this provider's API key in a secure Host window.",
   "settings.model_connection_route.protocol": "Protocol",
   "settings.model_connection_route.endpoint": "Endpoint",
   "settings.model_connection_route.model": "Model",
-  "settings.model_connection_active_mutation_help":
-    "Choose another default connection before editing or removing this one.",
   "settings.model_connection_edit_help":
     "Changing the protocol or endpoint requires another connection test. The API key is not shown or changed here.",
   "settings.model_connection_replace_credential": "Replace API key",
   "settings.model_connection_remove_confirm":
-    "Remove this connection and its stored credential? Existing tasks keep their current binding.",
+    "Remove this provider and its stored credential? If it supplies the default model, new tasks will pause until you choose another. Existing tasks keep their current binding.",
   "settings.model_connection_removing": "Removing…",
   "settings.model_connection_test": "Test connection",
   "settings.model_connection_testing": "Testing…",
-  "settings.model_connection_set_default": "Set as default",
-  "settings.model_connection_default_model": "Default model for {connection}",
   "settings.model_connection_state.configuring": "Not tested",
   "settings.model_connection_state.ready": "Ready",
   "settings.model_connection_state.disabled": "Disabled",
@@ -865,16 +872,19 @@ export const enUS = {
   "settings.model_connection_credential.invalid": "Credential rejected",
   "settings.catalog_count": "APIs {apis} · Models {models}",
   "settings.language_help": "Changes apply immediately on this device.",
-  "settings.default_api": "Default API",
-  "settings.default_api_help":
-    "Changing API loads the model catalog owned by that Metask API.",
+  "settings.metask_api": "Metask API",
+  "settings.metask_api_help":
+    "Choose which Metask API supplies the model catalog.",
   "settings.only_api_help":
     "Metask currently returns only this API. Other APIs appear after the next sync.",
   "settings.api_menu_help":
     "Protocol is supplied by Metask and shown for reference.",
-  "settings.default_model": "Default model",
+  "settings.default_model": "Model",
   "settings.default_model_help":
     "Used when you create a new task. Existing tasks keep their own model.",
+  "settings.metask_model": "Metask model",
+  "settings.metask_model_help":
+    "Choose a model from this Metask API, then set it as the default above when you want new tasks to use it.",
   "settings.only_model_help":
     "This API currently provides only one available model.",
   "settings.model_menu_help":

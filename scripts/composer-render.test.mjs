@@ -94,7 +94,7 @@ const base = {
   onConfirmAccess() {},
   onSelectWorkspace() {},
   onSelectModel() {},
-  onActivateMetask() {},
+  onOpenModels() {},
 };
 
 test("detached Conversation recovery stays invisible until normal send", () => {
