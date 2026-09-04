@@ -205,6 +205,7 @@ pub const FakeCore = struct {
     mutex: std.Io.Mutex = .init,
     catalog_condition: std.Io.Condition = .init,
     checkpoint_condition: std.Io.Condition = .init,
+    completion_condition: std.Io.Condition = .init,
     runtime: FakeRuntime = .{},
     catalogs: [16]FakeCatalog = [_]FakeCatalog{.{}} ** 16,
     sessions: [16]FakeSession = [_]FakeSession{.{}} ** 16,
@@ -302,6 +303,9 @@ pub const FakeCore = struct {
     completion_response: [4096]u8 = [_]u8{0} ** 4096,
     completion_response_len: usize = 0,
     completion_requests: usize = 0,
+    completion_controlled: bool = false,
+    completion_entered: bool = false,
+    allow_completion: bool = false,
 
     pub fn lock(self: *FakeCore) void {
         self.mutex.lockUncancelable(std.testing.io);
@@ -338,6 +342,31 @@ pub const FakeCore = struct {
         @memcpy(self.completion_response[prefix.len + title.len ..][0..suffix.len], suffix);
         self.completion_response_len = prefix.len + title.len + suffix.len;
         self.completion_enabled = true;
+        self.unlock();
+    }
+
+    pub fn controlNextCompletion(self: *FakeCore) void {
+        self.lock();
+        self.completion_controlled = true;
+        self.completion_entered = false;
+        self.allow_completion = false;
+        self.unlock();
+    }
+
+    pub fn waitCompletionEntered(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        while (!self.completion_entered)
+            self.completion_condition.waitUncancelable(
+                std.testing.io,
+                &self.mutex,
+            );
+    }
+
+    pub fn releaseCompletion(self: *FakeCore) void {
+        self.lock();
+        self.allow_completion = true;
+        self.completion_condition.broadcast(std.testing.io);
         self.unlock();
     }
 
@@ -2106,6 +2135,17 @@ fn fakeCompletionPerform(
     defer core.unlock();
     if (!core.completion_enabled) return error.Unexpected;
     core.completion_requests += 1;
+    if (core.completion_controlled) {
+        core.completion_controlled = false;
+        core.completion_entered = true;
+        core.completion_condition.broadcast(std.testing.io);
+        while (!core.allow_completion)
+            core.completion_condition.waitUncancelable(
+                std.testing.io,
+                &core.mutex,
+            );
+        if (cancellation.isRequested()) return error.Cancelled;
+    }
     if (core.completion_response_len > response_buffer.len)
         return error.ResponseTooLarge;
     @memcpy(
