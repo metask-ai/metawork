@@ -11,6 +11,7 @@ const execution_binding = @import("product_task_execution_binding");
 const agent_session = @import("product_task_agent_session");
 const state = @import("product_task_state");
 const policy = @import("product_task_policy");
+const worker_lease = @import("product_task_worker_lease");
 const agent_protocol = @import("product_agent_protocol_adapter");
 
 pub const Notifier = struct {
@@ -140,7 +141,8 @@ pub const CheckpointResources = struct {
 
 pub const RunJob = struct {
     run: *state.RunRecord,
-    worker_references: *std.atomic.Value(usize),
+    lease: worker_lease.WorkerLease,
+    checkpoint_lease: ?worker_lease.WorkerLease,
     notifier: Notifier,
     projector: TextProjector,
     completion_factory: CompletionFactory,
@@ -161,13 +163,17 @@ pub const RunJob = struct {
         self.releaseSessionAccess();
         if (self.title_execution) |*execution| execution.deinit();
         self.title_execution = null;
+        if (self.checkpoint_lease) |*lease| lease.deinit();
+        self.checkpoint_lease = null;
+        self.lease.deinit();
         std.heap.c_allocator.destroy(self);
     }
 };
 
 pub const CompactJob = struct {
     compact: *state.CompactRecord,
-    worker_references: *std.atomic.Value(usize),
+    lease: worker_lease.WorkerLease,
+    checkpoint_lease: ?worker_lease.WorkerLease,
     notifier: Notifier,
     projector: TextProjector,
     checkpoint: CheckpointResources,
@@ -180,6 +186,9 @@ pub const CompactJob = struct {
     pub fn destroy(self: *CompactJob) void {
         if (self.access) |*access| access.deinit();
         self.access = null;
+        if (self.checkpoint_lease) |*lease| lease.deinit();
+        self.checkpoint_lease = null;
+        self.lease.deinit();
         std.heap.c_allocator.destroy(self);
     }
 };
@@ -233,7 +242,6 @@ pub fn executeRun(context: *anyopaque) void {
             run.agent_handoff.store(.finishing, .release);
             commitBeginFailure(job.projector, run, failure);
             publishAutomaticTitleFallback(run);
-            releaseRunWorkerReference(job.worker_references, run);
             job.notifier.notify();
             return;
         },
@@ -258,23 +266,16 @@ pub fn executeRun(context: *anyopaque) void {
         terminal.session_disposition_at_completion == .reusable;
     terminal.deinit();
     agent_run.deinit();
-    const title_reference_held =
-        run.automatic_title.state.load(.acquire) == .pending;
-    if (title_reference_held)
-        acquireAuxiliaryWorkerReference(job.worker_references);
-    const checkpoint_started = checkpoint_eligible and postprocessCheckpoint(
+    _ = checkpoint_eligible and postprocessCheckpoint(
         job.checkpoint,
         job.sessionAccess(),
         &run.checkpoint,
         run.checkpoint_export_context,
+        &job.checkpoint_lease,
     );
     job.releaseSessionAccess();
     job.notifier.notify();
     generateAutomaticTitle(job);
-    if (title_reference_held)
-        releaseAuxiliaryWorkerReference(job.worker_references);
-    if (!checkpoint_started)
-        releaseRunWorkerReference(job.worker_references, run);
     job.notifier.notify();
 }
 
@@ -304,7 +305,6 @@ pub fn cancelRun(context: *anyopaque) void {
         false,
     );
     publishAutomaticTitleFallback(run);
-    releaseRunWorkerReference(job.worker_references, run);
     job.notifier.notify();
 }
 
@@ -329,7 +329,6 @@ pub fn executeCompact(context: *anyopaque) void {
             "",
             false,
         );
-        releaseCompactWorkerReference(job.worker_references, compact);
         job.notifier.notify();
         return;
     };
@@ -338,12 +337,13 @@ pub fn executeCompact(context: *anyopaque) void {
     const checkpoint_eligible = terminal.raw_status_code != null and
         terminal.session_disposition_at_completion == .reusable;
     terminal.deinit();
-    if (!checkpoint_eligible or !postprocessCheckpoint(
+    _ = checkpoint_eligible and postprocessCheckpoint(
         job.checkpoint,
         job.sessionAccess(),
         &compact.checkpoint,
         compact.checkpoint_export_context,
-    )) releaseCompactWorkerReference(job.worker_references, compact);
+        &job.checkpoint_lease,
+    );
     job.notifier.notify();
 }
 
@@ -366,7 +366,6 @@ pub fn cancelCompact(context: *anyopaque) void {
         "",
         false,
     );
-    releaseCompactWorkerReference(job.worker_references, compact);
     job.notifier.notify();
 }
 
@@ -593,9 +592,15 @@ fn postprocessCheckpoint(
     access: *agent_session.Access,
     postprocess: *state.CheckpointPostprocess,
     context: state.CheckpointExportContext,
+    checkpoint_lease: *?worker_lease.WorkerLease,
 ) bool {
     if (resources.store_health.load(.acquire) != .ready) return false;
     const store = resources.store orelse return false;
+    std.debug.assert(postprocess.lease == null);
+    if (checkpoint_lease.*) |*lease| {
+        postprocess.lease = lease.take();
+    } else unreachable;
+    checkpoint_lease.* = null;
     postprocess.state.store(.exporting, .release);
     if (postprocess.cancelled.load(.acquire)) {
         publishCheckpointFailure(postprocess, .cancelled);
@@ -713,29 +718,4 @@ pub fn cancelPreparedCompactOrPanic(access: *agent_session.Access, operation_id:
         "Executor removed queued compact {d}, but Agent rejected prepared cancellation: {s}",
         .{ operation_id, @errorName(err) },
     );
-}
-
-pub fn releaseRunWorkerReference(references: *std.atomic.Value(usize), run: *state.RunRecord) void {
-    std.debug.assert(run.worker_reference_held.swap(false, .acq_rel));
-    const previous = references.fetchSub(1, .release);
-    std.debug.assert(previous != 0);
-}
-
-pub fn releaseCompactWorkerReference(
-    references: *std.atomic.Value(usize),
-    compact: *state.CompactRecord,
-) void {
-    if (!compact.worker_reference_held.swap(false, .acq_rel)) return;
-    const previous = references.fetchSub(1, .release);
-    std.debug.assert(previous != 0);
-}
-
-fn acquireAuxiliaryWorkerReference(references: *std.atomic.Value(usize)) void {
-    const previous = references.fetchAdd(1, .acq_rel);
-    std.debug.assert(previous != 0 and previous != std.math.maxInt(usize));
-}
-
-fn releaseAuxiliaryWorkerReference(references: *std.atomic.Value(usize)) void {
-    const previous = references.fetchSub(1, .release);
-    std.debug.assert(previous != 0);
 }

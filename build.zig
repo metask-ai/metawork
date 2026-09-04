@@ -167,6 +167,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-task-checkpoint-store", .root_module = test_modules.product_task_checkpoint_store },
         .{ .name = "metawork-product-task-file-change-store", .root_module = test_modules.product_task_file_change_store },
         .{ .name = "metawork-product-task-checkpoint-record", .root_module = test_modules.product_task_checkpoint_record },
+        .{ .name = "metawork-product-task-worker-lease", .root_module = test_modules.product_task_worker_lease },
         .{ .name = "metawork-product-task-agent-session", .root_module = test_modules.product_task_agent_session },
         .{ .name = "metawork-product-task-attachment", .root_module = test_modules.product_task_attachment },
         .{ .name = "metawork-product-skill-catalog", .root_module = test_modules.product_skill_catalog },
@@ -420,6 +421,7 @@ const WiredModules = struct {
     product_task_checkpoint_store: *std.Build.Module,
     product_task_file_change_store: *std.Build.Module,
     product_task_checkpoint_record: *std.Build.Module,
+    product_task_worker_lease: *std.Build.Module,
     product_task_execution_binding: *std.Build.Module,
     product_task_agent_session: *std.Build.Module,
     product_task_attachment: *std.Build.Module,
@@ -1294,6 +1296,11 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     owned_task_execution.addImport("metawork_product_models_contract", models_contract);
+    const task_worker_lease = b.createModule(.{
+        .root_source_file = b.path("src/product/task/worker_lease.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const task_agent_session = b.createModule(.{
         .root_source_file = b.path("src/product/task/agent_session.zig"),
         .target = target,
@@ -1309,6 +1316,7 @@ fn wireAgentCore(
     task_attachment.addImport("product_task_agent_session", task_agent_session);
     task_attachment.addImport("metawork_product_skill", product_skill);
     task_attachment.addImport("product_task_execution_binding", owned_task_execution);
+    task_attachment.addImport("product_task_worker_lease", task_worker_lease);
     const task_deletion = b.createModule(.{
         .root_source_file = b.path("src/product/task/deletion.zig"),
         .target = target,
@@ -1330,6 +1338,7 @@ fn wireAgentCore(
     task_recovery_job.addImport("product_task_checkpoint_record", checkpoint_record);
     task_recovery_job.addImport("product_task_checkpoint_store", checkpoint_store);
     task_recovery_job.addImport("product_task_execution_binding", owned_task_execution);
+    task_recovery_job.addImport("product_task_worker_lease", task_worker_lease);
     task_recovery_job.addImport(
         "product_agent_protocol_adapter",
         product_agent_protocol_adapter,
@@ -1346,6 +1355,7 @@ fn wireAgentCore(
     task_state.addImport("product_task_attachment", task_attachment);
     task_state.addImport("product_task_deletion", task_deletion);
     task_state.addImport("product_task_recovery", task_recovery);
+    task_state.addImport("product_task_worker_lease", task_worker_lease);
     task_persistence.addImport("metawork_agent", agent);
     task_persistence.addImport("product_task_checkpoint_record", checkpoint_record);
     task_persistence.addImport("product_task_checkpoint_store", checkpoint_store);
@@ -1379,6 +1389,7 @@ fn wireAgentCore(
     task_runtime.addImport("product_task_recovery", task_recovery);
     task_runtime.addImport("product_task_agent_session", task_agent_session);
     task_runtime.addImport("product_task_execution_binding", owned_task_execution);
+    task_runtime.addImport("product_task_worker_lease", task_worker_lease);
     task_runtime.addImport(
         "product_agent_protocol_adapter",
         product_agent_protocol_adapter,
@@ -1395,6 +1406,7 @@ fn wireAgentCore(
     task_execution.addImport("product_task_agent_session", task_agent_session);
     task_execution.addImport("product_task_state", task_state);
     task_execution.addImport("product_task_policy", task_policy);
+    task_execution.addImport("product_task_worker_lease", task_worker_lease);
     task_execution.addImport(
         "product_agent_protocol_adapter",
         product_agent_protocol_adapter,
@@ -1427,6 +1439,7 @@ fn wireAgentCore(
     product_task.addImport("product_task_state", task_state);
     product_task.addImport("product_task_policy", task_policy);
     product_task.addImport("product_task_execution", task_execution);
+    product_task.addImport("product_task_worker_lease", task_worker_lease);
     product_task.addImport("product_task_view", task_view);
     const mcp_configuration = b.createModule(.{
         .root_source_file = b.path("src/product/mcp/configuration.zig"),
@@ -1795,6 +1808,7 @@ fn wireAgentCore(
         .product_task_checkpoint_store = checkpoint_store,
         .product_task_file_change_store = file_change_store,
         .product_task_checkpoint_record = checkpoint_record,
+        .product_task_worker_lease = task_worker_lease,
         .product_task_execution_binding = owned_task_execution,
         .product_task_agent_session = task_agent_session,
         .product_task_attachment = task_attachment,

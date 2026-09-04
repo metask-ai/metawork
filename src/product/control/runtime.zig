@@ -931,7 +931,7 @@ test "Task aggregate separates Task runtime ownership from product history" {
     try std.testing.expect(@hasField(TestTask, "deletion"));
     inline for (&.{
         "attachment",
-        "worker_references",
+        "worker_leases",
         "close_thread",
         "active_operation",
     }) |field_name| {
@@ -6438,7 +6438,7 @@ pub const Runtime = struct {
         task: *const TestTask,
     ) bool {
         return self.checkpoint_store_health.load(.acquire) != .unavailable and
-            task.runtime.worker_references.load(.acquire) != 0;
+            task.runtime.worker_leases.hasLive();
     }
 
     test "automatic title fallback extracts text and skill display names" {
@@ -7402,9 +7402,6 @@ fn closeWorker(
 const publishAutomaticTitleFallback = if (builtin.is_test) task_test_execution.publishAutomaticTitleFallback else void;
 const cancelPreparedRunOrPanic = taskWorkerCancelPreparedRun;
 const cancelPreparedCompactOrPanic = taskWorkerCancelPreparedCompact;
-const releaseWorkerReference = if (builtin.is_test) task_test_execution.releaseRunWorkerReference else void;
-const releaseCompactWorkerReference = if (builtin.is_test) task_test_execution.releaseCompactWorkerReference else void;
-
 fn taskWorkerCancelPreparedRun(
     access: *task_test_agent_session.Access,
     run_id: u64,
@@ -10614,11 +10611,11 @@ test "Task metadata mutations preserve lifecycle guards and projection accountin
     try std.testing.expectEqual(task_test_deletion.State.idle, control.task_runtime.tasks[0].?.deletion);
     try control.setTaskArchived(3, true);
     control.releaseTaskAttachmentNoFail(&control.task_runtime.tasks[0].?, .cold_start);
-    control.task_runtime.tasks[0].?.runtime.worker_references.store(1, .release);
+    var deletion_lease = try control.task_runtime.tasks[0].?.runtime.worker_leases.acquire();
     try control.deleteTask(3);
     try std.testing.expect(control.task_runtime.tasks[0] != null);
     try std.testing.expectError(error.TaskBusy, control.renameTask(3, "too late"));
-    control.task_runtime.tasks[0].?.runtime.worker_references.store(0, .release);
+    deletion_lease.deinit();
     const tracked_before_delete = control.projection_bytes;
     _ = control.currentRevision();
     try std.testing.expect(control.task_runtime.tasks[0] == null);
@@ -11374,10 +11371,10 @@ test "identity replacement does not disturb live Task runtime references" {
     ));
     run.event_stream_finalized = true;
     task.runtime.active_run_id = 0;
-    task.runtime.worker_references.store(1, .release);
+    var replacement_lease = try task.runtime.worker_leases.acquire();
     try control.beginExecutionReplacement();
     try std.testing.expect(control.executionReplacementPending());
-    try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_references.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_leases.liveCount());
     try std.testing.expectEqual(route_id, task.runtime.routeId());
     try std.testing.expectEqual(execution, task.runtime.executionConst().?);
     try std.testing.expectEqual(TaskLifecycle.open, taskLifecycle(task));
@@ -11385,7 +11382,7 @@ test "identity replacement does not disturb live Task runtime references" {
     try std.testing.expect(!control.canCreateTask());
     control.endExecutionReplacementNoFail();
     try std.testing.expect(control.canCreateTask());
-    task.runtime.worker_references.store(0, .release);
+    replacement_lease.deinit();
 }
 
 test "default replacement preserves Task generation and installs the next admission default" {

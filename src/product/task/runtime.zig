@@ -585,9 +585,7 @@ pub const PreparedRun = struct {
         if (self.provisional_title_applied)
             self.effects.text.discardPrevious(self.previous_title);
         self.effects.run_acceptance.accept();
-        _ = self.task.runtime.worker_references.fetchAdd(1, .acq_rel);
         const run_record = &self.task.durable.runs[self.slot].?;
-        run_record.worker_reference_held.store(true, .release);
         self.effects.executor.enqueue(
             run_record,
             self.job,
@@ -595,10 +593,6 @@ pub const PreparedRun = struct {
             task_execution.cancelRun,
         ) catch |err| {
             task_execution.publishAutomaticTitleFallback(run_record);
-            task_execution.releaseRunWorkerReference(
-                &self.task.runtime.worker_references,
-                run_record,
-            );
             task_execution.cancelPreparedRunOrPanic(self.job.sessionAccess(), self.run_id);
             self.job.destroy();
             _ = task_execution.commitRunTerminal(
@@ -656,19 +650,13 @@ pub const PreparedCompact = struct {
         self: *PreparedCompact,
     ) error{ ExecutorShuttingDown, QueueFull }!u64 {
         std.debug.assert(self.active);
-        _ = self.task.runtime.worker_references.fetchAdd(1, .acq_rel);
         const compact = &self.task.durable.compacts[self.slot].?;
-        compact.worker_reference_held.store(true, .release);
         self.effects.executor.enqueue(
             compact,
             self.job,
             task_execution.executeCompact,
             task_execution.cancelCompact,
         ) catch |err| {
-            task_execution.releaseCompactWorkerReference(
-                &self.task.runtime.worker_references,
-                compact,
-            );
             task_execution.cancelPreparedCompactOrPanic(
                 self.job.sessionAccess(),
                 self.operation_id,
@@ -1239,17 +1227,26 @@ pub const Runtime = struct {
         const run_record = &task.durable.runs[slot].?;
         run_record.id = run_id;
 
+        var run_lease = task.runtime.worker_leases.acquire() catch return error.TaskBusy;
+        var run_lease_owned = true;
+        errdefer if (run_lease_owned) run_lease.deinit();
+        var checkpoint_lease = task.runtime.worker_leases.acquire() catch return error.TaskBusy;
+        var checkpoint_lease_owned = true;
+        errdefer if (checkpoint_lease_owned) checkpoint_lease.deinit();
         const job = try std.heap.c_allocator.create(task_execution.RunJob);
         var job_owned = true;
         errdefer if (job_owned) job.destroy();
         job.* = .{
             .run = run_record,
-            .worker_references = &task.runtime.worker_references,
+            .lease = run_lease.take(),
+            .checkpoint_lease = checkpoint_lease.take(),
             .notifier = effects.worker.notifier,
             .projector = effects.worker.projector,
             .completion_factory = effects.worker.completion_factory,
             .checkpoint = effects.worker.checkpoint,
         };
+        run_lease_owned = false;
+        checkpoint_lease_owned = false;
         if (run_record.automatic_title.state.load(.acquire) == .pending) {
             job.title_execution = owned_task_execution.OwnedTaskExecution.clone(
                 self.allocator,
@@ -1351,16 +1348,25 @@ pub const Runtime = struct {
         errdefer if (record_owned)
             discardCompact(self, task, slot, effects.release);
         const compact = &task.durable.compacts[slot].?;
+        var compact_lease = task.runtime.worker_leases.acquire() catch return error.TaskBusy;
+        var compact_lease_owned = true;
+        errdefer if (compact_lease_owned) compact_lease.deinit();
+        var checkpoint_lease = task.runtime.worker_leases.acquire() catch return error.TaskBusy;
+        var checkpoint_lease_owned = true;
+        errdefer if (checkpoint_lease_owned) checkpoint_lease.deinit();
         const job = try std.heap.c_allocator.create(task_execution.CompactJob);
         var job_owned = true;
         errdefer if (job_owned) job.destroy();
         job.* = .{
             .compact = compact,
-            .worker_references = &task.runtime.worker_references,
+            .lease = compact_lease.take(),
+            .checkpoint_lease = checkpoint_lease.take(),
             .notifier = effects.worker.notifier,
             .projector = effects.worker.projector,
             .checkpoint = effects.worker.checkpoint,
         };
+        compact_lease_owned = false;
+        checkpoint_lease_owned = false;
         compact.checkpoint_export_context = .{
             .task_id = task.durable.id,
             .binding_epoch = task.durable.binding_epoch,
@@ -1877,12 +1883,12 @@ pub const Runtime = struct {
                 .detached;
             const decision = task_deletion.decide(task.deletion, .{
                 .checkpoint_pending = checkpoint_store_available and
-                    task.runtime.worker_references.load(.acquire) != 0,
+                    task.runtime.worker_leases.hasLive(),
                 .close_operation_running = task.runtime.close_completion.load(.acquire) == .running or
                     task.runtime.close_thread != null,
                 .unfinalized_terminal_events = task_state.hasUnfinalizedTerminalEvents(task),
                 .session = session,
-                .worker_references = task.runtime.worker_references.load(.acquire),
+                .has_live_workers = task.runtime.worker_leases.hasLive(),
             });
             switch (decision) {
                 .wait => {},
@@ -1984,7 +1990,7 @@ pub const Runtime = struct {
             if (task.runtime.hasAttachedSession() or
                 task.runtime.hasClosingSession() or
                 task.runtime.close_thread != null or
-                task.runtime.worker_references.load(.acquire) != 0 or
+                task.runtime.worker_leases.hasLive() or
                 task_policy.hasActiveOperation(task))
                 pending = true;
         }
@@ -2388,12 +2394,6 @@ pub const Runtime = struct {
                 if (!run.event_stream_finalized) continue;
                 if (!self.syncCheckpointPostprocess(task, &run.checkpoint, effects))
                     continue;
-                if (run.checkpoint.state.load(.acquire) == .settled and
-                    run.worker_reference_held.load(.acquire))
-                    task_execution.releaseRunWorkerReference(
-                        &task.runtime.worker_references,
-                        run,
-                    );
                 changed = true;
             }
             for (task.durable.compacts) |*compact_entry| {
@@ -2401,11 +2401,6 @@ pub const Runtime = struct {
                 if (!compact.terminal_observed) continue;
                 if (!self.syncCheckpointPostprocess(task, &compact.checkpoint, effects))
                     continue;
-                if (compact.checkpoint.state.load(.acquire) == .settled)
-                    task_execution.releaseCompactWorkerReference(
-                        &task.runtime.worker_references,
-                        compact,
-                    );
                 changed = true;
             }
         }
@@ -2531,6 +2526,7 @@ pub const Runtime = struct {
                     task.durable.checkpoint_attempt = previous;
                 postprocess.payload = .none;
                 postprocess.state.store(.settled, .release);
+                releaseCheckpointLease(postprocess);
                 return true;
             },
             .candidate_ready => {
@@ -2545,6 +2541,7 @@ pub const Runtime = struct {
                         candidate.record.deinit(self.allocator);
                         postprocess.payload = .none;
                         postprocess.state.store(.settled, .release);
+                        releaseCheckpointLease(postprocess);
                         return true;
                     },
                     .outcome_unknown => {
@@ -2561,6 +2558,7 @@ pub const Runtime = struct {
                 task.durable.checkpoint_attempt = .none;
                 postprocess.payload = .none;
                 postprocess.state.store(.settled, .release);
+                releaseCheckpointLease(postprocess);
                 if (old_identity) |identity| effects.delete(identity);
                 return true;
             },
@@ -2582,19 +2580,10 @@ pub const Runtime = struct {
             for (task.durable.runs) |*run_entry| {
                 const run = &(run_entry.* orelse continue);
                 self.settleCheckpointPostprocessForShutdown(&run.checkpoint);
-                if (run.worker_reference_held.load(.acquire))
-                    task_execution.releaseRunWorkerReference(
-                        &task.runtime.worker_references,
-                        run,
-                    );
             }
             for (task.durable.compacts) |*compact_entry| {
                 const compact = &(compact_entry.* orelse continue);
                 self.settleCheckpointPostprocessForShutdown(&compact.checkpoint);
-                task_execution.releaseCompactWorkerReference(
-                    &task.runtime.worker_references,
-                    compact,
-                );
             }
         }
     }
@@ -2607,7 +2596,7 @@ pub const Runtime = struct {
             const task = &(entry.* orelse continue);
             cancelTaskCheckpoints(task);
             cancelTaskAutomaticTitles(task);
-            if (task.runtime.worker_references.load(.acquire) == 0) continue;
+            if (!task.runtime.worker_leases.hasLive()) continue;
             switch (task.runtime.active_operation) {
                 .none => {},
                 .restore => {
@@ -3005,6 +2994,9 @@ pub const Runtime = struct {
         const model = try self.allocator.dupe(u8, task.durable.execution_model);
         var model_live = true;
         errdefer if (model_live) self.allocator.free(model);
+        var restore_lease = task.runtime.worker_leases.acquire() catch return error.RestoreBusy;
+        var restore_lease_owned = true;
+        errdefer if (restore_lease_owned) restore_lease.deinit();
         const job = try self.allocator.create(recovery_job.Job);
         var job_owned = true;
         var job_initialized = false;
@@ -3028,6 +3020,7 @@ pub const Runtime = struct {
                 .notify_fn = input.notifier.notify_fn,
             },
             .checkpoint_limits = input.checkpoint_limits,
+            .lease = restore_lease.take(),
             .attempt = .{
                 .attempt_id = attempt_id,
                 .task_id = task_id,
@@ -3047,6 +3040,7 @@ pub const Runtime = struct {
                 .permission_interaction = permission.interaction,
             },
         };
+        restore_lease_owned = false;
         job_initialized = true;
         checkpoint_live = false;
         workspace_live = false;
@@ -3054,7 +3048,6 @@ pub const Runtime = struct {
         task.runtime.active_operation = .{ .restore = .{ .id = attempt_id } };
         task.runtime.restore_job = job;
         task.runtime.last_restore_failure = null;
-        _ = task.runtime.worker_references.fetchAdd(1, .acq_rel);
         input.executor.enqueue(
             job,
             job,
@@ -3063,8 +3056,6 @@ pub const Runtime = struct {
         ) catch |err| {
             task.runtime.restore_job = null;
             task.runtime.active_operation = .none;
-            const previous = task.runtime.worker_references.fetchSub(1, .release);
-            std.debug.assert(previous != 0);
             job.outcome = .{ .failure = .cancelled };
             job.state.store(.cancelled, .release);
             return err;
@@ -3166,6 +3157,12 @@ pub const Runtime = struct {
         }
         postprocess.payload = .none;
         postprocess.state.store(.settled, .release);
+        releaseCheckpointLease(postprocess);
+    }
+
+    fn releaseCheckpointLease(postprocess: *task_state.CheckpointPostprocess) void {
+        if (postprocess.lease) |*lease| lease.deinit();
+        postprocess.lease = null;
     }
 
     /// Reconciles Task-owned Session observations and immutable Run/Compact
@@ -3175,7 +3172,7 @@ pub const Runtime = struct {
         var result: LifecycleSync = .{};
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            var observation_access = if (task.runtime.worker_references.load(.acquire) != 0 and
+            var observation_access = if (task.runtime.worker_leases.hasLive() and
                 task.runtime.active_run_id != 0)
                 task.runtime.acquireAccess() catch null
             else
@@ -3284,7 +3281,7 @@ pub const Runtime = struct {
         var changed = false;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.worker_references.load(.acquire) == 0 or
+            if (!task.runtime.worker_leases.hasLive() or
                 task.runtime.active_run_id == 0 or
                 task.runtime.cancel_requested)
                 continue;
@@ -3499,8 +3496,6 @@ pub const Runtime = struct {
             }
             task.runtime.restore_job = null;
             task.runtime.active_operation = .none;
-            const references = task.runtime.worker_references.fetchSub(1, .release);
-            std.debug.assert(references != 0);
             job.deinit();
             result.changed = true;
         }
@@ -4494,7 +4489,7 @@ fn checkpointMutationPending(
     health: *const std.atomic.Value(checkpoint_store.Health),
 ) bool {
     return health.load(.acquire) != .unavailable and
-        task.runtime.worker_references.load(.acquire) != 0;
+        task.runtime.worker_leases.hasLive();
 }
 
 fn taskExecutionInput(
@@ -5175,6 +5170,7 @@ fn deinitRun(
     effects: ReleaseEffects,
     run: *task_state.RunRecord,
 ) void {
+    std.debug.assert(run.checkpoint.lease == null);
     releaseAutomaticTitle(&run.automatic_title);
     for (run.tools) |*entry| if (entry.*) |*tool|
         deinitTool(self, effects, tool);
@@ -5198,7 +5194,7 @@ fn deinitCompact(
     effects: ReleaseEffects,
     compact: *task_state.CompactRecord,
 ) void {
-    std.debug.assert(!compact.worker_reference_held.load(.acquire));
+    std.debug.assert(compact.checkpoint.lease == null);
     std.debug.assert(compact.terminal_publication.load(.acquire) != .publishing);
     releaseProjectedSlice(self, effects, compact.terminal_diagnostic);
     compact.* = undefined;
@@ -5257,7 +5253,7 @@ fn deinitTask(
     task: *task_state.Task,
     effects: ReleaseEffects,
 ) void {
-    std.debug.assert(task.runtime.worker_references.load(.acquire) == 0);
+    std.debug.assert(!task.runtime.worker_leases.hasLive());
     std.debug.assert(task.runtime.restore_job == null);
     releaseAttachmentNoFail(self, task, effects, .cold_start);
     for (task.durable.runs) |*entry| if (entry.*) |*run|

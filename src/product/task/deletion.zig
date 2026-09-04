@@ -23,7 +23,7 @@ pub const Facts = struct {
     close_operation_running: bool,
     unfinalized_terminal_events: bool,
     session: Session,
-    worker_references: usize,
+    has_live_workers: bool,
 };
 
 pub const Decision = enum(u8) {
@@ -47,7 +47,7 @@ pub fn decide(state: State, facts: Facts) Decision {
         .closing => return .wait,
         .detached => {},
     }
-    if (facts.worker_references != 0) return .wait;
+    if (facts.has_live_workers) return .wait;
     return .commit_record_deletion;
 }
 
@@ -57,14 +57,14 @@ test "Task deletion policy advances resources in owner order" {
         .close_operation_running = false,
         .unfinalized_terminal_events = false,
         .session = .detached,
-        .worker_references = 0,
+        .has_live_workers = false,
     };
     try std.testing.expectEqual(Decision.wait, decide(.idle, base));
     try std.testing.expectEqual(Decision.wait, decide(.failed, base));
     try std.testing.expectEqual(Decision.commit_record_deletion, decide(.deleting, base));
 
     var facts = base;
-    facts.worker_references = 1;
+    facts.has_live_workers = true;
     try std.testing.expectEqual(Decision.wait, decide(.deleting, facts));
     facts.session = .attached;
     try std.testing.expectEqual(Decision.release_session, decide(.deleting, facts));
@@ -78,7 +78,7 @@ test "Task deletion policy makes failed Session release explicitly retryable" {
         .close_operation_running = false,
         .unfinalized_terminal_events = false,
         .session = .retryable_close_failure,
-        .worker_references = 0,
+        .has_live_workers = false,
     };
     try std.testing.expectEqual(Decision.wait, decide(.failed, facts));
     try std.testing.expectEqual(Decision.release_session, decide(.deleting, facts));

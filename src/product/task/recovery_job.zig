@@ -11,6 +11,7 @@ const checkpoint_record = @import("product_task_checkpoint_record");
 const checkpoint_store = @import("product_task_checkpoint_store");
 const owned_execution = @import("product_task_execution_binding");
 const agent_protocol = @import("product_agent_protocol_adapter");
+const worker_lease = @import("product_task_worker_lease");
 
 pub const Notifier = struct {
     context: ?*anyopaque = null,
@@ -311,6 +312,7 @@ pub const Job = struct {
     cancellation: std.atomic.Value(bool) = .init(false),
     state: std.atomic.Value(State) = .init(.queued),
     outcome: Outcome = .none,
+    lease: worker_lease.WorkerLease,
 
     pub fn execute(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
@@ -378,6 +380,7 @@ pub const Job = struct {
         self.attempt.execution.deinit();
         self.attempt.workspace.deinit();
         self.attempt.checkpoint.deinit(self.allocator);
+        self.lease.deinit();
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);

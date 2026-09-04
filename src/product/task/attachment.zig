@@ -6,6 +6,7 @@ const catalog_snapshot = @import("metawork_product_skill").catalog;
 const agent_session = @import("product_task_agent_session");
 const owned_execution = @import("product_task_execution_binding");
 const recovery_job = @import("product_task_recovery_job");
+const worker_lease = @import("product_task_worker_lease");
 
 pub const DetachmentCause = enum {
     cold_start,
@@ -71,7 +72,7 @@ pub const CloseCompletion = enum(u8) {
 
 pub const State = struct {
     attachment: Attachment = .{ .detached = .cold_start },
-    worker_references: std.atomic.Value(usize) = .init(0),
+    worker_leases: worker_lease.WorkerLeaseSet = .{},
     pending_ui_request_id: u64 = 0,
     pending_ui_order: u64 = 0,
     active_run_id: u64 = 0,

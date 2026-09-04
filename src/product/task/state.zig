@@ -11,6 +11,7 @@ const checkpoint_record = @import("product_task_checkpoint_record");
 const task_attachment = @import("product_task_attachment");
 const task_deletion = @import("product_task_deletion");
 const task_recovery = @import("product_task_recovery");
+const worker_lease = @import("product_task_worker_lease");
 
 pub const automatic_title_result_capacity: usize = 512;
 pub const ui_record_detail_capacity: usize = 512;
@@ -469,6 +470,7 @@ pub const CheckpointPostprocess = struct {
     state: std.atomic.Value(CheckpointPostprocessState) = .init(.none),
     cancelled: std.atomic.Value(bool) = .init(false),
     payload: CheckpointPostprocessPayload = .none,
+    lease: ?worker_lease.WorkerLease = null,
 };
 
 pub const RunRecord = struct {
@@ -534,7 +536,6 @@ pub const RunRecord = struct {
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
     next_activity_order: u64 = 1,
-    worker_reference_held: std.atomic.Value(bool) = .init(false),
     agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
     pending_termination: std.atomic.Value(PendingInterruption) = .init(.none),
     run_control: agent.RunControl = undefined,
@@ -553,7 +554,6 @@ pub const CompactRecord = struct {
     terminal_observed: bool = false,
     terminal_diagnostic: []u8,
     redaction_secret: []const u8 = &.{},
-    worker_reference_held: std.atomic.Value(bool) = .init(false),
     checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
 };

@@ -1861,7 +1861,6 @@ fn deinitRestoredCompact(
     projection: RestoreProjection,
     compact: *task_state.CompactRecord,
 ) void {
-    std.debug.assert(!compact.worker_reference_held.load(.acquire));
     projection.free(compact.terminal_diagnostic);
     compact.* = undefined;
 }
