@@ -1031,9 +1031,11 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
     providers: [],
     metaskSelection: null,
     defaultSelection: { sourceId: "provider-1", modelId: "gpt-5" },
+    builtinProviderPresets: [],
     customProviders: [
       {
         id: "provider-1",
+        builtinProviderId: null,
         displayName: "OpenAI",
         protocol: "openai_chat_completions",
         normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",

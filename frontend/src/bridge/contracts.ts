@@ -68,6 +68,23 @@ export type Protocol =
   | "openai_chat_completions"
   | "gemini_native";
 
+export const builtinProviderIds = [
+  "deepseek",
+  "kimi",
+  "minimax",
+  "glm",
+] as const;
+export type BuiltinProviderId = (typeof builtinProviderIds)[number];
+
+export type BuiltinProviderPresetView = {
+  id: BuiltinProviderId;
+  displayName: string;
+  protocol: Protocol;
+  defaultBaseUrl: string;
+  apiKeyUrl: string;
+  documentationUrl: string;
+};
+
 export const permissionProfiles = ["approval_required", "full_access"] as const;
 export type PermissionProfile = (typeof permissionProfiles)[number];
 export type PermissionInteraction = "interactive" | "noninteractive";
@@ -85,6 +102,7 @@ export type ModelMetadataProvenance =
 
 export type CustomProviderView = {
   id: string;
+  builtinProviderId: BuiltinProviderId | null;
   displayName: string;
   protocol: Protocol;
   normalizedBaseUrl: string;
@@ -195,6 +213,7 @@ export type ModelsView = {
   selectionRevision: string;
   operation: "idle" | "refreshing_catalog";
   errorCode: ModelsErrorCode;
+  builtinProviderPresets: BuiltinProviderPresetView[];
   customProviders: CustomProviderView[];
 };
 

@@ -775,11 +775,30 @@ export const enUS = {
   "settings.permission_defaults": "Defaults for new tasks",
   "settings.account_profile": "Account information",
   "settings.account_security": "Security",
-  "settings.providers_saved": "Configured providers",
-  "settings.provider_details": "Provider details",
-  "settings.provider_add": "Add provider",
-  "settings.provider_add_title": "Add provider",
+  "settings.providers_saved": "Model services",
   "settings.back_to_providers": "Back to providers",
+  "settings.builtin_provider": "Official model service",
+  "settings.builtin_provider_group": "Model providers",
+  "settings.builtin_provider_group_help":
+    "Choose a provider and MetaWork fills in its official protocol and address.",
+  "settings.builtin_provider_unconfigured": "Not configured",
+  "settings.builtin_provider_needs_models": "Add or test a model",
+  "settings.builtin_provider_configure": "Configure",
+  "settings.builtin_provider_manage": "Manage",
+  "settings.custom_provider": "Custom API",
+  "settings.custom_provider_group": "Custom API",
+  "settings.custom_provider_group_help":
+    "For self-hosted models, other providers, or API gateways.",
+  "settings.custom_provider_add_action": "Add custom API",
+  "settings.builtin_provider_help":
+    "MetaWork supplies this provider's protocol and official address. You can use a compatible address when needed.",
+  "settings.builtin_provider_address": "Service address",
+  "settings.builtin_provider_change_address": "Use another address",
+  "settings.builtin_provider_reset_address": "Restore official address",
+  "settings.builtin_provider_address_warning":
+    "Future model requests will send this Provider's API key to {host}.",
+  "settings.get_api_key": "Get an API key",
+  "settings.open_provider_docs": "Open official documentation",
   "settings.models_error": "Model configuration needs attention",
   "settings.models_error_help":
     "Refresh the Metask catalog or review the saved model configuration.",
@@ -835,26 +854,31 @@ export const enUS = {
     "No executable default model is selected",
   "settings.providers_help":
     "Manage the model services, endpoints, and API keys available to MetaWork. Choose the default model on the Models page.",
-  "settings.providers_empty": "No user-managed providers yet.",
+  "settings.providers_empty": "No custom APIs yet.",
   "settings.providers_unavailable":
     "Provider management is unavailable in this build.",
   "settings.custom_provider_capture_unavailable":
     "Adding a provider or replacing an API key is unavailable while the system credential store is unavailable.",
   "settings.custom_provider_add": "Save provider",
   "settings.custom_provider_adding": "Saving provider…",
-  "settings.custom_provider_name": "Provider name",
+  "settings.custom_provider_title": "Connect a custom API",
+  "settings.custom_provider_help":
+    "Choose the protocol explicitly, then enter the service address and credential.",
+  "settings.custom_provider_name": "Display name",
   "settings.custom_provider_name_placeholder": "My OpenAI service",
+  "settings.custom_provider_name_help":
+    "Used only to identify this provider inside MetaWork.",
   "settings.custom_provider_protocol": "Protocol",
   "settings.custom_provider_endpoint": "Base URL",
+  "settings.custom_provider_endpoint_help":
+    "Enter the service root. MetaWork adds the request path for the selected protocol.",
+  "settings.custom_provider_endpoint_preview": "Request endpoint: {endpoint}",
   "settings.custom_provider_model_id_placeholder": "gpt-5",
   "settings.provider_api_key_placeholder": "Enter API key",
   "settings.provider_models_configured_elsewhere":
     "The API key is saved in the operating system credential store. Configure models from the Models page after saving.",
   "settings.provider_save": "Save provider",
   "settings.provider_save_api_key": "Save API key",
-  "settings.custom_provider_route.protocol": "Protocol",
-  "settings.custom_provider_route.endpoint": "Base URL",
-  "settings.custom_provider_route.api_key": "API key",
   "settings.custom_provider_edit_help":
     "Changing the protocol or Base URL requires testing its models again. The saved API key is never filled back in.",
   "settings.custom_provider_replace_credential": "Update API key",

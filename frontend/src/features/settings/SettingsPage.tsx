@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   AccountView,
+  BuiltinProviderId,
   ModelsView,
   Protocol,
   PermissionProfile,
@@ -19,7 +20,7 @@ import { accountErrorText } from "../../i18n/account-error.ts";
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection =
   "general" | "permissions" | "account" | "models" | "providers";
-type ProvidersPage = "list" | "add";
+type ProvidersPage = "list" | "builtin" | "custom";
 type RequestedSelection = {
   selectionId: string;
   label: string;
@@ -29,6 +30,12 @@ type CustomProviderDraft = {
   protocol: Protocol;
   baseUrl: string;
   apiKey: string;
+};
+type BuiltinProviderDraft = {
+  providerId: BuiltinProviderId | "";
+  baseUrl: string;
+  apiKey: string;
+  editingBaseUrl: boolean;
 };
 type CustomProviderSubmission = {
   displayName: string;
@@ -106,6 +113,23 @@ function newCustomProviderDraft(): CustomProviderDraft {
   };
 }
 
+function newBuiltinProviderDraft(): BuiltinProviderDraft {
+  return {
+    providerId: "",
+    baseUrl: "",
+    apiKey: "",
+    editingBaseUrl: false,
+  };
+}
+
+function providerAddressHost(value: string) {
+  try {
+    return new URL(value).host;
+  } catch {
+    return value.trim();
+  }
+}
+
 function apiLabel(
   api: ModelsView["providers"][number]["apiKeys"][number],
   t: ReturnType<typeof useI18n>["t"],
@@ -166,6 +190,8 @@ export function SettingsPage({
   onSelectApiKey,
   onSelectModel,
   onCreateCustomProvider,
+  onCreateBuiltinProvider,
+  onUpdateBuiltinProviderBaseUrl,
   onUpdateCustomProvider,
   onReplaceCustomProviderCredential,
   onAddCustomModel,
@@ -204,6 +230,16 @@ export function SettingsPage({
   onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
   onCreateCustomProvider: (input: CustomProviderSubmission) => Promise<boolean>;
+  onCreateBuiltinProvider: (input: {
+    providerId: BuiltinProviderId;
+    baseUrl: string;
+    apiKey: string;
+  }) => Promise<boolean>;
+  onUpdateBuiltinProviderBaseUrl: (input: {
+    providerId: string;
+    expectedProviderRevision: string;
+    baseUrl: string;
+  }) => Promise<boolean>;
   onUpdateCustomProvider: (
     input: CustomProviderEditSubmission,
   ) => Promise<boolean>;
@@ -264,6 +300,13 @@ export function SettingsPage({
   );
   const [customProviderDraft, setCustomProviderDraft] =
     useState<CustomProviderDraft | null>(null);
+  const [builtinProviderDraft, setBuiltinProviderDraft] =
+    useState<BuiltinProviderDraft>({
+      providerId: "",
+      baseUrl: "",
+      apiKey: "",
+      editingBaseUrl: false,
+    });
   const [creatingCustomProvider, setCreatingCustomProvider] = useState(false);
   const [customModelId, setCustomModelId] = useState("");
   const [addingCustomModel, setAddingCustomModel] = useState(false);
@@ -489,6 +532,16 @@ export function SettingsPage({
       })),
     [t],
   );
+  const selectedBuiltinPreset = models.builtinProviderPresets.find(
+    (preset) => preset.id === builtinProviderDraft.providerId,
+  );
+  const selectedBuiltinProvider = models.customProviders.find(
+    (provider) =>
+      provider.builtinProviderId === builtinProviderDraft.providerId,
+  );
+  const customProviders = models.customProviders.filter(
+    (provider) => provider.builtinProviderId === null,
+  );
   const displayedApiId = providerIsMetask
     ? selectedApiId
     : (selectedCustomProvider?.id ?? "");
@@ -642,6 +695,7 @@ export function SettingsPage({
     if (activeSection === "providers") return;
     setProvidersPage("list");
     setCustomProviderDraft(null);
+    setBuiltinProviderDraft(newBuiltinProviderDraft());
     setCustomProviderCredentialEdit(null);
   }, [activeSection]);
 
@@ -656,6 +710,7 @@ export function SettingsPage({
   useEffect(() => {
     if (customProviderCapabilities.secretCapture) return;
     setCustomProviderDraft(null);
+    setBuiltinProviderDraft(newBuiltinProviderDraft());
     setCustomProviderCredentialEdit(null);
     setCreatingCustomProvider(false);
   }, [customProviderCapabilities.secretCapture]);
@@ -739,10 +794,88 @@ export function SettingsPage({
     try {
       if (await onCreateCustomProvider(input)) {
         setCustomProviderDraft(null);
+        setBuiltinProviderDraft(newBuiltinProviderDraft());
         setProvidersPage("list");
       }
     } finally {
       setCreatingCustomProvider(false);
+    }
+  }
+
+  async function submitBuiltinProvider() {
+    if (
+      creatingCustomProvider ||
+      !builtinProviderDraft.providerId ||
+      !builtinProviderDraft.baseUrl.trim() ||
+      !builtinProviderDraft.apiKey ||
+      !selectedBuiltinPreset
+    )
+      return;
+    setCreatingCustomProvider(true);
+    try {
+      if (
+        await onCreateBuiltinProvider({
+          providerId: builtinProviderDraft.providerId,
+          baseUrl: builtinProviderDraft.baseUrl.trim(),
+          apiKey: builtinProviderDraft.apiKey,
+        })
+      ) {
+        setBuiltinProviderDraft(newBuiltinProviderDraft());
+        setCustomProviderDraft(null);
+        setProvidersPage("list");
+      }
+    } finally {
+      setCreatingCustomProvider(false);
+    }
+  }
+
+  function openBuiltinProvider(providerId: BuiltinProviderId) {
+    const preset = models.builtinProviderPresets.find(
+      (candidate) => candidate.id === providerId,
+    );
+    if (!preset) return;
+    const provider = models.customProviders.find(
+      (candidate) => candidate.builtinProviderId === providerId,
+    );
+    setCustomProviderDraft(null);
+    setCustomProviderEdit(null);
+    setCustomProviderCredentialEdit(null);
+    setCustomProviderRemoval(null);
+    setBuiltinProviderDraft({
+      providerId,
+      baseUrl: provider
+        ? customProviderBaseUrlFromEndpoint(
+            provider.protocol,
+            provider.normalizedBaseUrl,
+          )
+        : preset.defaultBaseUrl,
+      apiKey: "",
+      editingBaseUrl: false,
+    });
+    setProvidersPage("builtin");
+  }
+
+  async function updateBuiltinProviderBaseUrl() {
+    if (
+      !selectedBuiltinProvider ||
+      !builtinProviderDraft.baseUrl.trim() ||
+      mutatingCustomProvider
+    )
+      return;
+    setMutatingCustomProvider(true);
+    try {
+      if (
+        await onUpdateBuiltinProviderBaseUrl({
+          providerId: selectedBuiltinProvider.id,
+          expectedProviderRevision: selectedBuiltinProvider.providerRevision,
+          baseUrl: builtinProviderDraft.baseUrl.trim(),
+        })
+      ) {
+        setBuiltinProviderDraft(newBuiltinProviderDraft());
+        setProvidersPage("list");
+      }
+    } finally {
+      setMutatingCustomProvider(false);
     }
   }
 
@@ -839,8 +972,14 @@ export function SettingsPage({
           customProviderRemoval.providerId,
           customProviderRemoval.expectedProviderRevision,
         )
-      )
+      ) {
         setCustomProviderRemoval(null);
+        if (providersPage === "builtin") {
+          setCustomProviderCredentialEdit(null);
+          setBuiltinProviderDraft(newBuiltinProviderDraft());
+          setProvidersPage("list");
+        }
+      }
     } finally {
       setMutatingCustomProvider(false);
     }
@@ -860,8 +999,11 @@ export function SettingsPage({
         );
         if (nestedOverlay && nestedOverlay !== event.currentTarget) return;
         event.preventDefault();
-        if (activeSection === "providers" && providersPage === "add") {
+        if (activeSection === "providers" && providersPage !== "list") {
           setCustomProviderDraft(null);
+          setBuiltinProviderDraft(newBuiltinProviderDraft());
+          setCustomProviderCredentialEdit(null);
+          setCustomProviderRemoval(null);
           setProvidersPage("list");
           return;
         }
@@ -949,6 +1091,9 @@ export function SettingsPage({
             onClick={(event) => {
               event.preventDefault();
               setCustomProviderDraft(null);
+              setBuiltinProviderDraft(newBuiltinProviderDraft());
+              setCustomProviderCredentialEdit(null);
+              setCustomProviderRemoval(null);
               setProvidersPage("list");
               setActiveSection("providers");
             }}
@@ -1657,16 +1802,20 @@ export function SettingsPage({
                   ref={providersHeading}
                   tabIndex={-1}
                 >
-                  {providersPage === "add"
-                    ? t("settings.provider_add_title")
-                    : t("settings.providers")}
+                  {providersPage === "builtin" && selectedBuiltinPreset
+                    ? selectedBuiltinPreset.displayName
+                    : providersPage === "custom"
+                      ? t("settings.custom_provider_title")
+                      : t("settings.providers")}
                 </h2>
               </div>
               <div className="settings-group">
                 <h3 className="settings-group-label">
-                  {providersPage === "add"
-                    ? t("settings.provider_details")
-                    : t("settings.providers_saved")}
+                  {providersPage === "builtin"
+                    ? t("settings.builtin_provider")
+                    : providersPage === "custom"
+                      ? t("settings.custom_provider")
+                      : t("settings.providers_saved")}
                 </h3>
                 <div className="settings-custom-providers">
                   <div className="settings-execution-header">
@@ -1678,6 +1827,9 @@ export function SettingsPage({
                         className="settings-subpage-back text-button focus-ring"
                         onClick={() => {
                           setCustomProviderDraft(null);
+                          setBuiltinProviderDraft(newBuiltinProviderDraft());
+                          setCustomProviderCredentialEdit(null);
+                          setCustomProviderRemoval(null);
                           setProvidersPage("list");
                         }}
                       >
@@ -1685,52 +1837,428 @@ export function SettingsPage({
                         {t("settings.back_to_providers")}
                       </button>
                     )}
-                    {providersPage === "list" &&
-                      customProviderCapabilities.secretCapture && (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={
-                            disabled ||
-                            executionDisabled ||
-                            creatingCustomProvider
+                  </div>
+                  {providersPage === "list" && (
+                    <div className="settings-provider-directory">
+                      <div className="settings-provider-directory-heading">
+                        <div>
+                          <strong>
+                            {t("settings.builtin_provider_group")}
+                          </strong>
+                          <p>{t("settings.builtin_provider_group_help")}</p>
+                        </div>
+                      </div>
+                      <div className="settings-custom-provider-list settings-builtin-provider-list">
+                        {models.builtinProviderPresets.map((preset) => {
+                          const provider = models.customProviders.find(
+                            (candidate) =>
+                              candidate.builtinProviderId === preset.id,
+                          );
+                          const status = !provider
+                            ? t("settings.builtin_provider_unconfigured")
+                            : provider.credentialStatus !== "ready"
+                              ? customProviderCredentialLabel(
+                                  provider.credentialStatus,
+                                  t,
+                                )
+                              : provider.state === "configuring"
+                                ? t("settings.builtin_provider_needs_models")
+                                : customProviderStateLabel(provider.state, t);
+                          return (
+                            <div
+                              className="settings-custom-provider settings-builtin-provider-row"
+                              key={preset.id}
+                            >
+                              <div className="settings-custom-provider-copy">
+                                <strong>{preset.displayName}</strong>
+                                <span>{status}</span>
+                              </div>
+                              <div className="settings-custom-provider-actions">
+                                <Button
+                                  variant={provider ? "ghost" : "secondary"}
+                                  size="sm"
+                                  disabled={
+                                    disabled ||
+                                    executionDisabled ||
+                                    mutatingCustomProvider
+                                  }
+                                  onClick={() => openBuiltinProvider(preset.id)}
+                                >
+                                  {provider
+                                    ? t("settings.builtin_provider_manage")
+                                    : t("settings.builtin_provider_configure")}
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  {providersPage === "builtin" && selectedBuiltinPreset && (
+                    <form
+                      className="settings-custom-provider-create settings-builtin-provider-create"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        if (selectedBuiltinProvider) {
+                          if (
+                            customProviderCredentialEdit?.providerId ===
+                            selectedBuiltinProvider.id
+                          ) {
+                            void replaceCustomProviderCredential();
+                          } else if (builtinProviderDraft.editingBaseUrl) {
+                            void updateBuiltinProviderBaseUrl();
                           }
+                        } else {
+                          void submitBuiltinProvider();
+                        }
+                      }}
+                    >
+                      <div className="settings-provider-create-intro">
+                        <strong>{selectedBuiltinPreset.displayName}</strong>
+                        <p>{t("settings.builtin_provider_help")}</p>
+                      </div>
+                      <div className="settings-builtin-provider-address settings-custom-provider-create-field-wide">
+                        <div>
+                          <span>{t("settings.builtin_provider_address")}</span>
+                          <code>{builtinProviderDraft.baseUrl}</code>
+                          <small>
+                            {customProviderProtocolLabel(
+                              selectedBuiltinPreset.protocol,
+                              t,
+                            )}
+                          </small>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={disabled || executionDisabled}
                           onClick={() => {
-                            setCustomProviderDraft(newCustomProviderDraft());
-                            setProvidersPage("add");
+                            setCustomProviderCredentialEdit(null);
+                            setBuiltinProviderDraft((current) => ({
+                              ...current,
+                              baseUrl: current.editingBaseUrl
+                                ? selectedBuiltinProvider
+                                  ? customProviderBaseUrlFromEndpoint(
+                                      selectedBuiltinProvider.protocol,
+                                      selectedBuiltinProvider.normalizedBaseUrl,
+                                    )
+                                  : selectedBuiltinPreset.defaultBaseUrl
+                                : current.baseUrl,
+                              editingBaseUrl: !current.editingBaseUrl,
+                            }));
                           }}
                         >
-                          {t("settings.provider_add")}
+                          {builtinProviderDraft.editingBaseUrl
+                            ? t("common.cancel")
+                            : t("settings.builtin_provider_change_address")}
                         </Button>
+                      </div>
+                      {builtinProviderDraft.editingBaseUrl && (
+                        <label className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
+                          <span>{t("settings.custom_provider_endpoint")}</span>
+                          <input
+                            className="settings-custom-provider-input focus-ring"
+                            aria-label={t("settings.custom_provider_endpoint")}
+                            autoComplete="url"
+                            inputMode="url"
+                            maxLength={2048}
+                            value={builtinProviderDraft.baseUrl}
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              creatingCustomProvider ||
+                              mutatingCustomProvider
+                            }
+                            onChange={(event) =>
+                              setBuiltinProviderDraft((current) => ({
+                                ...current,
+                                baseUrl: event.target.value,
+                              }))
+                            }
+                          />
+                          <small className="settings-custom-provider-field-help">
+                            {t("settings.custom_provider_endpoint_preview", {
+                              endpoint: customProviderEndpointFromBaseUrl(
+                                selectedBuiltinPreset.protocol,
+                                builtinProviderDraft.baseUrl,
+                              ),
+                            })}
+                          </small>
+                          {trimTrailingSlashes(
+                            builtinProviderDraft.baseUrl.trim(),
+                          ) !==
+                            trimTrailingSlashes(
+                              selectedBuiltinPreset.defaultBaseUrl,
+                            ) && (
+                            <small className="settings-provider-address-warning">
+                              {t("settings.builtin_provider_address_warning", {
+                                host: providerAddressHost(
+                                  builtinProviderDraft.baseUrl,
+                                ),
+                              })}
+                            </small>
+                          )}
+                          <button
+                            type="button"
+                            className="text-button focus-ring settings-provider-reset-address"
+                            onClick={() =>
+                              setBuiltinProviderDraft((current) => ({
+                                ...current,
+                                baseUrl: selectedBuiltinPreset.defaultBaseUrl,
+                              }))
+                            }
+                          >
+                            {t("settings.builtin_provider_reset_address")}
+                          </button>
+                        </label>
                       )}
-                  </div>
-                  {customProviderDraft && (
+                      {!selectedBuiltinProvider && (
+                        <label className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
+                          <span>{t("settings.api_key")}</span>
+                          <input
+                            className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
+                            type="password"
+                            autoComplete="off"
+                            spellCheck={false}
+                            maxLength={4096}
+                            value={builtinProviderDraft.apiKey}
+                            placeholder={t(
+                              "settings.provider_api_key_placeholder",
+                            )}
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              creatingCustomProvider
+                            }
+                            onChange={(event) =>
+                              setBuiltinProviderDraft((current) => ({
+                                ...current,
+                                apiKey: event.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                      )}
+                      {selectedBuiltinProvider && (
+                        <div className="settings-custom-provider-edit-credential settings-custom-provider-create-field-wide">
+                          <div className="settings-custom-provider-edit-credential-copy">
+                            <strong>{t("settings.api_key")}</strong>
+                            <span>
+                              {customProviderCredentialLabel(
+                                selectedBuiltinProvider.credentialStatus,
+                                t,
+                              )}
+                            </span>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            disabled={
+                              disabled ||
+                              executionDisabled ||
+                              mutatingCustomProvider
+                            }
+                            onClick={() => {
+                              setBuiltinProviderDraft((current) => ({
+                                ...current,
+                                baseUrl: customProviderBaseUrlFromEndpoint(
+                                  selectedBuiltinProvider.protocol,
+                                  selectedBuiltinProvider.normalizedBaseUrl,
+                                ),
+                                editingBaseUrl: false,
+                              }));
+                              setCustomProviderCredentialEdit({
+                                providerId: selectedBuiltinProvider.id,
+                                expectedProviderRevision:
+                                  selectedBuiltinProvider.providerRevision,
+                                apiKey: "",
+                              });
+                            }}
+                          >
+                            {t("settings.custom_provider_replace_credential")}
+                          </Button>
+                        </div>
+                      )}
+                      {selectedBuiltinProvider &&
+                        customProviderCredentialEdit?.providerId ===
+                          selectedBuiltinProvider.id && (
+                          <div className="settings-custom-provider-credential-edit settings-custom-provider-create-field-wide">
+                            <label className="settings-custom-provider-create-field">
+                              <span>{t("settings.api_key")}</span>
+                              <input
+                                className="settings-custom-provider-input settings-custom-provider-input-mono focus-ring"
+                                type="password"
+                                autoComplete="off"
+                                spellCheck={false}
+                                maxLength={4096}
+                                value={customProviderCredentialEdit.apiKey}
+                                placeholder={t(
+                                  "settings.provider_api_key_placeholder",
+                                )}
+                                disabled={mutatingCustomProvider}
+                                onChange={(event) =>
+                                  setCustomProviderCredentialEdit((current) =>
+                                    current
+                                      ? {
+                                          ...current,
+                                          apiKey: event.target.value,
+                                        }
+                                      : current,
+                                  )
+                                }
+                              />
+                            </label>
+                            <div className="settings-custom-provider-credential-actions">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={mutatingCustomProvider}
+                                onClick={() =>
+                                  setCustomProviderCredentialEdit(null)
+                                }
+                              >
+                                {t("common.cancel")}
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={
+                                  mutatingCustomProvider ||
+                                  !customProviderCredentialEdit.apiKey
+                                }
+                                onClick={() =>
+                                  void replaceCustomProviderCredential()
+                                }
+                              >
+                                {t("settings.provider_save_api_key")}
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      <div className="settings-custom-provider-create-footer">
+                        <p>
+                          <a
+                            href={selectedBuiltinPreset.apiKeyUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {t("settings.get_api_key")}
+                          </a>
+                          <span aria-hidden="true"> · </span>
+                          <a
+                            href={selectedBuiltinPreset.documentationUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {t("settings.open_provider_docs")}
+                          </a>
+                        </p>
+                        <div className="settings-provider-footer-actions">
+                          {selectedBuiltinProvider && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                setCustomProviderCredentialEdit(null);
+                                setBuiltinProviderDraft(
+                                  newBuiltinProviderDraft(),
+                                );
+                                setProvidersPage("list");
+                                setActiveSection("models");
+                              }}
+                            >
+                              {t("settings.open_models")}
+                            </Button>
+                          )}
+                          {selectedBuiltinProvider && (
+                            <button
+                              type="button"
+                              className="text-button settings-custom-provider-remove focus-ring"
+                              onClick={() =>
+                                setCustomProviderRemoval({
+                                  providerId: selectedBuiltinProvider.id,
+                                  expectedProviderRevision:
+                                    selectedBuiltinProvider.providerRevision,
+                                })
+                              }
+                            >
+                              {t("common.remove")}
+                            </button>
+                          )}
+                          {(!selectedBuiltinProvider ||
+                            builtinProviderDraft.editingBaseUrl) && (
+                            <Button
+                              type="submit"
+                              size="sm"
+                              disabled={
+                                disabled ||
+                                executionDisabled ||
+                                creatingCustomProvider ||
+                                mutatingCustomProvider ||
+                                !builtinProviderDraft.baseUrl.trim() ||
+                                (!selectedBuiltinProvider &&
+                                  !builtinProviderDraft.apiKey)
+                              }
+                            >
+                              {creatingCustomProvider || mutatingCustomProvider
+                                ? t("common.saving")
+                                : t("settings.provider_save")}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      {selectedBuiltinProvider &&
+                        customProviderRemoval?.providerId ===
+                          selectedBuiltinProvider.id && (
+                          <div className="settings-custom-provider-confirm-remove settings-custom-provider-create-field-wide">
+                            <p>
+                              {t("settings.custom_provider_remove_confirm")}
+                            </p>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              disabled={mutatingCustomProvider}
+                              onClick={() => setCustomProviderRemoval(null)}
+                            >
+                              {t("common.cancel")}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="danger"
+                              size="sm"
+                              disabled={mutatingCustomProvider}
+                              onClick={() => void removeCustomProvider()}
+                            >
+                              {t("common.remove")}
+                            </Button>
+                          </div>
+                        )}
+                    </form>
+                  )}
+                  {providersPage === "custom" && customProviderDraft && (
                     <form
                       id="settings-custom-provider-create"
-                      className="settings-custom-provider-create"
+                      className="settings-custom-provider-create settings-custom-provider-create-custom"
                       onSubmit={(event) => {
                         event.preventDefault();
                         void submitCustomProvider();
                       }}
                     >
-                      <div
-                        className="settings-custom-provider-route"
-                        aria-hidden="true"
-                      >
-                        <span>
-                          {t("settings.custom_provider_route.protocol")}
-                        </span>
-                        <span>
-                          {t("settings.custom_provider_route.endpoint")}
-                        </span>
-                        <span>
-                          {t("settings.custom_provider_route.api_key")}
-                        </span>
+                      <div className="settings-provider-create-intro">
+                        <strong>{t("settings.custom_provider_title")}</strong>
+                        <p>{t("settings.custom_provider_help")}</p>
                       </div>
-                      <label className="settings-custom-provider-create-field">
+                      <label className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
                         <span>{t("settings.custom_provider_name")}</span>
                         <input
                           className="settings-custom-provider-input focus-ring"
+                          aria-label={t("settings.custom_provider_name")}
                           autoComplete="off"
                           maxLength={256}
                           value={customProviderDraft.displayName}
@@ -1753,8 +2281,11 @@ export function SettingsPage({
                             )
                           }
                         />
+                        <small className="settings-custom-provider-field-help">
+                          {t("settings.custom_provider_name_help")}
+                        </small>
                       </label>
-                      <div className="settings-custom-provider-create-field">
+                      <div className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
                         <span>{t("settings.custom_provider_protocol")}</span>
                         <SelectionMenu
                           value={customProviderDraft.protocol}
@@ -1784,6 +2315,7 @@ export function SettingsPage({
                         <span>{t("settings.custom_provider_endpoint")}</span>
                         <input
                           className="settings-custom-provider-input focus-ring"
+                          aria-label={t("settings.custom_provider_endpoint")}
                           autoComplete="url"
                           inputMode="url"
                           maxLength={2048}
@@ -1809,6 +2341,19 @@ export function SettingsPage({
                             )
                           }
                         />
+                        <small
+                          className="settings-custom-provider-field-help"
+                          aria-live="polite"
+                        >
+                          {customProviderDraft.baseUrl.trim()
+                            ? t("settings.custom_provider_endpoint_preview", {
+                                endpoint: customProviderEndpointFromBaseUrl(
+                                  customProviderDraft.protocol,
+                                  customProviderDraft.baseUrl,
+                                ),
+                              })
+                            : t("settings.custom_provider_endpoint_help")}
+                        </small>
                       </label>
                       <label className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
                         <span>{t("settings.api_key")}</span>
@@ -1859,18 +2404,40 @@ export function SettingsPage({
                       </div>
                     </form>
                   )}
+                  {providersPage === "list" && (
+                    <div className="settings-provider-directory settings-provider-directory-secondary">
+                      <div className="settings-provider-directory-heading">
+                        <div>
+                          <strong>{t("settings.custom_provider_group")}</strong>
+                          <p>{t("settings.custom_provider_group_help")}</p>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={
+                            disabled ||
+                            executionDisabled ||
+                            creatingCustomProvider
+                          }
+                          onClick={() => {
+                            setBuiltinProviderDraft(newBuiltinProviderDraft());
+                            setCustomProviderDraft(newCustomProviderDraft());
+                            setProvidersPage("custom");
+                          }}
+                        >
+                          {t("settings.custom_provider_add_action")}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                   {providersPage === "list" &&
-                    (!customProviderCapabilities.management ? (
-                      <p className="settings-custom-providers-empty">
-                        {t("settings.providers_unavailable")}
-                      </p>
-                    ) : models.customProviders.length === 0 ? (
+                    (customProviders.length === 0 ? (
                       <p className="settings-custom-providers-empty">
                         {t("settings.providers_empty")}
                       </p>
                     ) : (
                       <div className="settings-custom-provider-list">
-                        {models.customProviders.map((provider) => (
+                        {customProviders.map((provider) => (
                           <div
                             className="settings-custom-provider"
                             key={provider.id}
@@ -1908,8 +2475,8 @@ export function SettingsPage({
                                   mutatingCustomProvider
                                 }
                                 onClick={() => {
-                                  setCustomProviderCredentialEdit(null);
                                   setCustomProviderRemoval(null);
+                                  setCustomProviderCredentialEdit(null);
                                   setCustomProviderEdit({
                                     providerId: provider.id,
                                     expectedProviderRevision:

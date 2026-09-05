@@ -46,6 +46,7 @@ const OwnedModel = struct {
 
 const OwnedProvider = struct {
     id: []u8,
+    builtin_provider_id: ?contract.BuiltinProviderId = null,
     display_name: []u8,
     normalized_base_url: []u8,
     protocol: contract.Protocol,
@@ -75,6 +76,7 @@ const OwnedProvider = struct {
         }
         return .{
             .id = self.id,
+            .builtin_provider_id = self.builtin_provider_id,
             .display_name = self.display_name,
             .protocol = self.protocol,
             .normalized_base_url = self.normalized_base_url,
@@ -199,8 +201,10 @@ pub const Registry = struct {
             catalog_generation == 0)
             return error.InvalidProvider;
         for (self.providers.items) |provider|
-            if (std.mem.eql(u8, provider.normalized_base_url, input.spec.normalized_base_url) and
-                provider.protocol == input.spec.protocol)
+            if ((std.mem.eql(u8, provider.normalized_base_url, input.spec.normalized_base_url) and
+                provider.protocol == input.spec.protocol) or
+                (input.spec.builtin_provider_id != null and
+                    provider.builtin_provider_id == input.spec.builtin_provider_id))
                 return error.InvalidProvider;
 
         if (input.provider_id.len == 0 or
@@ -210,6 +214,7 @@ pub const Registry = struct {
             return error.InvalidProvider;
         var provider: OwnedProvider = .{
             .id = try self.allocator.dupe(u8, input.provider_id),
+            .builtin_provider_id = input.spec.builtin_provider_id,
             .display_name = try self.allocator.dupe(u8, input.spec.display_name),
             .normalized_base_url = try self.allocator.dupe(u8, input.spec.normalized_base_url),
             .protocol = input.spec.protocol,
@@ -977,6 +982,7 @@ pub const Registry = struct {
             const model_end = self.model_view_storage.items.len;
             self.view_storage.append(self.allocator, .{
                 .id = provider.id,
+                .builtin_provider_id = provider.builtin_provider_id,
                 .display_name = provider.display_name,
                 .protocol = provider.protocol,
                 .normalized_base_url = provider.normalized_base_url,
@@ -1005,6 +1011,7 @@ fn cloneProvider(
 ) (std.mem.Allocator.Error || Error)!OwnedProvider {
     var result: OwnedProvider = .{
         .id = try allocator.dupe(u8, source.id),
+        .builtin_provider_id = source.builtin_provider_id,
         .display_name = try allocator.dupe(u8, source.display_name),
         .normalized_base_url = try allocator.dupe(u8, source.normalized_base_url),
         .protocol = source.protocol,
@@ -1057,6 +1064,7 @@ const CanonicalModelWire = struct {
 
 const CanonicalProviderWire = struct {
     id: []const u8,
+    builtin_provider_id: ?contract.BuiltinProviderId = null,
     display_name: []const u8,
     normalized_base_url: []const u8,
     protocol: contract.Protocol,
@@ -1098,6 +1106,7 @@ pub fn encodeAlloc(
             };
         provider_storage[provider_index] = .{
             .id = provider.id,
+            .builtin_provider_id = provider.builtin_provider_id,
             .display_name = provider.display_name,
             .normalized_base_url = provider.normalized_base_url,
             .protocol = provider.protocol,
@@ -1198,11 +1207,16 @@ pub fn decode(
             .normalized_base_url = provider_wire.normalized_base_url,
         }) catch return error.InvalidData;
         if (result.findIndex(provider_wire.id) != null) return error.InvalidData;
+        if (provider_wire.builtin_provider_id) |builtin_provider_id|
+            for (result.providers.items) |provider|
+                if (provider.builtin_provider_id == builtin_provider_id)
+                    return error.InvalidData;
         for (result.pending_credential_deletions.items) |provider_id|
             if (std.mem.eql(u8, provider_id, provider_wire.id))
                 return error.InvalidData;
         var provider: OwnedProvider = .{
             .id = try allocator.dupe(u8, provider_wire.id),
+            .builtin_provider_id = provider_wire.builtin_provider_id,
             .display_name = try allocator.dupe(u8, provider_wire.display_name),
             .normalized_base_url = try allocator.dupe(u8, provider_wire.normalized_base_url),
             .protocol = provider_wire.protocol,

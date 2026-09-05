@@ -72,6 +72,7 @@ const unavailableModels = {
   selectionRevision: "0",
   operation: "idle",
   errorCode: "authorization_unavailable",
+  builtinProviderPresets: [],
   customProviders: [],
 };
 

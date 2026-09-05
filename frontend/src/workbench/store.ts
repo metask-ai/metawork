@@ -85,6 +85,7 @@ export const initialWorkbenchState: WorkbenchState = {
       selectionRevision: "0",
       operation: "idle",
       errorCode: "none",
+      builtinProviderPresets: [],
       customProviders: [],
     },
     newTaskAdmission: {

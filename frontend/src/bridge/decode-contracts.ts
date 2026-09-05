@@ -1,8 +1,10 @@
 import {
   compactCauses,
+  builtinProviderIds,
   permissionProfiles,
   runCauses,
   type AccountCommandResult,
+  type BuiltinProviderId,
   type ExecutionCommandResult,
   type AccountView,
   type ModelsView,
@@ -1071,6 +1073,7 @@ function decodeCustomProviders(value: unknown, path: string) {
   const customProviders = arrayValue(value, path, (value, itemPath) => {
     const provider = object(value, itemPath, [
       "id",
+      "builtinProviderId",
       "displayName",
       "protocol",
       "normalizedBaseUrl",
@@ -1120,6 +1123,14 @@ function decodeCustomProviders(value: unknown, path: string) {
     );
     return {
       id: stringValue(provider.id, `${itemPath}.id`),
+      builtinProviderId:
+        provider.builtinProviderId === null
+          ? null
+          : (enumValue(
+              provider.builtinProviderId,
+              `${itemPath}.builtinProviderId`,
+              builtinProviderIds,
+            ) as BuiltinProviderId),
       displayName: stringValue(provider.displayName, `${itemPath}.displayName`),
       protocol: enumValue(
         provider.protocol,
@@ -1195,8 +1206,50 @@ function decodeModels(value: unknown, path: string): ModelsView {
     "selectionRevision",
     "operation",
     "errorCode",
+    "builtinProviderPresets",
     "customProviders",
   ]);
+  const builtinProviderPresets = arrayValue(
+    item.builtinProviderPresets,
+    `${path}.builtinProviderPresets`,
+    (value, itemPath) => {
+      const preset = object(value, itemPath, [
+        "id",
+        "displayName",
+        "protocol",
+        "defaultBaseUrl",
+        "apiKeyUrl",
+        "documentationUrl",
+      ]);
+      return {
+        id: enumValue(
+          preset.id,
+          `${itemPath}.id`,
+          builtinProviderIds,
+        ) as BuiltinProviderId,
+        displayName: stringValue(preset.displayName, `${itemPath}.displayName`),
+        protocol: enumValue(
+          preset.protocol,
+          `${itemPath}.protocol`,
+          customProviderProtocols,
+        ) as Protocol,
+        defaultBaseUrl: stringValue(
+          preset.defaultBaseUrl,
+          `${itemPath}.defaultBaseUrl`,
+        ),
+        apiKeyUrl: stringValue(preset.apiKeyUrl, `${itemPath}.apiKeyUrl`),
+        documentationUrl: stringValue(
+          preset.documentationUrl,
+          `${itemPath}.documentationUrl`,
+        ),
+      };
+    },
+  );
+  if (
+    new Set(builtinProviderPresets.map((preset) => preset.id)).size !==
+    builtinProviderPresets.length
+  )
+    fail(`${path}.builtinProviderPresets`, "preset identities must be unique");
   const providers = arrayValue(
     item.providers,
     `${path}.providers`,
@@ -1371,6 +1424,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
       "refreshing_catalog",
     ] as const),
     errorCode: enumValue(item.errorCode, `${path}.errorCode`, modelsErrorCodes),
+    builtinProviderPresets,
     customProviders: decodeCustomProviders(
       item.customProviders,
       `${path}.customProviders`,

@@ -6,6 +6,7 @@ const contract = @import("metawork_product_models_contract");
 const ports = @import("product_models_ports");
 const registry_impl = @import("product_models_providers");
 const metask_provider = @import("product_models_metask");
+const builtin_providers = @import("product_models_builtin_providers");
 
 pub const StartError = error{
     CustomProvidersDirectoryUnavailable,
@@ -245,6 +246,7 @@ pub const Runtime = struct {
             .selection_revision = self.registry.selection_revision,
             .operation = if (self.catalog_attempt == null) .idle else .refreshing_catalog,
             .error_code = if (!self.store_healthy) .persistence_unavailable else self.metask_error,
+            .builtin_provider_presets = builtin_providers.views(),
             .custom_providers = self.registry.views(),
         };
     }
@@ -760,6 +762,8 @@ pub const Runtime = struct {
         defer candidate.deinit();
         switch (command) {
             .create => |value| {
+                if (value.spec.builtin_provider_id != null)
+                    return .rejected(.invalid_provider);
                 const provider_revision = self.freshGeneration(0) catch
                     return .rejected(.local_resource_exhausted);
                 const source_generation = self.freshGeneration(provider_revision) catch
@@ -772,6 +776,9 @@ pub const Runtime = struct {
             .update => |value| {
                 const current = findProviderView(candidate.views(), value.selection.source_id) orelse
                     return .rejected(.provider_not_found);
+                if (current.builtin_provider_id != null or
+                    value.spec.builtin_provider_id != null)
+                    return .rejected(.invalid_provider);
                 const authority_changed = current.protocol != value.spec.protocol or
                     !std.mem.eql(u8, current.normalized_base_url, value.spec.normalized_base_url);
                 const provider_revision = self.freshGeneration(current.provider_revision) catch
@@ -938,6 +945,82 @@ pub const Runtime = struct {
     }
 
     pub fn createWithCredential(
+        self: *Runtime,
+        secret: []const u8,
+        spec: contract.CustomProviderSpec,
+    ) contract.CommandResult {
+        if (spec.builtin_provider_id != null)
+            return .rejected(.invalid_provider);
+        return self.createWithResolvedCredential(secret, spec);
+    }
+
+    pub fn createBuiltinWithCredential(
+        self: *Runtime,
+        secret: []const u8,
+        provider_id: contract.BuiltinProviderId,
+        base_url: []const u8,
+    ) contract.CommandResult {
+        for (self.registry.views()) |provider|
+            if (provider.builtin_provider_id == provider_id)
+                return .rejected(.invalid_provider);
+        const definition = builtin_providers.find(provider_id);
+        const endpoint = contract.completionEndpointFromBaseUrlAlloc(
+            self.allocator,
+            definition.protocol,
+            base_url,
+        ) catch return .rejected(.invalid_provider);
+        defer self.allocator.free(endpoint);
+        return self.createWithResolvedCredential(
+            secret,
+            definition.spec(endpoint),
+        );
+    }
+
+    pub fn updateBuiltinBaseUrl(
+        self: *Runtime,
+        selection: contract.CustomProviderSelectionCommand,
+        base_url: []const u8,
+    ) contract.CommandResult {
+        self.assertMainThread();
+        if (!self.store_healthy) return .rejected(.persistence_unavailable);
+        var candidate = self.registry.clone() catch |err|
+            return .rejected(mapRegistryError(err));
+        defer candidate.deinit();
+        const current = findProviderView(candidate.views(), selection.source_id) orelse
+            return .rejected(.provider_not_found);
+        if (current.provider_revision != selection.expected_provider_revision)
+            return .rejected(.generation_mismatch);
+        const builtin_provider_id = current.builtin_provider_id orelse
+            return .rejected(.invalid_provider);
+        const definition = builtin_providers.find(builtin_provider_id);
+        const endpoint = contract.completionEndpointFromBaseUrlAlloc(
+            self.allocator,
+            definition.protocol,
+            base_url,
+        ) catch return .rejected(.invalid_provider);
+        defer self.allocator.free(endpoint);
+        if (std.mem.eql(u8, current.normalized_base_url, endpoint))
+            return .acceptedResult();
+        const provider_revision = self.freshGeneration(current.provider_revision) catch
+            return .rejected(.local_resource_exhausted);
+        const source_generation = self.freshGeneration(
+            candidate.sourceGenerationForProvider(current.id) orelse
+                return .rejected(.provider_not_found),
+        ) catch return .rejected(.local_resource_exhausted);
+        const selection_revision = if (isDefaultProvider(&candidate, current.id))
+            self.freshGeneration(candidate.selection_revision) catch
+                return .rejected(.local_resource_exhausted)
+        else
+            null;
+        candidate.update(.{
+            .selection = selection,
+            .spec = definition.spec(endpoint),
+        }, provider_revision, source_generation, selection_revision) catch |err|
+            return .rejected(mapRegistryError(err));
+        return self.commitCandidate(&candidate, true);
+    }
+
+    fn createWithResolvedCredential(
         self: *Runtime,
         secret: []const u8,
         spec: contract.CustomProviderSpec,
@@ -1595,6 +1678,63 @@ test "Models Runtime durably creates a Provider before its first model" {
         try std.testing.expectEqual(@as(usize, 0), providers[0].models.len);
         try std.testing.expect(restored.defaultAuthority() == null);
     }
+}
+
+test "built-in Provider recipe creates a fixed provider and reuses model management" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory_storage[0..directory_len], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+
+    try std.testing.expect(runtime.createBuiltinWithCredential(
+        "official-secret",
+        .deepseek,
+        builtin_providers.find(.deepseek).default_base_url,
+    ).accepted);
+    try std.testing.expectEqual(
+        contract.BuiltinProviderId.deepseek,
+        runtime.views()[0].builtin_provider_id.?,
+    );
+    try std.testing.expect(!runtime.createBuiltinWithCredential(
+        "second-secret",
+        .deepseek,
+        builtin_providers.find(.deepseek).default_base_url,
+    ).accepted);
+
+    const provider = runtime.views()[0];
+    try std.testing.expectEqualStrings(
+        "https://api.deepseek.com/chat/completions",
+        provider.normalized_base_url,
+    );
+    try std.testing.expect(runtime.submitCommand(.{ .add_custom_model = .{
+        .source_id = provider.id,
+        .expected_provider_revision = provider.provider_revision,
+        .expected_catalog_generation = provider.catalog_generation,
+        .model = .{ .id = "deepseek-chat", .display_name = "DeepSeek Chat" },
+    } }).accepted);
+    const before_update = runtime.views()[0];
+    const before_source_generation = before_update.source_generation;
+    try std.testing.expect(runtime.updateBuiltinBaseUrl(.{
+        .source_id = TestVault.slot,
+        .expected_provider_revision = before_update.provider_revision,
+    }, "https://gateway.example.com/deepseek/v1/").accepted);
+    const updated = runtime.views()[0];
+    try std.testing.expectEqualStrings(
+        "https://gateway.example.com/deepseek/v1/chat/completions",
+        updated.normalized_base_url,
+    );
+    try std.testing.expectEqualStrings("DeepSeek", updated.display_name);
+    try std.testing.expectEqual(contract.Protocol.openai_chat_completions, updated.protocol);
+    try std.testing.expect(updated.source_generation != before_source_generation);
+    try std.testing.expectEqual(@as(usize, 1), updated.models.len);
+    try std.testing.expectEqual(contract.CustomModelTestStatus.untested, updated.models[0].test_status);
 }
 
 test "Models Runtime owns durable custom providers and source resolution" {

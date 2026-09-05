@@ -53,6 +53,8 @@ pub const models_select_metask_api_key = "metawork.models.selectMetaskApiKey";
 pub const models_configure_metask_selection = "metawork.models.configureMetaskSelection";
 pub const models_select_default = "metawork.models.selectDefault";
 pub const custom_provider_create = "metawork.models.customProviders.create";
+pub const builtin_provider_create = "metawork.models.builtinProviders.create";
+pub const builtin_provider_update_base_url = "metawork.models.builtinProviders.updateBaseUrl";
 pub const custom_provider_update = "metawork.models.customProviders.update";
 pub const custom_provider_replace_credential = "metawork.models.customProviders.replaceCredential";
 pub const custom_provider_remove = "metawork.models.customProviders.remove";
@@ -133,6 +135,8 @@ pub const product = [_][]const u8{
     models_configure_metask_selection,
     models_select_default,
     custom_provider_create,
+    builtin_provider_create,
+    builtin_provider_update_base_url,
     custom_provider_update,
     custom_provider_replace_credential,
     custom_provider_remove,
