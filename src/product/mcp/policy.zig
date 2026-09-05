@@ -263,13 +263,8 @@ pub fn replaceAdmission(
     mcp: *mcp_state.McpProductState,
     replacement: mcp_state.McpAdmissionAuthority,
 ) void {
-    var installed = replacement;
-    if (mcp.runtime_auth_failure_blocked and installed == .ready) {
-        installed.deinit();
-        installed = .{ .blocked = .runtime_authorization_failure };
-    }
     mcp.admission.deinit();
-    mcp.admission = installed;
+    mcp.admission = replacement;
 }
 
 pub fn installCommittedDesiredState(
@@ -340,13 +335,14 @@ pub fn serverOperationBusy(
 pub fn nextOauthExpiry(
     mcp: *const mcp_state.McpProductState,
 ) ?mcp_state.McpOauthExpiry {
-    if (mcp.authorization_operation != null) return null;
     const management = if (mcp.management) |*value| value else return null;
     if (management.inspect().health != .ready) return null;
     const registry = management.desiredRegistry() orelse return null;
     if (registry.oauth_operation != null) return null;
     var earliest: ?mcp_state.McpOauthExpiry = null;
     for (registry.servers) |server| {
+        if (mcp.authorization_operation) |operation|
+            if (std.mem.eql(u8, operation.server_id, server.id)) continue;
         if (!serverAdmittedByDesiredState(server)) continue;
         const oauth = server.auth.oauth orelse continue;
         const grant = oauth.grant orelse continue;
@@ -377,10 +373,7 @@ pub fn recoveryGeneration(
     refresh_job_active: bool,
 ) ?u64 {
     const current = mcp orelse return null;
-    if (!current.committed or refresh_job_active or
-        current.refresh_pending_blocks_admission or
-        current.authorization_operation != null or
-        current.runtime_auth_failure_blocked)
+    if (!current.committed or refresh_job_active or current.refresh_pending)
         return null;
     return switch (current.admission) {
         .ready => |ready| ready.catalog_generation,
@@ -437,6 +430,126 @@ test "blocked MCP Admission gives an ordinary new Task null authority" {
         @as(?*const lifecycle.McpSelection, null),
         selectionForNewTask(&state),
     );
+}
+
+test "browser authorization excludes only its server from OAuth refresh selection" {
+    const registration: mcp_configuration.OauthRegistrationWire = .{
+        .kind = "pre_registered",
+        .issuer = "https://auth.example.test",
+        .client_id = "client",
+        .token_endpoint_auth_method = "none",
+        .client_credential_revision = 1,
+        .client_secret_ref = null,
+    };
+    const consent: mcp_configuration.OauthConsentWire = .{
+        .epoch = 1,
+        .fingerprint = "consent",
+        .issuer = "https://auth.example.test",
+        .resource = "https://mcp.example.test",
+        .scopes = &.{"read"},
+        .redirect_uri = "http://127.0.0.1/callback",
+        .client_credential_revision = 1,
+    };
+    var servers = [_]mcp_configuration.ServerWire{
+        .{
+            .id = "authorizing",
+            .namespace = "authorizing",
+            .display_name = "Authorizing",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .kind = "streamable_http", .url = "https://mcp.example.test/a" },
+            .auth = .{ .kind = "oauth", .oauth = .{
+                .status = "ready",
+                .registration = registration,
+                .consent = consent,
+                .grant = .{
+                    .consent_epoch = 1,
+                    .token_revision = 1,
+                    .access_token_ref = "a/access",
+                    .refresh_token_ref = "a/refresh",
+                    .expires_at_unix_ms = 100,
+                },
+            } },
+            .connection_approval = .{ .fingerprint = "approved-a" },
+            .tools = &.{"read"},
+        },
+        .{
+            .id = "refreshable",
+            .namespace = "refreshable",
+            .display_name = "Refreshable",
+            .enabled = true,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = .{ .kind = "streamable_http", .url = "https://mcp.example.test/b" },
+            .auth = .{ .kind = "oauth", .oauth = .{
+                .status = "ready",
+                .registration = registration,
+                .consent = consent,
+                .grant = .{
+                    .consent_epoch = 1,
+                    .token_revision = 1,
+                    .access_token_ref = "b/access",
+                    .refresh_token_ref = "b/refresh",
+                    .expires_at_unix_ms = 200,
+                },
+            } },
+            .connection_approval = .{ .fingerprint = "approved-b" },
+            .tools = &.{"read"},
+        },
+    };
+    const registry: mcp_configuration.RegistryWire = .{
+        .schema_version = mcp_configuration.schema_version,
+        .generation = 1,
+        .oauth_operation = null,
+        .servers = &servers,
+    };
+    var management = try mcp_configuration.ManagementPort.init(
+        std.testing.allocator,
+        registry,
+        .{
+            .persistence = .{ .available = true },
+            .credentials = .{ .available = true },
+            .limits = .{
+                .max_servers = 2,
+                .max_tools_per_server = 2,
+                .max_namespace_bytes = 32,
+                .max_credential_locators = 8,
+                .max_runtime_secrets_per_server = 4,
+                .max_runtime_secret_bytes_per_server = 1024,
+            },
+        },
+    );
+    var management_owned = true;
+    defer if (management_owned) management.deinit();
+    var preparation = try mcp_configuration.prepare(
+        std.testing.allocator,
+        null,
+        true,
+        false,
+        .{},
+        management.limits,
+    );
+    var state: mcp_state.McpProductState = .{
+        .preparation = preparation.take(),
+        .activation = null,
+        .activation_failed = false,
+        .management = management,
+        .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
+        .authorization_operation = .{
+            .phase = .awaiting_browser,
+            .server_id = try std.testing.allocator.dupe(u8, "authorizing"),
+            .operation_id = try std.testing.allocator.dupe(u8, "browser-1"),
+        },
+        .host_capabilities = .{},
+        .committed = true,
+    };
+    management_owned = false;
+    defer state.deinit();
+
+    const expiry = nextOauthExpiry(&state).?;
+    try std.testing.expectEqualStrings("refreshable", expiry.server_id);
+    try std.testing.expectEqual(@as(u64, 200), expiry.expires_at_unix_ms);
 }
 
 test "OAuth operation remains excluded from every rebuilt Admission target" {

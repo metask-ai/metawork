@@ -926,38 +926,26 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         .raw = std.Io.Duration.fromMilliseconds(2_500),
         .clock = .awake,
     } }, std.testing.io) catch return error.TestUnexpectedResult;
-    try std.testing.expectError(
-        error.CatalogLoading,
-        restarted_workbench.createTaskInWorkspace(
-            workspace_id,
-            workspace_epoch,
-            1,
-            null,
-            null,
-            .{ .interactive = null },
-        ),
+    const task_id = try restarted_workbench.createTaskInWorkspace(
+        workspace_id,
+        workspace_epoch,
+        1,
+        null,
+        null,
+        .{ .interactive = null },
     );
-    var task_id: ?u64 = null;
-    for (0..400) |_| {
-        restarted_workbench.syncLifecycle();
-        task_id = restarted_workbench.createTaskInWorkspace(
-            workspace_id,
-            workspace_epoch,
-            1,
-            null,
-            null,
-            .{ .interactive = null },
-        ) catch |err| switch (err) {
-            error.CatalogLoading => null,
-            else => return err,
-        };
-        if (task_id != null) break;
-        std.Io.Timeout.sleep(.{ .duration = .{
-            .raw = std.Io.Duration.fromMilliseconds(5),
-            .clock = .awake,
-        } }, std.testing.io) catch return error.TestUnexpectedResult;
-    }
-    try std.testing.expect(task_id != null);
+    try std.testing.expectEqual(
+        product_control.TaskMcpAuthorityAtCreation.unavailable,
+        try restarted_workbench.taskMcpAuthority(task_id),
+    );
+    try waitForMcpSnapshot(
+        &restarted_workbench,
+        "\"mcp\":{\"availability\":\"ready\",\"managementHealth\":\"ready\",\"operation\":\"idle\"",
+    );
+    try std.testing.expectEqual(
+        product_control.TaskMcpAuthorityAtCreation.unavailable,
+        try restarted_workbench.taskMcpAuthority(task_id),
+    );
     try std.testing.expectEqual(@as(usize, 0), refresh_timer.arm_count);
     var snapshot_storage: [512 * 1024]u8 = undefined;
     const snapshot = try restarted_workbench.writeSnapshot(&snapshot_storage);

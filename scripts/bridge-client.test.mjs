@@ -567,6 +567,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
           accepted: true,
           taskId: "11",
           bindingEpoch: "13",
+          mcpAuthority: { kind: "ready", selection: "none" },
           reason: null,
         };
       if (command === "metawork.tasks.run")
@@ -641,6 +642,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
       accepted: true,
       taskId: "11",
       bindingEpoch: "13",
+      mcpAuthority: { kind: "ready", selection: "none" },
       reason: null,
     },
   );

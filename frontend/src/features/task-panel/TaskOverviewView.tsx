@@ -347,6 +347,18 @@ export function TaskOverviewView({
 
   return (
     <div className="task-overview-view">
+      <div className="inspector-permission-profile">
+        <span>{t("inspector.mcp_authority")}</span>
+        <strong>
+          {t(
+            task.mcpAuthority.kind === "unavailable"
+              ? "inspector.mcp_unavailable"
+              : task.mcpAuthority.selection === "selected"
+                ? "inspector.mcp_selected"
+                : "inspector.mcp_none",
+          )}
+        </strong>
+      </div>
       {permissionProfilesEnabled && (
         <div className="inspector-permission-profile">
           <span>{t("permission.task.label")}</span>

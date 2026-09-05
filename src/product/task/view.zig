@@ -145,6 +145,18 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"mcpAuthority\":") catch return error.SnapshotTooLarge;
+    switch (task.runtime.mcp_authority_at_creation) {
+        .ready_with_selection => writer.writeAll(
+            "{\"kind\":\"ready\",\"selection\":\"selected\"}",
+        ) catch return error.SnapshotTooLarge,
+        .ready_without_selection => writer.writeAll(
+            "{\"kind\":\"ready\",\"selection\":\"none\"}",
+        ) catch return error.SnapshotTooLarge,
+        .unavailable => writer.writeAll(
+            "{\"kind\":\"unavailable\",\"selection\":null}",
+        ) catch return error.SnapshotTooLarge,
+    }
     writer.writeAll(",\"skillCatalog\":") catch return error.SnapshotTooLarge;
     try input.catalog.write(writer, catalogProjection(task));
     writer.print(",\"lifecycle\":\"{s}\",\"deletionStatus\":\"{s}\",\"continuationAvailable\":{},\"continuationUnavailableReason\":", .{

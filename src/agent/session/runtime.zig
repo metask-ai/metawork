@@ -761,7 +761,12 @@ pub const Runtime = struct {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
-        if (self.mcp_refresh_running) return error.McpRefreshInProgress;
+        // A refresh invalidates only selections derived from the catalog being
+        // replaced. A session that deliberately carries no MCP selection does
+        // not consume that authority and remains safe to create while the
+        // refresh is in flight.
+        if (self.mcp_refresh_running and options.mcp_selection != null)
+            return error.McpRefreshInProgress;
         if (options.mcp_selection) |selection| {
             if (!mcp_catalog.belongsTo(selection, self.mcp_owner_id))
                 return error.McpCatalogBindingMismatch;

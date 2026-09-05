@@ -430,28 +430,24 @@ pub const Coordinator = struct {
     }
 
     fn drainRuntimeAuthFailures(self: *Coordinator) bool {
-        var batch = self.authorizations.takeRuntimeAuthFailures() catch {
-            self.control.blockMcpAdmissionAfterRuntimeAuthFailure();
-            return true;
-        };
+        var batch = self.authorizations.snapshotRuntimeAuthFailures() catch return false;
         defer batch.deinit();
         var changed = false;
-        for (batch.values) |failure| {
+        for (batch.values) |*failure| {
             const outcome = self.control.requireMcpOauthReauthorization(.{
                 .server_id = failure.server_id,
                 .consent_epoch = failure.consent_epoch,
                 .token_revision = failure.token_revision,
                 .challenge_scopes = failure.challenge_scopes,
                 .challenge_scopes_complete = failure.challenge_scopes_complete,
-            }) catch {
-                self.control.blockMcpAdmissionAfterRuntimeAuthFailure();
-                changed = true;
-                continue;
-            };
-            changed = switch (outcome) {
-                .applied, .persistence_outcome_unknown => true,
-                .stale, .rejected => changed,
-            };
+            }) catch continue;
+            switch (outcome) {
+                .applied, .stale, .persistence_outcome_unknown => {
+                    _ = self.authorizations.acknowledgeRuntimeAuthFailure(failure);
+                    changed = true;
+                },
+                .pending, .rejected => {},
+            }
         }
         return changed;
     }
@@ -496,8 +492,7 @@ pub const Coordinator = struct {
 fn commitRotation(context: *anyopaque) void {
     const pending: *mcp_platform.PendingHttpAuthRotation =
         @ptrCast(@alignCast(context));
-    if (pending.commit() != .replaced)
-        @panic("durable MCP token rotation lost its prepared HTTP snapshot CAS");
+    pending.commit();
 }
 
 fn secureFree(allocator: std.mem.Allocator, secret: []u8) void {

@@ -219,7 +219,6 @@ pub const McpOauthPort = struct {
     next_expiry_fn: *const fn (*anyopaque) ?mcp.McpOauthExpiry,
     begin_refresh_fn: *const fn (*anyopaque, []const u8) anyerror!mcp.McpOauthRefreshBeginOutcome,
     complete_refresh_fn: *const fn (*anyopaque, mcp_contract.CompleteRefreshInput, mcp.McpOauthRuntimeCommit) anyerror!mcp_contract.ManagementOutcome,
-    block_admission_fn: *const fn (*anyopaque) void,
     require_reauthorization_fn: *const fn (*anyopaque, mcp.McpRuntimeAuthorizationFailure) anyerror!mcp.McpRuntimeAuthorizationFailureOutcome,
     clear_operation_fn: *const fn (*anyopaque, []const u8) anyerror!mcp_contract.ManagementOutcome,
     recover_operation_fn: *const fn (*anyopaque, []const u8) anyerror!mcp_contract.ManagementOutcome,
@@ -232,9 +231,6 @@ pub const McpOauthPort = struct {
     }
     pub fn completeMcpOauthRefresh(self: McpOauthPort, input: mcp_contract.CompleteRefreshInput, commit: mcp.McpOauthRuntimeCommit) anyerror!mcp_contract.ManagementOutcome {
         return self.complete_refresh_fn(self.context, input, commit);
-    }
-    pub fn blockMcpAdmissionAfterRuntimeAuthFailure(self: McpOauthPort) void {
-        self.block_admission_fn(self.context);
     }
     pub fn requireMcpOauthReauthorization(self: McpOauthPort, failure: mcp.McpRuntimeAuthorizationFailure) anyerror!mcp.McpRuntimeAuthorizationFailureOutcome {
         return self.require_reauthorization_fn(self.context, failure);

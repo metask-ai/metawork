@@ -19,6 +19,15 @@ pub const AttachedHealth = enum {
     session_poisoned,
 };
 
+/// Immutable process-lifetime fact describing the MCP authority copied when
+/// this Task's Session was created. It is projected to Renderer, but is not
+/// persisted and never contains server, tool, or credential details.
+pub const McpAuthorityAtCreation = enum {
+    ready_with_selection,
+    ready_without_selection,
+    unavailable,
+};
+
 pub const LiveAttachment = struct {
     binding: agent_session.Binding,
     execution: owned_execution.OwnedTaskExecution,
@@ -72,6 +81,7 @@ pub const CloseCompletion = enum(u8) {
 
 pub const State = struct {
     attachment: Attachment = .{ .detached = .cold_start },
+    mcp_authority_at_creation: McpAuthorityAtCreation = .unavailable,
     worker_leases: worker_lease.WorkerLeaseSet = .{},
     pending_ui_request_id: u64 = 0,
     pending_ui_order: u64 = 0,

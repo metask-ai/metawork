@@ -165,6 +165,7 @@ pub const Runtime = struct {
     /// through Runtime typed operations; direct access is test-seam only.
     state: state_module.McpProductState,
     refresh_job: ?*refresh_job.Job = null,
+    runtime_auth_delivery_pending: bool = false,
     shutting_down: bool = false,
     changed: bool = false,
 
@@ -191,12 +192,13 @@ pub const Runtime = struct {
         return self.refresh_job != null;
     }
 
-    pub fn blocksNewTaskAdmission(self: *const Runtime) bool {
-        return self.refresh_job != null or self.state.refresh_pending_blocks_admission;
-    }
-
     pub fn selectionForNewTask(self: *const Runtime) ?*const agent.McpSelection {
         return policy.selectionForNewTask(&self.state);
+    }
+
+    pub fn newTaskAuthorityReady(self: *const Runtime) bool {
+        if (!self.state.committed) return false;
+        return self.state.admission == .ready;
     }
 
     pub fn authorizationOperation(
@@ -223,9 +225,7 @@ pub const Runtime = struct {
 
     pub fn authorityStable(self: *const Runtime) bool {
         if (!self.state.committed or self.refresh_job != null or
-            self.state.refresh_pending_blocks_admission or
-            self.state.authorization_operation != null or
-            self.state.runtime_auth_failure_blocked)
+            self.state.refresh_pending)
             return false;
         return self.state.admission == .ready;
     }
@@ -454,10 +454,11 @@ pub const Runtime = struct {
         self.ports.timer.cancel();
         mcp.refresh_request_generation += 1;
         mcp.refresh_pending = true;
-        mcp.refresh_pending_blocks_admission =
-            mcp.refresh_pending_blocks_admission or invalidate_admission;
         if (invalidate_admission) policy.blockAdmission(mcp, .refreshing);
-        return self.startPendingRefresh();
+        return self.startPendingRefresh() catch |err| {
+            self.armRefreshRetry();
+            return err;
+        };
     }
 
     fn startPendingRefresh(self: *Runtime) Error!bool {
@@ -465,8 +466,7 @@ pub const Runtime = struct {
         const mcp = &self.state;
         if (!mcp.refresh_pending) return false;
         if (self.refresh_job != null or
-            mcp.configuration_apply_state == .applying or
-            mcp.authorization_operation != null)
+            mcp.configuration_apply_state == .applying)
             return false;
         const management = if (mcp.management) |*value| value else return error.CatalogUnavailable;
         const inspection = management.inspect();
@@ -498,13 +498,16 @@ pub const Runtime = struct {
         try self.ports.executor.enqueue(job.executorJob());
         policy.blockAdmission(mcp, .refreshing);
         mcp.refresh_pending = false;
-        mcp.refresh_pending_blocks_admission = false;
         self.refresh_job = job;
         return true;
     }
 
     pub fn onRefreshTimer(self: *Runtime) bool {
         if (self.shutting_down) return false;
+        if (self.state.refresh_pending) {
+            _ = self.startPendingRefresh() catch self.armRefreshRetry();
+            return true;
+        }
         _ = self.requestRefresh(true) catch {
             if (self.refresh_job == null and !self.state.refresh_pending)
                 policy.blockAdmissionForCurrentState(&self.state);
@@ -566,7 +569,7 @@ pub const Runtime = struct {
             .queued, .running => unreachable,
         }
         job.deinit();
-        self.rearmRefreshTimer();
+        self.releaseBoundary();
         return true;
     }
 
@@ -653,7 +656,6 @@ pub const Runtime = struct {
         management.installRuntimeManifest(manifest);
         self.state.configuration_apply_state = .idle;
         self.state.refresh_pending = false;
-        self.state.refresh_pending_blocks_admission = false;
         if (activation_failed) {
             if (selection) |value| value.deinit();
             policy.blockAdmission(&self.state, .activation_unavailable);
@@ -668,7 +670,7 @@ pub const Runtime = struct {
         }
         self.state.connection_test = null;
         self.updateRefreshDeadline();
-        self.rearmRefreshTimer();
+        self.releaseBoundary();
         return true;
     }
 
@@ -678,7 +680,7 @@ pub const Runtime = struct {
         if (management.inspect().desired_generation != expected_generation) return false;
         self.state.configuration_apply_state = .failed;
         policy.blockAdmissionForCurrentState(&self.state);
-        self.rearmRefreshTimer();
+        self.releaseBoundary();
         return true;
     }
 
@@ -863,12 +865,12 @@ pub const Runtime = struct {
         self: *Runtime,
         preparation: *configuration.MutationPreparation,
     ) Error!configuration.ManagementOutcome {
-        if (self.state.configuration_apply_state == .applying) return .rejected;
         switch (preparation.*) {
             .unchanged => return .unchanged,
             .rejected => return .rejected,
             .prepared => |*mutation| {
                 defer mutation.deinit();
+                if (self.state.configuration_apply_state == .applying) return .rejected;
                 var candidate = try self.admissionForTarget(mutation.target());
                 var candidate_owned = true;
                 defer if (candidate_owned) candidate.deinit();
@@ -906,8 +908,6 @@ pub const Runtime = struct {
         self: *Runtime,
         target: configuration.RegistryWire,
     ) Error!state_module.McpAdmissionAuthority {
-        if (self.state.runtime_auth_failure_blocked)
-            return .{ .blocked = .runtime_authorization_failure };
         const management = &self.state.management.?;
         return switch (management.runtimeAlignmentFor(target)) {
             .restart_required => .{ .blocked = .pending_restart },
@@ -945,14 +945,22 @@ pub const Runtime = struct {
         self: *Runtime,
         failure: state_module.McpRuntimeAuthorizationFailure,
     ) Error!state_module.McpRuntimeAuthorizationFailureOutcome {
-        if (self.shutting_down or self.refresh_job != null) return .rejected;
+        if (self.shutting_down) return .rejected;
+        if (self.refresh_job != null or self.state.configuration_apply_state == .applying) {
+            self.runtime_auth_delivery_pending = true;
+            return .pending;
+        }
         if (self.state.authorization_operation) |operation|
-            if (std.mem.eql(u8, operation.server_id, failure.server_id))
-                return .rejected;
+            if (std.mem.eql(u8, operation.server_id, failure.server_id)) {
+                self.runtime_auth_delivery_pending = true;
+                return .pending;
+            };
         const management = if (self.state.management) |*value| value else return .rejected;
-        if (!failure.challenge_scopes_complete or
-            !configuration.validOauthScopeSet(failure.challenge_scopes, management.limits))
-            return error.McpOauthScopeCapacity;
+        const trusted_challenge_scopes: []const []const u8 = if (failure.challenge_scopes_complete and
+            configuration.validOauthScopeSet(failure.challenge_scopes, management.limits))
+            failure.challenge_scopes
+        else
+            &.{};
         if (management.inspect().health != .ready) return .rejected;
         const registry = management.desiredRegistry() orelse return .rejected;
         if (registry.oauth_operation) |operation|
@@ -965,16 +973,16 @@ pub const Runtime = struct {
         if (consent.epoch != failure.consent_epoch) return .stale;
         const scope_step_up = policy.scopeSetAddsRequirement(
             consent.scopes,
-            failure.challenge_scopes,
+            trusted_challenge_scopes,
         );
         if (std.mem.eql(u8, oauth.status, "reauth_required")) {
-            var pending = if (failure.challenge_scopes.len != 0)
+            var pending = if (trusted_challenge_scopes.len != 0)
                 try policy.preparePendingReauthorization(
                     self.allocator,
                     &self.state,
                     server.id,
                     consent.epoch,
-                    failure.challenge_scopes,
+                    trusted_challenge_scopes,
                     management.limits.max_oauth_scopes,
                 )
             else
@@ -991,13 +999,13 @@ pub const Runtime = struct {
             failure.token_revision > grant.token_revision or
             (!scope_step_up and failure.token_revision != grant.token_revision))
             return .stale;
-        var pending = if (failure.challenge_scopes.len != 0)
+        var pending = if (trusted_challenge_scopes.len != 0)
             try policy.preparePendingReauthorization(
                 self.allocator,
                 &self.state,
                 server.id,
                 consent.epoch,
-                failure.challenge_scopes,
+                trusted_challenge_scopes,
                 management.limits.max_oauth_scopes,
             )
         else
@@ -1018,23 +1026,12 @@ pub const Runtime = struct {
             .rejected => .rejected,
             .unchanged, .stale_generation => unreachable,
         };
-        if (result == .rejected) self.blockAdmissionAfterRuntimeAuthFailure();
         if (result != .rejected) if (pending) |*replacement| {
             policy.installPendingReauthorization(&self.state, replacement);
             pending_owned = false;
             self.markChanged();
         };
         return result;
-    }
-
-    pub fn blockAdmissionAfterRuntimeAuthFailure(self: *Runtime) void {
-        self.state.runtime_auth_failure_blocked = true;
-        switch (self.state.admission) {
-            .blocked => |reason| if (reason == .runtime_authorization_failure) return,
-            .ready => {},
-        }
-        policy.blockAdmission(&self.state, .runtime_authorization_failure);
-        self.markChanged();
     }
 
     pub fn beginAuthorization(
@@ -1089,12 +1086,12 @@ pub const Runtime = struct {
         const operation_server_id = try self.allocator.dupe(u8, server.id);
         errdefer self.allocator.free(operation_server_id);
         const operation_identity = try self.allocator.dupe(u8, operation_id);
-        self.ports.timer.cancel();
         self.state.authorization_operation = .{
             .phase = .discovering,
             .server_id = operation_server_id,
             .operation_id = operation_identity,
         };
+        self.rearmRefreshTimer();
         self.markChanged();
         return result;
     }
@@ -1154,7 +1151,7 @@ pub const Runtime = struct {
         if (!std.mem.eql(u8, operation.operation_id, operation_id)) return false;
         operation.deinit(self.allocator);
         self.state.authorization_operation = null;
-        self.rearmRefreshTimer();
+        self.releaseBoundary();
         self.markChanged();
         return true;
     }
@@ -1258,7 +1255,7 @@ pub const Runtime = struct {
         var preparation = try management.prepareCompleteDynamicRegistration(input);
         const outcome = try self.commitPreparedMutation(&preparation);
         switch (outcome) {
-            .saved, .saved_recovery_required => self.rearmRefreshTimer(),
+            .saved, .saved_recovery_required => self.releaseBoundary(),
             else => {},
         }
         return outcome;
@@ -1316,7 +1313,7 @@ pub const Runtime = struct {
         var preparation = try management.prepareCompleteCodeExchange(input);
         const outcome = try self.commitPreparedMutation(&preparation);
         switch (outcome) {
-            .saved, .saved_recovery_required => self.rearmRefreshTimer(),
+            .saved, .saved_recovery_required => self.releaseBoundary(),
             else => {},
         }
         return outcome;
@@ -1361,9 +1358,10 @@ pub const Runtime = struct {
         server_id: []const u8,
     ) Error!state_module.McpOauthRefreshBeginOutcome {
         if (self.shutting_down or !self.state.committed or self.refresh_job != null or
-            self.state.configuration_apply_state == .applying or
-            self.state.authorization_operation != null)
+            self.state.configuration_apply_state == .applying)
             return .rejected;
+        if (self.state.authorization_operation) |operation|
+            if (std.mem.eql(u8, operation.server_id, server_id)) return .rejected;
         const management = if (self.state.management) |*value| value else return .rejected;
         const inspection = management.inspect();
         if (inspection.health != .ready or inspection.runtime_alignment != .current or
@@ -1430,7 +1428,6 @@ pub const Runtime = struct {
                 var candidate = try self.admissionForTarget(mutation.target());
                 var candidate_owned = true;
                 defer if (candidate_owned) candidate.deinit();
-                if (candidate != .ready) return .rejected;
                 const outcome = try management.commitPreparedMutation(mutation);
                 const reported_outcome = if (outcome == .saved_recovery_required and
                     management.inspect().health == .outcome_unknown)
@@ -1442,7 +1439,7 @@ pub const Runtime = struct {
                         runtime_commit.commit();
                         policy.installCommittedDesiredState(&self.state, management, candidate);
                         candidate_owned = false;
-                        self.rearmRefreshTimer();
+                        self.releaseBoundary();
                         self.markChanged();
                     },
                     .indeterminate => {
@@ -1479,7 +1476,7 @@ pub const Runtime = struct {
             .saved => {
                 policy.installCommittedDesiredState(&self.state, management, candidate);
                 candidate_owned = false;
-                self.rearmRefreshTimer();
+                self.releaseBoundary();
                 self.markChanged();
             },
             .indeterminate => {
@@ -1501,7 +1498,7 @@ pub const Runtime = struct {
         var preparation = try management.prepareOauthOperationRecovery(operation_id);
         const outcome = try self.commitPreparedMutation(&preparation);
         switch (outcome) {
-            .saved, .saved_recovery_required => self.rearmRefreshTimer(),
+            .saved, .saved_recovery_required => self.releaseBoundary(),
             else => {},
         }
         return outcome;
@@ -1521,19 +1518,34 @@ pub const Runtime = struct {
         );
     }
 
+    fn releaseBoundary(self: *Runtime) void {
+        self.rearmRefreshTimer();
+        if (!self.runtime_auth_delivery_pending or self.shutting_down) return;
+        if (self.ports.notifier.notify())
+            self.runtime_auth_delivery_pending = false;
+    }
+
+    fn armRefreshRetry(self: *Runtime) void {
+        if (self.shutting_down or !self.ports.timer.enabled) return;
+        const now_ms = self.ports.timer.now() orelse return;
+        const deadline_ms = std.math.add(u64, now_ms, 1_000) catch std.math.maxInt(u64);
+        _ = self.ports.timer.armAt(deadline_ms);
+    }
+
     pub fn rearmRefreshTimer(self: *Runtime) void {
         self.ports.timer.cancel();
         if (self.shutting_down) return;
         if (self.state.refresh_pending) {
-            const started = self.startPendingRefresh() catch return;
+            const started = self.startPendingRefresh() catch {
+                self.armRefreshRetry();
+                return;
+            };
             if (started or self.state.refresh_pending) return;
         }
         if (!self.ports.timer.enabled) return;
         if (!self.state.committed or
             self.refresh_job != null or
             self.state.configuration_apply_state == .applying or
-            self.state.authorization_operation != null or
-            self.state.runtime_auth_failure_blocked or
             self.state.activation_failed)
             return;
         const management = if (self.state.management) |*value| value else return;
@@ -1604,12 +1616,18 @@ fn writeQuotedListItem(writer: *std.Io.Writer, value: []const u8) !void {
 const TestHarness = struct {
     queued: ?ports_module.Job = null,
     notifications: usize = 0,
+    failed_enqueues: usize = 0,
+    armed_deadline_ms: ?u64 = null,
 
     fn enqueue(
         context: *anyopaque,
         job: ports_module.Job,
     ) error{ ExecutorShuttingDown, QueueFull }!void {
         const self: *TestHarness = @ptrCast(@alignCast(context));
+        if (self.failed_enqueues != 0) {
+            self.failed_enqueues -= 1;
+            return error.QueueFull;
+        }
         std.debug.assert(self.queued == null);
         self.queued = job;
     }
@@ -1639,11 +1657,16 @@ const TestHarness = struct {
         return 100;
     }
 
-    fn armAt(_: ?*anyopaque, _: u64) bool {
+    fn armAt(context: ?*anyopaque, deadline_ms: u64) bool {
+        const self: *TestHarness = @ptrCast(@alignCast(context.?));
+        self.armed_deadline_ms = deadline_ms;
         return true;
     }
 
-    fn cancelTimer(_: ?*anyopaque) void {}
+    fn cancelTimer(context: ?*anyopaque) void {
+        const self: *TestHarness = @ptrCast(@alignCast(context.?));
+        self.armed_deadline_ms = null;
+    }
 
     fn notify(context: ?*anyopaque) bool {
         const self: *TestHarness = @ptrCast(@alignCast(context.?));
@@ -1692,6 +1715,11 @@ const test_limits: configuration.Limits = .{
     .max_runtime_secrets_per_server = 8,
     .max_runtime_secret_bytes_per_server = 4096,
 };
+
+fn fillTestMcpIdentity(_: ?*anyopaque, bytes: *[16]u8) bool {
+    bytes.* = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    return true;
+}
 
 test "Product MCP Runtime retains refresh requested during apply and starts it on settlement" {
     const allocator = std.testing.allocator;
@@ -1745,5 +1773,168 @@ test "Product MCP Runtime retains refresh requested during apply and starts it o
     harness.executeQueued();
     try std.testing.expect(runtime.syncRefreshJob());
     try std.testing.expect(!runtime.hasRefreshJob());
+    try std.testing.expectEqual(@as(usize, 1), harness.notifications);
+}
+
+test "Product MCP Runtime retries a pending refresh after executor enqueue failure" {
+    const allocator = std.testing.allocator;
+    const registry: configuration.RegistryWire = .{
+        .schema_version = configuration.schema_version,
+        .generation = 1,
+        .oauth_operation = null,
+        .servers = &.{},
+    };
+    var management = try configuration.ManagementPort.init(
+        allocator,
+        registry,
+        .{
+            .persistence = .{ .available = true },
+            .credentials = .{ .available = true },
+            .limits = test_limits,
+        },
+    );
+    var management_owned = true;
+    defer if (management_owned) management.deinit();
+    var harness = TestHarness{ .failed_enqueues = 1 };
+    var runtime = Runtime.init(
+        allocator,
+        harness.ports(),
+        .{
+            .preparation = .{ .allocator = allocator, .state = .empty },
+            .activation = null,
+            .activation_failed = false,
+            .management = management,
+            .admission = .{ .ready = .{
+                .selection = null,
+                .catalog_generation = null,
+            } },
+            .host_capabilities = .{},
+        },
+    );
+    management_owned = false;
+    defer runtime.deinit();
+
+    try std.testing.expect(runtime.syncInitialHealth());
+    try std.testing.expectError(error.QueueFull, runtime.requestRefresh(true));
+    try std.testing.expect(runtime.state.refresh_pending);
+    try std.testing.expect(!runtime.hasRefreshJob());
+    try std.testing.expectEqual(@as(?u64, 1_100), harness.armed_deadline_ms);
+
+    try std.testing.expect(runtime.onRefreshTimer());
+    try std.testing.expect(!runtime.state.refresh_pending);
+    try std.testing.expect(runtime.hasRefreshJob());
+    try std.testing.expect(harness.queued != null);
+    harness.executeQueued();
+    try std.testing.expect(runtime.syncRefreshJob());
+}
+
+test "Product MCP Runtime releases a prepared mutation rejected during apply" {
+    const allocator = std.testing.allocator;
+    const registry: configuration.RegistryWire = .{
+        .schema_version = configuration.schema_version,
+        .generation = 1,
+        .oauth_operation = null,
+        .servers = &.{},
+    };
+    var management = try configuration.ManagementPort.init(
+        allocator,
+        registry,
+        .{
+            .persistence = .{ .available = true },
+            .credentials = .{ .available = true },
+            .identity_generator = .{
+                .available = true,
+                .fill_fn = fillTestMcpIdentity,
+            },
+            .limits = test_limits,
+        },
+    );
+    var management_owned = true;
+    defer if (management_owned) management.deinit();
+    var harness = TestHarness{};
+    var runtime = Runtime.init(
+        allocator,
+        harness.ports(),
+        .{
+            .preparation = .{ .allocator = allocator, .state = .empty },
+            .activation = null,
+            .activation_failed = false,
+            .management = management,
+            .admission = .{ .ready = .{
+                .selection = null,
+                .catalog_generation = null,
+            } },
+            .host_capabilities = .{},
+        },
+    );
+    management_owned = false;
+    defer runtime.deinit();
+
+    try std.testing.expect(runtime.syncInitialHealth());
+    try std.testing.expect(try runtime.beginConfigurationApply(1));
+    try std.testing.expectEqual(
+        configuration.ManagementOutcome.rejected,
+        try runtime.createHttpServer(1, .{
+            .display_name = "Prepared while applying",
+            .url = "https://mcp.example.test/rpc",
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 1), runtime.state.management.?.inspect().desired_generation);
+}
+
+test "Product MCP Runtime wakes retained auth delivery when apply releases the boundary" {
+    const allocator = std.testing.allocator;
+    const registry: configuration.RegistryWire = .{
+        .schema_version = configuration.schema_version,
+        .generation = 1,
+        .oauth_operation = null,
+        .servers = &.{},
+    };
+    var management = try configuration.ManagementPort.init(
+        allocator,
+        registry,
+        .{
+            .persistence = .{ .available = true },
+            .credentials = .{ .available = true },
+            .limits = test_limits,
+        },
+    );
+    var management_owned = true;
+    defer if (management_owned) management.deinit();
+    var harness = TestHarness{};
+    var runtime = Runtime.init(
+        allocator,
+        harness.ports(),
+        .{
+            .preparation = .{ .allocator = allocator, .state = .empty },
+            .activation = null,
+            .activation_failed = false,
+            .management = management,
+            .admission = .{ .ready = .{
+                .selection = null,
+                .catalog_generation = null,
+            } },
+            .host_capabilities = .{},
+        },
+    );
+    management_owned = false;
+    defer runtime.deinit();
+
+    try std.testing.expect(runtime.syncInitialHealth());
+    try std.testing.expect(try runtime.beginConfigurationApply(1));
+    try std.testing.expectEqual(
+        state_module.McpRuntimeAuthorizationFailureOutcome.pending,
+        try runtime.requireOauthReauthorization(.{
+            .server_id = "oauth-server",
+            .consent_epoch = 1,
+            .token_revision = 1,
+            .challenge_scopes = &.{},
+            .challenge_scopes_complete = true,
+        }),
+    );
+    try std.testing.expect(runtime.runtime_auth_delivery_pending);
+    try std.testing.expectEqual(@as(usize, 0), harness.notifications);
+    try std.testing.expect(runtime.failConfigurationApply(1));
+    try std.testing.expect(!runtime.runtime_auth_delivery_pending);
     try std.testing.expectEqual(@as(usize, 1), harness.notifications);
 }

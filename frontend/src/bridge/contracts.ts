@@ -648,6 +648,10 @@ export type PermissionHistory = {
     "answered" | "user_cancelled" | "unavailable" | "contract_failure" | null;
 };
 
+export type TaskMcpAuthority =
+  | { kind: "ready"; selection: "selected" | "none" }
+  | { kind: "unavailable"; selection: null };
+
 export type TaskView = {
   id: string;
   recentOrder: string;
@@ -662,6 +666,7 @@ export type TaskView = {
     executionGeneration: string;
     unavailableReason: "runtime_detached" | null;
   };
+  mcpAuthority: TaskMcpAuthority;
   skillCatalog: SkillCatalogView;
   lifecycle: "open" | "closing";
   deletionStatus: "idle" | "deleting" | "failed";
@@ -1073,12 +1078,14 @@ export type TaskCreateResult =
       accepted: true;
       taskId: string;
       bindingEpoch: string;
+      mcpAuthority: TaskMcpAuthority;
       reason: null;
     }
   | {
       accepted: false;
       taskId: null;
       bindingEpoch: null;
+      mcpAuthority: null;
       reason: TaskCreateReason;
     };
 

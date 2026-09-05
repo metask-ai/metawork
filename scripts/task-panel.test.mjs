@@ -142,6 +142,7 @@ function task(overrides = {}) {
     title: "Release review",
     workspaceId: "1",
     binding: {},
+    mcpAuthority: { kind: "unavailable", selection: null },
     lifecycle: "open",
     deletionStatus: "idle",
     continuationAvailable: true,
@@ -279,6 +280,27 @@ test("Task Panel availability comes only from real Task facts", () => {
       }),
     ),
     true,
+  );
+});
+
+test("Overview distinguishes immutable MCP authority captured at Task creation", () => {
+  assert.match(
+    renderTaskOverview(
+      task({ mcpAuthority: { kind: "ready", selection: "selected" } }),
+    ),
+    /Tools selected/,
+  );
+  assert.match(
+    renderTaskOverview(
+      task({ mcpAuthority: { kind: "ready", selection: "none" } }),
+    ),
+    /Ready · no tools selected/,
+  );
+  assert.match(
+    renderTaskOverview(
+      task({ mcpAuthority: { kind: "unavailable", selection: null } }),
+    ),
+    /Unavailable/,
   );
 });
 
