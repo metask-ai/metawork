@@ -64,6 +64,8 @@ pub const BuiltinProviderId = enum {
 pub const BuiltinProviderPresetView = struct {
     id: BuiltinProviderId,
     display_name: []const u8,
+    protocol: Protocol,
+    default_base_url: []const u8,
     api_key_url: []const u8,
     documentation_url: []const u8,
 };
@@ -816,6 +818,44 @@ pub fn validCustomProviderEndpoint(protocol: Protocol, value: []const u8) bool {
     };
 }
 
+pub fn validProviderBaseUrl(value: []const u8) bool {
+    if (value.len == 0 or value.len > Limits.base_url_bytes or
+        !std.unicode.utf8ValidateSlice(value)) return false;
+    for (value) |byte| if (byte <= 0x20 or byte == 0x7f or byte == '\\')
+        return false;
+    const uri = std.Uri.parse(value) catch return false;
+    if (uri.user != null or uri.password != null or uri.query != null or
+        uri.fragment != null or uri.host == null) return false;
+    const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
+    const is_http_loopback = std.ascii.eqlIgnoreCase(uri.scheme, "http") and
+        isLoopbackHost(uri.host.?);
+    return is_https or is_http_loopback;
+}
+
+pub fn completionEndpointFromBaseUrlAlloc(
+    allocator: std.mem.Allocator,
+    protocol: Protocol,
+    value: []const u8,
+) (std.mem.Allocator.Error || ValidationError)![]u8 {
+    if (!customProviderProtocolAvailable(protocol))
+        return error.UnsupportedProtocol;
+    if (!validProviderBaseUrl(value)) return error.InvalidBaseUrl;
+    var base_url_end = value.len;
+    while (base_url_end > 0 and value[base_url_end - 1] == '/') : (base_url_end -= 1) {}
+    const base_url = value[0..base_url_end];
+    const suffix = switch (protocol) {
+        .openai_responses => "/responses",
+        .anthropic_messages => "/v1/messages",
+        .openai_chat_completions => "/chat/completions",
+        .gemini_native => "",
+    };
+    if (base_url.len + suffix.len > Limits.base_url_bytes)
+        return error.InvalidBaseUrl;
+    const candidate = try std.mem.concat(allocator, u8, &.{ base_url, suffix });
+    defer allocator.free(candidate);
+    return normalizeCustomProviderEndpointAlloc(allocator, protocol, candidate);
+}
+
 pub fn normalizeCustomProviderEndpointAlloc(
     allocator: std.mem.Allocator,
     protocol: Protocol,
@@ -1198,6 +1238,38 @@ test "custom provider endpoint normalization is deterministic" {
         std.testing.allocator,
         .openai_chat_completions,
         "https://api%2eexample.com/v1/chat/completions",
+    ));
+}
+
+test "provider Base URLs map to exact protocol endpoints" {
+    inline for (.{
+        .{ Protocol.openai_responses, "https://api.openai.com/v1/", "https://api.openai.com/v1/responses" },
+        .{ Protocol.anthropic_messages, "https://api.minimaxi.com/anthropic", "https://api.minimaxi.com/anthropic/v1/messages" },
+        .{ Protocol.openai_chat_completions, "HTTPS://API.Moonshot.CN/v1/", "https://api.moonshot.cn/v1/chat/completions" },
+        .{ Protocol.gemini_native, "https://generativelanguage.googleapis.com/", "https://generativelanguage.googleapis.com" },
+    }) |case| {
+        const endpoint = try completionEndpointFromBaseUrlAlloc(
+            std.testing.allocator,
+            case[0],
+            case[1],
+        );
+        defer std.testing.allocator.free(endpoint);
+        try std.testing.expectEqualStrings(case[2], endpoint);
+    }
+    try std.testing.expectError(error.InvalidBaseUrl, completionEndpointFromBaseUrlAlloc(
+        std.testing.allocator,
+        .openai_chat_completions,
+        "https://user@example.com/v1",
+    ));
+    try std.testing.expectError(error.InvalidBaseUrl, completionEndpointFromBaseUrlAlloc(
+        std.testing.allocator,
+        .openai_chat_completions,
+        "https://api.example.com/v1?token=secret",
+    ));
+    try std.testing.expectError(error.InvalidBaseUrl, completionEndpointFromBaseUrlAlloc(
+        std.testing.allocator,
+        .openai_chat_completions,
+        "http://api.example.com/v1",
     ));
 }
 

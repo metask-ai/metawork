@@ -910,13 +910,77 @@ pub const Runtime = struct {
         secret: []const u8,
         provider_id: contract.BuiltinProviderId,
     ) contract.CommandResult {
+        return self.createBuiltinAtBaseUrlWithCredential(
+            secret,
+            provider_id,
+            builtin_providers.find(provider_id).default_base_url,
+        );
+    }
+
+    pub fn createBuiltinAtBaseUrlWithCredential(
+        self: *Runtime,
+        secret: []const u8,
+        provider_id: contract.BuiltinProviderId,
+        base_url: []const u8,
+    ) contract.CommandResult {
         for (self.registry.views()) |provider|
             if (provider.builtin_provider_id == provider_id)
                 return .rejected(.invalid_provider);
+        const definition = builtin_providers.find(provider_id);
+        const endpoint = contract.completionEndpointFromBaseUrlAlloc(
+            self.allocator,
+            definition.protocol,
+            base_url,
+        ) catch return .rejected(.invalid_provider);
+        defer self.allocator.free(endpoint);
         return self.createWithResolvedCredential(
             secret,
-            builtin_providers.find(provider_id).spec(),
+            definition.spec(endpoint),
         );
+    }
+
+    pub fn updateBuiltinBaseUrl(
+        self: *Runtime,
+        selection: contract.CustomProviderSelectionCommand,
+        base_url: []const u8,
+    ) contract.CommandResult {
+        self.assertMainThread();
+        if (!self.store_healthy) return .rejected(.persistence_unavailable);
+        var candidate = self.registry.clone() catch |err|
+            return .rejected(mapRegistryError(err));
+        defer candidate.deinit();
+        const current = findProviderView(candidate.views(), selection.source_id) orelse
+            return .rejected(.provider_not_found);
+        if (current.provider_revision != selection.expected_provider_revision)
+            return .rejected(.generation_mismatch);
+        const builtin_provider_id = current.builtin_provider_id orelse
+            return .rejected(.invalid_provider);
+        const definition = builtin_providers.find(builtin_provider_id);
+        const endpoint = contract.completionEndpointFromBaseUrlAlloc(
+            self.allocator,
+            definition.protocol,
+            base_url,
+        ) catch return .rejected(.invalid_provider);
+        defer self.allocator.free(endpoint);
+        if (std.mem.eql(u8, current.normalized_base_url, endpoint))
+            return .acceptedResult();
+        const provider_revision = self.freshGeneration(current.provider_revision) catch
+            return .rejected(.local_resource_exhausted);
+        const source_generation = self.freshGeneration(
+            candidate.sourceGenerationForProvider(current.id) orelse
+                return .rejected(.provider_not_found),
+        ) catch return .rejected(.local_resource_exhausted);
+        const selection_revision = if (isDefaultProvider(&candidate, current.id))
+            self.freshGeneration(candidate.selection_revision) catch
+                return .rejected(.local_resource_exhausted)
+        else
+            null;
+        candidate.update(.{
+            .selection = selection,
+            .spec = definition.spec(endpoint),
+        }, provider_revision, source_generation, selection_revision) catch |err|
+            return .rejected(mapRegistryError(err));
+        return self.commitCandidate(&candidate, true);
     }
 
     fn createWithResolvedCredential(
@@ -1458,7 +1522,22 @@ test "built-in Provider recipe creates a fixed provider and reuses model managem
         .expected_catalog_generation = provider.catalog_generation,
         .model = .{ .id = "deepseek-chat", .display_name = "DeepSeek Chat" },
     } }).accepted);
-    try std.testing.expectEqual(@as(usize, 1), runtime.views()[0].models.len);
+    const before_update = runtime.views()[0];
+    const before_source_generation = before_update.source_generation;
+    try std.testing.expect(runtime.updateBuiltinBaseUrl(.{
+        .source_id = TestVault.slot,
+        .expected_provider_revision = before_update.provider_revision,
+    }, "https://gateway.example.com/deepseek/v1/").accepted);
+    const updated = runtime.views()[0];
+    try std.testing.expectEqualStrings(
+        "https://gateway.example.com/deepseek/v1/chat/completions",
+        updated.normalized_base_url,
+    );
+    try std.testing.expectEqualStrings("DeepSeek", updated.display_name);
+    try std.testing.expectEqual(contract.Protocol.openai_chat_completions, updated.protocol);
+    try std.testing.expect(updated.source_generation != before_source_generation);
+    try std.testing.expectEqual(@as(usize, 1), updated.models.len);
+    try std.testing.expectEqual(contract.CustomModelTestStatus.untested, updated.models[0].test_status);
 }
 
 test "Models Runtime owns durable custom providers and source resolution" {

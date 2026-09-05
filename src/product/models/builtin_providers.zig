@@ -10,16 +10,16 @@ pub const Definition = struct {
     id: contract.BuiltinProviderId,
     display_name: []const u8,
     protocol: contract.Protocol,
-    completion_endpoint: []const u8,
+    default_base_url: []const u8,
     api_key_url: []const u8,
     documentation_url: []const u8,
 
-    pub fn spec(self: Definition) contract.CustomProviderSpec {
+    pub fn spec(self: Definition, normalized_endpoint: []const u8) contract.CustomProviderSpec {
         return .{
             .builtin_provider_id = self.id,
             .display_name = self.display_name,
             .protocol = self.protocol,
-            .normalized_base_url = self.completion_endpoint,
+            .normalized_base_url = normalized_endpoint,
         };
     }
 
@@ -27,6 +27,8 @@ pub const Definition = struct {
         return .{
             .id = self.id,
             .display_name = self.display_name,
+            .protocol = self.protocol,
+            .default_base_url = self.default_base_url,
             .api_key_url = self.api_key_url,
             .documentation_url = self.documentation_url,
         };
@@ -38,7 +40,7 @@ pub const definitions = [_]Definition{
         .id = .deepseek,
         .display_name = "DeepSeek",
         .protocol = .openai_chat_completions,
-        .completion_endpoint = "https://api.deepseek.com/chat/completions",
+        .default_base_url = "https://api.deepseek.com",
         .api_key_url = "https://platform.deepseek.com/api_keys",
         .documentation_url = "https://api-docs.deepseek.com/",
     },
@@ -46,7 +48,7 @@ pub const definitions = [_]Definition{
         .id = .kimi,
         .display_name = "Kimi",
         .protocol = .openai_chat_completions,
-        .completion_endpoint = "https://api.moonshot.cn/v1/chat/completions",
+        .default_base_url = "https://api.moonshot.cn/v1",
         .api_key_url = "https://platform.moonshot.cn/console/api-keys",
         .documentation_url = "https://platform.kimi.com/docs/api/overview",
     },
@@ -54,7 +56,7 @@ pub const definitions = [_]Definition{
         .id = .minimax,
         .display_name = "MiniMax",
         .protocol = .anthropic_messages,
-        .completion_endpoint = "https://api.minimaxi.com/anthropic/v1/messages",
+        .default_base_url = "https://api.minimaxi.com/anthropic",
         .api_key_url = "https://platform.minimaxi.com/user-center/basic-information/interface-key",
         .documentation_url = "https://platform.minimaxi.com/docs/api-reference/api-overview",
     },
@@ -62,7 +64,7 @@ pub const definitions = [_]Definition{
         .id = .glm,
         .display_name = "智谱 GLM",
         .protocol = .openai_chat_completions,
-        .completion_endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        .default_base_url = "https://open.bigmodel.cn/api/paas/v4",
         .api_key_url = "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
         .documentation_url = "https://docs.bigmodel.cn/cn/api/introduction",
     },
@@ -91,13 +93,20 @@ test "official Provider recipes use explicit execution routes" {
     try std.testing.expectEqual(@as(usize, 4), definitions.len);
     for (definitions) |definition| {
         try std.testing.expect(definition.display_name.len != 0);
-        try std.testing.expect(definition.completion_endpoint.len != 0);
+        try std.testing.expect(contract.validProviderBaseUrl(definition.default_base_url));
         try std.testing.expect(definition.api_key_url.len != 0);
         try std.testing.expect(definition.documentation_url.len != 0);
-        try std.testing.expectEqual(definition.id, definition.spec().builtin_provider_id.?);
+        const endpoint = try contract.completionEndpointFromBaseUrlAlloc(
+            std.testing.allocator,
+            definition.protocol,
+            definition.default_base_url,
+        );
+        defer std.testing.allocator.free(endpoint);
+        const spec = definition.spec(endpoint);
+        try std.testing.expectEqual(definition.id, spec.builtin_provider_id.?);
         try std.testing.expect(contract.validCustomProviderEndpoint(
             definition.protocol,
-            definition.completion_endpoint,
+            endpoint,
         ));
     }
 }
