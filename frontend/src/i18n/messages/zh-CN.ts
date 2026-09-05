@@ -719,6 +719,20 @@ export const zhCN: Record<MessageId, string> = {
   "settings.provider_add": "添加 Provider",
   "settings.provider_add_title": "添加 Provider",
   "settings.back_to_providers": "返回 Provider",
+  "settings.provider_creation_mode": "Provider 配置方式",
+  "settings.builtin_provider": "官方厂商",
+  "settings.custom_provider": "自定义服务",
+  "settings.builtin_provider_official_api": "官方 API 预设",
+  "settings.builtin_provider_title": "连接官方厂商",
+  "settings.builtin_provider_help":
+    "协议和官方服务地址由 MetaWork 提供；你只需要填写 API Key。",
+  "settings.choose_builtin_provider": "选择官方厂商",
+  "settings.get_api_key": "获取 API Key",
+  "settings.open_provider_docs": "查看官方文档",
+  "settings.builtin_provider_select_help":
+    "选择厂商后，可前往对应官方平台获取 API Key 或查看文档。",
+  "settings.builtin_provider_connect": "保存 Provider",
+  "settings.builtin_provider_managed": "MetaWork 官方 API 预设",
   "settings.models_error": "模型配置需要处理",
   "settings.models_error_help":
     "请刷新 Metask 模型目录或检查已保存的模型配置。",

@@ -347,6 +347,7 @@ const readySettingsModels = {
   selectionRevision: "1",
   operation: "idle",
   errorCode: "none",
+  builtinProviderPresets: [],
   customProviders: [],
 };
 
@@ -394,6 +395,9 @@ function settingsElement(account, overrides = {}) {
       onSelectApiKey() {},
       onSelectModel() {},
       onCreateCustomProvider() {
+        return Promise.resolve(false);
+      },
+      onCreateBuiltinProvider() {
         return Promise.resolve(false);
       },
       onUpdateCustomProvider() {
@@ -488,6 +492,7 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
 
   await user.click(screen.getByRole("link", { name: "Providers" }));
   await user.click(screen.getByRole("button", { name: "Add provider" }));
+  await user.click(screen.getByRole("button", { name: "Custom provider" }));
 
   const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
   assert.equal(baseUrl.value, "");
@@ -526,6 +531,51 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
   ]);
 });
 
+test("Official Provider setup asks only for the preset and API key", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const submitted = [];
+  renderSettings(readySettingsAccount, {
+    models: {
+      ...readySettingsModels,
+      builtinProviderPresets: [
+        {
+          id: "deepseek",
+          displayName: "DeepSeek",
+          apiKeyUrl: "https://platform.deepseek.com/api_keys",
+          documentationUrl: "https://api-docs.deepseek.com/",
+        },
+      ],
+    },
+    customProviderCapabilities: {
+      management: true,
+      secretCapture: true,
+      modelTest: true,
+    },
+    onCreateBuiltinProvider(input) {
+      submitted.push(input);
+      return Promise.resolve(false);
+    },
+  });
+
+  await user.click(screen.getByRole("link", { name: "Providers" }));
+  await user.click(screen.getByRole("button", { name: "Add provider" }));
+  assert.equal(screen.queryByRole("combobox", { name: "Protocol" }), null);
+  assert.equal(screen.queryByRole("textbox", { name: "Base URL" }), null);
+
+  await user.click(screen.getByRole("combobox", { name: "Provider" }));
+  await user.click(await screen.findByRole("option", { name: /DeepSeek/ }));
+  const apiKey = screen.getByLabelText("API key");
+  await user.type(apiKey, "deepseek-secret");
+  assert.equal(
+    screen.getByRole("link", { name: "Get an API key" }).href,
+    "https://platform.deepseek.com/api_keys",
+  );
+  await user.click(screen.getByRole("button", { name: "Save provider" }));
+  assert.deepEqual(submitted, [
+    { providerId: "deepseek", apiKey: "deepseek-secret" },
+  ]);
+});
+
 test("Provider API key update lives inside Edit and submits the exact user input", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const replacements = [];
@@ -540,6 +590,7 @@ test("Provider API key update lives inside Edit and submits the exact user input
       customProviders: [
         {
           id: "provider-1",
+          builtinProviderId: null,
           displayName: "Team OpenAI",
           protocol: "openai_responses",
           normalizedBaseUrl: "https://api.openai.com/v1/responses",
@@ -730,6 +781,7 @@ test("Settings keeps Metask available while a custom provider is the default", a
       customProviders: [
         {
           id: "provider-1",
+          builtinProviderId: null,
           displayName: "Team OpenAI",
           protocol: "openai_chat_completions",
           normalizedBaseUrl: "https://api.openai.com/v1/chat/completions",
@@ -802,6 +854,7 @@ test("Models keeps adding and removing models after the first provider model", a
       customProviders: [
         {
           id: "provider-multi",
+          builtinProviderId: null,
           displayName: "Multi-model provider",
           protocol: "openai_responses",
           normalizedBaseUrl: "https://api.openai.com/v1/responses",

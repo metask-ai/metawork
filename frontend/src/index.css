@@ -1059,6 +1059,63 @@ summary::-webkit-details-marker {
   background: var(--settings-frost);
 }
 
+.settings-provider-creation-mode {
+  display: inline-flex;
+  width: fit-content;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--settings-line);
+  border-radius: 10px;
+  background: var(--settings-frost);
+}
+
+.settings-provider-creation-mode button {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--settings-muted);
+  background: transparent;
+  font: inherit;
+  font-size: var(--text-label);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.settings-provider-creation-mode button[aria-pressed="true"] {
+  color: var(--settings-ink);
+  background: var(--settings-paper);
+  box-shadow: 0 1px 3px rgba(37, 34, 45, 0.08);
+}
+
+.settings-builtin-provider-intro {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 4px;
+  padding-bottom: 2px;
+}
+
+.settings-builtin-provider-intro strong {
+  color: var(--settings-ink);
+  font-size: var(--text-body);
+}
+
+.settings-builtin-provider-intro p {
+  margin: 0;
+  color: var(--settings-muted);
+  font-size: var(--text-label);
+  line-height: 1.45;
+}
+
+.settings-builtin-provider-create a {
+  color: var(--settings-brand);
+  text-decoration: none;
+}
+
+.settings-builtin-provider-create a:hover {
+  text-decoration: underline;
+}
+
 .settings-custom-provider-route {
   position: relative;
   display: grid;

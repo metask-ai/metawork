@@ -780,6 +780,20 @@ export const enUS = {
   "settings.provider_add": "Add provider",
   "settings.provider_add_title": "Add provider",
   "settings.back_to_providers": "Back to providers",
+  "settings.provider_creation_mode": "Provider setup type",
+  "settings.builtin_provider": "Official provider",
+  "settings.custom_provider": "Custom provider",
+  "settings.builtin_provider_official_api": "Official API preset",
+  "settings.builtin_provider_title": "Connect an official provider",
+  "settings.builtin_provider_help":
+    "MetaWork supplies the protocol and official endpoint. You only need an API key.",
+  "settings.choose_builtin_provider": "Choose an official provider",
+  "settings.get_api_key": "Get an API key",
+  "settings.open_provider_docs": "Open official documentation",
+  "settings.builtin_provider_select_help":
+    "Choose a provider to see its official API key and documentation links.",
+  "settings.builtin_provider_connect": "Save provider",
+  "settings.builtin_provider_managed": "MetaWork official API preset",
   "settings.models_error": "Model configuration needs attention",
   "settings.models_error_help":
     "Refresh the Metask catalog or review the saved model configuration.",

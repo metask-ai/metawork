@@ -3073,6 +3073,9 @@ export default function App() {
             onCreateCustomProvider={(input) =>
               runExecutionCommand(() => client.createCustomProvider(input))
             }
+            onCreateBuiltinProvider={(input) =>
+              runExecutionCommand(() => client.createBuiltinProvider(input))
+            }
             onUpdateCustomProvider={(input) =>
               runExecutionCommand(() =>
                 client.updateCustomProvider({
