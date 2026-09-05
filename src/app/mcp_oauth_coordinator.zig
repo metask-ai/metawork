@@ -496,8 +496,7 @@ pub const Coordinator = struct {
 fn commitRotation(context: *anyopaque) void {
     const pending: *mcp_platform.PendingHttpAuthRotation =
         @ptrCast(@alignCast(context));
-    if (pending.commit() != .replaced)
-        @panic("durable MCP token rotation lost its prepared HTTP snapshot CAS");
+    pending.commit();
 }
 
 fn secureFree(allocator: std.mem.Allocator, secret: []u8) void {

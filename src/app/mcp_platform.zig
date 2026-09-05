@@ -296,6 +296,7 @@ const HttpAuthSlot = struct {
     mutex: std.Io.Mutex = .init,
     server_id: []u8,
     current: *HttpAuthSnapshot,
+    rotation_reserved: bool = false,
     pending_failure: ?PendingRuntimeAuthFailure = null,
     failure_notifier: ?RuntimeAuthFailureNotifier = null,
 
@@ -451,29 +452,49 @@ const HttpAuthSlot = struct {
         return self.pending_failure != null;
     }
 
-    fn replace(
+    fn reserveRotation(
         self: *HttpAuthSlot,
         expected_consent_epoch: u64,
         expected_token_revision: u64,
         replacement: *HttpAuthSnapshot,
     ) HttpAuthRotationOutcome {
         self.mutex.lockUncancelable(self.io);
-        const current = self.current;
-        if (current.consent_epoch != expected_consent_epoch) {
-            self.mutex.unlock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.current.consent_epoch != expected_consent_epoch)
             return .consent_epoch_mismatch;
-        }
-        if (current.token_revision != expected_token_revision or
+        if (self.rotation_reserved or
+            self.current.token_revision != expected_token_revision or
             replacement.token_revision != expected_token_revision + 1 or
             replacement.consent_epoch != expected_consent_epoch)
-        {
-            self.mutex.unlock(self.io);
             return .token_revision_mismatch;
-        }
+        self.rotation_reserved = true;
+        return .replaced;
+    }
+
+    fn commitReservedRotation(
+        self: *HttpAuthSlot,
+        expected_consent_epoch: u64,
+        expected_token_revision: u64,
+        replacement: *HttpAuthSnapshot,
+    ) void {
+        self.mutex.lockUncancelable(self.io);
+        const current = self.current;
+        std.debug.assert(self.rotation_reserved);
+        std.debug.assert(current.consent_epoch == expected_consent_epoch);
+        std.debug.assert(current.token_revision == expected_token_revision);
+        std.debug.assert(replacement.consent_epoch == expected_consent_epoch);
+        std.debug.assert(replacement.token_revision == expected_token_revision + 1);
         self.current = replacement;
+        self.rotation_reserved = false;
         self.mutex.unlock(self.io);
         current.release();
-        return .replaced;
+    }
+
+    fn cancelReservedRotation(self: *HttpAuthSlot) void {
+        self.mutex.lockUncancelable(self.io);
+        std.debug.assert(self.rotation_reserved);
+        self.rotation_reserved = false;
+        self.mutex.unlock(self.io);
     }
 };
 
@@ -503,23 +524,32 @@ pub const PendingHttpAuthRotation = struct {
     expected_consent_epoch: u64,
     expected_token_revision: u64,
 
-    pub fn commit(self: *PendingHttpAuthRotation) HttpAuthRotationOutcome {
-        const slot = self.slot orelse return .server_not_loaded;
-        const replacement = self.replacement orelse return .token_revision_mismatch;
-        const outcome = slot.replace(
+    pub fn commit(self: *PendingHttpAuthRotation) void {
+        const slot = self.slot orelse unreachable;
+        const replacement = self.replacement orelse unreachable;
+        slot.commitReservedRotation(
             self.expected_consent_epoch,
             self.expected_token_revision,
             replacement,
         );
-        if (outcome == .replaced) self.replacement = null;
-        return outcome;
+        self.replacement = null;
     }
 
     pub fn deinit(self: *PendingHttpAuthRotation) void {
-        if (self.replacement) |replacement| replacement.release();
+        if (self.replacement) |replacement| {
+            if (self.slot) |slot| slot.cancelReservedRotation();
+            replacement.release();
+        }
         if (self.slot) |slot| slot.release();
         self.* = undefined;
     }
+};
+
+const HttpAuthRotationPreparation = union(enum) {
+    prepared: PendingHttpAuthRotation,
+    server_not_loaded,
+    consent_epoch_mismatch,
+    token_revision_mismatch,
 };
 
 /// Application-owned lookup authority for the OAuth HTTP transports loaded by
@@ -578,17 +608,20 @@ pub const HttpAuthorizations = struct {
         expected_token_revision: u64,
         access_token: []const u8,
     ) std.mem.Allocator.Error!HttpAuthRotationOutcome {
-        if (expected_token_revision == std.math.maxInt(u64))
-            return .token_revision_mismatch;
-        var pending = (try self.prepareRotation(
+        var pending = switch (try self.prepareRotationDetailed(
             server_id,
             expected_consent_epoch,
             expected_token_revision,
             access_token,
-        )) orelse return .server_not_loaded;
+        )) {
+            .prepared => |prepared| prepared,
+            .server_not_loaded => return .server_not_loaded,
+            .consent_epoch_mismatch => return .consent_epoch_mismatch,
+            .token_revision_mismatch => return .token_revision_mismatch,
+        };
         defer pending.deinit();
-        const outcome = pending.commit();
-        return outcome;
+        pending.commit();
+        return .replaced;
     }
 
     pub fn prepareRotation(
@@ -598,24 +631,62 @@ pub const HttpAuthorizations = struct {
         expected_token_revision: u64,
         access_token: []const u8,
     ) std.mem.Allocator.Error!?PendingHttpAuthRotation {
-        if (!mcp_configuration.validHttpHeaderCredential(access_token)) return null;
+        return switch (try self.prepareRotationDetailed(
+            server_id,
+            expected_consent_epoch,
+            expected_token_revision,
+            access_token,
+        )) {
+            .prepared => |prepared| prepared,
+            .server_not_loaded,
+            .consent_epoch_mismatch,
+            .token_revision_mismatch,
+            => null,
+        };
+    }
+
+    fn prepareRotationDetailed(
+        self: *HttpAuthorizations,
+        server_id: []const u8,
+        expected_consent_epoch: u64,
+        expected_token_revision: u64,
+        access_token: []const u8,
+    ) std.mem.Allocator.Error!HttpAuthRotationPreparation {
+        if (!mcp_configuration.validHttpHeaderCredential(access_token) or
+            expected_token_revision == std.math.maxInt(u64))
+            return .token_revision_mismatch;
         const slot = for (self.slots) |candidate| {
             if (std.mem.eql(u8, candidate.server_id, server_id)) break candidate;
-        } else return null;
-        if (expected_token_revision == std.math.maxInt(u64)) return null;
+        } else return .server_not_loaded;
         slot.retain();
-        errdefer slot.release();
-        return .{
+        var slot_owned = true;
+        defer if (slot_owned) slot.release();
+        const replacement = try HttpAuthSnapshot.create(
+            self.allocator,
+            expected_consent_epoch,
+            expected_token_revision + 1,
+            access_token,
+        );
+        var replacement_owned = true;
+        defer if (replacement_owned) replacement.release();
+        switch (slot.reserveRotation(
+            expected_consent_epoch,
+            expected_token_revision,
+            replacement,
+        )) {
+            .replaced => {},
+            .server_not_loaded => unreachable,
+            .consent_epoch_mismatch => return .consent_epoch_mismatch,
+            .token_revision_mismatch => return .token_revision_mismatch,
+        }
+        slot_owned = false;
+        replacement_owned = false;
+        return .{ .prepared = .{
             .slot = slot,
-            .replacement = try HttpAuthSnapshot.create(
-                self.allocator,
-                expected_consent_epoch,
-                expected_token_revision + 1,
-                access_token,
-            ),
+            .replacement = replacement,
             .expected_consent_epoch = expected_consent_epoch,
             .expected_token_revision = expected_token_revision,
-        };
+        } };
     }
 };
 
@@ -1712,7 +1783,7 @@ test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {
         "new-access-token",
     )).?;
     defer pending.deinit();
-    try std.testing.expectEqual(HttpAuthRotationOutcome.replaced, pending.commit());
+    pending.commit();
     try std.testing.expectEqualStrings("old-access-token", in_flight.token());
     var next = slot.lease();
     defer next.deinit();
@@ -1725,6 +1796,52 @@ test "OAuth HTTP authorization rotates only by same-epoch revision CAS" {
         HttpAuthRotationOutcome.token_revision_mismatch,
         try authorizations.rotate("oauth-server", 4, 7, "stale-revision"),
     );
+}
+
+test "OAuth HTTP authorization reservation is exclusive and abandonment is retryable" {
+    const slot = try HttpAuthSlot.create(
+        std.testing.allocator,
+        std.testing.io,
+        "oauth-server",
+        4,
+        7,
+        "old-access-token",
+    );
+    defer slot.release();
+    const slots = try std.testing.allocator.alloc(*HttpAuthSlot, 1);
+    slots[0] = slot;
+    slot.retain();
+    var authorizations: HttpAuthorizations = .{
+        .allocator = std.testing.allocator,
+        .slots = slots,
+    };
+    defer authorizations.deinit();
+
+    var first = (try authorizations.prepareRotation(
+        "oauth-server",
+        4,
+        7,
+        "first-token",
+    )).?;
+    try std.testing.expect((try authorizations.prepareRotation(
+        "oauth-server",
+        4,
+        7,
+        "second-token",
+    )) == null);
+    first.deinit();
+
+    var retry = (try authorizations.prepareRotation(
+        "oauth-server",
+        4,
+        7,
+        "retry-token",
+    )).?;
+    defer retry.deinit();
+    retry.commit();
+    var lease = slot.lease();
+    defer lease.deinit();
+    try std.testing.expectEqualStrings("retry-token", lease.token());
 }
 
 test "OAuth HTTP authorization publishes the exact rejected snapshot fact" {

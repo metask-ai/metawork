@@ -863,12 +863,12 @@ pub const Runtime = struct {
         self: *Runtime,
         preparation: *configuration.MutationPreparation,
     ) Error!configuration.ManagementOutcome {
-        if (self.state.configuration_apply_state == .applying) return .rejected;
         switch (preparation.*) {
             .unchanged => return .unchanged,
             .rejected => return .rejected,
             .prepared => |*mutation| {
                 defer mutation.deinit();
+                if (self.state.configuration_apply_state == .applying) return .rejected;
                 var candidate = try self.admissionForTarget(mutation.target());
                 var candidate_owned = true;
                 defer if (candidate_owned) candidate.deinit();
@@ -1430,7 +1430,6 @@ pub const Runtime = struct {
                 var candidate = try self.admissionForTarget(mutation.target());
                 var candidate_owned = true;
                 defer if (candidate_owned) candidate.deinit();
-                if (candidate != .ready) return .rejected;
                 const outcome = try management.commitPreparedMutation(mutation);
                 const reported_outcome = if (outcome == .saved_recovery_required and
                     management.inspect().health == .outcome_unknown)
@@ -1693,6 +1692,11 @@ const test_limits: configuration.Limits = .{
     .max_runtime_secret_bytes_per_server = 4096,
 };
 
+fn fillTestMcpIdentity(_: ?*anyopaque, bytes: *[16]u8) bool {
+    bytes.* = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    return true;
+}
+
 test "Product MCP Runtime retains refresh requested during apply and starts it on settlement" {
     const allocator = std.testing.allocator;
     const registry: configuration.RegistryWire = .{
@@ -1746,4 +1750,58 @@ test "Product MCP Runtime retains refresh requested during apply and starts it o
     try std.testing.expect(runtime.syncRefreshJob());
     try std.testing.expect(!runtime.hasRefreshJob());
     try std.testing.expectEqual(@as(usize, 1), harness.notifications);
+}
+
+test "Product MCP Runtime releases a prepared mutation rejected during apply" {
+    const allocator = std.testing.allocator;
+    const registry: configuration.RegistryWire = .{
+        .schema_version = configuration.schema_version,
+        .generation = 1,
+        .oauth_operation = null,
+        .servers = &.{},
+    };
+    var management = try configuration.ManagementPort.init(
+        allocator,
+        registry,
+        .{
+            .persistence = .{ .available = true },
+            .credentials = .{ .available = true },
+            .identity_generator = .{
+                .available = true,
+                .fill_fn = fillTestMcpIdentity,
+            },
+            .limits = test_limits,
+        },
+    );
+    var management_owned = true;
+    defer if (management_owned) management.deinit();
+    var harness = TestHarness{};
+    var runtime = Runtime.init(
+        allocator,
+        harness.ports(),
+        .{
+            .preparation = .{ .allocator = allocator, .state = .empty },
+            .activation = null,
+            .activation_failed = false,
+            .management = management,
+            .admission = .{ .ready = .{
+                .selection = null,
+                .catalog_generation = null,
+            } },
+            .host_capabilities = .{},
+        },
+    );
+    management_owned = false;
+    defer runtime.deinit();
+
+    try std.testing.expect(runtime.syncInitialHealth());
+    try std.testing.expect(try runtime.beginConfigurationApply(1));
+    try std.testing.expectEqual(
+        configuration.ManagementOutcome.rejected,
+        try runtime.createHttpServer(1, .{
+            .display_name = "Prepared while applying",
+            .url = "https://mcp.example.test/rpc",
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 1), runtime.state.management.?.inspect().desired_generation);
 }
