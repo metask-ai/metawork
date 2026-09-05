@@ -5,11 +5,11 @@ import { CodeBlock } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { formatInteger } from "../../i18n/formatters.ts";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
-import type { InspectorSection } from "./inspector-state.ts";
+import type { TaskOverviewSection } from "./task-panel-state.ts";
 
-export type InspectorFocusRequest = {
+export type TaskOverviewFocusRequest = {
   taskId: string;
-  section: InspectorSection;
+  section: TaskOverviewSection;
   runId?: string;
   toolId?: string;
   nonce: number;
@@ -17,7 +17,7 @@ export type InspectorFocusRequest = {
 
 function selectedRun(
   task: TaskView,
-  focusRequest: InspectorFocusRequest,
+  focusRequest: TaskOverviewFocusRequest,
 ): RunView | null {
   if (focusRequest?.taskId === task.id && focusRequest.runId) {
     const requested = task.runs.find((run) => run.id === focusRequest.runId);
@@ -302,7 +302,7 @@ function WorkProcess({
   );
 }
 
-export function TaskOverview({
+export function TaskOverviewView({
   task,
   permissionProfilesEnabled,
   focusRequest,
@@ -310,11 +310,11 @@ export function TaskOverview({
 }: {
   task: TaskView;
   permissionProfilesEnabled: boolean;
-  focusRequest: InspectorFocusRequest;
+  focusRequest: TaskOverviewFocusRequest;
   onFocusPending: () => void;
 }) {
   const { locale, t } = useI18n();
-  const sectionRefs = useRef<Partial<Record<InspectorSection, HTMLElement>>>(
+  const sectionRefs = useRef<Partial<Record<TaskOverviewSection, HTMLElement>>>(
     {},
   );
   const run = selectedRun(task, focusRequest);
@@ -346,17 +346,13 @@ export function TaskOverview({
   }, [focusRequest, task.id]);
 
   return (
-    <div className="inspector-frame">
-      <header className="inspector-header">
-        <h2 id="task-inspector-title">{t("inspector.title")}</h2>
-        {permissionProfilesEnabled && (
-          <div className="inspector-permission-profile">
-            <span>{t("permission.task.label")}</span>
-            <strong>{t(`permission.profile.${task.permissionProfile}`)}</strong>
-          </div>
-        )}
-      </header>
-
+    <div className="task-overview-view">
+      {permissionProfilesEnabled && (
+        <div className="inspector-permission-profile">
+          <span>{t("permission.task.label")}</span>
+          <strong>{t(`permission.profile.${task.permissionProfile}`)}</strong>
+        </div>
+      )}
       <div className="inspector-sections">
         {task.pendingUi && (
           <section

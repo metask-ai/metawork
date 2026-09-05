@@ -10,7 +10,7 @@ import { Icon } from "../components/ui/Icon.tsx";
 import { ResizableSeparator } from "../components/ui/ResizableSeparator.tsx";
 import { WindowControls } from "../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
-import { shouldDismissInspectorForEscape } from "../features/inspector/inspector-interaction.ts";
+import { shouldDismissTaskPanelForEscape } from "../features/task-panel/task-panel-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
 import {
   readLocalPreference,
@@ -23,6 +23,20 @@ const defaultLeftWidth = 248;
 const minimumLeftWidth = 208;
 const maximumLeftWidth = 360;
 const leftWidthStep = 16;
+const rightWidthPreference = "metawork.panel.task.width";
+const defaultRightWidth = 400;
+const minimumRightWidth = 320;
+const maximumRightWidth = 640;
+const minimumTaskStageWidth = 480;
+const rightWidthStep = 16;
+
+export function shouldDockTaskPanel(
+  viewportWidth: number,
+  leftWidth: number,
+  rightWidth: number,
+) {
+  return viewportWidth - leftWidth - rightWidth >= minimumTaskStageWidth;
+}
 
 function clampLeftWidth(value: number) {
   return Math.min(maximumLeftWidth, Math.max(minimumLeftWidth, value));
@@ -33,6 +47,17 @@ function initialLeftWidth() {
   if (stored === null) return defaultLeftWidth;
   const parsed = Number(stored);
   return Number.isFinite(parsed) ? clampLeftWidth(parsed) : defaultLeftWidth;
+}
+
+function clampRightWidth(value: number) {
+  return Math.min(maximumRightWidth, Math.max(minimumRightWidth, value));
+}
+
+function initialRightWidth() {
+  const stored = readLocalPreference(rightWidthPreference);
+  if (stored === null) return defaultRightWidth;
+  const parsed = Number(stored);
+  return Number.isFinite(parsed) ? clampRightWidth(parsed) : defaultRightWidth;
 }
 
 function initialPanel(key: string, minimumWidth: number) {
@@ -49,9 +74,9 @@ export function AppShell({
   attentionNotice,
   onSearch,
   left,
-  inspector,
-  inspectorOpen,
-  onDismissInspector,
+  rightPanel,
+  rightPanelOpen,
+  onDismissRightPanel,
   overlay,
   children,
 }: {
@@ -62,9 +87,9 @@ export function AppShell({
   attentionNotice: string | null;
   onSearch: () => void;
   left: ReactNode | null;
-  inspector: ReactNode | null;
-  inspectorOpen: boolean;
-  onDismissInspector: (restoreFocus?: boolean) => void;
+  rightPanel: ReactNode | null;
+  rightPanelOpen: boolean;
+  onDismissRightPanel: (restoreFocus?: boolean) => void;
   overlay?: ReactNode;
   children: ReactNode;
 }) {
@@ -73,11 +98,28 @@ export function AppShell({
     initialPanel(leftPreference, 820),
   );
   const [leftWidth, setLeftWidth] = useState(initialLeftWidth);
+  const [rightWidth, setRightWidth] = useState(initialRightWidth);
   const [resizingLeft, setResizingLeft] = useState(false);
+  const [resizingRight, setResizingRight] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 1440 : window.innerWidth,
+  );
   const leftAvailable = left !== null;
   const effectiveLeftOpen = leftAvailable && leftOpen;
-  const inspectorAvailable = inspector !== null;
-  const effectiveInspectorOpen = inspectorAvailable && inspectorOpen;
+  const rightPanelAvailable = rightPanel !== null;
+  const effectiveRightPanelOpen = rightPanelAvailable && rightPanelOpen;
+  const rightResizeMaximum = Math.max(
+    minimumRightWidth,
+    Math.min(maximumRightWidth, viewportWidth - 44),
+  );
+  const renderedRightWidth = Math.min(rightWidth, rightResizeMaximum);
+  const rightPanelDocked =
+    effectiveRightPanelOpen &&
+    shouldDockTaskPanel(
+      viewportWidth,
+      effectiveLeftOpen ? leftWidth : 0,
+      rightWidth,
+    );
   const attentionDetails = useRef<HTMLDetailsElement>(null);
 
   useEffect(() => {
@@ -92,8 +134,20 @@ export function AppShell({
   }, []);
 
   useEffect(() => {
-    if (effectiveInspectorOpen && window.innerWidth < 820) setLeftOpen(false);
-  }, [effectiveInspectorOpen]);
+    const observeViewport = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", observeViewport);
+    return () => window.removeEventListener("resize", observeViewport);
+  }, []);
+
+  useEffect(() => {
+    if (effectiveRightPanelOpen && window.innerWidth < 820) setLeftOpen(false);
+  }, [effectiveRightPanelOpen]);
+
+  useEffect(() => {
+    if (effectiveRightPanelOpen || !resizingRight) return;
+    writeLocalPreference(rightWidthPreference, String(rightWidth));
+    setResizingRight(false);
+  }, [effectiveRightPanelOpen, resizingRight, rightWidth]);
 
   useEffect(() => {
     if (overlay && attentionDetails.current)
@@ -102,7 +156,7 @@ export function AppShell({
 
   function toggleLeft() {
     const next = !leftOpen;
-    if (next && window.innerWidth < 820) onDismissInspector(false);
+    if (next && window.innerWidth < 820) onDismissRightPanel(false);
     writeLocalPreference(leftPreference, next ? "open" : "closed");
     setLeftOpen(next);
   }
@@ -111,9 +165,17 @@ export function AppShell({
     <main
       className="app-window"
       data-left-open={effectiveLeftOpen}
-      data-inspector-open={effectiveInspectorOpen}
+      data-right-panel-open={effectiveRightPanelOpen}
+      data-right-panel-docked={rightPanelDocked}
       data-resizing-left={resizingLeft}
-      style={{ "--left-column-width": `${leftWidth}px` } as CSSProperties}
+      data-resizing-right={resizingRight}
+      style={
+        {
+          "--left-column-width": `${leftWidth}px`,
+          "--right-column-width": `${rightWidth}px`,
+          "--right-panel-rendered-width": `${renderedRightWidth}px`,
+        } as CSSProperties
+      }
       onKeyDown={(event) => {
         const target = event.target as HTMLElement;
         if (
@@ -121,15 +183,15 @@ export function AppShell({
         )
           return;
         if (
-          !shouldDismissInspectorForEscape(
-            effectiveInspectorOpen,
+          !shouldDismissTaskPanelForEscape(
+            effectiveRightPanelOpen,
             event.key,
             event.defaultPrevented,
           )
         )
           return;
         event.preventDefault();
-        onDismissInspector();
+        onDismissRightPanel();
       }}
     >
       <WindowTitlebar className="workbench-commandbar">
@@ -229,15 +291,34 @@ export function AppShell({
           />
         )}
         <section className="task-stage">{children}</section>
-        {inspectorAvailable && (
+        {rightPanelAvailable && (effectiveRightPanelOpen || resizingRight) && (
+          <ResizableSeparator
+            className="task-panel-resize-handle"
+            label={t("app.resize_task_panel")}
+            value={renderedRightWidth}
+            minimum={minimumRightWidth}
+            maximum={rightResizeMaximum}
+            step={rightWidthStep}
+            reverse
+            onChange={setRightWidth}
+            onCommit={(width) =>
+              writeLocalPreference(rightWidthPreference, String(width))
+            }
+            onResizeStart={() => setResizingRight(true)}
+            onResizeEnd={() => setResizingRight(false)}
+          />
+        )}
+        {rightPanelAvailable && (
           <aside
-            id="task-inspector"
-            className="task-inspector"
-            aria-labelledby="task-inspector-title"
-            aria-hidden={!effectiveInspectorOpen}
-            inert={!effectiveInspectorOpen}
+            id="task-panel"
+            className="task-panel"
+            aria-labelledby={
+              effectiveRightPanelOpen ? "task-panel-title" : undefined
+            }
+            aria-hidden={!effectiveRightPanelOpen}
+            inert={!effectiveRightPanelOpen}
           >
-            {inspector}
+            {effectiveRightPanelOpen ? rightPanel : null}
           </aside>
         )}
       </div>

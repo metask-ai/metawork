@@ -9,7 +9,7 @@ export function RunFileChangesSummary({
   onReview,
 }: {
   fileChanges: RunFileChanges;
-  onReview: () => void;
+  onReview: (opener: HTMLButtonElement) => void;
 }) {
   const { locale, t } = useI18n();
   const uniqueFiles = new Set(
@@ -49,7 +49,12 @@ export function RunFileChangesSummary({
         </span>
       </span>
       {fileChanges.changes.length > 0 && (
-        <Button type="button" variant="ghost" size="sm" onClick={onReview}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={(event) => onReview(event.currentTarget)}
+        >
           {t("file_changes.review")}
           <Icon name="chevron-right" />
         </Button>

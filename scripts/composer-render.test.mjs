@@ -17,7 +17,9 @@ const vite = await createServer({
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
-const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
+const { AppShell, shouldDockTaskPanel } = await vite.ssrLoadModule(
+  "/src/app/AppShell.tsx",
+);
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
@@ -169,8 +171,8 @@ function render(props = {}) {
 }
 
 function renderShell(
-  inspector,
-  inspectorOpen = false,
+  rightPanel,
+  rightPanelOpen = false,
   left = undefined,
   contextVisible = true,
 ) {
@@ -193,9 +195,9 @@ function renderShell(
           onSearch() {},
           left:
             left === undefined ? createElement("p", null, "Navigation") : left,
-          inspector,
-          inspectorOpen,
-          onDismissInspector() {},
+          rightPanel,
+          rightPanelOpen,
+          onDismissRightPanel() {},
         },
         createElement("p", null, "Composer stage"),
       ),
@@ -406,11 +408,33 @@ test("Workbench keeps Search as an icon beside the sidebar control", () => {
   assert.doesNotMatch(markup, /title="Search"/);
 });
 
-test("New task does not render or reserve an empty Inspector", () => {
+test("New task does not render or reserve an empty Task Panel", () => {
   const markup = renderShell(null);
-  assert.doesNotMatch(markup, /id="task-inspector"/);
-  assert.doesNotMatch(markup, /aria-controls="task-inspector"/);
-  assert.match(markup, /data-inspector-open="false"/);
+  assert.doesNotMatch(markup, /id="task-panel"/);
+  assert.doesNotMatch(markup, /aria-controls="task-panel"/);
+  assert.match(markup, /data-right-panel-open="false"/);
+});
+
+test("a closed Task Panel keeps its shell but unmounts its content", () => {
+  const closed = renderShell(createElement("p", null, "Private panel body"));
+  assert.match(closed, /id="task-panel"/);
+  assert.match(closed, /aria-hidden="true"/);
+  assert.doesNotMatch(closed, /Private panel body/);
+
+  const open = renderShell(
+    createElement("p", null, "Private panel body"),
+    true,
+  );
+  assert.match(open, /aria-hidden="false"/);
+  assert.match(open, /Private panel body/);
+  assert.match(open, /aria-label="Resize task panel"/);
+});
+
+test("Task Panel docking preserves the 480px central task stage", () => {
+  assert.equal(shouldDockTaskPanel(1128, 248, 400), true);
+  assert.equal(shouldDockTaskPanel(1127, 248, 400), false);
+  assert.equal(shouldDockTaskPanel(960, 0, 400), true);
+  assert.equal(shouldDockTaskPanel(879, 0, 400), false);
 });
 
 test("Settings uses the global stage without retaining the Task sidebar", () => {

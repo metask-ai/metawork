@@ -198,8 +198,13 @@ export function TaskContent({
     taskId: string,
     runId: string,
     reference: FileReferenceView,
+    opener: HTMLButtonElement,
   ) => void;
-  onReviewFileChanges: (taskId: string, runId: string) => void;
+  onReviewFileChanges: (
+    taskId: string,
+    runId: string,
+    opener: HTMLButtonElement,
+  ) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     taskId: string;
@@ -344,7 +349,9 @@ export function TaskContent({
                 {fileChangesEnabled && run.fileChanges && (
                   <RunFileChangesSummary
                     fileChanges={run.fileChanges}
-                    onReview={() => onReviewFileChanges(task.id, run.id)}
+                    onReview={(opener) =>
+                      onReviewFileChanges(task.id, run.id, opener)
+                    }
                   />
                 )}
               </>
@@ -385,7 +392,14 @@ export function TaskContent({
                     aria-label={t("file_preview.open", {
                       path: reference.displayPath,
                     })}
-                    onClick={() => onPreviewFile(task.id, run.id, reference)}
+                    onClick={(event) =>
+                      onPreviewFile(
+                        task.id,
+                        run.id,
+                        reference,
+                        event.currentTarget,
+                      )
+                    }
                   >
                     <Icon name="skill-file" />
                     <span className="max-w-72 truncate font-mono">
@@ -408,7 +422,9 @@ export function TaskContent({
                 {fileChangesEnabled && run.fileChanges && (
                   <RunFileChangesSummary
                     fileChanges={run.fileChanges}
-                    onReview={() => onReviewFileChanges(task.id, run.id)}
+                    onReview={(opener) =>
+                      onReviewFileChanges(task.id, run.id, opener)
+                    }
                   />
                 )}
               </>
