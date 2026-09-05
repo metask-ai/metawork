@@ -720,10 +720,11 @@ pub const Runtime = struct {
         self: *Runtime,
         options: SessionOpenOptions,
     ) (Error || std.mem.Allocator.Error)!SessionRoute {
+        const binding = options.model_binding;
         try validateWorkspace(options.workspace);
-        if (options.provider_id.len == 0 or options.provider_id.len > max_provider_id_bytes or
-            !std.unicode.utf8ValidateSlice(options.provider_id) or
-            options.credential.len == 0 or options.model.len == 0)
+        if (binding.target.provider_id.len == 0 or binding.target.provider_id.len > max_provider_id_bytes or
+            !std.unicode.utf8ValidateSlice(binding.target.provider_id) or
+            binding.credential.len == 0 or binding.target.model.len == 0)
             return error.CoreCallFailed;
         if (options.canonical_user_home.len != 0)
             try validateCanonicalDirectory(
@@ -786,7 +787,7 @@ pub const Runtime = struct {
         errdefer self.allocator.destroy(session);
         const control_block = try self.allocator.create(SessionControlBlock);
         errdefer self.allocator.destroy(control_block);
-        const provider_id = try self.allocator.dupe(u8, options.provider_id);
+        const provider_id = try self.allocator.dupe(u8, binding.target.provider_id);
         errdefer self.allocator.free(provider_id);
         const workspace_root = try self.allocator.dupe(u8, options.workspace.canonical_root);
         errdefer self.allocator.free(workspace_root);
@@ -804,7 +805,7 @@ pub const Runtime = struct {
             .agent_runtime = self,
             .id = session_id,
             .provider_id = provider_id,
-            .protocol = options.protocol,
+            .protocol = binding.target.protocol,
             .workspace_root = workspace_root,
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
@@ -813,7 +814,7 @@ pub const Runtime = struct {
         };
         control_block.* = .{ .session = session };
 
-        const secret = try self.allocator.dupe(u8, options.credential);
+        const secret = try self.allocator.dupe(u8, binding.credential);
         defer {
             secureZero(secret);
             self.allocator.free(secret);
@@ -826,12 +827,12 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
-        host_config.protocol_kind_code = session_wire.protocolKindCode(options.protocol);
-        host_config.provider_kind_code = providerKindCode(options.protocol);
+        host_config.protocol_kind_code = session_wire.protocolKindCode(binding.target.protocol);
+        host_config.provider_kind_code = providerKindCode(binding.target.protocol);
         host_config.permission_mode_code = permissionModeCode(options.permission_mode);
         host_config.shell_policy_code = shellPolicyCode(options.shell_policy);
         host_config.api_key = sdk.bytesView(secret);
-        host_config.base_url = sdk.bytesView(options.base_url);
+        host_config.base_url = sdk.bytesView(binding.target.base_url);
         host_config.workspace_root = sdk.bytesView(workspace_root);
         host_config.workspace_home = sdk.bytesView(workspace_home);
         host_config.skill_catalog = if (options.skill_catalog) |lease|
@@ -865,7 +866,7 @@ pub const Runtime = struct {
         var config = std.mem.zeroes(wire.SessionCreateConfigV1);
         config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
         config.host = &host_config;
-        config.model = sdk.bytesView(options.model);
+        config.model = sdk.bytesView(binding.target.model);
 
         var diagnostic = emptyOwnedBytes();
         var raw_session: ?*wire.SessionHandle = null;
@@ -902,13 +903,14 @@ pub const Runtime = struct {
         options: SessionRestoreOptions,
     ) (Error || std.mem.Allocator.Error)!SessionRestoreRoute {
         const session_options = options.session;
+        const binding = session_options.model_binding;
         try validateWorkspace(session_options.workspace);
         try checkpoint.validateLimits(options.checkpoint_limits);
-        if (session_options.provider_id.len == 0 or session_options.provider_id.len > max_provider_id_bytes or
-            !std.unicode.utf8ValidateSlice(session_options.provider_id) or
-            session_options.credential.len == 0 or
-            session_options.model.len == 0 or
-            !std.mem.eql(u8, session_options.model, options.expectation.model) or
+        if (binding.target.provider_id.len == 0 or binding.target.provider_id.len > max_provider_id_bytes or
+            !std.unicode.utf8ValidateSlice(binding.target.provider_id) or
+            binding.credential.len == 0 or
+            binding.target.model.len == 0 or
+            !std.mem.eql(u8, binding.target.model, options.expectation.model) or
             options.expectation.logical_session_id.len == 0 or
             options.expectation.logical_session_id.len > max_core_session_id_bytes or
             options.expectation.checkpoint_generation == 0)
@@ -951,7 +953,7 @@ pub const Runtime = struct {
         const session = try self.allocator.create(Session);
         var session_installed = false;
         defer if (!session_installed) self.allocator.destroy(session);
-        const provider_id = try self.allocator.dupe(u8, session_options.provider_id);
+        const provider_id = try self.allocator.dupe(u8, binding.target.provider_id);
         defer if (!session_installed) self.allocator.free(provider_id);
         const control_block = try self.allocator.create(SessionControlBlock);
         var control_installed = false;
@@ -974,7 +976,7 @@ pub const Runtime = struct {
         );
         var workspace_epoch_installed = false;
         defer if (!workspace_epoch_installed) self.allocator.free(workspace_epoch);
-        const secret = try self.allocator.dupe(u8, session_options.credential);
+        const secret = try self.allocator.dupe(u8, binding.credential);
         defer {
             secureZero(secret);
             self.allocator.free(secret);
@@ -1045,7 +1047,7 @@ pub const Runtime = struct {
             .agent_runtime = self,
             .id = route_id,
             .provider_id = provider_id,
-            .protocol = session_options.protocol,
+            .protocol = binding.target.protocol,
             .workspace_root = workspace_root,
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
@@ -1065,12 +1067,12 @@ pub const Runtime = struct {
         callbacks.release_response = Session.releaseUiResponse;
         var host_config = std.mem.zeroes(wire.SessionHostConfigV1);
         host_config.struct_size = @sizeOf(wire.SessionHostConfigV1);
-        host_config.protocol_kind_code = session_wire.protocolKindCode(session_options.protocol);
-        host_config.provider_kind_code = providerKindCode(session_options.protocol);
+        host_config.protocol_kind_code = session_wire.protocolKindCode(binding.target.protocol);
+        host_config.provider_kind_code = providerKindCode(binding.target.protocol);
         host_config.permission_mode_code = permissionModeCode(session_options.permission_mode);
         host_config.shell_policy_code = shellPolicyCode(session_options.shell_policy);
         host_config.api_key = sdk.bytesView(secret);
-        host_config.base_url = sdk.bytesView(session_options.base_url);
+        host_config.base_url = sdk.bytesView(binding.target.base_url);
         host_config.workspace_root = sdk.bytesView(workspace_root);
         host_config.workspace_home = sdk.bytesView(workspace_home);
         host_config.skill_catalog = if (session_options.skill_catalog) |lease|

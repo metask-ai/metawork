@@ -81,11 +81,13 @@ const ProbeJob = struct {
         const execution = &self.execution.?;
         const input = execution.input();
         self.succeeded = agent.runProviderProbe(self.io, self.completion_transport, .{
-            .provider_id = input.target.provider_id,
-            .protocol = agent_protocol.toAgent(input.target.protocol),
+            .target = .{
+                .provider_id = input.target.provider_id,
+                .protocol = agent_protocol.toAgent(input.target.protocol),
+                .base_url = input.target.base_url,
+                .model = input.target.model,
+            },
             .credential = input.api_key,
-            .model = input.target.model,
-            .base_url = input.target.base_url,
         }, &self.cancellation) == .connected;
         execution.deinit();
         self.execution = null;

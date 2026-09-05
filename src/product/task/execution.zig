@@ -28,16 +28,16 @@ pub const CompletionFactory = struct {
     create_fn: ?*const fn (
         ?*anyopaque,
         std.mem.Allocator,
-        agent.CompletionConfig,
+        agent.ModelBinding,
     ) anyerror!*agent.Completion = null,
 
     fn create(
         self: CompletionFactory,
         allocator: std.mem.Allocator,
-        config: agent.CompletionConfig,
+        binding: agent.ModelBinding,
     ) anyerror!*agent.Completion {
         if (self.create_fn) |create_fn|
-            return create_fn(self.context, allocator, config);
+            return create_fn(self.context, allocator, binding);
         return error.CompletionUnavailable;
     }
 };
@@ -379,11 +379,13 @@ fn generateAutomaticTitle(job: *RunJob) void {
     const execution = &(job.title_execution orelse return);
     const config = execution.input();
     const owner = job.completion_factory.create(std.heap.c_allocator, .{
-        .provider_id = config.target.provider_id,
-        .protocol = agent_protocol.toAgent(config.target.protocol),
+        .target = .{
+            .provider_id = config.target.provider_id,
+            .protocol = agent_protocol.toAgent(config.target.protocol),
+            .base_url = config.target.base_url,
+            .model = config.target.model,
+        },
         .credential = config.api_key,
-        .base_url = config.target.base_url,
-        .model = config.target.model,
     }) catch return;
     defer owner.deinit();
     const messages = [_]agent.CompletionMessage{.{ .role = .user, .text = source }};

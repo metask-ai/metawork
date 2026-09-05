@@ -18,10 +18,10 @@ pub const Backend = struct {
     pub fn createCompletion(
         context: ?*anyopaque,
         allocator: std.mem.Allocator,
-        config: agent.CompletionConfig,
+        binding: agent.ModelBinding,
     ) anyerror!*agent.Completion {
         const self: *Backend = @ptrCast(@alignCast(context.?));
-        return agent.Completion.init(allocator, self.transport(), config);
+        return agent.Completion.init(allocator, self.transport(), binding);
     }
 
     fn perform(

@@ -600,13 +600,17 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     );
     defer std.testing.allocator.free(workspace_root);
     const session = try runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .anthropic_messages,
+                .base_url = fixture.provider_endpoint,
+                .model = "claude-sonnet-4-20250514",
+            },
+            .credential = "fixture-credential",
+        },
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,
-        .credential = "fixture-credential",
-        .model = "claude-sonnet-4-20250514",
-        .base_url = fixture.provider_endpoint,
         .workspace = .{
             .canonical_root = workspace_root,
             .trust = .explicitly_trusted,
@@ -684,13 +688,17 @@ test "expired MCP authority is typed and the same model succeeds after refresh" 
     );
     defer std.testing.allocator.free(workspace_root);
     const open_options: agent.SessionOpenOptions = .{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .anthropic_messages,
+                .base_url = fixture.provider_endpoint,
+                .model = "fixture-model",
+            },
+            .credential = "fixture-credential",
+        },
         .permission_mode = .full_access,
         .shell_policy = .unrestricted,
-        .credential = "fixture-credential",
-        .model = "fixture-model",
-        .base_url = fixture.provider_endpoint,
         .workspace = .{
             .canonical_root = workspace_root,
             .trust = .explicitly_trusted,

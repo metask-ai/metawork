@@ -1072,14 +1072,18 @@ pub const Runtime = struct {
             input.permission_interaction,
         );
         var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
-            .provider_id = input.execution.target.provider_id,
-            .protocol = agent_protocol.toAgent(input.execution.target.protocol),
+            .model_binding = .{
+                .target = .{
+                    .provider_id = input.execution.target.provider_id,
+                    .protocol = agent_protocol.toAgent(input.execution.target.protocol),
+                    .base_url = input.execution.target.base_url,
+                    .model = input.model,
+                },
+                .credential = input.execution.api_key,
+            },
             .permission_mode = permission.mode,
             .shell_policy = permission.shell,
             .permission_interaction = permission.interaction,
-            .credential = input.execution.api_key,
-            .model = input.model,
-            .base_url = input.execution.target.base_url,
             .workspace = .{
                 .canonical_root = input.workspace_root,
                 .trust = switch (input.workspace_trust) {

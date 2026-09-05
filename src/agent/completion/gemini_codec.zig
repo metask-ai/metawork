@@ -17,7 +17,7 @@ const WireSystemInstruction = struct {
 
 pub fn encode(
     allocator: std.mem.Allocator,
-    config: types.Config,
+    config: types.CodecConfig,
     request: types.Request,
 ) codec.Error!codec.EncodedRequest {
     const parts = allocator.alloc(WirePart, request.messages.len) catch
@@ -171,8 +171,6 @@ test "Gemini codec decodes one non-streaming text result" {
 
 test "Gemini request is non-streaming and keeps the credential out of the URL" {
     var encoded = try encode(std.testing.allocator, .{
-        .provider_id = "fixture-provider",
-        .protocol = .gemini_native,
         .credential = "SECRET",
         .base_url = "https://generativelanguage.googleapis.com",
         .model = "gemini/test",

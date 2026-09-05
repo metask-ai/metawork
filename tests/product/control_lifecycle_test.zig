@@ -51,12 +51,17 @@ fn taskSessionOpenOptions() lifecycle.SessionOpenOptions {
         "/tmp/metawork-task-session-gateway";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return .{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .anthropic_messages,
+                .base_url = "",
+                .model = "fixture-model",
+            },
+            .credential = "fixture-secret",
+        },
         .permission_mode = .default,
         .shell_policy = .disabled,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = workspace_root,
             .trust = .{ .temporary = temporary_root },

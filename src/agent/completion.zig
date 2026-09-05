@@ -11,6 +11,7 @@ const openai = @import("completion/openai_codec.zig");
 const responses = @import("completion/openai_responses_codec.zig");
 const gemini = @import("completion/gemini_codec.zig");
 const anthropic = @import("completion/anthropic_codec.zig");
+const model_binding = @import("agent_model_binding");
 
 pub const Protocol = @import("agent_protocol").Protocol;
 pub const max_provider_id_bytes = @import("agent_protocol").max_provider_id_bytes;
@@ -20,7 +21,7 @@ pub const HttpHeader = transport.Header;
 pub const Cancellation = transport.Cancellation;
 pub const TransportError = transport.Error;
 pub const TransportResponse = transport.Response;
-pub const Config = types.Config;
+pub const ModelBinding = model_binding.ModelBinding;
 pub const Message = types.Message;
 pub const Request = types.Request;
 pub const Role = types.Role;
@@ -52,26 +53,26 @@ pub const Completion = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         network: Transport,
-        config: Config,
+        binding: ModelBinding,
     ) InitError!*Completion {
-        try validateConfig(config);
+        try validateConfig(binding);
         const self = try allocator.create(Completion);
         errdefer allocator.destroy(self);
-        const provider_id = try allocator.dupe(u8, config.provider_id);
+        const provider_id = try allocator.dupe(u8, binding.target.provider_id);
         errdefer allocator.free(provider_id);
-        const credential = try allocator.dupe(u8, config.credential);
+        const credential = try allocator.dupe(u8, binding.credential);
         errdefer {
             std.crypto.secureZero(u8, credential);
             allocator.free(credential);
         }
-        const base_url = try allocator.dupe(u8, config.base_url);
+        const base_url = try allocator.dupe(u8, binding.target.base_url);
         errdefer allocator.free(base_url);
-        const model = try allocator.dupe(u8, config.model);
+        const model = try allocator.dupe(u8, binding.target.model);
         self.* = .{
             .allocator = allocator,
             .transport = network,
             .provider_id = provider_id,
-            .protocol = config.protocol,
+            .protocol = binding.target.protocol,
             .credential = credential,
             .base_url = base_url,
             .model = model,
@@ -95,10 +96,10 @@ pub const Completion = struct {
         if (cancellation.isRequested()) return .{ .failure = .cancelled };
 
         var encoded = switch (self.protocol) {
-            .openai_responses => responses.encode(self.allocator, self.configView(), request),
-            .openai_chat_completions => openai.encode(self.allocator, self.configView(), request),
-            .anthropic_messages => anthropic.encode(self.allocator, self.configView(), request),
-            .gemini_native => gemini.encode(self.allocator, self.configView(), request),
+            .openai_responses => responses.encode(self.allocator, self.codecConfigView(), request),
+            .openai_chat_completions => openai.encode(self.allocator, self.codecConfigView(), request),
+            .anthropic_messages => anthropic.encode(self.allocator, self.codecConfigView(), request),
+            .gemini_native => gemini.encode(self.allocator, self.codecConfigView(), request),
         } catch |failure| return .{ .failure = codecFailure(failure) };
         defer encoded.deinit();
         if (cancellation.isRequested()) return .{ .failure = .cancelled };
@@ -142,10 +143,8 @@ pub const Completion = struct {
         allocator.destroy(self);
     }
 
-    fn configView(self: *const Completion) Config {
+    fn codecConfigView(self: *const Completion) types.CodecConfig {
         return .{
-            .provider_id = self.provider_id,
-            .protocol = self.protocol,
             .credential = self.credential,
             .base_url = self.base_url,
             .model = self.model,
@@ -153,18 +152,18 @@ pub const Completion = struct {
     }
 };
 
-fn validateConfig(config: Config) InitError!void {
-    if (config.provider_id.len == 0 or config.provider_id.len > max_provider_id_bytes or
-        !std.unicode.utf8ValidateSlice(config.provider_id)) return error.InvalidConfig;
-    if (config.credential.len == 0 or config.base_url.len == 0 or
-        config.model.len == 0 or !std.unicode.utf8ValidateSlice(config.base_url) or
-        !std.unicode.utf8ValidateSlice(config.model))
+fn validateConfig(binding: ModelBinding) InitError!void {
+    if (binding.target.provider_id.len == 0 or binding.target.provider_id.len > max_provider_id_bytes or
+        !std.unicode.utf8ValidateSlice(binding.target.provider_id)) return error.InvalidConfig;
+    if (binding.credential.len == 0 or binding.target.base_url.len == 0 or
+        binding.target.model.len == 0 or !std.unicode.utf8ValidateSlice(binding.target.base_url) or
+        !std.unicode.utf8ValidateSlice(binding.target.model))
         return error.InvalidConfig;
     var total: usize = 0;
-    inline for (.{ config.provider_id, config.credential, config.base_url, config.model }) |value|
+    inline for (.{ binding.target.provider_id, binding.credential, binding.target.base_url, binding.target.model }) |value|
         total = std.math.add(usize, total, value.len) catch return error.InvalidConfig;
     if (total > types.max_config_bytes) return error.InvalidConfig;
-    const uri = std.Uri.parse(config.base_url) catch return error.InvalidConfig;
+    const uri = std.Uri.parse(binding.target.base_url) catch return error.InvalidConfig;
     if (uri.host == null or uri.user != null or uri.password != null or
         uri.query != null or uri.fragment != null)
         return error.InvalidConfig;
@@ -266,14 +265,24 @@ test "invalid config and request fail before Transport" {
     try std.testing.expectError(error.InvalidConfig, Completion.init(
         std.testing.allocator,
         fake.port(),
-        .{ .provider_id = "fixture-provider", .protocol = .openai_responses, .credential = "", .base_url = "https://example.test", .model = "m" },
+        .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .openai_responses,
+                .base_url = "https://example.test",
+                .model = "m",
+            },
+            .credential = "",
+        },
     ));
     const owner = try Completion.init(std.testing.allocator, fake.port(), .{
-        .provider_id = "fixture-provider",
-        .protocol = .openai_chat_completions,
+        .target = .{
+            .provider_id = "fixture-provider",
+            .protocol = .openai_chat_completions,
+            .base_url = "https://example.test/v1/chat/completions",
+            .model = "m",
+        },
         .credential = "secret",
-        .base_url = "https://example.test/v1/chat/completions",
-        .model = "m",
     });
     defer owner.deinit();
     var cancellation = owner.newCancellation();
@@ -321,11 +330,13 @@ test "explicit protocols complete through one non-streaming path" {
     for (fixtures) |fixture| {
         var fake = FakeTransport{ .response = fixture.response };
         const owner = try Completion.init(std.testing.allocator, fake.port(), .{
-            .provider_id = "fixture-provider",
-            .protocol = fixture.protocol,
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = fixture.protocol,
+                .base_url = fixture.base_url,
+                .model = "model",
+            },
             .credential = "secret",
-            .base_url = fixture.base_url,
-            .model = "model",
         });
         defer owner.deinit();
         var cancellation = owner.newCancellation();
@@ -354,11 +365,13 @@ test "service instances share a protocol without sharing identity or sending it 
             .response = "{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{}}",
         };
         const owner = try Completion.init(std.testing.allocator, fake.port(), .{
-            .provider_id = id,
-            .protocol = .openai_responses,
+            .target = .{
+                .provider_id = id,
+                .protocol = .openai_responses,
+                .base_url = "https://example.test/v1/responses",
+                .model = "model",
+            },
             .credential = "secret",
-            .base_url = "https://example.test/v1/responses",
-            .model = "model",
         });
         defer owner.deinit();
         @memset(id, 'x');
@@ -377,11 +390,13 @@ test "service instances share a protocol without sharing identity or sending it 
 test "cancellation and provider rejection are explicit outcomes" {
     var fake = FakeTransport{ .response = "{}", .status = 429 };
     const owner = try Completion.init(std.testing.allocator, fake.port(), .{
-        .provider_id = "fixture-provider",
-        .protocol = .openai_responses,
+        .target = .{
+            .provider_id = "fixture-provider",
+            .protocol = .openai_responses,
+            .base_url = "https://example.test/v1/responses",
+            .model = "m",
+        },
         .credential = "secret",
-        .base_url = "https://example.test/v1/responses",
-        .model = "m",
     });
     defer owner.deinit();
     var cancellation = owner.newCancellation();
@@ -402,11 +417,13 @@ test "Completion clears its owned credential copy" {
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
     var fake = FakeTransport{ .response = "{}" };
     const owner = try Completion.init(fixed.allocator(), fake.port(), .{
-        .provider_id = "fixture-provider",
-        .protocol = .openai_responses,
+        .target = .{
+            .provider_id = "fixture-provider",
+            .protocol = .openai_responses,
+            .base_url = "https://example.test/v1/responses",
+            .model = "m",
+        },
         .credential = "FIXTURE_SECRET",
-        .base_url = "https://example.test/v1/responses",
-        .model = "m",
     });
     try std.testing.expect(std.mem.indexOf(u8, &storage, "FIXTURE_SECRET") != null);
     owner.deinit();

@@ -5,7 +5,7 @@ const types = @import("types.zig");
 
 pub fn encode(
     allocator: std.mem.Allocator,
-    config: types.Config,
+    config: types.CodecConfig,
     request: types.Request,
 ) codec.Error!codec.EncodedRequest {
     const Input = struct { role: []const u8, content: []const u8 };
@@ -94,8 +94,6 @@ pub fn decode(allocator: std.mem.Allocator, body: []const u8) codec.Error!types.
 
 test "Responses Completion owns an explicit non-streaming stateless request" {
     var encoded = try encode(std.testing.allocator, .{
-        .provider_id = "fixture-provider",
-        .protocol = .openai_responses,
         .credential = "fixture-secret",
         .base_url = "https://example.test/custom-endpoint",
         .model = "fixture-model",
@@ -120,8 +118,6 @@ test "Responses request releases partial allocations on failure" {
     const Fixture = struct {
         fn run(allocator: std.mem.Allocator) !void {
             var encoded = try encode(allocator, .{
-                .provider_id = "fixture-provider",
-                .protocol = .openai_responses,
                 .credential = "fixture-secret",
                 .base_url = "https://example.test/endpoint",
                 .model = "fixture-model",

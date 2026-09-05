@@ -404,14 +404,18 @@ pub const Job = struct {
         const execution = self.attempt.execution.input();
         var restored = agent_session.restore(self.runtime, .{
             .session = .{
-                .provider_id = execution.target.provider_id,
-                .protocol = agent_protocol.toAgent(execution.target.protocol),
+                .model_binding = .{
+                    .target = .{
+                        .provider_id = execution.target.provider_id,
+                        .protocol = agent_protocol.toAgent(execution.target.protocol),
+                        .base_url = execution.target.base_url,
+                        .model = self.attempt.checkpoint.session.model,
+                    },
+                    .credential = execution.api_key,
+                },
                 .permission_mode = self.attempt.permission_mode,
                 .shell_policy = self.attempt.shell_policy,
                 .permission_interaction = self.attempt.permission_interaction,
-                .credential = execution.api_key,
-                .model = self.attempt.checkpoint.session.model,
-                .base_url = execution.target.base_url,
                 .workspace = .{
                     .canonical_root = self.attempt.workspace.canonical_root,
                     .trust = switch (self.attempt.workspace.trust) {

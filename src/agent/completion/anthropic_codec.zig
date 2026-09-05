@@ -9,7 +9,7 @@ const WireMessage = struct {
 
 pub fn encode(
     allocator: std.mem.Allocator,
-    config: types.Config,
+    config: types.CodecConfig,
     request: types.Request,
 ) codec.Error!codec.EncodedRequest {
     const messages = allocator.alloc(WireMessage, request.messages.len) catch
