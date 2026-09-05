@@ -1176,6 +1176,13 @@ summary::-webkit-details-marker {
   border-color: var(--ui-action-primary);
 }
 
+.settings-custom-provider-input.focus-ring:focus-visible {
+  border-color: var(--ui-focus-ring);
+  outline: none;
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--ui-focus-ring) 14%, transparent);
+}
+
 .settings-custom-provider-input:disabled {
   color: var(--settings-muted);
   background: var(--settings-frost);
