@@ -97,7 +97,7 @@ Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。
 
 token response 必须有界解码，包含非空 `access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 scope 与非空 `account_id`。refresh token 成功轮换并 durable commit 后不得恢复旧 token。
 
-只有 `/me` 返回 `code = 0`、数值 `data.id` 的十进制文本精确匹配 token `account_id`，且 `data.username` 是非空有界 UTF-8 时，Account 才能提交 authenticated identity。明确 `401/403` 删除无效 refresh token并进入 `signed_out`；network、deadline、`429` 或 `5xx` 保留可恢复 credential 并发布 Account error，不得回退到旧 identity。
+只有 `/me` 返回 `code = 0`、数值 `data.id` 的十进制文本精确匹配 token `account_id`，且 `data.username` 是非空有界 UTF-8 时，Account 才能提交 authenticated identity。只有失败请求实际使用了当前 credential 时，明确 `401/403` 才能删除该 credential 并进入 `signed_out`：refresh exchange 使用旧 refresh token，`/me` identity validation 使用刚提交的新 access token；authorization-code exchange 不使用 retained credential，其 `400/401/403` 必须归类为 `oauth_exchange_failed`，不得删除已有会话的 credential。network、deadline、`429` 或 `5xx` 保留可恢复 credential 并发布 Account error，不得回退到旧 identity。
 
 API Key 与 `/v1/models` 的 request、decode、metadata、固定 provider endpoint 和目录规则属于 Models 的 Metask provider，不在 Account 合同中定义。OAuth token、PKCE verifier、authorization code、access/refresh token、Authorization header 和 authorization lease 不得进入 Renderer、Bridge、日志、Snapshot 或产品历史。
 

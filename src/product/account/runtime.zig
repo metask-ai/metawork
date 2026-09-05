@@ -705,7 +705,7 @@ pub const Runtime = struct {
         }
         if (completion.payload == .failed and
             completion.payload.failed.error_code == .metask_unauthorized and
-            self.account.credentialValidationInFlight())
+            self.account.activeRequestUsesCredential())
             completion.payload.failed.error_code = self.deleteInvalidCredential();
 
         const loaded_identity = completion.payload == .identity_loaded;
@@ -1623,6 +1623,130 @@ test "explicit login starts new OAuth even when a retained refresh remains" {
     defer login.deinit();
     try std.testing.expectEqual(contract.AccountState.authorizing, login.transition.view().state);
     try std.testing.expect(login.transition.takeEffect().? == .begin_oauth);
+}
+
+test "unauthorized login code exchange preserves the retained credential" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    try platform.setStoredRefreshToken("retained-refresh");
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(
+        &runtime,
+        "account-1",
+        "Metask User",
+        "old-access",
+        "retained-refresh",
+        200,
+    );
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+    var previous_lease = (try runtime.authorizationLease()).?;
+    const previous_generation = previous_lease.authorization_generation;
+    previous_lease.deinit();
+
+    _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    var input = try TestSupport.exchangeInput(std.testing.allocator, "authorization-code");
+    defer input.deinit();
+    var exchange = TestSupport.prepareLoginExchange(&runtime, &input);
+    defer exchange.deinit();
+    _ = exchange.transition.takeEffect() orelse
+        return error.TestUnexpectedResult;
+    runtime.commit(&exchange);
+
+    TestSupport.publishFailure(
+        &runtime,
+        runtime.account.activeAttempt().?,
+        .metask_unauthorized,
+    );
+    var failed = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer failed.deinit();
+    try std.testing.expectEqualStrings(
+        "retained-refresh",
+        platform.refresh_token[0..platform.refresh_token_len.?],
+    );
+    runtime.commit(&failed);
+    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+    var retained_lease = (try runtime.authorizationLease()).?;
+    defer retained_lease.deinit();
+    try std.testing.expectEqual(previous_generation, retained_lease.authorization_generation);
+}
+
+test "unauthorized login identity validation deletes the newly committed credential" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    try platform.setStoredRefreshToken("retained-refresh");
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var authenticated = try TestSupport.prepareAuthenticated(
+        &runtime,
+        "account-1",
+        "Metask User",
+        "old-access",
+        "retained-refresh",
+        200,
+    );
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+
+    _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+    var input = try TestSupport.exchangeInput(std.testing.allocator, "authorization-code");
+    defer input.deinit();
+    var exchange = TestSupport.prepareLoginExchange(&runtime, &input);
+    defer exchange.deinit();
+    _ = exchange.transition.takeEffect() orelse
+        return error.TestUnexpectedResult;
+    runtime.commit(&exchange);
+
+    var tokens = try metask_client.AuthorizationResult.fromStored(
+        std.testing.allocator,
+        "new-access",
+        "new-refresh",
+        200,
+        "account-2",
+    );
+    defer tokens.deinit();
+    var loading_identity = switch (runtime.prepareAuthorizedLogin(
+        runtime.account.activeAttempt().?,
+        &tokens,
+    )) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer loading_identity.deinit();
+    try std.testing.expectEqualStrings(
+        "new-refresh",
+        platform.refresh_token[0..platform.refresh_token_len.?],
+    );
+    _ = loading_identity.transition.takeEffect() orelse
+        return error.TestUnexpectedResult;
+    runtime.commit(&loading_identity);
+
+    TestSupport.publishFailure(
+        &runtime,
+        runtime.account.activeAttempt().?,
+        .metask_unauthorized,
+    );
+    var signed_out = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer signed_out.deinit();
+    try std.testing.expectEqual(@as(?usize, null), platform.refresh_token_len);
+    runtime.commit(&signed_out);
+    try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expect((try runtime.authorizationLease()) == null);
 }
 
 test "authorization lease rejects authorizing and mismatched principals" {

@@ -190,9 +190,12 @@ pub const Account = struct {
         return self.state.attemptKind() == .refresh_token;
     }
 
-    pub fn credentialValidationInFlight(self: *const Account) bool {
-        const kind = self.state.attemptKind() orelse return false;
-        return kind == .login or kind == .refresh_token;
+    pub fn activeRequestUsesCredential(self: *const Account) bool {
+        return switch (self.state.transaction) {
+            .token_exchange => |value| value.kind == .refresh_token,
+            .loading_identity => true,
+            else => false,
+        };
     }
 
     pub fn currentIdentity(self: *const Account) ?AccountIdentity {

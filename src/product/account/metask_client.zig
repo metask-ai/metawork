@@ -184,11 +184,10 @@ fn transportFailure(transport_error: TransportError) ClientError {
 
 fn classifyStatus(status: u16, exchange: bool) ClientError {
     return switch (status) {
-        400, 401 => if (exchange)
+        400, 401, 403 => if (exchange)
             error.OAuthExchangeFailed
         else
             error.Unauthorized,
-        403 => error.Unauthorized,
         429 => error.RateLimited,
         500...599 => error.ServiceUnavailable,
         else => error.ProtocolInvalid,
@@ -198,8 +197,8 @@ fn classifyStatus(status: u16, exchange: bool) ClientError {
 test "401 and 403 invalidate retained credentials outside code exchange" {
     try std.testing.expectEqual(error.Unauthorized, classifyStatus(401, false));
     try std.testing.expectEqual(error.Unauthorized, classifyStatus(403, false));
-    try std.testing.expectEqual(error.Unauthorized, classifyStatus(403, true));
     try std.testing.expectEqual(error.OAuthExchangeFailed, classifyStatus(401, true));
+    try std.testing.expectEqual(error.OAuthExchangeFailed, classifyStatus(403, true));
 }
 
 const FakeTransport = struct {
