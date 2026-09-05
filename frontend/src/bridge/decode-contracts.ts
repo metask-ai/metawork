@@ -299,7 +299,6 @@ const scheduledTaskFailureReasons = [
   "persistence_failed",
   "host_interrupted",
   "permission_required",
-  "binding_migration_required",
 ] as const;
 const taskCreateReasons = [
   "execution_changed",
@@ -2503,65 +2502,36 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
   ]);
   const bindingRoot = object(item.binding, `${path}.binding`, [
     "status",
-    ...(typeof item.binding === "object" &&
-    item.binding !== null &&
-    !Array.isArray(item.binding) &&
-    (item.binding as JsonObject).status === "bound"
-      ? ["modelRef", "sourceGeneration", "selectionRevision", "protocol"]
-      : ["legacyExecution"]),
+    "modelRef",
+    "sourceGeneration",
+    "selectionRevision",
+    "protocol",
   ]);
   const bindingStatus = enumValue(
     bindingRoot.status,
     `${path}.binding.status`,
-    ["bound", "migration_required"] as const,
+    ["bound"] as const,
   );
-  const binding =
-    bindingStatus === "bound"
-      ? {
-          status: "bound" as const,
-          modelRef: decodeRequiredModelRef(
-            bindingRoot.modelRef,
-            `${path}.binding.modelRef`,
-          ),
-          sourceGeneration: positiveWireId(
-            bindingRoot.sourceGeneration,
-            `${path}.binding.sourceGeneration`,
-          ),
-          selectionRevision: positiveWireId(
-            bindingRoot.selectionRevision,
-            `${path}.binding.selectionRevision`,
-          ),
-          protocol: enumValue(
-            bindingRoot.protocol,
-            `${path}.binding.protocol`,
-            protocols,
-          ),
-        }
-      : (() => {
-          const legacy = object(
-            bindingRoot.legacyExecution,
-            `${path}.binding.legacyExecution`,
-            ["generation", "protocol", "model"],
-          );
-          return {
-            status: "migration_required" as const,
-            legacyExecution: {
-              generation: positiveWireId(
-                legacy.generation,
-                `${path}.binding.legacyExecution.generation`,
-              ),
-              protocol: enumValue(
-                legacy.protocol,
-                `${path}.binding.legacyExecution.protocol`,
-                protocols,
-              ),
-              model: stringValue(
-                legacy.model,
-                `${path}.binding.legacyExecution.model`,
-              ),
-            },
-          };
-        })();
+  const binding = {
+    status: bindingStatus,
+    modelRef: decodeRequiredModelRef(
+      bindingRoot.modelRef,
+      `${path}.binding.modelRef`,
+    ),
+    sourceGeneration: positiveWireId(
+      bindingRoot.sourceGeneration,
+      `${path}.binding.sourceGeneration`,
+    ),
+    selectionRevision: positiveWireId(
+      bindingRoot.selectionRevision,
+      `${path}.binding.selectionRevision`,
+    ),
+    protocol: enumValue(
+      bindingRoot.protocol,
+      `${path}.binding.protocol`,
+      protocols,
+    ),
+  };
   if (
     typeof item.input !== "object" ||
     item.input === null ||
@@ -2734,11 +2704,6 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
     fail(path, "enabled schedule must be ready and expose its next run");
   if ((health === "needs_attention") !== (failureReason !== null))
     fail(path, "Schedule attention and failure reason must agree");
-  if (
-    (binding.status === "migration_required") !==
-    (failureReason === "binding_migration_required")
-  )
-    fail(path, "Schedule binding migration state and reason must agree");
   return {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),
@@ -3329,7 +3294,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         "read_failed",
         "corrupt",
         "write_failed",
-        "migration_failed",
         "outcome_unknown",
       ] as const,
     ),

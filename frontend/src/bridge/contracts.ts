@@ -354,16 +354,9 @@ export type ScheduledTaskBinding = {
   protocol: Protocol;
 };
 
-export type ScheduledTaskStoredBinding =
-  | ({ status: "bound" } & ScheduledTaskBinding)
-  | {
-      status: "migration_required";
-      legacyExecution: {
-        generation: string;
-        protocol: Protocol;
-        model: string;
-      };
-    };
+export type ScheduledTaskStoredBinding = {
+  status: "bound";
+} & ScheduledTaskBinding;
 
 export type ScheduledTaskView = {
   id: string;
@@ -384,7 +377,6 @@ export type ScheduledTaskView = {
     | "persistence_failed"
     | "host_interrupted"
     | "permission_required"
-    | "binding_migration_required"
     | null;
   binding: ScheduledTaskStoredBinding;
   input: { kind: "text"; text: string; redacted: boolean };
@@ -715,7 +707,6 @@ export type WorkbenchSnapshot = {
       | "read_failed"
       | "corrupt"
       | "write_failed"
-      | "migration_failed"
       | "outcome_unknown";
     scheduledTaskRecoveryAvailable: boolean;
     backgroundScheduleWake: boolean;

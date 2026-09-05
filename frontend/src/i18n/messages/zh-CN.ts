@@ -1001,17 +1001,11 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.occurrence.skipped": "已跳过",
   "scheduled.occurrence.rejected": "未能开始",
   "scheduled.occurrence.starting": "正在启动",
-  "scheduled.binding_migration_required":
-    "此定时任务仍使用旧版模型绑定。保存后会将其明确绑定到当前默认模型。",
   "scheduled.persistence.unavailable": "当前设备不支持持久定时任务。",
   "scheduled.persistence.read_failed": "无法读取已保存的定时任务。",
   "scheduled.persistence.corrupt":
     "定时任务数据已损坏。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.write_failed": "最近的更改未能保存，自动触发已停止。",
-  "scheduled.persistence.migration_failed":
-    "无法升级已保存的定时任务。原始数据已保留，自动触发已停止。",
-  "scheduled.persistence.migration_failed_detail":
-    "请重启 MetaWork 以重试升级；原始定时任务存储不会被覆盖。",
   "scheduled.persistence.outcome_unknown":
     "无法确认最近的更改是否保存。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.ready": "定时任务存储已就绪。",

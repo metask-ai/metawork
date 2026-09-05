@@ -149,7 +149,7 @@ Schedule 的可执行定义保存 Models-owned `ModelRef + source_generation + s
 
 Schedule persistence recovery 仍由 Schedule aggregate 决策：只有 typed non-ready health 才发布 action，命令必须校验全局 revision。Schedule 先对当前内存 store 执行 credential scrub 并编码 canonical candidate；Application 对旧 canonical 执行 hard delete，再以 durable atomic replace 写入 candidate，不生成 backup、quarantine 或 migration artifact。明确失败保持旧 health 与内存 store，outcome unknown 保持 timer fail-closed；只有 committed 才转为 ready 并重新 arm。
 
-启动时 schema 1→2 migration 是独立于普通 recovery 的原子事务。schema 1 definition 因缺少 source identity，只能保留旧 execution 显示事实并转成 disabled `binding_migration_required`；不得查询当前 default 推断归属。新 schema 2 candidate committed，或 outcome unknown 后重读精确确认新 canonical，才接纳迁移内存；明确失败或确认仍是旧 canonical 发布 `migration_failed`、保留原文件且不开放 hard-reset action，重启后可重试。既非完整旧 canonical 也非完整新 canonical 时发布 `outcome_unknown`，沿用显式 recovery。运行时没有 schema 1 launch fallback。
+Schedule store 只有唯一 canonical `schema_version = 1`，definition 的完整 binding 是不可分割的 `ModelRef + source_generation + selection_revision + protocol`。启动只严格解码当前 shape；旧 shape、未知 version 与未知字段都按 corrupt fail closed，不存在 legacy decoder、migration transaction、迁移中间状态或运行时 fallback。Renderer 只能看到完整可执行 binding，不承担历史身份推断或重绑流程。
 
 ### 2.4 Skill authority 与本地资产
 

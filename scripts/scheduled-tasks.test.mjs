@@ -149,49 +149,6 @@ test("Scheduled tasks is a truthful independent management page", () => {
   assert.doesNotMatch(html, /cron/i);
 });
 
-test("Migrated schedules cannot run or resume before explicit model rebind", async () => {
-  const snapshot = structuredClone(fixture);
-  snapshot.capabilities.automaticWorkspaces = true;
-  snapshot.capabilities.scheduledTasks = true;
-  snapshot.capabilities.scheduledTaskPersistence = true;
-  snapshot.capabilities.scheduledTaskPersistenceHealth = "ready";
-  snapshot.scheduledTasks = [
-    {
-      id: "8",
-      epoch: "1",
-      title: "Legacy schedule",
-      titleRedacted: false,
-      permissionProfile: "approval_required",
-      enabled: false,
-      health: "needs_attention",
-      failureReason: "binding_migration_required",
-      binding: {
-        status: "migration_required",
-        legacyExecution: {
-          generation: "19",
-          protocol: "anthropic_messages",
-          model: "legacy-model",
-        },
-      },
-      input: { kind: "text", text: "Inspect", redacted: false },
-      recurrence: { kind: "once", atUnixSeconds: "1800000000" },
-      nextRunAtUnixSeconds: null,
-      occurrences: [],
-    },
-  ];
-
-  renderDom(scheduledElement(snapshot));
-  assert.equal(screen.getByRole("button", { name: "Run now" }).disabled, true);
-  assert.equal(screen.getByRole("button", { name: "Resume" }).disabled, true);
-  await userEvent.click(
-    screen.getByRole("button", { name: /Legacy schedule/ }),
-  );
-  assert.match(
-    screen.getByText(/older model binding/).textContent,
-    /explicitly bind it to your current default model/,
-  );
-});
-
 test("Empty scheduled tasks page offers actionable starter templates", () => {
   const snapshot = structuredClone(fixture);
   snapshot.capabilities.automaticWorkspaces = true;

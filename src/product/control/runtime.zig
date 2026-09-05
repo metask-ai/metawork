@@ -366,7 +366,6 @@ pub const McpOauthRuntimeCommit = mcp_runtime.McpOauthRuntimeCommit;
 pub const McpRefreshTimer = mcp_runtime.McpRefreshTimer;
 
 pub const SchedulePersistenceCommit = product_schedule.PersistenceCommit;
-pub const SchedulePersistenceObservation = product_schedule.PersistenceObservation;
 pub const SchedulePersistence = product_schedule.Persistence;
 pub const SchedulePersistenceHealth = product_schedule.PersistenceHealth;
 
@@ -5504,12 +5503,12 @@ pub const Runtime = struct {
             return error.InvalidScheduledTaskInput;
         return .{
             .title = title,
-            .binding = .{ .current = .{
+            .binding = .{
                 .model_ref = input.binding.model_ref,
                 .source_generation = input.binding.source_generation,
                 .selection_revision = input.binding.selection_revision,
                 .protocol = input.binding.protocol,
-            } },
+            },
             .permission_profile = scheduledPermissionProfile(
                 input.permission_profile,
             ),

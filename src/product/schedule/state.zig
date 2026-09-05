@@ -112,7 +112,6 @@ pub const Health = enum {
 };
 
 pub const FailureReason = enum {
-    binding_migration_required,
     previous_task_running,
     execution_changed,
     workspace_unavailable,
@@ -165,33 +164,19 @@ pub const Definition = struct {
     recurrence: Recurrence,
 };
 
-pub const Binding = union(enum) {
-    current: struct {
-        model_ref: models_contract.ModelRef,
-        source_generation: u64,
-        selection_revision: u64,
-        protocol: Protocol,
-    },
-    migration_required: struct {
-        execution_generation: u64,
-        protocol: Protocol,
-        model: []const u8,
-    },
+pub const Binding = struct {
+    model_ref: models_contract.ModelRef,
+    source_generation: u64,
+    selection_revision: u64,
+    protocol: Protocol,
 };
 
-const OwnedBinding = union(enum) {
-    current: struct {
-        source_id: []u8,
-        model_id: []u8,
-        source_generation: u64,
-        selection_revision: u64,
-        protocol: Protocol,
-    },
-    migration_required: struct {
-        execution_generation: u64,
-        protocol: Protocol,
-        model: []u8,
-    },
+const OwnedBinding = struct {
+    source_id: []u8,
+    model_id: []u8,
+    source_generation: u64,
+    selection_revision: u64,
+    protocol: Protocol,
 };
 
 pub const Item = struct {
@@ -216,29 +201,19 @@ pub const Item = struct {
     }
 
     pub fn bindingView(self: *const Item) Binding {
-        return switch (self.binding) {
-            .current => |binding| .{ .current = .{
-                .model_ref = .{
-                    .source_id = binding.source_id,
-                    .model_id = binding.model_id,
-                },
-                .source_generation = binding.source_generation,
-                .selection_revision = binding.selection_revision,
-                .protocol = binding.protocol,
-            } },
-            .migration_required => |binding| .{ .migration_required = .{
-                .execution_generation = binding.execution_generation,
-                .protocol = binding.protocol,
-                .model = binding.model,
-            } },
+        return .{
+            .model_ref = .{
+                .source_id = self.binding.source_id,
+                .model_id = self.binding.model_id,
+            },
+            .source_generation = self.binding.source_generation,
+            .selection_revision = self.binding.selection_revision,
+            .protocol = self.binding.protocol,
         };
     }
 
     pub fn bindingModelMutable(self: *Item) []u8 {
-        return switch (self.binding) {
-            .current => |binding| binding.model_id,
-            .migration_required => |binding| binding.model,
-        };
+        return self.binding.model_id;
     }
 };
 
@@ -710,23 +685,14 @@ pub const Store = struct {
     }
 
     fn cloneBinding(self: *Store, binding: Binding) Error!OwnedBinding {
-        return switch (binding) {
-            .current => |current| current_binding: {
-                const source_id = try self.copy(current.model_ref.source_id);
-                errdefer self.free(source_id);
-                break :current_binding .{ .current = .{
-                    .source_id = source_id,
-                    .model_id = try self.copy(current.model_ref.model_id),
-                    .source_generation = current.source_generation,
-                    .selection_revision = current.selection_revision,
-                    .protocol = current.protocol,
-                } };
-            },
-            .migration_required => |legacy| .{ .migration_required = .{
-                .execution_generation = legacy.execution_generation,
-                .protocol = legacy.protocol,
-                .model = try self.copy(legacy.model),
-            } },
+        const source_id = try self.copy(binding.model_ref.source_id);
+        errdefer self.free(source_id);
+        return .{
+            .source_id = source_id,
+            .model_id = try self.copy(binding.model_ref.model_id),
+            .source_generation = binding.source_generation,
+            .selection_revision = binding.selection_revision,
+            .protocol = binding.protocol,
         };
     }
 
@@ -742,13 +708,8 @@ pub const Store = struct {
     }
 
     fn deinitBinding(self: *Store, binding: *OwnedBinding) void {
-        switch (binding.*) {
-            .current => |current| {
-                self.free(current.source_id);
-                self.free(current.model_id);
-            },
-            .migration_required => |legacy| self.free(legacy.model),
-        }
+        self.free(binding.source_id);
+        self.free(binding.model_id);
         binding.* = undefined;
     }
 
@@ -815,11 +776,6 @@ fn advanceAfterTimer(
 }
 
 fn validRestoredState(restored: RestoredItem) bool {
-    if (restored.definition.binding == .migration_required)
-        return !restored.enabled and
-            restored.health == .needs_attention and
-            restored.failure_reason == .binding_migration_required and
-            restored.next_run_at_unix_seconds == null;
     if (restored.enabled) {
         return restored.health == .ready and
             restored.failure_reason == null and
@@ -840,24 +796,15 @@ fn validDefinition(definition: Definition) bool {
     if (definition.title.len == 0 or
         !std.unicode.utf8ValidateSlice(definition.title))
         return false;
-    switch (definition.binding) {
-        .current => |binding| {
-            if (binding.model_ref.source_id.len == 0 or
-                binding.model_ref.source_id.len > models_contract.Limits.provider_id_bytes or
-                !std.unicode.utf8ValidateSlice(binding.model_ref.source_id) or
-                binding.model_ref.model_id.len == 0 or
-                binding.model_ref.model_id.len > models_contract.Limits.model_id_bytes or
-                !std.unicode.utf8ValidateSlice(binding.model_ref.model_id) or
-                binding.source_generation == 0 or binding.selection_revision == 0)
-                return false;
-        },
-        .migration_required => |legacy| {
-            if (legacy.execution_generation == 0 or legacy.model.len == 0 or
-                legacy.model.len > models_contract.Limits.model_id_bytes or
-                !std.unicode.utf8ValidateSlice(legacy.model))
-                return false;
-        },
-    }
+    const binding = definition.binding;
+    if (binding.model_ref.source_id.len == 0 or
+        binding.model_ref.source_id.len > models_contract.Limits.provider_id_bytes or
+        !std.unicode.utf8ValidateSlice(binding.model_ref.source_id) or
+        binding.model_ref.model_id.len == 0 or
+        binding.model_ref.model_id.len > models_contract.Limits.model_id_bytes or
+        !std.unicode.utf8ValidateSlice(binding.model_ref.model_id) or
+        binding.source_generation == 0 or binding.selection_revision == 0)
+        return false;
     if (definition.input.len == 0 or
         !std.unicode.utf8ValidateSlice(definition.input)) return false;
     return true;
@@ -924,12 +871,12 @@ test "store updates optimistically and a one-time occurrence completes" {
     defer store.deinit();
     const id = try store.create(.{
         .title = "Daily summary",
-        .binding = .{ .current = .{
+        .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
             .source_generation = 9,
             .selection_revision = 11,
             .protocol = .openai_chat_completions,
-        } },
+        },
         .permission_profile = .approval_required,
         .input = "Summarize the project",
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },

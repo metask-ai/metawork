@@ -38,7 +38,6 @@ pub const Limits = struct {
 };
 
 pub const PersistenceCommit = enum { committed, failed, outcome_unknown };
-pub const PersistenceObservation = enum { before, after, unknown };
 
 pub const Persistence = struct {
     context: ?*anyopaque = null,
@@ -47,11 +46,6 @@ pub const Persistence = struct {
     restore_failed: bool = false,
     commit_fn: *const fn (?*anyopaque, []const u8) PersistenceCommit = unsupportedCommit,
     recover_fn: *const fn (?*anyopaque, []const u8) PersistenceCommit = unsupportedCommit,
-    observe_fn: *const fn (
-        ?*anyopaque,
-        []const u8,
-        []const u8,
-    ) PersistenceObservation = unsupportedObserve,
 
     fn commit(self: Persistence, bytes: []const u8) PersistenceCommit {
         if (!self.enabled) return .failed;
@@ -63,25 +57,8 @@ pub const Persistence = struct {
         return self.recover_fn(self.context, bytes);
     }
 
-    fn observe(
-        self: Persistence,
-        before: []const u8,
-        after: []const u8,
-    ) PersistenceObservation {
-        if (!self.enabled) return .unknown;
-        return self.observe_fn(self.context, before, after);
-    }
-
     fn unsupportedCommit(_: ?*anyopaque, _: []const u8) PersistenceCommit {
         return .failed;
-    }
-
-    fn unsupportedObserve(
-        _: ?*anyopaque,
-        _: []const u8,
-        _: []const u8,
-    ) PersistenceObservation {
-        return .unknown;
     }
 };
 
@@ -90,7 +67,6 @@ pub const PersistenceHealth = enum {
     ready,
     read_failed,
     corrupt,
-    migration_failed,
     write_failed,
     outcome_unknown,
 };
@@ -110,52 +86,13 @@ fn bootstrapStore(
 ) Error!state.Store {
     if (health.* != .ready or persistence_capability.restored_bytes == null)
         return state.Store.init(allocator, limits);
-    const restored_bytes = persistence_capability.restored_bytes.?;
-    const decoded = persistence.decodeForBootstrap(
+    return persistence.decode(
         allocator,
-        restored_bytes,
+        persistence_capability.restored_bytes.?,
         limits,
     ) catch {
         health.* = .corrupt;
         return state.Store.init(allocator, limits);
-    };
-    return switch (decoded) {
-        .current => |store| store,
-        .migrated => |store_value| migrated: {
-            var store = store_value;
-            var owned = true;
-            defer if (owned) store.deinit();
-            const output = allocator.alloc(u8, persistence.max_store_bytes) catch {
-                health.* = .migration_failed;
-                break :migrated try state.Store.init(allocator, limits);
-            };
-            defer allocator.free(output);
-            const next_bytes = persistence.encode(output, &store) catch {
-                health.* = .migration_failed;
-                break :migrated try state.Store.init(allocator, limits);
-            };
-            const committed = switch (persistence_capability.commit(next_bytes)) {
-                .committed => true,
-                .failed => false,
-                .outcome_unknown => switch (persistence_capability.observe(
-                    restored_bytes,
-                    next_bytes,
-                )) {
-                    .after => true,
-                    .before => false,
-                    .unknown => {
-                        health.* = .outcome_unknown;
-                        break :migrated try state.Store.init(allocator, limits);
-                    },
-                },
-            };
-            if (!committed) {
-                health.* = .migration_failed;
-                break :migrated try state.Store.init(allocator, limits);
-            }
-            owned = false;
-            break :migrated store;
-        },
     };
 }
 
@@ -407,7 +344,7 @@ pub const Runtime = struct {
         if (!self.persistence.enabled) return false;
         return switch (self.persistence_health) {
             .read_failed, .corrupt, .write_failed, .outcome_unknown => true,
-            .unavailable, .ready, .migration_failed => false,
+            .unavailable, .ready => false,
         };
     }
 
@@ -688,10 +625,7 @@ pub const Runtime = struct {
         errdefer self.allocator.free(title);
         const input = try self.allocator.dupe(u8, candidate_item.input.borrowed());
         errdefer self.allocator.free(input);
-        const current_binding = switch (candidate_item.bindingView()) {
-            .current => |binding| binding,
-            .migration_required => return error.InvalidSchedule,
-        };
+        const current_binding = candidate_item.bindingView();
         const source_id = try self.allocator.dupe(
             u8,
             current_binding.model_ref.source_id,
@@ -1110,14 +1044,7 @@ fn reconcileBindingsInStore(
     for (store.items) |*entry| {
         const item = &(entry.* orelse continue);
         if (!item.enabled or item.health != .ready) continue;
-        const current = switch (item.bindingView()) {
-            .current => |value| value,
-            .migration_required => {
-                store.markNeedsAttention(item, .binding_migration_required);
-                changed = true;
-                continue;
-            },
-        };
+        const current = item.bindingView();
         const exact_model = if (binding.model_ref) |model_ref|
             std.mem.eql(u8, current.model_ref.source_id, model_ref.source_id) and
                 std.mem.eql(u8, current.model_ref.model_id, model_ref.model_id)
@@ -1147,7 +1074,6 @@ const TestEffects = struct {
     restored_bytes: ?[]const u8 = null,
     commit_result: PersistenceCommit = .committed,
     recovery_result: PersistenceCommit = .committed,
-    observation: PersistenceObservation = .unknown,
     commits: usize = 0,
     recoveries: usize = 0,
     notification_kind: ?NotificationKind = null,
@@ -1168,15 +1094,6 @@ const TestEffects = struct {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
         self.commits += 1;
         return self.commit_result;
-    }
-
-    fn observe(
-        context: ?*anyopaque,
-        _: []const u8,
-        _: []const u8,
-    ) PersistenceObservation {
-        const self: *TestEffects = @ptrCast(@alignCast(context.?));
-        return self.observation;
     }
 
     fn recover(context: ?*anyopaque, _: []const u8) PersistenceCommit {
@@ -1202,7 +1119,6 @@ const TestEffects = struct {
             .restored_bytes = self.restored_bytes,
             .commit_fn = commit,
             .recover_fn = recover,
-            .observe_fn = observe,
         };
     }
 
@@ -1281,23 +1197,23 @@ fn testBinding() ExecutionBinding {
 fn testDefinition(title: []const u8, input: []const u8) Definition {
     return .{
         .title = title,
-        .binding = .{ .current = .{
+        .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "model" },
             .source_generation = 1,
             .selection_revision = 1,
             .protocol = .anthropic_messages,
-        } },
+        },
         .permission_profile = .approval_required,
         .input = input,
         .recurrence = .{ .once = .{ .at_unix_seconds = 200 } },
     };
 }
 
-const legacy_schedule_bytes =
+const retired_schedule_bytes =
     "{\"schema_version\":1,\"next_id\":8,\"items\":[{\"id\":7,\"epoch\":3,\"title\":\"Legacy schedule\",\"execution_generation\":19,\"execution_protocol\":\"anthropic_messages\",\"execution_model\":\"legacy-model\",\"permission_profile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":200},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":200,\"occurrences\":[]}]}";
 
-test "schema 1 bootstrap persists a disabled explicit-rebind definition" {
-    var effects: TestEffects = .{ .restored_bytes = legacy_schedule_bytes };
+test "bootstrap rejects retired Schedule shapes without migration" {
+    var effects: TestEffects = .{ .restored_bytes = retired_schedule_bytes };
     var runtime = try Runtime.init(std.testing.allocator, .{
         .max_items = 2,
         .max_projection_bytes = 4096,
@@ -1307,101 +1223,10 @@ test "schema 1 bootstrap persists a disabled explicit-rebind definition" {
     });
     defer runtime.deinit();
 
-    try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
-    try std.testing.expectEqual(@as(usize, 1), effects.commits);
-    const item = testing.item(&runtime, 7).?;
-    try std.testing.expect(!item.enabled);
-    try std.testing.expectEqual(Health.needs_attention, item.health);
-    try std.testing.expectEqual(
-        FailureReason.binding_migration_required,
-        item.failure_reason.?,
-    );
-    switch (item.binding) {
-        .migration_required => |legacy| {
-            try std.testing.expectEqual(@as(u64, 19), legacy.execution_generation);
-            try std.testing.expectEqualStrings("legacy-model", legacy.model);
-        },
-        .current => return error.TestUnexpectedResult,
-    }
-
-    try runtime.update(
-        7,
-        3,
-        testDefinition("Rebound schedule", "inspect"),
-        testBinding(),
-        testRedaction(&effects),
-    );
-    const rebound = testing.item(&runtime, 7).?;
-    try std.testing.expect(rebound.enabled);
-    try std.testing.expectEqual(Health.ready, rebound.health);
-    try std.testing.expect(rebound.failure_reason == null);
-    try std.testing.expectEqual(@as(u64, 4), rebound.epoch);
-    switch (rebound.binding) {
-        .current => |binding| try std.testing.expectEqualStrings(
-            "metask:test",
-            binding.model_ref.source_id,
-        ),
-        .migration_required => return error.TestUnexpectedResult,
-    }
-}
-
-test "schema 1 bootstrap fails closed around migration commit certainty" {
-    const limits: Limits = .{ .max_items = 2, .max_projection_bytes = 4096 };
-
-    var failed_effects: TestEffects = .{
-        .restored_bytes = legacy_schedule_bytes,
-        .commit_result = .failed,
-    };
-    var failed = try Runtime.init(
-        std.testing.allocator,
-        limits,
-        .{ .persistence = failed_effects.persistence() },
-    );
-    defer failed.deinit();
-    try std.testing.expectEqual(PersistenceHealth.migration_failed, failed.persistenceHealth());
-    try std.testing.expect(testing.item(&failed, 7) == null);
-    try std.testing.expect(!failed.persistenceRecoveryAvailable());
-
-    var before_effects: TestEffects = .{
-        .restored_bytes = legacy_schedule_bytes,
-        .commit_result = .outcome_unknown,
-        .observation = .before,
-    };
-    var before = try Runtime.init(
-        std.testing.allocator,
-        limits,
-        .{ .persistence = before_effects.persistence() },
-    );
-    defer before.deinit();
-    try std.testing.expectEqual(PersistenceHealth.migration_failed, before.persistenceHealth());
-    try std.testing.expect(testing.item(&before, 7) == null);
-
-    var after_effects: TestEffects = .{
-        .restored_bytes = legacy_schedule_bytes,
-        .commit_result = .outcome_unknown,
-        .observation = .after,
-    };
-    var after = try Runtime.init(
-        std.testing.allocator,
-        limits,
-        .{ .persistence = after_effects.persistence() },
-    );
-    defer after.deinit();
-    try std.testing.expectEqual(PersistenceHealth.ready, after.persistenceHealth());
-    try std.testing.expect(testing.item(&after, 7) != null);
-
-    var unknown_effects: TestEffects = .{
-        .restored_bytes = legacy_schedule_bytes,
-        .commit_result = .outcome_unknown,
-    };
-    var unknown = try Runtime.init(
-        std.testing.allocator,
-        limits,
-        .{ .persistence = unknown_effects.persistence() },
-    );
-    defer unknown.deinit();
-    try std.testing.expectEqual(PersistenceHealth.outcome_unknown, unknown.persistenceHealth());
-    try std.testing.expect(testing.item(&unknown, 7) == null);
+    try std.testing.expectEqual(PersistenceHealth.corrupt, runtime.persistenceHealth());
+    try std.testing.expectEqual(@as(usize, 0), effects.commits);
+    try std.testing.expect(runtime.persistenceRecoveryAvailable());
+    try std.testing.expect(testing.item(&runtime, 7) == null);
 }
 
 test "occurrence claim owns launch facts across later store replacement" {

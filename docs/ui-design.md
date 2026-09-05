@@ -391,8 +391,8 @@ Disabled
 - 新建和保存从同一 snapshot 的 Models global default 与 `newTaskAdmission` active authority 构造完整 source-qualified binding；Renderer 不展示 protocol/revision，也不从 Account 或裸 model id 猜测归属。保存、暂停/恢复、立即运行和删除使用 Host typed result 与 optimistic `scheduledTaskEpoch`。命令 timeout 后先刷新 canonical snapshot，不自动重放；
 - 点击计划打开 detail drawer：上半部是定义与下一次运行，下半部是有界运行历史。每个 occurrence 链接到其真实 Task，并显示完成、失败、已跳过、延迟或等待处理；结果历史不复制 Task timeline；
 - 删除计划不停止或删除已经创建的真实 Task；`立即运行` 也通过同一 occurrence 与 Task admission，不能建立测试/手动专用路径；上一次真实 Task 仍 non-terminal 时显示 `已跳过：上一次仍在运行`；
-- 模型 authority、Workspace authority 或定义固定的非交互 PermissionProfile 不再满足时显示 `需要处理`，并要求用户编辑确认；立即运行与恢复启用在确认前禁用。schema 1 恢复项明确说明旧绑定缺少 provider identity，用户保存即将其绑定到当前默认模型，不把旧 model id 当成可执行身份。occurrence 不得进入同步 Agent permission wait。未覆盖操作使该次运行以 typed 原因停止，通知只定位真实 Task 和处理原因，不提供远程批准、临时升级或继续原 Run；
-- Schedule store 的 `migration_failed` 表示原 schema 1 canonical 仍被保留且本进程没有可安全提交的迁移内存；该状态只说明重启后重试，不显示“使用空存储继续”的 hard-reset 动作。`outcome_unknown` 才沿用显式恢复确认面；
+- 模型 authority、Workspace authority 或定义固定的非交互 PermissionProfile 不再满足时显示 `需要处理`，并要求用户编辑确认；立即运行与恢复启用在确认前禁用。occurrence 不得进入同步 Agent permission wait。未覆盖操作使该次运行以 typed 原因停止，通知只定位真实 Task 和处理原因，不提供远程批准、临时升级或继续原 Run；
+- Schedule store 只使用当前 schema 1；旧 shape、未知 version 或损坏数据只进入通用持久化恢复确认面，不向 Renderer 发布迁移状态或历史 binding；
 - 每次 default occurrence 创建新的真实 Task 与 Automatic Workspace；同一 occurrence 所属 Task 的后续 Run 复用该目录。运行历史链接 Task，不展示 automatic `workspace-key`；目录保留不等于 Host 重启后恢复 Task。
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
