@@ -610,6 +610,10 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     permissionRequired,
   );
 
+  const unavailableTask = clone(scheduled);
+  unavailableTask.scheduledTasks[0].occurrences[0].taskOutcome = "unavailable";
+  assert.deepEqual(decodeWorkbenchSnapshot(unavailableTask), unavailableTask);
+
   const rejectedAfterTaskCreation = clone(scheduled);
   rejectedAfterTaskCreation.scheduledTasks[0].occurrences[0] = {
     ...rejectedAfterTaskCreation.scheduledTasks[0].occurrences[0],

@@ -143,6 +143,7 @@ pub const OccurrenceTaskOutcome = enum {
     interrupted,
     failed,
     dependency_contract_failure,
+    unavailable,
 };
 
 pub const Occurrence = struct {
@@ -383,6 +384,7 @@ pub const Store = struct {
             return error.ScheduledTaskEpochMismatch;
         if (current.epoch == std.math.maxInt(u64))
             return error.ScheduledTaskIdentityExhausted;
+        const preserve_paused = current.health == .paused;
         const next_run = (try definition.recurrence.firstAtOrAfter(
             now_unix_seconds,
         )) orelse return error.InvalidSchedule;
@@ -399,6 +401,12 @@ pub const Store = struct {
             replacement.occurrence_history[0..current.occurrence_count],
             current.occurrence_history[0..current.occurrence_count],
         );
+        if (preserve_paused) {
+            replacement.enabled = false;
+            replacement.health = .paused;
+            replacement.failure_reason = null;
+            replacement.next_run_at_unix_seconds = null;
+        }
         self.deinitItem(current);
         self.items[slot] = replacement;
     }
@@ -893,4 +901,41 @@ test "store updates optimistically and a one-time occurrence completes" {
         store.delete(id, 2),
     );
     try store.delete(id, 1);
+}
+
+test "updating a paused schedule preserves its paused state" {
+    var store = try Store.init(std.testing.allocator, .{
+        .max_items = 2,
+        .max_projection_bytes = 4096,
+    });
+    defer store.deinit();
+    const original: Definition = .{
+        .title = "Daily summary",
+        .binding = .{
+            .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
+            .source_generation = 9,
+            .selection_revision = 11,
+            .protocol = .openai_chat_completions,
+        },
+        .permission_profile = .approval_required,
+        .input = "Summarize the project",
+        .recurrence = .{ .interval = .{
+            .start_at_unix_seconds = 2_000,
+            .every_seconds = 300,
+        } },
+    };
+    const id = try store.create(original, 1_000);
+    try store.setEnabled(id, 1, false, 1_100);
+
+    var updated = original;
+    updated.title = "Updated daily summary";
+    try store.update(id, 2, updated, 1_200);
+
+    const item = store.find(id).?;
+    try std.testing.expectEqual(@as(u64, 3), item.epoch);
+    try std.testing.expect(!item.enabled);
+    try std.testing.expectEqual(Health.paused, item.health);
+    try std.testing.expectEqual(@as(?FailureReason, null), item.failure_reason);
+    try std.testing.expectEqual(@as(?u64, null), item.next_run_at_unix_seconds);
+    try std.testing.expectEqualStrings("Updated daily summary", item.title);
 }

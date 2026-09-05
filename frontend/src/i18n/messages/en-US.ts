@@ -1127,10 +1127,10 @@ export const enUS = {
     "MetaWork will retain the current history file, then save the tasks and workspaces currently available in this session as the new history.",
   "persistence.recovery.scheduled.title": "Replace saved schedules?",
   "persistence.recovery.scheduled.hard_cut":
-    "The current scheduled task file will be permanently deleted.",
+    "The current scheduled task file will be retained as a recovery copy.",
   "persistence.recovery.scheduled.body":
-    "MetaWork will permanently delete the current scheduled task file and write the schedules still available in this session as a clean store. Retired formats are not preserved.",
-  "persistence.recovery.scheduled.confirm": "Delete file and reset",
+    "MetaWork will retain the current scheduled task file, then write the schedules still available in this session as a clean store. Retired formats will not be loaded.",
+  "persistence.recovery.scheduled.confirm": "Retain file and reset",
   "persistence.recovery.cancel": "Keep current state",
   "persistence.recovery.confirm": "Retain file and recover",
   "persistence.recovery.running": "Recovering…",

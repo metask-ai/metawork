@@ -15,6 +15,9 @@ pub const Error = scheduled.Error || error{
 };
 
 pub const file_name = "scheduled-tasks.json";
+const recovery_prefix = ".scheduled-tasks.recovery.";
+const recovery_id_hex_bytes = 16;
+const max_recovery_artifacts = 1024;
 
 pub const FileStoreError = std.mem.Allocator.Error || error{
     DirectoryUnavailable,
@@ -23,9 +26,17 @@ pub const FileStoreError = std.mem.Allocator.Error || error{
     PersistenceOutcomeUnknown,
 };
 
+pub const RecoveryFault = enum {
+    none,
+    install_failed,
+    interrupted_after_quarantine,
+    interrupted_after_install,
+};
+
 pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    recovery_fault: RecoveryFault = .none,
 
     pub fn init(
         io: std.Io,
@@ -53,6 +64,7 @@ pub const FileStore = struct {
         self: *FileStore,
         allocator: std.mem.Allocator,
     ) FileStoreError!?[]u8 {
+        if (self.hasIncompleteRecoveryArtifact()) return error.ReadFailed;
         var file = self.dir.openFile(
             self.io,
             file_name,
@@ -126,26 +138,269 @@ pub const FileStore = struct {
         if (!self.syncCommit()) return error.PersistenceOutcomeUnknown;
     }
 
-    /// Hard-resets the current canonical store and installs Product-owned
-    /// canonical bytes. Retired formats are deliberately not retained.
+    /// Fully stages and syncs the replacement before moving the current
+    /// canonical into quarantine. A definite install failure restores the
+    /// canonical; an interrupted or indeterminate window leaves recovery
+    /// artifacts that make the next load fail closed.
     pub fn recover(
         self: *FileStore,
         bytes: []const u8,
     ) FileStoreError!void {
         if (bytes.len == 0 or bytes.len > max_store_bytes)
             return error.WriteFailed;
-        self.dir.deleteFile(self.io, file_name) catch |err| switch (err) {
-            error.FileNotFound => {},
+        try self.settleIncompleteRecoveries();
+        var random: [8]u8 = undefined;
+        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
+        const random_hex = std.fmt.bytesToHex(random, .lower);
+        var temp_name_storage: [80]u8 = undefined;
+        var temp_name_writer = std.Io.Writer.fixed(&temp_name_storage);
+        temp_name_writer.print(
+            ".scheduled-tasks.recovery.{s}.tmp",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const temp_name = temp_name_writer.buffered();
+        var quarantine_name_storage: [80]u8 = undefined;
+        var quarantine_name_writer = std.Io.Writer.fixed(&quarantine_name_storage);
+        quarantine_name_writer.print(
+            ".scheduled-tasks.recovery.{s}.bak",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const quarantine_name = quarantine_name_writer.buffered();
+        var final_quarantine_name_storage: [88]u8 = undefined;
+        var final_quarantine_name_writer = std.Io.Writer.fixed(
+            &final_quarantine_name_storage,
+        );
+        final_quarantine_name_writer.print(
+            ".scheduled-tasks.recovery.{s}.quarantine",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const final_quarantine_name = final_quarantine_name_writer.buffered();
+        var pending_name_storage: [84]u8 = undefined;
+        var pending_name_writer = std.Io.Writer.fixed(&pending_name_storage);
+        pending_name_writer.print(
+            ".scheduled-tasks.recovery.{s}.pending",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const pending_name = pending_name_writer.buffered();
+
+        const replacement = self.dir.createFile(
+            self.io,
+            temp_name,
+            .{
+                .exclusive = true,
+                .permissions = privateFilePermissions(),
+                .resolve_beneath = true,
+            },
+        ) catch return error.WriteFailed;
+        var replacement_open = true;
+        var temp_exists = true;
+        defer {
+            if (replacement_open) replacement.close(self.io);
+            if (temp_exists) self.dir.deleteFile(self.io, temp_name) catch {};
+        }
+        replacement.writeStreamingAll(self.io, bytes) catch
+            return error.WriteFailed;
+        replacement.sync(self.io) catch return error.WriteFailed;
+        replacement.close(self.io);
+        replacement_open = false;
+        if (!self.syncPath(temp_name)) return error.WriteFailed;
+
+        const pending = self.dir.createFile(
+            self.io,
+            pending_name,
+            .{
+                .exclusive = true,
+                .permissions = privateFilePermissions(),
+                .resolve_beneath = true,
+            },
+        ) catch return error.WriteFailed;
+        var pending_open = true;
+        var clean_pending = true;
+        defer {
+            if (pending_open) pending.close(self.io);
+            if (clean_pending)
+                self.dir.deleteFile(self.io, pending_name) catch {};
+        }
+        pending.sync(self.io) catch return error.WriteFailed;
+        pending.close(self.io);
+        pending_open = false;
+        if (!self.syncPath(pending_name)) return error.WriteFailed;
+
+        var quarantined = true;
+        self.dir.rename(
+            file_name,
+            self.dir,
+            quarantine_name,
+            self.io,
+        ) catch |err| switch (err) {
+            error.FileNotFound => quarantined = false,
             else => return error.WriteFailed,
         };
-        return self.commit(bytes);
+        if (quarantined and !self.syncPath(quarantine_name)) {
+            if (!self.restoreCanonical(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+            return error.WriteFailed;
+        }
+
+        if (self.recovery_fault == .interrupted_after_quarantine) {
+            temp_exists = false;
+            clean_pending = false;
+            return error.PersistenceOutcomeUnknown;
+        }
+        if (self.recovery_fault == .install_failed) {
+            if (quarantined and !self.restoreCanonical(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+            return error.WriteFailed;
+        }
+        self.dir.rename(
+            temp_name,
+            self.dir,
+            file_name,
+            self.io,
+        ) catch {
+            if (quarantined and !self.restoreCanonical(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+            return error.WriteFailed;
+        };
+        temp_exists = false;
+        if (!self.syncPath(file_name)) {
+            clean_pending = false;
+            return error.PersistenceOutcomeUnknown;
+        }
+        if (self.recovery_fault == .interrupted_after_install) {
+            clean_pending = false;
+            return error.PersistenceOutcomeUnknown;
+        }
+        if (quarantined) {
+            self.dir.rename(
+                quarantine_name,
+                self.dir,
+                final_quarantine_name,
+                self.io,
+            ) catch {
+                clean_pending = false;
+                return error.PersistenceOutcomeUnknown;
+            };
+            if (!self.syncPath(final_quarantine_name)) {
+                clean_pending = false;
+                return error.PersistenceOutcomeUnknown;
+            }
+        }
+        self.dir.deleteFile(self.io, pending_name) catch {
+            clean_pending = false;
+            return error.PersistenceOutcomeUnknown;
+        };
+        clean_pending = false;
+        if (!self.syncDirectory()) return error.PersistenceOutcomeUnknown;
     }
 
-    fn syncCommit(self: *FileStore) bool {
+    fn restoreCanonical(self: *FileStore, quarantine_name: []const u8) bool {
+        self.dir.rename(
+            quarantine_name,
+            self.dir,
+            file_name,
+            self.io,
+        ) catch return false;
+        return self.syncPath(file_name);
+    }
+
+    /// Explicit recovery is the authority to finish older interrupted
+    /// recovery transactions. Preserve every displaced canonical as a final
+    /// quarantine, remove uninstalled candidates, and clear pending markers
+    /// last so a crash during settlement remains fail closed.
+    fn settleIncompleteRecoveries(self: *FileStore) FileStoreError!void {
+        var operations: usize = 0;
+        var name_storage: [96]u8 = undefined;
+        while (try self.findRecoveryArtifact(".bak", &name_storage)) |name| {
+            operations += 1;
+            if (operations > max_recovery_artifacts)
+                return error.PersistenceOutcomeUnknown;
+            const transaction_id = recoveryTransactionId(name, ".bak") orelse
+                return error.PersistenceOutcomeUnknown;
+            var quarantine_storage: [96]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&quarantine_storage);
+            writer.print(
+                recovery_prefix ++ "{s}.quarantine",
+                .{transaction_id},
+            ) catch return error.PersistenceOutcomeUnknown;
+            const quarantine_name = writer.buffered();
+            self.dir.rename(
+                name,
+                self.dir,
+                quarantine_name,
+                self.io,
+            ) catch return error.PersistenceOutcomeUnknown;
+            if (!self.syncPath(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+        }
+        var removed_temp = false;
+        while (try self.findRecoveryArtifact(".tmp", &name_storage)) |name| {
+            operations += 1;
+            if (operations > max_recovery_artifacts)
+                return error.PersistenceOutcomeUnknown;
+            self.dir.deleteFile(self.io, name) catch
+                return error.PersistenceOutcomeUnknown;
+            removed_temp = true;
+        }
+        if (removed_temp and !self.syncDirectory())
+            return error.PersistenceOutcomeUnknown;
+        var removed_pending = false;
+        while (try self.findRecoveryArtifact(".pending", &name_storage)) |name| {
+            operations += 1;
+            if (operations > max_recovery_artifacts)
+                return error.PersistenceOutcomeUnknown;
+            self.dir.deleteFile(self.io, name) catch
+                return error.PersistenceOutcomeUnknown;
+            removed_pending = true;
+        }
+        if (removed_pending and !self.syncDirectory())
+            return error.PersistenceOutcomeUnknown;
+    }
+
+    fn findRecoveryArtifact(
+        self: *FileStore,
+        suffix: []const u8,
+        output: []u8,
+    ) FileStoreError!?[]const u8 {
+        var iterable = self.dir.openDir(
+            self.io,
+            ".",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch return error.ReadFailed;
+        defer iterable.close(self.io);
+        var iterator = iterable.iterate();
+        while (iterator.next(self.io) catch return error.ReadFailed) |entry| {
+            if (entry.kind != .file or
+                recoveryTransactionId(entry.name, suffix) == null) continue;
+            if (entry.name.len > output.len)
+                return error.PersistenceOutcomeUnknown;
+            @memcpy(output[0..entry.name.len], entry.name);
+            return output[0..entry.name.len];
+        }
+        return null;
+    }
+
+    fn hasIncompleteRecoveryArtifact(self: *FileStore) bool {
+        var iterable = self.dir.openDir(
+            self.io,
+            ".",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch return true;
+        defer iterable.close(self.io);
+        var iterator = iterable.iterate();
+        while (iterator.next(self.io) catch return true) |entry| {
+            if (entry.kind != .file) continue;
+            if (recoveryTransactionId(entry.name, ".pending") != null)
+                return true;
+        }
+        return false;
+    }
+
+    fn syncPath(self: *FileStore, name: []const u8) bool {
         if (builtin.os.tag == .windows) {
             const file = self.dir.openFile(
                 self.io,
-                file_name,
+                name,
                 .{
                     .mode = .read_write,
                     .allow_directory = false,
@@ -157,6 +412,11 @@ pub const FileStore = struct {
             file.sync(self.io) catch return false;
             return true;
         }
+        return self.syncDirectory();
+    }
+
+    fn syncDirectory(self: *FileStore) bool {
+        if (builtin.os.tag == .windows) return true;
         const directory_file: std.Io.File = .{
             .handle = self.dir.handle,
             .flags = .{ .nonblocking = false },
@@ -164,7 +424,23 @@ pub const FileStore = struct {
         directory_file.sync(self.io) catch return false;
         return true;
     }
+
+    fn syncCommit(self: *FileStore) bool {
+        return self.syncPath(file_name);
+    }
 };
+
+fn recoveryTransactionId(name: []const u8, suffix: []const u8) ?[]const u8 {
+    const expected_len = recovery_prefix.len + recovery_id_hex_bytes + suffix.len;
+    if (name.len != expected_len or
+        !std.mem.startsWith(u8, name, recovery_prefix) or
+        !std.mem.endsWith(u8, name, suffix)) return null;
+    const transaction_id = name[recovery_prefix.len .. recovery_prefix.len + recovery_id_hex_bytes];
+    for (transaction_id) |byte| {
+        if (!std.ascii.isHex(byte)) return null;
+    }
+    return transaction_id;
+}
 
 fn directoryPermissions() std.Io.File.Permissions {
     return if (builtin.os.tag == .windows)
@@ -504,6 +780,12 @@ fn validText(value: []const u8) bool {
     return value.len > 0 and std.unicode.utf8ValidateSlice(value);
 }
 
+pub const testing = if (builtin.is_test) struct {
+    pub fn setRecoveryFault(store: *FileStore, fault: RecoveryFault) void {
+        store.recovery_fault = fault;
+    }
+} else struct {};
+
 test "scheduled task store round trips bounded occurrence history" {
     var store = try scheduled.Store.init(std.testing.allocator, .{
         .max_items = 4,
@@ -689,7 +971,7 @@ test "scheduled task file store atomically replaces and restores bytes" {
     );
 }
 
-test "scheduled task file store recovery hard-resets the previous canonical bytes" {
+test "scheduled task file store recovery quarantines the previous canonical bytes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var file_store: FileStore = .{
@@ -712,11 +994,129 @@ test "scheduled task file store recovery hard-resets the previous canonical byte
     );
     defer iterable.close(std.testing.io);
     var iterator = iterable.iterate();
-    var files: usize = 0;
+    var quarantine_name: ?[]u8 = null;
+    defer if (quarantine_name) |name| std.testing.allocator.free(name);
     while (try iterator.next(std.testing.io)) |entry| {
-        if (entry.kind != .file) continue;
-        files += 1;
-        try std.testing.expectEqualStrings(file_name, entry.name);
+        if (entry.kind == .file and std.mem.startsWith(
+            u8,
+            entry.name,
+            ".scheduled-tasks.recovery.",
+        )) {
+            try std.testing.expect(quarantine_name == null);
+            quarantine_name = try std.testing.allocator.dupe(u8, entry.name);
+        }
     }
-    try std.testing.expectEqual(@as(usize, 1), files);
+    const name = quarantine_name orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.endsWith(u8, name, ".quarantine"));
+    var quarantine = try tmp.dir.openFile(
+        std.testing.io,
+        name,
+        .{ .follow_symlinks = false },
+    );
+    if (builtin.os.tag == .windows) quarantine.flags.nonblocking = true;
+    defer quarantine.close(std.testing.io);
+    var quarantine_bytes: [previous.len]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, previous.len),
+        try quarantine.readPositionalAll(std.testing.io, &quarantine_bytes, 0),
+    );
+    try std.testing.expectEqualStrings(previous, &quarantine_bytes);
+}
+
+test "scheduled task recovery restores canonical after definite install failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{
+        .io = std.testing.io,
+        .dir = tmp.dir,
+    };
+    const previous = "{\"schema_version\":2,\"next_id\":1,\"items\":[]}";
+    try file_store.commit(previous);
+    testing.setRecoveryFault(&file_store, .install_failed);
+    try std.testing.expectError(
+        error.WriteFailed,
+        file_store.recover("{\"schema_version\":1,\"next_id\":1,\"items\":[]}"),
+    );
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(previous, restored);
+}
+
+test "interrupted scheduled task recovery never appears as first launch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{
+        .io = std.testing.io,
+        .dir = tmp.dir,
+    };
+    const replacement = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit("{\"schema_version\":2,\"next_id\":1,\"items\":[]}");
+    testing.setRecoveryFault(&file_store, .interrupted_after_quarantine);
+    try std.testing.expectError(
+        error.PersistenceOutcomeUnknown,
+        file_store.recover(replacement),
+    );
+    try std.testing.expectError(
+        error.ReadFailed,
+        file_store.loadAlloc(std.testing.allocator),
+    );
+
+    testing.setRecoveryFault(&file_store, .none);
+    try file_store.recover(replacement);
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+}
+
+test "indeterminate recovery install remains fail closed with a canonical file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{
+        .io = std.testing.io,
+        .dir = tmp.dir,
+    };
+    const replacement = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit("{\"schema_version\":2,\"next_id\":1,\"items\":[]}");
+    testing.setRecoveryFault(&file_store, .interrupted_after_install);
+    try std.testing.expectError(
+        error.PersistenceOutcomeUnknown,
+        file_store.recover(replacement),
+    );
+    try std.testing.expectError(
+        error.ReadFailed,
+        file_store.loadAlloc(std.testing.allocator),
+    );
+
+    testing.setRecoveryFault(&file_store, .none);
+    try file_store.recover(replacement);
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+}
+
+test "orphan recovery files without an exact pending marker do not block load" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{
+        .io = std.testing.io,
+        .dir = tmp.dir,
+    };
+    const canonical = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit(canonical);
+    inline for (.{
+        ".scheduled-tasks.recovery.0123456789abcdef.tmp",
+        ".scheduled-tasks.recovery.0123456789abcdef.bak",
+        ".scheduled-tasks.recovery.not-owned.pending",
+    }) |name| {
+        var artifact = try tmp.dir.createFile(
+            std.testing.io,
+            name,
+            .{ .exclusive = true },
+        );
+        artifact.close(std.testing.io);
+    }
+
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(canonical, restored);
 }

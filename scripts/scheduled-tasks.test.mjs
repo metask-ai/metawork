@@ -195,14 +195,14 @@ test("Schedule store recovery stays available when normal scheduling is blocked 
   );
   assert.match(
     screen.getByText(/write the schedules still available/).textContent,
-    /Retired formats are not preserved/,
+    /retain the current scheduled task file.*Retired formats will not be loaded/,
   );
   fireEvent.click(screen.getByRole("button", { name: "Keep current state" }));
   assert.equal(recoveries, 0);
 
   fireEvent.click(recovery);
   fireEvent.click(
-    screen.getByRole("button", { name: "Delete file and reset" }),
+    screen.getByRole("button", { name: "Retain file and reset" }),
   );
   await waitFor(() => assert.equal(recoveries, 1));
 });

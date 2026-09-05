@@ -1023,10 +1023,11 @@ export const zhCN: Record<MessageId, string> = {
   "persistence.recovery.task.body":
     "MetaWork 会保留当前历史文件，再将本次使用中仍可用的任务和工作区保存为新的任务历史。",
   "persistence.recovery.scheduled.title": "替换已保存的定时任务？",
-  "persistence.recovery.scheduled.hard_cut": "当前定时任务文件将被永久删除。",
+  "persistence.recovery.scheduled.hard_cut":
+    "当前定时任务文件会保留为恢复副本。",
   "persistence.recovery.scheduled.body":
-    "MetaWork 会永久删除当前定时任务文件，并将本次使用中仍可用的定时任务写入全新存储；已淘汰格式不会保留。",
-  "persistence.recovery.scheduled.confirm": "删除文件并重置",
+    "MetaWork 会保留当前定时任务文件，再将本次使用中仍可用的定时任务写入全新存储；已淘汰格式不会被加载。",
+  "persistence.recovery.scheduled.confirm": "保留文件并重置",
   "persistence.recovery.cancel": "保留当前状态",
   "persistence.recovery.confirm": "保留文件并恢复",
   "persistence.recovery.running": "正在恢复…",

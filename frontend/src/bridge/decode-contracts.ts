@@ -2636,6 +2636,7 @@ function decodeScheduledTask(value: unknown, path: string): ScheduledTaskView {
           "interrupted",
           "failed",
           "dependency_contract_failure",
+          "unavailable",
         ] as const,
       );
       if (

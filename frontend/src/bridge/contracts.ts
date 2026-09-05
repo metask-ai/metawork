@@ -396,6 +396,7 @@ export type ScheduledTaskView = {
       | "interrupted"
       | "failed"
       | "dependency_contract_failure"
+      | "unavailable"
       | null;
   }>;
 };

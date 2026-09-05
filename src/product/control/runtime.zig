@@ -5324,7 +5324,7 @@ pub const Runtime = struct {
             .context = self,
             .has_active_fn = scheduleTaskHasActive,
             .launch_fn = scheduleTaskLaunch,
-            .terminal_fn = scheduleTaskTerminal,
+            .observe_fn = scheduleTaskObservation,
         };
     }
 
@@ -5389,17 +5389,18 @@ pub const Runtime = struct {
         return .{ .submitted = task_id };
     }
 
-    fn scheduleTaskTerminal(
+    fn scheduleTaskObservation(
         context: *anyopaque,
         task_id: u64,
-    ) ?product_schedule.TaskTerminal {
+    ) product_schedule.TaskObservation {
         const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.task_runtime.findConst(task_id) == null) return .unavailable;
         const terminal = self.task_runtime.lastTerminalSummary(task_id) orelse
-            return null;
-        return .{
+            return .pending;
+        return .{ .terminal = .{
             .outcome = scheduledTaskOutcome(terminal.outcome),
             .permission_required = terminal.permission_required,
-        };
+        } };
     }
 
     fn scheduleRedaction(self: *Runtime) product_schedule.Redaction {

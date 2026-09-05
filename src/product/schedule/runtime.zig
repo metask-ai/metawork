@@ -236,6 +236,12 @@ const PendingCompletion = struct {
     task_id: u64,
 };
 
+const CompletionResolution = struct {
+    pending: PendingCompletion,
+    outcome: OccurrenceTaskOutcome,
+    permission_required: bool,
+};
+
 /// Callback-scoped access to the Task aggregate. Schedule owns occurrence
 /// transaction order; Product Control retains authority checks and the real
 /// Task effects behind this opaque capability. Runtime never retains it.
@@ -254,6 +260,12 @@ pub const TaskTerminal = struct {
     permission_required: bool,
 };
 
+pub const TaskObservation = union(enum) {
+    pending,
+    unavailable,
+    terminal: TaskTerminal,
+};
+
 pub const TaskLaunchFailure = struct {
     cause: anyerror,
     reason: FailureReason,
@@ -269,7 +281,7 @@ pub const TaskEffects = struct {
     context: *anyopaque,
     has_active_fn: *const fn (*anyopaque, u64) bool,
     launch_fn: *const fn (*anyopaque, TaskLaunch) TaskLaunchOutcome,
-    terminal_fn: *const fn (*anyopaque, u64) ?TaskTerminal,
+    observe_fn: *const fn (*anyopaque, u64) TaskObservation,
 
     fn hasActive(self: TaskEffects, task_id: u64) bool {
         return self.has_active_fn(self.context, task_id);
@@ -279,8 +291,8 @@ pub const TaskEffects = struct {
         return self.launch_fn(self.context, input);
     }
 
-    fn terminal(self: TaskEffects, task_id: u64) ?TaskTerminal {
-        return self.terminal_fn(self.context, task_id);
+    fn observe(self: TaskEffects, task_id: u64) TaskObservation {
+        return self.observe_fn(self.context, task_id);
     }
 };
 
@@ -660,66 +672,51 @@ pub const Runtime = struct {
         return if (item.last_occurrence) |last| last.task_id else 0;
     }
 
-    fn finishSubmitted(
+    fn retainExternalResult(
         self: *Runtime,
-        claim: *const Claim,
-        task_id: u64,
+        candidate: *state.Store,
         redaction: Redaction,
-    ) Error!void {
-        var candidate = try self.store.clone(self.allocator);
-        var owned = true;
-        defer if (owned) candidate.deinit();
-        try candidate.finalizeClaimSubmitted(
-            candidate.find(claim.id) orelse return error.UnknownScheduledTask,
-            claim.planned_at_unix_seconds,
-            claim.source,
-            task_id,
-        );
-        try self.commitCandidate(&candidate, redaction);
-        self.replace(&candidate);
-        owned = false;
+    ) void {
+        self.commitCandidate(candidate, redaction) catch {
+            // The Task effect has already happened and cannot be rolled back.
+            // Retain its identity in memory while persistence health keeps all
+            // further automatic triggers fail closed.
+            if (self.persistence_health == .ready) {
+                self.persistence_health = .write_failed;
+                self.changed = true;
+            }
+        };
+        self.replace(candidate);
     }
 
-    fn finishRejectedNoFail(
+    fn nextCompletionResolution(
         self: *Runtime,
-        claim: *const Claim,
-        reason: FailureReason,
-        task_id: u64,
-        redaction: Redaction,
-    ) bool {
-        var candidate = self.store.clone(self.allocator) catch return false;
-        var owned = true;
-        defer if (owned) candidate.deinit();
-        candidate.finalizeClaimRejected(
-            candidate.find(claim.id) orelse return false,
-            claim.planned_at_unix_seconds,
-            claim.source,
-            reason,
-            task_id,
-        ) catch return false;
-        self.commitCandidate(&candidate, redaction) catch return false;
-        self.replace(&candidate);
-        owned = false;
-        _ = self.notifier.notify(.{
-            .scheduled_task_id = claim.id,
-            .title = self.store.find(claim.id).?.title,
-            .kind = .needs_attention,
-        });
-        return true;
-    }
-
-    fn nextPendingCompletion(self: *Runtime) ?PendingCompletion {
+        tasks: TaskEffects,
+    ) ?CompletionResolution {
         for (self.store.items) |*entry| {
             const item = &(entry.* orelse continue);
             for (item.occurrences()) |occurrence| {
                 if (occurrence.result != .submitted or occurrence.task_id == 0 or
                     occurrence.notification_sent) continue;
-                return .{
+                const pending: PendingCompletion = .{
                     .scheduled_task_id = item.id,
                     .planned_at_unix_seconds = occurrence.planned_at_unix_seconds,
                     .source = occurrence.source,
                     .task_id = occurrence.task_id,
                 };
+                switch (tasks.observe(occurrence.task_id)) {
+                    .pending => continue,
+                    .unavailable => return .{
+                        .pending = pending,
+                        .outcome = .unavailable,
+                        .permission_required = false,
+                    },
+                    .terminal => |terminal| return .{
+                        .pending = pending,
+                        .outcome = terminal.outcome,
+                        .permission_required = terminal.permission_required,
+                    },
+                }
             }
         }
         return null;
@@ -727,10 +724,10 @@ pub const Runtime = struct {
 
     fn finishCompletionNoFail(
         self: *Runtime,
-        pending: PendingCompletion,
-        terminal: TaskTerminal,
+        resolution: CompletionResolution,
         redaction: Redaction,
     ) bool {
+        const pending = resolution.pending;
         var candidate = self.store.clone(self.allocator) catch return false;
         var owned = true;
         defer if (owned) candidate.deinit();
@@ -738,20 +735,21 @@ pub const Runtime = struct {
             candidate.find(pending.scheduled_task_id) orelse return false,
             pending.planned_at_unix_seconds,
             pending.source,
-            terminal.outcome,
-            if (terminal.permission_required) .permission_required else null,
+            resolution.outcome,
+            if (resolution.permission_required) .permission_required else null,
         ) catch return false;
         self.commitCandidate(&candidate, redaction) catch return false;
         self.replace(&candidate);
         owned = false;
+        if (resolution.outcome == .unavailable) return true;
         const committed = self.store.find(pending.scheduled_task_id) orelse return true;
         _ = self.notifier.notify(.{
             .scheduled_task_id = committed.id,
             .task_id = pending.task_id,
             .title = committed.title,
-            .kind = if (terminal.permission_required)
+            .kind = if (resolution.permission_required)
                 .needs_attention
-            else if (terminal.outcome == .completed)
+            else if (resolution.outcome == .completed)
                 .completed
             else
                 .failed,
@@ -784,7 +782,12 @@ pub const Runtime = struct {
             .claimed => |value| value,
         };
         defer claim.deinit();
-        const task_id = switch (tasks.launch(.{
+        // Allocate the completion candidate before crossing into Task. Once
+        // launch returns, the Task effect may no longer be reversible.
+        var completion = try self.store.clone(self.allocator);
+        var completion_owned = true;
+        defer if (completion_owned) completion.deinit();
+        const launch = tasks.launch(.{
             .title = claim.title,
             .input = claim.input,
             .model_ref = .{
@@ -795,20 +798,37 @@ pub const Runtime = struct {
             .selection_revision = claim.selection_revision,
             .protocol = claim.protocol,
             .permission_profile = claim.permission_profile,
-        })) {
-            .submitted => |task_id| task_id,
+        });
+        switch (launch) {
+            .submitted => |task_id| {
+                completion.finalizeClaimSubmitted(
+                    completion.find(claim.id) orelse unreachable,
+                    claim.planned_at_unix_seconds,
+                    claim.source,
+                    task_id,
+                ) catch unreachable;
+                self.retainExternalResult(&completion, redaction);
+                completion_owned = false;
+                return task_id;
+            },
             .rejected => |failure| {
-                _ = self.finishRejectedNoFail(
-                    &claim,
+                completion.finalizeClaimRejected(
+                    completion.find(claim.id) orelse unreachable,
+                    claim.planned_at_unix_seconds,
+                    claim.source,
                     failure.reason,
                     failure.task_id,
-                    redaction,
-                );
+                ) catch unreachable;
+                self.retainExternalResult(&completion, redaction);
+                completion_owned = false;
+                _ = self.notifier.notify(.{
+                    .scheduled_task_id = claim.id,
+                    .title = self.store.find(claim.id).?.title,
+                    .kind = .needs_attention,
+                });
                 return failure.cause;
             },
-        };
-        try self.finishSubmitted(&claim, task_id, redaction);
-        return task_id;
+        }
     }
 
     fn reconcileCompletionNoFail(
@@ -816,13 +836,12 @@ pub const Runtime = struct {
         tasks: TaskEffects,
         redaction: Redaction,
     ) bool {
-        const pending = self.nextPendingCompletion() orelse return false;
-        const terminal = tasks.terminal(pending.task_id) orelse return false;
-        return self.finishCompletionNoFail(
-            pending,
-            terminal,
-            redaction,
-        );
+        var changed = false;
+        while (self.nextCompletionResolution(tasks)) |resolution| {
+            if (!self.finishCompletionNoFail(resolution, redaction)) break;
+            changed = true;
+        }
+        return changed;
     }
 
     fn reconcileBindingsNoFail(
@@ -976,6 +995,7 @@ pub const testing = if (builtin.is_test) struct {
         health: Health,
         failure_reason: ?FailureReason,
         next_run_at_unix_seconds: ?u64,
+        last_occurrence: ?Occurrence,
     };
 
     pub fn configure(
@@ -1009,6 +1029,7 @@ pub const testing = if (builtin.is_test) struct {
             .health = stored.health,
             .failure_reason = stored.failure_reason,
             .next_run_at_unix_seconds = stored.next_run_at_unix_seconds,
+            .last_occurrence = stored.last_occurrence,
         };
     }
 
@@ -1044,14 +1065,16 @@ fn reconcileBindingsInStore(
     for (store.items) |*entry| {
         const item = &(entry.* orelse continue);
         if (!item.enabled or item.health != .ready) continue;
+        // A temporarily unavailable execution catalog is an admission fact,
+        // not a durable change to this schedule's captured binding.
+        if (!binding.available) continue;
         const current = item.bindingView();
         const exact_model = if (binding.model_ref) |model_ref|
             std.mem.eql(u8, current.model_ref.source_id, model_ref.source_id) and
                 std.mem.eql(u8, current.model_ref.model_id, model_ref.model_id)
         else
             false;
-        const reason: ?FailureReason = if (!binding.available or
-            !exact_model or
+        const reason: ?FailureReason = if (!exact_model or
             current.source_generation != binding.source_generation or
             current.selection_revision != binding.selection_revision or
             binding.protocol == null or
@@ -1073,9 +1096,11 @@ const TestEffects = struct {
     now: u64 = 100,
     restored_bytes: ?[]const u8 = null,
     commit_result: PersistenceCommit = .committed,
+    fail_commit_at: ?usize = null,
     recovery_result: PersistenceCommit = .committed,
     commits: usize = 0,
     recoveries: usize = 0,
+    notifications: usize = 0,
     notification_kind: ?NotificationKind = null,
     notification_task_id: u64 = 0,
 
@@ -1093,6 +1118,7 @@ const TestEffects = struct {
     fn commit(context: ?*anyopaque, _: []const u8) PersistenceCommit {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
         self.commits += 1;
+        if (self.fail_commit_at == self.commits) return .failed;
         return self.commit_result;
     }
 
@@ -1124,6 +1150,7 @@ const TestEffects = struct {
 
     fn notify(context: ?*anyopaque, notification: Notification) bool {
         const self: *TestEffects = @ptrCast(@alignCast(context.?));
+        self.notifications += 1;
         self.notification_kind = notification.kind;
         self.notification_task_id = notification.task_id;
         return true;
@@ -1141,6 +1168,9 @@ const TestEffects = struct {
 const TestTasks = struct {
     launched_profile: ?PermissionProfile = null,
     terminal: ?TaskTerminal = null,
+    next_task_id: u64 = 42,
+    unavailable_task_id: u64 = 0,
+    terminal_task_id: u64 = 0,
 
     fn hasActive(_: *anyopaque, _: u64) bool {
         return false;
@@ -1149,12 +1179,20 @@ const TestTasks = struct {
     fn launch(context: *anyopaque, input: TaskLaunch) TaskLaunchOutcome {
         const self: *TestTasks = @ptrCast(@alignCast(context));
         self.launched_profile = input.permission_profile;
-        return .{ .submitted = 42 };
+        const task_id = self.next_task_id;
+        self.next_task_id += 1;
+        return .{ .submitted = task_id };
     }
 
-    fn readTerminal(context: *anyopaque, _: u64) ?TaskTerminal {
+    fn observe(context: *anyopaque, task_id: u64) TaskObservation {
         const self: *TestTasks = @ptrCast(@alignCast(context));
-        return self.terminal;
+        if (task_id == self.unavailable_task_id) return .unavailable;
+        if (self.terminal) |terminal| {
+            if (self.terminal_task_id == 0 or
+                task_id == self.terminal_task_id)
+                return .{ .terminal = terminal };
+        }
+        return .pending;
     }
 
     fn effects(self: *TestTasks) TaskEffects {
@@ -1162,7 +1200,7 @@ const TestTasks = struct {
             .context = self,
             .has_active_fn = hasActive,
             .launch_fn = launch,
-            .terminal_fn = readTerminal,
+            .observe_fn = observe,
         };
     }
 };
@@ -1292,6 +1330,36 @@ test "selection revision prevents default-binding ABA from launching" {
     try std.testing.expectEqual(FailureReason.execution_changed, item.failure_reason.?);
 }
 
+test "temporary execution unavailability does not durably invalidate schedules" {
+    var effects: TestEffects = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{
+        .max_items = 1,
+        .max_projection_bytes = 4096,
+    }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const id = try runtime.create(
+        testDefinition("cold start", "inspect"),
+        testBinding(),
+        redaction,
+    );
+    const commits_before = effects.commits;
+    const unavailable: ExecutionBinding = .{
+        .available = false,
+        .automatic_workspace_available = true,
+    };
+
+    try std.testing.expect(!runtime.refreshBindingNoFail(unavailable, redaction));
+    try std.testing.expectEqual(commits_before, effects.commits);
+    const item = testing.item(&runtime, id).?;
+    try std.testing.expect(item.enabled);
+    try std.testing.expectEqual(Health.ready, item.health);
+    try std.testing.expectEqual(@as(?FailureReason, null), item.failure_reason);
+}
+
 test "persistence health failure remains observable through change latch" {
     var effects: TestEffects = .{ .commit_result = .failed };
     var runtime = try Runtime.init(std.testing.allocator, .{
@@ -1357,6 +1425,105 @@ test "explicit Schedule recovery preserves memory and only reopens committed per
     try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
     try std.testing.expect(testing.item(&runtime, id) != null);
     try std.testing.expectEqual(@as(usize, 3), effects.recoveries);
+}
+
+test "submitted Task identity remains in memory when Schedule commit fails" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{};
+    var runtime = try Runtime.init(std.testing.allocator, .{
+        .max_items = 1,
+        .max_projection_bytes = 4096,
+    }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const id = try runtime.create(
+        testDefinition("retained Task", "inspect"),
+        testBinding(),
+        redaction,
+    );
+    effects.fail_commit_at = 3;
+
+    try std.testing.expectEqual(
+        @as(u64, 42),
+        try runtime.runNow(id, 1, redaction, tasks.effects()),
+    );
+    try std.testing.expectEqual(PersistenceHealth.write_failed, runtime.persistenceHealth());
+    const occurrence = testing.item(&runtime, id).?.last_occurrence.?;
+    try std.testing.expectEqual(state.OccurrenceResult.submitted, occurrence.result);
+    try std.testing.expectEqual(@as(u64, 42), occurrence.task_id);
+    try std.testing.expectEqual(@as(?OccurrenceTaskOutcome, null), occurrence.task_outcome);
+
+    try std.testing.expectEqual(
+        PersistenceRecoveryOutcome.recovered,
+        runtime.recoverPersistence(redaction),
+    );
+    try std.testing.expectEqual(PersistenceHealth.ready, runtime.persistenceHealth());
+    try std.testing.expectEqual(
+        @as(u64, 42),
+        testing.item(&runtime, id).?.last_occurrence.?.task_id,
+    );
+}
+
+test "unavailable Task does not block later Schedule completion reconciliation" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{ .next_task_id = 41 };
+    var runtime = try Runtime.init(std.testing.allocator, .{
+        .max_items = 2,
+        .max_projection_bytes = 4096,
+    }, .{
+        .timer = effects.timer(),
+        .persistence = effects.persistence(),
+        .notifier = effects.notifier(),
+    });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const first = try runtime.create(
+        testDefinition("missing", "inspect first"),
+        testBinding(),
+        redaction,
+    );
+    const second = try runtime.create(
+        testDefinition("complete", "inspect second"),
+        testBinding(),
+        redaction,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 41),
+        try runtime.runNow(first, 1, redaction, tasks.effects()),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 42),
+        try runtime.runNow(second, 1, redaction, tasks.effects()),
+    );
+    tasks.unavailable_task_id = 41;
+    tasks.terminal_task_id = 42;
+    tasks.terminal = .{
+        .outcome = .completed,
+        .permission_required = false,
+    };
+
+    try std.testing.expect(runtime.reconcileNoFail(
+        testBinding(),
+        redaction,
+        tasks.effects(),
+    ));
+    const missing = testing.item(&runtime, first).?.last_occurrence.?;
+    try std.testing.expectEqual(
+        OccurrenceTaskOutcome.unavailable,
+        missing.task_outcome.?,
+    );
+    try std.testing.expect(missing.notification_sent);
+    const completed = testing.item(&runtime, second).?.last_occurrence.?;
+    try std.testing.expectEqual(
+        OccurrenceTaskOutcome.completed,
+        completed.task_outcome.?,
+    );
+    try std.testing.expect(completed.notification_sent);
+    try std.testing.expectEqual(@as(usize, 1), effects.notifications);
+    try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
 }
 
 test "permission-required scheduled occurrence stops without waiting for UI" {
