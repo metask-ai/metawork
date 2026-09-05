@@ -2277,16 +2277,6 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn customProviderDefaultBinding(
-        self: *const Runtime,
-    ) ?models_contract.DefaultBinding {
-        const binding = self.custom_providers.defaultBinding() orelse return null;
-        return .{
-            .provider_id = binding.provider_id,
-            .model_id = binding.model_id,
-        };
-    }
-
     pub fn clearCustomProviderDefault(self: *Runtime) models_contract.CommandResult {
         return self.custom_providers.clearDefault();
     }

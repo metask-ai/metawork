@@ -647,11 +647,6 @@ pub const Registry = struct {
         }
     }
 
-    pub fn clearMetaskRuntimeAuthority(self: *Registry) void {
-        _ = self;
-        // Durable non-secret intent intentionally survives authorization loss.
-    }
-
     pub fn defaultSelection(self: *const Registry) ?contract.ModelRef {
         if (self.default_source_id.len == 0) return null;
         return .{
@@ -663,10 +658,6 @@ pub const Registry = struct {
     pub fn sourceGenerationForProvider(self: *const Registry, provider_id: []const u8) ?u64 {
         const index = self.findIndex(provider_id) orelse return null;
         return self.providers.items[index].source_generation;
-    }
-
-    pub fn providerCount(self: *const Registry) usize {
-        return self.providers.items.len;
     }
 
     fn validDurableSelection(
@@ -761,14 +752,6 @@ pub const Registry = struct {
         self.clearDefaultSelection();
         self.selection_revision = selection_revision;
         return true;
-    }
-
-    pub fn activateMigratedDefault(self: *Registry, selection_revision: u64) Error!void {
-        if (self.default_source_id.len == 0 or self.default_model_id.len == 0 or
-            self.selection_revision != 0 or selection_revision == 0 or
-            !self.validDurableSelection(self.default_source_id, self.default_model_id))
-            return error.InvalidData;
-        self.selection_revision = selection_revision;
     }
 
     fn clearDefaultSelection(self: *Registry) void {
@@ -1353,17 +1336,7 @@ pub const FileStore = struct {
         self: *FileStore,
         allocator: std.mem.Allocator,
     ) (FileStoreError || std.mem.Allocator.Error)!?[]u8 {
-        return self.loadNamedAlloc(allocator, store_file_name, max_store_bytes);
-    }
-
-    pub fn loadNamedAlloc(
-        self: *FileStore,
-        allocator: std.mem.Allocator,
-        name: []const u8,
-        max_bytes: usize,
-    ) (FileStoreError || std.mem.Allocator.Error)!?[]u8 {
-        if (name.len == 0 or max_bytes == 0) return error.ReadFailed;
-        var file = self.dir.openFile(self.io, name, .{
+        var file = self.dir.openFile(self.io, store_file_name, .{
             .follow_symlinks = false,
             .resolve_beneath = true,
         }) catch |err| switch (err) {
@@ -1373,7 +1346,7 @@ pub const FileStore = struct {
         if (builtin.os.tag == .windows) file.flags.nonblocking = true;
         defer file.close(self.io);
         const length = file.length(self.io) catch return error.ReadFailed;
-        if (length == 0 or length > max_bytes) return error.ReadFailed;
+        if (length == 0 or length > max_store_bytes) return error.ReadFailed;
         const bytes = try allocator.alloc(u8, @intCast(length));
         errdefer allocator.free(bytes);
         const read = file.readPositionalAll(self.io, bytes, 0) catch
@@ -1691,7 +1664,7 @@ test "registry validates default revisions before update and remove commit" {
     const after_remove = try encodeAlloc(std.testing.allocator, &registry);
     defer std.testing.allocator.free(after_remove);
     try std.testing.expectEqualStrings(before, after_remove);
-    try std.testing.expectEqual(@as(usize, 1), registry.providerCount());
+    try std.testing.expectEqual(@as(usize, 1), registry.views().len);
     try std.testing.expectEqual(@as(usize, 0), registry.credentialDeletions().len);
     try std.testing.expect(registry.defaultSelection() != null);
 }

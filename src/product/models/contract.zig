@@ -395,11 +395,6 @@ pub const CommandSink = struct {
     }
 };
 
-pub const DefaultBinding = struct {
-    provider_id: []const u8,
-    model_id: []const u8,
-};
-
 pub const Preparation = union(enum) {
     ready: OwnedConfig,
     rejected: ManagementError,
@@ -680,18 +675,6 @@ pub const OwnedConfig = struct {
         self.protocol = undefined;
         self.execution_generation = 0;
         self.source = undefined;
-    }
-};
-
-/// Opaque, synchronous ownership handoff for a source candidate. The source
-/// authority stays distinct from the Product execution generation assigned by
-/// the receiving owner.
-pub const OwnedSourceCandidateTransfer = struct {
-    context: *anyopaque,
-    take_fn: *const fn (*anyopaque) OwnedSourceCandidate,
-
-    pub fn take(self: OwnedSourceCandidateTransfer) OwnedSourceCandidate {
-        return self.take_fn(self.context);
     }
 };
 
