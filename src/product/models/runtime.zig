@@ -909,18 +909,6 @@ pub const Runtime = struct {
         self: *Runtime,
         secret: []const u8,
         provider_id: contract.BuiltinProviderId,
-    ) contract.CommandResult {
-        return self.createBuiltinAtBaseUrlWithCredential(
-            secret,
-            provider_id,
-            builtin_providers.find(provider_id).default_base_url,
-        );
-    }
-
-    pub fn createBuiltinAtBaseUrlWithCredential(
-        self: *Runtime,
-        secret: []const u8,
-        provider_id: contract.BuiltinProviderId,
         base_url: []const u8,
     ) contract.CommandResult {
         for (self.registry.views()) |provider|
@@ -1501,6 +1489,7 @@ test "built-in Provider recipe creates a fixed provider and reuses model managem
     try std.testing.expect(runtime.createBuiltinWithCredential(
         "official-secret",
         .deepseek,
+        builtin_providers.find(.deepseek).default_base_url,
     ).accepted);
     try std.testing.expectEqual(
         contract.BuiltinProviderId.deepseek,
@@ -1509,6 +1498,7 @@ test "built-in Provider recipe creates a fixed provider and reuses model managem
     try std.testing.expect(!runtime.createBuiltinWithCredential(
         "second-secret",
         .deepseek,
+        builtin_providers.find(.deepseek).default_base_url,
     ).accepted);
 
     const provider = runtime.views()[0];

@@ -108,7 +108,13 @@ pub const CustomProviderCreate = struct {
 };
 pub const BuiltinProviderCreate = struct {
     providerId: []const u8,
+    baseUrl: []const u8,
     apiKey: []const u8,
+};
+pub const BuiltinProviderBaseUrlUpdate = struct {
+    providerId: []const u8,
+    expectedProviderRevision: []const u8,
+    baseUrl: []const u8,
 };
 pub const CustomProviderUpdate = struct {
     providerId: []const u8,

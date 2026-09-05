@@ -53,6 +53,8 @@ export const commands = {
   selectModelsDefault: "metawork.models.selectDefault",
   customProviderCreate: "metawork.models.customProviders.create",
   builtinProviderCreate: "metawork.models.builtinProviders.create",
+  builtinProviderUpdateBaseUrl:
+    "metawork.models.builtinProviders.updateBaseUrl",
   customProviderUpdate: "metawork.models.customProviders.update",
   customProviderReplaceCredential:
     "metawork.models.customProviders.replaceCredential",

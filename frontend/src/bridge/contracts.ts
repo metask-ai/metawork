@@ -79,6 +79,8 @@ export type BuiltinProviderId = (typeof builtinProviderIds)[number];
 export type BuiltinProviderPresetView = {
   id: BuiltinProviderId;
   displayName: string;
+  protocol: Protocol;
+  defaultBaseUrl: string;
   apiKeyUrl: string;
   documentationUrl: string;
 };

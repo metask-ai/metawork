@@ -213,6 +213,7 @@ export function SettingsPage({
   onCreateCustomProvider: (input: CustomProviderSubmission) => Promise<boolean>;
   onCreateBuiltinProvider: (input: {
     providerId: BuiltinProviderId;
+    baseUrl: string;
     apiKey: string;
   }) => Promise<boolean>;
   onUpdateCustomProvider: (
@@ -784,7 +785,8 @@ export function SettingsPage({
     if (
       creatingCustomProvider ||
       !builtinProviderDraft.providerId ||
-      !builtinProviderDraft.apiKey
+      !builtinProviderDraft.apiKey ||
+      !selectedBuiltinPreset
     )
       return;
     setCreatingCustomProvider(true);
@@ -792,6 +794,7 @@ export function SettingsPage({
       if (
         await onCreateBuiltinProvider({
           providerId: builtinProviderDraft.providerId,
+          baseUrl: selectedBuiltinPreset.defaultBaseUrl,
           apiKey: builtinProviderDraft.apiKey,
         })
       ) {

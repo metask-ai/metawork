@@ -1216,6 +1216,8 @@ function decodeModels(value: unknown, path: string): ModelsView {
       const preset = object(value, itemPath, [
         "id",
         "displayName",
+        "protocol",
+        "defaultBaseUrl",
         "apiKeyUrl",
         "documentationUrl",
       ]);
@@ -1226,6 +1228,15 @@ function decodeModels(value: unknown, path: string): ModelsView {
           builtinProviderIds,
         ) as BuiltinProviderId,
         displayName: stringValue(preset.displayName, `${itemPath}.displayName`),
+        protocol: enumValue(
+          preset.protocol,
+          `${itemPath}.protocol`,
+          customProviderProtocols,
+        ) as Protocol,
+        defaultBaseUrl: stringValue(
+          preset.defaultBaseUrl,
+          `${itemPath}.defaultBaseUrl`,
+        ),
         apiKeyUrl: stringValue(preset.apiKeyUrl, `${itemPath}.apiKeyUrl`),
         documentationUrl: stringValue(
           preset.documentationUrl,

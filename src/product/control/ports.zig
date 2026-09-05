@@ -47,7 +47,8 @@ pub const ModelsManagement = struct {
     stop_custom_providers_fn: *const fn (*anyopaque) void,
     reset_model_store_fn: *const fn (*anyopaque, u64) models_contract.CommandResult,
     create_custom_provider_fn: *const fn (*anyopaque, []const u8, models_contract.CustomProviderSpec) models_contract.CommandResult,
-    create_builtin_provider_fn: *const fn (*anyopaque, []const u8, models_contract.BuiltinProviderId) models_contract.CommandResult,
+    create_builtin_provider_fn: *const fn (*anyopaque, []const u8, models_contract.BuiltinProviderId, []const u8) models_contract.CommandResult,
+    update_builtin_provider_base_url_fn: *const fn (*anyopaque, models_contract.CustomProviderSelectionCommand, []const u8) models_contract.CommandResult,
     replace_custom_provider_credential_fn: *const fn (*anyopaque, []const u8, models_contract.CustomProviderSelectionCommand) models_contract.CommandResult,
     submit_custom_provider_fn: *const fn (*anyopaque, models_contract.CustomProviderCommand) models_contract.CommandResult,
     begin_custom_provider_probe_fn: *const fn (*anyopaque, models_contract.CustomModelTestCommand) models_contract.Preparation,
@@ -72,8 +73,11 @@ pub const ModelsManagement = struct {
     pub fn createCustomProviderWithCredential(self: ModelsManagement, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
         return self.create_custom_provider_fn(self.context, secret, spec);
     }
-    pub fn createBuiltinProviderWithCredential(self: ModelsManagement, secret: []const u8, provider_id: models_contract.BuiltinProviderId) models_contract.CommandResult {
-        return self.create_builtin_provider_fn(self.context, secret, provider_id);
+    pub fn createBuiltinProviderWithCredential(self: ModelsManagement, secret: []const u8, provider_id: models_contract.BuiltinProviderId, base_url: []const u8) models_contract.CommandResult {
+        return self.create_builtin_provider_fn(self.context, secret, provider_id, base_url);
+    }
+    pub fn updateBuiltinProviderBaseUrl(self: ModelsManagement, selection: models_contract.CustomProviderSelectionCommand, base_url: []const u8) models_contract.CommandResult {
+        return self.update_builtin_provider_base_url_fn(self.context, selection, base_url);
     }
     pub fn replaceCustomProviderCredential(self: ModelsManagement, secret: []const u8, selection: models_contract.CustomProviderSelectionCommand) models_contract.CommandResult {
         return self.replace_custom_provider_credential_fn(self.context, secret, selection);

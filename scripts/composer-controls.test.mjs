@@ -553,6 +553,8 @@ test("Official Provider setup asks only for the preset and API key", async () =>
         {
           id: "deepseek",
           displayName: "DeepSeek",
+          protocol: "openai_chat_completions",
+          defaultBaseUrl: "https://api.deepseek.com",
           apiKeyUrl: "https://platform.deepseek.com/api_keys",
           documentationUrl: "https://api-docs.deepseek.com/",
         },
@@ -594,7 +596,11 @@ test("Official Provider setup asks only for the preset and API key", async () =>
   );
   await user.click(screen.getByRole("button", { name: "Save provider" }));
   assert.deepEqual(submitted, [
-    { providerId: "deepseek", apiKey: "deepseek-secret" },
+    {
+      providerId: "deepseek",
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "deepseek-secret",
+    },
   ]);
 });
 

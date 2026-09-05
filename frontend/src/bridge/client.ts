@@ -580,9 +580,23 @@ export class BridgeClient {
     );
   }
 
-  async createBuiltinProvider(input: { providerId: string; apiKey: string }) {
+  async createBuiltinProvider(input: {
+    providerId: string;
+    baseUrl: string;
+    apiKey: string;
+  }) {
     return decodeExecutionCommandResult(
       await this.invoke(commands.builtinProviderCreate, input),
+    );
+  }
+
+  async updateBuiltinProviderBaseUrl(input: {
+    providerId: string;
+    expectedProviderRevision: string;
+    baseUrl: string;
+  }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.builtinProviderUpdateBaseUrl, input),
     );
   }
 
