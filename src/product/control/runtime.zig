@@ -1791,11 +1791,15 @@ pub const Runtime = struct {
         input: SkillInstallInput,
     ) Error!SkillMutationResult {
         try self.requireSkillMutationAuthority(input.scope);
-        const result = try self.skill.installDirectory(
+        const previous_health = self.skill.managementHealth();
+        const result = self.skill.installDirectory(
             absolute_path,
             input,
             self.schedule.now(),
-        );
+        ) catch |err| {
+            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            return err;
+        };
         self.bumpRevision();
         return result;
     }
@@ -1806,11 +1810,15 @@ pub const Runtime = struct {
         input: SkillInstallInput,
     ) Error!SkillMutationResult {
         try self.requireSkillMutationAuthority(input.scope);
-        const result = try self.skill.installArchive(
+        const previous_health = self.skill.managementHealth();
+        const result = self.skill.installArchive(
             absolute_path,
             input,
             self.schedule.now(),
-        );
+        ) catch |err| {
+            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            return err;
+        };
         self.bumpRevision();
         return result;
     }
@@ -1824,12 +1832,16 @@ pub const Runtime = struct {
     ) Error!SkillMutationResult {
         const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
-        const result = try self.skill.reimportDirectory(
+        const previous_health = self.skill.managementHealth();
+        const result = self.skill.reimportDirectory(
             install_id,
             absolute_path,
             expected_invocation_name,
             expected_content_hash,
-        );
+        ) catch |err| {
+            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            return err;
+        };
         self.bumpRevision();
         return result;
     }
@@ -1843,12 +1855,16 @@ pub const Runtime = struct {
     ) Error!SkillMutationResult {
         const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
-        const result = try self.skill.reimportArchive(
+        const previous_health = self.skill.managementHealth();
+        const result = self.skill.reimportArchive(
             install_id,
             absolute_path,
             expected_invocation_name,
             expected_content_hash,
-        );
+        ) catch |err| {
+            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            return err;
+        };
         self.bumpRevision();
         return result;
     }
@@ -1859,10 +1875,14 @@ pub const Runtime = struct {
     ) Error!SkillMutationResult {
         const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
-        const result = try self.skill.uninstall(
+        const previous_health = self.skill.managementHealth();
+        const result = self.skill.uninstall(
             install_id,
             self.schedule.now(),
-        );
+        ) catch |err| {
+            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            return err;
+        };
         self.bumpRevision();
         return result;
     }
@@ -1873,9 +1893,21 @@ pub const Runtime = struct {
     ) Error!SkillMutationResult {
         const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
-        const result = try self.skill.retryVerification(install_id);
+        const previous_health = self.skill.managementHealth();
+        const result = self.skill.retryVerification(install_id) catch |err| {
+            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            return err;
+        };
         self.bumpRevision();
         return result;
+    }
+
+    fn bumpRevisionIfSkillManagementHealthChanged(
+        self: *Runtime,
+        previous_health: skill_runtime.ManagementHealth,
+    ) void {
+        if (self.skill.managementHealth() != previous_health)
+            self.bumpRevision();
     }
     pub fn readSkillDefinition(
         self: *Runtime,
@@ -10024,6 +10056,24 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     try std.testing.expect(
         std.mem.indexOf(u8, encoded, "SECRET-KEY") == null,
     );
+}
+
+test "Skill management health failure advances Product revision exactly once" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const previous_health = control.skill.managementHealth();
+    const before_failure = control.revision;
+    control.skill.testSetManagementHealth(.outcome_unknown);
+    control.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+    try std.testing.expectEqual(before_failure + 1, control.revision);
+    try std.testing.expectEqual(
+        SkillManagementHealth.outcome_unknown,
+        control.skill.managementHealth(),
+    );
+
+    const before_rejection = control.revision;
+    control.bumpRevisionIfSkillManagementHealthChanged(.outcome_unknown);
+    try std.testing.expectEqual(before_rejection, control.revision);
 }
 
 fn installTestCommittedSkillAuthorities(control: *Runtime) !void {

@@ -163,6 +163,8 @@ Task 创建时同步借用当前 Workspace authority 并取得独立 pinned snap
 
 本地资产 import、reimport、uninstall 与 retry 使用同一 staged transaction：preview capability 绑定 source、内容摘要、目标 scope 与有效期；commit 重新校验 capability、目标 Workspace authority、冲突 generation 和相关 Task quiescence；publish 后必须完成 Agent catalog reconciliation。明确且可归因于候选的失败回滚 candidate/backup；catalog 暂时不可验证时保留可恢复 transaction 并发布 `pending_verification`，不能声称 ready。恢复只能完成或回滚已登记 transaction，不扫描、接管或删除 canonical root 外的目录。
 
+恢复 durable `prepared` transaction 时，只有 transaction 记录了 backup 才检查 target/backup 物理状态：target 存在且 backup 不存在表示 rename 尚未发生或回滚已恢复；target 不存在且 backup 存在时必须先原子恢复 backup，再幂等删除未发布 candidate；两者同时存在或同时缺失必须保留全部 artifact 与 transaction 并 fail closed。fresh install 没有 backup，target 与 backup 同时缺失是正常的未发布状态。恢复磁盘事实后才能清除 transaction 或临时 inventory owner；任一步持久化结果不确定必须将 management health 置为 `outcome_unknown`，明确写失败置为 `write_failed`，两者都阻止后续 management mutation，并通过 Product revision 发布该变化。
+
 ### 2.5 MCP authority
 
 Product Control 拥有 MCP Desired Registry、connection approval、OAuth consent、credential locator、Runtime Manifest、Admission Authority、mutation/recovery 与 Task admission。Agent 拥有 connector/backend 生命周期、AgentCore descriptor、declarative Runtime apply、Activation、catalog 与 Selection。Application 只执行 child、network、系统 credential、OAuth、HTTP auth snapshot 与跨 owner coordination，不拥有 MCP JSON-RPC、产品状态或 admission policy。Account 与 MCP 不共享 ownership、credential service 或 persistence。

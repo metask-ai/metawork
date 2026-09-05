@@ -431,6 +431,11 @@ pub const PublishResult = struct {
     replaced_existing: bool,
 };
 
+const RecoveryFault = enum {
+    none,
+    backup_restore_rename,
+};
+
 /// Owns the filesystem half of Skill management. Catalog reconciliation is an
 /// intentionally separate completion step because acquisition and scheduling
 /// remain outside this kernel. Every rename phase is durably recorded first or
@@ -440,6 +445,8 @@ pub const Transactions = struct {
     allocator: std.mem.Allocator,
     inventory: Inventory,
     persistence: *FileStore,
+    recovery_fault: if (builtin.is_test) RecoveryFault else void =
+        if (builtin.is_test) .none else {},
 
     pub fn init(
         io: std.Io,
@@ -725,9 +732,31 @@ pub const Transactions = struct {
         const recovery = asset.recovery orelse return;
         switch (recovery.phase) {
             .prepared => {
-                if (recovery.candidate_entry) |candidate|
-                    root.dir.deleteTree(root.io, candidate) catch
+                if (recovery.backup_entry) |backup| {
+                    const target_exists = directDirectoryExists(
+                        root,
+                        asset.target_entry,
+                    ) catch return error.FileTransactionFailed;
+                    const backup_exists = directDirectoryExists(
+                        root,
+                        backup,
+                    ) catch return error.FileTransactionFailed;
+                    if (target_exists == backup_exists)
                         return error.FileTransactionFailed;
+                    if (backup_exists) {
+                        if (builtin.is_test and
+                            self.recovery_fault == .backup_restore_rename)
+                            return error.FileTransactionFailed;
+                        root.dir.rename(
+                            backup,
+                            root.dir,
+                            asset.target_entry,
+                            root.io,
+                        ) catch return error.FileTransactionFailed;
+                    }
+                }
+                if (recovery.candidate_entry) |candidate|
+                    try deleteTransactionTreeIfPresent(root, candidate);
                 if (recovery.operation == .install or recovery.remove_asset_on_rollback)
                     try self.inventory.remove(install_id)
                 else
@@ -761,15 +790,34 @@ pub const Transactions = struct {
     }
 };
 
+fn deleteTransactionTreeIfPresent(
+    root: *const CanonicalRoot,
+    entry: []const u8,
+) Error!void {
+    const exists = directDirectoryExists(root, entry) catch
+        return error.FileTransactionFailed;
+    if (!exists) return;
+    root.dir.deleteTree(root.io, entry) catch
+        return error.FileTransactionFailed;
+}
+
 pub fn generateInstallId(io: std.Io) FileStoreError!InstallId {
     var result: InstallId = undefined;
     std.Io.randomSecure(io, &result) catch return error.WriteFailed;
     return result;
 }
 
+const CommitFault = enum {
+    none,
+    write_failed,
+    outcome_unknown,
+};
+
 pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    commit_fault: if (builtin.is_test) CommitFault else void =
+        if (builtin.is_test) .none else {},
 
     pub fn init(io: std.Io, absolute_directory: []const u8) FileStoreError!FileStore {
         if (!std.fs.path.isAbsolute(absolute_directory)) return error.DirectoryUnavailable;
@@ -806,6 +854,11 @@ pub const FileStore = struct {
 
     pub fn commit(self: *FileStore, bytes: []const u8) FileStoreError!void {
         if (bytes.len == 0 or bytes.len > max_store_bytes) return error.WriteFailed;
+        if (builtin.is_test) switch (self.commit_fault) {
+            .none => {},
+            .write_failed => return error.WriteFailed,
+            .outcome_unknown => return error.PersistenceOutcomeUnknown,
+        };
         var random: [8]u8 = undefined;
         std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
         const random_hex = std.fmt.bytesToHex(random, .lower);
@@ -855,6 +908,17 @@ pub const FileStore = struct {
         return true;
     }
 };
+
+pub const TestSupport = if (builtin.is_test) struct {
+    pub const FileStoreCommitFault = CommitFault;
+
+    pub fn setFileStoreCommitFault(
+        store: *FileStore,
+        fault: FileStoreCommitFault,
+    ) void {
+        store.commit_fault = fault;
+    }
+} else struct {};
 
 const StoreWire = struct {
     schema_version: u8,
@@ -1118,6 +1182,180 @@ fn privateFilePermissions() std.Io.File.Permissions {
 
 fn repeatedByte(comptime length: usize, byte: u8) [length]u8 {
     return [_]u8{byte} ** length;
+}
+
+const PreparedRecoveryCase = enum {
+    fresh_install,
+    reimport_backup_only,
+    uninstall_backup_only,
+    allow_replace_backup_only,
+    target_and_backup_present,
+    target_and_backup_absent,
+    candidate_already_missing,
+    backup_restore_rename_fails,
+};
+
+fn exercisePreparedRecovery(case: PreparedRecoveryCase) !void {
+    var target = std.testing.tmpDir(.{});
+    defer target.cleanup();
+    var persistence_dir = std.testing.tmpDir(.{});
+    defer persistence_dir.cleanup();
+    var target_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target_path_len = try target.dir.realPath(std.testing.io, &target_path_storage);
+    var root = try CanonicalRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        .personal,
+        target_path_storage[0..target_path_len],
+    );
+    defer root.deinit();
+    var persistence: FileStore = .{
+        .io = std.testing.io,
+        .dir = persistence_dir.dir,
+    };
+    var transactions = Transactions.init(
+        std.testing.io,
+        std.testing.allocator,
+        Inventory.init(std.testing.allocator, .{}),
+        &persistence,
+    );
+    defer transactions.deinit();
+
+    const id = repeatedByte(
+        install_id_bytes,
+        @as(u8, @intFromEnum(case)) + 1,
+    );
+    const candidate = ".demo.candidate-test";
+    const backup = ".demo.backup-test";
+    const operation: Operation = switch (case) {
+        .fresh_install => .install,
+        .uninstall_backup_only => .uninstall,
+        else => .replace,
+    };
+    const remove_asset = case == .fresh_install or case == .allow_replace_backup_only;
+    _ = try transactions.inventory.add(.{
+        .install_id = id,
+        .source_kind = .local_directory,
+        .scope = .personal,
+        .target_entry = "demo",
+        .content_hash = repeatedByte(hash_bytes, 0x22),
+        .installed_at_unix_seconds = 100,
+    });
+    try transactions.inventory.beginTransaction(id, .{
+        .operation = operation,
+        .remove_asset_on_rollback = remove_asset,
+        .candidate_entry = if (operation == .uninstall) null else candidate,
+        .backup_entry = if (operation == .install) null else backup,
+    });
+
+    const candidate_exists = switch (case) {
+        .uninstall_backup_only, .candidate_already_missing => false,
+        else => true,
+    };
+    const target_exists = switch (case) {
+        .target_and_backup_present, .candidate_already_missing => true,
+        else => false,
+    };
+    const backup_exists = switch (case) {
+        .reimport_backup_only,
+        .uninstall_backup_only,
+        .allow_replace_backup_only,
+        .target_and_backup_present,
+        .backup_restore_rename_fails,
+        => true,
+        else => false,
+    };
+    if (candidate_exists) try target.dir.createDir(std.testing.io, candidate, .default_dir);
+    if (target_exists) {
+        try target.dir.createDir(std.testing.io, "demo", .default_dir);
+        try target.dir.writeFile(std.testing.io, .{
+            .sub_path = "demo/original.txt",
+            .data = "target",
+        });
+    }
+    if (backup_exists) {
+        try target.dir.createDir(std.testing.io, backup, .default_dir);
+        try target.dir.writeFile(std.testing.io, .{
+            .sub_path = ".demo.backup-test/original.txt",
+            .data = "backup",
+        });
+    }
+    if (case == .backup_restore_rename_fails)
+        transactions.recovery_fault = .backup_restore_rename;
+
+    const invalid = case == .target_and_backup_present or
+        case == .target_and_backup_absent or
+        case == .backup_restore_rename_fails;
+    if (invalid) {
+        try std.testing.expectError(
+            error.FileTransactionFailed,
+            transactions.recover(&root, id, 101),
+        );
+        try std.testing.expect(transactions.inventory.find(id).?.recovery != null);
+        try std.testing.expectEqual(
+            candidate_exists,
+            try directDirectoryExists(&root, candidate),
+        );
+        try std.testing.expectEqual(
+            target_exists,
+            try directDirectoryExists(&root, "demo"),
+        );
+        try std.testing.expectEqual(
+            backup_exists,
+            try directDirectoryExists(&root, backup),
+        );
+        return;
+    }
+
+    try transactions.recover(&root, id, 101);
+    try std.testing.expect(!(try directDirectoryExists(&root, candidate)));
+    try std.testing.expect(!(try directDirectoryExists(&root, backup)));
+    if (case == .fresh_install) {
+        try std.testing.expect(transactions.inventory.find(id) == null);
+        return;
+    }
+    try std.testing.expect(try directDirectoryExists(&root, "demo"));
+    try expectFileContents(
+        root.dir,
+        "demo/original.txt",
+        if (case == .candidate_already_missing) "target" else "backup",
+    );
+    if (remove_asset)
+        try std.testing.expect(transactions.inventory.find(id) == null)
+    else
+        try std.testing.expect(transactions.inventory.find(id).?.recovery == null);
+}
+
+test "prepared recovery cleans a fresh install without requiring a backup" {
+    try exercisePreparedRecovery(.fresh_install);
+}
+
+test "prepared recovery restores a reimport backup before clearing inventory" {
+    try exercisePreparedRecovery(.reimport_backup_only);
+}
+
+test "prepared recovery restores an uninstall backup before clearing inventory" {
+    try exercisePreparedRecovery(.uninstall_backup_only);
+}
+
+test "prepared recovery restores an unmanaged replacement and removes its temporary owner" {
+    try exercisePreparedRecovery(.allow_replace_backup_only);
+}
+
+test "prepared recovery rejects simultaneous target and backup directories" {
+    try exercisePreparedRecovery(.target_and_backup_present);
+}
+
+test "prepared recovery rejects a missing target and backup" {
+    try exercisePreparedRecovery(.target_and_backup_absent);
+}
+
+test "prepared recovery tolerates an already removed candidate after restoring backup" {
+    try exercisePreparedRecovery(.candidate_already_missing);
+}
+
+test "prepared recovery preserves all artifacts when backup restore rename fails" {
+    try exercisePreparedRecovery(.backup_restore_rename_fails);
 }
 
 test "inventory keeps install identity separate from target and runtime identity" {
