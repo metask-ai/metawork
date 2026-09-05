@@ -85,6 +85,30 @@ fn FixedText(comptime capacity: usize) type {
     };
 }
 
+const CanonicalCommitOutcome = enum {
+    committed,
+    not_committed,
+    unresolved,
+};
+
+/// Commits one complete canonical image. A post-rename durability failure is
+/// resolved only by reading the canonical file back and comparing exact bytes;
+/// callers retain ownership of the policy decision for each outcome.
+fn commitCanonical(
+    allocator: std.mem.Allocator,
+    store: anytype,
+    bytes: []const u8,
+) CanonicalCommitOutcome {
+    store.commit(bytes) catch |err| {
+        if (err != error.PersistenceOutcomeUnknown) return .not_committed;
+        const loaded = store.loadAlloc(allocator) catch return .unresolved;
+        const actual = loaded orelse return .unresolved;
+        defer allocator.free(actual);
+        return if (std.mem.eql(u8, actual, bytes)) .committed else .unresolved;
+    };
+    return .committed;
+}
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1114,10 +1138,14 @@ pub const Runtime = struct {
             return .rejected(mapRegistryError(err));
         defer self.allocator.free(encoded);
         const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
-        store.commit(encoded) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) self.store_healthy = false;
-            return .rejected(.persistence_unavailable);
-        };
+        switch (commitCanonical(self.allocator, store, encoded)) {
+            .committed => {},
+            .not_committed => return .rejected(.persistence_unavailable),
+            .unresolved => {
+                self.store_healthy = false;
+                return .rejected(.persistence_unavailable);
+            },
+        }
         self.registry.replace(candidate);
         if (drain_cleanup) self.drainCredentialCleanup();
         return .acceptedResult();
@@ -1151,7 +1179,7 @@ pub const Runtime = struct {
                 return;
             };
             defer self.allocator.free(reconciled);
-            if (!self.commitVerified(reconciled)) {
+            if (commitCanonical(self.allocator, &self.store.?, reconciled) != .committed) {
                 self.store_healthy = false;
             }
         }
@@ -1168,23 +1196,11 @@ pub const Runtime = struct {
             return;
         };
         defer self.allocator.free(encoded);
-        if (!self.commitVerified(encoded)) {
+        if (commitCanonical(self.allocator, &self.store.?, encoded) != .committed) {
             self.store_healthy = false;
             return;
         }
         self.registry.replace(&empty);
-    }
-
-    fn commitVerified(self: *Runtime, bytes: []const u8) bool {
-        const store = if (self.store) |*value| value else return false;
-        store.commit(bytes) catch |err| {
-            if (err != error.PersistenceOutcomeUnknown) return false;
-            const loaded = store.loadAlloc(self.allocator) catch return false;
-            const actual = loaded orelse return false;
-            defer self.allocator.free(actual);
-            return std.mem.eql(u8, actual, bytes);
-        };
-        return true;
     }
 
     fn markCredentialMissing(self: *Runtime, binding: registry_impl.Registry.DefaultBinding) void {
@@ -1282,6 +1298,71 @@ fn metaskSourceMatches(source_id: []const u8, api_key_id: []const u8) bool {
         .{api_key_id},
     ) catch return false;
     return std.mem.eql(u8, source_id, expected);
+}
+
+const CanonicalCommitTestStore = struct {
+    const Mode = enum {
+        committed,
+        write_failed,
+        unknown_match,
+        unknown_different,
+        unknown_missing,
+        unknown_read_failed,
+    };
+
+    mode: Mode,
+    target: []const u8 = &.{},
+    read_count: usize = 0,
+
+    fn commit(self: *@This(), bytes: []const u8) registry_impl.FileStoreError!void {
+        self.target = bytes;
+        return switch (self.mode) {
+            .committed => {},
+            .write_failed => error.WriteFailed,
+            .unknown_match,
+            .unknown_different,
+            .unknown_missing,
+            .unknown_read_failed,
+            => error.PersistenceOutcomeUnknown,
+        };
+    }
+
+    fn loadAlloc(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+    ) (registry_impl.FileStoreError || std.mem.Allocator.Error)!?[]u8 {
+        self.read_count += 1;
+        return switch (self.mode) {
+            .unknown_match => try allocator.dupe(u8, self.target),
+            .unknown_different => try allocator.dupe(u8, "different-canonical"),
+            .unknown_missing => null,
+            .unknown_read_failed => error.ReadFailed,
+            .committed, .write_failed => unreachable,
+        };
+    }
+};
+
+test "canonical commit resolves only an exact outcome-unknown readback" {
+    const cases = [_]struct {
+        mode: CanonicalCommitTestStore.Mode,
+        expected: CanonicalCommitOutcome,
+        expected_reads: usize,
+    }{
+        .{ .mode = .committed, .expected = .committed, .expected_reads = 0 },
+        .{ .mode = .write_failed, .expected = .not_committed, .expected_reads = 0 },
+        .{ .mode = .unknown_match, .expected = .committed, .expected_reads = 1 },
+        .{ .mode = .unknown_different, .expected = .unresolved, .expected_reads = 1 },
+        .{ .mode = .unknown_missing, .expected = .unresolved, .expected_reads = 1 },
+        .{ .mode = .unknown_read_failed, .expected = .unresolved, .expected_reads = 1 },
+    };
+    for (cases) |case| {
+        var store: CanonicalCommitTestStore = .{ .mode = case.mode };
+        try std.testing.expectEqual(
+            case.expected,
+            commitCanonical(std.testing.allocator, &store, "candidate-canonical"),
+        );
+        try std.testing.expectEqual(case.expected_reads, store.read_count);
+    }
 }
 
 const TestVault = struct {
