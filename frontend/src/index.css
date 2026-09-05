@@ -2722,6 +2722,7 @@ button.run-process-tool:hover {
   --left-column-width: 248px;
   --right-column: 0px;
   --right-column-width: 400px;
+  --right-panel-rendered-width: var(--right-column-width);
   --workbench-content-surface: var(--ui-surface-panel);
   display: grid;
   grid-template-rows: var(--window-bar-height) minmax(0, 1fr);
@@ -2999,7 +3000,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   position: absolute;
   z-index: 30;
   top: 0;
-  right: calc(var(--right-column) - 5px);
+  right: calc(var(--right-column-width) - 5px);
   bottom: 0;
   width: 10px;
   padding: 0;
@@ -8441,9 +8442,17 @@ button.inspector-tool-summary:hover {
   top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
   right: 0;
   bottom: 0;
-  width: min(var(--right-column-width), calc(100vw - 44px));
+  width: var(--right-panel-rendered-width);
   transform: translateX(100%);
   transition: transform 160ms ease;
+}
+
+.app-window[data-right-panel-docked="false"] .task-panel-resize-handle {
+  position: fixed;
+  z-index: 46;
+  top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
+  right: calc(var(--right-panel-rendered-width) - 5px);
+  bottom: 0;
 }
 
 .app-window[data-right-panel-open="true"][data-right-panel-docked="false"]
@@ -8541,6 +8550,10 @@ button.inspector-tool-summary:hover {
 }
 
 @media (max-width: 619px) {
+  .task-panel-resize-handle {
+    display: none;
+  }
+
   .app-window[data-right-panel-docked="false"] .task-panel {
     width: 100%;
   }

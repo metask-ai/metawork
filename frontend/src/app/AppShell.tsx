@@ -108,6 +108,11 @@ export function AppShell({
   const effectiveLeftOpen = leftAvailable && leftOpen;
   const rightPanelAvailable = rightPanel !== null;
   const effectiveRightPanelOpen = rightPanelAvailable && rightPanelOpen;
+  const rightResizeMaximum = Math.max(
+    minimumRightWidth,
+    Math.min(maximumRightWidth, viewportWidth - 44),
+  );
+  const renderedRightWidth = Math.min(rightWidth, rightResizeMaximum);
   const rightPanelDocked =
     effectiveRightPanelOpen &&
     shouldDockTaskPanel(
@@ -139,6 +144,12 @@ export function AppShell({
   }, [effectiveRightPanelOpen]);
 
   useEffect(() => {
+    if (effectiveRightPanelOpen || !resizingRight) return;
+    writeLocalPreference(rightWidthPreference, String(rightWidth));
+    setResizingRight(false);
+  }, [effectiveRightPanelOpen, resizingRight, rightWidth]);
+
+  useEffect(() => {
     if (overlay && attentionDetails.current)
       attentionDetails.current.open = false;
   }, [overlay]);
@@ -162,6 +173,7 @@ export function AppShell({
         {
           "--left-column-width": `${leftWidth}px`,
           "--right-column-width": `${rightWidth}px`,
+          "--right-panel-rendered-width": `${renderedRightWidth}px`,
         } as CSSProperties
       }
       onKeyDown={(event) => {
@@ -279,13 +291,13 @@ export function AppShell({
           />
         )}
         <section className="task-stage">{children}</section>
-        {rightPanelAvailable && rightPanelDocked && (
+        {rightPanelAvailable && (effectiveRightPanelOpen || resizingRight) && (
           <ResizableSeparator
             className="task-panel-resize-handle"
             label={t("app.resize_task_panel")}
-            value={rightWidth}
+            value={renderedRightWidth}
             minimum={minimumRightWidth}
-            maximum={maximumRightWidth}
+            maximum={rightResizeMaximum}
             step={rightWidthStep}
             reverse
             onChange={setRightWidth}

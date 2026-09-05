@@ -40,6 +40,13 @@ export function ResizableSeparator({
     if (commit) onCommit(clamped);
   }
 
+  function finish(pointerId: number) {
+    if (drag.current?.pointerId !== pointerId) return;
+    drag.current = null;
+    update(current.current, true);
+    onResizeEnd?.();
+  }
+
   return (
     <div
       className={className}
@@ -68,18 +75,12 @@ export function ResizableSeparator({
       }}
       onPointerUp={(event) => {
         if (drag.current?.pointerId !== event.pointerId) return;
-        drag.current = null;
-        update(current.current, true);
-        onResizeEnd?.();
+        finish(event.pointerId);
         if (event.currentTarget.hasPointerCapture(event.pointerId))
           event.currentTarget.releasePointerCapture(event.pointerId);
       }}
-      onPointerCancel={(event) => {
-        if (drag.current?.pointerId !== event.pointerId) return;
-        drag.current = null;
-        update(current.current, true);
-        onResizeEnd?.();
-      }}
+      onPointerCancel={(event) => finish(event.pointerId)}
+      onLostPointerCapture={(event) => finish(event.pointerId)}
       onKeyDown={(event) => {
         let next: number | null = null;
         if (event.key === "ArrowLeft")
