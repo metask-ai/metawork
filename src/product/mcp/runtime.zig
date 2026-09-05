@@ -956,9 +956,11 @@ pub const Runtime = struct {
                 return .pending;
             };
         const management = if (self.state.management) |*value| value else return .rejected;
-        if (!failure.challenge_scopes_complete or
-            !configuration.validOauthScopeSet(failure.challenge_scopes, management.limits))
-            return error.McpOauthScopeCapacity;
+        const trusted_challenge_scopes: []const []const u8 = if (failure.challenge_scopes_complete and
+            configuration.validOauthScopeSet(failure.challenge_scopes, management.limits))
+            failure.challenge_scopes
+        else
+            &.{};
         if (management.inspect().health != .ready) return .rejected;
         const registry = management.desiredRegistry() orelse return .rejected;
         if (registry.oauth_operation) |operation|
@@ -971,16 +973,16 @@ pub const Runtime = struct {
         if (consent.epoch != failure.consent_epoch) return .stale;
         const scope_step_up = policy.scopeSetAddsRequirement(
             consent.scopes,
-            failure.challenge_scopes,
+            trusted_challenge_scopes,
         );
         if (std.mem.eql(u8, oauth.status, "reauth_required")) {
-            var pending = if (failure.challenge_scopes.len != 0)
+            var pending = if (trusted_challenge_scopes.len != 0)
                 try policy.preparePendingReauthorization(
                     self.allocator,
                     &self.state,
                     server.id,
                     consent.epoch,
-                    failure.challenge_scopes,
+                    trusted_challenge_scopes,
                     management.limits.max_oauth_scopes,
                 )
             else
@@ -997,13 +999,13 @@ pub const Runtime = struct {
             failure.token_revision > grant.token_revision or
             (!scope_step_up and failure.token_revision != grant.token_revision))
             return .stale;
-        var pending = if (failure.challenge_scopes.len != 0)
+        var pending = if (trusted_challenge_scopes.len != 0)
             try policy.preparePendingReauthorization(
                 self.allocator,
                 &self.state,
                 server.id,
                 consent.epoch,
-                failure.challenge_scopes,
+                trusted_challenge_scopes,
                 management.limits.max_oauth_scopes,
             )
         else

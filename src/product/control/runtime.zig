@@ -14805,6 +14805,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         .max_credential_locators = 64,
         .max_runtime_secrets_per_server = 128,
         .max_runtime_secret_bytes_per_server = 16 * 1024,
+        .max_oauth_scopes = 2,
     };
     var server: mcp_configuration.ServerWire = .{
         .id = "oauth",
@@ -14854,7 +14855,44 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         server.auth.oauth.?.consent.?,
     ).?;
     server.auth.oauth.?.consent.?.fingerprint = &consent_fingerprint;
-    var servers = [_]mcp_configuration.ServerWire{server};
+
+    var incomplete_server = server;
+    incomplete_server.id = "incomplete";
+    incomplete_server.namespace = "incomplete";
+    incomplete_server.display_name = "Incomplete challenge";
+    incomplete_server.transport.url = "https://mcp.example.test/incomplete";
+    incomplete_server.auth.oauth.?.consent.?.resource = "https://mcp.example.test/incomplete";
+    incomplete_server.auth.oauth.?.grant.?.access_token_ref = "oauth/access-8";
+    incomplete_server.auth.oauth.?.grant.?.refresh_token_ref = "oauth/refresh-8";
+    const incomplete_approval = mcp_configuration.connectionFingerprint(incomplete_server);
+    incomplete_server.connection_approval = .{ .fingerprint = &incomplete_approval };
+    const incomplete_consent_fingerprint = mcp_configuration.oauthConsentFingerprint(
+        incomplete_server,
+        incomplete_server.auth.oauth.?.consent.?,
+    ).?;
+    incomplete_server.auth.oauth.?.consent.?.fingerprint = &incomplete_consent_fingerprint;
+
+    var oversized_server = server;
+    oversized_server.id = "oversized";
+    oversized_server.namespace = "oversized";
+    oversized_server.display_name = "Oversized challenge";
+    oversized_server.transport.url = "https://mcp.example.test/oversized";
+    oversized_server.auth.oauth.?.consent.?.resource = "https://mcp.example.test/oversized";
+    oversized_server.auth.oauth.?.grant.?.access_token_ref = "oauth/access-8";
+    oversized_server.auth.oauth.?.grant.?.refresh_token_ref = "oauth/refresh-8";
+    const oversized_approval = mcp_configuration.connectionFingerprint(oversized_server);
+    oversized_server.connection_approval = .{ .fingerprint = &oversized_approval };
+    const oversized_consent_fingerprint = mcp_configuration.oauthConsentFingerprint(
+        oversized_server,
+        oversized_server.auth.oauth.?.consent.?,
+    ).?;
+    oversized_server.auth.oauth.?.consent.?.fingerprint = &oversized_consent_fingerprint;
+
+    var servers = [_]mcp_configuration.ServerWire{
+        server,
+        incomplete_server,
+        oversized_server,
+    };
     const registry: mcp_configuration.RegistryWire = .{
         .schema_version = 2,
         .generation = 4,
@@ -14995,6 +15033,44 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
         mcp_configuration.ManagementOutcome.saved,
         try control.removeMcpServer(6, "oauth"),
     );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
+    );
+
+    try std.testing.expectEqual(
+        McpRuntimeAuthorizationFailureOutcome.applied,
+        try control.requireMcpOauthReauthorization(.{
+            .server_id = "incomplete",
+            .consent_epoch = 3,
+            .token_revision = 8,
+            .challenge_scopes = &.{"files.write"},
+            .challenge_scopes_complete = false,
+        }),
+    );
+    const oversized_scopes = [_][]const u8{
+        "files.admin",
+        "files.read",
+        "files.write",
+    };
+    try std.testing.expectEqual(
+        McpRuntimeAuthorizationFailureOutcome.applied,
+        try control.requireMcpOauthReauthorization(.{
+            .server_id = "oversized",
+            .consent_epoch = 3,
+            .token_revision = 8,
+            .challenge_scopes = &oversized_scopes,
+            .challenge_scopes_complete = true,
+        }),
+    );
+    const sanitized_desired = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?;
+    for (sanitized_desired.servers) |sanitized_server| {
+        try std.testing.expectEqualStrings(
+            "reauth_required",
+            sanitized_server.auth.oauth.?.status,
+        );
+        try std.testing.expect(sanitized_server.auth.oauth.?.grant == null);
+    }
     try std.testing.expectEqual(
         @as(usize, 0),
         mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
