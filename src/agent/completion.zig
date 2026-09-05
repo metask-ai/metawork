@@ -30,6 +30,7 @@ pub const Failure = types.Failure;
 pub const Result = types.Result;
 pub const CompleteOutcome = types.CompleteOutcome;
 pub const max_messages = types.max_messages;
+pub const max_output_tokens = types.max_output_tokens;
 pub const max_request_bytes = types.max_request_bytes;
 pub const max_response_bytes = types.max_response_bytes;
 pub const max_result_bytes = types.max_result_bytes;
@@ -112,10 +113,7 @@ pub const Completion = struct {
             encoded.view(),
             cancellation,
             response_buffer,
-        ) catch |failure| return .{ .failure = if (failure == error.Cancelled)
-            .cancelled
-        else
-            .{ .transport_failed = transportFailure(failure) } };
+        ) catch |failure| return .{ .failure = transportFailure(failure) };
         if (cancellation.isRequested()) return .{ .failure = .cancelled };
         if (response.status < 200 or response.status > 299) return .{ .failure = .{
             .provider_rejected = types.rejectionForStatus(response.status),
@@ -156,9 +154,12 @@ fn validateConfig(binding: ModelBinding) InitError!void {
 }
 
 fn validateRequest(request: Request) error{ InvalidRequest, ResourceLimit }!void {
-    if (request.messages.len == 0 or request.messages.len > types.max_messages or
+    if (request.max_output_tokens == 0 or
+        request.messages.len == 0 or request.messages.len > types.max_messages or
         !std.unicode.utf8ValidateSlice(request.system))
         return error.InvalidRequest;
+    if (request.max_output_tokens > types.max_output_tokens)
+        return error.ResourceLimit;
     var total = request.system.len;
     for (request.messages) |message| {
         if (message.text.len == 0 or !std.unicode.utf8ValidateSlice(message.text))
@@ -178,15 +179,18 @@ fn codecFailure(failure: codec.Error) Failure {
     };
 }
 
-fn transportFailure(failure: transport.Error) types.TransportFailure {
+fn transportFailure(failure: transport.Error) Failure {
     return switch (failure) {
-        error.DnsFailed => .dns,
-        error.ConnectFailed => .connect,
-        error.TlsFailed => .tls,
-        error.WriteFailed => .write,
-        error.ReadFailed => .read,
-        error.InvalidHttp => .invalid_http,
-        error.Cancelled, error.ResponseTooLarge, error.OutOfMemory, error.Unexpected => .other,
+        error.Cancelled => .cancelled,
+        error.ResponseTooLarge => .resource_limit,
+        error.OutOfMemory => .out_of_memory,
+        error.DnsFailed => .{ .transport_failed = .dns },
+        error.ConnectFailed => .{ .transport_failed = .connect },
+        error.TlsFailed => .{ .transport_failed = .tls },
+        error.WriteFailed => .{ .transport_failed = .write },
+        error.ReadFailed => .{ .transport_failed = .read },
+        error.InvalidHttp => .{ .transport_failed = .invalid_http },
+        error.Unexpected => .{ .transport_failed = .other },
     };
 }
 
@@ -194,6 +198,7 @@ const FakeTransport = struct {
     response: []const u8,
     private_provider_id: ?[]const u8 = null,
     status: u16 = 200,
+    failure: ?transport.Error = null,
     perform_count: usize = 0,
     saw_sensitive_header: bool = false,
     request_streaming: bool = false,
@@ -211,6 +216,7 @@ const FakeTransport = struct {
     ) transport.Error!transport.Response {
         const self: *FakeTransport = @ptrCast(@alignCast(context.?));
         self.perform_count += 1;
+        if (self.failure) |failure| return failure;
         if (self.private_provider_id) |id| {
             if (std.mem.indexOf(u8, request.url, id) != null or
                 std.mem.indexOf(u8, request.body, id) != null) return error.Unexpected;
@@ -276,7 +282,21 @@ test "invalid config and request fail before Transport" {
     var cancellation = owner.newCancellation();
     try std.testing.expectEqual(
         Failure.invalid_request,
-        owner.complete(.{ .messages = &.{} }, &cancellation).failure,
+        owner.complete(.{ .messages = &.{}, .max_output_tokens = 4096 }, &cancellation).failure,
+    );
+    try std.testing.expectEqual(
+        Failure.invalid_request,
+        owner.complete(.{
+            .messages = &.{.{ .role = .user, .text = "hello" }},
+            .max_output_tokens = 0,
+        }, &cancellation).failure,
+    );
+    try std.testing.expectEqual(
+        Failure.resource_limit,
+        owner.complete(.{
+            .messages = &.{.{ .role = .user, .text = "hello" }},
+            .max_output_tokens = max_output_tokens + 1,
+        }, &cancellation).failure,
     );
     try std.testing.expectEqual(@as(usize, 0), fake.perform_count);
 }
@@ -328,10 +348,13 @@ test "explicit protocols complete through one non-streaming path" {
         });
         defer owner.deinit();
         var cancellation = owner.newCancellation();
-        var result = switch (owner.complete(.{ .messages = &.{.{
-            .role = .user,
-            .text = "hello",
-        }} }, &cancellation)) {
+        var result = switch (owner.complete(.{
+            .messages = &.{.{
+                .role = .user,
+                .text = "hello",
+            }},
+            .max_output_tokens = 4096,
+        }, &cancellation)) {
             .result => |value| value,
             .failure => return error.TestUnexpectedResult,
         };
@@ -365,7 +388,10 @@ test "service instances share a protocol without sharing identity or sending it 
         @memset(id, 'x');
         try std.testing.expectEqualStrings(expected, owner.provider_id);
         var cancellation = owner.newCancellation();
-        var result = switch (owner.complete(.{ .messages = &.{.{ .role = .user, .text = "hello" }} }, &cancellation)) {
+        var result = switch (owner.complete(.{
+            .messages = &.{.{ .role = .user, .text = "hello" }},
+            .max_output_tokens = 4096,
+        }, &cancellation)) {
             .result => |value| value,
             .failure => return error.TestUnexpectedResult,
         };
@@ -391,13 +417,51 @@ test "cancellation and provider rejection are explicit outcomes" {
     cancellation.request();
     try std.testing.expectEqual(
         Failure.cancelled,
-        owner.complete(.{ .messages = &.{.{ .role = .user, .text = "hi" }} }, &cancellation).failure,
+        owner.complete(.{
+            .messages = &.{.{ .role = .user, .text = "hi" }},
+            .max_output_tokens = 4096,
+        }, &cancellation).failure,
     );
     try std.testing.expectEqual(@as(usize, 0), fake.perform_count);
 
     var active = owner.newCancellation();
-    const rejected = owner.complete(.{ .messages = &.{.{ .role = .user, .text = "hi" }} }, &active);
+    const rejected = owner.complete(.{
+        .messages = &.{.{ .role = .user, .text = "hi" }},
+        .max_output_tokens = 4096,
+    }, &active);
     try std.testing.expectEqual(@as(u16, 429), rejected.failure.provider_rejected.status);
+}
+
+test "transport resource failures preserve their typed Completion semantics" {
+    var fake = FakeTransport{ .response = "{}" };
+    const owner = try Completion.init(std.testing.allocator, fake.port(), .{
+        .target = .{
+            .provider_id = "fixture-provider",
+            .protocol = .openai_responses,
+            .base_url = "https://example.test/v1/responses",
+            .model = "m",
+        },
+        .credential = "secret",
+    });
+    defer owner.deinit();
+    var cancellation = owner.newCancellation();
+    const cases = [_]struct {
+        transport_error: transport.Error,
+        expected: Failure,
+    }{
+        .{ .transport_error = error.Cancelled, .expected = .cancelled },
+        .{ .transport_error = error.ResponseTooLarge, .expected = .resource_limit },
+        .{ .transport_error = error.OutOfMemory, .expected = .out_of_memory },
+        .{ .transport_error = error.Unexpected, .expected = .{ .transport_failed = .other } },
+    };
+    for (cases) |case| {
+        fake.failure = case.transport_error;
+        const outcome = owner.complete(.{
+            .messages = &.{.{ .role = .user, .text = "hello" }},
+            .max_output_tokens = 4096,
+        }, &cancellation);
+        try std.testing.expectEqualDeep(case.expected, outcome.failure);
+    }
 }
 
 test "Completion clears its owned credential copy" {

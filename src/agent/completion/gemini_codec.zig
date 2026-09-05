@@ -15,6 +15,10 @@ const WireSystemInstruction = struct {
     parts: []const WirePart,
 };
 
+const WireGenerationConfig = struct {
+    maxOutputTokens: u64,
+};
+
 pub fn encode(
     allocator: std.mem.Allocator,
     config: types.CodecConfig,
@@ -39,12 +43,18 @@ pub fn encode(
     const body = if (request.system.len == 0)
         std.json.Stringify.valueAlloc(allocator, .{
             .contents = contents,
+            .generationConfig = WireGenerationConfig{
+                .maxOutputTokens = request.max_output_tokens,
+            },
         }, .{}) catch return error.OutOfMemory
     else body: {
         const system_parts = [_]WirePart{.{ .text = request.system }};
         break :body std.json.Stringify.valueAlloc(allocator, .{
             .systemInstruction = WireSystemInstruction{ .parts = &system_parts },
             .contents = contents,
+            .generationConfig = WireGenerationConfig{
+                .maxOutputTokens = request.max_output_tokens,
+            },
         }, .{}) catch return error.OutOfMemory;
     };
     const encoded_model = try encodePathSegment(allocator, config.model);
@@ -174,11 +184,21 @@ test "Gemini request is non-streaming and keeps the credential out of the URL" {
         .credential = "SECRET",
         .base_url = "https://generativelanguage.googleapis.com",
         .model = "gemini/test",
-    }, .{ .messages = &.{.{ .role = .user, .text = "hello" }} });
+    }, .{
+        .messages = &.{.{ .role = .user, .text = "hello" }},
+        .max_output_tokens = 1234,
+    });
     defer encoded.deinit();
     try std.testing.expect(std.mem.endsWith(u8, encoded.url, ":generateContent"));
     try std.testing.expect(std.mem.indexOf(u8, encoded.url, "SECRET") == null);
     try std.testing.expect(encoded.headers[2].sensitive);
+    var parsed = try codec.parseJson(std.testing.allocator, encoded.body);
+    defer parsed.deinit();
+    const root = try codec.object(parsed.value);
+    try std.testing.expectEqual(
+        @as(i64, 1234),
+        root.get("generationConfig").?.object.get("maxOutputTokens").?.integer,
+    );
 }
 
 test "Gemini codec rejects function calls" {

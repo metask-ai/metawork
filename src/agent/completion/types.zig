@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const max_messages: usize = 4096;
+pub const max_output_tokens: u64 = std.math.maxInt(u32);
 pub const max_request_bytes: usize = 16 * 1024 * 1024;
 pub const max_response_bytes: usize = 4 * 1024 * 1024;
 pub const max_result_bytes: usize = 1024 * 1024;
@@ -24,6 +25,7 @@ pub const Message = struct {
 pub const Request = struct {
     system: []const u8 = "",
     messages: []const Message,
+    max_output_tokens: u64,
 };
 
 pub const Usage = struct {

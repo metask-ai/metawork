@@ -22,6 +22,7 @@ pub fn encode(
         .model = config.model,
         .instructions = if (request.system.len != 0) request.system else @as(?[]const u8, null),
         .input = input,
+        .max_output_tokens = request.max_output_tokens,
         .stream = false,
         .store = false,
     }, .{ .emit_null_optional_fields = false }) catch return error.OutOfMemory;
@@ -97,7 +98,11 @@ test "Responses Completion owns an explicit non-streaming stateless request" {
         .credential = "fixture-secret",
         .base_url = "https://example.test/custom-endpoint",
         .model = "fixture-model",
-    }, .{ .system = "title only", .messages = &.{.{ .role = .user, .text = "hello\nworld" }} });
+    }, .{
+        .system = "title only",
+        .messages = &.{.{ .role = .user, .text = "hello\nworld" }},
+        .max_output_tokens = 1234,
+    });
     defer encoded.deinit();
     try std.testing.expectEqualStrings("https://example.test/custom-endpoint", encoded.view().url);
     var parsed = try codec.parseJson(std.testing.allocator, encoded.body);
@@ -105,6 +110,7 @@ test "Responses Completion owns an explicit non-streaming stateless request" {
     const root = try codec.object(parsed.value);
     try std.testing.expectEqual(false, root.get("stream").?.bool);
     try std.testing.expectEqual(false, root.get("store").?.bool);
+    try std.testing.expectEqual(@as(i64, 1234), root.get("max_output_tokens").?.integer);
     try std.testing.expect(root.get("messages") == null and root.get("tools") == null);
     try std.testing.expectEqualStrings("title only", root.get("instructions").?.string);
     const input = root.get("input").?.array.items[0].object;
@@ -121,7 +127,10 @@ test "Responses request releases partial allocations on failure" {
                 .credential = "fixture-secret",
                 .base_url = "https://example.test/endpoint",
                 .model = "fixture-model",
-            }, .{ .messages = &.{.{ .role = .user, .text = "hello" }} });
+            }, .{
+                .messages = &.{.{ .role = .user, .text = "hello" }},
+                .max_output_tokens = 1234,
+            });
             defer encoded.deinit();
         }
     };

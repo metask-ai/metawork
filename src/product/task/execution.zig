@@ -401,6 +401,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
     var completion_outcome = owner.complete(.{
         .system = automatic_title_system_prompt,
         .messages = &messages,
+        .max_output_tokens = 4096,
     }, &request_cancellation);
     watchdog.finished.store(true, .release);
     watchdog_thread.join();

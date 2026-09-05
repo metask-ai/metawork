@@ -96,7 +96,7 @@ pub fn run(
         .text = "Reply with OK.",
     }};
     var complete_outcome = owner.complete(
-        .{ .messages = &messages },
+        .{ .messages = &messages, .max_output_tokens = 4096 },
         &request_cancellation,
     );
     watchdog.finished.store(true, .release);
