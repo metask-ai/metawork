@@ -785,15 +785,15 @@ export const enUS = {
     "Refresh the Metask catalog or review the saved model configuration.",
   "settings.models_reset_message": "Model configuration cannot be read",
   "settings.models_reset_detail":
-    "Reset clears model configuration and custom connections, but keeps your account, Tasks, Workspaces, and conversations.",
-  "settings.models_reset_action": "Reset model configuration",
-  "settings.models_reset_dialog_title": "Reset model configuration?",
+    "Recovery first reloads valid configuration and clears it only when it is missing or confirmed damaged. Your account, Tasks, Workspaces, and conversations are unchanged.",
+  "settings.models_reset_action": "Recover model configuration",
+  "settings.models_reset_dialog_title": "Recover model configuration?",
   "settings.models_reset_dialog_body":
-    "This clears the current model configuration and custom connections. You will choose a Metask API key and model again; your account, Tasks, Workspaces, and conversations stay intact.",
-  "settings.models_reset_confirm": "Reset and continue",
-  "settings.models_reset_pending": "Resetting…",
+    "MetaWork first validates and restores the existing configuration. It clears model configuration only when the file is missing or confirmed damaged; your account, Tasks, Workspaces, and conversations stay intact.",
+  "settings.models_reset_confirm": "Recover and continue",
+  "settings.models_reset_pending": "Recovering…",
   "settings.models_reset_failed":
-    "Could not reset model configuration. Try again.",
+    "Could not recover model configuration. Try again.",
   "permission.profile.approval_required": "Request approval",
   "permission.profile.approval_required.help":
     "Routine workspace edits run automatically. MetaWork asks before operations the current policy does not cover.",

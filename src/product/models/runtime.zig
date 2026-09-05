@@ -883,28 +883,53 @@ pub const Runtime = struct {
         return self.commitCandidate(&candidate, true);
     }
 
-    /// Explicitly replaces the Models canonical store with the current empty
-    /// schema. This is the supported recovery path for a damaged or
-    /// otherwise unreadable `models.json`; it never decodes or migrates the
-    /// previous bytes. Host-owned custom credentials are represented as
-    /// pending deletions and scrubbed after the durable empty commit.
+    /// Recovers the Models canonical store without destroying a valid current
+    /// schema. Missing or strictly invalid canonical bytes are replaced with
+    /// the current empty schema after the caller explicitly requests reset.
     pub fn resetStore(self: *Runtime) contract.CommandResult {
         self.assertMainThread();
         if (self.store == null or self.store_healthy)
             return .rejected(.persistence_unavailable);
         if (self.catalog_attempt != null)
             return .rejected(.operation_in_progress);
+        const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
+        const bytes_optional = store.loadAlloc(self.allocator) catch
+            return .rejected(.persistence_unavailable);
+        if (bytes_optional) |bytes| {
+            defer self.allocator.free(bytes);
+            var restored = registry_impl.decode(self.allocator, bytes) catch |err| switch (err) {
+                error.OutOfMemory => return .rejected(.local_resource_exhausted),
+                else => return self.installEmptyRecovery(store),
+            };
+            defer restored.deinit();
+            if (restored.reconcileInterruptedTests()) {
+                const reconciled = registry_impl.encodeAlloc(self.allocator, &restored) catch |err|
+                    return .rejected(mapRegistryError(err));
+                defer self.allocator.free(reconciled);
+                if (commitCanonical(self.allocator, store, reconciled) != .committed)
+                    return .rejected(.persistence_unavailable);
+            }
+            self.registry.replace(&restored);
+            self.store_healthy = true;
+            self.clearMetaskRuntime(.needs_authentication, .none);
+            self.drainCredentialCleanup();
+            return .acceptedResult();
+        }
+        return self.installEmptyRecovery(store);
+    }
+
+    fn installEmptyRecovery(
+        self: *Runtime,
+        store: *registry_impl.FileStore,
+    ) contract.CommandResult {
         var candidate = self.registry.resetCandidate() catch |err|
             return .rejected(mapRegistryError(err));
         defer candidate.deinit();
         const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err|
             return .rejected(mapRegistryError(err));
         defer self.allocator.free(encoded);
-        const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
-        store.commit(encoded) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) self.store_healthy = false;
+        if (commitCanonical(self.allocator, store, encoded) != .committed)
             return .rejected(.persistence_unavailable);
-        };
         self.registry.replace(&candidate);
         self.store_healthy = true;
         self.clearMetaskRuntime(.needs_authentication, .none);
@@ -2084,7 +2109,7 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
     );
 }
 
-test "Models reset rejects healthy store and scrubs known credentials during recovery" {
+test "Models reset rejects healthy store and non-destructively recovers a valid canonical" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2114,18 +2139,76 @@ test "Models reset rejects healthy store and scrubs known credentials during rec
     try std.testing.expect(vault.present);
     try std.testing.expectEqual(@as(usize, 1), runtime.views().len);
 
-    // An outcome-unknown write leaves the last trusted in-memory registry
-    // available for explicit recovery, including credential cleanup.
+    const canonical_before = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(canonical_before);
+
+    // A prior uncertain result must not authorize destroying a canonical that
+    // strict readback now proves valid.
     runtime.store_healthy = false;
     try std.testing.expectEqual(
         contract.PersistenceHealth.recovery_required,
         runtime.view().persistence_health,
     );
     try std.testing.expect(runtime.resetStore().accepted);
-    try std.testing.expect(!vault.present);
-    try std.testing.expectEqual(@as(usize, 0), runtime.views().len);
+    try std.testing.expect(vault.present);
+    try std.testing.expectEqual(@as(usize, 1), runtime.views().len);
     try std.testing.expect(runtime.view().default_selection == null);
     try std.testing.expect(runtime.registry.nextCredentialDeletion() == null);
+    const canonical_after = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(canonical_after);
+    try std.testing.expectEqualStrings(canonical_before, canonical_after);
+}
+
+test "Models reset durably reconciles interrupted tests in a valid canonical" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory_storage[0..directory_len], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try createTestProviderWithModel(
+        &runtime,
+        "reset-secret",
+        .{
+            .display_name = "Interrupted",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        .{ .id = "gpt-5", .display_name = "GPT-5" },
+    );
+    const provider = runtime.views()[0];
+    try std.testing.expect(runtime.submitCommand(.{ .test_model = .{
+        .model = .{ .source_id = provider.id, .model_id = "gpt-5" },
+        .expected_provider_revision = provider.provider_revision,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    } }).accepted);
+    try std.testing.expectEqual(
+        contract.CustomModelTestStatus.testing,
+        runtime.views()[0].models[0].test_status,
+    );
+
+    runtime.store_healthy = false;
+    try std.testing.expect(runtime.resetStore().accepted);
+    try std.testing.expect(runtime.store_healthy);
+    try std.testing.expectEqual(
+        contract.CustomModelTestStatus.failed,
+        runtime.views()[0].models[0].test_status,
+    );
+
+    const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(bytes);
+    var restored = try registry_impl.decode(std.testing.allocator, bytes);
+    defer restored.deinit();
+    try std.testing.expect(!restored.reconcileInterruptedTests());
 }
 
 test "Models reset rejects unavailable persistence capability" {

@@ -1164,7 +1164,10 @@ pub fn decode(
         allocator,
         input,
         .{ .ignore_unknown_fields = false },
-    ) catch return error.InvalidData;
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidData,
+    };
     defer parsed.deinit();
     const wire = parsed.value;
     if (wire.schema != 1 or
@@ -1261,6 +1264,18 @@ pub fn decode(
     for (result.views()) |view|
         contract.validateCustomProviderView(view) catch return error.InvalidData;
     return result;
+}
+
+test "canonical decode preserves allocation exhaustion" {
+    var storage: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        decode(
+            fixed.allocator(),
+            "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
+        ),
+    );
 }
 
 fn providerHasModel(provider: *const OwnedProvider, model_id: []const u8) bool {
