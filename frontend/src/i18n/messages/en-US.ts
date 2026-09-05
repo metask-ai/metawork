@@ -776,13 +776,17 @@ export const enUS = {
   "settings.account_profile": "Account information",
   "settings.account_security": "Security",
   "settings.providers_saved": "Configured providers",
-  "settings.provider_details": "Provider details",
+  "settings.provider_details": "Connection type",
   "settings.provider_add": "Add provider",
   "settings.provider_add_title": "Add provider",
   "settings.back_to_providers": "Back to providers",
   "settings.provider_creation_mode": "Provider setup type",
-  "settings.builtin_provider": "Official provider",
-  "settings.custom_provider": "Custom provider",
+  "settings.builtin_provider": "Official model service",
+  "settings.builtin_provider_mode_help":
+    "Choose a provider whose protocol and endpoint are maintained by MetaWork.",
+  "settings.custom_provider": "Custom API",
+  "settings.custom_provider_mode_help":
+    "Connect a self-hosted model, independent vendor, or API gateway.",
   "settings.builtin_provider_official_api": "Official API preset",
   "settings.builtin_provider_title": "Connect an official provider",
   "settings.builtin_provider_help":
@@ -856,19 +860,24 @@ export const enUS = {
     "Adding a provider or replacing an API key is unavailable while the system credential store is unavailable.",
   "settings.custom_provider_add": "Save provider",
   "settings.custom_provider_adding": "Saving provider…",
-  "settings.custom_provider_name": "Provider name",
+  "settings.custom_provider_title": "Connect a custom API",
+  "settings.custom_provider_help":
+    "Choose the protocol explicitly, then enter the service address and credential.",
+  "settings.custom_provider_name": "Display name",
   "settings.custom_provider_name_placeholder": "My OpenAI service",
+  "settings.custom_provider_name_help":
+    "Used only to identify this provider inside MetaWork.",
   "settings.custom_provider_protocol": "Protocol",
   "settings.custom_provider_endpoint": "Base URL",
+  "settings.custom_provider_endpoint_help":
+    "Enter the service root. MetaWork adds the request path for the selected protocol.",
+  "settings.custom_provider_endpoint_preview": "Request endpoint: {endpoint}",
   "settings.custom_provider_model_id_placeholder": "gpt-5",
   "settings.provider_api_key_placeholder": "Enter API key",
   "settings.provider_models_configured_elsewhere":
     "The API key is saved in the operating system credential store. Configure models from the Models page after saving.",
   "settings.provider_save": "Save provider",
   "settings.provider_save_api_key": "Save API key",
-  "settings.custom_provider_route.protocol": "Protocol",
-  "settings.custom_provider_route.endpoint": "Base URL",
-  "settings.custom_provider_route.api_key": "API key",
   "settings.custom_provider_edit_help":
     "Changing the protocol or Base URL requires testing its models again. The saved API key is never filled back in.",
   "settings.custom_provider_replace_credential": "Update API key",

@@ -671,7 +671,9 @@ export function SettingsPage({
   useEffect(() => {
     if (activeSection === "providers") return;
     setProvidersPage("list");
+    setProviderCreationMode("builtin");
     setCustomProviderDraft(null);
+    setBuiltinProviderDraft({ providerId: "", apiKey: "" });
     setCustomProviderCredentialEdit(null);
   }, [activeSection]);
 
@@ -686,6 +688,7 @@ export function SettingsPage({
   useEffect(() => {
     if (customProviderCapabilities.secretCapture) return;
     setCustomProviderDraft(null);
+    setBuiltinProviderDraft({ providerId: "", apiKey: "" });
     setCustomProviderCredentialEdit(null);
     setCreatingCustomProvider(false);
   }, [customProviderCapabilities.secretCapture]);
@@ -769,6 +772,7 @@ export function SettingsPage({
     try {
       if (await onCreateCustomProvider(input)) {
         setCustomProviderDraft(null);
+        setBuiltinProviderDraft({ providerId: "", apiKey: "" });
         setProvidersPage("list");
       }
     } finally {
@@ -792,6 +796,7 @@ export function SettingsPage({
         })
       ) {
         setBuiltinProviderDraft({ providerId: "", apiKey: "" });
+        setCustomProviderDraft(null);
         setProvidersPage("list");
       }
     } finally {
@@ -915,6 +920,7 @@ export function SettingsPage({
         event.preventDefault();
         if (activeSection === "providers" && providersPage === "add") {
           setCustomProviderDraft(null);
+          setBuiltinProviderDraft({ providerId: "", apiKey: "" });
           setProvidersPage("list");
           return;
         }
@@ -1755,18 +1761,10 @@ export function SettingsPage({
                           onClick={() => {
                             setProviderCreationMode("builtin");
                             setBuiltinProviderDraft({
-                              providerId:
-                                models.builtinProviderPresets.find(
-                                  (preset) =>
-                                    !models.customProviders.some(
-                                      (provider) =>
-                                        provider.builtinProviderId ===
-                                        preset.id,
-                                    ),
-                                )?.id ?? "",
+                              providerId: "",
                               apiKey: "",
                             });
-                            setCustomProviderDraft(null);
+                            setCustomProviderDraft(newCustomProviderDraft());
                             setProvidersPage("add");
                           }}
                         >
@@ -1777,24 +1775,24 @@ export function SettingsPage({
                   {providersPage === "add" && (
                     <div
                       className="settings-provider-creation-mode"
-                      role="group"
+                      role="radiogroup"
                       aria-label={t("settings.provider_creation_mode")}
                     >
                       <button
                         type="button"
                         className="focus-ring"
-                        aria-pressed={providerCreationMode === "builtin"}
-                        onClick={() => {
-                          setProviderCreationMode("builtin");
-                          setCustomProviderDraft(null);
-                        }}
+                        role="radio"
+                        aria-checked={providerCreationMode === "builtin"}
+                        onClick={() => setProviderCreationMode("builtin")}
                       >
-                        {t("settings.builtin_provider")}
+                        <strong>{t("settings.builtin_provider")}</strong>
+                        <span>{t("settings.builtin_provider_mode_help")}</span>
                       </button>
                       <button
                         type="button"
                         className="focus-ring"
-                        aria-pressed={providerCreationMode === "custom"}
+                        role="radio"
+                        aria-checked={providerCreationMode === "custom"}
                         onClick={() => {
                           setProviderCreationMode("custom");
                           setCustomProviderDraft(
@@ -1802,7 +1800,8 @@ export function SettingsPage({
                           );
                         }}
                       >
-                        {t("settings.custom_provider")}
+                        <strong>{t("settings.custom_provider")}</strong>
+                        <span>{t("settings.custom_provider_mode_help")}</span>
                       </button>
                     </div>
                   )}
@@ -1815,7 +1814,7 @@ export function SettingsPage({
                           void submitBuiltinProvider();
                         }}
                       >
-                        <div className="settings-builtin-provider-intro">
+                        <div className="settings-provider-create-intro">
                           <strong>
                             {t("settings.builtin_provider_title")}
                           </strong>
@@ -1913,30 +1912,21 @@ export function SettingsPage({
                   {customProviderDraft && providerCreationMode === "custom" && (
                     <form
                       id="settings-custom-provider-create"
-                      className="settings-custom-provider-create"
+                      className="settings-custom-provider-create settings-custom-provider-create-custom"
                       onSubmit={(event) => {
                         event.preventDefault();
                         void submitCustomProvider();
                       }}
                     >
-                      <div
-                        className="settings-custom-provider-route"
-                        aria-hidden="true"
-                      >
-                        <span>
-                          {t("settings.custom_provider_route.protocol")}
-                        </span>
-                        <span>
-                          {t("settings.custom_provider_route.endpoint")}
-                        </span>
-                        <span>
-                          {t("settings.custom_provider_route.api_key")}
-                        </span>
+                      <div className="settings-provider-create-intro">
+                        <strong>{t("settings.custom_provider_title")}</strong>
+                        <p>{t("settings.custom_provider_help")}</p>
                       </div>
-                      <label className="settings-custom-provider-create-field">
+                      <label className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
                         <span>{t("settings.custom_provider_name")}</span>
                         <input
                           className="settings-custom-provider-input focus-ring"
+                          aria-label={t("settings.custom_provider_name")}
                           autoComplete="off"
                           maxLength={256}
                           value={customProviderDraft.displayName}
@@ -1959,8 +1949,11 @@ export function SettingsPage({
                             )
                           }
                         />
+                        <small className="settings-custom-provider-field-help">
+                          {t("settings.custom_provider_name_help")}
+                        </small>
                       </label>
-                      <div className="settings-custom-provider-create-field">
+                      <div className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
                         <span>{t("settings.custom_provider_protocol")}</span>
                         <SelectionMenu
                           value={customProviderDraft.protocol}
@@ -1990,6 +1983,7 @@ export function SettingsPage({
                         <span>{t("settings.custom_provider_endpoint")}</span>
                         <input
                           className="settings-custom-provider-input focus-ring"
+                          aria-label={t("settings.custom_provider_endpoint")}
                           autoComplete="url"
                           inputMode="url"
                           maxLength={2048}
@@ -2015,6 +2009,19 @@ export function SettingsPage({
                             )
                           }
                         />
+                        <small
+                          className="settings-custom-provider-field-help"
+                          aria-live="polite"
+                        >
+                          {customProviderDraft.baseUrl.trim()
+                            ? t("settings.custom_provider_endpoint_preview", {
+                                endpoint: customProviderEndpointFromBaseUrl(
+                                  customProviderDraft.protocol,
+                                  customProviderDraft.baseUrl,
+                                ),
+                              })
+                            : t("settings.custom_provider_endpoint_help")}
+                        </small>
                       </label>
                       <label className="settings-custom-provider-create-field settings-custom-provider-create-field-wide">
                         <span>{t("settings.api_key")}</span>

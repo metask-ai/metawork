@@ -492,7 +492,11 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
 
   await user.click(screen.getByRole("link", { name: "Providers" }));
   await user.click(screen.getByRole("button", { name: "Add provider" }));
-  await user.click(screen.getByRole("button", { name: "Custom provider" }));
+  const customMode = screen.getByRole("radio", { name: /Custom API/ });
+  const officialMode = screen.getByRole("radio", {
+    name: /Official model service/,
+  });
+  await user.click(customMode);
 
   const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
   assert.equal(baseUrl.value, "");
@@ -514,12 +518,20 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
   assert.equal(baseUrl.value, "");
   assert.equal(baseUrl.placeholder, "https://api.anthropic.com");
 
-  await user.type(
-    screen.getByRole("textbox", { name: "Provider name" }),
+  const displayName = screen.getByRole("textbox", { name: "Display name" });
+  await user.type(displayName, "My Anthropic");
+  await user.type(baseUrl, "https://api.anthropic.com/");
+  assert.ok(
+    screen.getByText("Request endpoint: https://api.anthropic.com/v1/messages"),
+  );
+  await user.type(apiKey, "anthropic-secret");
+  await user.click(officialMode);
+  await user.click(customMode);
+  assert.equal(
+    screen.getByRole("textbox", { name: "Display name" }).value,
     "My Anthropic",
   );
-  await user.type(baseUrl, "https://api.anthropic.com/");
-  await user.type(apiKey, "anthropic-secret");
+  assert.equal(screen.getByLabelText("API key").value, "anthropic-secret");
   await user.click(screen.getByRole("button", { name: "Save provider" }));
   assert.deepEqual(submitted, [
     {
@@ -559,8 +571,18 @@ test("Official Provider setup asks only for the preset and API key", async () =>
 
   await user.click(screen.getByRole("link", { name: "Providers" }));
   await user.click(screen.getByRole("button", { name: "Add provider" }));
+  assert.equal(
+    screen
+      .getByRole("radio", { name: /Official model service/ })
+      .getAttribute("aria-checked"),
+    "true",
+  );
   assert.equal(screen.queryByRole("combobox", { name: "Protocol" }), null);
   assert.equal(screen.queryByRole("textbox", { name: "Base URL" }), null);
+  assert.equal(
+    screen.getByRole("button", { name: "Save provider" }).disabled,
+    true,
+  );
 
   await user.click(screen.getByRole("combobox", { name: "Provider" }));
   await user.click(await screen.findByRole("option", { name: /DeepSeek/ }));
