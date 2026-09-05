@@ -50,7 +50,7 @@ export async function verifyFrontendBuild(
     throw new Error(
       "production CSS contains media-query range syntax unsupported by the macOS 13.0 baseline",
     );
-  for (const query of [1100, 819, 560]) {
+  for (const query of [819, 619, 560]) {
     if (!styleText.includes(`@media (max-width:${query}px)`))
       throw new Error(
         `production CSS is missing the ${query}px responsive query`,
