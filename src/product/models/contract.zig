@@ -51,6 +51,23 @@ pub const Protocol = enum {
     gemini_native,
 };
 
+/// Stable identity for a MetaWork-maintained official Provider recipe. This
+/// selects configuration policy only; Agent execution still consumes the
+/// explicit Protocol and endpoint stored on the resulting Provider.
+pub const BuiltinProviderId = enum {
+    deepseek,
+    kimi,
+    minimax,
+    glm,
+};
+
+pub const BuiltinProviderPresetView = struct {
+    id: BuiltinProviderId,
+    display_name: []const u8,
+    api_key_url: []const u8,
+    documentation_url: []const u8,
+};
+
 pub const CatalogState = enum {
     needs_authentication,
     loading,
@@ -164,6 +181,7 @@ pub const ModelsView = struct {
     selection_revision: u64 = 0,
     operation: ModelsOperation = .idle,
     error_code: ModelsError = .none,
+    builtin_provider_presets: []const BuiltinProviderPresetView = &.{},
     custom_providers: []const CustomProviderView = &.{},
 };
 
@@ -238,6 +256,7 @@ pub const CustomProviderModelView = struct {
 
 pub const CustomProviderView = struct {
     id: []const u8,
+    builtin_provider_id: ?BuiltinProviderId = null,
     display_name: []const u8,
     protocol: Protocol,
     normalized_base_url: []const u8,
@@ -251,6 +270,7 @@ pub const CustomProviderView = struct {
 };
 
 pub const CustomProviderSpec = struct {
+    builtin_provider_id: ?BuiltinProviderId = null,
     display_name: []const u8,
     protocol: Protocol,
     normalized_base_url: []const u8,
@@ -789,9 +809,9 @@ pub fn validCustomProviderEndpoint(protocol: Protocol, value: []const u8) bool {
         .raw, .percent_encoded => |bytes| bytes,
     };
     return switch (protocol) {
-        .openai_responses => std.mem.eql(u8, path, "/v1/responses"),
-        .anthropic_messages => std.mem.eql(u8, path, "/v1/messages"),
-        .openai_chat_completions => std.mem.eql(u8, path, "/v1/chat/completions"),
+        .openai_responses => std.mem.endsWith(u8, path, "/responses"),
+        .anthropic_messages => std.mem.endsWith(u8, path, "/v1/messages"),
+        .openai_chat_completions => std.mem.endsWith(u8, path, "/chat/completions"),
         .gemini_native => path.len == 0 or std.mem.eql(u8, path, "/"),
     };
 }
@@ -1113,12 +1133,14 @@ test "source candidate keeps source and execution generations independent" {
     try std.testing.expectEqualStrings("secret", config.input().api_key);
 }
 
-test "custom provider protocols have exact endpoint contracts" {
+test "custom provider protocols have endpoint contracts" {
     inline for (.{
         .{ Protocol.openai_responses, "https://api.openai.com/v1/responses" },
         .{ Protocol.anthropic_messages, "https://api.anthropic.com/v1/messages" },
         .{ Protocol.anthropic_messages, "http://127.0.0.1:43123/v1/messages" },
         .{ Protocol.openai_chat_completions, "https://api.openai.com/v1/chat/completions" },
+        .{ Protocol.openai_chat_completions, "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
+        .{ Protocol.anthropic_messages, "https://api.minimaxi.com/anthropic/v1/messages" },
         .{ Protocol.gemini_native, "https://generativelanguage.googleapis.com" },
     }) |case| try std.testing.expect(validCustomProviderEndpoint(case[0], case[1]));
     try validateCustomProviderSpec(.{

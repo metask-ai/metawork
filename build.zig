@@ -1019,6 +1019,15 @@ fn wireAgentCore(
     models_metask.addImport("metawork_product_models_contract", models_contract);
     models_metask.addImport("product_models_ports", models_ports);
     models_metask.addImport("metask_transport", metask_transport);
+    const models_builtin_providers = b.createModule(.{
+        .root_source_file = b.path("src/product/models/builtin_providers.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    models_builtin_providers.addImport(
+        "metawork_product_models_contract",
+        models_contract,
+    );
     const account_credentials_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/account/credentials.zig"),
         .target = target,
@@ -1046,6 +1055,10 @@ fn wireAgentCore(
     models_runtime.addImport("product_models_ports", models_ports);
     models_runtime.addImport("product_models_providers", models_providers);
     models_runtime.addImport("product_models_metask", models_metask);
+    models_runtime.addImport(
+        "product_models_builtin_providers",
+        models_builtin_providers,
+    );
     const models = b.createModule(.{
         .root_source_file = b.path("src/product/models.zig"),
         .target = target,

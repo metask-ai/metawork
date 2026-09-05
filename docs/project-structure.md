@@ -20,7 +20,7 @@
 | `src/app.zig`、`src/app/` | Application | Native SDK composition、平台 capability、资源生命周期和跨 owner 编排 |
 | `src/product/account.zig`、`src/product/account/` | Account | Account public module 与内部 aggregate |
 | `src/product/control.zig`、`src/product/control/` | Product Control | Product composition、shared execution 与跨 aggregate 编排 |
-| `src/product/models.zig`、`src/product/models/` | Product Control 持有的 Models aggregate | Product 通用 Protocol/ModelRef/ExecutionConfig 纯合同、Metask provider/catalog、Provider-local/global selection、Custom Provider及其有界 custom model definition registry、metadata provenance、per-model readiness、credential port、持久化与恢复；aggregate root只发布runtime API，不形成新的顶层owner |
+| `src/product/models.zig`、`src/product/models/` | Product Control 持有的 Models aggregate | Product 通用 Protocol/ModelRef/ExecutionConfig 纯合同、Metask provider/catalog、内置官方 Provider 配置模板、Provider-local/global selection、Custom Provider及其有界 custom model definition registry、metadata provenance、per-model readiness、credential port、持久化与恢复；aggregate root只发布runtime API，不形成新的顶层owner |
 | `src/product/agent_protocol_adapter.zig` | Product Control 的 Agent outbound boundary | Product 已开放 Protocol 到 Agent codec Protocol 的唯一穷举映射；无状态且不形成共享 enum 或新 owner |
 | `src/product/{attachment,mcp,schedule,skill,task,workspace}.zig` 及同名目录 | Product Control 持有的 aggregate | Attachment 只拥有 transient staged raw bytes、预算与线性消费；其余 aggregate 各自发布窄 public module，均不形成新的顶层 owner |
 | `src/agent.zig`、`src/agent/` | Agent | AgentCore integration、Runtime、Session、Completion 与 callback/event boundary |
