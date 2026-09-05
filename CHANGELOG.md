@@ -6,6 +6,30 @@
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-09-05
+
+### Added
+
+- 新增 DeepSeek、Kimi、MiniMax 与智谱 GLM 内置 Provider 配方，提供引导式配置、已复核 endpoint 和可选 Base URL override。
+- 将 Task overview、Tool detail、File Preview 与 File Changes 统一到可调整宽度的右侧 Task Panel。
+
+### Changed
+
+- 统一 Agent 模型 execution binding 与校验边界。
+- Scheduled Task store hard cut 为唯一 schema 1，完整持久化 source-qualified model binding；旧 shape、未知版本和损坏数据 fail closed，仅允许用户显式恢复。
+- 收口 Custom Provider 设置流程，在设置页优先呈现官方 Provider 引导，并统一表单交互与视觉层级。
+
+### Fixed
+
+- 修复模型绑定收口后 Completion 请求资源所有权语义被改变的问题。
+- 修复 Models canonical store 恢复、未知提交验证、credential tombstone 清理及借用生命周期问题。
+- 修复 MCP refresh/OAuth 无关阻塞 Text Task admission，以及运行时鉴权失败未被保留的问题。
+- 修复 MCP mutation、token rotation ownership 与 auth scope 校验未完整 fail closed 的问题。
+- 修复 Product Skill prepared backup 恢复与不确定写入冻结问题。
+- 修复 Account credential invalidation 越过对应 active request 边界的问题。
+- 修复 Scheduled Task persistence、reconciliation 和恢复 artifact 收口不一致的问题。
+- 修复 Task Panel resize transaction 丢失，以及 Provider 表单重复 focus ring 等界面问题。
+
 ## [0.1.6] - 2026-09-04
 
 ### Added
@@ -161,7 +185,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.6...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/metask-ai/metawork/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/metask-ai/metawork/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/metask-ai/metawork/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/metask-ai/metawork/compare/v0.1.3...v0.1.4
