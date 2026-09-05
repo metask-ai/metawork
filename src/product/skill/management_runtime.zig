@@ -337,18 +337,30 @@ pub fn uninstall(
     const transactions = if (context.state.transactions) |*value| value else return error.PersistenceFailed;
     if (pending_operation) |operation| switch (operation) {
         .install => {
-            try transactions.rollbackReconciliation(&root, install_id);
+            transactions.rollbackReconciliation(&root, install_id) catch |err| {
+                notePersistenceFailure(context, err);
+                return err;
+            };
             return .{ .install_id = install_id, .verification_pending = false };
         },
         .uninstall => {
             const now = validTimestamp(now_unix_seconds) orelse
                 return error.PersistenceFailed;
-            try transactions.commitReconciliation(&root, install_id, null, now);
+            transactions.commitReconciliation(&root, install_id, null, now) catch |err| {
+                notePersistenceFailure(context, err);
+                return err;
+            };
             return .{ .install_id = install_id, .verification_pending = false };
         },
-        .replace => try transactions.rollbackReconciliation(&root, install_id),
+        .replace => transactions.rollbackReconciliation(&root, install_id) catch |err| {
+            notePersistenceFailure(context, err);
+            return err;
+        },
     };
-    try transactions.uninstall(&root, install_id);
+    transactions.uninstall(&root, install_id) catch |err| {
+        notePersistenceFailure(context, err);
+        return err;
+    };
     transactions.markReconciliationUnavailable(install_id) catch |err| {
         notePersistenceFailure(context, err);
         return err;
@@ -483,7 +495,7 @@ fn installSource(
         else => error.PersistenceFailed,
     };
     const transactions = if (context.state.transactions) |*value| value else return error.PersistenceFailed;
-    const published = try transactions.publish(&root, source, &manifest, .{
+    const published = transactions.publish(&root, source, &manifest, .{
         .asset = .{
             .install_id = install_id,
             .source_kind = input.source_kind,
@@ -493,7 +505,10 @@ fn installSource(
             .installed_at_unix_seconds = now,
         },
         .allow_replace = input.allow_replace,
-    });
+    }) catch |err| {
+        notePersistenceFailure(context, err);
+        return err;
+    };
     transactions.markReconciliationUnavailable(install_id) catch |err| {
         notePersistenceFailure(context, err);
         return err;
@@ -534,7 +549,10 @@ fn reimportSource(
     var root = try openManagedRoot(context, scope, canonical_base);
     defer root.deinit();
     const transactions = if (context.state.transactions) |*value| value else return error.PersistenceFailed;
-    try transactions.reimport(&root, install_id, source, &manifest);
+    transactions.reimport(&root, install_id, source, &manifest) catch |err| {
+        notePersistenceFailure(context, err);
+        return err;
+    };
     transactions.markReconciliationUnavailable(install_id) catch |err| {
         notePersistenceFailure(context, err);
         return err;
@@ -588,7 +606,13 @@ fn setReconciliation(
 }
 
 fn notePersistenceFailure(context: Context, err: anyerror) void {
-    context.state.management_health = policy.managementHealthAfterPersistenceFailure(err);
+    switch (err) {
+        error.PersistenceFailed,
+        error.PersistenceOutcomeUnknown,
+        => context.state.management_health =
+            policy.managementHealthAfterPersistenceFailure(err),
+        else => {},
+    }
 }
 
 fn hasArchiveExtension(path: []const u8) bool {

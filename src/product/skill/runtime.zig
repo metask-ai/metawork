@@ -936,6 +936,14 @@ pub const Runtime = struct {
         self.state.enablement_health = .ready;
     }
 
+    pub fn testSetManagementHealth(
+        self: *Runtime,
+        health: ManagementHealth,
+    ) void {
+        comptime std.debug.assert(builtin.is_test);
+        self.state.management_health = health;
+    }
+
     pub fn testNoteEnablementPersistenceFailure(
         self: *Runtime,
         err: anyerror,
@@ -1476,6 +1484,105 @@ fn testRuntime(harness: *TestHarness) !Runtime {
             .max_policy_keys = 4,
             .max_policy_key_bytes = 64,
         },
+    );
+}
+
+fn exerciseManagementCommitFailure(
+    fault: management.TestSupport.FileStoreCommitFault,
+    expected_error: anyerror,
+    expected_health: ManagementHealth,
+) !void {
+    var harness: TestHarness = .{};
+    var home = std.testing.tmpDir(.{});
+    defer home.cleanup();
+    var source = std.testing.tmpDir(.{ .iterate = true });
+    defer source.cleanup();
+    try source.dir.writeFile(std.testing.io, .{
+        .sub_path = "SKILL.md",
+        .data = "---\nname: demo\ndescription: Demo\n---\n",
+    });
+    var staging = std.testing.tmpDir(.{});
+    defer staging.cleanup();
+    var persistence_dir = std.testing.tmpDir(.{});
+    defer persistence_dir.cleanup();
+    var persistence: management.FileStore = .{
+        .io = std.testing.io,
+        .dir = persistence_dir.dir,
+    };
+    var home_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home_path_len = try home.dir.realPath(std.testing.io, &home_path_storage);
+    var source_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const source_path_len = try source.dir.realPath(std.testing.io, &source_path_storage);
+    var staging_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const staging_path_len = try staging.dir.realPath(std.testing.io, &staging_path_storage);
+    var preview = try package.previewDirectory(
+        std.testing.io,
+        std.testing.allocator,
+        source.dir,
+        .{},
+    );
+    defer preview.deinit();
+    var runtime = try Runtime.init(
+        std.testing.io,
+        std.testing.allocator,
+        harness.effectPorts(),
+        .{
+            .state = .{ .management = .{
+                .file_store = &persistence,
+                .staging_root = staging_path_storage[0..staging_path_len],
+            } },
+            .max_workspaces = 1,
+            .canonical_user_home = home_path_storage[0..home_path_len],
+        },
+        .{
+            .max_assets = 4,
+            .max_workspaces = 1,
+            .max_policy_keys = 4,
+            .max_policy_key_bytes = 64,
+        },
+    );
+    defer runtime.deinit();
+    management.TestSupport.setFileStoreCommitFault(&persistence, fault);
+
+    const install_input: InstallInput = .{
+        .source_kind = .local_directory,
+        .scope = .personal,
+        .expected_invocation_name = preview.invocation_name,
+        .expected_content_hash = preview.content_hash,
+    };
+    if (runtime.installDirectory(
+        source_path_storage[0..source_path_len],
+        install_input,
+        100,
+    )) |_| {
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try std.testing.expectEqual(expected_error, err);
+    }
+    try std.testing.expectEqual(expected_health, runtime.managementHealth());
+    try std.testing.expectError(
+        error.PersistenceFailed,
+        runtime.installDirectory(
+            source_path_storage[0..source_path_len],
+            install_input,
+            101,
+        ),
+    );
+}
+
+test "management outcome unknown freezes subsequent Skill mutations" {
+    try exerciseManagementCommitFailure(
+        .outcome_unknown,
+        error.PersistenceOutcomeUnknown,
+        .outcome_unknown,
+    );
+}
+
+test "management definite write failure is observable and blocks retry" {
+    try exerciseManagementCommitFailure(
+        .write_failed,
+        error.PersistenceFailed,
+        .write_failed,
     );
 }
 

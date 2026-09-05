@@ -544,12 +544,7 @@ export function ScheduledTasksPage({
             message={t(
               `scheduled.persistence.${snapshot.capabilities.scheduledTaskPersistenceHealth}`,
             )}
-            detail={t(
-              snapshot.capabilities.scheduledTaskPersistenceHealth ===
-                "migration_failed"
-                ? "scheduled.persistence.migration_failed_detail"
-                : "persistence.recovery.scheduled.hard_cut",
-            )}
+            detail={t("persistence.recovery.scheduled.hard_cut")}
             actionLabel={t("persistence.recovery.action")}
             dialogTitle={t("persistence.recovery.scheduled.title")}
             dialogDescription={t("persistence.recovery.scheduled.body")}
@@ -825,12 +820,6 @@ export function ScheduledTasksPage({
                     <strong>{t(`scheduled.health.${selected.health}`)}</strong>
                   </div>
                 </section>
-              )}
-
-              {selected?.binding.status === "migration_required" && (
-                <p className="scheduled-error">
-                  {t("scheduled.binding_migration_required")}
-                </p>
               )}
 
               <section

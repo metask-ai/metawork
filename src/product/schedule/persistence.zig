@@ -4,8 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const scheduled = @import("product_schedule_state");
 
-pub const schema_version: u8 = 2;
-pub const legacy_schema_version: u8 = 1;
+pub const schema_version: u8 = 1;
 pub const max_store_bytes: usize = 256 * 1024;
 
 pub const Error = scheduled.Error || error{
@@ -16,6 +15,9 @@ pub const Error = scheduled.Error || error{
 };
 
 pub const file_name = "scheduled-tasks.json";
+const recovery_prefix = ".scheduled-tasks.recovery.";
+const recovery_id_hex_bytes = 16;
+const max_recovery_artifacts = 1024;
 
 pub const FileStoreError = std.mem.Allocator.Error || error{
     DirectoryUnavailable,
@@ -24,9 +26,17 @@ pub const FileStoreError = std.mem.Allocator.Error || error{
     PersistenceOutcomeUnknown,
 };
 
+pub const RecoveryFault = enum {
+    none,
+    install_failed,
+    interrupted_after_quarantine,
+    interrupted_after_install,
+};
+
 pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    recovery_fault: RecoveryFault = .none,
 
     pub fn init(
         io: std.Io,
@@ -54,6 +64,7 @@ pub const FileStore = struct {
         self: *FileStore,
         allocator: std.mem.Allocator,
     ) FileStoreError!?[]u8 {
+        if (self.hasIncompleteRecoveryArtifact()) return error.ReadFailed;
         var file = self.dir.openFile(
             self.io,
             file_name,
@@ -76,37 +87,6 @@ pub const FileStore = struct {
         ) catch return error.ReadFailed;
         if (read != length) return error.ReadFailed;
         return bytes;
-    }
-
-    pub fn matchesCanonical(
-        self: *FileStore,
-        expected: []const u8,
-    ) bool {
-        if (expected.len == 0 or expected.len > max_store_bytes) return false;
-        var file = self.dir.openFile(
-            self.io,
-            file_name,
-            .{ .follow_symlinks = false, .resolve_beneath = true },
-        ) catch return false;
-        if (builtin.os.tag == .windows) file.flags.nonblocking = true;
-        defer file.close(self.io);
-        const length = file.length(self.io) catch return false;
-        if (length != expected.len) return false;
-        var buffer: [4096]u8 = undefined;
-        var offset: usize = 0;
-        while (offset < expected.len) {
-            const count = @min(buffer.len, expected.len - offset);
-            const read = file.readPositionalAll(
-                self.io,
-                buffer[0..count],
-                offset,
-            ) catch return false;
-            if (read != count or
-                !std.mem.eql(u8, buffer[0..count], expected[offset .. offset + count]))
-                return false;
-            offset += count;
-        }
-        return true;
     }
 
     pub fn commit(
@@ -158,26 +138,269 @@ pub const FileStore = struct {
         if (!self.syncCommit()) return error.PersistenceOutcomeUnknown;
     }
 
-    /// Hard-resets the current canonical store and installs Product-owned
-    /// canonical bytes. Retired formats are deliberately not retained.
+    /// Fully stages and syncs the replacement before moving the current
+    /// canonical into quarantine. A definite install failure restores the
+    /// canonical; an interrupted or indeterminate window leaves recovery
+    /// artifacts that make the next load fail closed.
     pub fn recover(
         self: *FileStore,
         bytes: []const u8,
     ) FileStoreError!void {
         if (bytes.len == 0 or bytes.len > max_store_bytes)
             return error.WriteFailed;
-        self.dir.deleteFile(self.io, file_name) catch |err| switch (err) {
-            error.FileNotFound => {},
+        try self.settleIncompleteRecoveries();
+        var random: [8]u8 = undefined;
+        std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
+        const random_hex = std.fmt.bytesToHex(random, .lower);
+        var temp_name_storage: [80]u8 = undefined;
+        var temp_name_writer = std.Io.Writer.fixed(&temp_name_storage);
+        temp_name_writer.print(
+            ".scheduled-tasks.recovery.{s}.tmp",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const temp_name = temp_name_writer.buffered();
+        var quarantine_name_storage: [80]u8 = undefined;
+        var quarantine_name_writer = std.Io.Writer.fixed(&quarantine_name_storage);
+        quarantine_name_writer.print(
+            ".scheduled-tasks.recovery.{s}.bak",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const quarantine_name = quarantine_name_writer.buffered();
+        var final_quarantine_name_storage: [88]u8 = undefined;
+        var final_quarantine_name_writer = std.Io.Writer.fixed(
+            &final_quarantine_name_storage,
+        );
+        final_quarantine_name_writer.print(
+            ".scheduled-tasks.recovery.{s}.quarantine",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const final_quarantine_name = final_quarantine_name_writer.buffered();
+        var pending_name_storage: [84]u8 = undefined;
+        var pending_name_writer = std.Io.Writer.fixed(&pending_name_storage);
+        pending_name_writer.print(
+            ".scheduled-tasks.recovery.{s}.pending",
+            .{random_hex},
+        ) catch return error.WriteFailed;
+        const pending_name = pending_name_writer.buffered();
+
+        const replacement = self.dir.createFile(
+            self.io,
+            temp_name,
+            .{
+                .exclusive = true,
+                .permissions = privateFilePermissions(),
+                .resolve_beneath = true,
+            },
+        ) catch return error.WriteFailed;
+        var replacement_open = true;
+        var temp_exists = true;
+        defer {
+            if (replacement_open) replacement.close(self.io);
+            if (temp_exists) self.dir.deleteFile(self.io, temp_name) catch {};
+        }
+        replacement.writeStreamingAll(self.io, bytes) catch
+            return error.WriteFailed;
+        replacement.sync(self.io) catch return error.WriteFailed;
+        replacement.close(self.io);
+        replacement_open = false;
+        if (!self.syncPath(temp_name)) return error.WriteFailed;
+
+        const pending = self.dir.createFile(
+            self.io,
+            pending_name,
+            .{
+                .exclusive = true,
+                .permissions = privateFilePermissions(),
+                .resolve_beneath = true,
+            },
+        ) catch return error.WriteFailed;
+        var pending_open = true;
+        var clean_pending = true;
+        defer {
+            if (pending_open) pending.close(self.io);
+            if (clean_pending)
+                self.dir.deleteFile(self.io, pending_name) catch {};
+        }
+        pending.sync(self.io) catch return error.WriteFailed;
+        pending.close(self.io);
+        pending_open = false;
+        if (!self.syncPath(pending_name)) return error.WriteFailed;
+
+        var quarantined = true;
+        self.dir.rename(
+            file_name,
+            self.dir,
+            quarantine_name,
+            self.io,
+        ) catch |err| switch (err) {
+            error.FileNotFound => quarantined = false,
             else => return error.WriteFailed,
         };
-        return self.commit(bytes);
+        if (quarantined and !self.syncPath(quarantine_name)) {
+            if (!self.restoreCanonical(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+            return error.WriteFailed;
+        }
+
+        if (self.recovery_fault == .interrupted_after_quarantine) {
+            temp_exists = false;
+            clean_pending = false;
+            return error.PersistenceOutcomeUnknown;
+        }
+        if (self.recovery_fault == .install_failed) {
+            if (quarantined and !self.restoreCanonical(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+            return error.WriteFailed;
+        }
+        self.dir.rename(
+            temp_name,
+            self.dir,
+            file_name,
+            self.io,
+        ) catch {
+            if (quarantined and !self.restoreCanonical(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+            return error.WriteFailed;
+        };
+        temp_exists = false;
+        if (!self.syncPath(file_name)) {
+            clean_pending = false;
+            return error.PersistenceOutcomeUnknown;
+        }
+        if (self.recovery_fault == .interrupted_after_install) {
+            clean_pending = false;
+            return error.PersistenceOutcomeUnknown;
+        }
+        if (quarantined) {
+            self.dir.rename(
+                quarantine_name,
+                self.dir,
+                final_quarantine_name,
+                self.io,
+            ) catch {
+                clean_pending = false;
+                return error.PersistenceOutcomeUnknown;
+            };
+            if (!self.syncPath(final_quarantine_name)) {
+                clean_pending = false;
+                return error.PersistenceOutcomeUnknown;
+            }
+        }
+        self.dir.deleteFile(self.io, pending_name) catch {
+            clean_pending = false;
+            return error.PersistenceOutcomeUnknown;
+        };
+        clean_pending = false;
+        if (!self.syncDirectory()) return error.PersistenceOutcomeUnknown;
     }
 
-    fn syncCommit(self: *FileStore) bool {
+    fn restoreCanonical(self: *FileStore, quarantine_name: []const u8) bool {
+        self.dir.rename(
+            quarantine_name,
+            self.dir,
+            file_name,
+            self.io,
+        ) catch return false;
+        return self.syncPath(file_name);
+    }
+
+    /// Explicit recovery is the authority to finish older interrupted
+    /// recovery transactions. Preserve every displaced canonical as a final
+    /// quarantine, remove uninstalled candidates, and clear pending markers
+    /// last so a crash during settlement remains fail closed.
+    fn settleIncompleteRecoveries(self: *FileStore) FileStoreError!void {
+        var operations: usize = 0;
+        var name_storage: [96]u8 = undefined;
+        while (try self.findRecoveryArtifact(".bak", &name_storage)) |name| {
+            operations += 1;
+            if (operations > max_recovery_artifacts)
+                return error.PersistenceOutcomeUnknown;
+            const transaction_id = recoveryTransactionId(name, ".bak") orelse
+                return error.PersistenceOutcomeUnknown;
+            var quarantine_storage: [96]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&quarantine_storage);
+            writer.print(
+                recovery_prefix ++ "{s}.quarantine",
+                .{transaction_id},
+            ) catch return error.PersistenceOutcomeUnknown;
+            const quarantine_name = writer.buffered();
+            self.dir.rename(
+                name,
+                self.dir,
+                quarantine_name,
+                self.io,
+            ) catch return error.PersistenceOutcomeUnknown;
+            if (!self.syncPath(quarantine_name))
+                return error.PersistenceOutcomeUnknown;
+        }
+        var removed_temp = false;
+        while (try self.findRecoveryArtifact(".tmp", &name_storage)) |name| {
+            operations += 1;
+            if (operations > max_recovery_artifacts)
+                return error.PersistenceOutcomeUnknown;
+            self.dir.deleteFile(self.io, name) catch
+                return error.PersistenceOutcomeUnknown;
+            removed_temp = true;
+        }
+        if (removed_temp and !self.syncDirectory())
+            return error.PersistenceOutcomeUnknown;
+        var removed_pending = false;
+        while (try self.findRecoveryArtifact(".pending", &name_storage)) |name| {
+            operations += 1;
+            if (operations > max_recovery_artifacts)
+                return error.PersistenceOutcomeUnknown;
+            self.dir.deleteFile(self.io, name) catch
+                return error.PersistenceOutcomeUnknown;
+            removed_pending = true;
+        }
+        if (removed_pending and !self.syncDirectory())
+            return error.PersistenceOutcomeUnknown;
+    }
+
+    fn findRecoveryArtifact(
+        self: *FileStore,
+        suffix: []const u8,
+        output: []u8,
+    ) FileStoreError!?[]const u8 {
+        var iterable = self.dir.openDir(
+            self.io,
+            ".",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch return error.ReadFailed;
+        defer iterable.close(self.io);
+        var iterator = iterable.iterate();
+        while (iterator.next(self.io) catch return error.ReadFailed) |entry| {
+            if (entry.kind != .file or
+                recoveryTransactionId(entry.name, suffix) == null) continue;
+            if (entry.name.len > output.len)
+                return error.PersistenceOutcomeUnknown;
+            @memcpy(output[0..entry.name.len], entry.name);
+            return output[0..entry.name.len];
+        }
+        return null;
+    }
+
+    fn hasIncompleteRecoveryArtifact(self: *FileStore) bool {
+        var iterable = self.dir.openDir(
+            self.io,
+            ".",
+            .{ .iterate = true, .follow_symlinks = false },
+        ) catch return true;
+        defer iterable.close(self.io);
+        var iterator = iterable.iterate();
+        while (iterator.next(self.io) catch return true) |entry| {
+            if (entry.kind != .file) continue;
+            if (recoveryTransactionId(entry.name, ".pending") != null)
+                return true;
+        }
+        return false;
+    }
+
+    fn syncPath(self: *FileStore, name: []const u8) bool {
         if (builtin.os.tag == .windows) {
             const file = self.dir.openFile(
                 self.io,
-                file_name,
+                name,
                 .{
                     .mode = .read_write,
                     .allow_directory = false,
@@ -189,6 +412,11 @@ pub const FileStore = struct {
             file.sync(self.io) catch return false;
             return true;
         }
+        return self.syncDirectory();
+    }
+
+    fn syncDirectory(self: *FileStore) bool {
+        if (builtin.os.tag == .windows) return true;
         const directory_file: std.Io.File = .{
             .handle = self.dir.handle,
             .flags = .{ .nonblocking = false },
@@ -196,7 +424,23 @@ pub const FileStore = struct {
         directory_file.sync(self.io) catch return false;
         return true;
     }
+
+    fn syncCommit(self: *FileStore) bool {
+        return self.syncPath(file_name);
+    }
 };
+
+fn recoveryTransactionId(name: []const u8, suffix: []const u8) ?[]const u8 {
+    const expected_len = recovery_prefix.len + recovery_id_hex_bytes + suffix.len;
+    if (name.len != expected_len or
+        !std.mem.startsWith(u8, name, recovery_prefix) or
+        !std.mem.endsWith(u8, name, suffix)) return null;
+    const transaction_id = name[recovery_prefix.len .. recovery_prefix.len + recovery_id_hex_bytes];
+    for (transaction_id) |byte| {
+        if (!std.ascii.isHex(byte)) return null;
+    }
+    return transaction_id;
+}
 
 fn directoryPermissions() std.Io.File.Permissions {
     return if (builtin.os.tag == .windows)
@@ -234,46 +478,15 @@ const ItemWire = struct {
 };
 
 const BindingWire = struct {
-    kind: []const u8,
-    model_ref: ?ModelRefWire,
-    source_generation: ?u64,
-    selection_revision: ?u64,
-    protocol: ?[]const u8,
-    legacy_execution: ?LegacyExecutionWire,
+    model_ref: ModelRefWire,
+    source_generation: u64,
+    selection_revision: u64,
+    protocol: []const u8,
 };
 
 const ModelRefWire = struct {
     source_id: []const u8,
     model_id: []const u8,
-};
-
-const LegacyExecutionWire = struct {
-    generation: u64,
-    protocol: []const u8,
-    model: []const u8,
-};
-
-const LegacyStoreWire = struct {
-    schema_version: u8,
-    next_id: u64,
-    items: []LegacyItemWire,
-};
-
-const LegacyItemWire = struct {
-    id: u64,
-    epoch: u64,
-    title: []const u8,
-    execution_generation: u64,
-    execution_protocol: []const u8,
-    execution_model: []const u8,
-    permission_profile: []const u8,
-    input: InputWire,
-    recurrence: RecurrenceWire,
-    enabled: bool,
-    health: []const u8,
-    failure_reason: ?[]const u8,
-    next_run_at_unix_seconds: ?u64,
-    occurrences: []OccurrenceWire,
 };
 
 const InputWire = struct {
@@ -332,23 +545,6 @@ pub fn decode(
 ) Error!scheduled.Store {
     try validateStoreBytes(input);
     return decodeCurrent(allocator, input, limits);
-}
-
-pub const BootstrapDecode = union(enum) {
-    current: scheduled.Store,
-    migrated: scheduled.Store,
-};
-
-pub fn decodeForBootstrap(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-    limits: scheduled.Limits,
-) Error!BootstrapDecode {
-    try validateStoreBytes(input);
-    if (decodeCurrent(allocator, input, limits)) |store|
-        return .{ .current = store }
-    else |_| {}
-    return .{ .migrated = try decodeLegacyForMigration(allocator, input, limits) };
 }
 
 fn validateStoreBytes(input: []const u8) Error!void {
@@ -416,116 +612,17 @@ fn decodeCurrent(
     return store;
 }
 
-fn decodeLegacyForMigration(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-    limits: scheduled.Limits,
-) Error!scheduled.Store {
-    var parsed = std.json.parseFromSlice(
-        LegacyStoreWire,
-        allocator,
-        input,
-        .{ .ignore_unknown_fields = false },
-    ) catch return error.ScheduledTaskStoreCorrupt;
-    defer parsed.deinit();
-    if (parsed.value.schema_version != legacy_schema_version or
-        parsed.value.next_id == 0 or
-        parsed.value.items.len > limits.max_items)
-        return error.ScheduledTaskStoreCorrupt;
-
-    var store = try scheduled.Store.init(allocator, limits);
-    errdefer store.deinit();
-    for (parsed.value.items) |wire| {
-        var occurrences: [scheduled.max_occurrence_history]scheduled.Occurrence = undefined;
-        if (wire.occurrences.len > occurrences.len)
-            return error.ScheduledTaskStoreCorrupt;
-        for (wire.occurrences, 0..) |occurrence, index| {
-            occurrences[index] = try decodeOccurrence(occurrence);
-            if (occurrences[index].reason == .binding_migration_required)
-                return error.ScheduledTaskStoreCorrupt;
-        }
-        const protocol = parseEnum(
-            scheduled.Protocol,
-            wire.execution_protocol,
-        ) orelse return error.ScheduledTaskStoreCorrupt;
-        const permission_profile = parseEnum(
-            scheduled.PermissionProfile,
-            wire.permission_profile,
-        ) orelse return error.ScheduledTaskStoreCorrupt;
-        const prior_health = parseEnum(scheduled.Health, wire.health) orelse
-            return error.ScheduledTaskStoreCorrupt;
-        const prior_reason = if (wire.failure_reason) |reason|
-            parseEnum(scheduled.FailureReason, reason) orelse
-                return error.ScheduledTaskStoreCorrupt
-        else
-            null;
-        if (prior_reason == .binding_migration_required or
-            !validLegacyState(
-                wire.enabled,
-                prior_health,
-                prior_reason,
-                wire.next_run_at_unix_seconds,
-            ) or
-            !validText(wire.title) or !validText(wire.execution_model) or
-            wire.execution_generation == 0)
-            return error.ScheduledTaskStoreCorrupt;
-        store.restoreItem(.{
-            .id = wire.id,
-            .epoch = wire.epoch,
-            .definition = .{
-                .title = wire.title,
-                .binding = .{ .migration_required = .{
-                    .execution_generation = wire.execution_generation,
-                    .protocol = protocol,
-                    .model = wire.execution_model,
-                } },
-                .permission_profile = permission_profile,
-                .input = try decodeInput(wire.input),
-                .recurrence = try decodeRecurrence(wire.recurrence),
-            },
-            .enabled = false,
-            .health = .needs_attention,
-            .failure_reason = .binding_migration_required,
-            .next_run_at_unix_seconds = null,
-            .occurrences = occurrences[0..wire.occurrences.len],
-        }) catch return error.ScheduledTaskStoreCorrupt;
-    }
-    store.restoreNextId(parsed.value.next_id) catch
-        return error.ScheduledTaskStoreCorrupt;
-    return store;
-}
-
 fn decodeBinding(wire: BindingWire) Error!scheduled.Binding {
-    if (std.mem.eql(u8, wire.kind, "current")) {
-        if (wire.legacy_execution != null) return error.ScheduledTaskStoreCorrupt;
-        const model_ref = wire.model_ref orelse return error.ScheduledTaskStoreCorrupt;
-        return .{ .current = .{
-            .model_ref = .{
-                .source_id = model_ref.source_id,
-                .model_id = model_ref.model_id,
-            },
-            .source_generation = wire.source_generation orelse
-                return error.ScheduledTaskStoreCorrupt,
-            .selection_revision = wire.selection_revision orelse
-                return error.ScheduledTaskStoreCorrupt,
-            .protocol = parseEnum(
-                scheduled.Protocol,
-                wire.protocol orelse return error.ScheduledTaskStoreCorrupt,
-            ) orelse return error.ScheduledTaskStoreCorrupt,
-        } };
-    }
-    if (!std.mem.eql(u8, wire.kind, "migration_required") or
-        wire.model_ref != null or wire.source_generation != null or
-        wire.selection_revision != null or wire.protocol != null)
-        return error.ScheduledTaskStoreCorrupt;
-    const legacy = wire.legacy_execution orelse
-        return error.ScheduledTaskStoreCorrupt;
-    return .{ .migration_required = .{
-        .execution_generation = legacy.generation,
-        .protocol = parseEnum(scheduled.Protocol, legacy.protocol) orelse
+    return .{
+        .model_ref = .{
+            .source_id = wire.model_ref.source_id,
+            .model_id = wire.model_ref.model_id,
+        },
+        .source_generation = wire.source_generation,
+        .selection_revision = wire.selection_revision,
+        .protocol = parseEnum(scheduled.Protocol, wire.protocol) orelse
             return error.ScheduledTaskStoreCorrupt,
-        .model = legacy.model,
-    } };
+    };
 }
 
 fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
@@ -585,28 +682,16 @@ fn encodeItem(writer: *std.Io.Writer, item: *const scheduled.Item) !void {
 }
 
 fn encodeBinding(writer: *std.Io.Writer, binding: scheduled.Binding) !void {
-    switch (binding) {
-        .current => |current| {
-            try writer.writeAll("{\"kind\":\"current\",\"model_ref\":{\"source_id\":");
-            try jsonString(writer, current.model_ref.source_id);
-            try writer.writeAll(",\"model_id\":");
-            try jsonString(writer, current.model_ref.model_id);
-            try writer.print("}},\"source_generation\":{d},\"selection_revision\":{d},\"protocol\":", .{
-                current.source_generation,
-                current.selection_revision,
-            });
-            try jsonString(writer, @tagName(current.protocol));
-            try writer.writeAll(",\"legacy_execution\":null}");
-        },
-        .migration_required => |legacy| {
-            try writer.writeAll("{\"kind\":\"migration_required\",\"model_ref\":null,\"source_generation\":null,\"selection_revision\":null,\"protocol\":null,\"legacy_execution\":{");
-            try writer.print("\"generation\":{d},\"protocol\":", .{legacy.execution_generation});
-            try jsonString(writer, @tagName(legacy.protocol));
-            try writer.writeAll(",\"model\":");
-            try jsonString(writer, legacy.model);
-            try writer.writeAll("}}");
-        },
-    }
+    try writer.writeAll("{\"model_ref\":{\"source_id\":");
+    try jsonString(writer, binding.model_ref.source_id);
+    try writer.writeAll(",\"model_id\":");
+    try jsonString(writer, binding.model_ref.model_id);
+    try writer.print("}},\"source_generation\":{d},\"selection_revision\":{d},\"protocol\":", .{
+        binding.source_generation,
+        binding.selection_revision,
+    });
+    try jsonString(writer, @tagName(binding.protocol));
+    try writer.writeByte('}');
 }
 
 fn encodeInput(writer: *std.Io.Writer, input: []const u8) !void {
@@ -695,22 +780,11 @@ fn validText(value: []const u8) bool {
     return value.len > 0 and std.unicode.utf8ValidateSlice(value);
 }
 
-fn validLegacyState(
-    enabled: bool,
-    health: scheduled.Health,
-    reason: ?scheduled.FailureReason,
-    next_run_at_unix_seconds: ?u64,
-) bool {
-    if (enabled)
-        return health == .ready and reason == null and
-            next_run_at_unix_seconds != null;
-    return switch (health) {
-        .paused => reason == null and next_run_at_unix_seconds == null,
-        .needs_attention => reason != null and next_run_at_unix_seconds == null,
-        .completed => reason == null and next_run_at_unix_seconds == null,
-        .ready => false,
-    };
-}
+pub const testing = if (builtin.is_test) struct {
+    pub fn setRecoveryFault(store: *FileStore, fault: RecoveryFault) void {
+        store.recovery_fault = fault;
+    }
+} else struct {};
 
 test "scheduled task store round trips bounded occurrence history" {
     var store = try scheduled.Store.init(std.testing.allocator, .{
@@ -720,12 +794,12 @@ test "scheduled task store round trips bounded occurrence history" {
     defer store.deinit();
     const id = try store.create(.{
         .title = "Daily brief",
-        .binding = .{ .current = .{
+        .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
             .source_generation = 9,
             .selection_revision = 11,
             .protocol = .openai_chat_completions,
-        } },
+        },
         .permission_profile = .full_access,
         .input = "Summarize today's work",
         .recurrence = .{ .interval = .{
@@ -738,12 +812,12 @@ test "scheduled task store round trips bounded occurrence history" {
     try store.finalizeOccurrenceTask(item, 2_000, .timer, .completed, null);
     const default_id = try store.create(.{
         .title = "Independent brief",
-        .binding = .{ .current = .{
+        .binding = .{
             .model_ref = .{ .source_id = "metask:test", .model_id = "gpt-test" },
             .source_generation = 9,
             .selection_revision = 11,
             .protocol = .openai_chat_completions,
-        } },
+        },
         .permission_profile = .approval_required,
         .input = "Summarize current work",
         .recurrence = .{ .once = .{ .at_unix_seconds = 3_000 } },
@@ -760,6 +834,13 @@ test "scheduled task store round trips bounded occurrence history" {
 
     var output: [max_store_bytes]u8 = undefined;
     const bytes = try encode(&output, &store);
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        bytes,
+        "{\"schema_version\":1,",
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"kind\":\"current\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"model_ref\":") != null);
     var restored = try decode(std.testing.allocator, bytes, .{
         .max_items = 4,
         .max_projection_bytes = 16 * 1024,
@@ -795,6 +876,14 @@ test "scheduled task store rejects unknown fields and revisions" {
         decode(
             std.testing.allocator,
             "{\"schema_version\":3,\"next_id\":1,\"items\":[]}",
+            limits,
+        ),
+    );
+    try std.testing.expectError(
+        error.ScheduledTaskStoreCorrupt,
+        decode(
+            std.testing.allocator,
+            "{\"schema_version\":2,\"next_id\":2,\"items\":[{\"id\":1,\"epoch\":1,\"title\":\"Retired current binding\",\"binding\":{\"kind\":\"current\",\"model_ref\":{\"source_id\":\"metask:test\",\"model_id\":\"gpt-test\"},\"source_generation\":1,\"selection_revision\":1,\"protocol\":\"openai_chat_completions\",\"legacy_execution\":null},\"permission_profile\":\"approval_required\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":2},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":2,\"occurrences\":[]}]}",
             limits,
         ),
     );
@@ -848,8 +937,8 @@ test "scheduled task store rejects unknown fields and revisions" {
     );
 }
 
-test "schema 1 migration preserves legacy facts and writes strict schema 2" {
-    const legacy =
+test "scheduled task store rejects retired schema 1 shape" {
+    const retired =
         "{\"schema_version\":1,\"next_id\":8,\"items\":[{\"id\":7,\"epoch\":3,\"title\":\"Legacy schedule\",\"execution_generation\":19,\"execution_protocol\":\"anthropic_messages\",\"execution_model\":\"legacy-model\",\"permission_profile\":\"full_access\",\"input\":{\"kind\":\"text\",\"text\":\"inspect\"},\"recurrence\":{\"kind\":\"once\",\"at_unix_seconds\":200},\"enabled\":true,\"health\":\"ready\",\"failure_reason\":null,\"next_run_at_unix_seconds\":200,\"occurrences\":[]}]}";
     const limits: scheduled.Limits = .{
         .max_items = 2,
@@ -857,41 +946,7 @@ test "schema 1 migration preserves legacy facts and writes strict schema 2" {
     };
     try std.testing.expectError(
         error.ScheduledTaskStoreCorrupt,
-        decode(std.testing.allocator, legacy, limits),
-    );
-    var migrated = switch (try decodeForBootstrap(
-        std.testing.allocator,
-        legacy,
-        limits,
-    )) {
-        .migrated => |store| store,
-        .current => return error.TestUnexpectedResult,
-    };
-    defer migrated.deinit();
-    const item = migrated.find(7).?;
-    try std.testing.expect(!item.enabled);
-    try std.testing.expectEqual(scheduled.Health.needs_attention, item.health);
-    try std.testing.expectEqual(
-        scheduled.FailureReason.binding_migration_required,
-        item.failure_reason.?,
-    );
-    switch (item.bindingView()) {
-        .migration_required => |binding| {
-            try std.testing.expectEqual(@as(u64, 19), binding.execution_generation);
-            try std.testing.expectEqualStrings("legacy-model", binding.model);
-            try std.testing.expectEqual(scheduled.Protocol.anthropic_messages, binding.protocol);
-        },
-        .current => return error.TestUnexpectedResult,
-    }
-
-    var output: [max_store_bytes]u8 = undefined;
-    const bytes = try encode(&output, &migrated);
-    try std.testing.expect(std.mem.startsWith(u8, bytes, "{\"schema_version\":2,"));
-    var round_trip = try decode(std.testing.allocator, bytes, limits);
-    defer round_trip.deinit();
-    try std.testing.expectEqual(
-        scheduled.FailureReason.binding_migration_required,
-        round_trip.find(7).?.failure_reason.?,
+        decode(std.testing.allocator, retired, limits),
     );
 }
 
@@ -916,7 +971,7 @@ test "scheduled task file store atomically replaces and restores bytes" {
     );
 }
 
-test "scheduled task file store recovery hard-resets the previous canonical bytes" {
+test "scheduled task file store recovery quarantines the previous canonical bytes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var file_store: FileStore = .{
@@ -939,11 +994,129 @@ test "scheduled task file store recovery hard-resets the previous canonical byte
     );
     defer iterable.close(std.testing.io);
     var iterator = iterable.iterate();
-    var files: usize = 0;
+    var quarantine_name: ?[]u8 = null;
+    defer if (quarantine_name) |name| std.testing.allocator.free(name);
     while (try iterator.next(std.testing.io)) |entry| {
-        if (entry.kind != .file) continue;
-        files += 1;
-        try std.testing.expectEqualStrings(file_name, entry.name);
+        if (entry.kind == .file and std.mem.startsWith(
+            u8,
+            entry.name,
+            ".scheduled-tasks.recovery.",
+        )) {
+            try std.testing.expect(quarantine_name == null);
+            quarantine_name = try std.testing.allocator.dupe(u8, entry.name);
+        }
     }
-    try std.testing.expectEqual(@as(usize, 1), files);
+    const name = quarantine_name orelse return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.endsWith(u8, name, ".quarantine"));
+    var quarantine = try tmp.dir.openFile(
+        std.testing.io,
+        name,
+        .{ .follow_symlinks = false },
+    );
+    if (builtin.os.tag == .windows) quarantine.flags.nonblocking = true;
+    defer quarantine.close(std.testing.io);
+    var quarantine_bytes: [previous.len]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, previous.len),
+        try quarantine.readPositionalAll(std.testing.io, &quarantine_bytes, 0),
+    );
+    try std.testing.expectEqualStrings(previous, &quarantine_bytes);
+}
+
+test "scheduled task recovery restores canonical after definite install failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{
+        .io = std.testing.io,
+        .dir = tmp.dir,
+    };
+    const previous = "{\"schema_version\":2,\"next_id\":1,\"items\":[]}";
+    try file_store.commit(previous);
+    testing.setRecoveryFault(&file_store, .install_failed);
+    try std.testing.expectError(
+        error.WriteFailed,
+        file_store.recover("{\"schema_version\":1,\"next_id\":1,\"items\":[]}"),
+    );
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(previous, restored);
+}
+
+test "interrupted scheduled task recovery never appears as first launch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{
+        .io = std.testing.io,
+        .dir = tmp.dir,
+    };
+    const replacement = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit("{\"schema_version\":2,\"next_id\":1,\"items\":[]}");
+    testing.setRecoveryFault(&file_store, .interrupted_after_quarantine);
+    try std.testing.expectError(
+        error.PersistenceOutcomeUnknown,
+        file_store.recover(replacement),
+    );
+    try std.testing.expectError(
+        error.ReadFailed,
+        file_store.loadAlloc(std.testing.allocator),
+    );
+
+    testing.setRecoveryFault(&file_store, .none);
+    try file_store.recover(replacement);
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+}
+
+test "indeterminate recovery install remains fail closed with a canonical file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{
+        .io = std.testing.io,
+        .dir = tmp.dir,
+    };
+    const replacement = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit("{\"schema_version\":2,\"next_id\":1,\"items\":[]}");
+    testing.setRecoveryFault(&file_store, .interrupted_after_install);
+    try std.testing.expectError(
+        error.PersistenceOutcomeUnknown,
+        file_store.recover(replacement),
+    );
+    try std.testing.expectError(
+        error.ReadFailed,
+        file_store.loadAlloc(std.testing.allocator),
+    );
+
+    testing.setRecoveryFault(&file_store, .none);
+    try file_store.recover(replacement);
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+}
+
+test "orphan recovery files without an exact pending marker do not block load" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store: FileStore = .{
+        .io = std.testing.io,
+        .dir = tmp.dir,
+    };
+    const canonical = "{\"schema_version\":1,\"next_id\":1,\"items\":[]}";
+    try file_store.commit(canonical);
+    inline for (.{
+        ".scheduled-tasks.recovery.0123456789abcdef.tmp",
+        ".scheduled-tasks.recovery.0123456789abcdef.bak",
+        ".scheduled-tasks.recovery.not-owned.pending",
+    }) |name| {
+        var artifact = try tmp.dir.createFile(
+            std.testing.io,
+            name,
+            .{ .exclusive = true },
+        );
+        artifact.close(std.testing.io);
+    }
+
+    const restored = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(canonical, restored);
 }

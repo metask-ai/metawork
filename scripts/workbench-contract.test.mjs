@@ -571,12 +571,12 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(scheduled), scheduled);
 
-  const migrationRequired = clone(scheduled);
-  migrationRequired.scheduledTasks[0].enabled = false;
-  migrationRequired.scheduledTasks[0].health = "needs_attention";
-  migrationRequired.scheduledTasks[0].failureReason =
+  const retiredMigrationShape = clone(scheduled);
+  retiredMigrationShape.scheduledTasks[0].enabled = false;
+  retiredMigrationShape.scheduledTasks[0].health = "needs_attention";
+  retiredMigrationShape.scheduledTasks[0].failureReason =
     "binding_migration_required";
-  migrationRequired.scheduledTasks[0].binding = {
+  retiredMigrationShape.scheduledTasks[0].binding = {
     status: "migration_required",
     legacyExecution: {
       generation: "19",
@@ -584,10 +584,10 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       model: "legacy-model",
     },
   };
-  migrationRequired.scheduledTasks[0].nextRunAtUnixSeconds = null;
-  assert.deepEqual(
-    decodeWorkbenchSnapshot(migrationRequired),
-    migrationRequired,
+  retiredMigrationShape.scheduledTasks[0].nextRunAtUnixSeconds = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(retiredMigrationShape),
+    /expected keys|unexpected enum value/,
   );
 
   const updatedDefinitionProfile = clone(scheduled);
@@ -609,6 +609,10 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
     decodeWorkbenchSnapshot(permissionRequired),
     permissionRequired,
   );
+
+  const unavailableTask = clone(scheduled);
+  unavailableTask.scheduledTasks[0].occurrences[0].taskOutcome = "unavailable";
+  assert.deepEqual(decodeWorkbenchSnapshot(unavailableTask), unavailableTask);
 
   const rejectedAfterTaskCreation = clone(scheduled);
   rejectedAfterTaskCreation.scheduledTasks[0].occurrences[0] = {

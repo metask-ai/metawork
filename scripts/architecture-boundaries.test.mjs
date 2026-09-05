@@ -921,11 +921,19 @@ test("Product Schedule owns its aggregate state and persistence", () => {
   assert.match(scheduleRuntime, /@import\("product_schedule_view"\)/);
   assert.match(scheduleView, /@import\("product_schedule_state"\)/);
   assert.match(persistence, /@import\("product_schedule_state"\)/);
-  assert.match(persistence, /deleteFile\(self\.io, file_name\)/);
-  assert.doesNotMatch(
+  assert.match(persistence, /\.scheduled-tasks\.recovery\.\{s\}\.pending/);
+  assert.match(persistence, /\.scheduled-tasks\.recovery\.\{s\}\.quarantine/);
+  assert.match(persistence, /hasIncompleteRecoveryArtifact/);
+  assert.match(persistence, /settleIncompleteRecoveries/);
+  assert.match(
     persistence,
-    /quarantine|\.scheduled-tasks\.recovery|\.bak/,
+    /recoveryTransactionId\(entry\.name, "\.pending"\)/,
   );
+  assert.match(
+    persistence,
+    /rename\(\s*file_name,\s*self\.dir,\s*quarantine_name,/,
+  );
+  assert.doesNotMatch(persistence, /deleteFile\(\s*self\.io,\s*file_name\s*\)/);
   assert.match(stores, /@import\("product_schedule_persistence"\)/);
   assert.doesNotMatch(
     control,

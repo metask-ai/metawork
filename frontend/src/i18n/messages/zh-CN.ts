@@ -1023,17 +1023,11 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.occurrence.skipped": "已跳过",
   "scheduled.occurrence.rejected": "未能开始",
   "scheduled.occurrence.starting": "正在启动",
-  "scheduled.binding_migration_required":
-    "此定时任务仍使用旧版模型绑定。保存后会将其明确绑定到当前默认模型。",
   "scheduled.persistence.unavailable": "当前设备不支持持久定时任务。",
   "scheduled.persistence.read_failed": "无法读取已保存的定时任务。",
   "scheduled.persistence.corrupt":
     "定时任务数据已损坏。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.write_failed": "最近的更改未能保存，自动触发已停止。",
-  "scheduled.persistence.migration_failed":
-    "无法升级已保存的定时任务。原始数据已保留，自动触发已停止。",
-  "scheduled.persistence.migration_failed_detail":
-    "请重启 MetaWork 以重试升级；原始定时任务存储不会被覆盖。",
   "scheduled.persistence.outcome_unknown":
     "无法确认最近的更改是否保存。为避免重复运行，自动触发已停止。",
   "scheduled.persistence.ready": "定时任务存储已就绪。",
@@ -1051,10 +1045,11 @@ export const zhCN: Record<MessageId, string> = {
   "persistence.recovery.task.body":
     "MetaWork 会保留当前历史文件，再将本次使用中仍可用的任务和工作区保存为新的任务历史。",
   "persistence.recovery.scheduled.title": "替换已保存的定时任务？",
-  "persistence.recovery.scheduled.hard_cut": "当前定时任务文件将被永久删除。",
+  "persistence.recovery.scheduled.hard_cut":
+    "当前定时任务文件会保留为恢复副本。",
   "persistence.recovery.scheduled.body":
-    "MetaWork 会永久删除当前定时任务文件，并将本次使用中仍可用的定时任务写入全新存储；已淘汰格式不会保留。",
-  "persistence.recovery.scheduled.confirm": "删除文件并重置",
+    "MetaWork 会保留当前定时任务文件，再将本次使用中仍可用的定时任务写入全新存储；已淘汰格式不会被加载。",
+  "persistence.recovery.scheduled.confirm": "保留文件并重置",
   "persistence.recovery.cancel": "保留当前状态",
   "persistence.recovery.confirm": "保留文件并恢复",
   "persistence.recovery.running": "正在恢复…",

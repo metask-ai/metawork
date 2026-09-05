@@ -155,19 +155,6 @@ pub fn recoverScheduledTaskStore(
     return .committed;
 }
 
-pub fn observeScheduledTaskStore(
-    context: ?*anyopaque,
-    before: []const u8,
-    after: []const u8,
-) product_control.SchedulePersistenceObservation {
-    const store: *schedule_persistence.FileStore = @ptrCast(
-        @alignCast(context orelse return .unknown),
-    );
-    if (store.matchesCanonical(after)) return .after;
-    if (store.matchesCanonical(before)) return .before;
-    return .unknown;
-}
-
 pub fn commitTaskStore(
     context: ?*anyopaque,
     bytes: []const u8,
