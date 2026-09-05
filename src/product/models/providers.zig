@@ -302,23 +302,24 @@ pub const Registry = struct {
         return result;
     }
 
-    pub fn nextCredentialDeletion(self: *const Registry) ?[]const u8 {
-        if (self.pending_credential_deletions.items.len == 0) return null;
-        return self.pending_credential_deletions.items[0];
+    pub fn credentialDeletions(self: *const Registry) []const []const u8 {
+        return self.pending_credential_deletions.items;
     }
 
     pub fn completeCredentialDeletion(
         self: *Registry,
         provider_id: []const u8,
     ) Error!void {
-        if (self.pending_credential_deletions.items.len == 0 or
-            !std.mem.eql(
-                u8,
-                self.pending_credential_deletions.items[0],
-                provider_id,
-            ))
-            return error.InvalidProvider;
-        const removed = self.pending_credential_deletions.orderedRemove(0);
+        var index: ?usize = null;
+        for (self.pending_credential_deletions.items, 0..) |candidate, candidate_index| {
+            if (std.mem.eql(u8, candidate, provider_id)) {
+                index = candidate_index;
+                break;
+            }
+        }
+        const removed = self.pending_credential_deletions.orderedRemove(
+            index orelse return error.InvalidProvider,
+        );
         self.allocator.free(removed);
     }
 
@@ -1691,7 +1692,7 @@ test "registry validates default revisions before update and remove commit" {
     defer std.testing.allocator.free(after_remove);
     try std.testing.expectEqualStrings(before, after_remove);
     try std.testing.expectEqual(@as(usize, 1), registry.providerCount());
-    try std.testing.expect(registry.nextCredentialDeletion() == null);
+    try std.testing.expectEqual(@as(usize, 0), registry.credentialDeletions().len);
     try std.testing.expect(registry.defaultSelection() != null);
 }
 

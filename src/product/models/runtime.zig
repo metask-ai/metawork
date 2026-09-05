@@ -1253,13 +1253,26 @@ pub const Runtime = struct {
     fn drainCredentialCleanup(self: *Runtime) void {
         if (!self.store_healthy) return;
         const vault = self.credential_vault orelse return;
-        while (self.registry.nextCredentialDeletion()) |provider_id| {
-            vault.delete(provider_id) catch return;
-            var candidate = self.registry.clone() catch return;
+        var snapshot: std.ArrayList([]u8) = .empty;
+        defer {
+            for (snapshot.items) |provider_id| self.allocator.free(provider_id);
+            snapshot.deinit(self.allocator);
+        }
+        snapshot.ensureTotalCapacity(
+            self.allocator,
+            self.registry.credentialDeletions().len,
+        ) catch return;
+        for (self.registry.credentialDeletions()) |provider_id| {
+            const owned = self.allocator.dupe(u8, provider_id) catch return;
+            snapshot.appendAssumeCapacity(owned);
+        }
+        for (snapshot.items) |provider_id| {
+            vault.delete(provider_id) catch continue;
+            var candidate = self.registry.clone() catch continue;
             defer candidate.deinit();
-            candidate.completeCredentialDeletion(provider_id) catch return;
+            candidate.completeCredentialDeletion(provider_id) catch continue;
             const result = self.commitCandidate(&candidate, false);
-            if (!result.accepted) return;
+            if (!result.accepted and !self.store_healthy) return;
         }
     }
 
@@ -1436,6 +1449,88 @@ const TestVault = struct {
         self.present = false;
     }
 };
+
+const CleanupTestVault = struct {
+    fail_id: []const u8 = &.{},
+    calls: [8][contract.Limits.instance_id_bytes]u8 = undefined,
+    call_lengths: [8]usize = @splat(0),
+    call_count: usize = 0,
+
+    fn port(self: *@This()) ports.CredentialVault {
+        return .{
+            .context = self,
+            .generate_slot_fn = generate,
+            .store_fn = store,
+            .get_fn = get,
+            .delete_fn = delete,
+        };
+    }
+
+    fn generate(_: *anyopaque, _: *[ports.credential_slot_bytes]u8) anyerror!void {
+        return error.Unavailable;
+    }
+
+    fn store(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {
+        return error.Unavailable;
+    }
+
+    fn get(_: *anyopaque, _: []const u8, _: []u8) anyerror!?[]const u8 {
+        return null;
+    }
+
+    fn delete(context: *anyopaque, provider_id: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const index = self.call_count;
+        if (index >= self.calls.len or provider_id.len > self.calls[index].len)
+            return error.Unavailable;
+        @memcpy(self.calls[index][0..provider_id.len], provider_id);
+        self.call_lengths[index] = provider_id.len;
+        self.call_count += 1;
+        if (std.mem.eql(u8, provider_id, self.fail_id)) return error.DeleteFailed;
+    }
+
+    fn call(self: *const @This(), index: usize) []const u8 {
+        return self.calls[index][0..self.call_lengths[index]];
+    }
+};
+
+test "credential cleanup skips failed tombstones and completes later IDs" {
+    const cleanup_a = "custom-provider-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const cleanup_b = "custom-provider-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const cleanup_c = "custom-provider-cccccccccccccccccccccccccccccccc";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: CleanupTestVault = .{ .fail_id = cleanup_a };
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory_storage[0..directory_len], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+
+    var candidate = try runtime.registry.clone();
+    defer candidate.deinit();
+    try candidate.reserveCredentialDeletion(cleanup_a);
+    try candidate.reserveCredentialDeletion(cleanup_b);
+    try candidate.reserveCredentialDeletion(cleanup_c);
+    try std.testing.expect(runtime.commitCandidate(&candidate, false).accepted);
+
+    runtime.drainCredentialCleanup();
+    try std.testing.expectEqual(@as(usize, 3), vault.call_count);
+    try std.testing.expectEqualStrings(cleanup_a, vault.call(0));
+    try std.testing.expectEqualStrings(cleanup_b, vault.call(1));
+    try std.testing.expectEqualStrings(cleanup_c, vault.call(2));
+    try std.testing.expectEqual(@as(usize, 1), runtime.registry.credentialDeletions().len);
+    try std.testing.expectEqualStrings(cleanup_a, runtime.registry.credentialDeletions()[0]);
+
+    vault.fail_id = &.{};
+    runtime.drainCredentialCleanup();
+    try std.testing.expectEqual(@as(usize, 4), vault.call_count);
+    try std.testing.expectEqualStrings(cleanup_a, vault.call(3));
+    try std.testing.expectEqual(@as(usize, 0), runtime.registry.credentialDeletions().len);
+}
 
 fn createTestProviderWithModel(
     runtime: *Runtime,
@@ -2154,7 +2249,7 @@ test "Models reset rejects healthy store and non-destructively recovers a valid 
     try std.testing.expect(vault.present);
     try std.testing.expectEqual(@as(usize, 1), runtime.views().len);
     try std.testing.expect(runtime.view().default_selection == null);
-    try std.testing.expect(runtime.registry.nextCredentialDeletion() == null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.registry.credentialDeletions().len);
     const canonical_after = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
         return error.TestExpectedEqual;
     defer std.testing.allocator.free(canonical_after);
