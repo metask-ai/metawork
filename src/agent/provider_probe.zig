@@ -2,7 +2,8 @@
 
 const std = @import("std");
 const completion = @import("agent_completion");
-const ModelBinding = @import("agent_model_binding").ModelBinding;
+const model_binding = @import("agent_model_binding");
+const ModelBinding = model_binding.ModelBinding;
 const Protocol = completion.Protocol;
 
 pub const Failure = enum {
@@ -72,18 +73,11 @@ pub fn run(
     if (!validInput(binding)) return .{ .failed = .invalid_input };
     if (cancellation.isRequested()) return .{ .failed = .run_failed };
 
-    var secret_storage: [4096]u8 = undefined;
-    @memcpy(secret_storage[0..binding.credential.len], binding.credential);
-    defer std.crypto.secureZero(u8, &secret_storage);
-    const owner = completion.Completion.init(std.heap.c_allocator, network, .{
-        .target = .{
-            .provider_id = binding.target.provider_id,
-            .protocol = binding.target.protocol,
-            .base_url = binding.target.base_url,
-            .model = binding.target.model,
-        },
-        .credential = secret_storage[0..binding.credential.len],
-    }) catch |failure| return .{ .failed = switch (failure) {
+    const owner = completion.Completion.init(
+        std.heap.c_allocator,
+        network,
+        binding,
+    ) catch |failure| return .{ .failed = switch (failure) {
         error.InvalidConfig => .invalid_input,
         error.OutOfMemory => .run_failed,
     } };
@@ -115,13 +109,8 @@ pub fn run(
 }
 
 fn validInput(binding: ModelBinding) bool {
-    return binding.target.provider_id.len != 0 and binding.target.provider_id.len <= completion.max_provider_id_bytes and
-        std.unicode.utf8ValidateSlice(binding.target.provider_id) and
-        binding.credential.len != 0 and binding.credential.len <= 4096 and
-        binding.target.model.len != 0 and binding.target.model.len <= 256 and
-        binding.target.base_url.len != 0 and binding.target.base_url.len <= 2048 and
-        std.unicode.utf8ValidateSlice(binding.target.model) and
-        std.unicode.utf8ValidateSlice(binding.target.base_url);
+    model_binding.validate(binding, .required_explicit) catch return false;
+    return true;
 }
 
 fn classifyOutcome(
@@ -184,6 +173,19 @@ test "provider probe rejects invalid input before Transport" {
                 .model = "gpt-5",
             },
             .credential = "",
+        }, &cancellation),
+    );
+    var oversized_credential = [_]u8{0xff} ** (model_binding.max_credential_bytes + 1);
+    try std.testing.expectEqual(
+        Outcome{ .failed = .invalid_input },
+        run(std.testing.io, .{ .perform_fn = Fixture.perform }, .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .openai_responses,
+                .base_url = "https://api.openai.com/v1/chat/completions",
+                .model = "gpt-5",
+            },
+            .credential = &oversized_credential,
         }, &cancellation),
     );
 }

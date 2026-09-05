@@ -14,7 +14,6 @@ const anthropic = @import("completion/anthropic_codec.zig");
 const model_binding = @import("agent_model_binding");
 
 pub const Protocol = @import("agent_protocol").Protocol;
-pub const max_provider_id_bytes = @import("agent_protocol").max_provider_id_bytes;
 pub const Transport = transport.Transport;
 pub const HttpRequest = transport.HttpRequest;
 pub const HttpHeader = transport.Header;
@@ -30,7 +29,6 @@ pub const StopReason = types.StopReason;
 pub const Failure = types.Failure;
 pub const Result = types.Result;
 pub const CompleteOutcome = types.CompleteOutcome;
-pub const max_config_bytes = types.max_config_bytes;
 pub const max_messages = types.max_messages;
 pub const max_request_bytes = types.max_request_bytes;
 pub const max_response_bytes = types.max_response_bytes;
@@ -153,32 +151,8 @@ pub const Completion = struct {
 };
 
 fn validateConfig(binding: ModelBinding) InitError!void {
-    if (binding.target.provider_id.len == 0 or binding.target.provider_id.len > max_provider_id_bytes or
-        !std.unicode.utf8ValidateSlice(binding.target.provider_id)) return error.InvalidConfig;
-    if (binding.credential.len == 0 or binding.target.base_url.len == 0 or
-        binding.target.model.len == 0 or !std.unicode.utf8ValidateSlice(binding.target.base_url) or
-        !std.unicode.utf8ValidateSlice(binding.target.model))
+    model_binding.validate(binding, .required_explicit) catch
         return error.InvalidConfig;
-    var total: usize = 0;
-    inline for (.{ binding.target.provider_id, binding.credential, binding.target.base_url, binding.target.model }) |value|
-        total = std.math.add(usize, total, value.len) catch return error.InvalidConfig;
-    if (total > types.max_config_bytes) return error.InvalidConfig;
-    const uri = std.Uri.parse(binding.target.base_url) catch return error.InvalidConfig;
-    if (uri.host == null or uri.user != null or uri.password != null or
-        uri.query != null or uri.fragment != null)
-        return error.InvalidConfig;
-    if (!std.ascii.eqlIgnoreCase(uri.scheme, "https") and
-        !loopbackHttp(uri)) return error.InvalidConfig;
-}
-
-fn loopbackHttp(uri: std.Uri) bool {
-    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return false;
-    const host = switch (uri.host.?) {
-        .raw, .percent_encoded => |value| value,
-    };
-    return std.ascii.eqlIgnoreCase(host, "localhost") or
-        std.mem.eql(u8, host, "127.0.0.1") or
-        std.mem.eql(u8, host, "[::1]");
 }
 
 fn validateRequest(request: Request) error{ InvalidRequest, ResourceLimit }!void {
@@ -273,6 +247,20 @@ test "invalid config and request fail before Transport" {
                 .model = "m",
             },
             .credential = "",
+        },
+    ));
+    var oversized_credential = [_]u8{0xff} ** (model_binding.max_credential_bytes + 1);
+    try std.testing.expectError(error.InvalidConfig, Completion.init(
+        std.testing.allocator,
+        fake.port(),
+        .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .openai_responses,
+                .base_url = "https://example.test",
+                .model = "m",
+            },
+            .credential = &oversized_credential,
         },
     ));
     const owner = try Completion.init(std.testing.allocator, fake.port(), .{

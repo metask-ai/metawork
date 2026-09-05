@@ -1,6 +1,5 @@
 const std = @import("std");
 
-pub const max_config_bytes: usize = 16 * 1024;
 pub const max_messages: usize = 4096;
 pub const max_request_bytes: usize = 16 * 1024 * 1024;
 pub const max_response_bytes: usize = 4 * 1024 * 1024;

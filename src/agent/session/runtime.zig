@@ -12,7 +12,7 @@ const checkpoint = @import("agent_checkpoint");
 const checkpoint_restore = @import("agent_checkpoint_restore");
 const session_control = @import("control.zig");
 const session_wire = @import("wire.zig");
-const max_provider_id_bytes = @import("agent_protocol").max_provider_id_bytes;
+const model_binding = @import("agent_model_binding");
 const capabilities = @import("../capabilities.zig");
 const session_binding = @import("binding.zig");
 // Intentional same-module cycle with session.zig; Runtime and Session retain
@@ -722,9 +722,7 @@ pub const Runtime = struct {
     ) (Error || std.mem.Allocator.Error)!SessionRoute {
         const binding = options.model_binding;
         try validateWorkspace(options.workspace);
-        if (binding.target.provider_id.len == 0 or binding.target.provider_id.len > max_provider_id_bytes or
-            !std.unicode.utf8ValidateSlice(binding.target.provider_id) or
-            binding.credential.len == 0 or binding.target.model.len == 0)
+        model_binding.validate(binding, .optional_sdk_default) catch
             return error.CoreCallFailed;
         if (options.canonical_user_home.len != 0)
             try validateCanonicalDirectory(
@@ -906,11 +904,9 @@ pub const Runtime = struct {
         const binding = session_options.model_binding;
         try validateWorkspace(session_options.workspace);
         try checkpoint.validateLimits(options.checkpoint_limits);
-        if (binding.target.provider_id.len == 0 or binding.target.provider_id.len > max_provider_id_bytes or
-            !std.unicode.utf8ValidateSlice(binding.target.provider_id) or
-            binding.credential.len == 0 or
-            binding.target.model.len == 0 or
-            !std.mem.eql(u8, binding.target.model, options.expectation.model) or
+        model_binding.validate(binding, .optional_sdk_default) catch
+            return error.CoreCallFailed;
+        if (!std.mem.eql(u8, binding.target.model, options.expectation.model) or
             options.expectation.logical_session_id.len == 0 or
             options.expectation.logical_session_id.len > max_core_session_id_bytes or
             options.expectation.checkpoint_generation == 0)

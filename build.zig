@@ -904,6 +904,7 @@ fn wireAgentCore(
     });
     agent_checkpoint_restore.addImport("metask_agentcore", sdk);
     agent_checkpoint_restore.addImport("agent_checkpoint", agent_checkpoint);
+    agent_checkpoint_restore.addImport("agent_model_binding", agent_model_binding);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,

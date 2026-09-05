@@ -1284,6 +1284,66 @@ test "Session creation maps the selected protocol to the Core adapter and protoc
     }
 }
 
+test "model binding limits reject before Session and checkpoint Core calls" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 2 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const workspace_root = if (std.fs.path.sep == '\\')
+        "C:\\tmp\\metawork-model-binding-limits"
+    else
+        "/tmp/metawork-model-binding-limits";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+
+    var oversized_credential = [_]u8{0xff} ** 4097;
+    var invalid_binding = fixtureModelBinding(.anthropic_messages);
+    invalid_binding.credential = &oversized_credential;
+    try std.testing.expectError(error.CoreCallFailed, runtime.createSession(.{
+        .model_binding = invalid_binding,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{
+            .canonical_root = workspace_root,
+            .trust = .{ .temporary = temporary_root },
+        },
+    }));
+    try std.testing.expectEqual(@as(usize, 0), fake_core.session_created);
+
+    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+    var oversized_model = [_]u8{'m'} ** 257;
+    var restore_options = restoreOptions(
+        source.source(),
+        "000000000000000000000001",
+        0,
+        0,
+    );
+    restore_options.session.model_binding.target.model = &oversized_model;
+    restore_options.expectation.model = &oversized_model;
+    try std.testing.expectError(
+        error.CoreCallFailed,
+        runtime.restoreSessionRoute(restore_options),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fake_core.checkpoint_restores);
+
+    const session = try openSession(runtime);
+    defer {
+        closeSession(session, .session_close) catch unreachable;
+        runtime.releaseClosedSession(session) catch unreachable;
+    }
+    try std.testing.expectError(error.CoreCallFailed, session.setModel(&oversized_model));
+    var collector = CheckpointCollector{};
+    try std.testing.expectError(error.InvalidLimits, session.exportCheckpoint(
+        checkpoint_test_limits,
+        collector.sink(),
+        0,
+        0,
+        &oversized_model,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), fake_core.checkpoint_exports);
+}
+
 test "Agent Runtime applies the fixed MetaWork built-in surface to Session" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
