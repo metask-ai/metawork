@@ -1410,6 +1410,8 @@ const TestVault = struct {
     secret_len: usize = 0,
     present: bool = false,
     fail_store: bool = false,
+    expected_secret_ptr: ?[*]const u8 = null,
+    observed_direct_borrow: bool = false,
 
     fn port(self: *TestVault) ports.CredentialVault {
         return .{
@@ -1427,6 +1429,10 @@ const TestVault = struct {
 
     fn store(context: *anyopaque, _: []const u8, secret: []const u8) anyerror!void {
         const self: *TestVault = @ptrCast(@alignCast(context));
+        self.observed_direct_borrow = if (self.expected_secret_ptr) |expected|
+            secret.ptr == expected
+        else
+            false;
         if (self.fail_store) return error.WriteFailed;
         if (secret.len > self.secret.len) return error.WriteFailed;
         @memcpy(self.secret[0..secret.len], secret);
@@ -1724,9 +1730,11 @@ test "credential replacement revokes readiness before writing and restores fresh
         runtime.stop();
         runtime.deinit();
     }
+    const old_secret = "old-secret";
+    vault.expected_secret_ptr = old_secret.ptr;
     try createTestProviderWithModel(
         &runtime,
-        "old-secret",
+        old_secret,
         .{
             .display_name = "Provider",
             .protocol = .openai_responses,
@@ -1734,6 +1742,12 @@ test "credential replacement revokes readiness before writing and restores fresh
         },
         .{ .id = "model-1", .display_name = "Model 1" },
     );
+    try std.testing.expect(vault.observed_direct_borrow);
+    try std.testing.expectEqualStrings(old_secret, vault.secret[0..vault.secret_len]);
+    const created_canonical = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(created_canonical);
+    try std.testing.expect(std.mem.indexOf(u8, created_canonical, old_secret) == null);
     const initial = runtime.views()[0];
     const selection: contract.CustomProviderSelectionCommand = .{
         .source_id = TestVault.slot,
@@ -1760,9 +1774,18 @@ test "credential replacement revokes readiness before writing and restores fresh
     }).accepted);
 
     vault.fail_store = true;
-    const failed = runtime.replaceCredential("new-secret", selection);
+    const new_secret = "new-secret";
+    vault.expected_secret_ptr = new_secret.ptr;
+    vault.observed_direct_borrow = false;
+    const failed = runtime.replaceCredential(new_secret, selection);
     try std.testing.expect(!failed.accepted);
+    try std.testing.expect(vault.observed_direct_borrow);
     try std.testing.expectEqual(contract.ManagementError.credential_write_failed, failed.error_code.?);
+    try std.testing.expectEqualStrings(old_secret, vault.secret[0..vault.secret_len]);
+    const failed_canonical = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(failed_canonical);
+    try std.testing.expect(std.mem.indexOf(u8, failed_canonical, new_secret) == null);
     try std.testing.expect(runtime.view().default_selection == null);
     const revoked = runtime.views()[0];
     try std.testing.expectEqual(contract.CustomProviderCredentialStatus.missing, revoked.credential_status);
@@ -1770,16 +1793,22 @@ test "credential replacement revokes readiness before writing and restores fresh
     try std.testing.expect(!revoked.models[0].ready);
 
     vault.fail_store = false;
-    try std.testing.expect(runtime.replaceCredential("new-secret", .{
+    vault.observed_direct_borrow = false;
+    try std.testing.expect(runtime.replaceCredential(new_secret, .{
         .source_id = TestVault.slot,
         .expected_provider_revision = revoked.provider_revision,
     }).accepted);
+    try std.testing.expect(vault.observed_direct_borrow);
     const restored = runtime.views()[0];
     try std.testing.expectEqual(contract.CustomProviderCredentialStatus.ready, restored.credential_status);
     try std.testing.expectEqual(contract.CustomProviderState.configuring, restored.state);
     try std.testing.expect(restored.provider_revision != initial.provider_revision);
     try std.testing.expect(restored.source_generation != initial.source_generation);
-    try std.testing.expectEqualStrings("new-secret", vault.secret[0..vault.secret_len]);
+    try std.testing.expectEqualStrings(new_secret, vault.secret[0..vault.secret_len]);
+    const replaced_canonical = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(replaced_canonical);
+    try std.testing.expect(std.mem.indexOf(u8, replaced_canonical, new_secret) == null);
 }
 
 test "Models owns Metask catalog authority without changing global default" {
