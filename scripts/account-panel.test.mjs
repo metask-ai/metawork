@@ -398,7 +398,7 @@ test("Models canonical recovery preserves Account identity and freezes selectors
   assert.doesNotMatch(modelsMarkup, />Sign in with Metask</);
   assert.match(modelsMarkup, /id="settings-api"[^>]*disabled/);
   assert.match(modelsMarkup, /id="settings-model"[^>]*disabled/);
-  assert.match(modelsMarkup, />Reset model configuration</);
+  assert.match(modelsMarkup, />Recover model configuration</);
 });
 
 test("Models without a persistence capability do not offer destructive reset", () => {
@@ -412,7 +412,7 @@ test("Models without a persistence capability do not offer destructive reset", (
     },
     { initialSection: "models" },
   );
-  assert.doesNotMatch(markup, />Reset model configuration</);
+  assert.doesNotMatch(markup, />Recover model configuration</);
   assert.match(markup, /id="settings-api"[^>]*disabled/);
   assert.match(markup, /id="settings-model"[^>]*disabled/);
 });

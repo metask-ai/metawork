@@ -122,7 +122,7 @@ Workspace
 | Account              | 账号         | Metask 登录、身份、授权与退出         |
 | Providers            | Provider     | 用户管理的模型服务、协议、地址与凭据  |
 | Models               | 模型         | 所有 Provider 的模型与全局默认模型    |
-| Custom provider     | 模型连接     | Provider 的内部 wire 与持久化对象     |
+| Custom Provider      | 自定义 Provider | 用户创建并由 Models 持久化的 Provider |
 | Model                | 模型         | 新 Task 的执行模型，不称模式          |
 | Task overview        | 任务概览     | 按需活动摘要与详情，不称 Monitor      |
 | Current activity     | 当前活动     | Agent 此刻正在进行的可观察动作        |
@@ -435,7 +435,7 @@ Recent
 Metask 已连接
 
 账号设置
-模型连接
+模型设置
 退出登录
 ```
 
