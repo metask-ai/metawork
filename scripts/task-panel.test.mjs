@@ -8,14 +8,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
 import {
-  inspectorFocusReturnTarget,
-  shouldDismissInspectorForEscape,
-} from "../frontend/src/features/inspector/inspector-interaction.ts";
+  taskPanelFocusReturnTarget,
+  shouldDismissTaskPanelForEscape,
+} from "../frontend/src/features/task-panel/task-panel-interaction.ts";
 import {
-  inspectorOpenForTask,
-  reduceInspectorSession,
-  taskHasInspectorFacts,
-} from "../frontend/src/features/inspector/inspector-state.ts";
+  initialTaskPanelSessionState,
+  taskPanelOpenForTask,
+  reduceTaskPanelSession,
+  taskHasPanelFacts,
+} from "../frontend/src/features/task-panel/task-panel-state.ts";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   pretendToBeVisual: true,
@@ -55,14 +56,20 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { TaskOverview } = await vite.ssrLoadModule(
-  "/src/features/inspector/TaskOverview.tsx",
+const { TaskOverviewView } = await vite.ssrLoadModule(
+  "/src/features/task-panel/TaskOverviewView.tsx",
 );
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
-const { FileChangesDrawer } = await vite.ssrLoadModule(
-  "/src/features/files/FileChangesDrawer.tsx",
+const { FileChangesView, FileChangeDiffView } = await vite.ssrLoadModule(
+  "/src/features/task-panel/FileChangesView.tsx",
+);
+const { FilePreviewView } = await vite.ssrLoadModule(
+  "/src/features/task-panel/FilePreviewView.tsx",
+);
+const { TaskPanel } = await vite.ssrLoadModule(
+  "/src/features/task-panel/TaskPanel.tsx",
 );
 const { RunProcess } = await vite.ssrLoadModule(
   "/src/features/tasks/RunProcess.tsx",
@@ -151,7 +158,7 @@ function task(overrides = {}) {
   };
 }
 
-function renderInspector(value, locale = "en-US") {
+function renderTaskOverview(value, locale = "en-US") {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -162,7 +169,7 @@ function renderInspector(value, locale = "en-US") {
           t: (id, values) => translate(locale, id, values),
         },
       },
-      createElement(TaskOverview, {
+      createElement(TaskOverviewView, {
         task: value,
         focusRequest: null,
         onClose() {},
@@ -253,12 +260,12 @@ function runProcessElement(
   );
 }
 
-test("Inspector availability comes only from real Task facts", () => {
-  assert.equal(taskHasInspectorFacts(null), false);
-  assert.equal(taskHasInspectorFacts(task()), false);
-  assert.equal(taskHasInspectorFacts(task({ runs: [run()] })), true);
+test("Task Panel availability comes only from real Task facts", () => {
+  assert.equal(taskHasPanelFacts(null), false);
+  assert.equal(taskHasPanelFacts(task()), false);
+  assert.equal(taskHasPanelFacts(task({ runs: [run()] })), true);
   assert.equal(
-    taskHasInspectorFacts(
+    taskHasPanelFacts(
       task({
         pendingUi: {
           requestId: "request-1",
@@ -276,67 +283,162 @@ test("Inspector availability comes only from real Task facts", () => {
 });
 
 test("attention auto-opens once per Task and request identity", () => {
-  let state = {};
-  state = reduceInspectorSession(state, {
+  let state = initialTaskPanelSessionState;
+  state = reduceTaskPanelSession(state, {
     type: "task.observed",
     taskId: "task-a",
     attentionId: "run-1:request-1",
   });
-  assert.equal(inspectorOpenForTask(state, "task-a"), true);
+  assert.equal(taskPanelOpenForTask(state, "task-a"), true);
 
-  state = reduceInspectorSession(state, {
+  state = reduceTaskPanelSession(state, {
     type: "panel.closed",
     taskId: "task-a",
   });
   const closed = state;
-  state = reduceInspectorSession(state, {
+  state = reduceTaskPanelSession(state, {
     type: "task.observed",
     taskId: "task-a",
     attentionId: "run-1:request-1",
   });
   assert.equal(state, closed);
-  assert.equal(inspectorOpenForTask(state, "task-a"), false);
+  assert.equal(taskPanelOpenForTask(state, "task-a"), false);
 
-  state = reduceInspectorSession(state, {
+  state = reduceTaskPanelSession(state, {
     type: "task.observed",
     taskId: "task-a",
     attentionId: "run-2:request-2",
   });
-  assert.equal(inspectorOpenForTask(state, "task-a"), true);
+  assert.equal(taskPanelOpenForTask(state, "task-a"), true);
 
-  state = reduceInspectorSession(state, {
+  state = reduceTaskPanelSession(state, {
     type: "panel.closed",
     taskId: "task-a",
   });
   const closedAfterSecondRequest = state;
-  state = reduceInspectorSession(state, {
+  state = reduceTaskPanelSession(state, {
     type: "task.observed",
     taskId: "task-a",
     attentionId: "run-1:request-1",
   });
   assert.equal(state, closedAfterSecondRequest);
-  assert.equal(inspectorOpenForTask(state, "task-a"), false);
+  assert.equal(taskPanelOpenForTask(state, "task-a"), false);
 });
 
-test("Inspector visibility stays isolated per Task and ignores content churn", () => {
-  let state = reduceInspectorSession(
-    {},
-    {
-      type: "panel.opened",
+test("Task Panel visibility stays isolated per Task and clears transient tabs on Task switch", () => {
+  let state = reduceTaskPanelSession(initialTaskPanelSessionState, {
+    type: "overview.opened",
+    taskId: "task-a",
+  });
+  state = reduceTaskPanelSession(state, {
+    type: "resource.opened",
+    target: {
+      kind: "preview",
       taskId: "task-a",
+      runId: "run-a",
+      resourceId: "file-a",
+      displayPath: "src/a.zig",
+      returnTab: "overview",
     },
-  );
-  state = reduceInspectorSession(state, {
+  });
+  state = reduceTaskPanelSession(state, {
     type: "panel.closed",
     taskId: "task-b",
   });
-  assert.equal(inspectorOpenForTask(state, "task-a"), true);
-  assert.equal(inspectorOpenForTask(state, "task-b"), false);
-  assert.equal(inspectorOpenForTask(state, "task-a"), true);
+  assert.equal(taskPanelOpenForTask(state, "task-a"), true);
+  assert.equal(taskPanelOpenForTask(state, "task-b"), false);
+  state = reduceTaskPanelSession(state, {
+    type: "task.observed",
+    taskId: "task-b",
+    attentionId: null,
+  });
+  assert.equal(state.activeTab, "overview");
+  assert.equal(state.resource, null);
+  assert.equal(state.review, null);
 });
 
-test("Inspector shows Work process without eagerly mounting raw tool output", () => {
-  const markup = renderInspector(
+test("Task Panel keeps one same-Run review and resource target", () => {
+  let state = reduceTaskPanelSession(initialTaskPanelSessionState, {
+    type: "review.opened",
+    target: { taskId: "task-a", runId: "run-a" },
+  });
+  state = reduceTaskPanelSession(state, {
+    type: "resource.opened",
+    target: {
+      kind: "diff",
+      taskId: "task-a",
+      runId: "run-a",
+      resourceId: "change-a",
+      displayPath: "src/a.zig",
+      returnTab: "review",
+    },
+  });
+  assert.equal(state.activeTab, "resource");
+  assert.equal(state.review?.runId, "run-a");
+  state = reduceTaskPanelSession(state, {
+    type: "resource.opened",
+    target: {
+      kind: "preview",
+      taskId: "task-a",
+      runId: "run-b",
+      resourceId: "file-b",
+      displayPath: "src/b.zig",
+      returnTab: "review",
+    },
+  });
+  assert.equal(state.review, null);
+  assert.equal(state.resource?.returnTab, "overview");
+});
+
+test("new attention opens the panel without stealing an active resource tab", () => {
+  let state = reduceTaskPanelSession(initialTaskPanelSessionState, {
+    type: "resource.opened",
+    target: {
+      kind: "preview",
+      taskId: "task-a",
+      runId: "run-a",
+      resourceId: "file-a",
+      displayPath: "src/a.zig",
+      returnTab: "overview",
+    },
+  });
+  state = reduceTaskPanelSession(state, {
+    type: "task.observed",
+    taskId: "task-a",
+    attentionId: "run-a:request-1",
+  });
+  assert.equal(taskPanelOpenForTask(state, "task-a"), true);
+  assert.equal(state.activeTab, "resource");
+  assert.equal(state.resource?.resourceId, "file-a");
+});
+
+test("closing a resource returns to its valid root and clears the target", () => {
+  let state = reduceTaskPanelSession(initialTaskPanelSessionState, {
+    type: "review.opened",
+    target: { taskId: "task-a", runId: "run-a" },
+  });
+  state = reduceTaskPanelSession(state, {
+    type: "resource.opened",
+    target: {
+      kind: "diff",
+      taskId: "task-a",
+      runId: "run-a",
+      resourceId: "change-a",
+      displayPath: "src/a.zig",
+      returnTab: "review",
+    },
+  });
+  state = reduceTaskPanelSession(state, {
+    type: "resource.closed",
+    taskId: "task-a",
+  });
+  assert.equal(state.activeTab, "review");
+  assert.equal(state.resource, null);
+  assert.equal(state.review?.runId, "run-a");
+});
+
+test("Overview shows Work process without eagerly mounting raw tool output", () => {
+  const markup = renderTaskOverview(
     task({
       runs: [
         run({
@@ -390,7 +492,6 @@ test("Inspector shows Work process without eagerly mounting raw tool output", ()
       },
     }),
   );
-  assert.match(markup, />Task overview</);
   assert.match(markup, />Last run</);
   assert.match(markup, />Work process</);
   assert.match(markup, />Bash</);
@@ -407,7 +508,7 @@ test("Inspector shows Work process without eagerly mounting raw tool output", ()
 });
 
 test("Context and usage remains visible for cache-only usage", () => {
-  const markup = renderInspector(
+  const markup = renderTaskOverview(
     task({
       runs: [
         run({
@@ -469,7 +570,7 @@ test("Work process mounts and removes one Tool detail on demand", async () => {
   });
   const view = render(
     localizedView(
-      createElement(TaskOverview, {
+      createElement(TaskOverviewView, {
         task: value,
         focusRequest: null,
         onFocusPending() {},
@@ -495,7 +596,7 @@ test("Work process mounts and removes one Tool detail on demand", async () => {
   assert.ok(screen.getByText("private raw output"));
   view.rerender(
     localizedView(
-      createElement(TaskOverview, {
+      createElement(TaskOverviewView, {
         task: {
           ...value,
           id: "task-b",
@@ -1022,7 +1123,7 @@ test("Tool summary forwards exact Run, Tool, and opener identity", async () => {
   assert.equal(screen.queryByText("private input"), null);
 });
 
-test("Inspector focus request opens the exact historical Tool detail once", async () => {
+test("Overview focus request opens the exact historical Tool detail once", async () => {
   const historical = run({
     id: "8",
     tools: [
@@ -1047,7 +1148,7 @@ test("Inspector focus request opens the exact historical Tool detail once", asyn
   const current = run({ id: "9", tools: [] });
   render(
     localizedView(
-      createElement(TaskOverview, {
+      createElement(TaskOverviewView, {
         task: task({
           currentRunId: "9",
           runs: [historical, current],
@@ -1115,9 +1216,9 @@ test("typed Run activity uses safe localized labels", () => {
     runs: [thinkingRun],
   });
   const thinkingContent = renderTaskContent(thinkingTask, "zh-CN");
-  const thinkingInspector = renderInspector(thinkingTask, "zh-CN");
+  const thinkingOverview = renderTaskOverview(thinkingTask, "zh-CN");
   assert.match(thinkingContent, />正在分析</);
-  assert.match(thinkingInspector, />正在分析</);
+  assert.match(thinkingOverview, />正在分析</);
 
   const writingTask = task({
     currentRunId: "9",
@@ -1152,7 +1253,7 @@ test("typed Run activity uses safe localized labels", () => {
       new RegExp(`>${expected}<`),
     );
     assert.match(
-      renderInspector(activityTask, "zh-CN"),
+      renderTaskOverview(activityTask, "zh-CN"),
       new RegExp(`>${expected}<`),
     );
     if (activity.kind === "retrying_provider") {
@@ -1175,7 +1276,7 @@ test("typed Run activity uses safe localized labels", () => {
     ],
   });
   assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待下一步</);
-  assert.match(renderInspector(waitingModel, "zh-CN"), />正在等待下一步</);
+  assert.match(renderTaskOverview(waitingModel, "zh-CN"), />正在等待下一步</);
 
   const stoppingTask = task({
     currentRunId: "9",
@@ -1289,7 +1390,7 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   assert.doesNotMatch(incompleteMarkup, />Review changes</);
 });
 
-test("File Changes Drawer keeps repeated records, typed warnings, and narrow-screen structure", async () => {
+test("Task Panel review keeps repeated records and only mounts the active view", async () => {
   const changes = [
     {
       id: "change-1",
@@ -1319,12 +1420,41 @@ test("File Changes Drawer keeps repeated records, typed warnings, and narrow-scr
     },
   ];
   let selected = null;
-  render(
+  const view = render(
     localizedView(
-      createElement(FileChangesDrawer, {
+      createElement(FileChangesView, {
+        observation: "incomplete",
+        changes,
+        onSelect(change) {
+          selected = change;
+        },
+      }),
+    ),
+  );
+
+  assert.ok(screen.getByRole("navigation", { name: "Changed files" }));
+  assert.ok(screen.getByRole("status"));
+  assert.match(
+    document.body.textContent,
+    /Some file change records may be missing/,
+  );
+  assert.match(document.body.textContent, /Change 1/);
+  assert.match(document.body.textContent, /Change 2/);
+  assert.equal(screen.queryByText("-secret"), null);
+
+  const user = userEvent.setup({ document: dom.window.document });
+  await user.click(
+    screen.getByRole("button", {
+      name: /src\/main\.zig Moved Change 2/,
+    }),
+  );
+  assert.equal(selected, changes[1]);
+
+  view.rerender(
+    localizedView(
+      createElement(FileChangeDiffView, {
         state: {
           observation: "incomplete",
-          changes,
           selected: changes[0],
           phase: "settled",
           diff: {
@@ -1334,37 +1464,93 @@ test("File Changes Drawer keeps repeated records, typed warnings, and narrow-scr
             redacted: true,
           },
         },
-        onSelect(change) {
-          selected = change;
-        },
         onRefresh() {},
+      }),
+    ),
+  );
+  assert.match(document.body.textContent, /Recorded diff/);
+  assert.match(document.body.textContent, /not a workspace net diff/);
+  assert.match(document.body.textContent, /Recorded diff is incomplete/);
+  assert.match(document.body.textContent, /Known sensitive content was hidden/);
+  assert.match(document.body.textContent, /-secret/);
+  assert.match(document.body.textContent, /\+safe/);
+  assert.doesNotMatch(document.body.textContent, /Accept|Reject|Revert|Stage/);
+});
+
+test("Task Panel labels current file content distinctly from recorded diffs", () => {
+  const markup = renderToStaticMarkup(
+    localizedView(
+      createElement(FilePreviewView, {
+        state: {
+          references: [
+            {
+              id: "file-1",
+              title: "main.zig",
+              displayPath: "src/main.zig",
+            },
+            {
+              id: "file-2",
+              title: "types.zig",
+              displayPath: "src/types.zig",
+            },
+          ],
+          selected: {
+            id: "file-1",
+            title: "main.zig",
+            displayPath: "src/main.zig",
+          },
+          phase: "settled",
+          preview: {
+            state: "ready",
+            content: "const ready = true;",
+            truncated: false,
+            redacted: false,
+          },
+        },
+        onSelect() {},
+        onRefresh() {},
+      }),
+    ),
+  );
+  assert.match(markup, />Current file</);
+  assert.match(markup, /Current contents; they may differ/);
+  assert.match(markup, /aria-label="Referenced files"/);
+  assert.match(markup, /const ready = true;/);
+  assert.doesNotMatch(markup, /Recorded diff|role="dialog"|backdrop/);
+});
+
+test("Task Panel exposes stable roots and one closable resource tab without a plus action", () => {
+  const markup = renderToStaticMarkup(
+    localizedView(
+      createElement(TaskPanel, {
+        activeTab: "resource",
+        resource: {
+          kind: "preview",
+          taskId: "3",
+          runId: "9",
+          resourceId: "file-1",
+          displayPath: "src/providers.zig",
+          returnTab: "overview",
+        },
+        hasReview: true,
+        hasAttention: true,
+        overview: createElement("p", null, "overview body"),
+        review: createElement("p", null, "review body"),
+        resourceView: createElement("p", null, "resource body"),
+        onActivate() {},
+        onCloseReview() {},
+        onCloseResource() {},
         onClose() {},
       }),
     ),
   );
-
-  const dialog = screen.getByRole("dialog", { name: "Review changes" });
-  assert.match(dialog.className, /max-\[620px\]:w-full/);
-  assert.ok(
-    dialog.querySelector('[class*="max-[620px]:grid-cols-1"]'),
-    "Drawer did not retain its narrow-screen single-column layout",
-  );
-  assert.ok(screen.getByRole("navigation", { name: "Changed files" }));
-  assert.ok(screen.getByRole("status"));
-  assert.match(dialog.textContent, /Some file change records may be missing/);
-  assert.match(dialog.textContent, /Change 1/);
-  assert.match(dialog.textContent, /Change 2/);
-  assert.match(dialog.textContent, /Modified/);
-  assert.match(dialog.textContent, /Moved/);
-  assert.match(dialog.textContent, /Recorded diff is incomplete/);
-  assert.match(dialog.textContent, /Known sensitive content was hidden/);
-  assert.match(dialog.textContent, /-secret/);
-  assert.match(dialog.textContent, /\+safe/);
-  assert.doesNotMatch(dialog.textContent, /Accept|Reject|Revert|Stage/);
-
-  const user = userEvent.setup({ document: dom.window.document });
-  await user.click(screen.getByRole("button", { name: /Change 2 Moved/ }));
-  assert.equal(selected, changes[1]);
+  assert.match(markup, /role="tablist"/);
+  assert.match(markup, />Overview</);
+  assert.match(markup, />Review</);
+  assert.match(markup, />providers\.zig</);
+  assert.match(markup, /aria-selected="true"/);
+  assert.match(markup, />resource body</);
+  assert.doesNotMatch(markup, /overview body|review body|>\+<|plus/i);
 });
 
 test("permission intervention never exposes internal Run identity", () => {
@@ -1403,21 +1589,21 @@ test("permission intervention never exposes internal Run identity", () => {
   assert.doesNotMatch(markup, /8472|work item/i);
 });
 
-test("Escape dismissal and focus return preserve the real Inspector opener", () => {
-  assert.equal(shouldDismissInspectorForEscape(true, "Escape", false), true);
-  assert.equal(shouldDismissInspectorForEscape(false, "Escape", false), false);
-  assert.equal(shouldDismissInspectorForEscape(true, "Escape", true), false);
-  assert.equal(shouldDismissInspectorForEscape(true, "Enter", false), false);
+test("Escape dismissal and focus return preserve the real Task Panel opener", () => {
+  assert.equal(shouldDismissTaskPanelForEscape(true, "Escape", false), true);
+  assert.equal(shouldDismissTaskPanelForEscape(false, "Escape", false), false);
+  assert.equal(shouldDismissTaskPanelForEscape(true, "Escape", true), false);
+  assert.equal(shouldDismissTaskPanelForEscape(true, "Enter", false), false);
 
   const opener = { isConnected: true, focus() {} };
   const fallback = { isConnected: true, focus() {} };
-  assert.equal(inspectorFocusReturnTarget(opener, fallback), opener);
+  assert.equal(taskPanelFocusReturnTarget(opener, fallback), opener);
   assert.equal(
-    inspectorFocusReturnTarget({ ...opener, isConnected: false }, fallback),
+    taskPanelFocusReturnTarget({ ...opener, isConnected: false }, fallback),
     fallback,
   );
   assert.equal(
-    inspectorFocusReturnTarget(
+    taskPanelFocusReturnTarget(
       { ...opener, hasAttribute: (name) => name === "disabled" },
       fallback,
     ),

@@ -81,3 +81,39 @@ test("resizable separator clamps pointer movement and supports keyboard control"
   assert.equal(separator.getAttribute("aria-valuenow"), "360");
   assert.equal(commits.at(-1), 360);
 });
+
+test("right-side separator reverses pointer and arrow direction", () => {
+  const commits = [];
+
+  function Harness() {
+    const [value, setValue] = useState(400);
+    return createElement(ResizableSeparator, {
+      label: "Resize task panel",
+      value,
+      minimum: 320,
+      maximum: 640,
+      step: 16,
+      reverse: true,
+      onChange: setValue,
+      onCommit(next) {
+        commits.push(next);
+      },
+    });
+  }
+
+  render(createElement(Harness));
+  const separator = screen.getByRole("separator", {
+    name: "Resize task panel",
+  });
+
+  fireEvent.keyDown(separator, { key: "ArrowLeft" });
+  assert.equal(separator.getAttribute("aria-valuenow"), "416");
+  fireEvent.keyDown(separator, { key: "ArrowRight" });
+  assert.equal(separator.getAttribute("aria-valuenow"), "400");
+
+  fireEvent.pointerDown(separator, { pointerId: 8, clientX: 600 });
+  fireEvent.pointerMove(separator, { pointerId: 8, clientX: 540 });
+  fireEvent.pointerUp(separator, { pointerId: 8, clientX: 540 });
+  assert.equal(separator.getAttribute("aria-valuenow"), "460");
+  assert.equal(commits.at(-1), 460);
+});

@@ -7,6 +7,7 @@ export function ResizableSeparator({
   minimum,
   maximum,
   step,
+  reverse = false,
   onChange,
   onCommit,
   onResizeStart,
@@ -18,6 +19,7 @@ export function ResizableSeparator({
   minimum: number;
   maximum: number;
   step: number;
+  reverse?: boolean;
   onChange: (value: number) => void;
   onCommit: (value: number) => void;
   onResizeStart?: () => void;
@@ -61,7 +63,8 @@ export function ResizableSeparator({
       onPointerMove={(event) => {
         const active = drag.current;
         if (!active || active.pointerId !== event.pointerId) return;
-        update(active.startValue + event.clientX - active.startX, false);
+        const delta = event.clientX - active.startX;
+        update(active.startValue + (reverse ? -delta : delta), false);
       }}
       onPointerUp={(event) => {
         if (drag.current?.pointerId !== event.pointerId) return;
@@ -79,8 +82,10 @@ export function ResizableSeparator({
       }}
       onKeyDown={(event) => {
         let next: number | null = null;
-        if (event.key === "ArrowLeft") next = current.current - step;
-        if (event.key === "ArrowRight") next = current.current + step;
+        if (event.key === "ArrowLeft")
+          next = current.current + (reverse ? step : -step);
+        if (event.key === "ArrowRight")
+          next = current.current + (reverse ? -step : step);
         if (event.key === "Home") next = minimum;
         if (event.key === "End") next = maximum;
         if (next === null) return;
