@@ -714,29 +714,30 @@ export const zhCN: Record<MessageId, string> = {
   "settings.permission_defaults": "新任务默认策略",
   "settings.account_profile": "账户信息",
   "settings.account_security": "安全操作",
-  "settings.providers_saved": "已配置的 Provider",
-  "settings.provider_details": "接入方式",
-  "settings.provider_add": "添加 Provider",
-  "settings.provider_add_title": "添加 Provider",
+  "settings.providers_saved": "模型服务",
   "settings.back_to_providers": "返回 Provider",
-  "settings.provider_creation_mode": "Provider 配置方式",
   "settings.builtin_provider": "官方模型服务",
-  "settings.builtin_provider_mode_help":
-    "选择由 MetaWork 维护协议和服务地址的模型厂商。",
+  "settings.builtin_provider_group": "模型厂商",
+  "settings.builtin_provider_group_help":
+    "选择厂商后，MetaWork 会预填官方协议和服务地址。",
+  "settings.builtin_provider_unconfigured": "尚未配置",
+  "settings.builtin_provider_needs_models": "待添加或测试模型",
+  "settings.builtin_provider_configure": "配置",
+  "settings.builtin_provider_manage": "管理",
   "settings.custom_provider": "自定义 API",
-  "settings.custom_provider_mode_help":
-    "连接自部署模型、独立模型厂商或 API 中转服务。",
-  "settings.builtin_provider_official_api": "官方 API 预设",
-  "settings.builtin_provider_title": "连接官方厂商",
+  "settings.custom_provider_group": "自定义 API",
+  "settings.custom_provider_group_help":
+    "用于自部署模型、其他厂商或 API 中转服务。",
+  "settings.custom_provider_add_action": "添加自定义 API",
   "settings.builtin_provider_help":
-    "协议和官方服务地址由 MetaWork 提供；你只需要填写 API Key。",
-  "settings.choose_builtin_provider": "选择官方厂商",
+    "MetaWork 已配置该厂商的协议和官方地址；如有需要，也可以改用兼容地址。",
+  "settings.builtin_provider_address": "服务地址",
+  "settings.builtin_provider_change_address": "使用其他地址",
+  "settings.builtin_provider_reset_address": "恢复官方地址",
+  "settings.builtin_provider_address_warning":
+    "后续模型请求会将此 Provider 的 API Key 发送到 {host}。",
   "settings.get_api_key": "获取 API Key",
   "settings.open_provider_docs": "查看官方文档",
-  "settings.builtin_provider_select_help":
-    "选择厂商后，可前往对应官方平台获取 API Key 或查看文档。",
-  "settings.builtin_provider_connect": "保存 Provider",
-  "settings.builtin_provider_managed": "MetaWork 官方 API 预设",
   "settings.models_error": "模型配置需要处理",
   "settings.models_error_help":
     "请刷新 Metask 模型目录或检查已保存的模型配置。",
@@ -784,7 +785,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.default_selection_missing": "未设置可执行的默认模型",
   "settings.providers_help":
     "管理 MetaWork 可用的模型服务、服务地址和 API Key。默认模型请在模型页面选择。",
-  "settings.providers_empty": "还没有用户管理的 Provider。",
+  "settings.providers_empty": "还没有自定义 API。",
   "settings.providers_unavailable": "当前版本无法管理 Provider。",
   "settings.custom_provider_capture_unavailable":
     "系统凭据存储当前不可用，因此暂时不能添加 Provider 或替换 API Key。",

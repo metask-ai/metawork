@@ -1049,6 +1049,42 @@ summary::-webkit-details-marker {
   font-size: 13px;
 }
 
+.settings-provider-directory {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-provider-directory-secondary {
+  margin-top: 4px;
+  padding-top: 16px;
+  border-top: 1px solid var(--settings-line);
+}
+
+.settings-provider-directory-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.settings-provider-directory-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.settings-provider-directory-heading strong {
+  color: var(--settings-ink);
+  font-size: var(--text-body);
+}
+
+.settings-provider-directory-heading p {
+  margin: 0;
+  color: var(--settings-muted);
+  font-size: var(--text-label);
+  line-height: 1.45;
+}
+
 .settings-custom-provider-create {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1057,50 +1093,6 @@ summary::-webkit-details-marker {
   border: 1px solid var(--settings-line);
   border-radius: 12px;
   background: var(--settings-frost);
-}
-
-.settings-provider-creation-mode {
-  display: grid;
-  width: 100%;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.settings-provider-creation-mode button {
-  display: grid;
-  min-height: 68px;
-  gap: 4px;
-  padding: 11px 13px;
-  border: 1px solid var(--settings-line);
-  border-radius: 11px;
-  color: var(--settings-muted);
-  background: var(--settings-paper);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.settings-provider-creation-mode button strong {
-  color: var(--settings-ink);
-  font-size: var(--text-body);
-  font-weight: 680;
-}
-
-.settings-provider-creation-mode button span {
-  font-size: var(--text-label);
-  line-height: 1.4;
-}
-
-.settings-provider-creation-mode button:hover:not(:disabled) {
-  border-color: var(--ui-action-primary);
-}
-
-.settings-provider-creation-mode button[aria-checked="true"] {
-  color: var(--settings-ink);
-  border-color: var(--ui-action-primary);
-  background: var(--metask-primary-soft);
-  box-shadow: 0 0 0 1px
-    color-mix(in srgb, var(--ui-action-primary) 24%, transparent);
 }
 
 .settings-provider-create-intro {
@@ -1129,6 +1121,56 @@ summary::-webkit-details-marker {
 
 .settings-builtin-provider-create a:hover {
   text-decoration: underline;
+}
+
+.settings-builtin-provider-address {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 13px;
+  border: 1px solid var(--settings-line);
+  border-radius: 11px;
+  background: var(--settings-paper);
+}
+
+.settings-builtin-provider-address > div {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+
+.settings-builtin-provider-address span,
+.settings-builtin-provider-address small {
+  color: var(--settings-muted);
+  font-size: var(--text-label);
+}
+
+.settings-builtin-provider-address code {
+  overflow: hidden;
+  color: var(--settings-ink);
+  font-size: var(--text-control);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-provider-address-warning {
+  padding: 9px 10px;
+  border-left: 3px solid var(--metask-state-warning);
+  color: var(--ui-content-warning);
+  background: color-mix(in srgb, var(--metask-state-warning) 7%, transparent);
+}
+
+.settings-provider-reset-address {
+  width: max-content;
+}
+
+.settings-provider-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .settings-custom-provider-create-custom {
@@ -2560,16 +2602,29 @@ button.run-process-tool:hover {
     padding: 14px;
   }
 
-  .settings-provider-creation-mode {
-    grid-template-columns: 1fr;
-  }
-
   .settings-custom-provider-create-field-wide,
   .settings-custom-provider-create-footer {
     grid-column: 1;
   }
 
   .settings-custom-provider-create-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-provider-directory-heading,
+  .settings-builtin-provider-address {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-provider-directory-heading > button,
+  .settings-builtin-provider-address > button,
+  .settings-provider-footer-actions > button {
+    width: 100%;
+  }
+
+  .settings-provider-footer-actions {
     align-items: stretch;
     flex-direction: column;
   }

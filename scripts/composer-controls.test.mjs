@@ -400,6 +400,9 @@ function settingsElement(account, overrides = {}) {
       onCreateBuiltinProvider() {
         return Promise.resolve(false);
       },
+      onUpdateBuiltinProviderBaseUrl() {
+        return Promise.resolve(false);
+      },
       onUpdateCustomProvider() {
         return Promise.resolve(false);
       },
@@ -468,8 +471,8 @@ test("Settings exposes Providers only for the complete Host gate", () => {
   fireEvent.click(screen.getByRole("link", { name: "Providers" }));
   assert.ok(screen.getByRole("heading", { name: "Providers" }));
   assert.equal(screen.queryByRole("combobox", { name: "Default model" }), null);
-  fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
-  assert.ok(screen.getByRole("heading", { name: "Add provider" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add custom API" }));
+  assert.ok(screen.getByRole("heading", { name: "Connect a custom API" }));
   assert.ok(screen.getByRole("button", { name: "Back to providers" }));
 });
 
@@ -491,12 +494,8 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
   );
 
   await user.click(screen.getByRole("link", { name: "Providers" }));
-  await user.click(screen.getByRole("button", { name: "Add provider" }));
-  const customMode = screen.getByRole("radio", { name: /Custom API/ });
-  const officialMode = screen.getByRole("radio", {
-    name: /Official model service/,
-  });
-  await user.click(customMode);
+  await user.click(screen.getByRole("button", { name: "Add custom API" }));
+  assert.equal(screen.queryByRole("radio"), null);
 
   const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
   assert.equal(baseUrl.value, "");
@@ -525,13 +524,6 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
     screen.getByText("Request endpoint: https://api.anthropic.com/v1/messages"),
   );
   await user.type(apiKey, "anthropic-secret");
-  await user.click(officialMode);
-  await user.click(customMode);
-  assert.equal(
-    screen.getByRole("textbox", { name: "Display name" }).value,
-    "My Anthropic",
-  );
-  assert.equal(screen.getByLabelText("API key").value, "anthropic-secret");
   await user.click(screen.getByRole("button", { name: "Save provider" }));
   assert.deepEqual(submitted, [
     {
@@ -543,7 +535,7 @@ test("Provider setup keeps Base URL user-owned and submits the protocol endpoint
   ]);
 });
 
-test("Official Provider setup asks only for the preset and API key", async () => {
+test("Official Provider setup starts from its official address", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const submitted = [];
   renderSettings(readySettingsAccount, {
@@ -572,13 +564,9 @@ test("Official Provider setup asks only for the preset and API key", async () =>
   });
 
   await user.click(screen.getByRole("link", { name: "Providers" }));
-  await user.click(screen.getByRole("button", { name: "Add provider" }));
-  assert.equal(
-    screen
-      .getByRole("radio", { name: /Official model service/ })
-      .getAttribute("aria-checked"),
-    "true",
-  );
+  assert.ok(screen.getByText("Model providers"));
+  await user.click(screen.getByRole("button", { name: "Configure" }));
+  assert.ok(screen.getByRole("heading", { name: "DeepSeek" }));
   assert.equal(screen.queryByRole("combobox", { name: "Protocol" }), null);
   assert.equal(screen.queryByRole("textbox", { name: "Base URL" }), null);
   assert.equal(
@@ -586,8 +574,13 @@ test("Official Provider setup asks only for the preset and API key", async () =>
     true,
   );
 
-  await user.click(screen.getByRole("combobox", { name: "Provider" }));
-  await user.click(await screen.findByRole("option", { name: /DeepSeek/ }));
+  assert.ok(screen.getByText("https://api.deepseek.com"));
+  await user.click(screen.getByRole("button", { name: "Use another address" }));
+  assert.equal(
+    screen.getByRole("textbox", { name: "Base URL" }).value,
+    "https://api.deepseek.com",
+  );
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
   const apiKey = screen.getByLabelText("API key");
   await user.type(apiKey, "deepseek-secret");
   assert.equal(
@@ -600,6 +593,72 @@ test("Official Provider setup asks only for the preset and API key", async () =>
       providerId: "deepseek",
       baseUrl: "https://api.deepseek.com",
       apiKey: "deepseek-secret",
+    },
+  ]);
+});
+
+test("Official Provider address override is explicit and separate from its credential", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const updates = [];
+  renderSettings(readySettingsAccount, {
+    models: {
+      ...readySettingsModels,
+      builtinProviderPresets: [
+        {
+          id: "deepseek",
+          displayName: "DeepSeek",
+          protocol: "openai_chat_completions",
+          defaultBaseUrl: "https://api.deepseek.com",
+          apiKeyUrl: "https://platform.deepseek.com/api_keys",
+          documentationUrl: "https://api-docs.deepseek.com/",
+        },
+      ],
+      customProviders: [
+        {
+          id: "provider-deepseek",
+          builtinProviderId: "deepseek",
+          displayName: "DeepSeek",
+          protocol: "openai_chat_completions",
+          normalizedBaseUrl: "https://api.deepseek.com/chat/completions",
+          state: "configuring",
+          credentialStatus: "ready",
+          enabled: true,
+          models: [],
+          providerRevision: "7",
+          sourceGeneration: "3",
+          catalogGeneration: "5",
+        },
+      ],
+    },
+    customProviderCapabilities: {
+      management: true,
+      secretCapture: true,
+      modelTest: true,
+    },
+    onUpdateBuiltinProviderBaseUrl(input) {
+      updates.push(input);
+      return Promise.resolve(false);
+    },
+  });
+
+  await user.click(screen.getByRole("link", { name: "Providers" }));
+  await user.click(screen.getByRole("button", { name: "Manage" }));
+  assert.equal(screen.queryByRole("textbox", { name: "Base URL" }), null);
+  await user.click(screen.getByRole("button", { name: "Use another address" }));
+  const baseUrl = screen.getByRole("textbox", { name: "Base URL" });
+  await user.clear(baseUrl);
+  await user.type(baseUrl, "https://gateway.example.com/deepseek/v1");
+  assert.ok(
+    screen.getByText(
+      "Future model requests will send this Provider's API key to gateway.example.com.",
+    ),
+  );
+  await user.click(screen.getByRole("button", { name: "Save provider" }));
+  assert.deepEqual(updates, [
+    {
+      providerId: "provider-deepseek",
+      expectedProviderRevision: "7",
+      baseUrl: "https://gateway.example.com/deepseek/v1",
     },
   ]);
 });

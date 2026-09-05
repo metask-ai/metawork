@@ -1017,9 +1017,9 @@ Models
 └── Refresh catalog
 
 Providers（capability-gated）
-├── Configured Providers
-├── Add Provider（independent full page）
-└── Provider details and credential
+├── Model providers（DeepSeek / Kimi / MiniMax / GLM）
+├── Official provider setup and management（independent full page）
+└── Custom API（secondary group and independent add page）
 
 ```
 
@@ -1078,15 +1078,15 @@ Account与 Models状态在设置中分别投影：Account只按 `checking | sign
 > 该入口按完整 Host capability gate 开放；支持的桌面平台只要三项运行能力同时可用即可导航。
 
 - Renderer 同时校验 `customProviderManagement`、`customProviderSecretCapture` 与 `customModelTest` 三个 Host capability；只有三者均为 true 才显示整个设置入口。revision 1 保留 `customProviderSecretCapture` 字段名，但其 true 表示 create/replace API Key typed command 可用且 Models credential vault 可写，不再表示弹出原生输入窗。Host 只发布全 true 或全 false，并从实际 management、credential storage 与模型测试能力生成该组事实，不读取平台名决定产品可见性；不得提供“稍后补齐 credential”的半成品路径；
-- 页面显示 Provider 名称、protocol、脱敏服务地址、credential 状态、模型目录状态和可用动作；不显示完整 API Key，不回填秘密字段，也不显示或修改 global default；
-- `Add Provider` 打开独立全页，不使用列表内展开表单，也不成为 Models 的子页面。页面使用具有 radio 语义的“官方模型服务 / 自定义 API”接入方式选择；默认选中官方模式，但厂商保持未选择，必须由用户从 Host 发布的 DeepSeek、Kimi、MiniMax、智谱 GLM 只读模板中明确选择一项并填写 API Key。切换接入方式时保留当前添加页内两种模式各自的未提交草稿，保存成功、取消或离页后清除；
-- 自定义 API 使用单列连续表单，依次填写只用于 MetaWork 内识别的显示名称、protocol、API Base URL 与 API Key，不使用暗示连接步骤已经完成的装饰性流程图。填写 Base URL 后必须实时展示由 protocol 规则生成的实际请求地址，帮助用户在保存前确认最终 endpoint；API Key 使用可粘贴的 password input，不提供显示已保存值的能力，也不进入浏览器自动填充。两种模式保存时都不在该页配置模型；当前不显示厂商 logo；
-- 内置模板由 Models owner 固定 protocol、官方 endpoint、显示名、API Key 获取地址与文档地址，Renderer 只展示厂商选择和安全外链，不允许编辑或从 URL 推断这些字段。自定义模式精确开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native；选择协议只改变 Base URL 示例和后续 endpoint 生成规则，不得自动写入或覆盖输入框。Renderer 对前三者分别把用户填写的 Base URL确定性映射为 `{base_url}/responses`、`{base_url}/chat/completions` 与 `{base_url}/v1/messages`，Gemini Native 保持 Base URL并由既有消费者追加模型路径。Host 在提交时继续独立规范化 endpoint并校验 scheme/host/path/长度和控制字符；Renderer 不能把 arbitrary URL 或 query credential 直接交给 Run；
+- Provider 首页以“模型厂商”和“自定义 API”两个分组建立明确主次。DeepSeek、Kimi、MiniMax 与智谱 GLM 四个 Host 模板始终逐行显示，不因尚未配置而隐藏；行内只显示名称、`未配置 / 尚未测试 / 可用 / 凭据需处理` 状态和单一 `配置 / 管理` 动作。自定义 API 位于带分隔的第二分组，只有该分组提供弱化的“添加自定义 API”动作；不再提供通用 `Add Provider`、厂商下拉框或“官方 / 自定义”radio 模式切换；
+- 点击厂商行打开该厂商的独立全页，不使用列表内展开表单，也不成为 Models 的子页面。未配置状态默认直接使用 Host 模板发布的官方 Base URL，只要求 API Key；Base URL 输入默认隐藏，用户显式点击“使用其他地址”后才展开。展开区必须保留固定 protocol 的只读事实、实时展示最终 endpoint、提供恢复官方地址动作，并在地址偏离官方默认值时明确显示后续请求将把该 Provider API Key 发送到哪个 host；
+- 已配置厂商的管理页把地址与凭据作为两项独立设置：Base URL 修改使用专用 revision-bound mutation，API Key 更新始终打开新的空 password input 并使用独立 credential replacement，不把两者合并成一笔表单提交。厂商显示名和 protocol 始终不可编辑；地址或 credential authority 变化推进 source generation 并使该 Provider 全部模型回到待验证状态。秘密永不回填，保存成功、取消或离页后清除临时值；当前不显示厂商 logo；
+- 自定义 API 使用独立全页的单列连续表单，依次填写只用于 MetaWork 内识别的显示名称、protocol、API Base URL 与 API Key，不使用暗示连接步骤已经完成的装饰性流程图。填写 Base URL 后必须实时展示由 protocol 规则生成的实际请求地址，帮助用户在保存前确认最终 endpoint；API Key 使用可粘贴的 password input，不提供显示已保存值的能力，也不进入浏览器自动填充。自定义 API 精确开放 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini Native；选择协议只改变 Base URL 示例和后续 endpoint 生成规则，不得自动写入或覆盖输入框。Renderer 对前三者分别把用户填写的 Base URL确定性映射为 `{base_url}/responses`、`{base_url}/chat/completions` 与 `{base_url}/v1/messages`，Gemini Native 保持 Base URL并由既有消费者追加模型路径。Host 在提交时继续独立规范化 endpoint并校验 scheme/host/path/长度和控制字符；Renderer 不能把 arbitrary URL 或 query credential 直接交给 Run；
 - `Test model` 只通过 Host/Agent Completion 发起有界请求，不创建 Task、历史 Run 或持久 Conversation；页面分别显示 generation readiness 和最新测试状态。已成为默认模型后仍可重测，失败只显示“最近测试失败”，不能把正在使用的 ready generation、默认选择或新 Task admission 静默撤销；
 - 第一版不提供自动模型发现；Provider 保存后由 Models 页明确填写 bounded model ID并执行测试，Provider 没有 ready 模型时不能成为默认来源；
 - global default 只在 Models 页作为一笔 Models-owned、source-qualified desired transaction提交；Providers 页不得因当前 Provider 是默认来源而禁用编辑或删除。Product Control随后独立 reconcile active binding，处理中只关闭相关新 Task admission，不回滚已提交 desired selection；
 - Metask provider catalog与当前 custom default同时投影；custom default生效时模型设置仍可查看 Metask API/模型，并通过显式“设为新任务默认”提交同一个 global default command。Account只决定 Metask provider当前能否授权，不参与默认来源选择；
-- Provider 列表只提供编辑和删除两个一级操作；内置模板创建的 Provider 将编辑动作收窄为更新 API Key，固定名称、protocol 与 endpoint 不可修改；自定义 Provider 的 API Key 更新位于编辑界面的凭据区域，不在列表行中抢占一级操作。秘密永不回填；更新 API Key 时展开一个新的空 password input，只有用户显式保存才提交独立 credential replacement。credential storage 不可用时整个 Custom Provider 设置入口隐藏，不提供局部编辑路径。endpoint、protocol 或 credential authority 变化推进 source generation并使该 Provider 全部模型回到待验证状态；普通 display/metadata 编辑只推进对应 provider revision/catalog generation。Provider 可以在模型集合为空时持久存在于 configuring 状态；两种 Provider 都通过 Models-owned custom model mutation添加或删除模型，不把模型伪装成 Provider 身份的一部分；
+- 自定义 API 列表保留编辑和删除两个一级操作，API Key 更新位于编辑界面的凭据区域，不在列表行中抢占一级操作。credential storage 不可用时整个 Provider 设置入口隐藏，不提供局部编辑路径。endpoint、protocol 或 credential authority 变化推进 source generation并使该 Provider 全部模型回到待验证状态；普通 display/metadata 编辑只推进对应 provider revision/catalog generation。Provider 可以在模型集合为空时持久存在于 configuring 状态；两种 Provider 都通过 Models-owned custom model mutation添加或删除模型，不把模型伪装成 Provider 身份的一部分；
 - Models 按 exact Provider identity 与 expected provider revision 校验编辑/删除，不查询 live Session、Run、job 或 worker，也不以 consumer usage 拒绝 mutation。若 mutation 使当前 desired default 不可解析，Product Control 独立关闭 new admission 并进入 reconciliation；既有 Task/Run 保持自己的 owned binding，不静默改绑，历史仍保留；
 - Providers 页只管理 Provider 本身与 credential，不提供模型测试、默认模型、Workspace、权限策略、Task 历史或 AgentCore 内部状态。
 

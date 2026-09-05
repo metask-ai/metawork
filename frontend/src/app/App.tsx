@@ -3076,6 +3076,11 @@ export default function App() {
             onCreateBuiltinProvider={(input) =>
               runExecutionCommand(() => client.createBuiltinProvider(input))
             }
+            onUpdateBuiltinProviderBaseUrl={(input) =>
+              runExecutionCommand(() =>
+                client.updateBuiltinProviderBaseUrl(input),
+              )
+            }
             onUpdateCustomProvider={(input) =>
               runExecutionCommand(() =>
                 client.updateCustomProvider({

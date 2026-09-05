@@ -775,29 +775,30 @@ export const enUS = {
   "settings.permission_defaults": "Defaults for new tasks",
   "settings.account_profile": "Account information",
   "settings.account_security": "Security",
-  "settings.providers_saved": "Configured providers",
-  "settings.provider_details": "Connection type",
-  "settings.provider_add": "Add provider",
-  "settings.provider_add_title": "Add provider",
+  "settings.providers_saved": "Model services",
   "settings.back_to_providers": "Back to providers",
-  "settings.provider_creation_mode": "Provider setup type",
   "settings.builtin_provider": "Official model service",
-  "settings.builtin_provider_mode_help":
-    "Choose a provider whose protocol and endpoint are maintained by MetaWork.",
+  "settings.builtin_provider_group": "Model providers",
+  "settings.builtin_provider_group_help":
+    "Choose a provider and MetaWork fills in its official protocol and address.",
+  "settings.builtin_provider_unconfigured": "Not configured",
+  "settings.builtin_provider_needs_models": "Add or test a model",
+  "settings.builtin_provider_configure": "Configure",
+  "settings.builtin_provider_manage": "Manage",
   "settings.custom_provider": "Custom API",
-  "settings.custom_provider_mode_help":
-    "Connect a self-hosted model, independent vendor, or API gateway.",
-  "settings.builtin_provider_official_api": "Official API preset",
-  "settings.builtin_provider_title": "Connect an official provider",
+  "settings.custom_provider_group": "Custom API",
+  "settings.custom_provider_group_help":
+    "For self-hosted models, other providers, or API gateways.",
+  "settings.custom_provider_add_action": "Add custom API",
   "settings.builtin_provider_help":
-    "MetaWork supplies the protocol and official endpoint. You only need an API key.",
-  "settings.choose_builtin_provider": "Choose an official provider",
+    "MetaWork supplies this provider's protocol and official address. You can use a compatible address when needed.",
+  "settings.builtin_provider_address": "Service address",
+  "settings.builtin_provider_change_address": "Use another address",
+  "settings.builtin_provider_reset_address": "Restore official address",
+  "settings.builtin_provider_address_warning":
+    "Future model requests will send this Provider's API key to {host}.",
   "settings.get_api_key": "Get an API key",
   "settings.open_provider_docs": "Open official documentation",
-  "settings.builtin_provider_select_help":
-    "Choose a provider to see its official API key and documentation links.",
-  "settings.builtin_provider_connect": "Save provider",
-  "settings.builtin_provider_managed": "MetaWork official API preset",
   "settings.models_error": "Model configuration needs attention",
   "settings.models_error_help":
     "Refresh the Metask catalog or review the saved model configuration.",
@@ -853,7 +854,7 @@ export const enUS = {
     "No executable default model is selected",
   "settings.providers_help":
     "Manage the model services, endpoints, and API keys available to MetaWork. Choose the default model on the Models page.",
-  "settings.providers_empty": "No user-managed providers yet.",
+  "settings.providers_empty": "No custom APIs yet.",
   "settings.providers_unavailable":
     "Provider management is unavailable in this build.",
   "settings.custom_provider_capture_unavailable":
