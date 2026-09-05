@@ -91,6 +91,18 @@ const session_protocol_cases = [_]struct {
     .{ .protocol = .gemini_native, .provider_code = wire.PROVIDER_GEMINI, .protocol_code = wire.PROTOCOL_DEFAULT },
 };
 
+fn fixtureModelBinding(protocol: lifecycle.Protocol) lifecycle.ModelBinding {
+    return .{
+        .target = .{
+            .provider_id = "fixture-provider",
+            .protocol = protocol,
+            .base_url = "",
+            .model = "fixture-model",
+        },
+        .credential = "fixture-secret",
+    };
+}
+
 fn restoreOptions(
     source: lifecycle.CheckpointSource,
     logical_session_id: []const u8,
@@ -101,12 +113,9 @@ fn restoreOptions(
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return .{
         .session = .{
-            .provider_id = "fixture-provider",
-            .protocol = .anthropic_messages,
+            .model_binding = fixtureModelBinding(.anthropic_messages),
             .permission_mode = .default,
             .shell_policy = .disabled,
-            .credential = "fixture-secret",
-            .model = "fixture-model",
             .workspace = .{
                 .canonical_root = workspace_root,
                 .trust = .{ .temporary = temporary_root },
@@ -218,12 +227,9 @@ test "canonical AgentCore accepts an empty complete MCP Session replacement" {
     );
     defer std.testing.allocator.free(workspace_root);
     const session = try runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .unrestricted,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = workspace_root,
             .trust = .explicitly_trusted,
@@ -443,12 +449,9 @@ test "MCP catalog refresh binds explicit Session selection and idle replacement"
         "/tmp/metawork-mcp-selection";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     const session = try runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = workspace_root,
             .trust = .{ .temporary = temporary_root },
@@ -493,12 +496,9 @@ test "MCP selection mutation preserves reusable and poison status contracts" {
     const selection = try runtime.createMcpSelection(projection, &.{});
     defer selection.deinit();
     const session = try runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = if (std.fs.path.sep == '\\') "C:\\tmp\\metawork-mcp-status" else "/tmp/metawork-mcp-status",
             .trust = .{ .temporary = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp" },
@@ -864,12 +864,9 @@ test "Skill input is deep-copied and encoded only for the typed Core call" {
     });
     defer acquisition.projection.deinit();
     const session = try runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = root,
             .trust = .explicitly_trusted,
@@ -957,12 +954,9 @@ test "Skill rejection statuses leave the Session reusable" {
             .workspace_epoch = "workspace-1",
         });
         const session = try runtime.createSession(.{
-            .provider_id = "fixture-provider",
-            .protocol = .anthropic_messages,
+            .model_binding = fixtureModelBinding(.anthropic_messages),
             .permission_mode = .default,
             .shell_policy = .disabled,
-            .credential = "fixture-secret",
-            .model = "fixture-model",
             .workspace = .{
                 .canonical_root = root,
                 .trust = .explicitly_trusted,
@@ -1016,12 +1010,9 @@ test "Session catalog refresh binds explicit selection only while idle and rejec
     defer current.projection.deinit();
     defer runtime.releaseSkillCatalog(current.lease) catch unreachable;
     const session = try runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = root,
             .trust = .explicitly_trusted,
@@ -1265,12 +1256,17 @@ test "Session creation maps the selected protocol to the Core adapter and protoc
         }
         var provider_id = "service-instance-a".*;
         const session = try runtime.createSession(.{
-            .provider_id = &provider_id,
-            .protocol = case.protocol,
+            .model_binding = .{
+                .target = .{
+                    .provider_id = &provider_id,
+                    .protocol = case.protocol,
+                    .base_url = "",
+                    .model = "fixture-model",
+                },
+                .credential = "fixture-secret",
+            },
             .permission_mode = .default,
             .shell_policy = .disabled,
-            .credential = "fixture-secret",
-            .model = "fixture-model",
             .workspace = .{
                 .canonical_root = workspace_root,
                 .trust = .{ .temporary = temporary_root },
@@ -1286,6 +1282,66 @@ test "Session creation maps the selected protocol to the Core adapter and protoc
         try session.close(.session_close);
         try runtime.releaseClosedSession(session);
     }
+}
+
+test "model binding limits reject before Session and checkpoint Core calls" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 2 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const workspace_root = if (std.fs.path.sep == '\\')
+        "C:\\tmp\\metawork-model-binding-limits"
+    else
+        "/tmp/metawork-model-binding-limits";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+
+    var oversized_credential = [_]u8{0xff} ** 4097;
+    var invalid_binding = fixtureModelBinding(.anthropic_messages);
+    invalid_binding.credential = &oversized_credential;
+    try std.testing.expectError(error.CoreCallFailed, runtime.createSession(.{
+        .model_binding = invalid_binding,
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{
+            .canonical_root = workspace_root,
+            .trust = .{ .temporary = temporary_root },
+        },
+    }));
+    try std.testing.expectEqual(@as(usize, 0), fake_core.session_created);
+
+    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+    var oversized_model = [_]u8{'m'} ** 257;
+    var restore_options = restoreOptions(
+        source.source(),
+        "000000000000000000000001",
+        0,
+        0,
+    );
+    restore_options.session.model_binding.target.model = &oversized_model;
+    restore_options.expectation.model = &oversized_model;
+    try std.testing.expectError(
+        error.CoreCallFailed,
+        runtime.restoreSessionRoute(restore_options),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fake_core.checkpoint_restores);
+
+    const session = try openSession(runtime);
+    defer {
+        closeSession(session, .session_close) catch unreachable;
+        runtime.releaseClosedSession(session) catch unreachable;
+    }
+    try std.testing.expectError(error.CoreCallFailed, session.setModel(&oversized_model));
+    var collector = CheckpointCollector{};
+    try std.testing.expectError(error.InvalidLimits, session.exportCheckpoint(
+        checkpoint_test_limits,
+        collector.sink(),
+        0,
+        0,
+        &oversized_model,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), fake_core.checkpoint_exports);
 }
 
 test "Agent Runtime applies the fixed MetaWork built-in surface to Session" {
@@ -1305,12 +1361,9 @@ test "Agent Runtime applies the fixed MetaWork built-in surface to Session" {
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
     const workspace_root = root_storage[0..root_len];
     const session = try runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .unrestricted,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = workspace_root,
             .trust = .{ .temporary = workspace_root },
@@ -1349,33 +1402,24 @@ test "Workspace requires an absolute temporary or explicit trusted root" {
         deinitTestComposition(runtime);
     }
     try std.testing.expectError(error.InvalidWorkspace, runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{ .canonical_root = "relative", .trust = .explicitly_trusted },
     }));
     try std.testing.expectError(error.WorkspaceNotTrusted, runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = outside_temporary,
             .trust = .{ .temporary = temporary_root },
         },
     }));
     try std.testing.expectError(error.InvalidWorkspace, runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .default,
         .shell_policy = .disabled,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = non_canonical,
             .trust = .{ .temporary = temporary_root },
@@ -1887,13 +1931,10 @@ fn openNoninteractivePermissionSession(
         "/tmp/metawork-gate2";
     const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
     return runtime.createSession(.{
-        .provider_id = "fixture-provider",
-        .protocol = .anthropic_messages,
+        .model_binding = fixtureModelBinding(.anthropic_messages),
         .permission_mode = .accept_edits,
         .shell_policy = .unrestricted,
         .permission_interaction = .noninteractive,
-        .credential = "fixture-secret",
-        .model = "fixture-model",
         .workspace = .{
             .canonical_root = workspace_root,
             .trust = .{ .temporary = temporary_root },
@@ -2456,9 +2497,9 @@ test "checkpoint restore installs one exact logical Session and continues identi
             7,
             2,
         );
-        options.session.protocol = case.protocol;
+        options.session.model_binding.target.protocol = case.protocol;
         var provider_id = "service-instance-b".*;
-        options.session.provider_id = &provider_id;
+        options.session.model_binding.target.provider_id = &provider_id;
         const route = try runtime.restoreSessionRoute(options);
         @memset(&provider_id, 'x');
         try std.testing.expectEqualStrings("service-instance-b", route.session.provider_id);

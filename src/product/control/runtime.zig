@@ -312,16 +312,16 @@ pub const CompletionFactory = struct {
     create_fn: ?*const fn (
         ?*anyopaque,
         std.mem.Allocator,
-        lifecycle.CompletionConfig,
+        lifecycle.ModelBinding,
     ) anyerror!*lifecycle.Completion = null,
 
     fn create(
         self: CompletionFactory,
         allocator: std.mem.Allocator,
-        config: lifecycle.CompletionConfig,
+        binding: lifecycle.ModelBinding,
     ) anyerror!*lifecycle.Completion {
         if (self.create_fn) |create_fn|
-            return create_fn(self.context, allocator, config);
+            return create_fn(self.context, allocator, binding);
         return error.CompletionUnavailable;
     }
 };

@@ -9,7 +9,7 @@ const WireMessage = struct {
 
 pub fn encode(
     allocator: std.mem.Allocator,
-    config: types.Config,
+    config: types.CodecConfig,
     request: types.Request,
 ) codec.Error!codec.EncodedRequest {
     const extra: usize = @intFromBool(request.system.len != 0);
@@ -34,6 +34,7 @@ pub fn encode(
     const body = std.json.Stringify.valueAlloc(allocator, .{
         .model = config.model,
         .messages = messages,
+        .max_completion_tokens = request.max_output_tokens,
     }, .{}) catch return error.OutOfMemory;
     var encoded = try codec.EncodedRequest.init(allocator, config.base_url, body);
     errdefer encoded.deinit();
@@ -113,6 +114,26 @@ fn stopReason(value: []const u8) codec.Error!types.StopReason {
         std.mem.eql(u8, value, "function_call"))
         return error.UnsupportedResponse;
     return error.UnsupportedResponse;
+}
+
+test "OpenAI Chat codec encodes an explicit completion budget" {
+    var encoded = try encode(std.testing.allocator, .{
+        .credential = "fixture-secret",
+        .base_url = "https://example.test/v1/chat/completions",
+        .model = "fixture-model",
+    }, .{
+        .messages = &.{.{ .role = .user, .text = "hello" }},
+        .max_output_tokens = 1234,
+    });
+    defer encoded.deinit();
+    var parsed = try codec.parseJson(std.testing.allocator, encoded.body);
+    defer parsed.deinit();
+    const root = try codec.object(parsed.value);
+    try std.testing.expectEqual(
+        @as(i64, 1234),
+        root.get("max_completion_tokens").?.integer,
+    );
+    try std.testing.expect(root.get("max_tokens") == null);
 }
 
 test "OpenAI codec decodes one non-streaming text result" {

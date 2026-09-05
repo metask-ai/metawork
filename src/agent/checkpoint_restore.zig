@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const checkpoint = @import("agent_checkpoint");
+const model_binding = @import("agent_model_binding");
 const sdk = @import("metask_agentcore");
 const wire = sdk.types;
 
@@ -185,9 +186,10 @@ pub fn restore(
 ) Outcome {
     checkpoint.validateLimits(limits) catch
         return .{ .failure = dependencyFailure(.restore) };
+    model_binding.validateModel(expectation.model) catch
+        return .{ .failure = dependencyFailure(.restore) };
     if (expectation.logical_session_id.len == 0 or
-        expectation.checkpoint_generation == 0 or
-        expectation.model.len == 0)
+        expectation.checkpoint_generation == 0)
         return .{ .failure = dependencyFailure(.restore) };
 
     var adapter = SourceAdapter{ .source = source, .hard_bytes = limits.hard_bytes };
@@ -494,4 +496,46 @@ test "restore status mapping keeps checkpoint failures retryable" {
     try std.testing.expectEqual(FailureReason.cancelled, cancelled.reason);
     const io_failed = failureForStatus(.checkpoint_io, .io_failed);
     try std.testing.expectEqual(FailureReason.io_failed, io_failed.reason);
+}
+
+test "restore rejects an oversized expected model before touching AgentCore" {
+    const Fixture = struct {
+        fn read(_: ?*anyopaque, _: []u8) SourceReadResult {
+            return .eof;
+        }
+    };
+    var oversized_model = [_]u8{'m'} ** (model_binding.max_model_bytes + 1);
+    const outcome = restore(
+        std.testing.allocator,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        .{
+            .hard_bytes = 1024,
+            .max_section_bytes = 1024,
+            .max_string_bytes = 512,
+            .max_messages = 32,
+            .max_blocks_per_message = 16,
+            .chunk_bytes = 512,
+        },
+        .{ .context = null, .read_fn = Fixture.read },
+        .{
+            .logical_session_id = "fixture-session",
+            .checkpoint_generation = 1,
+            .last_run_id = 0,
+            .last_compact_id = 0,
+            .model = &oversized_model,
+        },
+    );
+    switch (outcome) {
+        .failure => |failure| {
+            try std.testing.expectEqual(Stage.restore, failure.stage);
+            try std.testing.expectEqual(
+                FailureReason.dependency_contract,
+                failure.reason,
+            );
+        },
+        .success => return error.TestUnexpectedResult,
+    }
 }

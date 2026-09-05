@@ -23,17 +23,28 @@ Completion.complete(request, cancellation) -> Result | Failure
 
 - `src/agent` 拥有 Completion 请求、结果、错误、协议 codec 和调用语义。
 - `src/app` 只实现一次 buffered HTTP/TLS 请求及请求级取消。
-- Product Models 合同拥有通用 Protocol/ExecutionConfig；Account 只拥有 Metask credential authority，Models aggregate 独立拥有 Custom Provider credential authority，Completion 不拥有任一服务实例或 credential。
-- Completion 使用与对应 Agent Run 相同、已冻结的 ExecutionConfig；不发现、选择或替换模型。
+- Product Models 合同拥有通用 Protocol/ExecutionConfig；Account 只拥有 Metask credential authority，Models aggregate 独立拥有 Custom Provider credential authority，Completion 不拥有任一服务实例或 credential authority。
+- Completion 使用与对应 Agent Run 相同、已冻结的模型执行绑定；不发现、选择或替换模型。
 - MetaWork 不修改 `metacodes`，也不要求 AgentCore 提供 Completion。
+
+Agent 的共享输入是 borrowed `ModelTarget { provider_id, protocol, base_url, model }`
+与 `ModelBinding { target, credential }`。它只表达执行所需事实，不携带 Product
+authority、generation、catalog metadata 或 ownership。Completion、Provider Probe 与
+Session 接收同一语义结构，但各自按生命周期决定是否取得 owned copy；公共 binding
+本身不分配内存，也没有 `deinit`。
 
 ## 3. Provider 与协议
 
 Provider 表示 Product execution source 配置的模型服务实例，其身份、配置与 credential authority 由 [Product Models 与对应 source](product-architecture.md#21-models-aggregate-与-account-handoff)拥有；不同服务实例可以使用相同协议，不能通过协议推导服务身份。Agent 不建立额外的 Provider 类别或继承层次。
 
-Product Models 与 Agent 分别拥有产品已开放的 `Protocol` 和可执行 codec `Protocol`。唯一的 Product-owned outbound adapter 对已开放集合做穷举编译期映射；两侧不共享 enum，不使用字符串转换，也不因 Agent 新增 codec 自动扩大产品能力。Session、Completion 和 Provider Probe 同时接收服务实例引用 `provider_id`、明确协议、endpoint、credential 和 model。`provider_id` 是 Host 侧的不透明引用，不是服务商枚举或协议适配器；协议不能由该引用、URL 或模型名推断。Session 与 Completion 持有引用的 owned copy，不依赖调用方配置缓冲区的生命周期；该引用不进入模型请求、Core ABI、Bridge、event、snapshot 或产品历史。
+Product Models 与 Agent 分别拥有产品已开放的 `Protocol` 和可执行 codec `Protocol`。唯一的 Product-owned outbound adapter 对已开放集合做穷举编译期映射；两侧不共享 enum，不使用字符串转换，也不因 Agent 新增 codec 自动扩大产品能力。Session、Completion 和 Provider Probe 同时接收服务实例引用 `provider_id`、明确协议、endpoint、credential 和 model。`provider_id` 是 Host 侧的不透明引用，不是服务商枚举或协议适配器；协议不能由该引用、URL 或模型名推断。Session 与 Completion 持有引用的 owned copy，不依赖调用方配置缓冲区的生命周期；该引用不进入模型请求、Core ABI、Bridge、event、snapshot 或产品历史。codec 只接收 credential、base URL 与 model；`provider_id` 和已经完成分派的 `protocol` 从类型上不可见。
 
-`provider_id` 作为执行元数据标识 Session 或 Completion 所绑定的服务配置来源；调用方负责提供正确引用，Agent 保留但不分配、解析或重新生成它。身份范围与生命周期由 Product Models source 合同定义，不由潜在的限流、遥测或 credential 分组用途改变。Agent 的接收上限由 `max_provider_id_bytes` 定义，Product Models 可以采用更小的生成范围；Session fresh/restore、Completion 和 Probe 必须使用同一 Agent 接收上限。
+`provider_id` 作为执行元数据标识 Session 或 Completion 所绑定的服务配置来源；调用方负责提供正确引用，Agent 保留但不分配、解析或重新生成它。身份范围与生命周期由 Product Models source 合同定义，不由潜在的限流、遥测或 credential 分组用途改变。Agent 模型字段的单字段上限与校验由 `model_binding` 唯一拥有，Product Models 可以采用更小的生成范围。Session fresh/restore、model rebind、checkpoint export/restore、Completion 和 Probe 必须复用该规则；credential 是有界 opaque bytes，不做 UTF-8 解释。
+
+endpoint policy 是显式的：Completion 与 Provider Probe 使用
+`required_explicit`，必须得到可直接请求的合法 endpoint；Session fresh/restore 使用
+`optional_sdk_default`，空 `base_url` 表示由 AgentCore SDK 选择协议默认 endpoint，非空值
+仍须通过同一 endpoint 校验。调用方不能用空字符串、URL 或模型名触发协议推断。
 
 | Protocol | Completion 接口 |
 | --- | --- |
@@ -49,8 +60,20 @@ Responses Completion 固定 `stream: false`、`store: false`，仅返回最终�
 每个 codec 只支持无 Tool 的文本子集：
 
 - 编码 system/messages、model 和认证 header；
+- 编码调用方给出的非零、有界 `max_output_tokens`；
 - 解码最终文本、usage 和 stop reason；
 - tool/function call、未知 terminal reason 或非文本结果 fail closed。
+
+输出预算在四种 wire dialect 中使用各自的原生字段：
+
+| Protocol | 输出预算字段 |
+| --- | --- |
+| `openai_responses` | `max_output_tokens` |
+| `openai_chat_completions` | `max_completion_tokens` |
+| `anthropic_messages` | `max_tokens` |
+| `gemini_native` | `generationConfig.maxOutputTokens` |
+
+Completion 不为某个 codec 私设默认预算；当前 Probe 与自动标题消费者都显式请求 4096。
 
 Agent 不建立另一套 Provider registry、动态发现、fallback、通用插件框架或第二套 AgentLoop。
 
@@ -92,13 +115,20 @@ perform(http_request, cancellation, response_buffer)
 
 Provider 非 2xx 响应按 HTTP status 分类，不把响应正文、credential 或 header 写入错误、日志、event、snapshot 或产品历史。
 
+Transport 的取消、响应缓冲超限和 host allocation failure 分别投影为
+`cancelled`、`resource_limit` 与 `out_of_memory`；只有 DNS、连接、TLS、读写、HTTP
+格式和未分类 transport failure 进入 `transport_failed`。`Unexpected` 保留为
+`transport_failed.other`，不能吞掉前三类既有语义。
+
 ## 6. 取消与生命周期
 
 - 每次 `complete()` 使用一个独立 Cancellation token。
 - watchdog 或 shutdown 可以从另一线程请求取消。
 - Application transport 必须让被阻塞的整次 fetch 返回，并在 `perform()` 返回前等待 I/O 静止。
-- 调用线程等待 `complete()` 返回并 join watchdog 后，才能销毁 Completion 和冻结的 ExecutionConfig。
-- Completion 销毁时 secure-zero 自己持有的 credential copy；编码后的 sensitive header copy在请求结束后 secure-zero。
+- 调用线程等待 `complete()` 返回并 join watchdog 后，才能销毁 Completion 和冻结的模型执行绑定。
+- Provider Probe 不产生 credential owned copy；它同步把 borrowed binding 交给 Completion，Completion 在返回前完成自己的复制。
+- Completion 在对象生命周期内持有一份 credential copy，销毁时 secure-zero；编码后的 sensitive header copy 在请求结束后 secure-zero。
+- Session fresh/restore 只为同步 AgentCore 调用取得一份临时 credential copy，并在调用返回的所有路径 secure-zero；Session 对象不保留 credential。
 
 不存在 Stream owner、abort reason 竞争、exactly-one terminal event 或 Stream-before-Completion teardown 合同。
 
@@ -119,7 +149,10 @@ MetaWork 产品代码不调用或 re-export AgentCore Completion API，也不保
 - 非 2xx typed rejection；
 - 请求前取消及阻塞请求取消；
 - credential/header copy 清零；
-- Provider Probe 与自动标题使用同一冻结 ExecutionConfig；
+- model binding 单字段边界、两种 endpoint policy，以及所有 Session/Completion/Probe 入口在外部调用前的一致拒绝；
+- 四种 codec 精确编码调用方的输出预算，零值与超限在 Transport 前拒绝；
+- Transport cancellation、response limit、allocation failure 与 unknown failure 保持各自的 typed 结果；
+- Provider Probe 与自动标题使用同一冻结模型执行绑定；
 - architecture guard 证明 Completion/Protocol 不导入 AgentCore SDK；
 - lifecycle 与 shutdown 验证。
 

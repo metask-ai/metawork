@@ -2,16 +2,9 @@
 
 const std = @import("std");
 const completion = @import("agent_completion");
-
-pub const Protocol = completion.Protocol;
-
-pub const Input = struct {
-    provider_id: []const u8,
-    protocol: Protocol,
-    credential: []const u8,
-    model: []const u8,
-    base_url: []const u8,
-};
+const model_binding = @import("agent_model_binding");
+const ModelBinding = model_binding.ModelBinding;
+const Protocol = completion.Protocol;
 
 pub const Failure = enum {
     invalid_input,
@@ -74,22 +67,17 @@ pub const Outcome = union(enum) {
 pub fn run(
     io: std.Io,
     network: completion.Transport,
-    input: Input,
+    binding: ModelBinding,
     cancellation: *const Cancellation,
 ) Outcome {
-    if (!validInput(input)) return .{ .failed = .invalid_input };
+    if (!validInput(binding)) return .{ .failed = .invalid_input };
     if (cancellation.isRequested()) return .{ .failed = .run_failed };
 
-    var secret_storage: [4096]u8 = undefined;
-    @memcpy(secret_storage[0..input.credential.len], input.credential);
-    defer std.crypto.secureZero(u8, &secret_storage);
-    const owner = completion.Completion.init(std.heap.c_allocator, network, .{
-        .provider_id = input.provider_id,
-        .protocol = input.protocol,
-        .credential = secret_storage[0..input.credential.len],
-        .base_url = input.base_url,
-        .model = input.model,
-    }) catch |failure| return .{ .failed = switch (failure) {
+    const owner = completion.Completion.init(
+        std.heap.c_allocator,
+        network,
+        binding,
+    ) catch |failure| return .{ .failed = switch (failure) {
         error.InvalidConfig => .invalid_input,
         error.OutOfMemory => .run_failed,
     } };
@@ -108,7 +96,7 @@ pub fn run(
         .text = "Reply with OK.",
     }};
     var complete_outcome = owner.complete(
-        .{ .messages = &messages },
+        .{ .messages = &messages, .max_output_tokens = 4096 },
         &request_cancellation,
     );
     watchdog.finished.store(true, .release);
@@ -120,14 +108,9 @@ pub fn run(
     );
 }
 
-fn validInput(input: Input) bool {
-    return input.provider_id.len != 0 and input.provider_id.len <= completion.max_provider_id_bytes and
-        std.unicode.utf8ValidateSlice(input.provider_id) and
-        input.credential.len != 0 and input.credential.len <= 4096 and
-        input.model.len != 0 and input.model.len <= 256 and
-        input.base_url.len != 0 and input.base_url.len <= 2048 and
-        std.unicode.utf8ValidateSlice(input.model) and
-        std.unicode.utf8ValidateSlice(input.base_url);
+fn validInput(binding: ModelBinding) bool {
+    model_binding.validate(binding, .required_explicit) catch return false;
+    return true;
 }
 
 fn classifyOutcome(
@@ -183,11 +166,26 @@ test "provider probe rejects invalid input before Transport" {
     try std.testing.expectEqual(
         Outcome{ .failed = .invalid_input },
         run(std.testing.io, .{ .perform_fn = Fixture.perform }, .{
-            .provider_id = "fixture-provider",
-            .protocol = .openai_responses,
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .openai_responses,
+                .base_url = "https://api.openai.com/v1/chat/completions",
+                .model = "gpt-5",
+            },
             .credential = "",
-            .model = "gpt-5",
-            .base_url = "https://api.openai.com/v1/chat/completions",
+        }, &cancellation),
+    );
+    var oversized_credential = [_]u8{0xff} ** (model_binding.max_credential_bytes + 1);
+    try std.testing.expectEqual(
+        Outcome{ .failed = .invalid_input },
+        run(std.testing.io, .{ .perform_fn = Fixture.perform }, .{
+            .target = .{
+                .provider_id = "fixture-provider",
+                .protocol = .openai_responses,
+                .base_url = "https://api.openai.com/v1/chat/completions",
+                .model = "gpt-5",
+            },
+            .credential = &oversized_credential,
         }, &cancellation),
     );
 }
@@ -231,11 +229,13 @@ test "provider probe selects the OpenAI protocol and requires a completed result
         try std.testing.expectEqual(
             case.expected,
             run(std.testing.io, .{ .context = &fixture, .perform_fn = Fixture.perform }, .{
-                .provider_id = "fixture-provider",
-                .protocol = case.protocol,
+                .target = .{
+                    .provider_id = "fixture-provider",
+                    .protocol = case.protocol,
+                    .base_url = "https://example.test/endpoint",
+                    .model = "fixture-model",
+                },
                 .credential = "secret",
-                .model = "fixture-model",
-                .base_url = "https://example.test/endpoint",
             }, &cancellation),
         );
     }
@@ -276,11 +276,13 @@ test "external cancellation wakes a blocked Provider probe" {
 
         fn runProbe(self: *@This()) void {
             self.outcome = run(std.testing.io, self.network, .{
-                .provider_id = "fixture-provider",
-                .protocol = .openai_chat_completions,
+                .target = .{
+                    .provider_id = "fixture-provider",
+                    .protocol = .openai_chat_completions,
+                    .base_url = "https://api.openai.com/v1/chat/completions",
+                    .model = "gpt-5",
+                },
                 .credential = "secret",
-                .model = "gpt-5",
-                .base_url = "https://api.openai.com/v1/chat/completions",
             }, self.cancellation);
         }
     };

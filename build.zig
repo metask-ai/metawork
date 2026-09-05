@@ -124,6 +124,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-automation-enabled", .root_module = test_modules.automation_enabled },
         .{ .name = "metawork-bridge", .root_module = test_modules.bridge },
         .{ .name = "metawork-agent-mcp-connector", .root_module = test_modules.agent_mcp_connector },
+        .{ .name = "metawork-agent-model-binding", .root_module = test_modules.agent_model_binding },
         .{ .name = "metawork-agent-completion", .root_module = test_modules.agent_completion },
         .{ .name = "metawork-agent-provider-probe", .root_module = test_modules.agent_provider_probe },
         .{ .name = "metawork-agent-mcp-catalog", .root_module = test_modules.agent_mcp_catalog },
@@ -365,6 +366,7 @@ const WiredModules = struct {
     mcp_platform: *std.Build.Module,
     mcp_oauth: *std.Build.Module,
     agent: *std.Build.Module,
+    agent_model_binding: *std.Build.Module,
     agent_completion: *std.Build.Module,
     agent_session: *std.Build.Module,
     agent_catalog: *std.Build.Module,
@@ -819,12 +821,19 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const agent_model_binding = b.createModule(.{
+        .root_source_file = b.path("src/agent/model_binding.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    agent_model_binding.addImport("agent_protocol", agent_protocol);
     const agent_completion = b.createModule(.{
         .root_source_file = b.path("src/agent/completion.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     agent_completion.addImport("agent_protocol", agent_protocol);
+    agent_completion.addImport("agent_model_binding", agent_model_binding);
     const event_sink = b.createModule(.{
         .root_source_file = b.path("src/agent/event_sink.zig"),
         .target = target,
@@ -895,6 +904,7 @@ fn wireAgentCore(
     });
     agent_checkpoint_restore.addImport("metask_agentcore", sdk);
     agent_checkpoint_restore.addImport("agent_checkpoint", agent_checkpoint);
+    agent_checkpoint_restore.addImport("agent_model_binding", agent_model_binding);
     const session = b.createModule(.{
         .root_source_file = b.path("src/agent/session.zig"),
         .target = target,
@@ -902,6 +912,7 @@ fn wireAgentCore(
     });
     session.addImport("metask_agentcore", sdk);
     session.addImport("agent_protocol", agent_protocol);
+    session.addImport("agent_model_binding", agent_model_binding);
     session.addImport("event_pump", event_pump);
     session.addImport("agent_catalog", agent_catalog);
     session.addImport("agent_mcp_runtime", agent_mcp_runtime);
@@ -915,6 +926,7 @@ fn wireAgentCore(
     });
     agent.addImport("agent_session", session);
     agent.addImport("agent_protocol", agent_protocol);
+    agent.addImport("agent_model_binding", agent_model_binding);
     agent.addImport("agent_completion", agent_completion);
     agent.addImport("agent_mcp_connector", agent_mcp_connector);
     agent.addImport("agent_mcp_stdio", agent_mcp_stdio);
@@ -925,6 +937,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     agent_provider_probe.addImport("agent_completion", agent_completion);
+    agent_provider_probe.addImport("agent_model_binding", agent_model_binding);
     agent.addImport("agent_provider_probe", agent_provider_probe);
     const models_contract = b.createModule(.{
         .root_source_file = b.path("src/product/models/contract.zig"),
@@ -1752,6 +1765,7 @@ fn wireAgentCore(
         .mcp_platform = mcp_platform,
         .mcp_oauth = mcp_oauth,
         .agent = agent,
+        .agent_model_binding = agent_model_binding,
         .agent_completion = agent_completion,
         .agent_session = session,
         .agent_catalog = agent_catalog,

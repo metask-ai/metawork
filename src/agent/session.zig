@@ -17,6 +17,8 @@ const session_control = @import("session/control.zig");
 const session_wire = @import("session/wire.zig");
 const capabilities = @import("capabilities.zig");
 const session_binding = @import("session/binding.zig");
+const model_binding = @import("agent_model_binding");
+const ModelBinding = model_binding.ModelBinding;
 // Intentional same-module cycle: Runtime owns the runtime lifecycle while
 // Session remains the composition root for the Session-bound domain object.
 const session_runtime = @import("session/runtime.zig");
@@ -324,15 +326,10 @@ const OwnedRunInput = union(enum) {
 };
 
 pub const SessionOpenOptions = struct {
-    /// Opaque service instance reference. Host-only, not part of the Core ABI.
-    provider_id: []const u8,
-    protocol: Protocol,
+    model_binding: ModelBinding,
     permission_mode: PermissionMode,
     shell_policy: ShellPolicy,
     permission_interaction: PermissionInteraction = .interactive,
-    credential: []const u8,
-    model: []const u8,
-    base_url: []const u8 = "",
     workspace: WorkspaceInput,
     canonical_user_home: []const u8 = "",
     workspace_epoch: []const u8 = "",
@@ -927,7 +924,7 @@ pub const Session = struct {
     /// the same operation while a Run is active; the caller uses that busy
     /// result to keep model changes out of the in-flight Run path.
     pub fn setModel(self: *Session, model: []const u8) Error!void {
-        if (model.len == 0 or !std.unicode.utf8ValidateSlice(model))
+        model_binding.validateModel(model) catch
             return error.CoreCallFailed;
         self.lock();
         defer self.unlock();
@@ -1224,7 +1221,7 @@ pub const Session = struct {
         expected_model: []const u8,
     ) Error!CheckpointOutcome {
         try checkpoint.validateLimits(limits);
-        if (expected_model.len == 0 or !std.unicode.utf8ValidateSlice(expected_model))
+        model_binding.validateModel(expected_model) catch
             return error.InvalidLimits;
 
         self.lock();
