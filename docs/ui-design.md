@@ -122,7 +122,7 @@ Workspace
 | Account              | 账号         | Metask 登录、身份、授权与退出         |
 | Providers            | Provider     | 用户管理的模型服务、协议、地址与凭据  |
 | Models               | 模型         | 所有 Provider 的模型与全局默认模型    |
-| Custom provider     | 模型连接     | Provider 的内部 wire 与持久化对象     |
+| Custom Provider      | 自定义 Provider | 用户创建并由 Models 持久化的 Provider |
 | Model                | 模型         | 新 Task 的执行模型，不称模式          |
 | Task overview        | 任务概览     | 按需活动摘要与详情，不称 Monitor      |
 | Current activity     | 当前活动     | Agent 此刻正在进行的可观察动作        |
@@ -435,7 +435,7 @@ Recent
 Metask 已连接
 
 账号设置
-模型连接
+模型设置
 退出登录
 ```
 
@@ -1042,6 +1042,7 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 
 `Models`规则：
 
+- `persistenceHealth = recovery_required` 显示单一显式恢复确认面；文案必须说明 Host 会先尝试恢复合法配置，只有文件缺失或确认损坏时才清空，不得无条件承诺删除 Provider 或模型配置。操作成功后完全以新 snapshot 为准；失败保留恢复面，不由 Renderer 猜测磁盘结果或自动重放；
 - 进入该设置 route只渲染 Host已提交的 Models projection，不触发隐藏同步；用户显式点击 `重新同步`时才刷新 Metask provider目录。已提交 intent在同步期间保持可读，`重新同步`只用于失败恢复或页面保持打开期间发生的 Metask外部变更，不能成为打开下拉框或切换默认值的前置步骤；
 - 页面以一组连续的 `Provider → API Key → 默认模型` 控件显示并修改 global default，并在组头持续显示当前已提交的 `Provider · Model`；Provider 先限定 credential authority，API Key 再限定模型目录，只有最终选择默认模型时才提交完整 `ModelRef`。Models 是唯一允许提交 global default 的产品页面；
 - API Key 列表对 Metask 显示名称、protocol、尾号和可用/需要处理状态；对 user-managed Provider 显示由 Host 安全持有的已保存 credential authority。两者都不显示完整 secret；

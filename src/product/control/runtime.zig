@@ -2277,16 +2277,6 @@ pub const Runtime = struct {
         return result;
     }
 
-    pub fn customProviderDefaultBinding(
-        self: *const Runtime,
-    ) ?models_contract.DefaultBinding {
-        const binding = self.custom_providers.defaultBinding() orelse return null;
-        return .{
-            .provider_id = binding.provider_id,
-            .model_id = binding.model_id,
-        };
-    }
-
     pub fn clearCustomProviderDefault(self: *Runtime) models_contract.CommandResult {
         return self.custom_providers.clearDefault();
     }
@@ -11302,7 +11292,7 @@ test "explicit Metask default activation restores admission from an empty global
     try std.testing.expect(control.newTaskAdmissionView().active_generation != 0);
 }
 
-test "Product Control reset clears Models admission without touching task state" {
+test "Product Control non-destructively recovers Models admission without touching task state" {
     var control = try testRuntime();
     defer control.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -11352,10 +11342,10 @@ test "Product Control reset clears Models admission without touching task state"
         std.mem.indexOf(u8, recovery_snapshot, "\"persistenceHealth\":\"recovery_required\"") != null,
     );
     try std.testing.expect(control.resetModelsStore(revision).accepted);
-    try std.testing.expectEqual(@as(usize, 0), control.modelsView().custom_providers.len);
-    try std.testing.expect(control.modelsView().default_selection == null);
-    try std.testing.expect(!control.newTaskAdmissionView().available);
-    try std.testing.expect(!vault.present);
+    try std.testing.expectEqual(@as(usize, 1), control.modelsView().custom_providers.len);
+    try std.testing.expect(control.modelsView().default_selection != null);
+    try std.testing.expect(control.newTaskAdmissionView().available);
+    try std.testing.expect(vault.present);
     try std.testing.expectEqual(task_route, control.task_runtime.tasks[0].?.runtime.routeId());
     try std.testing.expectEqual(task_execution, control.task_runtime.tasks[0].?.runtime.executionConst().?);
     try std.testing.expectEqualStrings(task_model, control.task_runtime.tasks[0].?.durable.execution_model);

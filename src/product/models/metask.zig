@@ -563,19 +563,6 @@ pub const PublicCatalog = struct {
         }
     }
 
-    pub fn replaceFromPublic(
-        self: *PublicCatalog,
-        source: *const PublicCatalog,
-    ) void {
-        for (source.api_keys[0..source.api_key_count], 0..) |key, index|
-            self.api_keys[index] = key;
-        for (source.models[0..source.model_count], 0..) |model, index|
-            self.models[index] = model;
-        self.model_catalog_api_key_id = source.model_catalog_api_key_id;
-        self.api_key_count = source.api_key_count;
-        self.model_count = source.model_count;
-    }
-
     pub fn clear(self: *PublicCatalog) void {
         self.model_catalog_api_key_id.set("");
         self.api_key_count = 0;
@@ -586,15 +573,6 @@ pub const PublicCatalog = struct {
         for (self.api_keys[0..self.api_key_count]) |*entry|
             if (std.mem.eql(u8, entry.id.view(), id)) return true;
         return false;
-    }
-
-    pub fn protocolForApiKey(
-        self: *const PublicCatalog,
-        id: []const u8,
-    ) ?contract.Protocol {
-        for (self.api_keys[0..self.api_key_count]) |*entry|
-            if (std.mem.eql(u8, entry.id.view(), id)) return entry.protocol;
-        return null;
     }
 
     pub fn hasModel(self: *const PublicCatalog, id: []const u8) bool {
@@ -682,31 +660,6 @@ pub const TestSupport = if (builtin.is_test) struct {
             .secret = secret,
         }) catch return error.OutOfMemory;
         secret = .{};
-    }
-
-    pub fn replacePublic(
-        catalog: *PublicCatalog,
-        api_keys: []const contract.ApiKeyView,
-        models: []const contract.ModelView,
-    ) void {
-        std.debug.assert(api_keys.len <= catalog.api_keys.len);
-        std.debug.assert(models.len <= catalog.models.len);
-        catalog.model_catalog_api_key_id.set(
-            if (models.len == 0 or api_keys.len == 0) "" else api_keys[0].id,
-        );
-        catalog.api_key_count = api_keys.len;
-        for (api_keys, catalog.api_keys[0..api_keys.len]) |source, *target| {
-            target.id.set(source.id);
-            target.name.set(source.name);
-            target.suffix.set(source.suffix);
-            target.protocol = source.protocol;
-        }
-        catalog.model_count = models.len;
-        for (models, catalog.models[0..models.len]) |source, *target| {
-            target.id.set(source.id);
-            target.display_name.set(source.display_name);
-            target.metadata = source.metadata;
-        }
     }
 } else struct {};
 
@@ -1177,14 +1130,10 @@ test "model declarations survive owned catalog copies and never leak into a repl
     var views: [contract.Limits.model_entries]contract.ModelView = undefined;
     try std.testing.expectEqualDeep(expected, session.writeModelViews(&views)[0].metadata);
 
-    var candidate: PublicCatalog = .{};
-    candidate.replaceFromSession(&session);
     var committed: PublicCatalog = .{};
-    committed.replaceFromPublic(&candidate);
+    committed.replaceFromSession(&session);
     session.reset();
-    candidate.clear();
     try std.testing.expectEqualDeep(expected, committed.modelViews()[0].metadata);
-    try std.testing.expectEqual(@as(usize, 0), candidate.modelViews().len);
 
     parsed = try parseModels(std.testing.allocator, model_fixture);
     session.models.deinit(session.allocator);

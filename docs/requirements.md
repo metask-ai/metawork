@@ -63,7 +63,7 @@ File Changes 是一次 Run 内由 AgentCore typed `file_changes` observation 记
 
 代表 Agent 继续工作前仍缺少的用户决定，不是 Tool 名称、Shell 语法或产品安全感的可视化。一个正式权限请求必须对应当前 authority 尚未覆盖、值得中断、可准确描述且执行层能兑现的具体能力或 effect；已由 Workspace picker、当前 Task authority、已配置服务或系统原生授权覆盖的决定不得重复询问。当前 MetaWork Agent 只开放 AgentCore 同步工具 permission；该请求仍是 compatibility baseline，不表示现有 payload 已具备上述完整 effect 语义。AgentCore ABI v1 虽支持结构化问题回答，但该 built-in 不进入 MetaWork Agent 能力集合。需要补充信息时，Agent 以普通 Assistant 回复结束当前 Run，用户通过 Composer 继续。同步等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批、自定义结构化交互和 typed effect confirmation 只有在 AgentCore 发布相应控制协议并通过 MetaWork 产品验收后才进入产品范围。
 
-### Account、模型连接与 ExecutionConfig
+### Account、Models 与 ExecutionConfig
 
 Account 是 MetaWork 的 Metask 账号控制面，只负责 OAuth 登录、当前已验证 identity 与 Account credential 生命周期。Product Control 的 Models aggregate 是模型提供方，拥有内置 Metask provider、API Key/model catalog、Provider-local 与 global default selection、source generation、用户管理的 Custom Provider、模型持久化和解析合同。Account 的有效授权是 Metask provider 可用的前提，但两套体系不互相拥有：Account 退出使 Metask provider不能继续目录加载或新解析，不影响 custom source，也不回收已经交给 Task/Run 的 binding。Product Control 持有当前 active `ExecutionConfig` 与新 Task admission；配置包含 typed `protocol + model + base_url`、API credential 和 opaque binding generation，Task 为实际运行取得 owned copy。durable Task 与历史记录不是 Account identity、Custom Provider identity 或 credential 的副本，只保存解释历史所需的 Workspace、protocol、model、opaque generation 和 binding facts。
 
@@ -341,7 +341,7 @@ Automatic Workspace 或经原生 picker 授权的 Manual Workspace → Task（�
 当前在同步执行路径之前提供：
 
 ```text
-Metask 登录或配置用户模型连接 → Host 后台恢复/验证 API、credential 与模型
+Metask 登录或配置用户 Provider → Host 后台恢复/验证 API、credential 与模型
 → 仅在真实歧义时请求默认 Provider/模型 → ready ExecutionConfig
 → 进入 Workbench → 选择 Workspace / 编辑 New task 草稿
 → Composer 确认模型 → Task admission → 当前同步执行 baseline

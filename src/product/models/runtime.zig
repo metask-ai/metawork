@@ -85,6 +85,30 @@ fn FixedText(comptime capacity: usize) type {
     };
 }
 
+const CanonicalCommitOutcome = enum {
+    committed,
+    not_committed,
+    unresolved,
+};
+
+/// Commits one complete canonical image. A post-rename durability failure is
+/// resolved only by reading the canonical file back and comparing exact bytes;
+/// callers retain ownership of the policy decision for each outcome.
+fn commitCanonical(
+    allocator: std.mem.Allocator,
+    store: anytype,
+    bytes: []const u8,
+) CanonicalCommitOutcome {
+    store.commit(bytes) catch |err| {
+        if (err != error.PersistenceOutcomeUnknown) return .not_committed;
+        const loaded = store.loadAlloc(allocator) catch return .unresolved;
+        const actual = loaded orelse return .unresolved;
+        defer allocator.free(actual);
+        return if (std.mem.eql(u8, actual, bytes)) .committed else .unresolved;
+    };
+    return .committed;
+}
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -859,28 +883,53 @@ pub const Runtime = struct {
         return self.commitCandidate(&candidate, true);
     }
 
-    /// Explicitly replaces the Models canonical store with the current empty
-    /// schema. This is the supported recovery path for a damaged or
-    /// otherwise unreadable `models.json`; it never decodes or migrates the
-    /// previous bytes. Host-owned custom credentials are represented as
-    /// pending deletions and scrubbed after the durable empty commit.
+    /// Recovers the Models canonical store without destroying a valid current
+    /// schema. Missing or strictly invalid canonical bytes are replaced with
+    /// the current empty schema after the caller explicitly requests reset.
     pub fn resetStore(self: *Runtime) contract.CommandResult {
         self.assertMainThread();
         if (self.store == null or self.store_healthy)
             return .rejected(.persistence_unavailable);
         if (self.catalog_attempt != null)
             return .rejected(.operation_in_progress);
+        const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
+        const bytes_optional = store.loadAlloc(self.allocator) catch
+            return .rejected(.persistence_unavailable);
+        if (bytes_optional) |bytes| {
+            defer self.allocator.free(bytes);
+            var restored = registry_impl.decode(self.allocator, bytes) catch |err| switch (err) {
+                error.OutOfMemory => return .rejected(.local_resource_exhausted),
+                else => return self.installEmptyRecovery(store),
+            };
+            defer restored.deinit();
+            if (restored.reconcileInterruptedTests()) {
+                const reconciled = registry_impl.encodeAlloc(self.allocator, &restored) catch |err|
+                    return .rejected(mapRegistryError(err));
+                defer self.allocator.free(reconciled);
+                if (commitCanonical(self.allocator, store, reconciled) != .committed)
+                    return .rejected(.persistence_unavailable);
+            }
+            self.registry.replace(&restored);
+            self.store_healthy = true;
+            self.clearMetaskRuntime(.needs_authentication, .none);
+            self.drainCredentialCleanup();
+            return .acceptedResult();
+        }
+        return self.installEmptyRecovery(store);
+    }
+
+    fn installEmptyRecovery(
+        self: *Runtime,
+        store: *registry_impl.FileStore,
+    ) contract.CommandResult {
         var candidate = self.registry.resetCandidate() catch |err|
             return .rejected(mapRegistryError(err));
         defer candidate.deinit();
         const encoded = registry_impl.encodeAlloc(self.allocator, &candidate) catch |err|
             return .rejected(mapRegistryError(err));
         defer self.allocator.free(encoded);
-        const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
-        store.commit(encoded) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) self.store_healthy = false;
+        if (commitCanonical(self.allocator, store, encoded) != .committed)
             return .rejected(.persistence_unavailable);
-        };
         self.registry.replace(&candidate);
         self.store_healthy = true;
         self.clearMetaskRuntime(.needs_authentication, .none);
@@ -1114,10 +1163,14 @@ pub const Runtime = struct {
             return .rejected(mapRegistryError(err));
         defer self.allocator.free(encoded);
         const store = if (self.store) |*value| value else return .rejected(.persistence_unavailable);
-        store.commit(encoded) catch |err| {
-            if (err == error.PersistenceOutcomeUnknown) self.store_healthy = false;
-            return .rejected(.persistence_unavailable);
-        };
+        switch (commitCanonical(self.allocator, store, encoded)) {
+            .committed => {},
+            .not_committed => return .rejected(.persistence_unavailable),
+            .unresolved => {
+                self.store_healthy = false;
+                return .rejected(.persistence_unavailable);
+            },
+        }
         self.registry.replace(candidate);
         if (drain_cleanup) self.drainCredentialCleanup();
         return .acceptedResult();
@@ -1151,7 +1204,7 @@ pub const Runtime = struct {
                 return;
             };
             defer self.allocator.free(reconciled);
-            if (!self.commitVerified(reconciled)) {
+            if (commitCanonical(self.allocator, &self.store.?, reconciled) != .committed) {
                 self.store_healthy = false;
             }
         }
@@ -1168,23 +1221,11 @@ pub const Runtime = struct {
             return;
         };
         defer self.allocator.free(encoded);
-        if (!self.commitVerified(encoded)) {
+        if (commitCanonical(self.allocator, &self.store.?, encoded) != .committed) {
             self.store_healthy = false;
             return;
         }
         self.registry.replace(&empty);
-    }
-
-    fn commitVerified(self: *Runtime, bytes: []const u8) bool {
-        const store = if (self.store) |*value| value else return false;
-        store.commit(bytes) catch |err| {
-            if (err != error.PersistenceOutcomeUnknown) return false;
-            const loaded = store.loadAlloc(self.allocator) catch return false;
-            const actual = loaded orelse return false;
-            defer self.allocator.free(actual);
-            return std.mem.eql(u8, actual, bytes);
-        };
-        return true;
     }
 
     fn markCredentialMissing(self: *Runtime, binding: registry_impl.Registry.DefaultBinding) void {
@@ -1212,13 +1253,26 @@ pub const Runtime = struct {
     fn drainCredentialCleanup(self: *Runtime) void {
         if (!self.store_healthy) return;
         const vault = self.credential_vault orelse return;
-        while (self.registry.nextCredentialDeletion()) |provider_id| {
-            vault.delete(provider_id) catch return;
-            var candidate = self.registry.clone() catch return;
+        var snapshot: std.ArrayList([]u8) = .empty;
+        defer {
+            for (snapshot.items) |provider_id| self.allocator.free(provider_id);
+            snapshot.deinit(self.allocator);
+        }
+        snapshot.ensureTotalCapacity(
+            self.allocator,
+            self.registry.credentialDeletions().len,
+        ) catch return;
+        for (self.registry.credentialDeletions()) |provider_id| {
+            const owned = self.allocator.dupe(u8, provider_id) catch return;
+            snapshot.appendAssumeCapacity(owned);
+        }
+        for (snapshot.items) |provider_id| {
+            vault.delete(provider_id) catch continue;
+            var candidate = self.registry.clone() catch continue;
             defer candidate.deinit();
-            candidate.completeCredentialDeletion(provider_id) catch return;
+            candidate.completeCredentialDeletion(provider_id) catch continue;
             const result = self.commitCandidate(&candidate, false);
-            if (!result.accepted) return;
+            if (!result.accepted and !self.store_healthy) return;
         }
     }
 
@@ -1284,6 +1338,71 @@ fn metaskSourceMatches(source_id: []const u8, api_key_id: []const u8) bool {
     return std.mem.eql(u8, source_id, expected);
 }
 
+const CanonicalCommitTestStore = struct {
+    const Mode = enum {
+        committed,
+        write_failed,
+        unknown_match,
+        unknown_different,
+        unknown_missing,
+        unknown_read_failed,
+    };
+
+    mode: Mode,
+    target: []const u8 = &.{},
+    read_count: usize = 0,
+
+    fn commit(self: *@This(), bytes: []const u8) registry_impl.FileStoreError!void {
+        self.target = bytes;
+        return switch (self.mode) {
+            .committed => {},
+            .write_failed => error.WriteFailed,
+            .unknown_match,
+            .unknown_different,
+            .unknown_missing,
+            .unknown_read_failed,
+            => error.PersistenceOutcomeUnknown,
+        };
+    }
+
+    fn loadAlloc(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+    ) (registry_impl.FileStoreError || std.mem.Allocator.Error)!?[]u8 {
+        self.read_count += 1;
+        return switch (self.mode) {
+            .unknown_match => try allocator.dupe(u8, self.target),
+            .unknown_different => try allocator.dupe(u8, "different-canonical"),
+            .unknown_missing => null,
+            .unknown_read_failed => error.ReadFailed,
+            .committed, .write_failed => unreachable,
+        };
+    }
+};
+
+test "canonical commit resolves only an exact outcome-unknown readback" {
+    const cases = [_]struct {
+        mode: CanonicalCommitTestStore.Mode,
+        expected: CanonicalCommitOutcome,
+        expected_reads: usize,
+    }{
+        .{ .mode = .committed, .expected = .committed, .expected_reads = 0 },
+        .{ .mode = .write_failed, .expected = .not_committed, .expected_reads = 0 },
+        .{ .mode = .unknown_match, .expected = .committed, .expected_reads = 1 },
+        .{ .mode = .unknown_different, .expected = .unresolved, .expected_reads = 1 },
+        .{ .mode = .unknown_missing, .expected = .unresolved, .expected_reads = 1 },
+        .{ .mode = .unknown_read_failed, .expected = .unresolved, .expected_reads = 1 },
+    };
+    for (cases) |case| {
+        var store: CanonicalCommitTestStore = .{ .mode = case.mode };
+        try std.testing.expectEqual(
+            case.expected,
+            commitCanonical(std.testing.allocator, &store, "candidate-canonical"),
+        );
+        try std.testing.expectEqual(case.expected_reads, store.read_count);
+    }
+}
+
 const TestVault = struct {
     const slot = "custom-provider-00000000000000000000000000000001";
 
@@ -1291,6 +1410,8 @@ const TestVault = struct {
     secret_len: usize = 0,
     present: bool = false,
     fail_store: bool = false,
+    expected_secret_ptr: ?[*]const u8 = null,
+    observed_direct_borrow: bool = false,
 
     fn port(self: *TestVault) ports.CredentialVault {
         return .{
@@ -1308,6 +1429,10 @@ const TestVault = struct {
 
     fn store(context: *anyopaque, _: []const u8, secret: []const u8) anyerror!void {
         const self: *TestVault = @ptrCast(@alignCast(context));
+        self.observed_direct_borrow = if (self.expected_secret_ptr) |expected|
+            secret.ptr == expected
+        else
+            false;
         if (self.fail_store) return error.WriteFailed;
         if (secret.len > self.secret.len) return error.WriteFailed;
         @memcpy(self.secret[0..secret.len], secret);
@@ -1330,6 +1455,88 @@ const TestVault = struct {
         self.present = false;
     }
 };
+
+const CleanupTestVault = struct {
+    fail_id: []const u8 = &.{},
+    calls: [8][contract.Limits.instance_id_bytes]u8 = undefined,
+    call_lengths: [8]usize = @splat(0),
+    call_count: usize = 0,
+
+    fn port(self: *@This()) ports.CredentialVault {
+        return .{
+            .context = self,
+            .generate_slot_fn = generate,
+            .store_fn = store,
+            .get_fn = get,
+            .delete_fn = delete,
+        };
+    }
+
+    fn generate(_: *anyopaque, _: *[ports.credential_slot_bytes]u8) anyerror!void {
+        return error.Unavailable;
+    }
+
+    fn store(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {
+        return error.Unavailable;
+    }
+
+    fn get(_: *anyopaque, _: []const u8, _: []u8) anyerror!?[]const u8 {
+        return null;
+    }
+
+    fn delete(context: *anyopaque, provider_id: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const index = self.call_count;
+        if (index >= self.calls.len or provider_id.len > self.calls[index].len)
+            return error.Unavailable;
+        @memcpy(self.calls[index][0..provider_id.len], provider_id);
+        self.call_lengths[index] = provider_id.len;
+        self.call_count += 1;
+        if (std.mem.eql(u8, provider_id, self.fail_id)) return error.DeleteFailed;
+    }
+
+    fn call(self: *const @This(), index: usize) []const u8 {
+        return self.calls[index][0..self.call_lengths[index]];
+    }
+};
+
+test "credential cleanup skips failed tombstones and completes later IDs" {
+    const cleanup_a = "custom-provider-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const cleanup_b = "custom-provider-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const cleanup_c = "custom-provider-cccccccccccccccccccccccccccccccc";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: CleanupTestVault = .{ .fail_id = cleanup_a };
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory_storage[0..directory_len], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+
+    var candidate = try runtime.registry.clone();
+    defer candidate.deinit();
+    try candidate.reserveCredentialDeletion(cleanup_a);
+    try candidate.reserveCredentialDeletion(cleanup_b);
+    try candidate.reserveCredentialDeletion(cleanup_c);
+    try std.testing.expect(runtime.commitCandidate(&candidate, false).accepted);
+
+    runtime.drainCredentialCleanup();
+    try std.testing.expectEqual(@as(usize, 3), vault.call_count);
+    try std.testing.expectEqualStrings(cleanup_a, vault.call(0));
+    try std.testing.expectEqualStrings(cleanup_b, vault.call(1));
+    try std.testing.expectEqualStrings(cleanup_c, vault.call(2));
+    try std.testing.expectEqual(@as(usize, 1), runtime.registry.credentialDeletions().len);
+    try std.testing.expectEqualStrings(cleanup_a, runtime.registry.credentialDeletions()[0]);
+
+    vault.fail_id = &.{};
+    runtime.drainCredentialCleanup();
+    try std.testing.expectEqual(@as(usize, 4), vault.call_count);
+    try std.testing.expectEqualStrings(cleanup_a, vault.call(3));
+    try std.testing.expectEqual(@as(usize, 0), runtime.registry.credentialDeletions().len);
+}
 
 fn createTestProviderWithModel(
     runtime: *Runtime,
@@ -1523,9 +1730,11 @@ test "credential replacement revokes readiness before writing and restores fresh
         runtime.stop();
         runtime.deinit();
     }
+    const old_secret = "old-secret";
+    vault.expected_secret_ptr = old_secret.ptr;
     try createTestProviderWithModel(
         &runtime,
-        "old-secret",
+        old_secret,
         .{
             .display_name = "Provider",
             .protocol = .openai_responses,
@@ -1533,6 +1742,12 @@ test "credential replacement revokes readiness before writing and restores fresh
         },
         .{ .id = "model-1", .display_name = "Model 1" },
     );
+    try std.testing.expect(vault.observed_direct_borrow);
+    try std.testing.expectEqualStrings(old_secret, vault.secret[0..vault.secret_len]);
+    const created_canonical = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(created_canonical);
+    try std.testing.expect(std.mem.indexOf(u8, created_canonical, old_secret) == null);
     const initial = runtime.views()[0];
     const selection: contract.CustomProviderSelectionCommand = .{
         .source_id = TestVault.slot,
@@ -1559,9 +1774,18 @@ test "credential replacement revokes readiness before writing and restores fresh
     }).accepted);
 
     vault.fail_store = true;
-    const failed = runtime.replaceCredential("new-secret", selection);
+    const new_secret = "new-secret";
+    vault.expected_secret_ptr = new_secret.ptr;
+    vault.observed_direct_borrow = false;
+    const failed = runtime.replaceCredential(new_secret, selection);
     try std.testing.expect(!failed.accepted);
+    try std.testing.expect(vault.observed_direct_borrow);
     try std.testing.expectEqual(contract.ManagementError.credential_write_failed, failed.error_code.?);
+    try std.testing.expectEqualStrings(old_secret, vault.secret[0..vault.secret_len]);
+    const failed_canonical = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(failed_canonical);
+    try std.testing.expect(std.mem.indexOf(u8, failed_canonical, new_secret) == null);
     try std.testing.expect(runtime.view().default_selection == null);
     const revoked = runtime.views()[0];
     try std.testing.expectEqual(contract.CustomProviderCredentialStatus.missing, revoked.credential_status);
@@ -1569,16 +1793,22 @@ test "credential replacement revokes readiness before writing and restores fresh
     try std.testing.expect(!revoked.models[0].ready);
 
     vault.fail_store = false;
-    try std.testing.expect(runtime.replaceCredential("new-secret", .{
+    vault.observed_direct_borrow = false;
+    try std.testing.expect(runtime.replaceCredential(new_secret, .{
         .source_id = TestVault.slot,
         .expected_provider_revision = revoked.provider_revision,
     }).accepted);
+    try std.testing.expect(vault.observed_direct_borrow);
     const restored = runtime.views()[0];
     try std.testing.expectEqual(contract.CustomProviderCredentialStatus.ready, restored.credential_status);
     try std.testing.expectEqual(contract.CustomProviderState.configuring, restored.state);
     try std.testing.expect(restored.provider_revision != initial.provider_revision);
     try std.testing.expect(restored.source_generation != initial.source_generation);
-    try std.testing.expectEqualStrings("new-secret", vault.secret[0..vault.secret_len]);
+    try std.testing.expectEqualStrings(new_secret, vault.secret[0..vault.secret_len]);
+    const replaced_canonical = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(replaced_canonical);
+    try std.testing.expect(std.mem.indexOf(u8, replaced_canonical, new_secret) == null);
 }
 
 test "Models owns Metask catalog authority without changing global default" {
@@ -2003,7 +2233,7 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
     );
 }
 
-test "Models reset rejects healthy store and scrubs known credentials during recovery" {
+test "Models reset rejects healthy store and non-destructively recovers a valid canonical" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2033,18 +2263,76 @@ test "Models reset rejects healthy store and scrubs known credentials during rec
     try std.testing.expect(vault.present);
     try std.testing.expectEqual(@as(usize, 1), runtime.views().len);
 
-    // An outcome-unknown write leaves the last trusted in-memory registry
-    // available for explicit recovery, including credential cleanup.
+    const canonical_before = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(canonical_before);
+
+    // A prior uncertain result must not authorize destroying a canonical that
+    // strict readback now proves valid.
     runtime.store_healthy = false;
     try std.testing.expectEqual(
         contract.PersistenceHealth.recovery_required,
         runtime.view().persistence_health,
     );
     try std.testing.expect(runtime.resetStore().accepted);
-    try std.testing.expect(!vault.present);
-    try std.testing.expectEqual(@as(usize, 0), runtime.views().len);
+    try std.testing.expect(vault.present);
+    try std.testing.expectEqual(@as(usize, 1), runtime.views().len);
     try std.testing.expect(runtime.view().default_selection == null);
-    try std.testing.expect(runtime.registry.nextCredentialDeletion() == null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.registry.credentialDeletions().len);
+    const canonical_after = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(canonical_after);
+    try std.testing.expectEqualStrings(canonical_before, canonical_after);
+}
+
+test "Models reset durably reconciles interrupted tests in a valid canonical" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(directory_storage[0..directory_len], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try createTestProviderWithModel(
+        &runtime,
+        "reset-secret",
+        .{
+            .display_name = "Interrupted",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://api.openai.com/v1/responses",
+        },
+        .{ .id = "gpt-5", .display_name = "GPT-5" },
+    );
+    const provider = runtime.views()[0];
+    try std.testing.expect(runtime.submitCommand(.{ .test_model = .{
+        .model = .{ .source_id = provider.id, .model_id = "gpt-5" },
+        .expected_provider_revision = provider.provider_revision,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    } }).accepted);
+    try std.testing.expectEqual(
+        contract.CustomModelTestStatus.testing,
+        runtime.views()[0].models[0].test_status,
+    );
+
+    runtime.store_healthy = false;
+    try std.testing.expect(runtime.resetStore().accepted);
+    try std.testing.expect(runtime.store_healthy);
+    try std.testing.expectEqual(
+        contract.CustomModelTestStatus.failed,
+        runtime.views()[0].models[0].test_status,
+    );
+
+    const bytes = (try runtime.store.?.loadAlloc(std.testing.allocator)) orelse
+        return error.TestExpectedEqual;
+    defer std.testing.allocator.free(bytes);
+    var restored = try registry_impl.decode(std.testing.allocator, bytes);
+    defer restored.deinit();
+    try std.testing.expect(!restored.reconcileInterruptedTests());
 }
 
 test "Models reset rejects unavailable persistence capability" {
