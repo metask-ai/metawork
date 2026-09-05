@@ -193,6 +193,10 @@ test("Custom Provider and model commands carry split source-qualified revisions"
     normalizedBaseUrl: "https://api.example.com/v1/responses",
     apiKey: "create-secret",
   });
+  await client.createBuiltinProvider({
+    providerId: "deepseek",
+    apiKey: "builtin-secret",
+  });
   await client.updateCustomProvider({
     providerId: "source-1",
     expectedProviderRevision: "2",
@@ -233,6 +237,13 @@ test("Custom Provider and model commands carry split source-qualified revisions"
         protocol: "openai_responses",
         normalizedBaseUrl: "https://api.example.com/v1/responses",
         apiKey: "create-secret",
+      },
+    },
+    {
+      command: "metawork.models.builtinProviders.create",
+      payload: {
+        providerId: "deepseek",
+        apiKey: "builtin-secret",
       },
     },
     {

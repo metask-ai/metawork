@@ -335,6 +335,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.models_configure_metask_selection, .function = configureMetaskSelection },
             .{ .name = commands.models_select_default, .function = selectModelsDefault },
             .{ .name = commands.custom_provider_create, .function = customProviderCreate },
+            .{ .name = commands.builtin_provider_create, .function = builtinProviderCreate },
             .{ .name = commands.custom_provider_update, .function = customProviderUpdate },
             .{ .name = commands.custom_provider_replace_credential, .function = customProviderReplaceCredential },
             .{ .name = commands.custom_provider_remove, .function = customProviderRemove },
@@ -1648,6 +1649,37 @@ pub const Dispatcher = struct {
         return encodeExecutionResult(
             output,
             control.createCustomProviderWithCredential(parsed.value.apiKey, spec),
+        );
+    }
+
+    fn builtinProviderCreate(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(
+            handlers.BuiltinProviderCreate,
+            invocation.request.payload,
+        );
+        defer parsed.deinit();
+        const provider_id = std.meta.stringToEnum(
+            models_contract.BuiltinProviderId,
+            parsed.value.providerId,
+        ) orelse return error.InvalidBridgePayload;
+        if (parsed.value.apiKey.len == 0 or
+            parsed.value.apiKey.len > models_contract.Limits.credential_bytes)
+            return error.InvalidBridgePayload;
+        const control = try self.requireProductControl();
+        return encodeExecutionResult(
+            output,
+            control.createBuiltinProviderWithCredential(
+                parsed.value.apiKey,
+                provider_id,
+            ),
         );
     }
 

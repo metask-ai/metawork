@@ -580,6 +580,12 @@ export class BridgeClient {
     );
   }
 
+  async createBuiltinProvider(input: { providerId: string; apiKey: string }) {
+    return decodeExecutionCommandResult(
+      await this.invoke(commands.builtinProviderCreate, input),
+    );
+  }
+
   async updateCustomProvider(input: {
     providerId: string;
     expectedProviderRevision: string;

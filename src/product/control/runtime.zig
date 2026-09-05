@@ -2264,6 +2264,19 @@ pub const Runtime = struct {
         return result;
     }
 
+    pub fn createBuiltinProviderWithCredential(
+        self: *Runtime,
+        secret: []const u8,
+        provider_id: models_contract.BuiltinProviderId,
+    ) models_contract.CommandResult {
+        const result = self.custom_providers.createBuiltinWithCredential(
+            secret,
+            provider_id,
+        );
+        if (result.accepted) self.finishExecutionCommitNoFail();
+        return result;
+    }
+
     pub fn replaceCustomProviderCredential(
         self: *Runtime,
         secret: []const u8,
@@ -4750,11 +4763,24 @@ pub const Runtime = struct {
             view.metask_selection_revision,
         }) catch return error.SnapshotTooLarge;
         try self.writeOptionalModelRef(writer, view.default_selection);
-        writer.print(",\"selectionRevision\":\"{d}\",\"operation\":\"{s}\",\"errorCode\":\"{s}\",\"customProviders\":[", .{
+        writer.print(",\"selectionRevision\":\"{d}\",\"operation\":\"{s}\",\"errorCode\":\"{s}\",\"builtinProviderPresets\":[", .{
             view.selection_revision,
             @tagName(view.operation),
             @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
+        for (view.builtin_provider_presets, 0..) |preset, index| {
+            if (index != 0) writer.writeByte(',') catch
+                return error.SnapshotTooLarge;
+            writer.print("{{\"id\":\"{s}\",\"displayName\":", .{@tagName(preset.id)}) catch
+                return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, preset.display_name);
+            writer.writeAll(",\"apiKeyUrl\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, preset.api_key_url);
+            writer.writeAll(",\"documentationUrl\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, preset.documentation_url);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("],\"customProviders\":[") catch return error.SnapshotTooLarge;
         try self.writeCustomProviders(writer, view.custom_providers);
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
@@ -4782,6 +4808,12 @@ pub const Runtime = struct {
             if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
             writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, provider.id);
+            writer.writeAll(",\"builtinProviderId\":") catch return error.SnapshotTooLarge;
+            if (provider.builtin_provider_id) |provider_id|
+                writer.print("\"{s}\"", .{@tagName(provider_id)}) catch
+                    return error.SnapshotTooLarge
+            else
+                writer.writeAll("null") catch return error.SnapshotTooLarge;
             writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, provider.display_name);
             writer.print(",\"protocol\":\"{s}\",\"normalizedBaseUrl\":", .{@tagName(provider.protocol)}) catch
@@ -6995,6 +7027,7 @@ pub const Runtime = struct {
             .stop_custom_providers_fn = controlStopCustomProviders,
             .reset_model_store_fn = controlResetModelStore,
             .create_custom_provider_fn = controlCreateCustomProvider,
+            .create_builtin_provider_fn = controlCreateBuiltinProvider,
             .replace_custom_provider_credential_fn = controlReplaceCustomProviderCredential,
             .submit_custom_provider_fn = controlSubmitCustomProvider,
             .begin_custom_provider_probe_fn = controlBeginCustomProviderProbe,
@@ -7258,6 +7291,9 @@ fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_co
 }
 fn controlCreateCustomProvider(context: *anyopaque, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
     return controlOwner(context).createCustomProviderWithCredential(secret, spec);
+}
+fn controlCreateBuiltinProvider(context: *anyopaque, secret: []const u8, provider_id: models_contract.BuiltinProviderId) models_contract.CommandResult {
+    return controlOwner(context).createBuiltinProviderWithCredential(secret, provider_id);
 }
 fn controlReplaceCustomProviderCredential(context: *anyopaque, secret: []const u8, selection: models_contract.CustomProviderSelectionCommand) models_contract.CommandResult {
     return controlOwner(context).replaceCustomProviderCredential(secret, selection);
