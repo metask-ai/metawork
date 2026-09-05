@@ -349,6 +349,18 @@ export function TaskOverview({
     <div className="inspector-frame">
       <header className="inspector-header">
         <h2 id="task-inspector-title">{t("inspector.title")}</h2>
+        <div className="inspector-permission-profile">
+          <span>{t("inspector.mcp_authority")}</span>
+          <strong>
+            {t(
+              task.mcpAuthority.kind === "unavailable"
+                ? "inspector.mcp_unavailable"
+                : task.mcpAuthority.selection === "selected"
+                  ? "inspector.mcp_selected"
+                  : "inspector.mcp_none",
+            )}
+          </strong>
+        </div>
         {permissionProfilesEnabled && (
           <div className="inspector-permission-profile">
             <span>{t("permission.task.label")}</span>

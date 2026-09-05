@@ -444,6 +444,7 @@ pub const CreateCandidate = struct {
     binding: task_agent_session.Binding,
     execution: owned_task_execution.OwnedTaskExecution,
     pinned_catalog: ?product_skill.catalog.Snapshot,
+    mcp_authority: task_attachment.McpAuthorityAtCreation,
 };
 
 pub const CreateWorkspaceTrust = union(enum) {
@@ -466,6 +467,7 @@ pub const CreateTaskInput = struct {
     skill_catalog: ?*agent.CatalogLease,
     granted_skill_ids: []const []const u8,
     mcp_selection: ?*const agent.McpSelection,
+    mcp_authority: task_attachment.McpAuthorityAtCreation,
     pinned_catalog: *?product_skill.catalog.Snapshot,
     max_workspace_bytes: usize,
     max_title_bytes: usize,
@@ -1117,6 +1119,7 @@ pub const Runtime = struct {
             .binding = binding.take(),
             .execution = execution.take(),
             .pinned_catalog = pinned,
+            .mcp_authority = input.mcp_authority,
         };
         model_live = false;
         workspace_live = false;
@@ -1185,6 +1188,7 @@ pub const Runtime = struct {
                 .ui_history = ui_history,
             },
             .runtime = .{
+                .mcp_authority_at_creation = owned.mcp_authority,
                 .attachment = .{ .attached = .{
                     .binding = owned.binding.take(),
                     .execution = owned.execution.take(),
@@ -1697,6 +1701,14 @@ pub const Runtime = struct {
     pub fn taskBindingEpoch(self: *const Runtime, task_id: u64) ?u64 {
         const task = self.findConst(task_id) orelse return null;
         return task.durable.binding_epoch;
+    }
+
+    pub fn taskMcpAuthority(
+        self: *const Runtime,
+        task_id: u64,
+    ) ?task_attachment.McpAuthorityAtCreation {
+        const task = self.findConst(task_id) orelse return null;
+        return task.runtime.mcp_authority_at_creation;
     }
 
     pub fn taskExecutionIdentity(

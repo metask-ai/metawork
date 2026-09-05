@@ -43,6 +43,8 @@ const mcp_testing = product_mcp.testing;
 const contract_fixture = @import("product_control_contract_fixture");
 const build_options = @import("build_options");
 
+pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
+
 pub const Error = lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
@@ -3086,9 +3088,6 @@ pub const Runtime = struct {
         allow_unowned_automatic: bool,
     ) Error!PreparedTaskCreate {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.mcp) |*mcp|
-            if (mcp.blocksNewTaskAdmission())
-                return error.CatalogLoading;
         if (self.executionReplacementPending())
             return error.ExecutionInUse;
         if (!self.canCreateTask())
@@ -3163,7 +3162,18 @@ pub const Runtime = struct {
             .workspace = &self.workspace,
             .preparation = &order_preparation,
         };
-        const prepared = self.task_runtime.openTask(.{
+        var mcp_selection = if (self.mcp) |*mcp|
+            mcp.selectionForNewTask()
+        else
+            null;
+        var mcp_authority: product_task.McpAuthorityAtCreation = if (self.mcp) |*mcp|
+            if (mcp.newTaskAuthorityReady())
+                if (mcp_selection == null) .ready_without_selection else .ready_with_selection
+            else
+                .unavailable
+        else
+            .unavailable;
+        var task_input: task_runtime.CreateTaskInput = .{
             .agent_runtime = self.agent_runtime,
             .execution = execution_input,
             .protocol = execution_input.target.protocol,
@@ -3180,7 +3190,8 @@ pub const Runtime = struct {
             .canonical_user_home = self.canonical_user_home orelse "",
             .skill_catalog = catalog_lease,
             .granted_skill_ids = granted_skill_ids.items,
-            .mcp_selection = if (self.mcp) |*mcp| mcp.selectionForNewTask() else null,
+            .mcp_selection = mcp_selection,
+            .mcp_authority = mcp_authority,
             .pinned_catalog = &pinned_catalog,
             .max_workspace_bytes = self.limits.max_workspace_bytes,
             .max_title_bytes = self.limits.max_task_title_bytes,
@@ -3197,11 +3208,19 @@ pub const Runtime = struct {
             },
             .text = self.taskRuntimeTextProjection(),
             .release = self.taskRuntimeReleaseEffects(),
-        }) catch |err| switch (err) {
+        };
+        const prepared = self.task_runtime.openTask(task_input) catch |err| switch (err) {
             error.SessionCapacity => return error.TaskCapacity,
-            error.McpNotRefreshed => {
+            error.McpNotRefreshed => retry: {
                 self.recoverExpiredMcpCatalogNoFail();
-                return error.CatalogLoading;
+                mcp_selection = null;
+                mcp_authority = .unavailable;
+                task_input.mcp_selection = mcp_selection;
+                task_input.mcp_authority = mcp_authority;
+                break :retry self.task_runtime.openTask(task_input) catch |retry_err| switch (retry_err) {
+                    error.SessionCapacity => return error.TaskCapacity,
+                    else => return retry_err,
+                };
             },
             else => return err,
         };
@@ -3365,6 +3384,14 @@ pub const Runtime = struct {
     pub fn taskBindingEpoch(self: *Runtime, task_id: u64) Error!u64 {
         self.syncLifecycle();
         return self.task_runtime.taskBindingEpoch(task_id) orelse error.UnknownTask;
+    }
+
+    pub fn taskMcpAuthority(
+        self: *Runtime,
+        task_id: u64,
+    ) Error!product_task.McpAuthorityAtCreation {
+        self.syncLifecycle();
+        return self.task_runtime.taskMcpAuthority(task_id) orelse error.UnknownTask;
     }
 
     pub fn testRestoreCancellationRequested(
@@ -15232,11 +15259,7 @@ test "MCP authorization operation owns product phase and durable token boundary"
     const server_id = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].id;
     var start = (try control.beginMcpAuthorization(1, server_id)).?;
     defer start.deinit();
-    try std.testing.expectError(error.CatalogLoading, control.refreshMcpCatalog());
-    try std.testing.expect(mcp_testing.state(&control.mcp.?).refresh_pending);
-    try std.testing.expect(!mcp_testing.state(&control.mcp.?).refresh_pending_blocks_admission);
     try std.testing.expect(mcp_testing.state(&control.mcp.?).admission == .ready);
-    try std.testing.expectEqual(@as(u64, 1), mcp_testing.state(&control.mcp.?).refresh_request_generation);
     try std.testing.expect(!control.mcp.?.hasRefreshJob());
     try std.testing.expectEqual(
         McpAuthorizationPhase.discovering,
@@ -15284,21 +15307,13 @@ test "MCP authorization operation owns product phase and durable token boundary"
     const durable_id = exchange.started.operation.id;
     try std.testing.expect(control.finishMcpAuthorization(start.operation_id));
     try std.testing.expect(control.mcpAuthorizationOperation() == null);
-    try std.testing.expect(mcp_testing.state(&control.mcp.?).refresh_pending);
-    try std.testing.expect(!mcp_testing.state(&control.mcp.?).refresh_pending_blocks_admission);
     try std.testing.expect(!control.mcp.?.hasRefreshJob());
-    try std.testing.expectError(error.CatalogLoading, control.refreshMcpCatalog());
-    try std.testing.expectEqual(@as(u64, 2), mcp_testing.state(&control.mcp.?).refresh_request_generation);
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
         try control.recoverMcpOauthOperation(durable_id),
     );
     try std.testing.expect(!mcp_testing.state(&control.mcp.?).refresh_pending);
-    try std.testing.expect(control.mcp.?.hasRefreshJob());
-    try std.testing.expectEqual(
-        @as(u64, 2),
-        mcp_testing.refreshJob(&control.mcp.?).?.request_generation,
-    );
+    try std.testing.expect(!control.mcp.?.hasRefreshJob());
     const oauth = mcp_testing.state(&control.mcp.?).management.?.desiredRegistry().?.servers[0].auth.oauth.?;
     try std.testing.expectEqualStrings("reauth_required", oauth.status);
 }
@@ -15564,7 +15579,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     mcp_testing.state(&control.mcp.?).refresh_request_generation = 1;
     mcp_testing.installRefreshJob(&control.mcp.?, blocked_job);
     try std.testing.expectError(
-        error.CatalogLoading,
+        error.ExecutionUnavailable,
         control.createTaskInWorkspace(
             1,
             1,

@@ -2513,7 +2513,8 @@ fn entryCompatible(
                 std.mem.eql(u8, &fingerprint, &runtimeDescriptorFingerprint(server)) and
                 (serverRuntimeAuthorizationReady(server) or
                     if (server.auth.oauth) |oauth|
-                        std.mem.eql(u8, oauth.status, "reauth_required")
+                        std.mem.eql(u8, oauth.status, "reauth_required") or
+                            std.mem.eql(u8, oauth.status, "awaiting_tokens")
                     else
                         false)
         else
@@ -7751,6 +7752,15 @@ test "runtime OAuth rejection retires the grant without invalidating its loaded 
         .id = "oauth",
         .state = .{ .loaded = runtimeDescriptorFingerprint(server) },
     }, target.servers[0], test_limits));
+    var awaiting = target.servers[0];
+    var awaiting_oauth = awaiting.auth.oauth.?;
+    awaiting_oauth.status = "awaiting_tokens";
+    awaiting_oauth.grant = null;
+    awaiting.auth.oauth = awaiting_oauth;
+    try std.testing.expect(entryCompatible(.{
+        .id = "oauth",
+        .state = .{ .loaded = runtimeDescriptorFingerprint(server) },
+    }, awaiting, test_limits));
 }
 
 test "typed OAuth management commits consent marker and fresh token locators" {

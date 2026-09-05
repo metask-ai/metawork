@@ -2073,16 +2073,18 @@ pub const Dispatcher = struct {
             .{ .interactive = permission_profile },
         ) catch |err| {
             if (taskCreateRejection(err)) |reason|
-                return encodeTaskCreateResult(output, false, null, null, reason);
+                return encodeTaskCreateResult(output, false, null, null, null, reason);
             return err;
         };
         const binding_epoch = try workbench.taskBindingEpoch(task_id);
+        const mcp_authority = try workbench.taskMcpAuthority(task_id);
         self.notifyCommitted();
         return encodeTaskCreateResult(
             output,
             true,
             task_id,
             binding_epoch,
+            mcp_authority,
             null,
         );
     }
@@ -4228,13 +4230,16 @@ fn encodeTaskCreateResult(
     accepted: bool,
     task_id: ?u64,
     binding_epoch: ?u64,
+    mcp_authority: ?product_control.TaskMcpAuthorityAtCreation,
     reason: ?[]const u8,
 ) ![]const u8 {
     const valid = if (accepted)
         task_id != null and task_id.? != 0 and
-            binding_epoch != null and binding_epoch.? != 0 and reason == null
+            binding_epoch != null and binding_epoch.? != 0 and
+            mcp_authority != null and reason == null
     else
-        task_id == null and binding_epoch == null and reason != null;
+        task_id == null and binding_epoch == null and
+            mcp_authority == null and reason != null;
     if (!valid)
         return error.InvalidTaskCreateResult;
     var writer = std.Io.Writer.fixed(output);
@@ -4249,6 +4254,18 @@ fn encodeTaskCreateResult(
         writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"mcpAuthority\":") catch return error.NoSpaceLeft;
+    if (mcp_authority) |authority| switch (authority) {
+        .ready_with_selection => writer.writeAll(
+            "{\"kind\":\"ready\",\"selection\":\"selected\"}",
+        ) catch return error.NoSpaceLeft,
+        .ready_without_selection => writer.writeAll(
+            "{\"kind\":\"ready\",\"selection\":\"none\"}",
+        ) catch return error.NoSpaceLeft,
+        .unavailable => writer.writeAll(
+            "{\"kind\":\"unavailable\",\"selection\":null}",
+        ) catch return error.NoSpaceLeft,
+    } else writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
     if (reason) |value|
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
@@ -4870,23 +4887,39 @@ test "mutation response encoders reject every inconsistent success and rejection
     var output: [256]u8 = undefined;
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, false, 1, null, "task_unavailable"),
+        encodeTaskCreateResult(&output, false, 1, null, null, "task_unavailable"),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, false, null, null, null),
+        encodeTaskCreateResult(&output, false, null, null, null, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 1, 1, "unexpected"),
+        encodeTaskCreateResult(&output, true, 1, 1, .ready_without_selection, "unexpected"),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 0, 1, null),
+        encodeTaskCreateResult(&output, true, 0, 1, .ready_without_selection, null),
     );
     try std.testing.expectError(
         error.InvalidTaskCreateResult,
-        encodeTaskCreateResult(&output, true, 1, 0, null),
+        encodeTaskCreateResult(&output, true, 1, 0, .ready_without_selection, null),
+    );
+    try std.testing.expectError(
+        error.InvalidTaskCreateResult,
+        encodeTaskCreateResult(&output, true, 1, 1, null, null),
+    );
+    const task_create = try encodeTaskCreateResult(
+        &output,
+        true,
+        1,
+        1,
+        .unavailable,
+        null,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"accepted\":true,\"taskId\":\"1\",\"bindingEpoch\":\"1\",\"mcpAuthority\":{\"kind\":\"unavailable\",\"selection\":null},\"reason\":null}",
+        task_create,
     );
     try std.testing.expectError(
         error.InvalidTaskRunResult,

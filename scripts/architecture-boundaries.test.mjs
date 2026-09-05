@@ -1891,11 +1891,12 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
   for (const field of [
     "refresh_request_generation",
     "refresh_pending",
-    "refresh_pending_blocks_admission",
     "refresh_deadline_ms",
   ]) {
     assert.match(state, new RegExp(`\\b${field}\\b`));
   }
+  assert.doesNotMatch(state, /\brefresh_pending_blocks_admission\b/);
+  assert.doesNotMatch(runtime, /\bblocksNewTaskAdmission\b/);
   assert.match(state, /pub fn mcpRefreshDelayMs/);
   assert.match(state, /pub fn mcpRefreshDeadlineMs/);
   // Product MCP policy prepares Agent-owned allowlist values and returns

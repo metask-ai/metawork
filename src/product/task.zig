@@ -12,6 +12,7 @@ const view = @import("product_task_view");
 const execution_binding = @import("product_task_execution_binding");
 
 pub const Runtime = runtime.Runtime;
+pub const CreateTaskInput = runtime.CreateTaskInput;
 pub const PreparedCreate = runtime.PreparedCreate;
 pub const PreparedRun = runtime.PreparedRun;
 pub const PreparedCompact = runtime.PreparedCompact;
@@ -44,6 +45,7 @@ pub const LifecycleEffects = runtime.LifecycleEffects;
 pub const Protocol = state.Protocol;
 pub const PermissionProfile = state.PermissionProfile;
 pub const PermissionInteraction = state.PermissionInteraction;
+pub const McpAuthorityAtCreation = attachment.McpAuthorityAtCreation;
 pub const RunOutcome = state.RunOutcome;
 pub const FileReferencePosition = state.FileReferencePositionView;
 pub const FileReferenceRange = state.FileReferenceRangeView;

@@ -77,6 +77,28 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   );
 });
 
+test("Task MCP authority is an exact immutable creation-time fact", () => {
+  for (const authority of [
+    { kind: "ready", selection: "selected" },
+    { kind: "ready", selection: "none" },
+    { kind: "unavailable", selection: null },
+  ]) {
+    const candidate = clone(fixture);
+    candidate.tasks[0].mcpAuthority = authority;
+    assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  }
+
+  const mixed = clone(fixture);
+  mixed.tasks[0].mcpAuthority = {
+    kind: "unavailable",
+    selection: "selected",
+  };
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mixed),
+    /cannot have a selection/,
+  );
+});
+
 test("durable Metask intent remains decodable when the current catalog is unavailable", () => {
   const catalogUnavailable = clone(fixture);
   catalogUnavailable.models = modelsUnavailableFixture;
@@ -908,9 +930,38 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
       accepted: true,
       taskId: "3",
       bindingEpoch: "7",
+      mcpAuthority: { kind: "ready", selection: "none" },
       reason: null,
     }),
-    { accepted: true, taskId: "3", bindingEpoch: "7", reason: null },
+    {
+      accepted: true,
+      taskId: "3",
+      bindingEpoch: "7",
+      mcpAuthority: { kind: "ready", selection: "none" },
+      reason: null,
+    },
+  );
+  assert.throws(
+    () =>
+      decodeTaskCreateResult({
+        accepted: true,
+        taskId: "3",
+        bindingEpoch: "7",
+        mcpAuthority: { kind: "unavailable", selection: "none" },
+        reason: null,
+      }),
+    /cannot have a selection/,
+  );
+  assert.throws(
+    () =>
+      decodeTaskCreateResult({
+        accepted: false,
+        taskId: null,
+        bindingEpoch: null,
+        mcpAuthority: { kind: "unavailable", selection: null },
+        reason: "catalog_loading",
+      }),
+    /cannot expose identities/,
   );
   assert.throws(() => decodeTaskCreateResult({ taskId: "3" }), /expected keys/);
   assert.deepEqual(

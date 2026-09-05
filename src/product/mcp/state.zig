@@ -329,7 +329,6 @@ pub const McpProductState = struct {
     admission: McpAdmissionAuthority,
     refresh_request_generation: u64 = 0,
     refresh_pending: bool = false,
-    refresh_pending_blocks_admission: bool = false,
     refresh_deadline_ms: ?u64 = null,
     connection_test: ?McpConnectionTest = null,
     configuration_apply_state: McpConfigurationApplyState = .idle,

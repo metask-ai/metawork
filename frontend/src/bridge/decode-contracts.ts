@@ -2134,6 +2134,29 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
   return fail(`${path}.kind`, `unexpected request kind ${kind}`);
 }
 
+function decodeTaskMcpAuthority(
+  value: unknown,
+  path: string,
+): TaskView["mcpAuthority"] {
+  const item = object(value, path, ["kind", "selection"]);
+  const kind = enumValue(item.kind, `${path}.kind`, [
+    "ready",
+    "unavailable",
+  ] as const);
+  if (kind === "ready") {
+    return {
+      kind,
+      selection: enumValue(item.selection, `${path}.selection`, [
+        "selected",
+        "none",
+      ] as const),
+    };
+  }
+  if (item.selection !== null)
+    fail(`${path}.selection`, "unavailable authority cannot have a selection");
+  return { kind, selection: null };
+}
+
 function decodeTask(value: unknown, path: string): TaskView {
   const item = object(value, path, [
     "id",
@@ -2142,6 +2165,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "workspaceId",
     "permissionProfile",
     "binding",
+    "mcpAuthority",
     "skillCatalog",
     "lifecycle",
     "deletionStatus",
@@ -2199,6 +2223,10 @@ function decodeTask(value: unknown, path: string): TaskView {
     ),
     unavailableReason,
   };
+  const mcpAuthority = decodeTaskMcpAuthority(
+    item.mcpAuthority,
+    `${path}.mcpAuthority`,
+  );
   const runs = arrayValue(item.runs, `${path}.runs`, decodeRun);
   const permissionProfile = enumValue(
     item.permissionProfile,
@@ -2443,6 +2471,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
     permissionProfile,
     binding,
+    mcpAuthority,
     skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
     lifecycle,
     deletionStatus,
@@ -4106,6 +4135,7 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
     "accepted",
     "taskId",
     "bindingEpoch",
+    "mcpAuthority",
     "reason",
   ]);
   const accepted = booleanValue(item.accepted, "$.accepted");
@@ -4115,15 +4145,21 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
       accepted: true,
       taskId: positiveWireId(item.taskId, "$.taskId"),
       bindingEpoch: positiveWireId(item.bindingEpoch, "$.bindingEpoch"),
+      mcpAuthority: decodeTaskMcpAuthority(item.mcpAuthority, "$.mcpAuthority"),
       reason: null,
     };
   }
-  if (item.taskId !== null || item.bindingEpoch !== null)
+  if (
+    item.taskId !== null ||
+    item.bindingEpoch !== null ||
+    item.mcpAuthority !== null
+  )
     fail("$", "a rejected Task creation cannot expose identities");
   return {
     accepted: false,
     taskId: null,
     bindingEpoch: null,
+    mcpAuthority: null,
     reason: enumValue(item.reason, "$.reason", taskCreateReasons),
   };
 }
