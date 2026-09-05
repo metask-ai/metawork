@@ -1076,6 +1076,8 @@ summary::-webkit-details-marker {
 .settings-provider-directory-heading strong {
   color: var(--settings-ink);
   font-size: var(--text-body);
+  font-weight: 650;
+  line-height: 1.4;
 }
 
 .settings-provider-directory-heading p {
@@ -1338,9 +1340,17 @@ summary::-webkit-details-marker {
   white-space: nowrap;
 }
 
+.settings-custom-provider-copy strong {
+  color: var(--settings-ink);
+  font-size: var(--text-body);
+  font-weight: 650;
+  line-height: 1.4;
+}
+
 .settings-custom-provider-copy span {
   color: var(--settings-muted);
-  font-size: 12px;
+  font-size: var(--text-label);
+  line-height: 1.4;
 }
 
 .settings-custom-provider-actions {
