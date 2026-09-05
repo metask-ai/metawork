@@ -263,13 +263,8 @@ pub fn replaceAdmission(
     mcp: *mcp_state.McpProductState,
     replacement: mcp_state.McpAdmissionAuthority,
 ) void {
-    var installed = replacement;
-    if (mcp.runtime_auth_failure_blocked and installed == .ready) {
-        installed.deinit();
-        installed = .{ .blocked = .runtime_authorization_failure };
-    }
     mcp.admission.deinit();
-    mcp.admission = installed;
+    mcp.admission = replacement;
 }
 
 pub fn installCommittedDesiredState(
@@ -379,8 +374,7 @@ pub fn recoveryGeneration(
     const current = mcp orelse return null;
     if (!current.committed or refresh_job_active or
         current.refresh_pending_blocks_admission or
-        current.authorization_operation != null or
-        current.runtime_auth_failure_blocked)
+        current.authorization_operation != null)
         return null;
     return switch (current.admission) {
         .ready => |ready| ready.catalog_generation,

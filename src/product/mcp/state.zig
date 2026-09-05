@@ -27,7 +27,6 @@ pub const McpAdmissionBlockReason = enum {
     alignment_unknown,
     refreshing,
     activation_unavailable,
-    runtime_authorization_failure,
     persistence_outcome_unknown,
     management_recovery_required,
     shutting_down,
@@ -156,6 +155,7 @@ pub const McpRuntimeAuthorizationFailure = struct {
 pub const McpRuntimeAuthorizationFailureOutcome = enum {
     applied,
     stale,
+    pending,
     rejected,
     persistence_outcome_unknown,
 };
@@ -335,7 +335,6 @@ pub const McpProductState = struct {
     configuration_apply_state: McpConfigurationApplyState = .idle,
     authorization_operation: ?McpAuthorizationOperation = null,
     pending_reauthorizations: std.ArrayList(McpPendingReauthorization) = .empty,
-    runtime_auth_failure_blocked: bool = false,
     host_capabilities: McpHostCapabilities,
     committed: bool = false,
 

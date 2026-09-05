@@ -261,6 +261,7 @@ pub const RuntimeAuthFailure = struct {
     challenge_scopes: []const []const u8,
     challenge_scopes_complete: bool,
     scopes_owner: ?OwnedRuntimeScopes = null,
+    slot: *HttpAuthSlot,
 
     pub fn deinit(self: *RuntimeAuthFailure) void {
         if (self.scopes_owner) |*scopes| scopes.deinit();
@@ -428,28 +429,53 @@ const HttpAuthSlot = struct {
         if (notifier) |value| value.notify();
     }
 
-    fn takeRuntimeAuthFailure(self: *HttpAuthSlot) ?RuntimeAuthFailure {
+    fn snapshotRuntimeAuthFailure(
+        self: *HttpAuthSlot,
+    ) std.mem.Allocator.Error!?RuntimeAuthFailure {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        var pending = self.pending_failure orelse return null;
-        self.pending_failure = null;
-        const scopes = if (pending.scopes) |*owner| owner.values else &.{};
-        const result: RuntimeAuthFailure = .{
+        const pending = self.pending_failure orelse return null;
+        const scopes_owner = if (pending.scopes) |*owner|
+            ownRuntimeScopes(self.allocator, owner.values, &.{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.ScopeCapacity => unreachable,
+            }
+        else
+            null;
+        return .{
             .server_id = self.server_id,
             .consent_epoch = pending.consent_epoch,
             .token_revision = pending.token_revision,
-            .challenge_scopes = scopes,
+            .challenge_scopes = if (scopes_owner) |*owner| owner.values else &.{},
             .challenge_scopes_complete = pending.scopes_complete,
-            .scopes_owner = pending.scopes,
+            .scopes_owner = scopes_owner,
+            .slot = self,
         };
-        pending.scopes = null;
-        return result;
     }
 
     fn hasRuntimeAuthFailure(self: *HttpAuthSlot) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.pending_failure != null;
+    }
+
+    fn acknowledgeRuntimeAuthFailure(
+        self: *HttpAuthSlot,
+        failure: *const RuntimeAuthFailure,
+    ) bool {
+        if (failure.slot != self) return false;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const pending = if (self.pending_failure) |*value| value else return false;
+        const pending_scopes = if (pending.scopes) |*owner| owner.values else &.{};
+        if (pending.consent_epoch != failure.consent_epoch or
+            pending.token_revision != failure.token_revision or
+            pending.scopes_complete != failure.challenge_scopes_complete or
+            !runtimeScopeSetsEqual(pending_scopes, failure.challenge_scopes))
+            return false;
+        pending.deinit();
+        self.pending_failure = null;
+        return true;
     }
 
     fn reserveRotation(
@@ -573,7 +599,7 @@ pub const HttpAuthorizations = struct {
         for (self.slots) |slot| slot.setFailureNotifier(notifier);
     }
 
-    pub fn takeRuntimeAuthFailures(
+    pub fn snapshotRuntimeAuthFailures(
         self: *HttpAuthorizations,
     ) std.mem.Allocator.Error!RuntimeAuthFailureBatch {
         var pending_count: usize = 0;
@@ -587,9 +613,13 @@ pub const HttpAuthorizations = struct {
         };
         const storage = try self.allocator.alloc(RuntimeAuthFailure, pending_count);
         var count: usize = 0;
+        errdefer {
+            for (storage[0..count]) |*failure| failure.deinit();
+            self.allocator.free(storage);
+        }
         for (self.slots) |slot| {
             if (count == storage.len) break;
-            if (slot.takeRuntimeAuthFailure()) |failure| {
+            if (try slot.snapshotRuntimeAuthFailure()) |failure| {
                 storage[count] = failure;
                 count += 1;
             }
@@ -599,6 +629,16 @@ pub const HttpAuthorizations = struct {
             .storage = storage,
             .values = storage[0..count],
         };
+    }
+
+    pub fn acknowledgeRuntimeAuthFailure(
+        self: *HttpAuthorizations,
+        failure: *const RuntimeAuthFailure,
+    ) bool {
+        for (self.slots) |slot|
+            if (slot == failure.slot)
+                return slot.acknowledgeRuntimeAuthFailure(failure);
+        return false;
     }
 
     pub fn rotate(
@@ -689,6 +729,13 @@ pub const HttpAuthorizations = struct {
         } };
     }
 };
+
+fn runtimeScopeSetsEqual(left: []const []const u8, right: []const []const u8) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |left_scope, right_scope|
+        if (!std.mem.eql(u8, left_scope, right_scope)) return false;
+    return true;
+}
 
 pub const RuntimeBuild = struct {
     input: ?agent.McpRuntimeInput = null,
@@ -1885,16 +1932,56 @@ test "OAuth HTTP authorization publishes the exact rejected snapshot fact" {
     slot.recordRuntimeAuthFailure(&rejected, &.{ "files.write", "files.read" });
     try std.testing.expectEqual(@as(usize, 1), wake.calls);
 
-    var batch = try authorizations.takeRuntimeAuthFailures();
+    var batch = try authorizations.snapshotRuntimeAuthFailures();
     defer batch.deinit();
     try std.testing.expectEqual(@as(usize, 1), batch.values.len);
-    const failure = batch.values[0];
+    const failure = &batch.values[0];
     try std.testing.expectEqualStrings("oauth-server", failure.server_id);
     try std.testing.expectEqual(@as(u64, 4), failure.consent_epoch);
     try std.testing.expectEqual(@as(u64, 7), failure.token_revision);
     try std.testing.expect(failure.challenge_scopes_complete);
     try std.testing.expectEqualStrings("files.read", failure.challenge_scopes[0]);
     try std.testing.expectEqualStrings("files.write", failure.challenge_scopes[1]);
+    var retained = try authorizations.snapshotRuntimeAuthFailures();
+    defer retained.deinit();
+    try std.testing.expectEqual(@as(usize, 1), retained.values.len);
+    try std.testing.expect(authorizations.acknowledgeRuntimeAuthFailure(failure));
+    var empty = try authorizations.snapshotRuntimeAuthFailures();
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.values.len);
+}
+
+test "OAuth HTTP authorization exact acknowledgement retains a newer failure" {
+    const slot = try HttpAuthSlot.create(
+        std.testing.allocator,
+        std.testing.io,
+        "oauth-server",
+        4,
+        7,
+        "access-token",
+    );
+    defer slot.release();
+    const slots = try std.testing.allocator.alloc(*HttpAuthSlot, 1);
+    slots[0] = slot;
+    slot.retain();
+    var authorizations: HttpAuthorizations = .{
+        .allocator = std.testing.allocator,
+        .slots = slots,
+    };
+    defer authorizations.deinit();
+    var rejected = slot.lease();
+    defer rejected.deinit();
+
+    slot.recordRuntimeAuthFailure(&rejected, &.{"files.read"});
+    var first = try authorizations.snapshotRuntimeAuthFailures();
+    defer first.deinit();
+    slot.recordRuntimeAuthFailure(&rejected, &.{"files.write"});
+    try std.testing.expect(!authorizations.acknowledgeRuntimeAuthFailure(&first.values[0]));
+
+    var merged = try authorizations.snapshotRuntimeAuthFailures();
+    defer merged.deinit();
+    try std.testing.expectEqual(@as(usize, 2), merged.values[0].challenge_scopes.len);
+    try std.testing.expect(authorizations.acknowledgeRuntimeAuthFailure(&merged.values[0]));
 }
 
 test "MCP platform owns stdio process pipes and stderr drain" {
@@ -2225,13 +2312,14 @@ test "MCP platform publishes only a valid HTTP Bearer challenge" {
     }
     transport.close_fn(first);
     {
-        var failure = authorization.takeRuntimeAuthFailure().?;
+        var failure = (try authorization.snapshotRuntimeAuthFailure()).?;
         defer failure.deinit();
         try std.testing.expectEqual(@as(u64, 3), failure.consent_epoch);
         try std.testing.expectEqual(@as(u64, 8), failure.token_revision);
         try std.testing.expect(failure.challenge_scopes_complete);
         try std.testing.expectEqualStrings("files.read", failure.challenge_scopes[0]);
         try std.testing.expectEqualStrings("files.write", failure.challenge_scopes[1]);
+        try std.testing.expect(authorization.acknowledgeRuntimeAuthFailure(&failure));
     }
     const second = switch (transport.open_fn(
         transport.context,
@@ -2254,7 +2342,7 @@ test "MCP platform publishes only a valid HTTP Bearer challenge" {
     transport.close_fn(second);
     thread.join();
     try std.testing.expectEqual(@as(?anyerror, null), server.failure);
-    try std.testing.expect(authorization.takeRuntimeAuthFailure() == null);
+    try std.testing.expect((try authorization.snapshotRuntimeAuthFailure()) == null);
 }
 
 test "MCP platform builds lazy stdio and HTTP transport owners without opening them" {

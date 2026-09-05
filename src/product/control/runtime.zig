@@ -4208,12 +4208,6 @@ pub const Runtime = struct {
         return runtime.requireOauthReauthorization(failure) catch |err| return @errorCast(err);
     }
 
-    pub fn blockMcpAdmissionAfterRuntimeAuthFailure(self: *Runtime) void {
-        const runtime = if (self.mcp) |*value| value else return;
-        runtime.blockAdmissionAfterRuntimeAuthFailure();
-        self.publishMcpRuntimeChanges();
-    }
-
     pub fn beginMcpAuthorization(
         self: *Runtime,
         expected_generation: u64,
@@ -7120,7 +7114,6 @@ pub const Runtime = struct {
             .next_expiry_fn = controlMcpNextOauthExpiry,
             .begin_refresh_fn = controlMcpBeginOauthRefresh,
             .complete_refresh_fn = controlMcpCompleteOauthRefresh,
-            .block_admission_fn = controlMcpBlockAdmission,
             .require_reauthorization_fn = controlMcpRequireReauthorization,
             .clear_operation_fn = controlMcpClearOauthOperation,
             .recover_operation_fn = controlMcpRecoverOauthOperation,
@@ -7448,9 +7441,6 @@ fn controlMcpBeginOauthRefresh(context: *anyopaque, server_id: []const u8) anyer
 }
 fn controlMcpCompleteOauthRefresh(context: *anyopaque, input: mcp_configuration.CompleteRefreshInput, commit: McpOauthRuntimeCommit) anyerror!mcp_configuration.ManagementOutcome {
     return controlOwner(context).completeMcpOauthRefresh(input, commit);
-}
-fn controlMcpBlockAdmission(context: *anyopaque) void {
-    controlOwner(context).blockMcpAdmissionAfterRuntimeAuthFailure();
 }
 fn controlMcpRequireReauthorization(context: *anyopaque, failure: McpRuntimeAuthorizationFailure) anyerror!McpRuntimeAuthorizationFailureOutcome {
     return controlOwner(context).requireMcpOauthReauthorization(failure);
@@ -14962,11 +14952,6 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
     try std.testing.expectEqualStrings("files.write", start.additional_scopes[1]);
     try std.testing.expect(control.finishMcpAuthorization(start.operation_id));
 
-    control.blockMcpAdmissionAfterRuntimeAuthFailure();
-    try std.testing.expectEqual(
-        McpAdmissionBlockReason.runtime_authorization_failure,
-        mcp_testing.state(&control.mcp.?).admission.blocked,
-    );
     try std.testing.expectEqual(
         mcp_configuration.ManagementOutcome.saved,
         try control.renameMcpServer(5, .{
@@ -14974,10 +14959,7 @@ test "MCP runtime OAuth failure durably reauthorizes and preserves scope step-up
             .display_name = "Renamed OAuth",
         }),
     );
-    try std.testing.expectEqual(
-        McpAdmissionBlockReason.runtime_authorization_failure,
-        mcp_testing.state(&control.mcp.?).admission.blocked,
-    );
+    try std.testing.expect(mcp_testing.state(&control.mcp.?).admission == .ready);
     try std.testing.expectEqual(
         @as(usize, 1),
         mcp_testing.state(&control.mcp.?).pending_reauthorizations.items.len,
