@@ -985,7 +985,13 @@ export const enUS = {
   "cause.queue_capacity_failure": "Workbench capacity reached",
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.agent_failure":
-    "Agent execution failed. Check the model or network configuration.",
+    "Agent execution failed. Review the work process and try again.",
+  "cause.provider_failure":
+    "The model service returned an error while generating the response. Try again; if it continues, check the model service configuration.",
+  "cause.tool_failure":
+    "Tool execution failed and could not recover. Review the work process and try again.",
+  "cause.image_input_unsupported":
+    "The current model does not support image input. Choose a model that supports images and select the image again.",
   "cause.dependency_contract_failure": "Task runtime became incompatible",
   "cause.stale_catalog":
     "Skill execution did not start because the catalog is out of date",

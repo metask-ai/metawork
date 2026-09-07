@@ -633,6 +633,7 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 - Tool 摘要属于次要 technical work evidence，active 与 terminal Run 都默认折叠；用户明确展开后，主区 Tool 行只显示名称、状态与 Host 提供的真实 elapsed，不带入 input/progress/result、usage 或 Run ID。terminal 摘要弱化为“工作过程 · N 项操作”，不单独强调已被整个 Run 恢复的 Tool failure；失败事实仍在展开详情中保留。disclosure choice 按 Task+Run 仅存于当前 Renderer 会话，不写入 Bridge 或持久化，也不随 revision 或终态自动翻转；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
+- terminal cause 使用最具体的稳定本地化文案：`provider_failure` 说明模型服务在生成期间返回错误，`tool_failure` 说明工具失败且 Agent 未能恢复，`image_input_unsupported` 明确要求更换支持图片的模型并重新选择图片；不得把三者统一写成“检查模型或网络”，也不得直接展示 provider raw body；
 - Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。
 
 ### 7.6 滚动与密度

@@ -1218,6 +1218,40 @@ test("partial output and terminal failure render one composite notice", () => {
   assert.doesNotMatch(markup, />Work failed</);
 });
 
+test("typed Agent failures render accurate recovery guidance", () => {
+  const cases = [
+    [
+      "provider_failure",
+      "The model service returned an error while generating the response.",
+      "模型服务在生成回复时返回错误",
+    ],
+    [
+      "tool_failure",
+      "Tool execution failed and could not recover.",
+      "工具执行失败且未能恢复",
+    ],
+    [
+      "image_input_unsupported",
+      "The current model does not support image input.",
+      "当前模型不支持图片输入",
+    ],
+  ];
+
+  for (const [cause, expectedEnglish, expectedChinese] of cases) {
+    const value = task({
+      runs: [run({ phase: "failed", outcome: "failed", cause })],
+    });
+    assert.match(
+      renderTaskContent(value),
+      new RegExp(expectedEnglish.replaceAll(".", "\\.")),
+    );
+    assert.match(
+      renderTaskContent(value, "zh-CN"),
+      new RegExp(expectedChinese),
+    );
+  }
+});
+
 test("typed Run activity uses safe localized labels", () => {
   const thinkingRun = run({
     phase: "running",
