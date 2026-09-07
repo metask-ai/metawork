@@ -73,6 +73,8 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 
 Models 默认选择与新 Task admission 的回归必须覆盖：同一 source identity/source generation/protocol 内默认模型 A→B→A 只推进 selection revision 并保持 Product execution generation；旧 `generation + selection revision` pair 被拒绝，新 pair 被接受；credential、endpoint、protocol 或 source authority 变化仍建立新 generation。
 
+已有 Task 模型选择投影的回归必须覆盖 Host 对 `available | catalog_loading | catalog_unavailable | execution_replacing | runtime_detached | unsupported_source | authority_changed` 的跨 owner 判定、serializer 与严格 Renderer decoder；Renderer 行为测试必须证明它只消费该枚举，暂态保留 disabled selector，detached/unsupported/changed 显示带原因只读值，缺失或未知枚举 fail closed。provider 的非 authority 失败不得单独撤销选择，活跃 Run 仍沿用 pending model 语义。
+
 选择能观察真实失败模式的最小充分验证层；文件位置不能反向决定 owner，也不因脚本名、lock 路径或构建文件变化机械扩大平台矩阵。
 
 | 变更类型                                             | 最小充分证据                                                                   |

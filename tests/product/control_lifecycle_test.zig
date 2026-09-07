@@ -719,6 +719,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         workspace_id,
         try first.workspaceEpoch(workspace_id),
         1,
+        first.newTaskAdmissionView().active_selection_revision,
         catalog.revision,
         catalog.selection_revision,
         .{ .interactive = .full_access },
@@ -1200,6 +1201,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     const task_id = try first.createTaskForWorkspace(
         .automatic,
         1,
+        first.newTaskAdmissionView().active_selection_revision,
         null,
         null,
         .{ .interactive = null },
@@ -2463,6 +2465,7 @@ test "scheduled durable admission failure does not block an interactive Product 
     const task_id = try workbench.createTaskForWorkspace(
         .automatic,
         1,
+        workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
         .{ .interactive = null },
@@ -2683,6 +2686,7 @@ test "interactive Product Task remains accepted when history commit outcome is u
     const task_id = try workbench.createTaskForWorkspace(
         .automatic,
         1,
+        workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
         .{ .interactive = null },
@@ -2760,6 +2764,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     const task_id = try workbench.createTaskForWorkspace(
         .automatic,
         1,
+        workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
         .{ .interactive = null },
@@ -3065,6 +3070,7 @@ test "Manual Task persistence failure keeps Product Task usable in memory" {
             .expected_epoch = epoch,
         } },
         1,
+        workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
         .{ .interactive = null },
@@ -3250,6 +3256,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     const first_task = try workbench.createTaskForWorkspace(
         .automatic,
         1,
+        workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
         .{ .interactive = null },
@@ -3294,6 +3301,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
             first_workspace,
             try workbench.workspaceEpoch(first_workspace),
             1,
+            workbench.newTaskAdmissionView().active_selection_revision,
             null,
             null,
             .{ .interactive = null },
@@ -3312,6 +3320,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     const second_task = try workbench.createTaskForWorkspace(
         .automatic,
         1,
+        workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
         .{ .interactive = null },
@@ -3432,6 +3441,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
         workbench.createTaskForWorkspace(
             .automatic,
             1,
+            workbench.newTaskAdmissionView().active_selection_revision,
             null,
             null,
             .{ .interactive = null },
@@ -3661,6 +3671,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     const running_task = try workbench.createTaskForWorkspace(
         .automatic,
         1,
+        workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
         .{ .interactive = null },
@@ -3668,6 +3679,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
     const queued_task = try workbench.createTaskForWorkspace(
         .automatic,
         1,
+        workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
         .{ .interactive = null },

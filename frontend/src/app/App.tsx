@@ -118,6 +118,7 @@ import type {
   SkillEnablementResult,
   TaskRunReason,
   TaskModelSelectionReason,
+  TaskModelSelectionAvailability,
   TaskView,
   FilePreview,
   FileReferenceView,
@@ -144,6 +145,28 @@ import { taskModelSelectionPolicy } from "./task-model-selection.ts";
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function taskModelSelectionMessageId(
+  availability: TaskModelSelectionAvailability | undefined,
+): MessageId {
+  switch (availability) {
+    case "available":
+      return "settings.task_model_help";
+    case "catalog_loading":
+      return "settings.task_model_catalog_loading";
+    case "catalog_unavailable":
+      return "settings.task_model_catalog_unavailable";
+    case "execution_replacing":
+      return "settings.task_model_execution_replacing";
+    case "runtime_detached":
+      return "settings.task_model_runtime_detached";
+    case "unsupported_source":
+      return "settings.task_model_unsupported_source";
+    case "authority_changed":
+    default:
+      return "settings.task_model_authority_changed";
+  }
 }
 
 type MutationReason =
@@ -935,11 +958,7 @@ export default function App() {
       })
     : (activeTask?.binding.model ?? selectedModelLabel);
   const displayedTaskModelId = pendingTaskModelId ?? taskModelId;
-  const taskModelPolicy = taskModelSelectionPolicy(
-    snapshot.models,
-    snapshot.newTaskAdmission,
-    activeTask,
-  );
+  const taskModelPolicy = taskModelSelectionPolicy(activeTask);
 
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
@@ -2868,14 +2887,14 @@ export default function App() {
       modelOptions={
         newTaskDraftActive
           ? newTaskModelOptions
-          : taskModelPolicy.authorityExact
+          : taskModelPolicy.showsSelector
             ? metaskModelOptions
             : []
       }
       selectedModelId={
         newTaskDraftActive ? selectedModelId : displayedTaskModelId
       }
-      modelEditable={!newTaskDraftActive && taskModelPolicy.authorityExact}
+      modelEditable={!newTaskDraftActive && taskModelPolicy.showsSelector}
       modelSelectionDisabled={
         bridgeUnavailable ||
         (customCustomProviderSelected ? executionBusy : accountBusy) ||
@@ -2883,22 +2902,25 @@ export default function App() {
           ? newTaskModelOptions.length === 0 ||
             (!customCustomProviderSelected &&
               snapshot.models.operation === "refreshing_catalog")
-          : !taskModelPolicy.catalogUsable)
+          : !taskModelPolicy.selectable)
       }
       modelSelectionPending={
         (customCustomProviderSelected ? executionBusy : accountBusy) ||
-        (!newTaskDraftActive || !customCustomProviderSelected
-          ? snapshot.models.operation === "refreshing_catalog"
-          : false)
+        (newTaskDraftActive
+          ? !customCustomProviderSelected &&
+            snapshot.models.operation === "refreshing_catalog"
+          : taskModelPolicy.pending)
       }
       modelContextTitle={
         newTaskDraftActive && customCustomProviderSelected
           ? customCustomProviderContext
           : newTaskDraftActive
             ? t("settings.default_model_help")
-            : taskModelPolicy.authorityExact
-              ? t("settings.task_model_help")
-              : t("settings.task_binding_model")
+            : t(
+                taskModelSelectionMessageId(
+                  activeTask?.modelSelectionAvailability,
+                ),
+              )
       }
       defaultSelectionMissing={metaskDefaultRecoveryAvailable}
       defaultRecoveryDisabled={bridgeUnavailable || executionBusy}

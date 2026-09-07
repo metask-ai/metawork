@@ -15,6 +15,16 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidUiResponse,
 };
 
+pub const ModelSelectionAvailability = enum {
+    available,
+    catalog_loading,
+    catalog_unavailable,
+    execution_replacing,
+    runtime_detached,
+    unsupported_source,
+    authority_changed,
+};
+
 /// Callback-scoped access to Workbench's global sensitive-text projection.
 /// The callbacks expose neither credential bytes nor the composition object.
 pub const TextProjection = struct {
@@ -112,6 +122,7 @@ pub const PendingUiProjection = struct {
 pub const Input = struct {
     task: *const task_state.Task,
     recovery: task_recovery.Projection,
+    model_selection_availability: ModelSelectionAvailability,
     shutting_down: bool,
     text: TextProjection,
     catalog: CatalogProjection,
@@ -145,6 +156,9 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
+    writer.print(",\"modelSelectionAvailability\":\"{s}\"", .{
+        @tagName(input.model_selection_availability),
+    }) catch return error.SnapshotTooLarge;
     writer.writeAll(",\"mcpAuthority\":") catch return error.SnapshotTooLarge;
     switch (task.runtime.mcp_authority_at_creation) {
         .ready_with_selection => writer.writeAll(

@@ -19,119 +19,48 @@ test.after(async () => {
   await vite.close();
 });
 
-function models(providerOverrides = {}) {
-  return {
-    metaskSelection: { sourceId: "metask:key-1", modelId: "gpt-5" },
-    selectionRevision: "11",
-    providers: [
-      {
-        id: "metask",
-        catalogState: "ready",
-        apiKeys: [
-          {
-            id: "key-1",
-            name: "Primary",
-            suffix: "1234",
-            protocol: "openai_chat_completions",
-          },
-        ],
-        models: [{ id: "gpt-5", displayName: "GPT-5" }],
-        selectedApiKeyId: "key-1",
-        catalogGeneration: "9",
-        ...providerOverrides,
-      },
-    ],
-  };
+function task(modelSelectionAvailability) {
+  return { modelSelectionAvailability };
 }
 
-function admission(overrides = {}) {
-  return {
-    available: true,
-    reason: "none",
-    activeModelRef: { sourceId: "metask:key-1", modelId: "gpt-5" },
-    activeGeneration: "7",
-    activeSelectionRevision: "11",
-    state: "ready",
-    ...overrides,
-  };
-}
-
-function task(overrides = {}) {
-  return {
-    binding: {
-      protocol: "openai_chat_completions",
-      model: "removed-model",
-      executionGeneration: "7",
-      ...overrides,
-    },
-  };
-}
-
-test("exact Metask authority can replace a model removed from the current catalog", () => {
-  assert.deepEqual(taskModelSelectionPolicy(models(), admission(), task()), {
-    authorityExact: true,
-    catalogUsable: true,
+test("Host availability is the only Renderer model-selection authority", () => {
+  assert.deepEqual(taskModelSelectionPolicy(task("available")), {
+    showsSelector: true,
+    selectable: true,
+    pending: false,
+  });
+  assert.deepEqual(taskModelSelectionPolicy(task("catalog_loading")), {
+    showsSelector: true,
+    selectable: false,
+    pending: true,
+  });
+  assert.deepEqual(taskModelSelectionPolicy(task("execution_replacing")), {
+    showsSelector: true,
+    selectable: false,
+    pending: true,
+  });
+  assert.deepEqual(taskModelSelectionPolicy(task("catalog_unavailable")), {
+    showsSelector: true,
+    selectable: false,
+    pending: false,
   });
 });
 
-test("catalog loading preserves authority but disables selection", () => {
-  assert.deepEqual(
-    taskModelSelectionPolicy(
-      models({ catalogState: "loading" }),
-      admission(),
-      task(),
-    ),
-    { authorityExact: true, catalogUsable: false },
-  );
-});
-
-test("generation, protocol, and installed source are exact", () => {
-  assert.equal(
-    taskModelSelectionPolicy(
-      models(),
-      admission(),
-      task({ executionGeneration: "6" }),
-    ).authorityExact,
-    false,
-  );
-  assert.equal(
-    taskModelSelectionPolicy(
-      models(),
-      admission(),
-      task({ protocol: "gemini_native" }),
-    ).authorityExact,
-    false,
-  );
-  assert.equal(
-    taskModelSelectionPolicy(
-      models(),
-      admission({
-        activeModelRef: { sourceId: "provider-1", modelId: "gpt-5" },
-      }),
-      task(),
-    ).authorityExact,
-    false,
-  );
-  assert.equal(
-    taskModelSelectionPolicy(models(), admission({ available: false }), task())
-      .authorityExact,
-    false,
-  );
-});
-
-test("Metask provider authorization loss disables selection without consulting Account", () => {
-  assert.deepEqual(
-    taskModelSelectionPolicy(
-      models({
-        catalogState: "needs_authentication",
-        apiKeys: [],
-        models: [],
-        selectedApiKeyId: "",
-        catalogGeneration: "0",
-      }),
-      admission(),
-      task(),
-    ),
-    { authorityExact: false, catalogUsable: false },
-  );
+test("detached, unsupported, and changed authority remain read-only", () => {
+  for (const availability of [
+    "runtime_detached",
+    "unsupported_source",
+    "authority_changed",
+  ]) {
+    assert.deepEqual(taskModelSelectionPolicy(task(availability)), {
+      showsSelector: false,
+      selectable: false,
+      pending: false,
+    });
+  }
+  assert.deepEqual(taskModelSelectionPolicy(null), {
+    showsSelector: false,
+    selectable: false,
+    pending: false,
+  });
 });

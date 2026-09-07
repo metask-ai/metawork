@@ -25,6 +25,8 @@ Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的
 
 `metawork.tasks.create` 的 execution admission 字段精确为 `expectedExecutionGeneration + expectedSelectionRevision`，两者必须来自同一份根 `newTaskAdmission` snapshot 且均为非零 canonical wire id。Host 在创建事务中同时 compare-and-swap 当前 active generation 与 selection revision；缺少任一字段、revision 已变化或两者来自不同 snapshot 均 fail closed。这样同一 execution authority 内默认模型变化可以保持 generation 稳定，同时不会让旧 Renderer snapshot 静默采用新的默认模型。
 
+每个 Task 根对象必须发布 Host-owned `modelSelectionAvailability`，精确取 `available | catalog_loading | catalog_unavailable | execution_replacing | runtime_detached | unsupported_source | authority_changed`。Product Control 根据 Task binding、当前 installed execution、replacement 与 Models catalog 的跨 owner 事实一次性计算；Renderer 只消费该枚举决定菜单可编辑、暂时禁用或只读及其原因，不得再比较根 `models`、`newTaskAdmission` 与 Task 字段重建 authority。缺失或未知值属于 snapshot contract failure。
+
 Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Host 或新 Renderer/旧 Host 的兼容。bootstrap 必须拒绝合同 identity 或经用户批准后出现的 revision 错配；固定 revision 策略下，`connect` 无法通过 revision 数字识别同 revision 的陈旧开发产物。严格 command catalog 和 payload decoder 只能在实际命令或结构差异被触及时失败，不能检测纯 wire 语义错配。此类错配属于 unsupported development state，必须通过 clean rebuild、清理缓存或重新安装恢复；原子打包用于降低发生概率，不构成 runtime compatibility guarantee。Renderer Bridge contract 覆盖全部 product command、event 和 snapshot wire surface；它与产品版本、AgentCore ABI、bundle manifest schema 相互独立。
 
 Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开发阶段固定 revision 为 `1`。Host 与 Renderer 随同一应用包原子发布，任何 command、event、payload 字段或 wire 语义变化都直接原地 hard cut，不为临时合同形态递增 revision、不维护兼容层，也不在 snapshot 内维护第二个局部版本。`contractRevision` 仍精确匹配，用于拒绝非当前固定标识，但不承诺识别同 revision 的开发产物错配。任何合同类版本标识的变更都必须先得到用户显式同意；对本文件即包括 Renderer Bridge revision。

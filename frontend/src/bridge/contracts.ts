@@ -655,6 +655,15 @@ export type TaskMcpAuthority =
   | { kind: "ready"; selection: "selected" | "none" }
   | { kind: "unavailable"; selection: null };
 
+export type TaskModelSelectionAvailability =
+  | "available"
+  | "catalog_loading"
+  | "catalog_unavailable"
+  | "execution_replacing"
+  | "runtime_detached"
+  | "unsupported_source"
+  | "authority_changed";
+
 export type TaskView = {
   id: string;
   recentOrder: string;
@@ -669,6 +678,7 @@ export type TaskView = {
     executionGeneration: string;
     unavailableReason: "runtime_detached" | null;
   };
+  modelSelectionAvailability: TaskModelSelectionAvailability;
   mcpAuthority: TaskMcpAuthority;
   skillCatalog: SkillCatalogView;
   lifecycle: "open" | "closing";

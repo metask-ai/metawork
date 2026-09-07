@@ -136,6 +136,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.3 Task
 
+- Host 为每个 Task 发布模型选择可用状态，精确区分可用、目录加载、目录不可用、执行替换中、运行时分离、不支持的来源和 authority 已变化；Renderer 只按该状态显示可编辑菜单、暂时禁用菜单或带原因的只读模型，不跨根 projection 猜测权限。
 - New task 草稿始终属于 Workbench，但只有登录和执行准备完成后才能发送；Renderer 按 Workspace intent 隔离并可恢复。默认 intent 为 Automatic，界面显示“默认”，首次发送时才由 Host 创建 Automatic Workspace。用户可以在发送前切换到已授权或新选择的 Manual Workspace；
 - New task 首次发送依次创建真实 Task 并启动第一个 Run，两步不能在界面中伪装成一个不可分失败状态：Task 创建失败或拒绝时留在 New task 并恢复原草稿；Task 已创建但 Run 启动失败或拒绝时进入该真实 Task、把输入恢复为 Task 草稿且不伪造已提交指令或 Running；命令 timeout 必须先刷新 canonical snapshot 决定实际页面和草稿 scope，不能自动重放可能有副作用的提交；
 - 用户可以在 Workspace 中创建、切换、继续、归档和删除 Task；不存在独立的 Task `closed` 产品终态；

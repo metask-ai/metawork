@@ -462,6 +462,36 @@ test("typed Agent failures cross the Host to Renderer contract", () => {
   }
 });
 
+test("Task model selection availability is a strict Host-owned projection", () => {
+  for (const availability of [
+    "available",
+    "catalog_loading",
+    "catalog_unavailable",
+    "execution_replacing",
+    "runtime_detached",
+    "unsupported_source",
+    "authority_changed",
+  ]) {
+    const snapshot = clone(fixture);
+    snapshot.tasks[0].modelSelectionAvailability = availability;
+    assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+  }
+
+  const missing = clone(fixture);
+  delete missing.tasks[0].modelSelectionAvailability;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(missing),
+    /modelSelectionAvailability/,
+  );
+
+  const unknown = clone(fixture);
+  unknown.tasks[0].modelSelectionAvailability = "provider_failed";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unknown),
+    /modelSelectionAvailability/,
+  );
+});
+
 test("automatic Workspace projection is one-to-one and capability-gated", () => {
   const automatic = clone(fixture);
   automatic.capabilities.automaticWorkspaces = true;

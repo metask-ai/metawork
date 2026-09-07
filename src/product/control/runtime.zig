@@ -5273,6 +5273,40 @@ pub const Runtime = struct {
                 .unavailable,
             .authority_stable = !self.shutting_down and
                 self.canonical_user_home != null and workspace.exists,
+            .model_selection_availability = self.taskModelSelectionAvailability(query),
+        };
+    }
+
+    fn taskModelSelectionAvailability(
+        self: *Runtime,
+        query: task_runtime.ProjectionAuthorityQuery,
+    ) product_task.ModelSelectionAvailability {
+        if (!query.runtime_attached) return .runtime_detached;
+        if (self.shutting_down) return .authority_changed;
+        if (self.execution_state.replacementPending()) return .execution_replacing;
+        if (!self.execution_state.ready() or
+            query.execution_generation != self.execution_state.generation() or
+            self.execution_state.protocol() == null or
+            query.execution_protocol != self.execution_state.protocol().?)
+            return .authority_changed;
+        if (self.execution_state.activeSource() != .metask)
+            return if (self.execution_state.activeSource() == .custom_provider)
+                .unsupported_source
+            else
+                .authority_changed;
+        if (!self.metaskBindingCurrent()) return .authority_changed;
+
+        const models = self.modelsView();
+        const provider = for (models.providers) |candidate| {
+            if (std.mem.eql(u8, candidate.id, "metask")) break candidate;
+        } else return .catalog_unavailable;
+        return switch (provider.catalog_state) {
+            .loading, .choosing => .catalog_loading,
+            .ready => if (provider.catalog_generation != 0 and provider.models.len != 0)
+                .available
+            else
+                .catalog_unavailable,
+            .needs_authentication, .failed, .unavailable => .catalog_unavailable,
         };
     }
 
@@ -11833,6 +11867,81 @@ test "same-source default model change preserves execution generation and advanc
     try std.testing.expectEqual(before.active_generation, reverted.active_generation);
     try std.testing.expect(reverted.active_selection_revision != after.active_selection_revision);
     try std.testing.expectEqualStrings("fixture-model", reverted.active_model_ref.?.model_id);
+}
+
+test "Product Control publishes Task model selection availability from cross-owner authority" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    const task = &control.task_runtime.tasks[0].?;
+    var query: task_runtime.ProjectionAuthorityQuery = .{
+        .task_id = task.durable.id,
+        .workspace_id = task.durable.workspace_id,
+        .workspace_epoch = task.durable.workspace_epoch,
+        .workspace_root = task.durable.workspace_root,
+        .execution_generation = task.durable.execution_generation,
+        .execution_protocol = task.durable.execution_protocol,
+        .execution_model = task.durable.execution_model,
+        .runtime_attached = true,
+    };
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.available,
+        control.taskModelSelectionAvailability(query),
+    );
+
+    const refresh = control.prepareMetaskCatalogRefresh("account-1", 17);
+    const preparation = switch (refresh) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.catalog_loading,
+        control.taskModelSelectionAvailability(query),
+    );
+    control.failMetaskCatalogRefresh(
+        preparation.attempt_id,
+        preparation.authorization_generation,
+        .catalog_unavailable,
+        "fixture unavailable",
+    );
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.catalog_unavailable,
+        control.taskModelSelectionAvailability(query),
+    );
+
+    try control.beginDefaultExecutionReplacement();
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.execution_replacing,
+        control.taskModelSelectionAvailability(query),
+    );
+    control.endExecutionReplacementNoFail();
+
+    query.runtime_attached = false;
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.runtime_detached,
+        control.taskModelSelectionAvailability(query),
+    );
+    query.runtime_attached = true;
+    query.execution_generation += 1;
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.authority_changed,
+        control.taskModelSelectionAvailability(query),
+    );
+    query.execution_generation -= 1;
+
+    var binding = try PreparedCustomProviderBinding.init(
+        std.testing.allocator,
+        "provider-1",
+        "fixture-model",
+    );
+    execution_state.testing.installCustomProviderBinding(
+        &control.execution_state,
+        &binding,
+    );
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.unsupported_source,
+        control.taskModelSelectionAvailability(query),
+    );
 }
 
 test "user Custom Provider cannot consume the current Metask catalog" {

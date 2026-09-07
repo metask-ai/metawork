@@ -971,6 +971,18 @@ export const enUS = {
   "settings.task_binding_model":
     "This task keeps its pinned execution. The current default cannot safely change its model.",
   "settings.task_model_help": "Choose the model for this task's next run.",
+  "settings.task_model_catalog_loading":
+    "The model catalog is updating. You can choose a model when it finishes.",
+  "settings.task_model_catalog_unavailable":
+    "The model catalog is unavailable. This task keeps its model until the catalog recovers.",
+  "settings.task_model_execution_replacing":
+    "The default execution is changing. You can choose a model when it finishes.",
+  "settings.task_model_runtime_detached":
+    "This task's runtime is detached. Restore the conversation before changing models.",
+  "settings.task_model_unsupported_source":
+    "This task uses a custom provider, which does not support in-conversation model switching.",
+  "settings.task_model_authority_changed":
+    "This task keeps its pinned execution because its provider, credential, or protocol changed.",
   "outcome.completed": "Completed",
   "outcome.stopped": "Stopped",
   "outcome.cancelled": "Stopped",
