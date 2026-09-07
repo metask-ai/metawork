@@ -71,6 +71,8 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 
 ## 变更验证 Gate
 
+Models 默认选择与新 Task admission 的回归必须覆盖：同一 source identity/source generation/protocol 内默认模型 A→B→A 只推进 selection revision 并保持 Product execution generation；旧 `generation + selection revision` pair 被拒绝，新 pair 被接受；credential、endpoint、protocol 或 source authority 变化仍建立新 generation。
+
 选择能观察真实失败模式的最小充分验证层；文件位置不能反向决定 owner，也不因脚本名、lock 路径或构建文件变化机械扩大平台矩阵。
 
 | 变更类型                                             | 最小充分证据                                                                   |

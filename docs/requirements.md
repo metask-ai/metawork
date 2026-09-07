@@ -104,6 +104,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.2 账号、Provider、模型与执行配置
 
+同一 source identity、source generation 与 protocol 内改变 global default model 只推进 selection revision，不改变 opaque Product execution generation；credential、endpoint、protocol 或 source authority 变化才建立新的 execution generation。新 Task 创建必须同时校验同一 snapshot 的 generation 与 selection revision，已有 Task 保留自己的模型并继续使用原 generation。
+
 - 普通用户通过 Metask OAuth 登录，不需要手工填写 protocol、model、base URL 或 API Key；
 - Metask managed Provider 继续遵循 OAuth、API Key catalog 和 fixed protocol/base URL 合同；用户管理的 Custom Provider 不要求 Metask 登录，但必须先显式创建、为其配置并验证模型，再安装到 Host-owned execution registry；
 - `AccountView` 只发布 `state`、脱敏 identity、`canCancel` 和 Account-owned稳定错误；不得包含 catalog、model、selection、source、execution、Task admission 或 Custom Provider。`ModelsView` 独立发布 Metask/custom source目录、Provider-local/global desired selection、Models revisions、persistence health与脱敏 Custom Provider；`NewTaskAdmissionView` 只发布 Product Control active binding、replacement、安装状态、新 Task admission与 active generation。三者不得互相伪装；

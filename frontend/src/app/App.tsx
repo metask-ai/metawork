@@ -1840,6 +1840,8 @@ export default function App() {
         taskId: existingTaskId,
         workspace,
         expectedExecutionGeneration: snapshot.newTaskAdmission.activeGeneration,
+        expectedSelectionRevision:
+          snapshot.newTaskAdmission.activeSelectionRevision,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         permissionProfile: newTaskPermissionProfile,
         input,

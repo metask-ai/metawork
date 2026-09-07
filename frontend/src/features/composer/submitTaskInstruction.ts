@@ -13,6 +13,7 @@ export type TaskSubmissionClient = {
   createTask: (
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: string,
+    expectedSelectionRevision: string,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
     permissionProfile: PermissionProfile,
@@ -58,6 +59,7 @@ export async function submitTaskInstruction({
   taskId,
   workspace,
   expectedExecutionGeneration,
+  expectedSelectionRevision,
   expectedBindingEpoch,
   permissionProfile,
   input,
@@ -69,6 +71,7 @@ export async function submitTaskInstruction({
   taskId: string | null;
   workspace: TaskWorkspaceIntent;
   expectedExecutionGeneration: string;
+  expectedSelectionRevision: string;
   expectedBindingEpoch: string | null;
   permissionProfile: PermissionProfile;
   input: TaskRunInput;
@@ -87,6 +90,7 @@ export async function submitTaskInstruction({
       const createdTask = await client.createTask(
         workspace,
         expectedExecutionGeneration,
+        expectedSelectionRevision,
         input.kind === "skill" ? input.catalogRevision : null,
         input.kind === "skill" ? input.selectionRevision : null,
         permissionProfile,

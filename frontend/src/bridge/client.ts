@@ -696,6 +696,7 @@ export class BridgeClient {
   async createTask(
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: string,
+    expectedSelectionRevision: string,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
     permissionProfile: PermissionProfile,
@@ -704,6 +705,7 @@ export class BridgeClient {
       await this.invoke(commands.createTask, {
         workspace,
         expectedExecutionGeneration,
+        expectedSelectionRevision,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,
         permissionProfile,

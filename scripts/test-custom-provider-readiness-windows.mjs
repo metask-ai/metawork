@@ -273,6 +273,8 @@ try {
     },
     expectedExecutionGeneration:
       workspaceReady.current.newTaskAdmission.activeGeneration,
+    expectedSelectionRevision:
+      workspaceReady.current.newTaskAdmission.activeSelectionRevision,
     expectedSkillCatalogRevision: workspaceReady.catalog.revision,
     expectedSkillSelectionRevision: workspaceReady.catalog.selectionRevision,
     permissionProfile: "approval_required",

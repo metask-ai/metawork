@@ -2352,8 +2352,9 @@ pub const Runtime = struct {
                 self.clearRecordedModelsDefaultNoFail();
             return;
         };
-        const aligned = self.execution_state.defaultAuthorityMatches(desired);
-        if (aligned and !refresh_aligned and !clear_unresolvable) return;
+        const default_aligned = self.execution_state.defaultAuthorityMatches(desired);
+        const execution_authority_aligned = self.execution_state.executionAuthorityMatches(desired);
+        if (default_aligned and !refresh_aligned and !clear_unresolvable) return;
 
         var candidate = (self.custom_providers.resolveDefault() catch {
             if (clear_unresolvable and
@@ -2387,7 +2388,7 @@ pub const Runtime = struct {
             return;
         }
 
-        const execution_generation = if (aligned)
+        const execution_generation = if (execution_authority_aligned)
             self.executionGeneration()
         else
             self.nextExecutionGeneration(self.executionGeneration()) catch {
@@ -2987,6 +2988,7 @@ pub const Runtime = struct {
             workspace_id,
             (self.workspace.facts(workspace_id) orelse return error.UnknownWorkspace).epoch,
             self.execution_state.generation(),
+            self.execution_state.activeSelectionRevision(),
             null,
             null,
             .{ .interactive = input.permission_profile },
@@ -2999,6 +3001,7 @@ pub const Runtime = struct {
         workspace_id: u64,
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3009,6 +3012,7 @@ pub const Runtime = struct {
             workspace_id,
             expected_workspace_epoch,
             expected_execution_generation,
+            expected_selection_revision,
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
             permission,
@@ -3020,6 +3024,7 @@ pub const Runtime = struct {
         self: *Runtime,
         request: TaskWorkspaceRequest,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3031,6 +3036,7 @@ pub const Runtime = struct {
                 manual.workspace_id,
                 manual.expected_epoch,
                 expected_execution_generation,
+                expected_selection_revision,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
                 permission,
@@ -3038,6 +3044,7 @@ pub const Runtime = struct {
             ),
             .automatic => self.createAutomaticTask(
                 expected_execution_generation,
+                expected_selection_revision,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
                 permission,
@@ -3050,6 +3057,7 @@ pub const Runtime = struct {
         workspace_id: u64,
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3059,6 +3067,7 @@ pub const Runtime = struct {
             workspace_id,
             expected_workspace_epoch,
             expected_execution_generation,
+            expected_selection_revision,
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
             permission,
@@ -3078,6 +3087,7 @@ pub const Runtime = struct {
         workspace_id: u64,
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3088,7 +3098,10 @@ pub const Runtime = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
-        if (!self.validExecutionGeneration(expected_execution_generation))
+        if (!self.validNewTaskAdmission(
+            expected_execution_generation,
+            expected_selection_revision,
+        ))
             return error.ExecutionGenerationMismatch;
         const workspace_view = try self.workspace.taskCreateAuthority(
             workspace_id,
@@ -3226,6 +3239,7 @@ pub const Runtime = struct {
     fn createAutomaticTask(
         self: *Runtime,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3235,7 +3249,10 @@ pub const Runtime = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
-        if (!self.validExecutionGeneration(expected_execution_generation))
+        if (!self.validNewTaskAdmission(
+            expected_execution_generation,
+            expected_selection_revision,
+        ))
             return error.ExecutionGenerationMismatch;
         if (expected_skill_catalog_revision != null or
             expected_skill_selection_revision != null)
@@ -3250,6 +3267,7 @@ pub const Runtime = struct {
             workspace.id,
             workspace.epoch,
             expected_execution_generation,
+            expected_selection_revision,
             null,
             null,
             permission,
@@ -3275,6 +3293,7 @@ pub const Runtime = struct {
             workspace.id,
             workspace.epoch,
             self.execution_state.generation(),
+            self.execution_state.activeSelectionRevision(),
             null,
             null,
             .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
@@ -5358,8 +5377,14 @@ pub const Runtime = struct {
         );
     }
 
-    fn validExecutionGeneration(self: *const Runtime, generation: u64) bool {
-        return generation != 0 and
+    fn validNewTaskAdmission(
+        self: *const Runtime,
+        generation: u64,
+        selection_revision: u64,
+    ) bool {
+        return selection_revision != 0 and
+            selection_revision == self.execution_state.activeSelectionRevision() and
+            generation != 0 and
             generation == self.execution_state.generation() and
             self.modelsDefaultCurrent();
     }
@@ -8749,6 +8774,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
         unavailable.createTaskForWorkspace(
             .automatic,
             1,
+            unavailable.newTaskAdmissionView().active_selection_revision,
             null,
             null,
             .{ .interactive = null },
@@ -10667,6 +10693,7 @@ test "mutation admission rejects stale execution and binding facts" {
             1,
             1,
             0,
+            control.newTaskAdmissionView().active_selection_revision,
             null,
             null,
             .{ .interactive = null },
@@ -10678,6 +10705,7 @@ test "mutation admission rejects stale execution and binding facts" {
             1,
             1,
             2,
+            control.newTaskAdmissionView().active_selection_revision,
             null,
             null,
             .{ .interactive = null },
@@ -10689,6 +10717,7 @@ test "mutation admission rejects stale execution and binding facts" {
             1,
             2,
             1,
+            control.newTaskAdmissionView().active_selection_revision,
             null,
             null,
             .{ .interactive = null },
@@ -11706,6 +11735,104 @@ test "busy Task model selection keeps only the last runtime pending model" {
             ),
         ),
     );
+}
+
+test "same-source default model change preserves execution generation and advances admission revision" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    const models = [_]models_contract.ModelView{
+        .{ .id = "fixture-model", .display_name = "Fixture model" },
+        .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
+    };
+    try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
+    const before = control.newTaskAdmissionView();
+    const initial_view = control.modelsView();
+    const initial_provider = initial_view.providers[0];
+    try models_aggregate.TestSupport.installMetaskDefault(
+        &control.custom_providers,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Fixture API",
+            .suffix = "ture",
+            .protocol = .anthropic_messages,
+        },
+        "fixture-secret",
+        &models,
+        "fixture-model-2",
+        initial_provider.source_generation,
+        initial_view.metask_selection_revision + 1,
+        initial_view.selection_revision + 1,
+        initial_provider.catalog_generation + 1,
+    );
+    control.reconcileModelsDefaultNoFail(false, false);
+    control.finishExecutionCommitNoFail();
+    const view = control.modelsView();
+    const provider = view.providers[0];
+
+    const after = control.newTaskAdmissionView();
+    try std.testing.expectEqual(before.active_generation, after.active_generation);
+    try std.testing.expect(after.active_selection_revision != before.active_selection_revision);
+    try std.testing.expectEqualStrings("fixture-model-2", after.active_model_ref.?.model_id);
+    try std.testing.expect(!control.validNewTaskAdmission(
+        before.active_generation,
+        before.active_selection_revision,
+    ));
+    try std.testing.expect(control.validNewTaskAdmission(
+        after.active_generation,
+        after.active_selection_revision,
+    ));
+    try std.testing.expectError(
+        error.ExecutionGenerationMismatch,
+        control.createTaskInWorkspace(
+            1,
+            1,
+            before.active_generation,
+            before.active_selection_revision,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
+    );
+    const task = &control.task_runtime.tasks[0].?;
+    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+    try std.testing.expect(control.taskModelSelectionAuthorized(
+        .{
+            .generation = task.durable.execution_generation,
+            .protocol = task.durable.execution_protocol,
+        },
+        .{
+            .source_id = after.active_model_ref.?.source_id,
+            .model_id = "fixture-model-2",
+        },
+        provider.source_generation,
+        provider.catalog_generation,
+    ));
+
+    try models_aggregate.TestSupport.installMetaskDefault(
+        &control.custom_providers,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Fixture API",
+            .suffix = "ture",
+            .protocol = .anthropic_messages,
+        },
+        "fixture-secret",
+        &models,
+        "fixture-model",
+        provider.source_generation,
+        view.metask_selection_revision + 1,
+        view.selection_revision + 1,
+        provider.catalog_generation + 1,
+    );
+    control.reconcileModelsDefaultNoFail(false, false);
+    control.finishExecutionCommitNoFail();
+    const reverted = control.newTaskAdmissionView();
+    try std.testing.expectEqual(before.active_generation, reverted.active_generation);
+    try std.testing.expect(reverted.active_selection_revision != after.active_selection_revision);
+    try std.testing.expectEqualStrings("fixture-model", reverted.active_model_ref.?.model_id);
 }
 
 test "user Custom Provider cannot consume the current Metask catalog" {
@@ -15651,6 +15778,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
             1,
             1,
             1,
+            control.newTaskAdmissionView().active_selection_revision,
             null,
             null,
             .{ .interactive = null },

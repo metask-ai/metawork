@@ -267,6 +267,7 @@ pub const TaskWorkspaceIntent = struct {
 pub const TaskCreate = struct {
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: []const u8,
+    expectedSelectionRevision: []const u8,
     expectedSkillCatalogRevision: ?[]const u8,
     expectedSkillSelectionRevision: ?[]const u8,
     permissionProfile: []const u8,
@@ -657,17 +658,24 @@ test "Task Run input is an exact text skill or multimodal tagged object" {
 
 test "Task creation requires an explicit nullable catalog revision" {
     var text = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"permissionProfile":"approval_required"}
+        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSelectionRevision":"4","expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"permissionProfile":"approval_required"}
     );
     defer text.deinit();
     try std.testing.expect(text.value.expectedSkillCatalogRevision == null);
     try std.testing.expect(text.value.expectedSkillSelectionRevision == null);
+    try std.testing.expectEqualStrings("4", text.value.expectedSelectionRevision);
     try std.testing.expectEqual(
         product_control.PermissionProfile.approval_required,
         permissionProfile(text.value.permissionProfile).?,
     );
     try std.testing.expect(permissionProfile("full_access") != null);
     try std.testing.expect(permissionProfile("accept_edits") == null);
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(TaskCreate,
+            \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"permissionProfile":"approval_required"}
+        ),
+    );
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(TaskCreate,

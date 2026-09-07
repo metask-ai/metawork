@@ -310,8 +310,12 @@ try {
   const expectedWorkspaceEpoch = selectedWorkspace.epoch;
   const expectedExecutionGeneration =
     afterChoose.newTaskAdmission.activeGeneration;
+  const expectedSelectionRevision =
+    afterChoose.newTaskAdmission.activeSelectionRevision;
   if (!isWireId(expectedExecutionGeneration))
     throw new Error("snapshot omitted the current execution generation");
+  if (!isWireId(expectedSelectionRevision))
+    throw new Error("snapshot omitted the current selection revision");
   const catalogSnapshot = await poll(
     async () => {
       const current = await snapshot();
@@ -355,6 +359,7 @@ try {
       expectedWorkspaceEpoch,
     },
     expectedExecutionGeneration,
+    expectedSelectionRevision,
     expectedSkillCatalogRevision: catalogSnapshot.catalog.revision,
     expectedSkillSelectionRevision: catalogSnapshot.catalog.selectionRevision,
     permissionProfile: "approval_required",

@@ -94,7 +94,7 @@ Models desired commit 不等待、查询或受制于任何消费者。后续 res
 
 每个 Account prepared transition 的 commit 仍在主线程单一 turn 内完成。Models catalog 可以跨 worker completion，但只由 Models attempt 与 authorization generation 接纳。实际 Product execution 安装只能发生在 Models desired state提交之后；后续 fallible effect 只能改变 Product active/recovery projection。
 
-Product Control 的 replacement/reconciliation gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。Models 改变默认模型时更新 selection revision；是否需要新的 source generation 或 Product binding generation由各自 authority变化决定，不能由 model id 单独推断。
+Product Control 的 replacement/reconciliation gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。Models 改变默认模型时更新 selection revision；同一 source identity、source generation 与 protocol 内的默认模型变化复用 Product binding generation，credential、endpoint、protocol 或 source authority 变化才建立新 generation。新 Task admission 必须同时 compare-and-swap active generation 与 selection revision，不能由 model id 单独推断，也不能让旧 Renderer snapshot 静默采用新默认模型。
 
 Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权能否产生 lease，Models 只回答 provider/source 能否解析，Product Control 只回答 desired binding 是否已经安装并可用于新 admission。
 
