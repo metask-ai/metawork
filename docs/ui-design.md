@@ -650,7 +650,7 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 
 已有 Task 的 Composer 固定在中间区域底部，并为滚动内容预留空间。New task 的 Composer 位于工作面的视觉中心；Host 确认创建真实 Task 后，它再通过一次克制过渡落到底部。
 
-New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动标题和一句 Workspace 工作说明，不使用人格化欢迎语；Composer 下方不放示例、推荐卡片或快捷指令。输入框附近只放与“这次 Task 如何开始”直接相关的上下文：连接与模型、Workspace、图片/PDF 附件和发送。API Key、连接编辑、账号目录刷新、权限默认值、显示密度与诊断不得堆入同一行。
+New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动标题和一句 Workspace 工作说明，不使用人格化欢迎语；Composer 下方不放示例、推荐卡片或快捷指令。输入框附近只放与“这次 Task 如何开始”直接相关的上下文：连接与模型、Workspace、图片附件和发送。API Key、连接编辑、账号目录刷新、权限默认值、显示密度与诊断不得堆入同一行。
 
 ```text
 ┌────────────────────────────────────────────────────┐
@@ -717,17 +717,17 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 运行中的输入不会发送给当前 Run，也不使用未验证的 `UiBackend.poll()` 模拟实时 steering。首版 Composer 只保存 Renderer 本地草稿，发送动作保持禁用并显示 `当前任务结束后发送`；当前 Run terminal 后由用户明确发送。不得自动提交、自动启动下一次 Run，或把草稿伪装成已排队状态。`queued` 只表示唯一已提交 Run 正在等待 Host executor，不表示当前 Run 后面还有另一条队列。未来只有在 AgentCore 发布 typed steering capability 后，才设计 `排队补充` 与 `立即打断` 的不同操作。
 
-### 8.2 图片与 PDF 附件
+### 8.2 图片附件
 
-Composer 工具带在模型控件之前提供一个带可访问名称的“添加附件”按钮，使用 Host 原生多选文件选择器；不提供 WebView file input、拖放或粘贴替代入口。首版 picker 只显示 PNG、JPEG、WebP 与 PDF 候选。选择期间按钮进入单一 busy 状态，整批 staging 成功后才显示 chip；取消不改变草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip。
+Composer 工具带在模型控件之前提供一个带可访问名称的“添加附件”按钮，使用 Host 原生多选文件选择器；不提供 WebView file input、拖放或粘贴替代入口。picker 只显示 PNG、JPEG 与 WebP 候选。选择期间按钮进入单一 busy 状态，整批 staging 成功后才显示 chip；取消不改变草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip。
 
-ready 附件按选择顺序显示紧凑 chip，包含经过 Host 校验的 basename、类型与格式化大小，并提供逐项移除按钮。chip 不显示绝对路径、缩略图、页数、hash、上传进度或 provider wire；图片与 PDF 使用不同但克制的固定图标。文件名保持原文且服从普通用户内容方向规则；超长名称中间截断，完整安全名称通过可访问文本提供。键盘焦点按选择顺序进入移除按钮，删除后移到相邻 chip 或“添加附件”。
+ready 附件按选择顺序显示紧凑 chip，包含经过 Host 校验的 basename、图片格式与格式化大小，并提供逐项移除按钮。chip 不显示绝对路径、缩略图、hash、上传进度或 provider wire。文件名保持原文且服从普通用户内容方向规则；超长名称中间截断，完整安全名称通过可访问文本提供。键盘焦点按选择顺序进入移除按钮，删除后移到相邻 chip 或“添加附件”。
 
 Text draft 可以为空，只要至少有一个 ready 附件；非空文字固定先于全部附件提交，chip 顺序就是 media part 顺序。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
 
 附件 token 与 metadata 只保存在当前 Renderer connection 的内存草稿；Task 切换可以保留，document generation replacement、reload 或 disconnect 后必须清除。Renderer 只允许保存一个不含名称、大小、类型和 token 的 generic marker，使 reload 后能提示“未发送的附件需要重新选择”。文字/Skill 仍按既有 tagged session storage 保存。New task 已创建但 Run 尚未接纳时，附件草稿和文字一起迁移到真实 Task；Run 被 Product 接纳后立即清空 draft chip，timeout 先 resync snapshot且不得自动重放。
 
-历史用户指令的附件 chip 只显示已保存名称、类型、大小和顺序，不可点击、预览、下载或一键重新发送。AgentCore 返回 `image_input_unsupported` 或 `document_input_unsupported` 时，该 Run 以准确 terminal notice 收口，Composer 继续可用，但媒体已被已接纳 Run 消费，用户若要换模型重试必须重新选择原文件。
+历史用户指令的附件 chip 只显示已保存名称、类型、大小和顺序，不可点击、预览、下载或一键重新发送。AgentCore 返回 `image_input_unsupported` 时，该 Run 以准确 terminal notice 收口，Composer 继续可用，但图片已被已接纳 Run 消费，用户若要换模型重试必须重新选择原文件。
 
 ### 8.3 New task 首次发送
 

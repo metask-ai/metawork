@@ -155,9 +155,9 @@ test("attachment results enforce opaque grants and atomic typed outcomes", () =>
       },
       {
         token: "b".repeat(48),
-        kind: "pdf",
-        format: "pdf",
-        displayName: "spec.pdf",
+        kind: "image",
+        format: "jpeg",
+        displayName: "spec.jpg",
         sizeBytes: "4096",
       },
     ],
@@ -185,9 +185,9 @@ test("attachment results enforce opaque grants and atomic typed outcomes", () =>
     () =>
       decodeAttachmentChooseResult({
         ...ready,
-        attachments: [{ ...ready.attachments[1], kind: "image" }],
+        attachments: [{ ...ready.attachments[1], kind: "pdf", format: "pdf" }],
       }),
-    /kind and format must agree/,
+    /unexpected value pdf/,
   );
   assert.deepEqual(decodeAttachmentReleaseResult({ released: true }), {
     released: true,
@@ -208,9 +208,9 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
         redacted: false,
       },
       {
-        kind: "pdf",
-        format: "pdf",
-        displayName: "brief.pdf",
+        kind: "image",
+        format: "webp",
+        displayName: "brief.webp",
         sizeBytes: "256",
         redacted: false,
       },
@@ -223,11 +223,12 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
   leaked.tasks[0].runs[0].input.attachments[0].path = "/tmp/diagram.png";
   assert.throws(() => decodeWorkbenchSnapshot(leaked), /expected keys/);
 
-  const mismatched = clone(snapshot);
-  mismatched.tasks[0].runs[0].input.attachments[1].kind = "image";
+  const retiredPdf = clone(snapshot);
+  retiredPdf.tasks[0].runs[0].input.attachments[1].kind = "pdf";
+  retiredPdf.tasks[0].runs[0].input.attachments[1].format = "pdf";
   assert.throws(
-    () => decodeWorkbenchSnapshot(mismatched),
-    /kind and format must agree/,
+    () => decodeWorkbenchSnapshot(retiredPdf),
+    /unexpected value pdf/,
   );
 });
 

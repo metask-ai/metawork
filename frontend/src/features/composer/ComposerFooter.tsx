@@ -52,12 +52,10 @@ function formatAttachmentSize(value: string) {
 }
 
 function attachmentTypeLabel(
-  attachment: ComposerAttachment,
+  _attachment: ComposerAttachment,
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  return attachment.kind === "pdf"
-    ? t("attachment.type.pdf")
-    : t("attachment.type.image");
+  return t("attachment.type.image");
 }
 
 function attachmentErrorMessage(reason: string): MessageId {
@@ -129,7 +127,7 @@ export function ComposerFooter({
   attachmentsEnabled: boolean;
   attachmentBusy: boolean;
   attachmentError: string | null;
-  attachmentModelWarning: "image" | "pdf" | "both" | null;
+  attachmentModelWarning: "image" | null;
   skillCatalog: SkillCatalogView;
   slashCommands: readonly SlashCommandState[];
   composeDisabled: boolean;
@@ -437,9 +435,7 @@ export function ComposerFooter({
                         className="composer-attachment-kind"
                         aria-hidden="true"
                       >
-                        {attachment.kind === "pdf"
-                          ? "PDF"
-                          : attachment.format.toUpperCase()}
+                        {attachment.format.toUpperCase()}
                       </span>
                       <span className="composer-attachment-copy">
                         <strong dir="auto" title={attachment.displayName}>

@@ -1465,7 +1465,6 @@ pub const Session = struct {
         self.core_call_in_progress = true;
         const input = &self.run_input.?;
         const has_images = input.* == .multimodal and input.multimodal.has_images;
-        const has_documents = input.* == .multimodal and input.multimodal.has_documents;
         self.unlock();
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
@@ -1536,7 +1535,7 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         } else if (typed_status) |known_status| {
-            const disposition = runStatusDisposition(known_status, has_images, has_documents);
+            const disposition = runStatusDisposition(known_status, has_images);
             if (disposition == null) {
                 self.dependency_contract_failure = true;
                 failure = .dependency_contract;
@@ -2316,9 +2315,8 @@ fn skillUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
     };
 }
 
-fn runStatusDisposition(status: sdk.Status, has_images: bool, has_documents: bool) ?SessionStatusDisposition {
+fn runStatusDisposition(status: sdk.Status, has_images: bool) ?SessionStatusDisposition {
     if (status == .image_input_unsupported) return if (has_images) .reusable else null;
-    if (status == .document_input_unsupported) return if (has_documents) .reusable else null;
     return switch (status) {
         .out_of_memory,
         .invalid_state,

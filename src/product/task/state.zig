@@ -383,8 +383,8 @@ pub const RunInputRecord = union(enum) {
     },
 };
 
-pub const AttachmentKind = enum { image, pdf };
-pub const AttachmentFormat = enum { png, jpeg, webp, pdf };
+pub const AttachmentKind = enum { image };
+pub const AttachmentFormat = enum { png, jpeg, webp };
 pub const AttachmentRecord = struct {
     kind: AttachmentKind,
     format: AttachmentFormat,

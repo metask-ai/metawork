@@ -4687,14 +4687,9 @@ fn validateRunInput(
                             .png => .png,
                             .jpeg => .jpeg,
                             .webp => .webp,
-                            .pdf => return error.InvalidRunInput,
                         },
                         .bytes = item.bytes,
                     } },
-                    .pdf => if (item.format == .pdf)
-                        .{ .document = .{ .bytes = item.bytes } }
-                    else
-                        return error.InvalidRunInput,
                 };
                 part_count += 1;
             }

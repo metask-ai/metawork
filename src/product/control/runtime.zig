@@ -126,7 +126,6 @@ pub const Limits = struct {
     max_attachments_per_draft: usize = 8,
     max_attachment_display_name_bytes: usize = 512,
     max_image_attachment_bytes: usize = lifecycle.multimodal_input_limits.max_image_raw_bytes,
-    max_pdf_attachment_bytes: usize = lifecycle.multimodal_input_limits.max_document_raw_bytes,
     max_staged_attachment_bytes: usize = 32 * 1024 * 1024,
     max_assistant_message_bytes: usize = 256 * 1024,
     max_tool_field_bytes: usize = 256 * 1024,
@@ -1086,7 +1085,6 @@ pub const Runtime = struct {
             limits.max_attachments_per_draft >= lifecycle.multimodal_input_limits.max_parts or
             limits.max_attachment_display_name_bytes == 0 or
             limits.max_image_attachment_bytes == 0 or
-            limits.max_pdf_attachment_bytes == 0 or
             limits.max_staged_attachment_bytes == 0 or
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
@@ -1138,7 +1136,6 @@ pub const Runtime = struct {
             .max_files = limits.max_attachments_per_draft,
             .max_display_name_bytes = limits.max_attachment_display_name_bytes,
             .max_image_bytes = limits.max_image_attachment_bytes,
-            .max_pdf_bytes = limits.max_pdf_attachment_bytes,
             .max_staged_bytes = limits.max_staged_attachment_bytes,
         });
         errdefer attachments.deinit();
@@ -1374,7 +1371,6 @@ pub const Runtime = struct {
                 .max_files = self.limits.max_attachments_per_draft,
                 .max_display_name_bytes = self.limits.max_attachment_display_name_bytes,
                 .max_image_bytes = self.limits.max_image_attachment_bytes,
-                .max_pdf_bytes = self.limits.max_pdf_attachment_bytes,
                 .max_staged_bytes = self.limits.max_staged_attachment_bytes,
             },
         });
@@ -3515,15 +3511,11 @@ pub const Runtime = struct {
                 for (borrowed_parts[0..multimodal.attachment_ids.len], 0..) |part, index| {
                     const descriptor = self.attachments.descriptorFor(part.id) orelse unreachable;
                     multimodal_items[index] = .{
-                        .kind = switch (descriptor.kind) {
-                            .image => .image,
-                            .pdf => .pdf,
-                        },
+                        .kind = .image,
                         .format = switch (descriptor.format) {
                             .png => .png,
                             .jpeg => .jpeg,
                             .webp => .webp,
-                            .pdf => .pdf,
                         },
                         .display_name = descriptor.display_name,
                         .bytes = part.bytes,
@@ -4619,7 +4611,7 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":true,\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"pdf\":true,\"maxFiles\":\"{d}\",\"maxImageBytes\":\"{d}\",\"maxPdfBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":true,\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"maxFiles\":\"{d}\",\"maxImageBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -4643,7 +4635,6 @@ pub const Runtime = struct {
             mcp_capabilities.host.oauth,
             self.limits.max_attachments_per_draft,
             self.limits.max_image_attachment_bytes,
-            self.limits.max_pdf_attachment_bytes,
             self.limits.max_staged_attachment_bytes,
         }) catch
             return error.SnapshotTooLarge;

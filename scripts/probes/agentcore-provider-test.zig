@@ -201,18 +201,8 @@ pub fn main() !void {
     try expectOk(api, "multimodal", image_status);
     try validateResult(result);
     releaseOwned(api, &diagnostic);
-    const document_parts = [_]wire.RunInputPartV1{agentcore.documentPart("application/pdf", @embedFile("document.b64"), "")};
-    const events_before_document = provider_test.event_count;
-    const document_status = api.session().runMultimodal(raw_session, 3, &document_parts, &options, &result, &diagnostic);
-    if (__EXPECT_DOCUMENT_SUPPORT__) {
-        try expectOk(api, "document", document_status);
-        try validateResult(result);
-    } else if (document_status != wire.STATUS_DOCUMENT_INPUT_UNSUPPORTED or provider_test.event_count != events_before_document) {
-        return error.UnexpectedDocumentRejection;
-    }
-    releaseOwned(api, &diagnostic);
-    const history_run_id: u64 = if (__EXPECT_DOCUMENT_SUPPORT__) 4 else 3;
-    try expectOk(api, "multimodal_history", api.session().runText(raw_session, history_run_id, agentcore.bytesView("Continue with the images and document."), &options, &result, &diagnostic));
+    const history_run_id: u64 = 3;
+    try expectOk(api, "multimodal_history", api.session().runText(raw_session, history_run_id, agentcore.bytesView("Continue with the images."), &options, &result, &diagnostic));
     try validateResult(result);
     releaseOwned(api, &diagnostic);
     const large_parts = [_]wire.RunInputPartV1{agentcore.imagePart("image/png", @embedFile("image.b64"))};
@@ -283,9 +273,6 @@ pub fn main() !void {
         if (rejected != wire.STATUS_IMAGE_INPUT_UNSUPPORTED or provider_test.event_count != events_before)
             return error.UnexpectedImageRejection;
         releaseOwned(api, &diagnostic);
-        const document_rejected = api.session().runMultimodal(restored, rejected_run_id, &document_parts, &options, &result, &diagnostic);
-        if (document_rejected != wire.STATUS_DOCUMENT_INPUT_UNSUPPORTED or provider_test.event_count != events_before)
-            return error.UnexpectedDocumentRejection;
         try expectOk(api, "restore_multimodal_model", api.sessionControl().setModel()(restored, agentcore.bytesView("__MODEL__"), null));
     } else {
         // Gemini's unknown-model defaults accept images; use a malformed input

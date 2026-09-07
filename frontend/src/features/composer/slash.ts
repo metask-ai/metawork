@@ -8,8 +8,8 @@ export type ComposerTextDraft = {
 
 export type ComposerAttachment = {
   token: string;
-  kind: "image" | "pdf";
-  format: "png" | "jpeg" | "webp" | "pdf";
+  kind: "image";
+  format: "png" | "jpeg" | "webp";
   displayName: string;
   sizeBytes: string;
 };

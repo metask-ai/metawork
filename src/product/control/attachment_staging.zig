@@ -115,8 +115,7 @@ const Job = struct {
                 self.rejection = .unsupported_type;
                 return;
             }
-            const largest = @max(self.limits.max_image_bytes, self.limits.max_pdf_bytes);
-            if (before.size > largest or before.size > std.math.maxInt(usize)) {
+            if (before.size > self.limits.max_image_bytes or before.size > std.math.maxInt(usize)) {
                 self.rejection = .file_too_large;
                 return;
             }
@@ -153,11 +152,7 @@ const Job = struct {
                 self.rejection = .unsupported_type;
                 return;
             };
-            const format_limit = if (format == .pdf)
-                self.limits.max_pdf_bytes
-            else
-                self.limits.max_image_bytes;
-            if (size > format_limit) {
+            if (size > self.limits.max_image_bytes) {
                 std.crypto.secureZero(u8, bytes);
                 self.lane.allocator.free(bytes);
                 self.rejection = .file_too_large;
@@ -191,7 +186,7 @@ const Job = struct {
     }
 };
 
-test "attachment staging lane reads an ordered image and PDF batch" {
+test "attachment staging lane reads an ordered image batch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{
@@ -199,15 +194,15 @@ test "attachment staging lane reads an ordered image and PDF batch" {
         .data = "\x89PNG\r\n\x1a\nbody",
     });
     try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "paper.pdf",
-        .data = "%PDF-1.7\nbody",
+        .sub_path = "paper.jpg",
+        .data = "\xff\xd8\xffbody",
     });
 
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
     const paths = try std.fmt.allocPrint(
         std.testing.allocator,
-        "{s}{c}picture.png\n{s}{c}paper.pdf",
+        "{s}{c}picture.png\n{s}{c}paper.jpg",
         .{ root_storage[0..root_len], std.fs.path.sep, root_storage[0..root_len], std.fs.path.sep },
     );
     defer std.testing.allocator.free(paths);
@@ -252,8 +247,8 @@ test "attachment staging lane reads an ordered image and PDF batch" {
     try std.testing.expectEqual(@as(usize, 2), taken.completion.candidates.len);
     try std.testing.expectEqual(attachment.Format.png, taken.completion.candidates[0].format);
     try std.testing.expectEqualStrings("picture.png", taken.completion.candidates[0].display_name);
-    try std.testing.expectEqual(attachment.Format.pdf, taken.completion.candidates[1].format);
-    try std.testing.expectEqualStrings("paper.pdf", taken.completion.candidates[1].display_name);
+    try std.testing.expectEqual(attachment.Format.jpeg, taken.completion.candidates[1].format);
+    try std.testing.expectEqualStrings("paper.jpg", taken.completion.candidates[1].display_name);
 }
 
 test "attachment staging lane rejects a mixed invalid batch atomically" {
@@ -313,7 +308,6 @@ fn testLimits() attachment.Limits {
         .max_files = 4,
         .max_display_name_bytes = 128,
         .max_image_bytes = 1024,
-        .max_pdf_bytes = 1024,
         .max_staged_bytes = 4096,
     };
 }
@@ -433,11 +427,10 @@ fn detectFormat(bytes: []const u8) ?attachment.Format {
     if (bytes.len >= 3 and bytes[0] == 0xff and bytes[1] == 0xd8 and bytes[2] == 0xff) return .jpeg;
     if (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and
         std.mem.eql(u8, bytes[8..12], "WEBP")) return .webp;
-    if (bytes.len >= 5 and std.mem.eql(u8, bytes[0..5], "%PDF-")) return .pdf;
     return null;
 }
 
-test "attachment staging detects every published image and PDF signature" {
+test "attachment staging detects every published image signature and rejects PDF" {
     try std.testing.expectEqual(
         attachment.Format.png,
         detectFormat("\x89PNG\r\n\x1a\npayload").?,
@@ -450,10 +443,7 @@ test "attachment staging detects every published image and PDF signature" {
         attachment.Format.webp,
         detectFormat("RIFFxxxxWEBPpayload").?,
     );
-    try std.testing.expectEqual(
-        attachment.Format.pdf,
-        detectFormat("%PDF-1.7\npayload").?,
-    );
+    try std.testing.expectEqual(@as(?attachment.Format, null), detectFormat("%PDF-1.7\npayload"));
     try std.testing.expectEqual(@as(?attachment.Format, null), detectFormat("GIF89a"));
 }
 
