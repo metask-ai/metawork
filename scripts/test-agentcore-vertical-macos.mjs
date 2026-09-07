@@ -222,9 +222,12 @@ const responses = [
         toolSseFromBackgroundJob("m9", "kill-shell-1", "KillShell"),
       ]
     : []),
-  textSse(
-    process.platform === "win32" ? "m10" : "m4",
-    "metawork agentcore vertical complete",
+  streamedSse(
+    textSse(
+      process.platform === "win32" ? "m10" : "m4",
+      "metawork agentcore vertical complete",
+    ),
+    350,
   ),
   (payload) => {
     assertMultimodalProviderRequest(
