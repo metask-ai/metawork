@@ -86,6 +86,7 @@ import {
   submitTaskInstruction,
   type EnsureTaskContinuationResult,
 } from "../features/composer/submitTaskInstruction.ts";
+import { newTaskModelSelectionState } from "./new-task-model-selection.ts";
 import {
   composerDraftHasContent,
   composerDraftToRunInput,
@@ -119,6 +120,7 @@ import type {
   TaskRunReason,
   TaskModelSelectionReason,
   TaskModelSelectionAvailability,
+  ModelRef,
   TaskView,
   FilePreview,
   FileReferenceView,
@@ -269,6 +271,8 @@ export default function App() {
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [newTaskPermissionOverride, setNewTaskPermissionOverride] =
     useState<PermissionProfile | null>(null);
+  const [newTaskRequestedModel, setNewTaskRequestedModel] =
+    useState<ModelRef | null>(null);
   const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -859,10 +863,16 @@ export default function App() {
     composerDraft.kind !== "skill" ||
     isSkillDraftCurrent(composerDraft, skillCatalog);
   const composerRunInput = composerDraftToRunInput(composerDraft);
+  const newTaskModelState = newTaskModelSelectionState(
+    snapshot.models,
+    snapshot.newTaskAdmission,
+    newTaskRequestedModel,
+  );
   const canSubmit =
     taskCanCompose &&
     (!newTaskDraftActive || snapshot.newTaskAdmission.available) &&
     (!newTaskDraftActive || newTaskWorkspaceReady) &&
+    (!newTaskDraftActive || newTaskModelState.valid) &&
     !taskOperationInFlight &&
     composerDraftHasContent(composerDraft) &&
     composerRunInput !== null &&
@@ -880,19 +890,13 @@ export default function App() {
     displayName: model.displayName,
     metadata: model.metadata,
   }));
-  const selectedModel = metaskProvider?.models.find(
-    (model) => model.id === snapshot.models.metaskSelection?.modelId,
-  );
   const activeCustomProvider = snapshot.models.customProviders.find(
     (connection) =>
-      connection.id === snapshot.models.defaultSelection?.sourceId,
+      connection.id === snapshot.newTaskAdmission.activeModelRef?.sourceId,
   );
-  const customModelId = snapshot.models.defaultSelection?.modelId ?? "";
   const customCustomProviderSelected = activeCustomProvider !== undefined;
   const composerModelMetadata = newTaskDraftActive
-    ? customCustomProviderSelected
-      ? null
-      : (selectedModel?.metadata ?? null)
+    ? newTaskModelState.selectedMetadata
     : (metaskProvider?.models.find(
         (model) => model.id === activeTask?.binding.model,
       )?.metadata ?? null);
@@ -908,30 +912,8 @@ export default function App() {
         `settings.custom_provider_protocol.${activeCustomProvider.protocol}`,
       )}`
     : "";
-  const customModelOptions = activeCustomProvider
-    ? activeCustomProvider.models
-        .filter((model) => model.ready)
-        .map((model) => {
-          const displayName = model.displayName || model.id;
-          return {
-            selectionId: model.id,
-            displayName,
-            triggerLabel: `${activeCustomProvider.displayName} · ${displayName}`,
-          };
-        })
-    : [];
-  const newTaskModelOptions = customCustomProviderSelected
-    ? customModelOptions
-    : metaskModelOptions;
-  const selectedModelLabel = customCustomProviderSelected
-    ? customModelOptions.find((model) => model.selectionId === customModelId)
-        ?.displayName || customModelId
-    : selectedModel?.displayName ||
-      selectedModel?.id ||
-      t("account.choose_model");
-  const selectedModelId = customCustomProviderSelected
-    ? customModelId
-    : selectedModel?.id || "";
+  const selectedModelLabel =
+    newTaskModelState.selectedModelLabel || t("account.choose_model");
   const metaskDefaultRecoveryAvailable = Boolean(
     newTaskDraftActive &&
     snapshot.models.persistenceHealth === "ready" &&
@@ -940,7 +922,9 @@ export default function App() {
     metaskProvider?.catalogState === "ready" &&
     snapshot.models.metaskSelection.sourceId ===
       `metask:${metaskProvider.selectedApiKeyId}` &&
-    selectedModel,
+    metaskProvider.models.some(
+      (model) => model.id === snapshot.models.metaskSelection?.modelId,
+    ),
   );
   const taskModelId = activeTask?.binding.model ?? "";
   const pendingTaskModelId = activeTask
@@ -1716,6 +1700,7 @@ export default function App() {
   function beginNewTask() {
     pendingTaskSelection.current = null;
     setNewTaskPermissionOverride(null);
+    setNewTaskRequestedModel(null);
     setRoute("workbench");
     dispatchWorkbench({
       type: "task.draft.opened",
@@ -1861,7 +1846,7 @@ export default function App() {
         expectedExecutionGeneration: snapshot.newTaskAdmission.activeGeneration,
         expectedSelectionRevision:
           snapshot.newTaskAdmission.activeSelectionRevision,
-        modelSelection: null,
+        modelSelection: newTaskDraftActive ? newTaskModelState.intent : null,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         permissionProfile: newTaskPermissionProfile,
         input,
@@ -1871,6 +1856,7 @@ export default function App() {
         ensureContinuation: ensureTaskContinuation,
         onTaskCreated: (taskId) => {
           setNewTaskPermissionOverride(null);
+          setNewTaskRequestedModel(null);
           pendingTaskSelection.current = taskId;
           pendingTaskDraftRetention.current.add(taskId);
           taskDrafts.setDraft(taskId, submitted);
@@ -2887,20 +2873,26 @@ export default function App() {
       }
       modelOptions={
         newTaskDraftActive
-          ? newTaskModelOptions
+          ? newTaskModelState.options
           : taskModelPolicy.showsSelector
             ? metaskModelOptions
             : []
       }
       selectedModelId={
-        newTaskDraftActive ? selectedModelId : displayedTaskModelId
+        newTaskDraftActive
+          ? newTaskModelState.selectedModelId
+          : displayedTaskModelId
       }
-      modelEditable={!newTaskDraftActive && taskModelPolicy.showsSelector}
+      modelEditable={
+        newTaskDraftActive
+          ? newTaskModelState.editable
+          : taskModelPolicy.showsSelector
+      }
       modelSelectionDisabled={
         bridgeUnavailable ||
         (customCustomProviderSelected ? executionBusy : accountBusy) ||
         (newTaskDraftActive
-          ? newTaskModelOptions.length === 0 ||
+          ? newTaskModelState.options.length === 0 ||
             (!customCustomProviderSelected &&
               snapshot.models.operation === "refreshing_catalog")
           : !taskModelPolicy.selectable)
@@ -2913,15 +2905,17 @@ export default function App() {
           : taskModelPolicy.pending)
       }
       modelContextTitle={
-        newTaskDraftActive && customCustomProviderSelected
-          ? customCustomProviderContext
-          : newTaskDraftActive
-            ? t("settings.default_model_help")
-            : t(
-                taskModelSelectionMessageId(
-                  activeTask?.modelSelectionAvailability,
-                ),
-              )
+        newTaskDraftActive && !newTaskModelState.valid
+          ? t("settings.new_task_model_invalid")
+          : newTaskDraftActive && customCustomProviderSelected
+            ? customCustomProviderContext
+            : newTaskDraftActive
+              ? t("settings.new_task_model_help")
+              : t(
+                  taskModelSelectionMessageId(
+                    activeTask?.modelSelectionAvailability,
+                  ),
+                )
       }
       defaultSelectionMissing={metaskDefaultRecoveryAvailable}
       defaultRecoveryDisabled={bridgeUnavailable || executionBusy}
@@ -2956,7 +2950,19 @@ export default function App() {
       onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
       onConfirmAccess={() => void chooseWorkspaceForDraft()}
       onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
-      onSelectModel={(id) => void selectModelForTask(id)}
+      onSelectModel={(id) => {
+        if (newTaskDraftActive) {
+          const activeModel = snapshot.newTaskAdmission.activeModelRef;
+          if (activeModel)
+            setNewTaskRequestedModel(
+              id === activeModel.modelId
+                ? null
+                : { sourceId: activeModel.sourceId, modelId: id },
+            );
+          return;
+        }
+        void selectModelForTask(id);
+      }}
       onOpenModels={() => openSettings("models")}
     />
   );

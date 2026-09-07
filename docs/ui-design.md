@@ -475,7 +475,7 @@ Metask 已连接
 | Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task       |
 | View sync            | `ready / syncing / failed`                            | Renderer 是否拥有可安全 mutation 的最新投影视图 |
 
-`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity；发送前必须同时满足相应 Workspace admission 与默认执行配置。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。Conversation restore 完成后 active operation 回到 `none`；成功只改变 runtime attachment/continuation，失败只改变派生的 unavailable reason，二者都不新增 Run、消息或 maintenance history。
+`draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity，并可持有不修改 global default 的 runtime-only 同源模型选择；发送前必须同时满足相应 Workspace admission、默认执行配置与所选模型 authority。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。Conversation restore 完成后 active operation 回到 `none`；成功只改变 runtime attachment/continuation，失败只改变派生的 unavailable reason，二者都不新增 Run、消息或 maintenance history。
 
 Execution binding availability 是下一次 admission 的独立前置事实，不得塞入上述四个状态轴或改写最近一次 Run 结果。Host projection 只发布 `available / rebind_required / unavailable` 及脱敏原因；Renderer 不根据当前默认模型自行判断能否继续。
 
@@ -664,8 +664,8 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 
 模型选择规则：
 
-- New task 始终只读显示当前默认 Provider 与模型；global default 只能在 `Models` 设置修改，Composer 不提供默认模型菜单；
-- 模型不可用或尚未设置 global default 时，Composer 提供进入 `Models` 设置的导航；不得显示完整 secret，也不得直接提交默认选择；
+- New task 默认显示当前 active Provider 与模型；当 Host snapshot 能证明 active source 的 current catalog 可用时，Composer 菜单可以为本次 Task 选择该 source 中的另一个 ready 模型。该 runtime-only 选择不修改 global default，不开放跨 credential 或跨 Provider 候选；重新打开 New task 时恢复 active default；
+- 模型不可用或尚未设置 global default 时，Composer 提供进入 `Models` 设置的导航；不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
 - Models默认来源、Metask API/protocol/credential authority或 ready Custom Provider模型变化先更新 Models desired selection及对应 revision/source generation，再由 Product Control独立 reconcile active binding generation。两类变化都不热替换已有 live Task；detached历史 Task可在 §6.4的 Conversation restore中采用同 protocol、可承载其 pinned model的当前 credential authority，并通过窄 binding adoption提交新 generation，任意 protocol/model变化仍只能走未来显式 rebind；
 - 已有 Task 的 Composer 显示当前 binding epoch 的模型事实，历史按 epoch 保留原模型；`available` 时菜单列出当前 Metask catalog 候选，即使 pinned model 已离开目录也允许切换到有效候选；`catalog_loading`、`catalog_unavailable` 与 `execution_replacing` 保留菜单但禁用并显示对应原因；`runtime_detached`、`unsupported_source` 与 `authority_changed` 只显示 pinned model 和原因，不展示必然被 Host 拒绝的菜单。以上状态只消费 Host 发布的 `modelSelectionAvailability`；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
@@ -674,7 +674,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 Composer 布局与输入规则：
 
 - 模型控件位于输入框内部左下角，发送位于右下角；textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
-- New task 的 global `defaultSelection` 为空时，Composer 在发送位置说明“未设置可执行的默认模型”并提供“打开模型设置”动作；发送保持禁用，直到用户在 `Models` 页明确选择且 Product Control 发布 active binding。Composer 不提交或修改 global default；
+- New task 的 global `defaultSelection` 为空时，Composer 在发送位置说明“未设置可执行的默认模型”并提供“打开模型设置”动作；发送保持禁用，直到用户在 `Models` 页明确选择且 Product Control 发布 active binding。Composer 不提交或修改 global default；非默认草稿选择只随首次 Task create 提交 exact source/catalog generation，创建失败时保留以便重试，创建成功后清除；
 - New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已授权 Manual Workspace 之间切换，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
