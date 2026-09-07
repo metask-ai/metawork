@@ -275,6 +275,7 @@ try {
       workspaceReady.current.newTaskAdmission.activeGeneration,
     expectedSelectionRevision:
       workspaceReady.current.newTaskAdmission.activeSelectionRevision,
+    modelSelection: null,
     expectedSkillCatalogRevision: workspaceReady.catalog.revision,
     expectedSkillSelectionRevision: workspaceReady.catalog.selectionRevision,
     permissionProfile: "approval_required",

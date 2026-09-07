@@ -96,6 +96,8 @@ Models desired commit 不等待、查询或受制于任何消费者。后续 res
 
 Product Control 的 replacement/reconciliation gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。Models 改变默认模型时更新 selection revision；同一 source identity、source generation 与 protocol 内的默认模型变化复用 Product binding generation，credential、endpoint、protocol 或 source authority 变化才建立新 generation。新 Task admission 必须同时 compare-and-swap active generation 与 selection revision，不能由 model id 单独推断，也不能让旧 Renderer snapshot 静默采用新默认模型。
 
+New task 的模型选择是创建事务的一次性 override，不是 Models desired state。Renderer 可以从 `newTaskAdmission.activeModelRef` 所属的 exact current source catalog 选择另一个 ready 模型，并在 `tasks.create` 中提交完整 `ModelRef + expected source generation + expected catalog generation`；未覆盖时显式提交 null 并采用 active default。Product Control 必须先校验普通 admission CAS，再校验 override 与 active source、protocol、source generation 和 catalog membership 完全一致，随后只替换本次 Task owned ExecutionConfig 的 model 字段。任何 authority/catalog 漂移都拒绝创建，不得回退到 active default、修改 Models selection 或建立跨 source credential 路径。
+
 Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权能否产生 lease，Models 只回答 provider/source 能否解析，Product Control 只回答 desired binding 是否已经安装并可用于新 admission。
 
 Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取消 Host 中的 deadline、mutation 或 terminal completion。Renderer Account command 只涉及登录、取消和退出；Models command 使用 source-qualified identifier 与对应 expected revision。除用户显式提交 Custom Provider create/replace 时一次性转交 API Key 外，Renderer 不参与 prepare、commit、authorization lease 或 credential transfer；该表单值不属于可恢复 UI 状态。

@@ -310,6 +310,7 @@ const taskCreateReasons = [
   "workspace_removing",
   "catalog_loading",
   "catalog_unavailable",
+  "model_selection_changed",
   "stale_catalog",
   "capacity_reached",
   "shutting_down",

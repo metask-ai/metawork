@@ -1,6 +1,7 @@
 import type {
   TaskCreateReason,
   TaskCreateResult,
+  NewTaskModelSelectionIntent,
   PermissionProfile,
   TaskRestoreReason,
   TaskRunInput,
@@ -14,6 +15,7 @@ export type TaskSubmissionClient = {
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: string,
     expectedSelectionRevision: string,
+    modelSelection: NewTaskModelSelectionIntent | null,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
     permissionProfile: PermissionProfile,
@@ -60,6 +62,7 @@ export async function submitTaskInstruction({
   workspace,
   expectedExecutionGeneration,
   expectedSelectionRevision,
+  modelSelection,
   expectedBindingEpoch,
   permissionProfile,
   input,
@@ -72,6 +75,7 @@ export async function submitTaskInstruction({
   workspace: TaskWorkspaceIntent;
   expectedExecutionGeneration: string;
   expectedSelectionRevision: string;
+  modelSelection: NewTaskModelSelectionIntent | null;
   expectedBindingEpoch: string | null;
   permissionProfile: PermissionProfile;
   input: TaskRunInput;
@@ -91,6 +95,7 @@ export async function submitTaskInstruction({
         workspace,
         expectedExecutionGeneration,
         expectedSelectionRevision,
+        modelSelection,
         input.kind === "skill" ? input.catalogRevision : null,
         input.kind === "skill" ? input.selectionRevision : null,
         permissionProfile,

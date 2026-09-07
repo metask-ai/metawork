@@ -1861,6 +1861,7 @@ export default function App() {
         expectedExecutionGeneration: snapshot.newTaskAdmission.activeGeneration,
         expectedSelectionRevision:
           snapshot.newTaskAdmission.activeSelectionRevision,
+        modelSelection: null,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
         permissionProfile: newTaskPermissionProfile,
         input,

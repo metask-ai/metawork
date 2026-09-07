@@ -92,6 +92,7 @@ pub const Error = lifecycle.Error || product_attachment.Error || product_schedul
     McpOauthScopeCapacity,
     CatalogRequestGenerationExhausted,
     StaleCatalog,
+    ModelSelectionChanged,
     SkillNotFound,
     SkillUnavailable,
     InvalidSkillArguments,
@@ -221,6 +222,12 @@ pub const TaskRunInput = union(enum) {
 pub const TaskModelSelectionInput = struct {
     expected_model: []const u8,
     expected_execution_generation: u64,
+    target: models_contract.ModelRef,
+    expected_source_generation: u64,
+    expected_catalog_generation: u64,
+};
+
+pub const NewTaskModelSelectionInput = struct {
     target: models_contract.ModelRef,
     expected_source_generation: u64,
     expected_catalog_generation: u64,
@@ -2991,6 +2998,7 @@ pub const Runtime = struct {
             self.execution_state.activeSelectionRevision(),
             null,
             null,
+            null,
             .{ .interactive = input.permission_profile },
             false,
         );
@@ -3002,6 +3010,7 @@ pub const Runtime = struct {
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
         expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3013,6 +3022,7 @@ pub const Runtime = struct {
             expected_workspace_epoch,
             expected_execution_generation,
             expected_selection_revision,
+            model_selection,
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
             permission,
@@ -3025,6 +3035,7 @@ pub const Runtime = struct {
         request: TaskWorkspaceRequest,
         expected_execution_generation: u64,
         expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3037,6 +3048,7 @@ pub const Runtime = struct {
                 manual.expected_epoch,
                 expected_execution_generation,
                 expected_selection_revision,
+                model_selection,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
                 permission,
@@ -3045,6 +3057,7 @@ pub const Runtime = struct {
             .automatic => self.createAutomaticTask(
                 expected_execution_generation,
                 expected_selection_revision,
+                model_selection,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
                 permission,
@@ -3058,6 +3071,7 @@ pub const Runtime = struct {
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
         expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3068,6 +3082,7 @@ pub const Runtime = struct {
             expected_workspace_epoch,
             expected_execution_generation,
             expected_selection_revision,
+            model_selection,
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
             permission,
@@ -3088,6 +3103,7 @@ pub const Runtime = struct {
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
         expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3103,6 +3119,9 @@ pub const Runtime = struct {
             expected_selection_revision,
         ))
             return error.ExecutionGenerationMismatch;
+        if (model_selection) |selection|
+            if (!self.newTaskModelSelectionAuthorized(selection))
+                return error.ModelSelectionChanged;
         const workspace_view = try self.workspace.taskCreateAuthority(
             workspace_id,
             expected_workspace_epoch,
@@ -3152,7 +3171,9 @@ pub const Runtime = struct {
                 self.allocator,
                 skill.skill_id,
             );
-        const execution_input = self.execution_state.executionInput().?;
+        var execution_input = self.execution_state.executionInput().?;
+        if (model_selection) |selection|
+            execution_input.target.model = selection.target.model_id;
         const permission_profile: PermissionProfile = switch (permission) {
             .interactive => |profile| profile orelse self.default_permission_profile,
             .noninteractive => |profile| profile,
@@ -3186,7 +3207,7 @@ pub const Runtime = struct {
             .agent_runtime = self.agent_runtime,
             .execution = execution_input,
             .protocol = execution_input.target.protocol,
-            .model = self.admissionModel(),
+            .model = execution_input.target.model,
             .permission_profile = permission_profile,
             .permission_interaction = permission_interaction,
             .workspace_id = workspace_id,
@@ -3240,6 +3261,7 @@ pub const Runtime = struct {
         self: *Runtime,
         expected_execution_generation: u64,
         expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3268,6 +3290,7 @@ pub const Runtime = struct {
             workspace.epoch,
             expected_execution_generation,
             expected_selection_revision,
+            model_selection,
             null,
             null,
             permission,
@@ -3294,6 +3317,7 @@ pub const Runtime = struct {
             workspace.epoch,
             self.execution_state.generation(),
             self.execution_state.activeSelectionRevision(),
+            null,
             null,
             null,
             .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
@@ -5423,8 +5447,29 @@ pub const Runtime = struct {
             self.modelsDefaultCurrent();
     }
 
-    fn admissionModel(self: *const Runtime) []const u8 {
-        return self.execution_state.model();
+    fn newTaskModelSelectionAuthorized(
+        self: *Runtime,
+        selection: NewTaskModelSelectionInput,
+    ) bool {
+        if (selection.target.source_id.len == 0 or
+            selection.target.model_id.len == 0 or
+            selection.target.source_id.len > models_contract.Limits.provider_id_bytes or
+            selection.target.model_id.len > models_contract.Limits.model_id_bytes or
+            selection.expected_source_generation == 0 or
+            selection.expected_catalog_generation == 0 or
+            !std.unicode.utf8ValidateSlice(selection.target.source_id) or
+            !std.unicode.utf8ValidateSlice(selection.target.model_id))
+            return false;
+        const active = self.execution_state.activeModelRef() orelse return false;
+        const protocol = self.execution_state.protocol() orelse return false;
+        return std.mem.eql(u8, selection.target.source_id, active.source_id) and
+            selection.expected_source_generation == self.execution_state.activeSourceGeneration() and
+            self.custom_providers.sourceModelAvailable(
+                selection.target,
+                selection.expected_source_generation,
+                selection.expected_catalog_generation,
+                protocol,
+            );
     }
 
     fn modelsDefaultCurrent(self: *const Runtime) bool {
@@ -8811,6 +8856,7 @@ test "automatic Workspace root is optional and reserved from user registration" 
             unavailable.newTaskAdmissionView().active_selection_revision,
             null,
             null,
+            null,
             .{ .interactive = null },
         ),
     );
@@ -10730,6 +10776,7 @@ test "mutation admission rejects stale execution and binding facts" {
             control.newTaskAdmissionView().active_selection_revision,
             null,
             null,
+            null,
             .{ .interactive = null },
         ),
     );
@@ -10742,6 +10789,7 @@ test "mutation admission rejects stale execution and binding facts" {
             control.newTaskAdmissionView().active_selection_revision,
             null,
             null,
+            null,
             .{ .interactive = null },
         ),
     );
@@ -10752,6 +10800,7 @@ test "mutation admission rejects stale execution and binding facts" {
             2,
             1,
             control.newTaskAdmissionView().active_selection_revision,
+            null,
             null,
             null,
             .{ .interactive = null },
@@ -11824,6 +11873,7 @@ test "same-source default model change preserves execution generation and advanc
             1,
             before.active_generation,
             before.active_selection_revision,
+            null,
             null,
             null,
             .{ .interactive = null },
@@ -15888,6 +15938,7 @@ test "MCP startup health commits a safe degraded Runtime projection" {
             1,
             1,
             control.newTaskAdmissionView().active_selection_revision,
+            null,
             null,
             null,
             .{ .interactive = null },

@@ -848,6 +848,10 @@ export const zhCN: Record<MessageId, string> = {
   "settings.default_model": "默认模型",
   "settings.default_model_help":
     "选择新任务使用的模型；已有任务继续使用创建时绑定的模型。",
+  "settings.new_task_model_help":
+    "选择这个新任务使用的模型；不会修改全局默认模型。",
+  "settings.new_task_model_invalid":
+    "之前选择的模型已不可用；请重新选择模型后再发送。",
   "settings.only_model_help": "当前配置只提供这一个可用模型。",
   "settings.model_menu_help": "从所选 Provider 与 API Key 的可用模型中选择。",
   "settings.custom_model_add_help":
@@ -950,6 +954,8 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.no_history": "请先运行一次任务，再压缩上下文。",
   "mutation.reason.catalog_loading": "相关能力目录正在刷新，请稍后重试。",
   "mutation.reason.catalog_unavailable": "当前工作区或任务无法使用 Skill。",
+  "mutation.reason.model_selection_changed":
+    "可用模型已发生变化，请重新选择模型后再试。",
   "mutation.reason.stale_catalog": "Skill 目录已变化，请刷新后重新选择。",
   "mutation.reason.skill_not_found": "所选 Skill 已不在当前任务目录中。",
   "mutation.reason.skill_unavailable": "所选 Skill 已在当前任务中禁用。",

@@ -933,6 +933,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         restarted_workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
+        null,
         .{ .interactive = null },
     );
     try std.testing.expectEqual(

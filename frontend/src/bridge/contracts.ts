@@ -1080,6 +1080,7 @@ export type TaskCreateReason =
   | "workspace_removing"
   | "catalog_loading"
   | "catalog_unavailable"
+  | "model_selection_changed"
   | "stale_catalog"
   | "capacity_reached"
   | "shutting_down";
@@ -1112,6 +1113,12 @@ export type TaskWorkspaceIntent =
       workspaceId: string;
       expectedWorkspaceEpoch: string;
     };
+
+export type NewTaskModelSelectionIntent = {
+  targetModelRef: ModelRef;
+  expectedSourceGeneration: string;
+  expectedCatalogGeneration: string;
+};
 
 export type TaskRunReason =
   | "binding_changed"

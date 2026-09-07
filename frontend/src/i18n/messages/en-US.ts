@@ -921,6 +921,10 @@ export const enUS = {
   "settings.default_model": "Default model",
   "settings.default_model_help":
     "Choose the model used by new tasks. Existing tasks keep their own model.",
+  "settings.new_task_model_help":
+    "Choose the model for this new task without changing the global default.",
+  "settings.new_task_model_invalid":
+    "The previously selected model is no longer available. Choose another model before sending.",
   "settings.only_model_help":
     "This configuration currently provides only one available model.",
   "settings.model_menu_help":
@@ -1049,6 +1053,8 @@ export const enUS = {
     "Capabilities are refreshing. Please wait a moment and try again.",
   "mutation.reason.catalog_unavailable":
     "Skills are unavailable for this workspace or task.",
+  "mutation.reason.model_selection_changed":
+    "Available models changed. Choose the model again and retry.",
   "mutation.reason.stale_catalog":
     "The skill catalog changed. Refresh it and choose the skill again.",
   "mutation.reason.skill_not_found":

@@ -241,6 +241,119 @@ fn taskModelSelectionInput(
     };
 }
 
+fn newTaskModelSelectionInput(
+    workbench: *product_control.Runtime,
+    target_model: []const u8,
+) product_control.NewTaskModelSelectionInput {
+    const models = workbench.modelsView();
+    return .{
+        .target = .{
+            .source_id = models.metask_selection.?.source_id,
+            .model_id = target_model,
+        },
+        .expected_source_generation = models.providers[0].source_generation,
+        .expected_catalog_generation = models.providers[0].catalog_generation,
+    };
+}
+
+test "new Task model selection binds only the created Task and rejects stale authority" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        productControlConfiguration(),
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    installTwoModelCatalog(&workbench);
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    const workspace_epoch = try workbench.workspaceEpoch(workspace_id);
+    const admission = workbench.newTaskAdmissionView();
+    var stale = newTaskModelSelectionInput(&workbench, "fixture-model-2");
+    stale.expected_catalog_generation += 1;
+    try std.testing.expectError(
+        error.ModelSelectionChanged,
+        workbench.createTaskInWorkspace(
+            workspace_id,
+            workspace_epoch,
+            admission.active_generation,
+            admission.active_selection_revision,
+            stale,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
+    );
+    var stale_source = newTaskModelSelectionInput(&workbench, "fixture-model-2");
+    stale_source.expected_source_generation += 1;
+    try std.testing.expectError(
+        error.ModelSelectionChanged,
+        workbench.createTaskInWorkspace(
+            workspace_id,
+            workspace_epoch,
+            admission.active_generation,
+            admission.active_selection_revision,
+            stale_source,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
+    );
+    try std.testing.expectError(
+        error.ModelSelectionChanged,
+        workbench.createTaskInWorkspace(
+            workspace_id,
+            workspace_epoch,
+            admission.active_generation,
+            admission.active_selection_revision,
+            newTaskModelSelectionInput(&workbench, "missing-model"),
+            null,
+            null,
+            .{ .interactive = null },
+        ),
+    );
+
+    const task_id = try workbench.createTaskInWorkspace(
+        workspace_id,
+        workspace_epoch,
+        admission.active_generation,
+        admission.active_selection_revision,
+        newTaskModelSelectionInput(&workbench, "fixture-model-2"),
+        null,
+        null,
+        .{ .interactive = null },
+    );
+    const identity = try workbench.taskExecutionIdentity(task_id);
+    try std.testing.expectEqualStrings("fixture-model-2", identity.model);
+    try expectFakeSessionModel(0, "fixture-model-2");
+    try std.testing.expectEqualStrings(
+        "fixture-model",
+        workbench.modelsView().default_selection.?.model_id,
+    );
+    try std.testing.expectEqualStrings(
+        "fixture-model",
+        workbench.newTaskAdmissionView().active_model_ref.?.model_id,
+    );
+}
+
 fn waitCatalogReady(
     workbench: *product_control.Runtime,
     workspace_id: u64,
@@ -720,6 +833,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         try first.workspaceEpoch(workspace_id),
         1,
         first.newTaskAdmissionView().active_selection_revision,
+        null,
         catalog.revision,
         catalog.selection_revision,
         .{ .interactive = .full_access },
@@ -1202,6 +1316,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
         .automatic,
         1,
         first.newTaskAdmissionView().active_selection_revision,
+        null,
         null,
         null,
         .{ .interactive = null },
@@ -2468,6 +2583,7 @@ test "scheduled durable admission failure does not block an interactive Product 
         workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
+        null,
         .{ .interactive = null },
     );
     _ = try workbench.runTask(task_id, .{ .text = "Continue interactively" });
@@ -2689,6 +2805,7 @@ test "interactive Product Task remains accepted when history commit outcome is u
         workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
+        null,
         .{ .interactive = null },
     );
     _ = try workbench.runTask(task_id, .{ .text = "Remain accepted" });
@@ -2765,6 +2882,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         .automatic,
         1,
         workbench.newTaskAdmissionView().active_selection_revision,
+        null,
         null,
         null,
         .{ .interactive = null },
@@ -2919,6 +3037,7 @@ test "Product Control pins an async catalog and admits typed Skill through the e
         try workbench.workspaceEpoch(workspace_id),
         1,
         workbench.newTaskAdmissionView().active_selection_revision,
+        null,
         catalog.revision,
         catalog.selection_revision,
         .{ .interactive = null },
@@ -3071,6 +3190,7 @@ test "Manual Task persistence failure keeps Product Task usable in memory" {
         } },
         1,
         workbench.newTaskAdmissionView().active_selection_revision,
+        null,
         null,
         null,
         .{ .interactive = null },
@@ -3259,6 +3379,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
+        null,
         .{ .interactive = null },
     );
     const first_workspace = try workbench.taskWorkspaceId(first_task);
@@ -3304,6 +3425,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
             workbench.newTaskAdmissionView().active_selection_revision,
             null,
             null,
+            null,
             .{ .interactive = null },
         ),
     );
@@ -3321,6 +3443,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         .automatic,
         1,
         workbench.newTaskAdmissionView().active_selection_revision,
+        null,
         null,
         null,
         .{ .interactive = null },
@@ -3442,6 +3565,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
             .automatic,
             1,
             workbench.newTaskAdmissionView().active_selection_revision,
+            null,
             null,
             null,
             .{ .interactive = null },
@@ -3674,12 +3798,14 @@ test "schedule rejection retains the automatic Task created before a full Run qu
         workbench.newTaskAdmissionView().active_selection_revision,
         null,
         null,
+        null,
         .{ .interactive = null },
     );
     const queued_task = try workbench.createTaskForWorkspace(
         .automatic,
         1,
         workbench.newTaskAdmissionView().active_selection_revision,
+        null,
         null,
         null,
         .{ .interactive = null },
@@ -3828,6 +3954,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
             try workbench.workspaceEpoch(workspace_id),
             1,
             workbench.newTaskAdmissionView().active_selection_revision,
+            null,
             "stale-revision",
             catalog.selection_revision,
             .{ .interactive = null },
@@ -3844,6 +3971,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
         try workbench.workspaceEpoch(workspace_id),
         1,
         workbench.newTaskAdmissionView().active_selection_revision,
+        null,
         catalog.revision,
         catalog.selection_revision,
         .{ .interactive = null },
@@ -3932,6 +4060,7 @@ test "Product Control refreshes a Task only from the committed Workspace catalog
         try workbench.workspaceEpoch(workspace_id),
         1,
         workbench.newTaskAdmissionView().active_selection_revision,
+        null,
         null,
         null,
         .{ .interactive = null },
