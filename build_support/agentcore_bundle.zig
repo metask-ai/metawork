@@ -93,9 +93,9 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         lock.contract.binary_abi_version != 1 or
         !std.mem.eql(u8, lock.contract.binary_abi_status, "experimental"))
         @panic("unsupported locked AgentCore bundle contract");
-    if (lock.contract.binary_abi_revision != 16 or
+    if (lock.contract.binary_abi_revision != 15 or
         lock.contract.binary_abi_table_size != 64)
-        @panic("AgentCore requires a clean revision 16 bundle and matching repository lock");
+        @panic("AgentCore requires a clean revision 15 bundle and matching repository lock");
     if (!std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or !lock.build.strip)
         @panic("unsupported locked AgentCore build identity");
     const target = validateTarget(lock);

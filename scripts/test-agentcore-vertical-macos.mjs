@@ -718,15 +718,6 @@ try {
     throw new Error(
       `Multimodal Run was not accepted: ${JSON.stringify(multimodalRunResult)}`,
     );
-  for (const token of attachmentTokens) {
-    const released = await invokeBridge("metawork.attachments.release", {
-      token,
-    });
-    if (released?.released !== false)
-      throw new Error(
-        `consumed attachment grant remained releasable: ${JSON.stringify(released)}`,
-      );
-  }
   const acceptedMultimodalRunId = multimodalRunResult?.runId ?? null;
   const multimodalTerminal = await poll(
     async () => {
@@ -772,6 +763,15 @@ try {
       sizeBytes: String(attachmentJpegBytes.length),
     },
   ]);
+  for (const token of attachmentTokens) {
+    const released = await invokeBridge("metawork.attachments.release", {
+      token,
+    });
+    if (released?.released !== false)
+      throw new Error(
+        `consumed attachment grant remained releasable: ${JSON.stringify(released)}`,
+      );
+  }
   const multimodalCheckpointObservedAt = Date.now();
   const multimodalCheckpoint = await poll(
     async () =>

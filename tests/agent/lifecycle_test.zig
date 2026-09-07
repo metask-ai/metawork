@@ -699,7 +699,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects missing revision 16 child tables and entries" {
+test "Runtime rejects missing revision 15 child tables and entries" {
     var api = fake_api;
     api.skill = null;
     try std.testing.expectError(
@@ -2363,7 +2363,6 @@ test "status is validated before RunResult and invalid results poison the Sessio
         .{ .plan = .unknown_status, .expected_status = 42, .expected_stop = null },
         .{ .plan = .stale_compact_status, .expected_status = wire.STATUS_STALE_COMPACT, .expected_stop = null },
         .{ .plan = .image_input_unsupported_status, .expected_status = wire.STATUS_IMAGE_INPUT_UNSUPPORTED, .expected_stop = null },
-        .{ .plan = .document_input_unsupported_status, .expected_status = wire.STATUS_DOCUMENT_INPUT_UNSUPPORTED, .expected_stop = null },
     };
     for (cases) |case| {
         fake_core.setNextPlan(case.plan);

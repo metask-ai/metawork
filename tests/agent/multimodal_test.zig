@@ -162,19 +162,6 @@ test "multimodal image capability rejection matches the submitted media kind" {
     }
 }
 
-test "retired document status is a dependency contract failure" {
-    fixture.fake_core.reset();
-    fixture.fake_core.setNextPlan(.document_input_unsupported_status);
-    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
-    defer destroy(runtime);
-    const session = try fixture.openSession(runtime);
-    var terminal = try execute(session, .{ .multimodal = &.{image} });
-    defer terminal.deinit();
-    try std.testing.expectEqual(agent.Status.document_input_unsupported, terminal.abi_status.?);
-    try std.testing.expectEqual(agent.TerminalFailure.dependency_contract, terminal.failure.?);
-    try std.testing.expectEqual(agent.SessionState.poisoned, session.snapshot().state);
-}
-
 test "multimodal cancellation before Core call and shutdown release owned input" {
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 2 });

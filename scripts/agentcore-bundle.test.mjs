@@ -89,7 +89,7 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 16,
+      binary_abi_revision: 15,
       binary_abi_table_size: 64,
     },
     runtime_assets: [
@@ -179,7 +179,7 @@ async function seedCanonicalBundle(repositoryRoot) {
   return { storageRoot, target };
 }
 
-test("accepts the current pinned Windows x64 GNU bundle", async (t) => {
+test("accepts a locked revision 15 Windows x64 GNU candidate", async (t) => {
   const { root, manifest } = await fixture(t);
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
@@ -189,7 +189,7 @@ test("accepts the current pinned Windows x64 GNU bundle", async (t) => {
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts the current pinned Windows ARM64 GNU bundle", async (t) => {
+test("accepts a locked revision 15 Windows ARM64 GNU candidate", async (t) => {
   const { root, manifest } = await fixture(t, (manifest) => {
     manifest.target = {
       id: "aarch64-windows-gnu",
@@ -208,7 +208,7 @@ test("accepts the current pinned Windows ARM64 GNU bundle", async (t) => {
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts the current pinned macOS arm64 bundle", async (t) => {
+test("accepts a locked revision 15 macOS arm64 candidate", async (t) => {
   const candidate = await fixture(t, (manifest) => {
     manifest.target = {
       id: "aarch64-macos",
@@ -241,7 +241,7 @@ test("accepts the current pinned macOS arm64 bundle", async (t) => {
   assert.equal(path.basename(result.libraryPath), "libmetask_agentcore.a");
 });
 
-test("accepts a pinned macOS x64 bundle when cross-building on arm64 macOS", async (t) => {
+test("accepts a locked revision 15 macOS x64 candidate when cross-building on arm64 macOS", async (t) => {
   const candidate = await fixture(t, (manifest) => {
     manifest.target = {
       id: "x86_64-macos",
@@ -367,7 +367,7 @@ test("staged preflight refuses a retired revision lock", async (t) => {
   );
   await assert.rejects(
     verifyStagedAgentCoreBundle(root, injectedVerification),
-    /requires a revision 16 repository lock/,
+    /requires a revision 15 repository lock/,
   );
 });
 
