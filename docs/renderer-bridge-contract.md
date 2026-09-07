@@ -88,9 +88,9 @@ response 是以下 closed union：
 
 Product Control 使用 File Changes 专用 bounded artifact lane 按 reference 读取，不扫描 Workspace 或 Git。异步 completion 在跨 Bridge 前重新校验 Task、Run、change 与 artifact identity 仍一致；Task/Run 切换、删除、shutdown 或 reference replacement 后的旧结果只能返回 `not_recorded`。任一已接纳请求必须恰好一次 terminal response；正文和 retained payload 必须落在 Native SDK async response 与 shutdown 上界内，不进入 Snapshot、Task persistence、日志或 Renderer 缓存。
 
-## 图片与 PDF attachment commands
+## 图片 attachment commands
 
-根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, pdf, maxFiles, maxImageBytes, maxPdfBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，其他 limit 是 canonical decimal `u64` string；关闭时 formats 为空、pdf=false，其余 limit 仍发布 Host canonical policy。Renderer 只用该对象解释选择器和本地 admission，Host 对 command 重新执行全部限制。
+根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, maxFiles, maxImageBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，其他 limit 是 canonical decimal `u64` string；关闭时 formats 为空，其余 limit 仍发布 Host canonical policy。Renderer 只用该对象解释选择器和本地 admission，Host 对 command 重新执行全部限制。
 
 `metawork.attachments.choose` 是 revision 1 async command，只接受空对象。Application 在当前 source/window authority 下打开原生多选 picker，随后由 Product Control attachment lane 完成整批 staging。结果严格为以下三种之一：
 
@@ -120,7 +120,7 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 }
 ```
 
-`attachments` 在 ready 时非空且保持 picker 顺序；PDF entry 精确使用 `kind=pdf, format=pdf`，image 只接受已发布 format。token 是 Bridge-owned、不可猜、connection/window/document-generation-bound 的一次性 grant，不是 Product identity 或路径。整批任一候选失败只能返回单一 rejected 并释放全部 candidate，不返回 ready 与 rejected 混合集合。
+`attachments` 在 ready 时非空且保持 picker 顺序；entry 精确使用 `kind=image`，format 只接受已发布图片格式。token 是 Bridge-owned、不可猜、connection/window/document-generation-bound 的一次性 grant，不是 Product identity 或路径。整批任一候选失败只能返回单一 rejected 并释放全部 candidate，不返回 ready 与 rejected 混合集合。
 
 `metawork.attachments.release` 是同步 revision 1 command，payload 精确为 `{ token }`，返回 `{ released }`。它只撤销当前 connection 拥有且尚未 borrowed/consumed 的 grant；未知、stale 或已经释放的 token 返回 released=false，不泄露其他 connection 的存在性。disconnect、document generation replacement 与 shutdown 必须等价释放该 connection 全部 grant。
 

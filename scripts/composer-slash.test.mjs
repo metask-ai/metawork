@@ -127,9 +127,9 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
     },
     {
       token: "b".repeat(48),
-      kind: "pdf",
-      format: "pdf",
-      displayName: "brief.pdf",
+      kind: "image",
+      format: "webp",
+      displayName: "brief.webp",
       sizeBytes: "256",
     },
   ];

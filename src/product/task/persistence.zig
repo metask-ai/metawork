@@ -2841,9 +2841,8 @@ fn validateRunInput(input: RunInputWire, limits: Limits) !void {
         for (items) |item| {
             if (!validText(item.display_name, limits.max_tool_field_bytes, false) or
                 item.size_bytes == 0 or
-                !oneOf(item.kind, &.{ "image", "pdf" }) or
-                !oneOf(item.format, &.{ "png", "jpeg", "webp", "pdf" }) or
-                (std.mem.eql(u8, item.kind, "pdf") != std.mem.eql(u8, item.format, "pdf")))
+                !std.mem.eql(u8, item.kind, "image") or
+                !oneOf(item.format, &.{ "png", "jpeg", "webp" }))
                 return error.Invalid;
         }
         return;
@@ -3287,6 +3286,117 @@ test "one damaged Task frame does not poison surviving history" {
     try std.testing.expectEqual(@as(usize, 1), recovered.value.failures.len);
     try std.testing.expectEqual(@as(u64, 2), recovered.value.failures[0].task_id);
     try std.testing.expectEqualStrings("payload_checksum", recovered.value.failures[0].reason);
+}
+
+test "a retired PDF Task is isolated without blocking valid Task recovery" {
+    var workspaces = [_]WorkspaceWire{.{
+        .id = 1,
+        .epoch = 1,
+        .kind = "manual",
+        .canonical_root = "/tmp/repo",
+        .display_name = "repo",
+        .visible = true,
+        .recent_order = 1,
+    }};
+    var legacy_attachments = [_]AttachmentWire{.{
+        .kind = "pdf",
+        .format = "pdf",
+        .display_name = "legacy.pdf",
+        .size_bytes = 128,
+        .redacted = false,
+    }};
+    var legacy_runs = [_]RunWire{.{
+        .id = 1,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = "openai_chat_completions",
+        .execution_model = "m",
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
+        .input = .{
+            .kind = "multimodal",
+            .text = "legacy",
+            .skill_id = null,
+            .catalog_revision = null,
+            .invocation_name = null,
+            .display_name = null,
+            .argument_values = null,
+            .attachments = &legacy_attachments,
+            .redacted = false,
+        },
+        .assistant = "done",
+        .assistant_redacted = false,
+        .commentary_ends = &.{},
+        .assistant_output_kind = "final",
+        .assistant_output_start = 0,
+        .phase = "completed",
+        .outcome = "completed",
+        .cause = null,
+        .usage = .{ .input_tokens = 0, .output_tokens = 0, .cache_read_input_tokens = 0, .cache_creation_input_tokens = 0 },
+        .tools = &.{},
+        .diagnostic = "",
+        .diagnostic_truncated = false,
+        .diagnostic_redacted = false,
+        .event_projection_failure = null,
+        .next_activity_order = 1,
+    }};
+    var tasks = [_]TaskWire{
+        .{
+            .id = 1,
+            .recent_order = 1,
+            .workspace_id = 1,
+            .workspace_epoch = 1,
+            .workspace_root = "/tmp/repo",
+            .title = "legacy PDF",
+            .title_redacted = false,
+            .archived = false,
+            .permission_profile = "approval_required",
+            .permission_interaction = "interactive",
+            .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
+            .next_run_generation = 1,
+            .active_operation = null,
+            .runs = &legacy_runs,
+            .compacts = &.{},
+            .ui_history = &.{},
+        },
+        .{
+            .id = 2,
+            .recent_order = 2,
+            .workspace_id = 1,
+            .workspace_epoch = 1,
+            .workspace_root = "/tmp/repo",
+            .title = "valid",
+            .title_redacted = false,
+            .archived = false,
+            .permission_profile = "approval_required",
+            .permission_interaction = "interactive",
+            .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
+            .next_run_generation = 0,
+            .active_operation = null,
+            .runs = &.{},
+            .compacts = &.{},
+            .ui_history = &.{},
+        },
+    };
+    var bytes: [64 * 1024]u8 = undefined;
+    const encoded = try encodeUncheckedImpl(&bytes, .{
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 3,
+        .next_task_recent_order = 3,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    });
+
+    var recovered = try decodeRecovering(std.testing.allocator, encoded, testLimits());
+    defer recovered.deinit();
+    try std.testing.expect(recovered.degraded);
+    try std.testing.expectEqual(@as(usize, 1), recovered.dropped_tasks);
+    try std.testing.expectEqual(@as(usize, 1), recovered.value.tasks.len);
+    try std.testing.expectEqual(@as(u64, 2), recovered.value.tasks[0].id);
+    try std.testing.expectEqual(@as(usize, 1), recovered.value.failures.len);
+    try std.testing.expectEqual(@as(u64, 1), recovered.value.failures[0].task_id);
+    try std.testing.expectEqualStrings("task_validation", recovered.value.failures[0].reason);
 }
 
 test "corrupt Task identity cannot manufacture a global failure" {

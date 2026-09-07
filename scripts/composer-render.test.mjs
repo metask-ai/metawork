@@ -531,10 +531,10 @@ test("Task content renders multimodal history as metadata-only attachment chips"
         redacted: false,
       },
       {
-        kind: "pdf",
-        format: "pdf",
-        displayName: "brief.pdf",
-        mediaType: "application/pdf",
+        kind: "image",
+        format: "webp",
+        displayName: "brief.webp",
+        mediaType: "image/webp",
         sizeBytes: "4096",
         redacted: false,
       },
@@ -544,7 +544,7 @@ test("Task content renders multimodal history as metadata-only attachment chips"
 
   assert.match(markup, /task-input-attachments/);
   assert.match(markup, /diagram\.png/);
-  assert.match(markup, /brief\.pdf/);
+  assert.match(markup, /brief\.webp/);
   assert.match(markup, /2 KB/);
   assert.doesNotMatch(markup, /attachmentToken|token|file:\/\/|\/Users\//);
 });

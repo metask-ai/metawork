@@ -2,18 +2,14 @@
 const std = @import("std");
 const sdk = @import("metask_agentcore");
 
-const document_media_type = "application/pdf";
-
 pub const InputLimits = struct {
     max_parts: usize,
     max_image_raw_bytes: usize,
-    max_document_raw_bytes: usize,
 };
 
 pub const input_limits: InputLimits = .{
     .max_parts = sdk.types.MAX_RUN_INPUT_PARTS_V1,
     .max_image_raw_bytes = sdk.types.MAX_RUN_INPUT_IMAGE_DATA_BYTES_V1 / 4 * 3,
-    .max_document_raw_bytes = sdk.types.MAX_RUN_INPUT_DOCUMENT_DATA_BYTES_V1 / 4 * 3,
 };
 
 pub const ImageFormat = enum {
@@ -38,11 +34,6 @@ pub const InputPart = union(enum) {
         format: ImageFormat,
         /// Encoded image-file bytes, not pixels or Base64. Borrowed until
         /// prepareRun returns; the caller owns format/content correctness.
-        bytes: []const u8,
-    },
-    document: struct {
-        /// PDF file bytes, not Base64. Borrowed until prepareRun returns;
-        /// AgentCore owns PDF structure, encryption, and page limits.
         bytes: []const u8,
     },
 };
@@ -71,7 +62,6 @@ pub const OwnedInput = struct {
     parts: []sdk.types.RunInputPartV1,
     storage: []u8,
     has_images: bool,
-    has_documents: bool,
     budget: *Budget,
     reserved_bytes: usize,
 
@@ -87,7 +77,6 @@ pub const OwnedInput = struct {
         var storage_bytes: usize = 0;
         var prompt_bytes: usize = 0;
         var has_images = false;
-        var has_documents = false;
         for (input) |part| {
             const size = switch (part) {
                 .text => |value| text: {
@@ -105,15 +94,6 @@ pub const OwnedInput = struct {
                     has_images = true;
                     prompt_bytes = try add(prompt_bytes, value.format.mediaType().len);
                     break :image encoded_size;
-                },
-                .document => |value| document: {
-                    const encoded_size = try base64EncodedSize(
-                        value.bytes.len,
-                        sdk.types.MAX_RUN_INPUT_DOCUMENT_DATA_BYTES_V1,
-                    );
-                    has_documents = true;
-                    prompt_bytes = try add(prompt_bytes, document_media_type.len);
-                    break :document encoded_size;
                 },
             };
             storage_bytes = try add(storage_bytes, size);
@@ -144,19 +124,12 @@ pub const OwnedInput = struct {
                     owned.* = sdk.imagePart(value.format.mediaType(), encoded);
                     offset += size;
                 },
-                .document => |value| {
-                    const size = std.base64.standard.Encoder.calcSize(value.bytes.len);
-                    const encoded = std.base64.standard.Encoder.encode(storage[offset..][0..size], value.bytes);
-                    owned.* = sdk.documentPart(document_media_type, encoded, "");
-                    offset += size;
-                },
             }
         }
         return .{
             .parts = parts,
             .storage = storage,
             .has_images = has_images,
-            .has_documents = has_documents,
             .budget = budget,
             .reserved_bytes = reserved_bytes,
         };

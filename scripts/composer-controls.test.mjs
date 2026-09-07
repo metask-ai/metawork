@@ -1564,9 +1564,9 @@ test("multimodal drafts expose ordered removable chips and preserve keyboard foc
         },
         {
           token: "b".repeat(48),
-          kind: "pdf",
-          format: "pdf",
-          displayName: "brief.pdf",
+          kind: "image",
+          format: "webp",
+          displayName: "brief.webp",
           sizeBytes: "2048",
         },
       ],
@@ -1594,9 +1594,9 @@ test("multimodal drafts expose ordered removable chips and preserve keyboard foc
       attachments: [
         {
           token: "b".repeat(48),
-          kind: "pdf",
-          format: "pdf",
-          displayName: "brief.pdf",
+          kind: "image",
+          format: "webp",
+          displayName: "brief.webp",
           sizeBytes: "2048",
         },
       ],
@@ -1605,7 +1605,7 @@ test("multimodal drafts expose ordered removable chips and preserve keyboard foc
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   assert.equal(
     document.activeElement,
-    screen.getByRole("button", { name: "Remove brief.pdf" }),
+    screen.getByRole("button", { name: "Remove brief.webp" }),
   );
 });
 
@@ -1638,6 +1638,6 @@ test("removing the last attachment returns keyboard focus to the picker", async 
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   assert.equal(
     document.activeElement,
-    screen.getByRole("button", { name: "Add images or PDFs" }),
+    screen.getByRole("button", { name: "Add images" }),
   );
 });

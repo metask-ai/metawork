@@ -500,22 +500,17 @@ export const zhCN: Record<MessageId, string> = {
   "run.start_failed": "未能开始工作，请检查连接后重试。",
   "run.stop_failed": "未能确认停止请求，请刷新后重试。",
   "run.stop_requested": "正在停止当前工作…",
-  "attachment.add": "添加图片或 PDF",
+  "attachment.add": "添加图片",
   "attachment.selected": "已选择的附件",
   "attachment.remove": "移除 {name}",
   "attachment.type.image": "图片",
-  "attachment.type.pdf": "PDF",
   "attachment.reload_required":
     "附件不会在重新载入后保留，请重新添加后再发送。",
   "attachment.skill_conflict":
     "请先移除附件再选择 Skill，或将开头的斜杠改写为普通文本。",
   "attachment.model_warning.image":
     "此模型声明不支持图片输入；仍可发送，并以实际返回结果为准。",
-  "attachment.model_warning.pdf":
-    "此模型声明不支持 PDF 输入；仍可发送，并以实际返回结果为准。",
-  "attachment.model_warning.both":
-    "此模型声明不支持图片和 PDF 输入；仍可发送，并以实际返回结果为准。",
-  "attachment.error.unsupported_type": "请选择 PNG、JPEG、WebP 或 PDF 文件。",
+  "attachment.error.unsupported_type": "请选择 PNG、JPEG 或 WebP 文件。",
   "attachment.error.file_too_large": "所选文件中有文件超过大小限制。",
   "attachment.error.too_many_files": "最多可添加 8 个文件。",
   "attachment.error.staging_capacity": "附件暂存空间不足，请移除文件后重试。",

@@ -189,9 +189,9 @@ test "automation attachments are an explicit activation-scoped capability" {
     try std.testing.expectEqual(@as(?[]const u8, null), runtime.attachmentPaths());
     try env.put(attachments_env, "");
     try std.testing.expectEqual(@as(?[]const u8, null), runtime.attachmentPaths());
-    try env.put(attachments_env, "/tmp/one.png\n/tmp/two.pdf");
+    try env.put(attachments_env, "/tmp/one.png\n/tmp/two.jpg");
     try std.testing.expectEqualStrings(
-        "/tmp/one.png\n/tmp/two.pdf",
+        "/tmp/one.png\n/tmp/two.jpg",
         runtime.attachmentPaths().?,
     );
 }

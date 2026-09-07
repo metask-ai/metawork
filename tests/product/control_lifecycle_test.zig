@@ -2744,7 +2744,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
 
     const candidates = [_]product_control.AttachmentCandidate{
         .{ .display_name = "diagram.png", .format = .png, .bytes = "\x89PNG\r\n\x1a\nbody" },
-        .{ .display_name = "brief.pdf", .format = .pdf, .bytes = "%PDF-1.7\nbody" },
+        .{ .display_name = "brief.webp", .format = .webp, .bytes = "RIFFxxxxWEBPbody" },
     };
     var descriptor_storage: [2]product_control.AttachmentDescriptor = undefined;
     const descriptors = try workbench.stageAttachments(&candidates, &descriptor_storage);
@@ -2779,7 +2779,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"redacted\":false},{\"kind\":\"pdf\",\"format\":\"pdf\",\"displayName\":\"brief.pdf\",\"sizeBytes\":\"13\",\"redacted\":false}],\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Compare these\",\"attachments\":[{\"kind\":\"image\",\"format\":\"png\",\"displayName\":\"diagram.png\",\"sizeBytes\":\"12\",\"redacted\":false},{\"kind\":\"image\",\"format\":\"webp\",\"displayName\":\"brief.webp\",\"sizeBytes\":\"16\",\"redacted\":false}],\"redacted\":false}",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "attachmentTokens") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "PNG\\r\\n") == null);

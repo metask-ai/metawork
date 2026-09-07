@@ -59,7 +59,6 @@ const providers = [
     protocol: "wire.OPENAI_PROTOCOL_RESPONSES",
     apiKey: "responses-provider-test-key",
     model: "gpt-4o",
-    documentSupported: false,
     path: "/v1/responses",
     baseUrlSuffix: "/v1/responses",
     authorization: "Bearer responses-provider-test-key",
@@ -134,7 +133,6 @@ const providers = [
     code: "wire.PROVIDER_ANTHROPIC",
     apiKey: "anthropic-provider-test-key",
     model: "claude-sonnet-4-20250514",
-    documentSupported: true,
     path: "/v1/messages",
     baseUrlSuffix: "/v1/messages",
     authorization: "Bearer anthropic-provider-test-key",
@@ -189,7 +187,6 @@ const providers = [
     code: "wire.PROVIDER_OPENAI",
     apiKey: "openai-provider-test-key",
     model: "gpt-4o",
-    documentSupported: false,
     path: "/v1/chat/completions",
     baseUrlSuffix: "/v1/chat/completions",
     authorization: "Bearer openai-provider-test-key",
@@ -215,7 +212,6 @@ const providers = [
     code: "wire.PROVIDER_GEMINI",
     apiKey: "gemini-provider-test-key",
     model: "gemini-2.5-flash",
-    documentSupported: false,
     path: "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
     baseUrlSuffix: "",
     googleKey: "gemini-provider-test-key",
@@ -272,40 +268,12 @@ const largePng = Buffer.concat([
   ancillaryCrc,
   pngBytes.subarray(-12),
 ]).toString("base64");
-function minimalPdf() {
-  const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >>",
-    "<< /Length 0 >>\nstream\n\nendstream",
-  ];
-  let source = "%PDF-1.4\n";
-  const offsets = [0];
-  for (const [index, object] of objects.entries()) {
-    offsets.push(Buffer.byteLength(source));
-    source += `${index + 1} 0 obj\n${object}\nendobj\n`;
-  }
-  const xrefOffset = Buffer.byteLength(source);
-  source += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  source += offsets
-    .slice(1)
-    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
-    .join("");
-  source += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
-  return Buffer.from(source, "ascii");
-}
-const pdfBytes = minimalPdf();
-const pdf = pdfBytes.toString("base64");
 function mediaIdentity(mime, data) {
   return {
     mime,
     bytes: data.length,
     sha256: createHash("sha256").update(data).digest("hex"),
   };
-}
-function base64Payload(value) {
-  const match = /^data:([^;]+);base64,(.+)$/.exec(value);
-  return match ? { mime: match[1], data: match[2] } : { data: value };
 }
 function userParts(provider, payload) {
   const messages = payload.input ?? payload.messages ?? payload.contents;
@@ -318,8 +286,6 @@ function userParts(provider, payload) {
         if (typeof part.text === "string") return { text: part.text };
         if (part.type === "image")
           return mediaIdentity(part.source.media_type, part.source.data);
-        if (part.type === "document")
-          return mediaIdentity(part.source.media_type, part.source.data);
         if (part.type === "image_url" || part.type === "input_image") {
           const url =
             typeof part.image_url === "string"
@@ -328,17 +294,6 @@ function userParts(provider, payload) {
           const match = /^data:([^;]+);base64,(.+)$/.exec(url);
           assert.ok(match, `${provider.name}: expected inline image`);
           return mediaIdentity(match[1], match[2]);
-        }
-        if (part.type === "input_file" || part.type === "file") {
-          const file = part.file ?? part;
-          const encoded = file.file_data ?? file.data;
-          assert.equal(
-            typeof encoded,
-            "string",
-            `${provider.name}: expected inline document`,
-          );
-          const decoded = base64Payload(encoded);
-          return mediaIdentity(decoded.mime ?? "application/pdf", decoded.data);
         }
         const inline = part.inlineData ?? part.inline_data;
         assert.ok(inline, `${provider.name}: unexpected content part`);
@@ -407,10 +362,7 @@ const server = createServer((request, response) => {
             { text: "Second image." },
             mediaIdentity("image/gif", gif),
           ],
-          ...(activeProvider.documentSupported
-            ? [[mediaIdentity("application/pdf", pdf)]]
-            : []),
-          [{ text: "Continue with the images and document." }],
+          [{ text: "Continue with the images." }],
           [mediaIdentity("image/png", largePng)],
           [{ text: "Continue after restore." }],
           [{ text: "Continue after rejection." }],
@@ -463,11 +415,9 @@ try {
       path.join(consumerRoot, "large.png"),
       Buffer.from(largePng, "base64"),
     );
-    await writeFile(path.join(consumerRoot, "document.pdf"), pdfBytes);
   }
   if (!hostMode) {
     await writeFile(path.join(consumerRoot, "image.b64"), largePng);
-    await writeFile(path.join(consumerRoot, "document.b64"), pdf);
     await symlink(
       bundle.root,
       path.join(consumerRoot, "bundle"),
@@ -533,10 +483,6 @@ pub fn build(b: *std.Build) void {
           "__EXPECT_UNKNOWN_IMAGE_REJECTION__",
           String(provider.name !== "gemini"),
         )
-        .replaceAll(
-          "__EXPECT_DOCUMENT_SUPPORT__",
-          String(provider.documentSupported),
-        )
         .replaceAll("__API_KEY__", provider.apiKey)
         .replaceAll("__MODEL__", provider.model);
       await writeFile(path.join(consumerRoot, "main.zig"), main);
@@ -554,7 +500,6 @@ pub fn build(b: *std.Build) void {
             baseUrl,
             provider.apiKey,
             provider.model,
-            String(provider.documentSupported),
             consumerRoot,
           ],
           {
@@ -593,11 +538,9 @@ pub fn build(b: *std.Build) void {
       providerFailures.push(
         new Error(`${provider.name}: ${requestError.message}`),
       );
-    else if (requestCount !== 6 + Number(provider.documentSupported))
+    else if (requestCount !== 6)
       providerFailures.push(
-        new Error(
-          `${provider.name}: expected ${6 + Number(provider.documentSupported)} requests, got ${requestCount}`,
-        ),
+        new Error(`${provider.name}: expected 6 requests, got ${requestCount}`),
       );
     else
       console.log(

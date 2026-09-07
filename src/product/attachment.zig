@@ -1,15 +1,13 @@
-//! Transient Product-owned image/PDF staging.
+//! Transient Product-owned image staging.
 const std = @import("std");
 
-pub const Format = enum { png, jpeg, webp, pdf };
-pub const Kind = enum { image, pdf };
+pub const Format = enum { png, jpeg, webp };
 pub const State = enum { ready, borrowed };
 
 pub const Limits = struct {
     max_files: usize,
     max_display_name_bytes: usize,
     max_image_bytes: usize,
-    max_pdf_bytes: usize,
     max_staged_bytes: usize,
 };
 
@@ -21,7 +19,6 @@ pub const Candidate = struct {
 
 pub const Descriptor = struct {
     id: u64,
-    kind: Kind,
     format: Format,
     display_name: []const u8,
     size_bytes: u64,
@@ -67,7 +64,6 @@ pub const Runtime = struct {
         if (limits.max_files == 0 or
             limits.max_display_name_bytes == 0 or
             limits.max_image_bytes == 0 or
-            limits.max_pdf_bytes == 0 or
             limits.max_staged_bytes == 0)
             return error.InvalidLimits;
         const slots = try allocator.alloc(?Entry, limits.max_files);
@@ -168,18 +164,13 @@ pub const Runtime = struct {
         if (!validDisplayName(candidate.display_name, self.limits.max_display_name_bytes))
             return error.InvalidDisplayName;
         if (candidate.bytes.len == 0) return error.EmptyFile;
-        const max_bytes = switch (candidate.format) {
-            .png, .jpeg, .webp => self.limits.max_image_bytes,
-            .pdf => self.limits.max_pdf_bytes,
-        };
-        if (candidate.bytes.len > max_bytes) return error.FileTooLarge;
+        if (candidate.bytes.len > self.limits.max_image_bytes) return error.FileTooLarge;
         if (!matches(candidate.format, candidate.bytes)) return error.UnsupportedType;
     }
 
     fn descriptor(_: *const Runtime, entry: Entry) Descriptor {
         return .{
             .id = entry.id,
-            .kind = if (entry.format == .pdf) .pdf else .image,
             .format = entry.format,
             .display_name = entry.display_name,
             .size_bytes = entry.bytes.len,
@@ -260,7 +251,6 @@ fn matches(format: Format, bytes: []const u8) bool {
         .jpeg => bytes.len >= 3 and bytes[0] == 0xff and bytes[1] == 0xd8 and bytes[2] == 0xff,
         .webp => bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and
             std.mem.eql(u8, bytes[8..12], "WEBP"),
-        .pdf => bytes.len >= 5 and std.mem.eql(u8, bytes[0..5], "%PDF-"),
     };
 }
 
@@ -269,7 +259,6 @@ fn testLimits() Limits {
         .max_files = 4,
         .max_display_name_bytes = 64,
         .max_image_bytes = 64,
-        .max_pdf_bytes = 128,
         .max_staged_bytes = 160,
     };
 }
@@ -279,7 +268,7 @@ test "staging validates signatures and rolls back a failed batch atomically" {
     defer runtime.deinit();
     const candidates = [_]Candidate{
         .{ .display_name = "ok.png", .format = .png, .bytes = "\x89PNG\r\n\x1a\npayload" },
-        .{ .display_name = "bad.pdf", .format = .pdf, .bytes = "not a pdf" },
+        .{ .display_name = "bad.jpg", .format = .jpeg, .bytes = "not an image" },
     };
     var output: [2]Descriptor = undefined;
     try std.testing.expectError(error.UnsupportedType, runtime.stageBatch(&candidates, &output));
@@ -292,7 +281,7 @@ test "borrow rollback preserves ready entries and consume releases the batch" {
     defer runtime.deinit();
     const candidates = [_]Candidate{
         .{ .display_name = "a.webp", .format = .webp, .bytes = "RIFFxxxxWEBPdata" },
-        .{ .display_name = "b.pdf", .format = .pdf, .bytes = "%PDF-1.7" },
+        .{ .display_name = "b.png", .format = .png, .bytes = "\x89PNG\r\n\x1a\ndata" },
     };
     var output: [2]Descriptor = undefined;
     const staged = try runtime.stageBatch(&candidates, &output);

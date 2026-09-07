@@ -1004,8 +1004,8 @@ pub const Dispatcher = struct {
         };
         var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
         const filters = [_]native_sdk.platform.FileFilter{.{
-            .name = "Images and PDF documents",
-            .extensions = &.{ "png", "jpg", "jpeg", "webp", "pdf" },
+            .name = "Images",
+            .extensions = &.{ "png", "jpg", "jpeg", "webp" },
         }};
         const selected = if (self.automation.active()) automation: {
             const paths = self.automation.attachmentPaths() orelse {
@@ -1024,7 +1024,7 @@ pub const Dispatcher = struct {
             break :user self.platform.show_open_dialog_fn(
                 self.platform.context,
                 .{
-                    .title = "Choose images or PDF documents",
+                    .title = "Choose images",
                     .filters = &filters,
                     .allow_directories = false,
                     .allow_multiple = true,
@@ -1204,7 +1204,7 @@ pub const Dispatcher = struct {
             if (index != 0) writer.writeByte(',') catch return responderEncodingFailure(responder, request_id);
             writer.print("{{\"token\":\"{s}\",\"kind\":\"{s}\",\"format\":\"{s}\",\"displayName\":", .{
                 grant.token,
-                @tagName(descriptor.kind),
+                "image",
                 @tagName(descriptor.format),
             }) catch return responderEncodingFailure(responder, request_id);
             std.json.Stringify.value(descriptor.display_name, .{}, &writer) catch return responderEncodingFailure(responder, request_id);
@@ -5001,12 +5001,12 @@ fn countAutomationAttachmentPaths(paths: []const u8) ?usize {
 test "automation attachment path batches preserve platform selection cardinality" {
     try std.testing.expectEqual(
         @as(?usize, 2),
-        countAutomationAttachmentPaths("/tmp/one.png\n/tmp/two.pdf"),
+        countAutomationAttachmentPaths("/tmp/one.png\n/tmp/two.jpg"),
     );
     try std.testing.expectEqual(@as(?usize, 1), countAutomationAttachmentPaths("/tmp/one.png"));
     try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths(""));
     try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths("/tmp/one.png\n"));
-    try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths("\n/tmp/two.pdf"));
+    try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths("\n/tmp/two.jpg"));
 }
 
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {

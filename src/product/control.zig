@@ -18,7 +18,6 @@ pub const TaskMcpAuthorityAtCreation = runtime_impl.TaskMcpAuthorityAtCreation;
 pub const TaskWorkspaceRequest = runtime_impl.TaskWorkspaceRequest;
 pub const TaskRunInput = runtime_impl.TaskRunInput;
 pub const AttachmentFormat = product_attachment.Format;
-pub const AttachmentKind = product_attachment.Kind;
 pub const AttachmentCandidate = product_attachment.Candidate;
 pub const AttachmentDescriptor = product_attachment.Descriptor;
 pub const TaskModelSelectionInput = runtime_impl.TaskModelSelectionInput;

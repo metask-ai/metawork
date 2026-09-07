@@ -129,11 +129,11 @@ const attachmentPngBytes = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
   "base64",
 );
-const attachmentPdfBytes = minimalPdf();
+const attachmentJpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 const attachmentPngPath = join(canonicalWorkspace, "reference.png");
-const attachmentPdfPath = join(canonicalWorkspace, "brief.pdf");
+const attachmentJpegPath = join(canonicalWorkspace, "brief.jpg");
 await writeFile(attachmentPngPath, attachmentPngBytes, { mode: 0o600 });
-await writeFile(attachmentPdfPath, attachmentPdfBytes, { mode: 0o600 });
+await writeFile(attachmentJpegPath, attachmentJpegBytes, { mode: 0o600 });
 // This fixture targets an AgentCore-owned canonical project source. No
 // MetaWork product module reads, configures, or exposes this physical path.
 const skillSourceDirectory = ".agents";
@@ -222,16 +222,19 @@ const responses = [
         toolSseFromBackgroundJob("m9", "kill-shell-1", "KillShell"),
       ]
     : []),
-  textSse(
-    process.platform === "win32" ? "m10" : "m4",
-    "metawork agentcore vertical complete",
+  streamedSse(
+    textSse(
+      process.platform === "win32" ? "m10" : "m4",
+      "metawork agentcore vertical complete",
+    ),
+    350,
   ),
   (payload) => {
     assertMultimodalProviderRequest(
       payload,
-      "Compare the reference image with the PDF brief.",
+      "Compare the reference images.",
       attachmentPngBytes,
-      attachmentPdfBytes,
+      attachmentJpegBytes,
     );
     return textSse(
       process.platform === "win32" ? "m11" : "m5",
@@ -690,10 +693,10 @@ try {
       sizeBytes: String(attachmentPngBytes.length),
     },
     {
-      kind: "pdf",
-      format: "pdf",
-      displayName: path.basename(attachmentPdfPath),
-      sizeBytes: String(attachmentPdfBytes.length),
+      kind: "image",
+      format: "jpeg",
+      displayName: path.basename(attachmentJpegPath),
+      sizeBytes: String(attachmentJpegBytes.length),
     },
   ]);
   const attachmentTokens = attachmentChoice.attachments.map(
@@ -705,7 +708,7 @@ try {
     expectedBindingEpoch,
     input: {
       kind: "multimodal",
-      text: "Compare the reference image with the PDF brief.",
+      text: "Compare the reference images.",
       attachmentTokens,
     },
   });
@@ -718,15 +721,6 @@ try {
     throw new Error(
       `Multimodal Run was not accepted: ${JSON.stringify(multimodalRunResult)}`,
     );
-  for (const token of attachmentTokens) {
-    const released = await invokeBridge("metawork.attachments.release", {
-      token,
-    });
-    if (released?.released !== false)
-      throw new Error(
-        `consumed attachment grant remained releasable: ${JSON.stringify(released)}`,
-      );
-  }
   const acceptedMultimodalRunId = multimodalRunResult?.runId ?? null;
   const multimodalTerminal = await poll(
     async () => {
@@ -766,12 +760,21 @@ try {
       sizeBytes: String(attachmentPngBytes.length),
     },
     {
-      kind: "pdf",
-      format: "pdf",
-      displayName: path.basename(attachmentPdfPath),
-      sizeBytes: String(attachmentPdfBytes.length),
+      kind: "image",
+      format: "jpeg",
+      displayName: path.basename(attachmentJpegPath),
+      sizeBytes: String(attachmentJpegBytes.length),
     },
   ]);
+  for (const token of attachmentTokens) {
+    const released = await invokeBridge("metawork.attachments.release", {
+      token,
+    });
+    if (released?.released !== false)
+      throw new Error(
+        `consumed attachment grant remained releasable: ${JSON.stringify(released)}`,
+      );
+  }
   const multimodalCheckpointObservedAt = Date.now();
   const multimodalCheckpoint = await poll(
     async () =>
@@ -1028,10 +1031,10 @@ try {
         sizeBytes: String(attachmentPngBytes.length),
       },
       {
-        kind: "pdf",
-        format: "pdf",
-        displayName: path.basename(attachmentPdfPath),
-        sizeBytes: String(attachmentPdfBytes.length),
+        kind: "image",
+        format: "jpeg",
+        displayName: path.basename(attachmentJpegPath),
+        sizeBytes: String(attachmentJpegBytes.length),
       },
     ],
   );
@@ -1059,8 +1062,8 @@ try {
 
   process.stdout.write(
     process.platform === "win32"
-      ? "AgentCore Windows desktop vertical passed: real Skill/multimodal/Text/compact checkpoints, ordered image/PDF provider input, metadata-only attachment history, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
-      : "AgentCore macOS desktop vertical passed: real Skill/multimodal/Text/compact checkpoints, ordered image/PDF provider input, metadata-only attachment history, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
+      ? "AgentCore Windows desktop vertical passed: real Skill/multimodal/Text/compact checkpoints, ordered image provider input, metadata-only attachment history, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
+      : "AgentCore macOS desktop vertical passed: real Skill/multimodal/Text/compact checkpoints, ordered image provider input, metadata-only attachment history, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
   );
 } catch (error) {
   process.stderr.write(`${output}\n`);
@@ -1088,7 +1091,7 @@ function startApplication() {
       METAWORK_AUTOMATION_WORKSPACE: canonicalWorkspace,
       METAWORK_AUTOMATION_ATTACHMENTS: [
         attachmentPngPath,
-        attachmentPdfPath,
+        attachmentJpegPath,
       ].join("\n"),
       METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL: baseUrl,
     },
@@ -1172,29 +1175,6 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function minimalPdf() {
-  const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> /Contents 4 0 R >>",
-    "<< /Length 0 >>\nstream\n\nendstream",
-  ];
-  let source = "%PDF-1.4\n";
-  const offsets = [0];
-  for (const [index, object] of objects.entries()) {
-    offsets.push(Buffer.byteLength(source));
-    source += `${index + 1} 0 obj\n${object}\nendobj\n`;
-  }
-  const xrefOffset = Buffer.byteLength(source);
-  source += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  source += offsets
-    .slice(1)
-    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
-    .join("");
-  source += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
-  return Buffer.from(source, "ascii");
-}
-
 function assertAttachmentChoice(actual, expected) {
   if (actual?.status !== "ready" || !Array.isArray(actual.attachments))
     throw new Error(
@@ -1219,7 +1199,7 @@ function assertAttachmentChoice(actual, expected) {
   }
 }
 
-function assertMultimodalProviderRequest(payload, text, pngBytes, pdfBytes) {
+function assertMultimodalProviderRequest(payload, text, pngBytes, jpegBytes) {
   const lastUser = payload.messages
     ?.filter((message) => message.role === "user")
     .at(-1);
@@ -1234,11 +1214,11 @@ function assertMultimodalProviderRequest(payload, text, pngBytes, pdfBytes) {
       },
     },
     {
-      type: "document",
+      type: "image",
       source: {
         type: "base64",
-        media_type: "application/pdf",
-        data: pdfBytes.toString("base64"),
+        media_type: "image/jpeg",
+        data: jpegBytes.toString("base64"),
       },
     },
   ]);
@@ -1247,7 +1227,7 @@ function assertMultimodalProviderRequest(payload, text, pngBytes, pdfBytes) {
 function assertMultimodalHistory(result, attachmentTokens, expected) {
   assert.deepEqual(result.run.input, {
     kind: "multimodal",
-    text: "Compare the reference image with the PDF brief.",
+    text: "Compare the reference images.",
     attachments: expected.map((attachment) => ({
       ...attachment,
       redacted: false,
@@ -1267,7 +1247,7 @@ function assertMultimodalHistory(result, attachmentTokens, expected) {
     "snapshot retained attachment path",
   );
   assert.equal(
-    encoded.includes(attachmentPdfPath),
+    encoded.includes(attachmentJpegPath),
     false,
     "snapshot retained attachment path",
   );
@@ -1277,7 +1257,7 @@ function assertMultimodalHistory(result, attachmentTokens, expected) {
     "snapshot retained attachment bytes",
   );
   assert.equal(
-    encoded.includes(attachmentPdfBytes.toString("base64")),
+    encoded.includes(attachmentJpegBytes.toString("base64")),
     false,
     "snapshot retained attachment bytes",
   );

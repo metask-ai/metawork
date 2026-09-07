@@ -542,22 +542,17 @@ export const enUS = {
   "run.stop_failed":
     "The stop request could not be confirmed. Refresh and try again.",
   "run.stop_requested": "Stopping the current work…",
-  "attachment.add": "Add images or PDFs",
+  "attachment.add": "Add images",
   "attachment.selected": "Selected attachments",
   "attachment.remove": "Remove {name}",
   "attachment.type.image": "Image",
-  "attachment.type.pdf": "PDF",
   "attachment.reload_required":
     "Attachments are not kept after reload. Add them again before sending.",
   "attachment.skill_conflict":
     "Remove the attachments before choosing a Skill, or rewrite the leading slash as ordinary text.",
   "attachment.model_warning.image":
     "This model declares that image input is unsupported. You can still send and receive the exact result.",
-  "attachment.model_warning.pdf":
-    "This model declares that PDF input is unsupported. You can still send and receive the exact result.",
-  "attachment.model_warning.both":
-    "This model declares that image and PDF input are unsupported. You can still send and receive the exact result.",
-  "attachment.error.unsupported_type": "Choose PNG, JPEG, WebP, or PDF files.",
+  "attachment.error.unsupported_type": "Choose PNG, JPEG, or WebP files.",
   "attachment.error.file_too_large": "One of the selected files is too large.",
   "attachment.error.too_many_files": "You can attach up to 8 files.",
   "attachment.error.staging_capacity":

@@ -518,15 +518,13 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
         const attachmentKind = enumValue(
           attachment.kind,
           `${attachmentPath}.kind`,
-          ["image", "pdf"] as const,
+          ["image"] as const,
         );
         const format = enumValue(
           attachment.format,
           `${attachmentPath}.format`,
-          ["png", "jpeg", "webp", "pdf"] as const,
+          ["png", "jpeg", "webp"] as const,
         );
-        if ((attachmentKind === "pdf") !== (format === "pdf"))
-          fail(attachmentPath, "attachment kind and format must agree");
         return {
           kind: attachmentKind,
           format,
@@ -3297,15 +3295,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const attachmentCapability = object(
     capabilityItem.attachments,
     "$.capabilities.attachments",
-    [
-      "enabled",
-      "imageFormats",
-      "pdf",
-      "maxFiles",
-      "maxImageBytes",
-      "maxPdfBytes",
-      "maxStagedBytes",
-    ],
+    ["enabled", "imageFormats", "maxFiles", "maxImageBytes", "maxStagedBytes"],
   );
   const capabilities = {
     taskHistoryPersistence: booleanValue(
@@ -3441,10 +3431,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         (format, formatPath) =>
           enumValue(format, formatPath, ["png", "jpeg", "webp"] as const),
       ),
-      pdf: booleanValue(
-        attachmentCapability.pdf,
-        "$.capabilities.attachments.pdf",
-      ),
       maxFiles: positiveWireId(
         attachmentCapability.maxFiles,
         "$.capabilities.attachments.maxFiles",
@@ -3452,10 +3438,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       maxImageBytes: positiveWireId(
         attachmentCapability.maxImageBytes,
         "$.capabilities.attachments.maxImageBytes",
-      ),
-      maxPdfBytes: positiveWireId(
-        attachmentCapability.maxPdfBytes,
-        "$.capabilities.attachments.maxPdfBytes",
       ),
       maxStagedBytes: positiveWireId(
         attachmentCapability.maxStagedBytes,
@@ -3465,8 +3447,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   };
   if (
     capabilities.attachments.enabled !==
-      (capabilities.attachments.pdf &&
-        capabilities.attachments.imageFormats.length === 3) ||
+      (capabilities.attachments.imageFormats.length === 3) ||
     (capabilities.attachments.enabled &&
       capabilities.attachments.imageFormats.join(",") !== "png,jpeg,webp")
   )
@@ -4515,19 +4496,15 @@ export function decodeAttachmentChooseResult(
       ]);
       const kind = enumValue(attachment.kind, `${path}.kind`, [
         "image",
-        "pdf",
       ] as const);
       const format = enumValue(attachment.format, `${path}.format`, [
         "png",
         "jpeg",
         "webp",
-        "pdf",
       ] as const);
       const token = stringValue(attachment.token, `${path}.token`);
       if (!/^[0-9a-f]{48}$/.test(token))
         fail(`${path}.token`, "invalid attachment token");
-      if ((kind === "pdf") !== (format === "pdf"))
-        fail(path, "attachment kind and format must agree");
       return {
         token,
         kind,

@@ -877,18 +877,9 @@ export default function App() {
     composerDraft.kind === "multimodal" &&
     composerModelMetadata?.capabilities.imageInput === false &&
     composerDraft.attachments.some((attachment) => attachment.kind === "image");
-  const pdfDeclaredUnsupported =
-    composerDraft.kind === "multimodal" &&
-    composerModelMetadata?.capabilities.pdfInput === false &&
-    composerDraft.attachments.some((attachment) => attachment.kind === "pdf");
-  const attachmentModelWarning =
-    imageDeclaredUnsupported && pdfDeclaredUnsupported
-      ? ("both" as const)
-      : imageDeclaredUnsupported
-        ? ("image" as const)
-        : pdfDeclaredUnsupported
-          ? ("pdf" as const)
-          : null;
+  const attachmentModelWarning = imageDeclaredUnsupported
+    ? ("image" as const)
+    : null;
   const customCustomProviderContext = activeCustomProvider
     ? `${activeCustomProvider.displayName} · ${t(
         `settings.custom_provider_protocol.${activeCustomProvider.protocol}`,

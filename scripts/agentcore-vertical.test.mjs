@@ -16,7 +16,7 @@ test("desktop vertical uses one canonical Workspace identity for Agent file path
   assert.match(source, /METAWORK_AUTOMATION_WORKSPACE: canonicalWorkspace/);
   assert.match(
     source,
-    /METAWORK_AUTOMATION_ATTACHMENTS: \[\s*attachmentPngPath,\s*attachmentPdfPath,\s*\]\.join\("\\n"\)/,
+    /METAWORK_AUTOMATION_ATTACHMENTS: \[\s*attachmentPngPath,\s*attachmentJpegPath,\s*\]\.join\("\\n"\)/,
   );
   assert.doesNotMatch(source, /METAWORK_AUTOMATION_WORKSPACE: workspace/);
   assert.doesNotMatch(source, /const fixturePath = join\(workspace,/);

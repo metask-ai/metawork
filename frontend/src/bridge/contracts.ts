@@ -337,8 +337,8 @@ export type TaskRunInput =
 
 export type AttachmentDescriptor = {
   token: string;
-  kind: "image" | "pdf";
-  format: "png" | "jpeg" | "webp" | "pdf";
+  kind: "image";
+  format: "png" | "jpeg" | "webp";
   displayName: string;
   sizeBytes: string;
 };
@@ -447,8 +447,8 @@ export type RunInputView =
       kind: "multimodal";
       text: string | null;
       attachments: Array<{
-        kind: "image" | "pdf";
-        format: "png" | "jpeg" | "webp" | "pdf";
+        kind: "image";
+        format: "png" | "jpeg" | "webp";
         displayName: string;
         sizeBytes: string;
         redacted: boolean;
@@ -753,10 +753,8 @@ export type WorkbenchSnapshot = {
     attachments: {
       enabled: boolean;
       imageFormats: Array<"png" | "jpeg" | "webp">;
-      pdf: boolean;
       maxFiles: string;
       maxImageBytes: string;
-      maxPdfBytes: string;
       maxStagedBytes: string;
     };
   };
