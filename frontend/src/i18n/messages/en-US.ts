@@ -921,6 +921,10 @@ export const enUS = {
   "settings.default_model": "Default model",
   "settings.default_model_help":
     "Choose the model used by new tasks. Existing tasks keep their own model.",
+  "settings.new_task_model_help":
+    "Choose the model for this new task without changing the global default.",
+  "settings.new_task_model_invalid":
+    "The previously selected model is no longer available. Choose another model before sending.",
   "settings.only_model_help":
     "This configuration currently provides only one available model.",
   "settings.model_menu_help":
@@ -971,6 +975,18 @@ export const enUS = {
   "settings.task_binding_model":
     "This task keeps its pinned execution. The current default cannot safely change its model.",
   "settings.task_model_help": "Choose the model for this task's next run.",
+  "settings.task_model_catalog_loading":
+    "The model catalog is updating. You can choose a model when it finishes.",
+  "settings.task_model_catalog_unavailable":
+    "The model catalog is unavailable. This task keeps its model until the catalog recovers.",
+  "settings.task_model_execution_replacing":
+    "The default execution is changing. You can choose a model when it finishes.",
+  "settings.task_model_runtime_detached":
+    "This task's runtime is detached. Restore the conversation before changing models.",
+  "settings.task_model_unsupported_source":
+    "This task uses a custom provider, which does not support in-conversation model switching.",
+  "settings.task_model_authority_changed":
+    "This task keeps its pinned execution because its provider, credential, or protocol changed.",
   "outcome.completed": "Completed",
   "outcome.stopped": "Stopped",
   "outcome.cancelled": "Stopped",
@@ -985,7 +1001,13 @@ export const enUS = {
   "cause.queue_capacity_failure": "Workbench capacity reached",
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.agent_failure":
-    "Agent execution failed. Check the model or network configuration.",
+    "Agent execution failed. Review the work process and try again.",
+  "cause.provider_failure":
+    "The model service returned an error while generating the response. Try again; if it continues, check the model service configuration.",
+  "cause.tool_failure":
+    "Tool execution failed and could not recover. Review the work process and try again.",
+  "cause.image_input_unsupported":
+    "The current model does not support image input. Choose a model that supports images and select the image again.",
   "cause.dependency_contract_failure": "Task runtime became incompatible",
   "cause.stale_catalog":
     "Skill execution did not start because the catalog is out of date",
@@ -1031,6 +1053,8 @@ export const enUS = {
     "Capabilities are refreshing. Please wait a moment and try again.",
   "mutation.reason.catalog_unavailable":
     "Skills are unavailable for this workspace or task.",
+  "mutation.reason.model_selection_changed":
+    "Available models changed. Choose the model again and retry.",
   "mutation.reason.stale_catalog":
     "The skill catalog changed. Refresh it and choose the skill again.",
   "mutation.reason.skill_not_found":

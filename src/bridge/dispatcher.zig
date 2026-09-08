@@ -2052,6 +2052,25 @@ pub const Dispatcher = struct {
         const execution_generation = try handlers.parseWireId(
             parsed.value.expectedExecutionGeneration,
         );
+        const selection_revision = try handlers.parseWireId(
+            parsed.value.expectedSelectionRevision,
+        );
+        const model_selection: ?product_control.NewTaskModelSelectionInput =
+            if (parsed.value.modelSelection) |selection|
+                .{
+                    .target = .{
+                        .source_id = selection.targetModelRef.sourceId,
+                        .model_id = selection.targetModelRef.modelId,
+                    },
+                    .expected_source_generation = try handlers.parseWireId(
+                        selection.expectedSourceGeneration,
+                    ),
+                    .expected_catalog_generation = try handlers.parseWireId(
+                        selection.expectedCatalogGeneration,
+                    ),
+                }
+            else
+                null;
         if (parsed.value.expectedSkillCatalogRevision) |revision|
             if (revision.len == 0) return error.InvalidBridgePayload;
         if ((parsed.value.expectedSkillCatalogRevision == null) !=
@@ -2068,6 +2087,8 @@ pub const Dispatcher = struct {
         const task_id = workbench.createTaskForWorkspace(
             workspace_request,
             execution_generation,
+            selection_revision,
+            model_selection,
             parsed.value.expectedSkillCatalogRevision,
             skill_selection_revision,
             .{ .interactive = permission_profile },
@@ -4053,6 +4074,7 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
         error.WorkspaceRemovalInProgress => "workspace_removing",
         error.CatalogLoading => "catalog_loading",
         error.CatalogUnavailable => "catalog_unavailable",
+        error.ModelSelectionChanged => "model_selection_changed",
         error.StaleCatalog => "stale_catalog",
         error.TaskCapacity, error.ProjectionCapacity => "capacity_reached",
         error.ExecutorShuttingDown => "shutting_down",
@@ -5599,7 +5621,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -5614,7 +5636,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     ) != null);
 
     const automatic_create = native_dispatcher.dispatch(
-        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}",
+        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}",
         source,
         &response,
     );
@@ -5624,10 +5646,10 @@ test "Dispatcher validates authority before domain calls and preserves committed
         "\"reason\":\"workspace_unavailable\"",
     ) != null);
 
-    var request_storage: [384]u8 = undefined;
+    var request_storage: [512]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
         .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;

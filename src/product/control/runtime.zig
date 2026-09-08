@@ -92,6 +92,7 @@ pub const Error = lifecycle.Error || product_attachment.Error || product_schedul
     McpOauthScopeCapacity,
     CatalogRequestGenerationExhausted,
     StaleCatalog,
+    ModelSelectionChanged,
     SkillNotFound,
     SkillUnavailable,
     InvalidSkillArguments,
@@ -221,6 +222,12 @@ pub const TaskRunInput = union(enum) {
 pub const TaskModelSelectionInput = struct {
     expected_model: []const u8,
     expected_execution_generation: u64,
+    target: models_contract.ModelRef,
+    expected_source_generation: u64,
+    expected_catalog_generation: u64,
+};
+
+pub const NewTaskModelSelectionInput = struct {
     target: models_contract.ModelRef,
     expected_source_generation: u64,
     expected_catalog_generation: u64,
@@ -2352,8 +2359,9 @@ pub const Runtime = struct {
                 self.clearRecordedModelsDefaultNoFail();
             return;
         };
-        const aligned = self.execution_state.defaultAuthorityMatches(desired);
-        if (aligned and !refresh_aligned and !clear_unresolvable) return;
+        const default_aligned = self.execution_state.defaultAuthorityMatches(desired);
+        const execution_authority_aligned = self.execution_state.executionAuthorityMatches(desired);
+        if (default_aligned and !refresh_aligned and !clear_unresolvable) return;
 
         var candidate = (self.custom_providers.resolveDefault() catch {
             if (clear_unresolvable and
@@ -2387,7 +2395,7 @@ pub const Runtime = struct {
             return;
         }
 
-        const execution_generation = if (aligned)
+        const execution_generation = if (execution_authority_aligned)
             self.executionGeneration()
         else
             self.nextExecutionGeneration(self.executionGeneration()) catch {
@@ -2987,6 +2995,8 @@ pub const Runtime = struct {
             workspace_id,
             (self.workspace.facts(workspace_id) orelse return error.UnknownWorkspace).epoch,
             self.execution_state.generation(),
+            self.execution_state.activeSelectionRevision(),
+            null,
             null,
             null,
             .{ .interactive = input.permission_profile },
@@ -2999,6 +3009,8 @@ pub const Runtime = struct {
         workspace_id: u64,
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3009,6 +3021,8 @@ pub const Runtime = struct {
             workspace_id,
             expected_workspace_epoch,
             expected_execution_generation,
+            expected_selection_revision,
+            model_selection,
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
             permission,
@@ -3020,6 +3034,8 @@ pub const Runtime = struct {
         self: *Runtime,
         request: TaskWorkspaceRequest,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3031,6 +3047,8 @@ pub const Runtime = struct {
                 manual.workspace_id,
                 manual.expected_epoch,
                 expected_execution_generation,
+                expected_selection_revision,
+                model_selection,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
                 permission,
@@ -3038,6 +3056,8 @@ pub const Runtime = struct {
             ),
             .automatic => self.createAutomaticTask(
                 expected_execution_generation,
+                expected_selection_revision,
+                model_selection,
                 expected_skill_catalog_revision,
                 expected_skill_selection_revision,
                 permission,
@@ -3050,6 +3070,8 @@ pub const Runtime = struct {
         workspace_id: u64,
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3059,6 +3081,8 @@ pub const Runtime = struct {
             workspace_id,
             expected_workspace_epoch,
             expected_execution_generation,
+            expected_selection_revision,
+            model_selection,
             expected_skill_catalog_revision,
             expected_skill_selection_revision,
             permission,
@@ -3078,6 +3102,8 @@ pub const Runtime = struct {
         workspace_id: u64,
         expected_workspace_epoch: u64,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3088,8 +3114,14 @@ pub const Runtime = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
-        if (!self.validExecutionGeneration(expected_execution_generation))
+        if (!self.validNewTaskAdmission(
+            expected_execution_generation,
+            expected_selection_revision,
+        ))
             return error.ExecutionGenerationMismatch;
+        if (model_selection) |selection|
+            if (!self.newTaskModelSelectionAuthorized(selection))
+                return error.ModelSelectionChanged;
         const workspace_view = try self.workspace.taskCreateAuthority(
             workspace_id,
             expected_workspace_epoch,
@@ -3139,7 +3171,9 @@ pub const Runtime = struct {
                 self.allocator,
                 skill.skill_id,
             );
-        const execution_input = self.execution_state.executionInput().?;
+        var execution_input = self.execution_state.executionInput().?;
+        if (model_selection) |selection|
+            execution_input.target.model = selection.target.model_id;
         const permission_profile: PermissionProfile = switch (permission) {
             .interactive => |profile| profile orelse self.default_permission_profile,
             .noninteractive => |profile| profile,
@@ -3173,7 +3207,7 @@ pub const Runtime = struct {
             .agent_runtime = self.agent_runtime,
             .execution = execution_input,
             .protocol = execution_input.target.protocol,
-            .model = self.admissionModel(),
+            .model = execution_input.target.model,
             .permission_profile = permission_profile,
             .permission_interaction = permission_interaction,
             .workspace_id = workspace_id,
@@ -3226,6 +3260,8 @@ pub const Runtime = struct {
     fn createAutomaticTask(
         self: *Runtime,
         expected_execution_generation: u64,
+        expected_selection_revision: u64,
+        model_selection: ?NewTaskModelSelectionInput,
         expected_skill_catalog_revision: ?[]const u8,
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
@@ -3235,7 +3271,10 @@ pub const Runtime = struct {
             return error.ExecutionInUse;
         if (!self.canCreateTask())
             return error.ExecutionUnavailable;
-        if (!self.validExecutionGeneration(expected_execution_generation))
+        if (!self.validNewTaskAdmission(
+            expected_execution_generation,
+            expected_selection_revision,
+        ))
             return error.ExecutionGenerationMismatch;
         if (expected_skill_catalog_revision != null or
             expected_skill_selection_revision != null)
@@ -3250,6 +3289,8 @@ pub const Runtime = struct {
             workspace.id,
             workspace.epoch,
             expected_execution_generation,
+            expected_selection_revision,
+            model_selection,
             null,
             null,
             permission,
@@ -3275,6 +3316,8 @@ pub const Runtime = struct {
             workspace.id,
             workspace.epoch,
             self.execution_state.generation(),
+            self.execution_state.activeSelectionRevision(),
+            null,
             null,
             null,
             .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
@@ -5254,6 +5297,40 @@ pub const Runtime = struct {
                 .unavailable,
             .authority_stable = !self.shutting_down and
                 self.canonical_user_home != null and workspace.exists,
+            .model_selection_availability = self.taskModelSelectionAvailability(query),
+        };
+    }
+
+    fn taskModelSelectionAvailability(
+        self: *Runtime,
+        query: task_runtime.ProjectionAuthorityQuery,
+    ) product_task.ModelSelectionAvailability {
+        if (!query.runtime_attached) return .runtime_detached;
+        if (self.shutting_down) return .authority_changed;
+        if (self.execution_state.replacementPending()) return .execution_replacing;
+        if (!self.execution_state.ready() or
+            query.execution_generation != self.execution_state.generation() or
+            self.execution_state.protocol() == null or
+            query.execution_protocol != self.execution_state.protocol().?)
+            return .authority_changed;
+        if (self.execution_state.activeSource() != .metask)
+            return if (self.execution_state.activeSource() == .custom_provider)
+                .unsupported_source
+            else
+                .authority_changed;
+        if (!self.metaskBindingCurrent()) return .authority_changed;
+
+        const models = self.modelsView();
+        const provider = for (models.providers) |candidate| {
+            if (std.mem.eql(u8, candidate.id, "metask")) break candidate;
+        } else return .catalog_unavailable;
+        return switch (provider.catalog_state) {
+            .loading, .choosing => .catalog_loading,
+            .ready => if (provider.catalog_generation != 0 and provider.models.len != 0)
+                .available
+            else
+                .catalog_unavailable,
+            .needs_authentication, .failed, .unavailable => .catalog_unavailable,
         };
     }
 
@@ -5358,14 +5435,41 @@ pub const Runtime = struct {
         );
     }
 
-    fn validExecutionGeneration(self: *const Runtime, generation: u64) bool {
-        return generation != 0 and
+    fn validNewTaskAdmission(
+        self: *const Runtime,
+        generation: u64,
+        selection_revision: u64,
+    ) bool {
+        return selection_revision != 0 and
+            selection_revision == self.execution_state.activeSelectionRevision() and
+            generation != 0 and
             generation == self.execution_state.generation() and
             self.modelsDefaultCurrent();
     }
 
-    fn admissionModel(self: *const Runtime) []const u8 {
-        return self.execution_state.model();
+    fn newTaskModelSelectionAuthorized(
+        self: *Runtime,
+        selection: NewTaskModelSelectionInput,
+    ) bool {
+        if (selection.target.source_id.len == 0 or
+            selection.target.model_id.len == 0 or
+            selection.target.source_id.len > models_contract.Limits.provider_id_bytes or
+            selection.target.model_id.len > models_contract.Limits.model_id_bytes or
+            selection.expected_source_generation == 0 or
+            selection.expected_catalog_generation == 0 or
+            !std.unicode.utf8ValidateSlice(selection.target.source_id) or
+            !std.unicode.utf8ValidateSlice(selection.target.model_id))
+            return false;
+        const active = self.execution_state.activeModelRef() orelse return false;
+        const protocol = self.execution_state.protocol() orelse return false;
+        return std.mem.eql(u8, selection.target.source_id, active.source_id) and
+            selection.expected_source_generation == self.execution_state.activeSourceGeneration() and
+            self.custom_providers.sourceModelAvailable(
+                selection.target,
+                selection.expected_source_generation,
+                selection.expected_catalog_generation,
+                protocol,
+            );
     }
 
     fn modelsDefaultCurrent(self: *const Runtime) bool {
@@ -8749,6 +8853,8 @@ test "automatic Workspace root is optional and reserved from user registration" 
         unavailable.createTaskForWorkspace(
             .automatic,
             1,
+            unavailable.newTaskAdmissionView().active_selection_revision,
+            null,
             null,
             null,
             .{ .interactive = null },
@@ -10667,6 +10773,8 @@ test "mutation admission rejects stale execution and binding facts" {
             1,
             1,
             0,
+            control.newTaskAdmissionView().active_selection_revision,
+            null,
             null,
             null,
             .{ .interactive = null },
@@ -10678,6 +10786,8 @@ test "mutation admission rejects stale execution and binding facts" {
             1,
             1,
             2,
+            control.newTaskAdmissionView().active_selection_revision,
+            null,
             null,
             null,
             .{ .interactive = null },
@@ -10689,6 +10799,8 @@ test "mutation admission rejects stale execution and binding facts" {
             1,
             2,
             1,
+            control.newTaskAdmissionView().active_selection_revision,
+            null,
             null,
             null,
             .{ .interactive = null },
@@ -11705,6 +11817,180 @@ test "busy Task model selection keeps only the last runtime pending model" {
                 "fixture-model",
             ),
         ),
+    );
+}
+
+test "same-source default model change preserves execution generation and advances admission revision" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    const models = [_]models_contract.ModelView{
+        .{ .id = "fixture-model", .display_name = "Fixture model" },
+        .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
+    };
+    try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
+    const before = control.newTaskAdmissionView();
+    const initial_view = control.modelsView();
+    const initial_provider = initial_view.providers[0];
+    try models_aggregate.TestSupport.installMetaskDefault(
+        &control.custom_providers,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Fixture API",
+            .suffix = "ture",
+            .protocol = .anthropic_messages,
+        },
+        "fixture-secret",
+        &models,
+        "fixture-model-2",
+        initial_provider.source_generation,
+        initial_view.metask_selection_revision + 1,
+        initial_view.selection_revision + 1,
+        initial_provider.catalog_generation + 1,
+    );
+    control.reconcileModelsDefaultNoFail(false, false);
+    control.finishExecutionCommitNoFail();
+    const view = control.modelsView();
+    const provider = view.providers[0];
+
+    const after = control.newTaskAdmissionView();
+    try std.testing.expectEqual(before.active_generation, after.active_generation);
+    try std.testing.expect(after.active_selection_revision != before.active_selection_revision);
+    try std.testing.expectEqualStrings("fixture-model-2", after.active_model_ref.?.model_id);
+    try std.testing.expect(!control.validNewTaskAdmission(
+        before.active_generation,
+        before.active_selection_revision,
+    ));
+    try std.testing.expect(control.validNewTaskAdmission(
+        after.active_generation,
+        after.active_selection_revision,
+    ));
+    try std.testing.expectError(
+        error.ExecutionGenerationMismatch,
+        control.createTaskInWorkspace(
+            1,
+            1,
+            before.active_generation,
+            before.active_selection_revision,
+            null,
+            null,
+            null,
+            .{ .interactive = null },
+        ),
+    );
+    const task = &control.task_runtime.tasks[0].?;
+    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+    try std.testing.expect(control.taskModelSelectionAuthorized(
+        .{
+            .generation = task.durable.execution_generation,
+            .protocol = task.durable.execution_protocol,
+        },
+        .{
+            .source_id = after.active_model_ref.?.source_id,
+            .model_id = "fixture-model-2",
+        },
+        provider.source_generation,
+        provider.catalog_generation,
+    ));
+
+    try models_aggregate.TestSupport.installMetaskDefault(
+        &control.custom_providers,
+        "account-1",
+        .{
+            .id = "key-1",
+            .name = "Fixture API",
+            .suffix = "ture",
+            .protocol = .anthropic_messages,
+        },
+        "fixture-secret",
+        &models,
+        "fixture-model",
+        provider.source_generation,
+        view.metask_selection_revision + 1,
+        view.selection_revision + 1,
+        provider.catalog_generation + 1,
+    );
+    control.reconcileModelsDefaultNoFail(false, false);
+    control.finishExecutionCommitNoFail();
+    const reverted = control.newTaskAdmissionView();
+    try std.testing.expectEqual(before.active_generation, reverted.active_generation);
+    try std.testing.expect(reverted.active_selection_revision != after.active_selection_revision);
+    try std.testing.expectEqualStrings("fixture-model", reverted.active_model_ref.?.model_id);
+}
+
+test "Product Control publishes Task model selection availability from cross-owner authority" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    const task = &control.task_runtime.tasks[0].?;
+    var query: task_runtime.ProjectionAuthorityQuery = .{
+        .task_id = task.durable.id,
+        .workspace_id = task.durable.workspace_id,
+        .workspace_epoch = task.durable.workspace_epoch,
+        .workspace_root = task.durable.workspace_root,
+        .execution_generation = task.durable.execution_generation,
+        .execution_protocol = task.durable.execution_protocol,
+        .execution_model = task.durable.execution_model,
+        .runtime_attached = true,
+    };
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.available,
+        control.taskModelSelectionAvailability(query),
+    );
+
+    const refresh = control.prepareMetaskCatalogRefresh("account-1", 17);
+    const preparation = switch (refresh) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.catalog_loading,
+        control.taskModelSelectionAvailability(query),
+    );
+    control.failMetaskCatalogRefresh(
+        preparation.attempt_id,
+        preparation.authorization_generation,
+        .catalog_unavailable,
+        "fixture unavailable",
+    );
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.catalog_unavailable,
+        control.taskModelSelectionAvailability(query),
+    );
+
+    try control.beginDefaultExecutionReplacement();
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.execution_replacing,
+        control.taskModelSelectionAvailability(query),
+    );
+    control.endExecutionReplacementNoFail();
+
+    query.runtime_attached = false;
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.runtime_detached,
+        control.taskModelSelectionAvailability(query),
+    );
+    query.runtime_attached = true;
+    query.execution_generation += 1;
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.authority_changed,
+        control.taskModelSelectionAvailability(query),
+    );
+    query.execution_generation -= 1;
+
+    var binding = try PreparedCustomProviderBinding.init(
+        std.testing.allocator,
+        "provider-1",
+        "fixture-model",
+    );
+    execution_state.testing.installCustomProviderBinding(
+        &control.execution_state,
+        &binding,
+    );
+    try std.testing.expectEqual(
+        product_task.ModelSelectionAvailability.unsupported_source,
+        control.taskModelSelectionAvailability(query),
     );
 }
 
@@ -15651,6 +15937,8 @@ test "MCP startup health commits a safe degraded Runtime projection" {
             1,
             1,
             1,
+            control.newTaskAdmissionView().active_selection_revision,
+            null,
             null,
             null,
             .{ .interactive = null },

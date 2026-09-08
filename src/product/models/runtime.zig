@@ -753,6 +753,42 @@ pub const Runtime = struct {
             );
     }
 
+    /// Validates one source-qualified model against the exact current source
+    /// and catalog generations. This does not change the global default.
+    pub fn sourceModelAvailable(
+        self: *Runtime,
+        target: contract.ModelRef,
+        expected_source_generation: u64,
+        expected_catalog_generation: u64,
+        protocol: contract.Protocol,
+    ) bool {
+        self.assertMainThread();
+        if (std.mem.startsWith(u8, target.source_id, "metask:"))
+            return self.metaskSourceModelAvailable(
+                target,
+                expected_source_generation,
+                expected_catalog_generation,
+                protocol,
+            );
+        if (expected_source_generation == 0 or expected_catalog_generation == 0)
+            return false;
+        for (self.registry.views()) |provider| {
+            if (!std.mem.eql(u8, provider.id, target.source_id)) continue;
+            if (provider.state != .ready or
+                provider.credential_status != .ready or
+                !provider.enabled or
+                provider.protocol != protocol or
+                provider.source_generation != expected_source_generation or
+                provider.catalog_generation != expected_catalog_generation)
+                return false;
+            for (provider.models) |model|
+                if (model.ready and std.mem.eql(u8, model.id, target.model_id))
+                    return true;
+            return false;
+        }
+        return false;
+    }
+
     pub fn submitCommand(self: *Runtime, command: contract.CustomProviderCommand) contract.CommandResult {
         self.assertMainThread();
         contract.validateCustomProviderCommand(command) catch
@@ -1784,6 +1820,30 @@ test "Models Runtime owns durable custom providers and source resolution" {
             .expected_catalog_generation = view.catalog_generation,
         }, true).accepted);
         const provider = runtime.views()[0];
+        try std.testing.expect(runtime.sourceModelAvailable(
+            .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+            provider.source_generation,
+            provider.catalog_generation,
+            .openai_responses,
+        ));
+        try std.testing.expect(!runtime.sourceModelAvailable(
+            .{ .source_id = selection.source_id, .model_id = "missing-model" },
+            provider.source_generation,
+            provider.catalog_generation,
+            .openai_responses,
+        ));
+        try std.testing.expect(!runtime.sourceModelAvailable(
+            .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+            provider.source_generation + 1,
+            provider.catalog_generation,
+            .openai_responses,
+        ));
+        try std.testing.expect(!runtime.sourceModelAvailable(
+            .{ .source_id = selection.source_id, .model_id = "gpt-5" },
+            provider.source_generation,
+            provider.catalog_generation,
+            .anthropic_messages,
+        ));
         try std.testing.expect(runtime.selectDefault(.{
             .selection = .{ .source_id = selection.source_id, .model_id = "gpt-5" },
             .expected_selection_revision = runtime.view().selection_revision,

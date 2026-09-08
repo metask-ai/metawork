@@ -930,6 +930,8 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         workspace_id,
         workspace_epoch,
         1,
+        restarted_workbench.newTaskAdmissionView().active_selection_revision,
+        null,
         null,
         null,
         .{ .interactive = null },

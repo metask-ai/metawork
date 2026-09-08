@@ -848,6 +848,10 @@ export const zhCN: Record<MessageId, string> = {
   "settings.default_model": "默认模型",
   "settings.default_model_help":
     "选择新任务使用的模型；已有任务继续使用创建时绑定的模型。",
+  "settings.new_task_model_help":
+    "选择这个新任务使用的模型；不会修改全局默认模型。",
+  "settings.new_task_model_invalid":
+    "之前选择的模型已不可用；请重新选择模型后再发送。",
   "settings.only_model_help": "当前配置只提供这一个可用模型。",
   "settings.model_menu_help": "从所选 Provider 与 API Key 的可用模型中选择。",
   "settings.custom_model_add_help":
@@ -889,6 +893,17 @@ export const zhCN: Record<MessageId, string> = {
   "settings.task_binding_model":
     "此任务保留原执行配置；当前默认配置无法安全修改它的模型。",
   "settings.task_model_help": "选择此任务下一轮使用的模型。",
+  "settings.task_model_catalog_loading": "模型目录正在更新，完成后可继续选择。",
+  "settings.task_model_catalog_unavailable":
+    "当前模型目录不可用；任务仍保留原模型，目录恢复后可再次选择。",
+  "settings.task_model_execution_replacing":
+    "默认执行配置正在切换，完成后可继续选择。",
+  "settings.task_model_runtime_detached":
+    "此任务的运行时已分离；恢复会话后才能修改模型。",
+  "settings.task_model_unsupported_source":
+    "此任务使用自定义 Provider，当前不支持在会话中切换模型。",
+  "settings.task_model_authority_changed":
+    "此任务保留原执行配置；Provider、凭据或协议已变化，无法安全切换模型。",
   "outcome.completed": "已完成",
   "outcome.stopped": "已停止",
   "outcome.cancelled": "已停止",
@@ -902,7 +917,12 @@ export const zhCN: Record<MessageId, string> = {
   "cause.event_pipeline_failure": "活动传递失败",
   "cause.queue_capacity_failure": "工作台容量已满",
   "cause.ui_pipeline_failure": "回复传递失败",
-  "cause.agent_failure": "Agent 执行失败，请检查模型或网络配置",
+  "cause.agent_failure": "Agent 执行失败，请查看工作过程后重试",
+  "cause.provider_failure":
+    "模型服务在生成回复时返回错误，请重试；若仍失败，请检查模型服务配置",
+  "cause.tool_failure": "工具执行失败且未能恢复，请查看工作过程后重试",
+  "cause.image_input_unsupported":
+    "当前模型不支持图片输入，请更换支持图片的模型并重新选择图片",
   "cause.dependency_contract_failure": "任务运行环境已不兼容",
   "cause.stale_catalog": "Skill 未开始执行：所选目录已过期",
   "cause.skill_not_found": "Skill 未开始执行：所选 Skill 已不可用",
@@ -934,6 +954,8 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.no_history": "请先运行一次任务，再压缩上下文。",
   "mutation.reason.catalog_loading": "相关能力目录正在刷新，请稍后重试。",
   "mutation.reason.catalog_unavailable": "当前工作区或任务无法使用 Skill。",
+  "mutation.reason.model_selection_changed":
+    "可用模型已发生变化，请重新选择模型后再试。",
   "mutation.reason.stale_catalog": "Skill 目录已变化，请刷新后重新选择。",
   "mutation.reason.skill_not_found": "所选 Skill 已不在当前任务目录中。",
   "mutation.reason.skill_unavailable": "所选 Skill 已在当前任务中禁用。",

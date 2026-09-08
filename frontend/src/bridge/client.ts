@@ -12,6 +12,7 @@ import type {
   McpStdioConnectionInput,
   PermissionProfile,
   Protocol,
+  NewTaskModelSelectionIntent,
   ScheduledTaskMutation,
   TaskRunInput,
   TaskWorkspaceIntent,
@@ -696,6 +697,8 @@ export class BridgeClient {
   async createTask(
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: string,
+    expectedSelectionRevision: string,
+    modelSelection: NewTaskModelSelectionIntent | null,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
     permissionProfile: PermissionProfile,
@@ -704,6 +707,8 @@ export class BridgeClient {
       await this.invoke(commands.createTask, {
         workspace,
         expectedExecutionGeneration,
+        expectedSelectionRevision,
+        modelSelection,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,
         permissionProfile,

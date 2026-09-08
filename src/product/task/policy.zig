@@ -221,6 +221,7 @@ pub fn classifyAgentTerminal(
                 .skill_policy_violation => .skill_policy_violation,
                 .skill_unavailable => .skill_unavailable,
                 .resource_limit, .checkpoint_budget_required => .resource_limit,
+                .image_input_unsupported => .image_input_unsupported,
                 else => null,
             }
         else
@@ -230,13 +231,21 @@ pub fn classifyAgentTerminal(
         .end_turn => .{ .phase = .completed, .outcome = .completed, .cause = null },
         .max_turns, .tool_loop => .{ .phase = .stopped, .outcome = .stopped, .cause = null },
         .aborted => decisionForSignal(result.termination_signal),
-        .tool_error, .api_error => .{
+        .tool_error => .{
             .phase = .failed,
             .outcome = .failed,
             .cause = if (result.termination_signal) |signal|
                 causeForSignal(signal)
             else
-                .agent_failure,
+                .tool_failure,
+        },
+        .api_error => .{
+            .phase = .failed,
+            .outcome = .failed,
+            .cause = if (result.termination_signal) |signal|
+                causeForSignal(signal)
+            else
+                .provider_failure,
         },
         .checkpoint_budget_exhausted, .checkpoint_resource_limit => .{
             .phase = .stopped,
@@ -548,6 +557,17 @@ test "Agent terminal facts map into Product Task outcomes" {
         classifyAgentTerminal(&terminal),
     );
 
+    terminal.abi_status = .image_input_unsupported;
+    terminal.raw_status_code = @intFromEnum(agent.Status.image_input_unsupported);
+    try std.testing.expectEqual(
+        TerminalDecision{
+            .phase = .failed,
+            .outcome = .failed,
+            .cause = .image_input_unsupported,
+        },
+        classifyAgentTerminal(&terminal),
+    );
+
     terminal.abi_status = .ok;
     terminal.raw_status_code = @intFromEnum(agent.Status.ok);
     terminal.stop_reason = .checkpoint_budget_exhausted;
@@ -601,7 +621,21 @@ test "Agent terminal facts map into Product Task outcomes" {
     terminal.raw_stop_reason_code = @intFromEnum(agent.StopReason.api_error);
     terminal.termination_signal = null;
     try std.testing.expectEqual(
-        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .agent_failure },
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .provider_failure },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.termination_signal = .{ .interrupted = .timeout };
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .timeout },
+        classifyAgentTerminal(&terminal),
+    );
+
+    terminal.stop_reason = .tool_error;
+    terminal.raw_stop_reason_code = @intFromEnum(agent.StopReason.tool_error);
+    terminal.termination_signal = null;
+    try std.testing.expectEqual(
+        TerminalDecision{ .phase = .failed, .outcome = .failed, .cause = .tool_failure },
         classifyAgentTerminal(&terminal),
     );
 }

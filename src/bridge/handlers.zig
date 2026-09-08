@@ -264,9 +264,19 @@ pub const TaskWorkspaceIntent = struct {
     workspaceId: ?[]const u8 = null,
     expectedWorkspaceEpoch: ?[]const u8 = null,
 };
+pub const NewTaskModelSelection = struct {
+    targetModelRef: struct {
+        sourceId: []const u8,
+        modelId: []const u8,
+    },
+    expectedSourceGeneration: []const u8,
+    expectedCatalogGeneration: []const u8,
+};
 pub const TaskCreate = struct {
     workspace: TaskWorkspaceIntent,
     expectedExecutionGeneration: []const u8,
+    expectedSelectionRevision: []const u8,
+    modelSelection: ?NewTaskModelSelection,
     expectedSkillCatalogRevision: ?[]const u8,
     expectedSkillSelectionRevision: ?[]const u8,
     permissionProfile: []const u8,
@@ -655,19 +665,53 @@ test "Task Run input is an exact text skill or multimodal tagged object" {
     }
 }
 
-test "Task creation requires an explicit nullable catalog revision" {
+test "Task creation requires explicit nullable model and skill selections" {
     var text = try parsePayload(TaskCreate,
-        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"permissionProfile":"approval_required"}
+        \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSelectionRevision":"4","modelSelection":null,"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"permissionProfile":"approval_required"}
     );
     defer text.deinit();
     try std.testing.expect(text.value.expectedSkillCatalogRevision == null);
     try std.testing.expect(text.value.expectedSkillSelectionRevision == null);
+    try std.testing.expect(text.value.modelSelection == null);
+    try std.testing.expectEqualStrings("4", text.value.expectedSelectionRevision);
     try std.testing.expectEqual(
         product_control.PermissionProfile.approval_required,
         permissionProfile(text.value.permissionProfile).?,
     );
     try std.testing.expect(permissionProfile("full_access") != null);
     try std.testing.expect(permissionProfile("accept_edits") == null);
+    var selected = try parsePayload(TaskCreate,
+        \\{"workspace":{"kind":"automatic"},"expectedExecutionGeneration":"3","expectedSelectionRevision":"4","modelSelection":{"targetModelRef":{"sourceId":"metask:key-1","modelId":"model-2"},"expectedSourceGeneration":"5","expectedCatalogGeneration":"6"},"expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"permissionProfile":"full_access"}
+    );
+    defer selected.deinit();
+    try std.testing.expectEqualStrings(
+        "metask:key-1",
+        selected.value.modelSelection.?.targetModelRef.sourceId,
+    );
+    try std.testing.expectEqualStrings(
+        "model-2",
+        selected.value.modelSelection.?.targetModelRef.modelId,
+    );
+    try std.testing.expectEqualStrings(
+        "5",
+        selected.value.modelSelection.?.expectedSourceGeneration,
+    );
+    try std.testing.expectEqualStrings(
+        "6",
+        selected.value.modelSelection.?.expectedCatalogGeneration,
+    );
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(TaskCreate,
+            \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSelectionRevision":"4","expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"permissionProfile":"approval_required"}
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayload(TaskCreate,
+            \\{"workspace":{"kind":"manual","workspaceId":"1","expectedWorkspaceEpoch":"2"},"expectedExecutionGeneration":"3","expectedSkillCatalogRevision":null,"expectedSkillSelectionRevision":null,"permissionProfile":"approval_required"}
+        ),
+    );
     try std.testing.expectError(
         error.InvalidBridgePayload,
         parsePayload(TaskCreate,

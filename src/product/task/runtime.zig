@@ -878,8 +878,10 @@ pub const ProjectionAuthorityQuery = struct {
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []const u8,
+    execution_generation: u64,
     execution_protocol: task_state.Protocol,
     execution_model: []const u8,
+    runtime_attached: bool,
 };
 
 pub const ProjectionAuthority = struct {
@@ -891,6 +893,7 @@ pub const ProjectionAuthority = struct {
     automatic_owner_exact: bool,
     runtime_admission: task_recovery.RuntimeAdmission,
     authority_stable: bool,
+    model_selection_availability: task_view.ModelSelectionAvailability,
 };
 
 /// Command admission uses its own typed observation port. It deliberately
@@ -2938,6 +2941,7 @@ pub const Runtime = struct {
             task_view.writeProjection(writer, .{
                 .task = task,
                 .recovery = recovery,
+                .model_selection_availability = external.model_selection_availability,
                 .shutting_down = external.shutting_down,
                 .text = effects.text,
                 .catalog = effects.catalog,
@@ -3578,8 +3582,10 @@ fn projectionAuthorityQuery(
         .workspace_id = task.durable.workspace_id,
         .workspace_epoch = task.durable.workspace_epoch,
         .workspace_root = task.durable.workspace_root,
+        .execution_generation = task.durable.execution_generation,
         .execution_protocol = task.durable.execution_protocol,
         .execution_model = task.durable.execution_model,
+        .runtime_attached = task.runtime.executionConst() != null,
     };
 }
 

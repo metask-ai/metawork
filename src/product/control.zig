@@ -21,6 +21,7 @@ pub const AttachmentFormat = product_attachment.Format;
 pub const AttachmentCandidate = product_attachment.Candidate;
 pub const AttachmentDescriptor = product_attachment.Descriptor;
 pub const TaskModelSelectionInput = runtime_impl.TaskModelSelectionInput;
+pub const NewTaskModelSelectionInput = runtime_impl.NewTaskModelSelectionInput;
 pub const NewTaskAdmissionView = runtime_impl.NewTaskAdmissionView;
 pub const WorkspaceKind = runtime_impl.WorkspaceKind;
 pub const WorkspaceProjection = runtime_impl.WorkspaceProjection;

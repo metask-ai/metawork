@@ -310,6 +310,7 @@ const taskCreateReasons = [
   "workspace_removing",
   "catalog_loading",
   "catalog_unavailable",
+  "model_selection_changed",
   "stale_catalog",
   "capacity_reached",
   "shutting_down",
@@ -2163,6 +2164,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "workspaceId",
     "permissionProfile",
     "binding",
+    "modelSelectionAvailability",
     "mcpAuthority",
     "skillCatalog",
     "lifecycle",
@@ -2221,6 +2223,19 @@ function decodeTask(value: unknown, path: string): TaskView {
     ),
     unavailableReason,
   };
+  const modelSelectionAvailability = enumValue(
+    item.modelSelectionAvailability,
+    `${path}.modelSelectionAvailability`,
+    [
+      "available",
+      "catalog_loading",
+      "catalog_unavailable",
+      "execution_replacing",
+      "runtime_detached",
+      "unsupported_source",
+      "authority_changed",
+    ] as const,
+  );
   const mcpAuthority = decodeTaskMcpAuthority(
     item.mcpAuthority,
     `${path}.mcpAuthority`,
@@ -2469,6 +2484,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
     permissionProfile,
     binding,
+    modelSelectionAvailability,
     mcpAuthority,
     skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
     lifecycle,

@@ -51,6 +51,7 @@ pub const FileReferencePosition = state.FileReferencePositionView;
 pub const FileReferenceRange = state.FileReferenceRangeView;
 pub const ProjectionError = view.Error;
 pub const ProjectionText = view.TextProjection;
+pub const ModelSelectionAvailability = view.ModelSelectionAvailability;
 pub const history = @import("product_task_persistence");
 pub const checkpoint_store = @import("product_task_checkpoint_store");
 pub const file_change_store = @import("product_task_file_change_store");

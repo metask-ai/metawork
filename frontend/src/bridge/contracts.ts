@@ -466,6 +466,9 @@ export const runCauses = [
   "ui_pipeline_failure",
   "permission_required",
   "agent_failure",
+  "provider_failure",
+  "tool_failure",
+  "image_input_unsupported",
   "dependency_contract_failure",
   "stale_catalog",
   "skill_not_found",
@@ -652,6 +655,15 @@ export type TaskMcpAuthority =
   | { kind: "ready"; selection: "selected" | "none" }
   | { kind: "unavailable"; selection: null };
 
+export type TaskModelSelectionAvailability =
+  | "available"
+  | "catalog_loading"
+  | "catalog_unavailable"
+  | "execution_replacing"
+  | "runtime_detached"
+  | "unsupported_source"
+  | "authority_changed";
+
 export type TaskView = {
   id: string;
   recentOrder: string;
@@ -666,6 +678,7 @@ export type TaskView = {
     executionGeneration: string;
     unavailableReason: "runtime_detached" | null;
   };
+  modelSelectionAvailability: TaskModelSelectionAvailability;
   mcpAuthority: TaskMcpAuthority;
   skillCatalog: SkillCatalogView;
   lifecycle: "open" | "closing";
@@ -1067,6 +1080,7 @@ export type TaskCreateReason =
   | "workspace_removing"
   | "catalog_loading"
   | "catalog_unavailable"
+  | "model_selection_changed"
   | "stale_catalog"
   | "capacity_reached"
   | "shutting_down";
@@ -1099,6 +1113,12 @@ export type TaskWorkspaceIntent =
       workspaceId: string;
       expectedWorkspaceEpoch: string;
     };
+
+export type NewTaskModelSelectionIntent = {
+  targetModelRef: ModelRef;
+  expectedSourceGeneration: string;
+  expectedCatalogGeneration: string;
+};
 
 export type TaskRunReason =
   | "binding_changed"

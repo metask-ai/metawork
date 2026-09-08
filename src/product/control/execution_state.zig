@@ -507,6 +507,34 @@ pub const State = struct {
                 false,
         };
     }
+
+    /// Returns whether the installed execution still belongs to the same
+    /// credential/protocol authority. Model choice and selection revision are
+    /// deliberately excluded: changing the default model within one source
+    /// must not invalidate existing Task execution bindings.
+    pub fn executionAuthorityMatches(
+        self: *const State,
+        authority: models_contract.DefaultSelectionAuthority,
+    ) bool {
+        if (!self.execution.ready() or
+            self.replacement != .none or
+            self.default_source_generation != authority.source_generation or
+            self.execution.protocol.? != authority.protocol)
+            return false;
+        return switch (authority.source) {
+            .metask => self.custom_binding == null and
+                self.metask_source_binding_generation == authority.source_generation and
+                std.mem.eql(
+                    u8,
+                    self.execution.providerId(),
+                    authority.selection.source_id,
+                ),
+            .custom_provider => if (self.custom_binding) |binding|
+                std.mem.eql(u8, binding.provider_id, authority.selection.source_id)
+            else
+                false,
+        };
+    }
     pub fn hasRecordedDefaultAuthority(self: *const State) bool {
         return self.default_selection_revision != 0;
     }
@@ -711,9 +739,14 @@ test "Metask installation owns only execution and source binding" {
     try std.testing.expect(state.canCreateTask(true, true));
     try std.testing.expect(!state.canCreateTask(true, false));
     try std.testing.expect(state.defaultAuthorityMatches(authority));
+    try std.testing.expect(state.executionAuthorityMatches(authority));
     var stale = authority;
     stale.selection_revision = 14;
     try std.testing.expect(!state.defaultAuthorityMatches(stale));
+    stale.selection.model_id = "model-next";
+    try std.testing.expect(state.executionAuthorityMatches(stale));
+    stale.source_generation = 12;
+    try std.testing.expect(!state.executionAuthorityMatches(stale));
 }
 
 test "Custom Provider execution never borrows Metask model authority" {
@@ -758,6 +791,7 @@ test "Custom Provider execution never borrows Metask model authority" {
 
     try std.testing.expect(state.customProviderSelected());
     try std.testing.expect(state.defaultAuthorityMatches(authority));
+    try std.testing.expect(state.executionAuthorityMatches(authority));
     const resolved = state.executionInput().?;
     try std.testing.expectEqualStrings("custom_provider:fixture-provider", resolved.target.provider_id);
     try std.testing.expectEqual(models_contract.Protocol.openai_chat_completions, resolved.target.protocol);

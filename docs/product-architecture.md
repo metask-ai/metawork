@@ -94,7 +94,9 @@ Models desired commit 不等待、查询或受制于任何消费者。后续 res
 
 每个 Account prepared transition 的 commit 仍在主线程单一 turn 内完成。Models catalog 可以跨 worker completion，但只由 Models attempt 与 authorization generation 接纳。实际 Product execution 安装只能发生在 Models desired state提交之后；后续 fallible effect 只能改变 Product active/recovery projection。
 
-Product Control 的 replacement/reconciliation gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。Models 改变默认模型时更新 selection revision；是否需要新的 source generation 或 Product binding generation由各自 authority变化决定，不能由 model id 单独推断。
+Product Control 的 replacement/reconciliation gate 只串行化本次默认 execution 交接与相关新 Task admission。已有 Task、Session、Run 和 worker 已经取得的 owned ExecutionConfig 按原生命周期收口，不热替换、不等待 Account identity 变化，也不被 logout 伪造为已撤权。Models 改变默认模型时更新 selection revision；同一 source identity、source generation 与 protocol 内的默认模型变化复用 Product binding generation，credential、endpoint、protocol 或 source authority 变化才建立新 generation。新 Task admission 必须同时 compare-and-swap active generation 与 selection revision，不能由 model id 单独推断，也不能让旧 Renderer snapshot 静默采用新默认模型。
+
+New task 的模型选择是创建事务的一次性 override，不是 Models desired state。Renderer 可以从 `newTaskAdmission.activeModelRef` 所属的 exact current source catalog 选择另一个 ready 模型，并在 `tasks.create` 中提交完整 `ModelRef + expected source generation + expected catalog generation`；未覆盖时显式提交 null 并采用 active default。Product Control 必须先校验普通 admission CAS，再校验 override 与 active source、protocol、source generation 和 catalog membership 完全一致，随后只替换本次 Task owned ExecutionConfig 的 model 字段。任何 authority/catalog 漂移都拒绝创建，不得回退到 active default、修改 Models selection 或建立跨 source credential 路径。
 
 Account identity/token rotation与 Models registry是独立 durable authority；任一方的提交、恢复或 outcome unknown 不得由另一方解释或回滚。Account 只回答当前授权能否产生 lease，Models 只回答 provider/source 能否解析，Product Control 只回答 desired binding 是否已经安装并可用于新 admission。
 
@@ -102,7 +104,7 @@ Renderer reload、断连或命令 timeout 只影响交互与 resync，不能取�
 
 Identity replacement、default execution replacement 与 durable Task history 是三个边界。durable history 只保存解释执行来源所需的 protocol、model、不透明 execution generation 与 binding facts，不保存 Account identity、Custom Provider identity、API Key metadata、credential locator、完整 ExecutionConfig 或可重建 secret 的信息。
 
-Canonical snapshot 同样保持 owner 边界：根 `account` 只投影 Account identity、取消能力与稳定错误；根 `models` 投影 provider catalog、Provider-local/global desired selection、Models generations/revisions、persistence health与 Custom Provider；根 `newTaskAdmission` 只投影 Product Control 当前安装的 active `ModelRef`、generation、selection revision、replacement/availability和新 Task admission。三者可以独立处于 ready/unavailable；例如 Account authenticated但 Metask catalog失败，或 Models desired已经提交但 Product scrub/install失败，都必须是合法 snapshot，不能伪造 active execution，也不能令整个 Workbench fail closed。
+Canonical snapshot 同样保持 owner 边界：根 `account` 只投影 Account identity、取消能力与稳定错误；根 `models` 投影 provider catalog、Provider-local/global desired selection、Models generations/revisions、persistence health与 Custom Provider；根 `newTaskAdmission` 只投影 Product Control 当前安装的 active `ModelRef`、generation、selection revision、replacement/availability和新 Task admission。每个 Task 的 `modelSelectionAvailability` 由 Product Control 根据 Task binding、installed execution、replacement 与 Models catalog 跨 aggregate 计算，Task view 只序列化，Renderer 不重建 authority。三者可以独立处于 ready/unavailable；例如 Account authenticated但 Metask catalog失败，或 Models desired已经提交但 Product scrub/install失败，都必须是合法 snapshot，不能伪造 active execution，也不能令整个 Workbench fail closed。
 
 Models 每次 resolve 只产生一个调用方 owned candidate，绑定精确 `ModelRef + source_generation + protocol`；candidate 不持久化。Product Control 在 installed binding取得 ownership后负责其 credential清零。Schedule store 不可信或 scrub失败时不得安装候选；Models desired state保持不变，Product 发布 mismatch/recovery并等待重试，不能跳过 scrub。
 
