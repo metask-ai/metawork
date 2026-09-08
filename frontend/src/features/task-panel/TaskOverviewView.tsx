@@ -446,20 +446,13 @@ export function TaskOverviewView({
                 <strong>{t("run.provider_failure.title")}</strong>
                 <span>
                   {t(
-                    run.output.responseKind === "partial"
-                      ? "run.provider_failure.partial_impact"
-                      : "run.provider_failure.no_response_impact",
+                    providerFailureTerminal.diagnosticDisposition === "withheld"
+                      ? "run.provider_failure.diagnostic_withheld"
+                      : "run.provider_failure.diagnostic_absent",
                   )}
                 </span>
               </div>
             </div>
-            <p className="inspector-diagnostic-note">
-              {t(
-                providerFailureTerminal.diagnosticDisposition === "withheld"
-                  ? "run.provider_failure.diagnostic_withheld"
-                  : "run.provider_failure.diagnostic_absent",
-              )}
-            </p>
             <p className="section-label inspector-run-information-label">
               {t("inspector.run_information")}
             </p>

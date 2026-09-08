@@ -455,13 +455,6 @@ export function TaskContent({
                             : "run.provider_failure.no_response_impact",
                         )}
                       </span>
-                      <span>
-                        {t(
-                          terminal.diagnosticDisposition === "withheld"
-                            ? "run.provider_failure.diagnostic_withheld"
-                            : "run.provider_failure.diagnostic_absent",
-                        )}
-                      </span>
                       {run.tools.length > 0 && (
                         <span>
                           {t("run.provider_failure.review_tool_effects")}

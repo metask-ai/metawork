@@ -634,8 +634,8 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - terminal cause 使用最具体的稳定本地化文案：`provider_failure` 显示“模型服务请求失败”，并在同一 notice 中说明本次 Run 未生成可用回复或只生成了可能不完整的部分回复；`tool_failure` 说明工具失败且 Agent 未能恢复，`image_input_unsupported` 明确要求更换支持图片的模型并重新选择图片；不得把三者统一写成“检查模型或网络”，也不得直接展示 provider raw body；
-- `provider_failure` 的 notice 必须明确附加诊断是 `absent` 还是 `withheld`：前者说明 MetaWork 未收到该 Run 的附加诊断，后者只说明 MetaWork 收到过当前安全边界不允许在界面展示的附加技术诊断。不得从任一状态猜测 401、API Key、限流、网络或设置问题；若该 Run 已有 Tool 记录，重试前提醒用户先检查工作过程，避免重复外部 effect；
-- Task Panel 的 Overview 为该失败 Run 提供可聚焦的“运行详情”区，以唯一失败摘要表达回复影响和诊断边界，并只在“运行信息”中显示稳定错误标识、精确 Run identity、该 Run 的 model 与 protocol；Bridge 中的 execution generation 继续作为精确 provenance，但不作为默认用户字段展示。主区“查看运行详情”必须携带被点击的历史 Run identity，不能跳到最新 Run，也不能用 Task 当前 binding 或 Models 当前默认值改写历史；被精确选择的历史 Run 标为“所选运行”，不得误称“上次运行”。只有当前 Task 真实可重试且输入区无待保留草稿时才沿用既有“准备重试”流程，动作文字必须明确只把指令重新填入 Composer；详情入口本身不触发重试、设置跳转、模型测试或任何外部操作；
+- `provider_failure` 的主区 notice 只表达失败原因、回复影响和匹配的恢复动作，不重复技术诊断边界；若该 Run 已有 Tool 记录，重试前提醒用户先检查工作过程，避免重复外部 effect；
+- Task Panel 的 Overview 为该失败 Run 提供可聚焦的“运行详情”区，以失败原因与诊断边界构成唯一详情摘要：`absent` 说明 MetaWork 未收到该 Run 的附加诊断，`withheld` 只说明 MetaWork 收到过当前安全边界不允许在界面展示的附加技术诊断。不得从任一状态猜测 401、API Key、限流、网络或设置问题；“运行信息”只显示稳定错误标识、精确 Run ID、该 Run 的 model 与 protocol，不能使用含混的运行序号文案；Bridge 中的 execution generation 继续作为精确 provenance，但不作为默认用户字段展示。主区“查看运行详情”必须携带被点击的历史 Run identity，不能跳到最新 Run，也不能用 Task 当前 binding 或 Models 当前默认值改写历史；被精确选择的历史 Run 标为“所选运行”，不得误称“上次运行”。只有当前 Task 真实可重试且输入区无待保留草稿时才沿用既有“准备重试”流程，动作文字必须明确只把指令重新填入 Composer；详情入口本身不触发重试、设置跳转、模型测试或任何外部操作；
 - Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。
 
 ### 7.6 滚动与密度

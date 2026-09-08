@@ -8357,17 +8357,6 @@ button.inspector-tool-summary:hover {
   font-size: inherit;
 }
 
-.inspector-diagnostic-note {
-  margin: 12px 0 0;
-  padding: 10px 11px;
-  border: 1px solid var(--ui-border);
-  border-radius: 7px;
-  color: var(--ui-content-secondary);
-  background: var(--ui-surface-panel);
-  font-size: var(--text-micro);
-  line-height: 1.55;
-}
-
 .inspector-run-diagnostics .inspector-state-line {
   background: var(--metask-state-error);
 }

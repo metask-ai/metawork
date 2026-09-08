@@ -1261,7 +1261,7 @@ test("typed Agent failures render accurate recovery guidance", () => {
   }
 });
 
-test("provider failures explain impact and the diagnostic boundary", () => {
+test("provider failure notices explain impact without duplicating diagnostics", () => {
   const failedWithoutResponse = task({
     runs: [
       run({
@@ -1281,7 +1281,7 @@ test("provider failures explain impact and the diagnostic boundary", () => {
   const absent = renderTaskContent(failedWithoutResponse);
   assert.match(absent, />Model service request failed</);
   assert.match(absent, /This run did not produce a usable response\./);
-  assert.match(
+  assert.doesNotMatch(
     absent,
     /MetaWork did not receive additional diagnostics for this run\./,
   );
@@ -1317,7 +1317,7 @@ test("provider failures explain impact and the diagnostic boundary", () => {
   });
   const withheld = renderTaskContent(partialWithWithheldDiagnostic);
   assert.match(withheld, /produced only a partial response/);
-  assert.match(withheld, /current security boundary/);
+  assert.doesNotMatch(withheld, /current security boundary/);
 
   for (const unsupportedGuess of [
     /401/i,
@@ -1384,7 +1384,10 @@ test("provider failure details open for the exact historical Run", async () => {
   const diagnostics = screen.getByText("Run details").closest("section");
   assert.ok(diagnostics);
   assert.match(diagnostics.textContent, /Model service request failed/);
-  assert.match(diagnostics.textContent, /did not produce a usable response/);
+  assert.doesNotMatch(
+    diagnostics.textContent,
+    /did not produce a usable response/,
+  );
   assert.match(diagnostics.textContent, /current security boundary/);
   assert.match(diagnostics.textContent, /Run information/);
   assert.match(diagnostics.textContent, /historical-model/);
@@ -1399,6 +1402,7 @@ test("provider failure details open for the exact historical Run", async () => {
   assert.equal(screen.queryByText("Last run"), null);
   assert.equal(screen.queryByText("fixture-model"), null);
   assert.equal(document.activeElement, diagnostics);
+  assert.equal(translate("zh-CN", "inspector.diagnostic_run"), "运行 ID");
 });
 
 test("typed Run activity uses safe localized labels", () => {
