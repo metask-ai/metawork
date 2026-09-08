@@ -580,7 +580,7 @@ export const enUS = {
   "run.process.tool_step_one": "{count} operation",
   "run.process.tool_step_many": "{count} operations",
   "run.process.open_tool": "View details for {name}",
-  "run.prepare_retry": "Use instruction again",
+  "run.prepare_retry": "Copy instruction to Composer",
   "run.retry_help":
     "Copies this instruction to the Composer for review. Nothing is sent automatically.",
   "run.review_draft": "Review current draft",
@@ -597,12 +597,12 @@ export const enUS = {
   "run.provider_failure.partial_impact":
     "This run produced only a partial response, which may be incomplete.",
   "run.provider_failure.diagnostic_absent":
-    "The model runtime did not provide a more specific reason.",
+    "MetaWork did not receive additional diagnostics for this run.",
   "run.provider_failure.diagnostic_withheld":
-    "Additional diagnostics exist but cannot be shown safely in the interface.",
+    "MetaWork received additional technical diagnostics, but the current security boundary does not allow their contents to be shown here.",
   "run.provider_failure.review_tool_effects":
     "Review the work process before running again to avoid repeating completed operations.",
-  "run.view_diagnostics": "View run diagnostics",
+  "run.view_diagnostics": "View run details",
   "slash.title": "Composer actions",
   "slash.group.commands": "Commands",
   "slash.group.skills": "Skills",
@@ -696,17 +696,13 @@ export const enUS = {
   "inspector.view_request": "View request",
   "inspector.current_activity": "Current activity",
   "inspector.last_run": "Last run",
-  "inspector.run_diagnostics": "Run diagnostics",
-  "inspector.diagnostic_status": "Status",
+  "inspector.selected_run": "Selected run",
+  "inspector.run_details": "Run details",
+  "inspector.run_information": "Run information",
   "inspector.diagnostic_code": "Error identifier",
   "inspector.diagnostic_run": "Run ID",
   "inspector.diagnostic_model": "Model for this run",
   "inspector.diagnostic_protocol": "Execution protocol",
-  "inspector.diagnostic_generation": "Execution configuration version",
-  "inspector.diagnostic_response": "Response result",
-  "inspector.diagnostic_response_absent": "No usable response produced",
-  "inspector.diagnostic_response_partial":
-    "Only a partial response was produced",
   "inspector.work_process": "Work process",
   "inspector.tool.running": "Running",
   "inspector.tool.completed": "Completed",

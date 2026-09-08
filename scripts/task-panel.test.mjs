@@ -1200,6 +1200,8 @@ test("Overview focus request opens the exact historical Tool detail once", async
     ),
   );
   await new Promise((resolve) => requestAnimationFrame(resolve));
+  assert.ok(screen.getByText("Selected run"));
+  assert.equal(screen.queryByText("Last run"), null);
   assert.ok(screen.getByText("historical input"));
   assert.ok(screen.getByText("historical result"));
   const toolButton = screen.getByRole("button", { name: /Bash/ });
@@ -1281,8 +1283,21 @@ test("provider failures explain impact and the diagnostic boundary", () => {
   assert.match(absent, /This run did not produce a usable response\./);
   assert.match(
     absent,
-    /The model runtime did not provide a more specific reason\./,
+    /MetaWork did not receive additional diagnostics for this run\./,
   );
+  render(
+    taskContentElement(failedWithoutResponse, "1", {
+      retryAvailable: true,
+    }),
+  );
+  assert.ok(
+    screen.getByRole("button", { name: "Copy instruction to Composer" }),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Use instruction again" }),
+    null,
+  );
+  cleanup();
 
   const partialWithWithheldDiagnostic = task({
     runs: [
@@ -1302,7 +1317,7 @@ test("provider failures explain impact and the diagnostic boundary", () => {
   });
   const withheld = renderTaskContent(partialWithWithheldDiagnostic);
   assert.match(withheld, /produced only a partial response/);
-  assert.match(withheld, /cannot be shown safely in the interface/);
+  assert.match(withheld, /current security boundary/);
 
   for (const unsupportedGuess of [
     /401/i,
@@ -1315,7 +1330,7 @@ test("provider failures explain impact and the diagnostic boundary", () => {
   }
 });
 
-test("provider failure diagnostics open for the exact historical Run", async () => {
+test("provider failure details open for the exact historical Run", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const calls = [];
   const historical = run({
@@ -1345,9 +1360,7 @@ test("provider failure diagnostics open for the exact historical Run", async () 
       onOpenRunDiagnostics: (runId, opener) => calls.push({ runId, opener }),
     }),
   );
-  await user.click(
-    screen.getByRole("button", { name: "View run diagnostics" }),
-  );
+  await user.click(screen.getByRole("button", { name: "View run details" }));
   assert.equal(calls.length, 1);
   assert.equal(calls[0].runId, "8");
   assert.ok(calls[0].opener instanceof HTMLButtonElement);
@@ -1368,12 +1381,22 @@ test("provider failure diagnostics open for the exact historical Run", async () 
     ),
   );
   await new Promise((resolve) => requestAnimationFrame(resolve));
-  const diagnostics = screen.getByText("Run diagnostics").closest("section");
+  const diagnostics = screen.getByText("Run details").closest("section");
   assert.ok(diagnostics);
+  assert.match(diagnostics.textContent, /Model service request failed/);
+  assert.match(diagnostics.textContent, /did not produce a usable response/);
+  assert.match(diagnostics.textContent, /current security boundary/);
+  assert.match(diagnostics.textContent, /Run information/);
   assert.match(diagnostics.textContent, /historical-model/);
   assert.match(diagnostics.textContent, /OpenAI Responses/);
-  assert.match(diagnostics.textContent, /Execution configuration version4/);
   assert.match(diagnostics.textContent, /provider_failure/);
+  assert.doesNotMatch(
+    diagnostics.textContent,
+    /Execution configuration version/,
+  );
+  assert.doesNotMatch(diagnostics.textContent, /Response result/);
+  assert.doesNotMatch(diagnostics.textContent, /Status/);
+  assert.equal(screen.queryByText("Last run"), null);
   assert.equal(screen.queryByText("fixture-model"), null);
   assert.equal(document.activeElement, diagnostics);
 });

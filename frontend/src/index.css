@@ -8319,7 +8319,7 @@ button.inspector-tool-summary:hover {
 
 .inspector-diagnostic-facts {
   display: grid;
-  margin: 12px 0 0;
+  margin: 8px 0 0;
   gap: 0;
 }
 
@@ -8360,11 +8360,20 @@ button.inspector-tool-summary:hover {
 .inspector-diagnostic-note {
   margin: 12px 0 0;
   padding: 10px 11px;
-  border-left: 3px solid var(--metask-state-error);
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
   color: var(--ui-content-secondary);
   background: var(--ui-surface-panel);
   font-size: var(--text-micro);
   line-height: 1.55;
+}
+
+.inspector-run-diagnostics .inspector-state-line {
+  background: var(--metask-state-error);
+}
+
+.inspector-run-information-label {
+  margin-top: 20px;
 }
 
 .inspector-context-pressure,
