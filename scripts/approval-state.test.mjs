@@ -69,8 +69,6 @@ function task(identity, pendingUi = pending(identity)) {
     archived: false,
     currentRunId: identity.runId,
     currentRunPhase: "waiting_ui",
-    lastRunOutcome: null,
-    cause: null,
     runs: [],
     pendingUi,
     uiHistory: [],

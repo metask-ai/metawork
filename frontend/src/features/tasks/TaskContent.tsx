@@ -4,6 +4,7 @@ import type {
   FileReferenceView,
   PendingUi,
   RunInputView,
+  RunOutcome,
   RunView,
   TaskView,
   ToolView,
@@ -36,7 +37,7 @@ function formatAttachmentSize(value: string) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function outcomeMessage(outcome: NonNullable<RunView["outcome"]>): MessageId {
+function outcomeMessage(outcome: RunOutcome): MessageId {
   switch (outcome) {
     case "completed":
       return "run.terminal.completed";
@@ -51,7 +52,7 @@ function outcomeMessage(outcome: NonNullable<RunView["outcome"]>): MessageId {
   }
 }
 
-function retryable(outcome: NonNullable<RunView["outcome"]>): boolean {
+function retryable(outcome: RunOutcome): boolean {
   return ["failed", "interrupted", "dependency_contract_failure"].includes(
     outcome,
   );
@@ -59,7 +60,7 @@ function retryable(outcome: NonNullable<RunView["outcome"]>): boolean {
 
 function terminalMessage(
   responseKind: RunView["output"]["responseKind"],
-  outcome: NonNullable<RunView["outcome"]>,
+  outcome: RunOutcome,
 ): MessageId {
   if (responseKind !== "partial") return outcomeMessage(outcome);
   switch (outcome) {
@@ -95,7 +96,7 @@ export function runFileReferences(run: RunView): FileReferenceView[] {
 }
 
 function outcomeState(
-  outcome: NonNullable<RunView["outcome"]>,
+  outcome: RunOutcome,
 ): "completed" | "stopped" | "failed" | "interrupted" {
   switch (outcome) {
     case "completed":
@@ -169,7 +170,9 @@ export function TaskContent({
   retryAvailable,
   responseDisabled,
   fileChangesEnabled,
+  runDiagnosticsAvailable,
   onPrepareRetry,
+  onOpenRunDiagnostics,
   onOpenTool,
   onPreviewFile,
   onReviewFileChanges,
@@ -182,7 +185,9 @@ export function TaskContent({
   retryAvailable: boolean;
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
+  runDiagnosticsAvailable: boolean;
   onPrepareRetry: (input: RunInputView) => void;
+  onOpenRunDiagnostics: (runId: string, opener: HTMLButtonElement) => void;
   onOpenTool: (
     runId: string,
     toolId: string,
@@ -284,6 +289,7 @@ export function TaskContent({
     >
       {task?.runs.map((run) => {
         const isCurrent = run.id === currentRun?.id;
+        const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
         const fileReferences = runFileReferences(run);
         const disclosureKey = `${task.id}:${run.id}`;
@@ -423,34 +429,89 @@ export function TaskContent({
                 )}
               </>
             )}
-            {presentation.showTerminalNotice && run.outcome && (
+            {presentation.showTerminalNotice && terminal && (
               <Activity
-                state={outcomeState(run.outcome)}
-                label={t(terminalMessage(run.output.responseKind, run.outcome))}
+                className={
+                  terminal.cause === "provider_failure"
+                    ? "run-terminal-activity"
+                    : undefined
+                }
+                state={outcomeState(terminal.outcome)}
+                label={t(
+                  terminal.cause === "provider_failure"
+                    ? "run.provider_failure.title"
+                    : terminalMessage(
+                        run.output.responseKind,
+                        terminal.outcome,
+                      ),
+                )}
                 detail={
-                  run.cause
-                    ? t(`cause.${run.cause}`)
-                    : run.outcome === "completed" &&
-                        run.output.responseKind !== "partial"
-                      ? t("run.no_final_response")
-                      : undefined
+                  terminal.cause === "provider_failure" ? (
+                    <span className="run-terminal-detail">
+                      <span>
+                        {t(
+                          run.output.responseKind === "partial"
+                            ? "run.provider_failure.partial_impact"
+                            : "run.provider_failure.no_response_impact",
+                        )}
+                      </span>
+                      <span>
+                        {t(
+                          terminal.diagnosticDisposition === "withheld"
+                            ? "run.provider_failure.diagnostic_withheld"
+                            : "run.provider_failure.diagnostic_absent",
+                        )}
+                      </span>
+                      {run.tools.length > 0 && (
+                        <span>
+                          {t("run.provider_failure.review_tool_effects")}
+                        </span>
+                      )}
+                    </span>
+                  ) : terminal.cause ? (
+                    t(`cause.${terminal.cause}`)
+                  ) : terminal.outcome === "completed" &&
+                    run.output.responseKind !== "partial" ? (
+                    t("run.no_final_response")
+                  ) : undefined
                 }
                 announce={isCurrent}
                 action={
-                  isCurrent && retryAvailable && retryable(run.outcome) ? (
-                    <button
-                      className="ai-activity-retry focus-ring"
-                      title={
-                        composerHasDraft
-                          ? t("run.review_draft_help")
-                          : t("run.retry_help")
-                      }
-                      onClick={() => onPrepareRetry(run.input)}
-                    >
-                      {composerHasDraft
-                        ? t("run.review_draft")
-                        : t("run.prepare_retry")}
-                    </button>
+                  (isCurrent &&
+                    retryAvailable &&
+                    retryable(terminal.outcome)) ||
+                  (terminal.cause === "provider_failure" &&
+                    runDiagnosticsAvailable) ? (
+                    <div className="run-terminal-actions">
+                      {isCurrent &&
+                        retryAvailable &&
+                        retryable(terminal.outcome) && (
+                          <button
+                            className="ai-activity-retry focus-ring"
+                            title={
+                              composerHasDraft
+                                ? t("run.review_draft_help")
+                                : t("run.retry_help")
+                            }
+                            onClick={() => onPrepareRetry(run.input)}
+                          >
+                            {composerHasDraft
+                              ? t("run.review_draft")
+                              : t("run.prepare_retry")}
+                          </button>
+                        )}
+                      {terminal.cause === "provider_failure" &&
+                        runDiagnosticsAvailable && (
+                          <button
+                            className="ai-activity-details focus-ring"
+                            onClick={(event) =>
+                              onOpenRunDiagnostics(run.id, event.currentTarget)
+                            }
+                          >
+                            {t("run.view_diagnostics")}
+                          </button>
+                        )}
+                    </div>
                   ) : undefined
                 }
               />

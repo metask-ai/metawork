@@ -118,6 +118,12 @@ function runLabel(run: RunView): MessageId {
   }
 }
 
+function protocolMessage(
+  protocol: RunView["execution"]["protocol"],
+): MessageId {
+  return `settings.custom_provider_protocol.${protocol}`;
+}
+
 function wireInteger(value: string): bigint {
   try {
     return BigInt(value);
@@ -411,9 +417,68 @@ export function TaskOverviewView({
                 {isActiveRun(run) && activityDetail && (
                   <span>{activityDetail}</span>
                 )}
-                {run.cause && <small>{t(`cause.${run.cause}`)}</small>}
+                {run.terminal?.cause && (
+                  <small>{t(`cause.${run.terminal.cause}`)}</small>
+                )}
               </div>
             </div>
+          </section>
+        )}
+
+        {run?.terminal?.cause === "provider_failure" && (
+          <section
+            ref={(node) => {
+              sectionRefs.current.diagnostics = node ?? undefined;
+            }}
+            className="inspector-section inspector-run-diagnostics"
+            tabIndex={-1}
+          >
+            <p className="section-label">{t("inspector.run_diagnostics")}</p>
+            <dl className="inspector-diagnostic-facts">
+              <div>
+                <dt>{t("inspector.diagnostic_status")}</dt>
+                <dd>{t("run.provider_failure.title")}</dd>
+              </div>
+              <div>
+                <dt>{t("inspector.diagnostic_code")}</dt>
+                <dd>
+                  <code>provider_failure</code>
+                </dd>
+              </div>
+              <div>
+                <dt>{t("inspector.diagnostic_run")}</dt>
+                <dd>{run.id}</dd>
+              </div>
+              <div>
+                <dt>{t("inspector.diagnostic_model")}</dt>
+                <dd>{run.execution.model}</dd>
+              </div>
+              <div>
+                <dt>{t("inspector.diagnostic_protocol")}</dt>
+                <dd>{t(protocolMessage(run.execution.protocol))}</dd>
+              </div>
+              <div>
+                <dt>{t("inspector.diagnostic_generation")}</dt>
+                <dd>{run.execution.generation}</dd>
+              </div>
+              <div>
+                <dt>{t("inspector.diagnostic_response")}</dt>
+                <dd>
+                  {t(
+                    run.output.responseKind === "partial"
+                      ? "inspector.diagnostic_response_partial"
+                      : "inspector.diagnostic_response_absent",
+                  )}
+                </dd>
+              </div>
+            </dl>
+            <p className="inspector-diagnostic-note">
+              {t(
+                run.terminal.diagnosticDisposition === "withheld"
+                  ? "run.provider_failure.diagnostic_withheld"
+                  : "run.provider_failure.diagnostic_absent",
+              )}
+            </p>
           </section>
         )}
 

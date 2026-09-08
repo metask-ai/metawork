@@ -68,9 +68,9 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
     processVisible: active || processCanCollapse,
     processCanCollapse,
     showTerminalNotice:
-      run.outcome !== null &&
+      run.terminal !== null &&
       (run.output.responseKind === "partial" ||
-        run.outcome !== "completed" ||
+        run.terminal.outcome !== "completed" ||
         !responseVisible),
     tools,
     runningToolName:

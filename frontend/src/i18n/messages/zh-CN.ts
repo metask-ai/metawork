@@ -539,6 +539,17 @@ export const zhCN: Record<MessageId, string> = {
   "run.draft_preserved": "已保留当前输入区草稿，未作修改。",
   "run.retry_too_long":
     "这条指令超出输入区长度限制，请改写一条更短的后续指令。",
+  "run.provider_failure.title": "模型服务请求失败",
+  "run.provider_failure.no_response_impact": "本次运行未生成可用回复。",
+  "run.provider_failure.partial_impact":
+    "本次运行只生成了部分回复，内容可能不完整。",
+  "run.provider_failure.diagnostic_absent":
+    "模型运行环境没有提供更具体的原因。",
+  "run.provider_failure.diagnostic_withheld":
+    "存在附加诊断，但无法在界面中安全展示。",
+  "run.provider_failure.review_tool_effects":
+    "再次执行前请检查工作过程，避免重复执行已完成的操作。",
+  "run.view_diagnostics": "查看运行诊断",
   "slash.title": "输入区动作",
   "slash.group.commands": "命令",
   "slash.group.skills": "Skills",
@@ -626,6 +637,16 @@ export const zhCN: Record<MessageId, string> = {
   "inspector.view_request": "查看请求",
   "inspector.current_activity": "当前活动",
   "inspector.last_run": "上次运行",
+  "inspector.run_diagnostics": "运行诊断",
+  "inspector.diagnostic_status": "状态",
+  "inspector.diagnostic_code": "错误标识",
+  "inspector.diagnostic_run": "运行编号",
+  "inspector.diagnostic_model": "本次运行模型",
+  "inspector.diagnostic_protocol": "执行协议",
+  "inspector.diagnostic_generation": "执行配置版本",
+  "inspector.diagnostic_response": "回复结果",
+  "inspector.diagnostic_response_absent": "未生成可用回复",
+  "inspector.diagnostic_response_partial": "只生成了部分回复",
   "inspector.work_process": "工作过程",
   "inspector.tool.running": "运行中",
   "inspector.tool.completed": "已完成",
@@ -918,8 +939,7 @@ export const zhCN: Record<MessageId, string> = {
   "cause.queue_capacity_failure": "工作台容量已满",
   "cause.ui_pipeline_failure": "回复传递失败",
   "cause.agent_failure": "Agent 执行失败，请查看工作过程后重试",
-  "cause.provider_failure":
-    "模型服务在生成回复时返回错误，请重试；若仍失败，请检查模型服务配置",
+  "cause.provider_failure": "模型服务请求失败",
   "cause.tool_failure": "工具执行失败且未能恢复，请查看工作过程后重试",
   "cause.image_input_unsupported":
     "当前模型不支持图片输入，请更换支持图片的模型并重新选择图片",

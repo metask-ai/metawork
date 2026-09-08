@@ -3,7 +3,7 @@ import type { TaskView } from "../../bridge/contracts.ts";
 export type TaskPanelTab = "overview" | "review" | "resource";
 
 export type TaskOverviewSection =
-  "attention" | "summary" | "work_process" | "usage";
+  "attention" | "summary" | "diagnostics" | "work_process" | "usage";
 
 export type TaskPanelReviewTarget = {
   taskId: string;

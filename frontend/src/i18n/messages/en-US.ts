@@ -591,6 +591,18 @@ export const enUS = {
   "run.draft_preserved": "Your current Composer draft was kept unchanged.",
   "run.retry_too_long":
     "This instruction is too long for the Composer. Write a shorter follow-up instead.",
+  "run.provider_failure.title": "Model service request failed",
+  "run.provider_failure.no_response_impact":
+    "This run did not produce a usable response.",
+  "run.provider_failure.partial_impact":
+    "This run produced only a partial response, which may be incomplete.",
+  "run.provider_failure.diagnostic_absent":
+    "The model runtime did not provide a more specific reason.",
+  "run.provider_failure.diagnostic_withheld":
+    "Additional diagnostics exist but cannot be shown safely in the interface.",
+  "run.provider_failure.review_tool_effects":
+    "Review the work process before running again to avoid repeating completed operations.",
+  "run.view_diagnostics": "View run diagnostics",
   "slash.title": "Composer actions",
   "slash.group.commands": "Commands",
   "slash.group.skills": "Skills",
@@ -684,6 +696,17 @@ export const enUS = {
   "inspector.view_request": "View request",
   "inspector.current_activity": "Current activity",
   "inspector.last_run": "Last run",
+  "inspector.run_diagnostics": "Run diagnostics",
+  "inspector.diagnostic_status": "Status",
+  "inspector.diagnostic_code": "Error identifier",
+  "inspector.diagnostic_run": "Run ID",
+  "inspector.diagnostic_model": "Model for this run",
+  "inspector.diagnostic_protocol": "Execution protocol",
+  "inspector.diagnostic_generation": "Execution configuration version",
+  "inspector.diagnostic_response": "Response result",
+  "inspector.diagnostic_response_absent": "No usable response produced",
+  "inspector.diagnostic_response_partial":
+    "Only a partial response was produced",
   "inspector.work_process": "Work process",
   "inspector.tool.running": "Running",
   "inspector.tool.completed": "Completed",
@@ -1002,8 +1025,7 @@ export const enUS = {
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.agent_failure":
     "Agent execution failed. Review the work process and try again.",
-  "cause.provider_failure":
-    "The model service returned an error while generating the response. Try again; if it continues, check the model service configuration.",
+  "cause.provider_failure": "Model service request failed",
   "cause.tool_failure":
     "Tool execution failed and could not recover. Review the work process and try again.",
   "cause.image_input_unsupported":

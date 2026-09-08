@@ -214,19 +214,6 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         jsonValue(writer, @tagName(phase)) catch return error.SnapshotTooLarge
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
-    const last_terminal = task_policy.lastTerminalFacts(task.durable.runs);
-    writer.writeAll(",\"lastRunOutcome\":") catch return error.SnapshotTooLarge;
-    if (last_terminal) |terminal|
-        jsonValue(writer, @tagName(terminal.outcome)) catch return error.SnapshotTooLarge
-    else
-        writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
-    if (last_terminal) |terminal| {
-        if (terminal.cause) |cause|
-            jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge
-        else
-            writer.writeAll("null") catch return error.SnapshotTooLarge;
-    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"context\":") catch return error.SnapshotTooLarge;
     try writeConversationContext(writer, task.conversation_observation);
     writer.writeAll(",\"runs\":[") catch return error.SnapshotTooLarge;
@@ -343,12 +330,16 @@ fn writeRun(
     projection: task_state.RunProjectionFacts,
 ) Error!void {
     const terminal = projection.terminal;
-    writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"input\":", .{
+    writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
         run.id,
         @tagName(projection.phase),
         @tagName(run.permission_profile),
         @tagName(run.permission_interaction),
+        run.execution_generation,
+        @tagName(run.execution_protocol),
     }) catch return error.SnapshotTooLarge;
+    try text_projection.writeJson(writer, run.execution_model);
+    writer.writeAll("},\"input\":") catch return error.SnapshotTooLarge;
     switch (run.input) {
         .text => |text| {
             writer.writeAll("{\"kind\":\"text\",\"text\":") catch
@@ -407,17 +398,16 @@ fn writeRun(
     try writeRunOutput(writer, text_projection, run);
     writer.writeAll(",\"activity\":") catch return error.SnapshotTooLarge;
     try writeRunActivity(writer, projection.activity);
-    writer.writeAll(",\"outcome\":") catch return error.SnapshotTooLarge;
-    if (terminal) |value|
-        jsonValue(writer, @tagName(value.outcome)) catch return error.SnapshotTooLarge
-    else
-        writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"cause\":") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"terminal\":") catch return error.SnapshotTooLarge;
     if (terminal) |value| {
+        writer.print("{{\"outcome\":\"{s}\",\"cause\":", .{@tagName(value.outcome)}) catch
+            return error.SnapshotTooLarge;
         if (value.cause) |cause|
             jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"diagnosticDisposition\":\"{s}\"}}", .{@tagName(value.diagnostic_disposition)}) catch
+            return error.SnapshotTooLarge;
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"usage\":{{\"input\":\"{d}\",\"output\":\"{d}\",\"cacheRead\":\"{d}\",\"cacheCreation\":\"{d}\"}},\"tools\":[", .{
         run.usage.input_tokens,

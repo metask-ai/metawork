@@ -1615,15 +1615,32 @@ function decodeRun(value: unknown, path: string): RunView {
     "phase",
     "permissionProfile",
     "permissionInteraction",
+    "execution",
     "input",
     "output",
     "activity",
-    "outcome",
-    "cause",
+    "terminal",
     "usage",
     "tools",
     "fileChanges",
   ]);
+  const executionItem = object(item.execution, `${path}.execution`, [
+    "generation",
+    "protocol",
+    "model",
+  ]);
+  const execution = {
+    generation: positiveWireId(
+      executionItem.generation,
+      `${path}.execution.generation`,
+    ),
+    protocol: enumValue(
+      executionItem.protocol,
+      `${path}.execution.protocol`,
+      protocols,
+    ),
+    model: stringValue(executionItem.model, `${path}.execution.model`),
+  };
   const usage = object(item.usage, `${path}.usage`, [
     "input",
     "output",
@@ -1631,8 +1648,36 @@ function decodeRun(value: unknown, path: string): RunView {
     "cacheCreation",
   ]);
   const phase = enumValue(item.phase, `${path}.phase`, runPhases);
-  const outcome = nullableEnum(item.outcome, `${path}.outcome`, runOutcomes);
-  validateRunTerminalState(phase, outcome, path);
+  const terminal =
+    item.terminal === null
+      ? null
+      : (() => {
+          const terminalItem = object(item.terminal, `${path}.terminal`, [
+            "outcome",
+            "cause",
+            "diagnosticDisposition",
+          ]);
+          return {
+            outcome: enumValue(
+              terminalItem.outcome,
+              `${path}.terminal.outcome`,
+              runOutcomes,
+            ),
+            cause: nullableEnum(
+              terminalItem.cause,
+              `${path}.terminal.cause`,
+              runCauses,
+            ),
+            diagnosticDisposition: enumValue(
+              terminalItem.diagnosticDisposition,
+              `${path}.terminal.diagnosticDisposition`,
+              ["absent", "withheld"] as const,
+            ),
+          };
+        })();
+  validateRunTerminalState(phase, terminal, path);
+  if (terminal?.cause === "provider_failure" && terminal.outcome !== "failed")
+    fail(`${path}.terminal`, "provider failure must describe a failed Run");
   const outputItem = object(item.output, `${path}.output`, [
     "commentary",
     "response",
@@ -1667,8 +1712,8 @@ function decodeRun(value: unknown, path: string): RunView {
     ),
   };
   const activity = decodeRunActivity(item.activity, `${path}.activity`);
-  const terminal = !nonTerminalRunPhases.includes(phase as never);
-  if (terminal !== (activity === null))
+  const isTerminal = terminal !== null;
+  if (isTerminal !== (activity === null))
     fail(path, "Run phase and activity must describe the same terminal state");
   if (phase === "queued" && activity?.kind !== "queued")
     fail(path, "queued Run must expose queued activity");
@@ -1685,7 +1730,7 @@ function decodeRun(value: unknown, path: string): RunView {
     fail(path, "unclassified output cannot publish a response");
   if (output.responseKind !== null && output.provisional !== "")
     fail(path, "classified response cannot retain provisional output");
-  if (terminal && output.provisional !== "")
+  if (isTerminal && output.provisional !== "")
     fail(path, "terminal Run cannot retain provisional output");
   return {
     id: positiveWireId(item.id, `${path}.id`),
@@ -1700,11 +1745,11 @@ function decodeRun(value: unknown, path: string): RunView {
       `${path}.permissionInteraction`,
       permissionInteractions,
     ),
+    execution,
     input: decodeRunInput(item.input, `${path}.input`),
     output,
     activity,
-    outcome,
-    cause: nullableEnum(item.cause, `${path}.cause`, runCauses),
+    terminal,
     usage: {
       input: wireId(usage.input, `${path}.usage.input`),
       output: wireId(usage.output, `${path}.usage.output`),
@@ -1970,9 +2015,10 @@ function decodeCompact(value: unknown, path: string): CompactView {
 
 function validateRunTerminalState(
   phase: RunView["phase"],
-  outcome: RunView["outcome"],
+  terminal: RunView["terminal"],
   path: string,
 ) {
+  const outcome = terminal?.outcome ?? null;
   switch (phase) {
     case "queued":
     case "running":
@@ -2177,8 +2223,6 @@ function decodeTask(value: unknown, path: string): TaskView {
     "activeOperation",
     "currentRunId",
     "currentRunPhase",
-    "lastRunOutcome",
-    "cause",
     "context",
     "runs",
     "compacts",
@@ -2497,12 +2541,6 @@ function decodeTask(value: unknown, path: string): TaskView {
     activeOperation,
     currentRunId,
     currentRunPhase,
-    lastRunOutcome: nullableEnum(
-      item.lastRunOutcome,
-      `${path}.lastRunOutcome`,
-      runOutcomes,
-    ),
-    cause: nullableEnum(item.cause, `${path}.cause`, runCauses),
     context,
     runs,
     compacts,

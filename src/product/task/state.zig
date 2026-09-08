@@ -630,7 +630,13 @@ pub const ProductTerminalFacts = struct {
     phase: RunPhase,
     outcome: RunOutcome,
     cause: ?RunCause,
+    diagnostic_disposition: TerminalDiagnosticDisposition,
     session_disposition_at_completion: agent.SessionDisposition,
+};
+
+pub const TerminalDiagnosticDisposition = enum {
+    absent,
+    withheld,
 };
 
 pub const RunProjectionFacts = struct {
@@ -659,17 +665,22 @@ pub fn productTerminalPayload(run: *const RunRecord) ?*const TerminalPayload {
 
 pub fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
     const terminal = productTerminalPayload(run) orelse return null;
+    const diagnostic_disposition: TerminalDiagnosticDisposition = if (terminal.diagnostic_len == 0 and
+        !terminal.diagnostic_truncated and
+        !terminal.diagnostic_redacted) .absent else .withheld;
     if (run.event_projection_failure) |failure| return switch (failure) {
         .consumer_rejected => .{
             .phase = .failed,
             .outcome = .failed,
             .cause = .event_pipeline_failure,
+            .diagnostic_disposition = diagnostic_disposition,
             .session_disposition_at_completion = terminal.session_disposition_at_completion,
         },
         .dependency_contract_failure => .{
             .phase = .failed,
             .outcome = .dependency_contract_failure,
             .cause = .dependency_contract_failure,
+            .diagnostic_disposition = diagnostic_disposition,
             .session_disposition_at_completion = terminal.session_disposition_at_completion,
         },
     };
@@ -677,6 +688,7 @@ pub fn productTerminalFacts(run: *const RunRecord) ?ProductTerminalFacts {
         .phase = terminal.phase,
         .outcome = terminal.outcome,
         .cause = terminal.cause,
+        .diagnostic_disposition = diagnostic_disposition,
         .session_disposition_at_completion = terminal.session_disposition_at_completion,
     };
 }
@@ -1619,7 +1631,29 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
     const terminal_projection = runProjectionFacts(run);
     try std.testing.expectEqual(RunPhase.completed, terminal_projection.phase);
     try std.testing.expectEqual(RunOutcome.completed, terminal_projection.terminal.?.outcome);
+    try std.testing.expectEqual(
+        TerminalDiagnosticDisposition.absent,
+        terminal_projection.terminal.?.diagnostic_disposition,
+    );
     try std.testing.expect(terminal_projection.activity == null);
+
+    run.terminal_payload.diagnostic_len = 1;
+    try std.testing.expectEqual(
+        TerminalDiagnosticDisposition.withheld,
+        productTerminalFacts(run).?.diagnostic_disposition,
+    );
+    run.terminal_payload.diagnostic_len = 0;
+    run.terminal_payload.diagnostic_truncated = true;
+    try std.testing.expectEqual(
+        TerminalDiagnosticDisposition.withheld,
+        productTerminalFacts(run).?.diagnostic_disposition,
+    );
+    run.terminal_payload.diagnostic_truncated = false;
+    run.terminal_payload.diagnostic_redacted = true;
+    try std.testing.expectEqual(
+        TerminalDiagnosticDisposition.withheld,
+        productTerminalFacts(run).?.diagnostic_disposition,
+    );
 }
 
 test "event drain advances the final commentary boundary with the committed suffix" {

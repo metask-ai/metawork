@@ -109,8 +109,19 @@ export type TaskDisplayState =
   | { kind: "compact_phase"; value: "queued" | "compacting" | "stopping" }
   | { kind: "recovery" }
   | { kind: "archived" }
-  | { kind: "outcome"; value: NonNullable<TaskView["lastRunOutcome"]> }
+  | {
+      kind: "outcome";
+      value: NonNullable<RunView["terminal"]>["outcome"];
+    }
   | { kind: "ready" };
+
+export function lastTerminalRun(task: TaskView): RunView | null {
+  for (let index = task.runs.length - 1; index >= 0; index -= 1) {
+    const run = task.runs[index]!;
+    if (run.terminal) return run;
+  }
+  return null;
+}
 
 export function taskDisplayState(task: TaskView): TaskDisplayState {
   if (task.currentRunPhase)
@@ -126,14 +137,15 @@ export function taskDisplayState(task: TaskView): TaskDisplayState {
   if (task.lifecycle !== "open")
     return { kind: "lifecycle", value: task.lifecycle };
   if (task.archived) return { kind: "archived" };
-  if (task.lastRunOutcome)
-    return { kind: "outcome", value: task.lastRunOutcome };
+  const terminal = lastTerminalRun(task)?.terminal;
+  if (terminal) return { kind: "outcome", value: terminal.outcome };
   return { kind: "ready" };
 }
 
 export function taskSignals(task: TaskView): TaskSignals {
   const compact = activeCompact(task);
   const lastCompact = task.compacts.at(-1);
+  const terminal = lastTerminalRun(task)?.terminal ?? null;
   return {
     running:
       task.currentRunPhase === "queued" ||
@@ -146,12 +158,12 @@ export function taskSignals(task: TaskView): TaskSignals {
     attention: task.currentRunPhase === "waiting_ui",
     failed:
       task.deletionStatus === "failed" ||
-      task.lastRunOutcome === "failed" ||
-      task.lastRunOutcome === "dependency_contract_failure" ||
-      task.lastRunOutcome === "interrupted" ||
-      (task.cause !== null &&
-        task.cause !== "user_cancel" &&
-        task.cause !== "session_close") ||
+      terminal?.outcome === "failed" ||
+      terminal?.outcome === "dependency_contract_failure" ||
+      terminal?.outcome === "interrupted" ||
+      (terminal?.cause != null &&
+        terminal.cause !== "user_cancel" &&
+        terminal.cause !== "session_close") ||
       lastCompact?.phase === "failed",
   };
 }
@@ -161,10 +173,8 @@ export function taskSignals(task: TaskView): TaskSignals {
  * A new Run gets a new identity, so a later completion can be unread again.
  */
 export function taskCompletionNotificationKey(task: TaskView): string | null {
-  if (task.lastRunOutcome !== "completed") return null;
-  const completedRun = [...task.runs]
-    .reverse()
-    .find((run) => run.outcome === "completed");
+  const completedRun = lastTerminalRun(task);
+  if (completedRun?.terminal?.outcome !== "completed") return null;
   return completedRun ? `${task.id}:${completedRun.id}` : null;
 }
 
@@ -222,7 +232,7 @@ export function searchWorkbench(
           title,
           detail: input,
         });
-      if (run.outcome === "completed" && output && matches(output))
+      if (run.terminal?.outcome === "completed" && output && matches(output))
         results.push({
           key: `completion:${task.id}:${run.id}`,
           kind: "completion",

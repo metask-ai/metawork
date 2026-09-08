@@ -353,7 +353,7 @@ try {
     "custom-source Task Run",
   );
   if (
-    terminal.run.outcome !== "completed" ||
+    terminal.run.terminal?.outcome !== "completed" ||
     !terminal.run.output?.response?.includes(
       "custom provider readiness complete",
     )
@@ -381,7 +381,7 @@ try {
       windowsCredentialTarget: "present",
       modelTest: "connected",
       defaultSource: "custom_provider",
-      taskRun: terminal.run.outcome,
+      taskRun: terminal.run.terminal?.outcome,
       providerRequests: provider.requests.length,
       cleanShutdown: true,
     })}\n`,

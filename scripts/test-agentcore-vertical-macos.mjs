@@ -551,7 +551,7 @@ try {
     throw new Error("checkpoint export did not expose conversation recovery");
   if (task.continuationAvailable !== true)
     throw new Error("completed Task did not remain available for continuation");
-  if (run.phase !== "completed" || run.outcome !== "completed")
+  if (run.phase !== "completed" || run.terminal?.outcome !== "completed")
     throw new Error(`run did not complete truthfully: ${JSON.stringify(run)}`);
   assertFileChanges(run.fileChanges, process.platform === "win32");
   const fileChangeDiff = await invokeBridge("metawork.files.diff", {
@@ -576,7 +576,7 @@ try {
   );
   await captureVisual("terminal", 1320, 812);
   await captureVisual("settings", 1320, 812, true);
-  if (run.cause !== null || task.cause !== null)
+  if (run.terminal?.cause !== null)
     throw new Error(
       `completed run retained a Host cause: ${JSON.stringify(task)}`,
     );

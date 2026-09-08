@@ -34,10 +34,20 @@ import {
   workspaceDirectoryLabel,
 } from "../frontend/src/workbench/selectors.ts";
 
-function run(id, text, assistant, outcome, toolContent = "") {
+function run(id, text, assistant, outcome, toolContent = "", cause = null) {
   return {
     id,
-    phase: outcome === null ? "running" : "completed",
+    phase:
+      outcome === null
+        ? "running"
+        : outcome === "dependency_contract_failure"
+          ? "failed"
+          : outcome,
+    execution: {
+      generation: "1",
+      protocol: "anthropic_messages",
+      model: "fixture-model",
+    },
     input: { kind: "text", text, redacted: false },
     output: {
       commentary: [],
@@ -48,8 +58,10 @@ function run(id, text, assistant, outcome, toolContent = "") {
       provisionalRedacted: false,
     },
     activity: outcome === null ? { kind: "waiting_model" } : null,
-    outcome,
-    cause: null,
+    terminal:
+      outcome === null
+        ? null
+        : { outcome, cause, diagnosticDisposition: "absent" },
     usage: { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" },
     tools: toolContent
       ? [
@@ -86,8 +98,6 @@ function task(overrides) {
     currentRunId: "0",
     currentRunPhase: null,
     recentOrder: "1",
-    lastRunOutcome: null,
-    cause: null,
     runs: [],
     compacts: [],
     pendingUi: null,
@@ -141,13 +151,13 @@ test("Task signals and Workspace path labels preserve their independent semantic
     task({
       id: "3",
       workspaceId: "2",
-      lastRunOutcome: "failed",
+      runs: [run("3", "", "", "failed")],
     }),
     task({
       id: "4",
       workspaceId: "2",
       archived: true,
-      lastRunOutcome: "failed",
+      runs: [run("4", "", "", "failed")],
     }),
   ];
   assert.deepEqual(taskSignals(tasks[2]), {
@@ -156,7 +166,11 @@ test("Task signals and Workspace path labels preserve their independent semantic
     failed: true,
   });
   assert.deepEqual(
-    taskSignals(task({ lastRunOutcome: "interrupted", cause: "app_shutdown" })),
+    taskSignals(
+      task({
+        runs: [run("5", "", "", "interrupted", "", "app_shutdown")],
+      }),
+    ),
     { running: false, attention: false, failed: true },
   );
   assert.deepEqual(
@@ -189,23 +203,30 @@ test("Task display state preserves Run, lifecycle, archive, and outcome preceden
         currentRunId: "9",
         currentRunPhase: "running",
         lifecycle: "closing",
-        lastRunOutcome: "failed",
+        runs: [run("9", "", "", "failed")],
       }),
     ),
     { kind: "phase", value: "running" },
   );
   assert.deepEqual(
-    taskDisplayState(task({ lifecycle: "closing", lastRunOutcome: "failed" })),
+    taskDisplayState(
+      task({ lifecycle: "closing", runs: [run("9", "", "", "failed")] }),
+    ),
     { kind: "lifecycle", value: "closing" },
   );
   assert.deepEqual(
-    taskDisplayState(task({ archived: true, lastRunOutcome: "failed" })),
+    taskDisplayState(
+      task({ archived: true, runs: [run("9", "", "", "failed")] }),
+    ),
     { kind: "archived" },
   );
-  assert.deepEqual(taskDisplayState(task({ lastRunOutcome: "failed" })), {
-    kind: "outcome",
-    value: "failed",
-  });
+  assert.deepEqual(
+    taskDisplayState(task({ runs: [run("9", "", "", "failed")] })),
+    {
+      kind: "outcome",
+      value: "failed",
+    },
+  );
   assert.deepEqual(taskDisplayState(task({})), { kind: "ready" });
 });
 
