@@ -3146,6 +3146,7 @@ export default function App() {
               previewMatchesTarget &&
               filePreviewViewState ? (
               <FilePreviewView
+                key={`${panelTarget.taskId}:${panelTarget.runId}:${panelTarget.referenceId}`}
                 state={filePreviewViewState}
                 onRefresh={refreshFilePreview}
               />

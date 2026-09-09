@@ -644,6 +644,11 @@ export const enUS = {
   "file_preview.close": "Close file preview",
   "file_preview.open": "Preview {path}",
   "file_preview.refresh": "Refresh",
+  "file_preview.mode": "File display mode",
+  "file_preview.rendered": "Preview",
+  "file_preview.source": "Source",
+  "file_preview.html_source_only":
+    "HTML page preview is not yet supported. Showing source; scripts and resources are not loaded.",
   "file_preview.retry": "Retry",
   "file_preview.current_content_notice":
     "Current contents; they may differ from the file when this run executed.",

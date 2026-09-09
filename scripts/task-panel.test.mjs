@@ -1348,6 +1348,94 @@ test("Task Panel labels current file content distinctly from recorded diffs", ()
   assert.doesNotMatch(markup, /Recorded diff|role="dialog"|backdrop/);
 });
 
+test("Markdown preview renders documents, switches to source, and preserves mode while refreshing", () => {
+  const content =
+    "# API guide\n\n**Strong**\n\n| key | value |\n| --- | --- |\n| page | 1 |\n\n- [x] done\n\n> note\n\n```\nGET /users\n```\n\n![Remote image](https://example.com/track.png)\n\n[local](relative.md)\n\n<script>alert(1)</script>";
+  const state = {
+    selected: { id: "doc", displayPath: "doc.MD", title: "doc.MD" },
+    phase: "settled",
+    preview: { state: "ready", content, truncated: true, redacted: true },
+  };
+  let refreshes = 0;
+  const element = (next) =>
+    localizedView(
+      createElement(FilePreviewView, {
+        state: next,
+        onRefresh: () => refreshes++,
+      }),
+    );
+  const view = render(element(state));
+  assert.ok(screen.getByRole("heading", { name: "API guide" }));
+  assert.ok(screen.getByRole("table"));
+  assert.ok(document.querySelector("blockquote"));
+  assert.equal(document.querySelector("input[type=checkbox]").disabled, true);
+  assert.equal(
+    document.querySelector("pre.code-block-preview").textContent,
+    "GET /users",
+  );
+  assert.equal(document.querySelector("img, script, iframe"), null);
+  assert.equal(document.querySelector('a[href="relative.md"]'), null);
+  assert.ok(screen.getByText("Remote image"));
+  assert.ok(screen.getByText("Preview truncated"));
+  assert.ok(screen.getByText("Known sensitive content was hidden"));
+  fireEvent.click(screen.getByRole("tab", { name: "Source" }));
+  assert.equal(
+    document.querySelector("pre.task-panel-code").textContent,
+    content,
+  );
+  assert.equal(screen.queryByRole("heading", { name: "API guide" }), null);
+  assert.equal(document.querySelector("table"), null);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  assert.equal(refreshes, 1);
+  view.rerender(element({ ...state, phase: "loading", preview: null }));
+  assert.equal(document.querySelector("pre"), null);
+  view.rerender(
+    element({ ...state, preview: { ...state.preview, content: "# Updated" } }),
+  );
+  assert.equal(
+    screen.getByRole("tab", { name: "Source" }).getAttribute("aria-selected"),
+    "true",
+  );
+  assert.equal(
+    document.querySelector("pre.task-panel-code").textContent,
+    "# Updated",
+  );
+  fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
+  assert.ok(screen.getByRole("heading", { name: "Updated" }));
+});
+
+test("text and HTML stay inert source; unsupported HTML rendering is explicit", () => {
+  for (const path of ["notes.txt", "script.js", "page.html", "page.HTM"]) {
+    const content =
+      '<h1>Page</h1><script>window.zero.invoke("attack")</script><img src="https://example.com/track.png">';
+    render(
+      localizedView(
+        createElement(FilePreviewView, {
+          state: {
+            selected: { id: path, displayPath: path, title: path },
+            phase: "settled",
+            preview: {
+              state: "ready",
+              content,
+              redacted: false,
+              truncated: false,
+            },
+          },
+          onRefresh() {},
+        }),
+      ),
+    );
+    assert.equal(document.querySelector("pre").textContent, content);
+    assert.equal(document.querySelector("h1, script, img, iframe"), null);
+    assert.equal(screen.queryByRole("tablist"), null);
+    assert.equal(
+      Boolean(screen.queryByText(/HTML page preview is not yet supported/)),
+      /\.html?$/i.test(path),
+    );
+    cleanup();
+  }
+});
+
 test("permission intervention never exposes internal Run identity", () => {
   const markup = renderToStaticMarkup(
     createElement(
@@ -1743,7 +1831,6 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
   );
   const first = snapshot.tasks[0];
   first.title = "First task";
-  Object.assign(first.runs[0], runOverrides);
   first.runs[0].tools = [
     technicalTool({
       fileRefs: [
@@ -1783,6 +1870,7 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
       },
     ],
   };
+  Object.assign(first.runs[0], runOverrides);
   snapshot.capabilities.typedFileChanges = true;
   snapshot.tasks.push({
     ...structuredClone(first),
@@ -2097,6 +2185,39 @@ test("conversation file links preview directly without expanding tools and retur
   assert.equal(document.activeElement, second);
   assert.equal(document.querySelector("#task-panel"), null);
   assert.equal(document.querySelector(".run-process-files"), null);
+});
+
+test("selecting another Markdown reference resets the display mode without retaining old content", async (ctx) => {
+  const { previews } = await renderAppFixture(ctx, 1440, {
+    tools: [
+      technicalTool({
+        fileRefs: [
+          { id: "ref-a", displayPath: "a.md", title: "a.md" },
+          { id: "ref-b", displayPath: "b.markdown", title: "b.markdown" },
+        ],
+      }),
+    ],
+  });
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  const ready = (content) => ({
+    state: "ready",
+    content,
+    truncated: false,
+    redacted: false,
+  });
+  fireEvent.click(filePreviewOpener("a.md"));
+  await act(async () => previews[0].resolve(ready("# First document")));
+  assert.ok(screen.getByRole("heading", { name: "First document" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Source" }));
+  fireEvent.click(filePreviewOpener("b.markdown"));
+  assert.equal(document.querySelector(".task-panel-code"), null);
+  await act(async () => previews[1].resolve(ready("# Second document")));
+  assert.ok(screen.getByRole("heading", { name: "Second document" }));
+  assert.equal(
+    screen.getByRole("tab", { name: "Preview" }).getAttribute("aria-selected"),
+    "true",
+  );
+  assert.equal(screen.queryByText("# First document"), null);
 });
 
 test("App previews exact operation references, rejects superseded reads, and refreshes only the current file", async (ctx) => {

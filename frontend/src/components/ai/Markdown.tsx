@@ -113,29 +113,29 @@ function safeHref(href: string | undefined): string | null {
 // Stable component identities keep the actual opener mounted when preview state
 // or a snapshot changes. The reference context updates callbacks without remounts.
 const components: Components = {
-  pre: ({ children: content }) => <>{content}</>,
-  code: ({
-    className: codeClassName,
-    children: content,
-    node: _node,
-    ...props
-  }) => {
-    const value = String(content).replace(/\n$/, "");
-    const language = codeClassName?.match(/language-(\w+)/)?.[1];
-    if (!language && !value.includes("\n")) {
-      return (
-        <code className={codeClassName} {...props}>
-          {content}
-        </code>
-      );
-    }
+  pre: ({ node }) => {
+    // The Markdown AST owns block/inline semantics, not line count or language.
+    const code = node?.children[0];
+    const value =
+      code?.type === "element"
+        ? code.children
+            .filter((child) => child.type === "text")
+            .map((child) => child.value)
+            .join("")
+        : "";
+    const classes =
+      code?.type === "element" ? String(code.properties.className ?? "") : "";
+    const language = classes.match(/language-(\S+)/)?.[1];
     return (
       <CodeBlock
         aria-label={language ? `${language} code` : "Code block"}
-        value={value}
+        value={value.replace(/\n$/, "")}
       />
     );
   },
+  code: ({ children, node: _node, ...props }) => (
+    <code {...props}>{children}</code>
+  ),
   a: function ReferenceLink({ href, children: content, node, ...props }) {
     const references = useContext(ReferenceContext);
     const alias = node?.properties["data-inline-reference"];
@@ -167,14 +167,32 @@ const components: Components = {
   },
 };
 
+const textResourceComponents: Components = {
+  ...components,
+  img: ({ alt }) => <span>{alt}</span>,
+  a: ({ href, children, node, ...props }) => {
+    // Documents do not gain a relative-resource or app navigation capability.
+    const value = safeHref(href);
+    return value && /^https?:/i.test(value) ? (
+      <a {...props} href={value} target="_blank" rel="noreferrer noopener">
+        {children}
+      </a>
+    ) : (
+      <span>{children}</span>
+    );
+  },
+};
+
 export function Markdown({
   className,
   children,
   references,
+  textResourcesOnly = false,
 }: {
   className?: string;
   children: string;
   references?: ReadonlyMap<string, MarkdownReference>;
+  textResourcesOnly?: boolean;
 }) {
   return (
     <div className={className ? `ai-markdown ${className}` : "ai-markdown"}>
@@ -186,7 +204,7 @@ export function Markdown({
               ? [remarkGfm, referencePlugin(references)]
               : [remarkGfm]
           }
-          components={components}
+          components={textResourcesOnly ? textResourceComponents : components}
         >
           {children}
         </ReactMarkdown>

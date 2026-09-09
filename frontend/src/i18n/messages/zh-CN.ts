@@ -588,6 +588,11 @@ export const zhCN: Record<MessageId, string> = {
   "file_preview.close": "关闭文件预览",
   "file_preview.open": "预览 {path}",
   "file_preview.refresh": "刷新",
+  "file_preview.mode": "文件展示模式",
+  "file_preview.rendered": "预览",
+  "file_preview.source": "源码",
+  "file_preview.html_source_only":
+    "尚未支持 HTML 页面预览。当前显示源码，不执行脚本或加载资源。",
   "file_preview.retry": "重试",
   "file_preview.current_content_notice":
     "当前内容；可能不同于本次 Run 执行时的文件版本。",

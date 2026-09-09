@@ -8021,6 +8021,44 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow: hidden;
 }
 
+.task-panel-preview-modes {
+  padding: 0 12px;
+}
+
+.task-panel-preview-document,
+.task-panel-preview-source {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  background: var(--ui-surface-canvas);
+}
+
+.task-panel-preview-document {
+  padding: 16px;
+  overflow-wrap: anywhere;
+}
+
+.task-panel-preview-document .ai-markdown ul {
+  list-style: disc;
+}
+
+.task-panel-preview-document .ai-markdown ol {
+  list-style: decimal;
+}
+
+.task-panel-preview-document .ai-markdown .contains-task-list {
+  list-style: none;
+}
+
+.task-panel-preview-document .code-block-preview {
+  white-space: pre;
+}
+
+.task-panel-preview-source {
+  padding: 0;
+}
+
 .task-panel-resource-state {
   display: grid;
   min-height: 0;
