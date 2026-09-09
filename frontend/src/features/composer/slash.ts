@@ -1,4 +1,8 @@
-import type { SkillCatalogView, TaskRunInput } from "../../bridge/contracts.ts";
+import type {
+  AttachmentDescriptor,
+  SkillCatalogView,
+  TaskRunInput,
+} from "../../bridge/contracts.ts";
 
 export type ComposerTextDraft = {
   kind: "text";
@@ -6,13 +10,7 @@ export type ComposerTextDraft = {
   attachmentsReloadRequired?: true;
 };
 
-export type ComposerAttachment = {
-  token: string;
-  kind: "image";
-  format: "png" | "jpeg" | "webp";
-  displayName: string;
-  sizeBytes: string;
-};
+export type ComposerAttachment = AttachmentDescriptor;
 
 export type ComposerMultimodalDraft = {
   kind: "multimodal";
@@ -87,7 +85,9 @@ export function composerDraftToRunInput(
       ? null
       : { kind: "text", text: draft.text };
   if (draft.kind === "multimodal")
-    return draft.attachments.length === 0 || parseSlashInput(draft.text)
+    return draft.attachments.length === 0 ||
+      draft.attachments.some((attachment) => attachment.kind === "file") ||
+      parseSlashInput(draft.text)
       ? null
       : {
           kind: "multimodal",

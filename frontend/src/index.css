@@ -6989,8 +6989,37 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .composer-shell {
+  position: relative;
   width: min(100%, var(--content-measure));
   margin: 0 auto;
+}
+
+.composer-file-drop {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  display: flex;
+  min-height: 108px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+  border: 2px dashed var(--ui-action-primary);
+  border-radius: 18px;
+  color: var(--ui-action-primary);
+  background: color-mix(in srgb, var(--ui-surface-panel) 88%, transparent);
+  font-size: var(--text-label);
+  font-weight: 700;
+}
+
+.composer-file-drop svg {
+  width: 18px;
+  height: 18px;
+}
+
+.composer-shell[data-file-drag-active="true"] .ai-composer {
+  border-color: var(--ui-action-primary);
+  background: var(--ui-action-selected-surface);
 }
 
 .slash-menu {
@@ -7326,15 +7355,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .composer-attachments {
   display: flex;
   padding: 3px 5px 0;
-  overflow-x: auto;
+  flex-wrap: wrap;
   gap: 7px;
-  scrollbar-width: thin;
 }
 
 .composer-attachment {
   display: grid;
-  min-width: 172px;
+  min-width: min(172px, 100%);
   max-width: 248px;
+  flex: 1 1 172px;
   padding: 6px 5px 6px 8px;
   grid-template-columns: auto minmax(0, 1fr) 24px;
   align-items: center;
@@ -7350,6 +7379,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-family: var(--font-mono);
   font-size: var(--text-micro);
   font-weight: 760;
+}
+
+.composer-attachment-kind svg {
+  display: block;
+  width: 16px;
+  height: 16px;
 }
 
 .composer-attachment-copy {

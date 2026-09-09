@@ -1156,6 +1156,7 @@ function renderComposer(overrides = {}) {
       unavailableReason: null,
       draft,
       attachmentsEnabled: false,
+      attachmentMaxFileBytes: "3750000",
       attachmentBusy: false,
       attachmentError: null,
       attachmentModelWarning: null,
@@ -1638,6 +1639,101 @@ test("removing the last attachment returns keyboard focus to the picker", async 
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   assert.equal(
     document.activeElement,
-    screen.getByRole("button", { name: "Add images" }),
+    screen.getByRole("button", { name: "Add files" }),
   );
+});
+
+test("generic file drafts explain the current send boundary", () => {
+  renderComposer({
+    attachmentsEnabled: true,
+    canSubmit: false,
+    draft: {
+      kind: "multimodal",
+      text: "Use this file",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "file",
+          displayName: "notes.txt",
+          sizeBytes: "128",
+        },
+      ],
+    },
+  });
+  assert.match(
+    screen.getByRole("status").textContent,
+    /only images can be sent/i,
+  );
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+});
+
+test("file size rejection displays the Host limit and preserves ready chips", () => {
+  renderComposer({
+    attachmentsEnabled: true,
+    attachmentMaxFileBytes: "3750000",
+    attachmentError: "file_too_large",
+    draft: {
+      kind: "multimodal",
+      text: "keep draft",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "file",
+          displayName: "ready.txt",
+          sizeBytes: "25",
+        },
+      ],
+    },
+  });
+  assert.match(screen.getByRole("alert").textContent, /3\.75 MB/);
+  assert.ok(screen.getByText("ready.txt"));
+});
+
+test("file drag highlights the active Composer and hands the drop files to its input owner", () => {
+  const received = [];
+  renderComposer({
+    attachmentsEnabled: true,
+    onDropFiles: (files) => received.push(files),
+  });
+  const file = new File(["abc"], "notes.txt");
+  const dataTransfer = { types: ["Files"], dropEffect: "none", files: [file] };
+  const enter = new window.Event("dragenter", {
+    bubbles: true,
+    cancelable: true,
+  });
+  Object.defineProperty(enter, "dataTransfer", { value: dataTransfer });
+  fireEvent(document, enter);
+  assert.ok(screen.getByText("Drop files to add"));
+  assert.equal(
+    document.querySelector(".composer-shell").dataset.fileDragActive,
+    "true",
+  );
+
+  const drop = new window.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", { value: dataTransfer });
+  fireEvent(document, drop);
+  assert.equal(screen.queryByText("Drop files to add"), null);
+  assert.deepEqual(received, [[file]]);
+});
+
+test("receiving offers cancellation, keeps text editable and rejects another drop", () => {
+  let cancelled = 0;
+  const composer = renderComposer({
+    attachmentsEnabled: true,
+    attachmentBusy: true,
+    canSubmit: false,
+    onCancelAttachments: () => {
+      cancelled++;
+    },
+    onDropFiles: () => assert.fail("busy composer must not admit files"),
+  });
+  assert.equal(composer.textarea.disabled, false);
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  fireEvent.click(screen.getByRole("button", { name: "Cancel adding files" }));
+  assert.equal(cancelled, 1);
+  const drop = new window.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", {
+    value: { types: ["Files"], files: [new File(["abc"], "a.txt")] },
+  });
+  fireEvent(document, drop);
 });

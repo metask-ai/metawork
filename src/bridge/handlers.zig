@@ -352,6 +352,20 @@ pub const FileChangeDiffRequest = struct {
     fileChangeId: []const u8,
 };
 pub const AttachmentRelease = struct { token: []const u8 };
+pub const AttachmentPaths = struct { paths: []const []const u8 };
+pub const AttachmentReceiveKey = struct { generation: []const u8, batchId: []const u8 };
+pub const AttachmentReceiveBegin = struct {
+    generation: []const u8,
+    batchId: []const u8,
+    files: []const struct { name: []const u8, sizeBytes: []const u8 },
+};
+pub const AttachmentReceiveAppend = struct {
+    generation: []const u8,
+    batchId: []const u8,
+    fileIndex: u32,
+    offset: []const u8,
+    dataBase64: []const u8,
+};
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
 pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };
@@ -663,6 +677,27 @@ test "Task Run input is an exact text skill or multimodal tagged object" {
             parseTaskRunInput(parsed.value),
         );
     }
+}
+
+test "dropped attachment paths use one exact bounded payload" {
+    var parsed = try parsePayloadWithLimit(
+        AttachmentPaths,
+        \\{"paths":["C:\\work\\notes.txt","C:\\work\\image.png"]}
+    ,
+        256,
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.paths.len);
+    try std.testing.expectEqualStrings("C:\\work\\notes.txt", parsed.value.paths[0]);
+    try std.testing.expectError(
+        error.InvalidBridgePayload,
+        parsePayloadWithLimit(
+            AttachmentPaths,
+            \\{"paths":["C:\\work\\notes.txt"],"source":"renderer"}
+        ,
+            256,
+        ),
+    );
 }
 
 test "Task creation requires explicit nullable model and skill selections" {

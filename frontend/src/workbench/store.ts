@@ -57,7 +57,7 @@ export const initialWorkbenchState: WorkbenchState = {
         enabled: false,
         imageFormats: [],
         maxFiles: "8",
-        maxImageBytes: "3750000",
+        maxFileBytes: "3750000",
         maxStagedBytes: "33554432",
       },
     },

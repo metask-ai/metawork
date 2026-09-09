@@ -44,6 +44,7 @@ const base = {
   unavailableReason: null,
   draft: { kind: "text", text: "" },
   attachmentsEnabled: false,
+  attachmentMaxFileBytes: "3750000",
   attachmentBusy: false,
   attachmentError: null,
   attachmentModelWarning: null,

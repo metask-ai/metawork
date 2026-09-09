@@ -159,9 +159,8 @@ test("attachment results enforce opaque grants and atomic typed outcomes", () =>
       },
       {
         token: "b".repeat(48),
-        kind: "image",
-        format: "jpeg",
-        displayName: "spec.jpg",
+        kind: "file",
+        displayName: "spec.pdf",
         sizeBytes: "4096",
       },
     ],
@@ -189,9 +188,17 @@ test("attachment results enforce opaque grants and atomic typed outcomes", () =>
     () =>
       decodeAttachmentChooseResult({
         ...ready,
-        attachments: [{ ...ready.attachments[1], kind: "pdf", format: "pdf" }],
+        attachments: [{ ...ready.attachments[1], kind: "pdf" }],
       }),
     /unexpected value pdf/,
+  );
+  assert.throws(
+    () =>
+      decodeAttachmentChooseResult({
+        ...ready,
+        attachments: [{ ...ready.attachments[1], format: "pdf" }],
+      }),
+    /expected keys/,
   );
   assert.deepEqual(decodeAttachmentReleaseResult({ released: true }), {
     released: true,

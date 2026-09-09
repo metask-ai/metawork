@@ -1,4 +1,4 @@
-//! Bounded worker lane that turns native-picker paths into validated bytes.
+//! Bounded worker lane that turns native file paths into validated bytes.
 const std = @import("std");
 const attachment = @import("metawork_product_attachment");
 
@@ -115,7 +115,7 @@ const Job = struct {
                 self.rejection = .unsupported_type;
                 return;
             }
-            if (before.size > self.limits.max_image_bytes or before.size > std.math.maxInt(usize)) {
+            if (before.size > self.limits.max_file_bytes or before.size > std.math.maxInt(usize)) {
                 self.rejection = .file_too_large;
                 return;
             }
@@ -146,18 +146,7 @@ const Job = struct {
                 self.rejection = .file_changed;
                 return;
             }
-            const format = detectFormat(bytes) orelse {
-                std.crypto.secureZero(u8, bytes);
-                self.lane.allocator.free(bytes);
-                self.rejection = .unsupported_type;
-                return;
-            };
-            if (size > self.limits.max_image_bytes) {
-                std.crypto.secureZero(u8, bytes);
-                self.lane.allocator.free(bytes);
-                self.rejection = .file_too_large;
-                return;
-            }
+            const format = detectFormat(bytes);
             self.candidates.len += 1;
             self.candidates[self.candidates.len - 1] = .{
                 .display_name = display_name,
@@ -186,7 +175,7 @@ const Job = struct {
     }
 };
 
-test "attachment staging lane reads an ordered image batch" {
+test "attachment staging lane classifies an ordered file batch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{
@@ -194,15 +183,15 @@ test "attachment staging lane reads an ordered image batch" {
         .data = "\x89PNG\r\n\x1a\nbody",
     });
     try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "paper.jpg",
-        .data = "\xff\xd8\xffbody",
+        .sub_path = "notes.txt",
+        .data = "plain text",
     });
 
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
     const paths = try std.fmt.allocPrint(
         std.testing.allocator,
-        "{s}{c}picture.png\n{s}{c}paper.jpg",
+        "{s}{c}picture.png\n{s}{c}notes.txt",
         .{ root_storage[0..root_len], std.fs.path.sep, root_storage[0..root_len], std.fs.path.sep },
     );
     defer std.testing.allocator.free(paths);
@@ -245,13 +234,13 @@ test "attachment staging lane reads an ordered image batch" {
     try std.testing.expectEqual(@as(u64, 7), taken.completion.completion_id);
     try std.testing.expectEqual(@as(?Rejection, null), taken.completion.rejection);
     try std.testing.expectEqual(@as(usize, 2), taken.completion.candidates.len);
-    try std.testing.expectEqual(attachment.Format.png, taken.completion.candidates[0].format);
+    try std.testing.expectEqual(@as(?attachment.Format, .png), taken.completion.candidates[0].format);
     try std.testing.expectEqualStrings("picture.png", taken.completion.candidates[0].display_name);
-    try std.testing.expectEqual(attachment.Format.jpeg, taken.completion.candidates[1].format);
-    try std.testing.expectEqualStrings("paper.jpg", taken.completion.candidates[1].display_name);
+    try std.testing.expectEqual(@as(?attachment.Format, null), taken.completion.candidates[1].format);
+    try std.testing.expectEqualStrings("notes.txt", taken.completion.candidates[1].display_name);
 }
 
-test "attachment staging lane rejects a mixed invalid batch atomically" {
+test "attachment staging lane rejects a mixed empty-file batch atomically" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{
@@ -260,7 +249,7 @@ test "attachment staging lane rejects a mixed invalid batch atomically" {
     });
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "notes.txt",
-        .data = "not media",
+        .data = "",
     });
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
@@ -307,7 +296,7 @@ fn testLimits() attachment.Limits {
     return .{
         .max_files = 4,
         .max_display_name_bytes = 128,
-        .max_image_bytes = 1024,
+        .max_file_bytes = 1024,
         .max_staged_bytes = 4096,
     };
 }
@@ -422,13 +411,7 @@ pub const Lane = struct {
     }
 };
 
-fn detectFormat(bytes: []const u8) ?attachment.Format {
-    if (bytes.len >= 8 and std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n")) return .png;
-    if (bytes.len >= 3 and bytes[0] == 0xff and bytes[1] == 0xd8 and bytes[2] == 0xff) return .jpeg;
-    if (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and
-        std.mem.eql(u8, bytes[8..12], "WEBP")) return .webp;
-    return null;
-}
+const detectFormat = attachment.detectFormat;
 
 test "attachment staging detects every published image signature and rejects PDF" {
     try std.testing.expectEqual(

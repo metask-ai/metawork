@@ -145,6 +145,7 @@ pub const Adapter = struct {
 
     pub fn dispatcherPlatform(self: *Adapter) bridge_api.DispatcherPlatform {
         return .{
+            .attachment_input = if (@import("builtin").os.tag == .windows) .file_bytes else .native_paths,
             .context = self,
             .wake_fn = wake,
             .emit_fn = emit,

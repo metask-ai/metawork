@@ -52,10 +52,14 @@ function formatAttachmentSize(value: string) {
 }
 
 function attachmentTypeLabel(
-  _attachment: ComposerAttachment,
+  attachment: ComposerAttachment,
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  return t("attachment.type.image");
+  return t(
+    attachment.kind === "image"
+      ? "attachment.type.image"
+      : "attachment.type.file",
+  );
 }
 
 function attachmentErrorMessage(reason: string): MessageId {
@@ -67,6 +71,8 @@ function attachmentErrorMessage(reason: string): MessageId {
     read_failed: "attachment.error.read_failed",
     file_changed: "attachment.error.file_changed",
     shutting_down: "attachment.error.shutting_down",
+    invalid_transfer: "attachment.error.invalid_transfer",
+    stale_transfer: "attachment.error.stale_transfer",
   };
   return messages[reason] ?? "attachment.error.generic";
 }
@@ -79,6 +85,7 @@ export function ComposerFooter({
   unavailableReason,
   draft,
   attachmentsEnabled,
+  attachmentMaxFileBytes,
   attachmentBusy,
   attachmentError,
   attachmentModelWarning,
@@ -108,6 +115,8 @@ export function ComposerFooter({
   stopDisabled,
   onDraftChange,
   onChooseAttachments,
+  onDropFiles,
+  onCancelAttachments,
   onRemoveAttachment,
   onSubmit,
   onStop,
@@ -125,6 +134,7 @@ export function ComposerFooter({
   unavailableReason: TaskView["continuationUnavailableReason"];
   draft: ComposerDraft;
   attachmentsEnabled: boolean;
+  attachmentMaxFileBytes: string;
   attachmentBusy: boolean;
   attachmentError: string | null;
   attachmentModelWarning: "image" | null;
@@ -164,6 +174,8 @@ export function ComposerFooter({
   stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onChooseAttachments: () => void;
+  onDropFiles?: (files: File[]) => void;
+  onCancelAttachments?: () => void;
   onRemoveAttachment: (token: string) => void;
   onSubmit: () => void;
   onStop: () => void;
@@ -180,11 +192,14 @@ export function ComposerFooter({
     null,
   );
   const [composing, setComposing] = useState(false);
+  const [fileDragActive, setFileDragActive] = useState(false);
   const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
   const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
   const sendButtonRef = useRef<HTMLButtonElement>(null);
   const stopButtonRef = useRef<HTMLButtonElement>(null);
   const attachmentButtonRef = useRef<HTMLButtonElement>(null);
+  const onDropFilesRef = useRef(onDropFiles);
+  onDropFilesRef.current = onDropFiles;
   const attachmentRemoveRefs = useRef(new Map<string, HTMLElement>());
   const pendingAttachmentFocusRef = useRef<{
     removedToken: string;
@@ -202,6 +217,14 @@ export function ComposerFooter({
   );
   const attachmentSkillConflict =
     draft.kind === "multimodal" && parseSlashInput(draft.text) !== null;
+  const hasGenericAttachment =
+    draft.kind === "multimodal" &&
+    draft.attachments.some((attachment) => attachment.kind === "file");
+  const fileDropEnabled =
+    attachmentsEnabled &&
+    draft.kind !== "skill" &&
+    !composeDisabled &&
+    !attachmentBusy;
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
   const sendEnabled = canSubmit && slashInput === null;
   const skillDraftCurrent =
@@ -222,6 +245,53 @@ export function ComposerFooter({
     candidates.find((candidate) => candidate.key === activeCandidateKey) ??
     candidates.find((candidate) => candidate.enabled) ??
     null;
+
+  useEffect(() => {
+    if (!fileDropEnabled) setFileDragActive(false);
+    let depth = 0;
+    const hasFiles = (event: DragEvent) =>
+      event.dataTransfer?.types.includes("Files") ?? false;
+    const onDragEnter = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      depth += 1;
+      if (fileDropEnabled) setFileDragActive(true);
+    };
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    };
+    const clear = (event: DragEvent) => {
+      if (!hasFiles(event) && event.type !== "dragend") return;
+      event.preventDefault();
+      depth = 0;
+      setFileDragActive(false);
+    };
+    const onDragLeave = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setFileDragActive(false);
+    };
+    const onDrop = (event: DragEvent) => {
+      clear(event);
+      if (fileDropEnabled && event.dataTransfer?.files.length)
+        onDropFilesRef.current?.(Array.from(event.dataTransfer.files));
+    };
+    document.addEventListener("dragenter", onDragEnter);
+    document.addEventListener("dragover", onDragOver);
+    document.addEventListener("dragleave", onDragLeave);
+    document.addEventListener("drop", onDrop);
+    document.addEventListener("dragend", clear);
+    return () => {
+      document.removeEventListener("dragenter", onDragEnter);
+      document.removeEventListener("dragover", onDragOver);
+      document.removeEventListener("dragleave", onDragLeave);
+      document.removeEventListener("drop", onDrop);
+      document.removeEventListener("dragend", clear);
+    };
+  }, [fileDropEnabled]);
 
   const chooseCandidate = useCallback(
     (candidate: SlashCandidate) => {
@@ -395,7 +465,13 @@ export function ComposerFooter({
 
   return (
     <footer className="composer-bar">
-      <div className="composer-shell">
+      <div className="composer-shell" data-file-drag-active={fileDragActive}>
+        {fileDragActive && (
+          <div className="composer-file-drop" aria-hidden="true">
+            <Icon name="paperclip" />
+            <span>{t("attachment.drop")}</span>
+          </div>
+        )}
         {menuOpen && slashInput && (
           <SlashMenu
             input={slashInput}
@@ -435,7 +511,11 @@ export function ComposerFooter({
                         className="composer-attachment-kind"
                         aria-hidden="true"
                       >
-                        {attachment.format.toUpperCase()}
+                        {attachment.kind === "image" ? (
+                          attachment.format.toUpperCase()
+                        ) : (
+                          <Icon name="skill-file" />
+                        )}
                       </span>
                       <span className="composer-attachment-copy">
                         <strong dir="auto" title={attachment.displayName}>
@@ -482,6 +562,11 @@ export function ComposerFooter({
               {attachmentSkillConflict && (
                 <p className="composer-attachment-notice" role="status">
                   {t("attachment.skill_conflict")}
+                </p>
+              )}
+              {hasGenericAttachment && (
+                <p className="composer-attachment-notice" role="status">
+                  {t("attachment.file_send_unavailable")}
                 </p>
               )}
               {attachmentModelWarning && (
@@ -657,12 +742,32 @@ export function ComposerFooter({
                   ref={attachmentButtonRef}
                   className="composer-attachment-add"
                   data-busy={attachmentBusy || undefined}
-                  aria-label={t("attachment.add")}
-                  title={t("attachment.add")}
-                  disabled={composeDisabled || attachmentBusy}
-                  onClick={onChooseAttachments}
+                  aria-label={t(
+                    attachmentBusy && onCancelAttachments
+                      ? "attachment.cancel"
+                      : "attachment.add",
+                  )}
+                  title={t(
+                    attachmentBusy && onCancelAttachments
+                      ? "attachment.cancel"
+                      : "attachment.add",
+                  )}
+                  disabled={
+                    composeDisabled || (attachmentBusy && !onCancelAttachments)
+                  }
+                  onClick={
+                    attachmentBusy ? onCancelAttachments : onChooseAttachments
+                  }
                 >
-                  <Icon name={attachmentBusy ? "loading" : "paperclip"} />
+                  <Icon
+                    name={
+                      attachmentBusy
+                        ? onCancelAttachments
+                          ? "close"
+                          : "loading"
+                        : "paperclip"
+                    }
+                  />
                 </Button>
               )}
               {modelLabel && (
@@ -734,7 +839,11 @@ export function ComposerFooter({
         </Composer>
         {attachmentError && (
           <p className="composer-attachment-error" role="alert">
-            {t(attachmentErrorMessage(attachmentError))}
+            {t(attachmentErrorMessage(attachmentError), {
+              limit: (
+                Number(attachmentMaxFileBytes) / 1_000_000
+              ).toLocaleString(),
+            })}
           </p>
         )}
         <WorkspaceContextSelector

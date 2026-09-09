@@ -143,6 +143,35 @@ test("bootstrap transport failure is classified separately from snapshot sync fa
   assert.equal(statuses.at(-1)?.failure, "bootstrap_failed");
 });
 
+test("uncertain attachment cleanup replaces even a healthy snapshot connection", async () => {
+  let generation = 0;
+  const disconnected = [];
+  const observed = [];
+  const client = {
+    available: () => true,
+    onWorkbenchRevision: () => () => {},
+    onHostSignal: () => () => {},
+    connect: async () => String(++generation),
+    disconnect: async (value) => {
+      disconnected.push(value);
+    },
+    fetchSnapshot: async () => snapshot("1"),
+    ping: async () => ({}),
+  };
+  const connection = new WorkbenchConnection(client, {
+    onSnapshot: () => {},
+    onStatus: () => {},
+    onReady: () => {},
+    onViewSyncFailed: () => {},
+    onGeneration: (value) => observed.push(value),
+  });
+  await connection.start();
+  await connection.retry({ replaceConnection: true });
+  assert.deepEqual(disconnected, ["1"]);
+  assert.deepEqual(observed, ["1", "0", "2"]);
+  await connection.stop();
+});
+
 test("snapshot contract failure is terminal and never enters refresh retry backoff", async () => {
   let fetchCalls = 0;
   const statuses = [];

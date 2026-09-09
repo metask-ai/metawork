@@ -65,9 +65,12 @@ import {
   decodeFileChangeDiff,
   decodeAttachmentChooseResult,
   decodeAttachmentReleaseResult,
+  decodeAttachmentReceiveResult,
+  decodeAttachmentReceiveAcceptance,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
+import { AttachmentReceive } from "./attachment-receive.ts";
 
 export {
   RendererBridgeContractError,
@@ -98,6 +101,14 @@ export type BridgeClientOptions = {
 export class BridgeClient {
   private readonly bridgeOverride?: NativeBridge;
   private readonly commandTimeoutMs: number;
+  private attachmentConnection:
+    | {
+        generation: string;
+        mode: "native_paths" | "file_bytes";
+        maxChunkBytes: number;
+      }
+    | undefined;
+  private nextReceiveBatch = 1n;
 
   constructor(options: BridgeClientOptions = {}) {
     this.bridgeOverride = options.bridge;
@@ -133,6 +144,15 @@ export class BridgeClient {
 
   onShortcut(consume: (shortcut: NativeSdkShortcutDetail) => void) {
     return this.bridge().on("shortcut", consume);
+  }
+
+  onFileDrop(consume: (paths: string[]) => void) {
+    if (this.attachmentConnection?.mode !== "native_paths") return () => {};
+    return this.bridge().on("drop:files", ({ paths }) => consume(paths));
+  }
+
+  get attachmentInputMode() {
+    return this.attachmentConnection?.mode;
   }
 
   onWorkbenchRevision(
@@ -188,10 +208,17 @@ export class BridgeClient {
         "invalid_response",
         `Host accepted ${result.contractId} revision ${result.contractRevision}`,
       );
+    this.attachmentConnection = {
+      generation: result.generation,
+      ...result.attachmentInput,
+    };
+    this.nextReceiveBatch = 1n;
     return result.generation;
   }
 
   async disconnect(generation: string) {
+    if (this.attachmentConnection?.generation === generation)
+      this.attachmentConnection = undefined;
     assertDisconnected(
       await this.invoke(commands.disconnect, { generation }),
       generation,
@@ -737,6 +764,53 @@ export class BridgeClient {
     // leave the resulting staged grants without a Renderer consumer.
     return decodeAttachmentChooseResult(
       await this.bridge().invoke(commands.chooseAttachments, {}),
+    );
+  }
+
+  createAttachmentReceive() {
+    const connection = this.attachmentConnection;
+    if (connection?.mode !== "file_bytes")
+      throw new Error("File byte input is unavailable");
+    if (this.nextReceiveBatch > 18446744073709551615n)
+      throw new Error("Attachment batch identity exhausted");
+    const key = {
+      generation: connection.generation,
+      batchId: String(this.nextReceiveBatch++),
+    };
+    return new AttachmentReceive(
+      {
+        begin: async (files) =>
+          decodeAttachmentReceiveAcceptance(
+            await this.invoke(commands.beginAttachmentReceive, {
+              ...key,
+              files,
+            }),
+          ),
+        append: async (fileIndex, offset, dataBase64) =>
+          decodeAttachmentReceiveAcceptance(
+            await this.invoke(commands.appendAttachmentReceive, {
+              ...key,
+              fileIndex,
+              offset,
+              dataBase64,
+            }),
+          ),
+        finish: async () =>
+          decodeAttachmentReceiveResult(
+            await this.invoke(commands.finishAttachmentReceive, key),
+          ),
+        cancel: async () =>
+          decodeAttachmentReleaseResult(
+            await this.invoke(commands.cancelAttachmentReceive, key),
+          ),
+      },
+      connection.maxChunkBytes,
+    );
+  }
+
+  async addDroppedAttachments(paths: string[]) {
+    return decodeAttachmentChooseResult(
+      await this.bridge().invoke(commands.addDroppedAttachments, { paths }),
     );
   }
 

@@ -43,6 +43,11 @@ pub const snapshot_chunk = "metawork.workbench.snapshot.chunk";
 pub const preview_file = "metawork.files.preview";
 pub const diff_file = "metawork.files.diff";
 pub const choose_attachments = "metawork.attachments.choose";
+pub const add_dropped_attachments = "metawork.attachments.addDropped";
+pub const begin_attachment_receive = "metawork.attachments.beginReceive";
+pub const append_attachment_receive = "metawork.attachments.appendReceive";
+pub const finish_attachment_receive = "metawork.attachments.finishReceive";
+pub const cancel_attachment_receive = "metawork.attachments.cancelReceive";
 pub const release_attachment = "metawork.attachments.release";
 pub const account_begin_login = "metawork.account.beginLogin";
 pub const account_cancel_operation = "metawork.account.cancelOperation";
@@ -125,6 +130,11 @@ pub const product = [_][]const u8{
     preview_file,
     diff_file,
     choose_attachments,
+    add_dropped_attachments,
+    begin_attachment_receive,
+    append_attachment_receive,
+    finish_attachment_receive,
+    cancel_attachment_receive,
     release_attachment,
     account_begin_login,
     account_cancel_operation,

@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -99,6 +100,10 @@ import {
   RendererBridgeContractError,
 } from "../bridge/client.ts";
 import { WorkbenchConnection } from "../bridge/connection.ts";
+import {
+  AttachmentCleanupError,
+  type AttachmentReceive,
+} from "../bridge/attachment-receive.ts";
 import type {
   TaskCreateReason,
   TaskCompactReason,
@@ -269,6 +274,14 @@ export default function App() {
   const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const attachmentBusyRef = useRef(false);
+  const attachmentOperation = useRef<{
+    cancelled: boolean;
+    receive?: AttachmentReceive;
+  } | null>(null);
+  const droppedAttachmentHandlerRef = useRef<(paths: string[]) => void>(
+    () => undefined,
+  );
   const [taskPending, setTaskPending] = useState<Record<string, string>>({});
   const [pendingTaskModels, setPendingTaskModels] = useState<
     Record<string, string>
@@ -278,6 +291,7 @@ export default function App() {
   const [accountCancelBusy, setAccountCancelBusy] = useState(false);
   const [bridgeReady, setBridgeReady] = useState(false);
   const [bridgeGeneration, setBridgeGeneration] = useState("0");
+  const bridgeGenerationRef = useRef("0");
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
   const [rootRenderBlockReason, setRootRenderBlockReason] = useState<
     "bootstrap_failed" | null
@@ -680,6 +694,15 @@ export default function App() {
   const composerDraftScopeRef = useRef(composerDraftScope);
   composerDraftScopeRef.current = composerDraftScope;
   useEffect(() => setAttachmentError(null), [composerDraftScope]);
+  useLayoutEffect(
+    () => () => {
+      const operation = attachmentOperation.current;
+      if (!operation) return;
+      operation.cancelled = true;
+      void operation.receive?.cancel().catch(() => undefined);
+    },
+    [composerDraftScope, bridgeGeneration, route, settingsOpen, searchOpen],
+  );
   const previousBridgeGeneration = useRef(bridgeGeneration);
   useEffect(() => {
     const previous = previousBridgeGeneration.current;
@@ -1034,6 +1057,13 @@ export default function App() {
       },
       onGeneration: (generation) => {
         if (!cancelled) {
+          bridgeGenerationRef.current = generation;
+          if (attachmentOperation.current) {
+            attachmentOperation.current.cancelled = true;
+            void attachmentOperation.current.receive
+              ?.cancel()
+              .catch(() => undefined);
+          }
           dispatchWorkbench({ type: "generation.started", generation });
           setBridgeGeneration(generation);
           if (generation !== "0") setRootRenderBlockReason(null);
@@ -1244,7 +1274,7 @@ export default function App() {
     });
   }
 
-  async function retryViewSynchronization() {
+  async function retryViewSynchronization(replaceConnection = false) {
     if (connectionBusyRef.current) return;
     connectionBusyRef.current = true;
     setConnectionBusy(true);
@@ -1252,7 +1282,7 @@ export default function App() {
     try {
       const current = connection.current;
       if (!current) throw new Error("Workbench connection is not available");
-      await current.retry();
+      await current.retry({ replaceConnection });
       setBridgeReady(true);
       setStatus(quietStatus("connection.recovered", { scope: "connection" }));
     } catch (error) {
@@ -1846,25 +1876,48 @@ export default function App() {
     }
   }
 
-  async function chooseAttachments() {
+  async function addAttachments(
+    input?: { paths: string[] } | { files: File[] },
+  ) {
     if (
-      attachmentBusy ||
+      attachmentBusyRef.current ||
       bridgeUnavailable ||
       !snapshot.capabilities.attachments.enabled ||
+      !taskCanCompose ||
+      taskMutationDisabled ||
       composerDraftRef.current.kind === "skill"
     )
       return;
     const requestedScope = composerDraftScopeRef.current;
+    const requestedGeneration = bridgeGenerationRef.current;
+    const operation: { cancelled: boolean; receive?: AttachmentReceive } = {
+      cancelled: false,
+    };
+    attachmentOperation.current = operation;
+    attachmentBusyRef.current = true;
     setAttachmentBusy(true);
     setAttachmentError(null);
     try {
-      const result = await client.chooseAttachments();
+      if (input && "files" in input)
+        operation.receive = client.createAttachmentReceive();
+      const result = input
+        ? "files" in input
+          ? await operation.receive!.run(input.files)
+          : await client.addDroppedAttachments(input.paths)
+        : await client.chooseAttachments();
       if (result.status === "cancelled") return;
       if (result.status === "rejected") {
-        setAttachmentError(result.reason);
+        if (!operation.cancelled) setAttachmentError(result.reason);
         return;
       }
-      if (composerDraftScopeRef.current !== requestedScope) {
+      if (
+        operation.cancelled ||
+        composerDraftScopeRef.current !== requestedScope
+      ) {
+        if (operation.receive) {
+          await operation.receive.cancel();
+          return;
+        }
         await Promise.allSettled(
           result.attachments.map((attachment) =>
             client.releaseAttachment(attachment.token),
@@ -1874,6 +1927,10 @@ export default function App() {
       }
       const current = composerDraftRef.current as ComposerDraft;
       if (current.kind === "skill") {
+        if (operation.receive) {
+          await operation.receive.cancel();
+          return;
+        }
         await Promise.allSettled(
           result.attachments.map((attachment) =>
             client.releaseAttachment(attachment.token),
@@ -1887,12 +1944,44 @@ export default function App() {
         text: current.text,
         attachments: [...existing, ...result.attachments],
       });
+      operation.receive?.handoff();
+      attachmentOperation.current = null;
     } catch (error) {
-      setAttachmentError(errorText(error));
+      let failure = error;
+      try {
+        await operation.receive?.cancel();
+      } catch (cleanupError) {
+        failure = cleanupError;
+      }
+      if (failure instanceof AttachmentCleanupError) {
+        if (requestedGeneration === bridgeGenerationRef.current)
+          await retryViewSynchronization(true);
+      } else if (!operation.cancelled) setAttachmentError(errorText(failure));
     } finally {
+      if (attachmentOperation.current === operation)
+        attachmentOperation.current = null;
+      attachmentBusyRef.current = false;
       setAttachmentBusy(false);
     }
   }
+
+  droppedAttachmentHandlerRef.current = (paths) => {
+    if (
+      paths.length === 0 ||
+      route !== "workbench" ||
+      settingsOpen ||
+      searchOpen
+    )
+      return;
+    void addAttachments({ paths });
+  };
+
+  useEffect(() => {
+    if (!client.available()) return;
+    return client.onFileDrop((paths) => {
+      droppedAttachmentHandlerRef.current(paths);
+    });
+  }, [bridgeGeneration]);
 
   async function removeAttachment(token: string) {
     const current = composerDraftRef.current;
@@ -2692,6 +2781,7 @@ export default function App() {
         unavailableReason={activeTask?.continuationUnavailableReason ?? null}
         draft={composerDraft}
         attachmentsEnabled={snapshot.capabilities.attachments.enabled}
+        attachmentMaxFileBytes={snapshot.capabilities.attachments.maxFileBytes}
         attachmentBusy={attachmentBusy}
         attachmentError={attachmentError}
         attachmentModelWarning={attachmentModelWarning}
@@ -2817,7 +2907,26 @@ export default function App() {
           )
         }
         onDraftChange={updateComposerDraft}
-        onChooseAttachments={() => void chooseAttachments()}
+        onChooseAttachments={() => void addAttachments()}
+        onDropFiles={(files) => {
+          if (
+            client.attachmentInputMode === "file_bytes" &&
+            route === "workbench" &&
+            !settingsOpen &&
+            !searchOpen
+          )
+            void addAttachments({ files });
+        }}
+        onCancelAttachments={
+          attachmentOperation.current?.receive
+            ? () => {
+                const operation = attachmentOperation.current;
+                if (!operation) return;
+                operation.cancelled = true;
+                void operation.receive?.cancel().catch(() => undefined);
+              }
+            : undefined
+        }
         onRemoveAttachment={(token) => void removeAttachment(token)}
         onSubmit={() => void submitRun()}
         onStop={() =>

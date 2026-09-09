@@ -26,6 +26,7 @@ import {
   type RunActivity,
   type RunView,
   type AttachmentChooseResult,
+  type AttachmentReceiveResult,
   type ScheduledTaskView,
   type PersistenceRecoveryOutcome,
   type SkillCatalogView,
@@ -328,6 +329,7 @@ const taskRunReasons = [
   "skill_not_found",
   "skill_unavailable",
   "invalid_skill_arguments",
+  "unsupported_attachment",
   "capacity_reached",
   "shutting_down",
 ] as const;
@@ -3349,7 +3351,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const attachmentCapability = object(
     capabilityItem.attachments,
     "$.capabilities.attachments",
-    ["enabled", "imageFormats", "maxFiles", "maxImageBytes", "maxStagedBytes"],
+    ["enabled", "imageFormats", "maxFiles", "maxFileBytes", "maxStagedBytes"],
   );
   const capabilities = {
     taskHistoryPersistence: booleanValue(
@@ -3489,9 +3491,9 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         attachmentCapability.maxFiles,
         "$.capabilities.attachments.maxFiles",
       ),
-      maxImageBytes: positiveWireId(
-        attachmentCapability.maxImageBytes,
-        "$.capabilities.attachments.maxImageBytes",
+      maxFileBytes: positiveWireId(
+        attachmentCapability.maxFileBytes,
+        "$.capabilities.attachments.maxFileBytes",
       ),
       maxStagedBytes: positiveWireId(
         attachmentCapability.maxStagedBytes,
@@ -3722,12 +3724,17 @@ export function decodeExecutionCommandResult(
 }
 
 export function decodeRendererBridgeConnect(value: unknown) {
+  const acceptedValue = booleanValue(
+    (value as JsonObject)?.accepted,
+    "$.accepted",
+  );
   const item = object(value, "$", [
     "accepted",
     "contractId",
     "contractRevision",
     "generation",
     "error",
+    ...(acceptedValue ? ["attachmentInput"] : []),
   ]);
   const accepted = booleanValue(item.accepted, "$.accepted");
   const contractId = stringValue(item.contractId, "$.contractId");
@@ -3737,11 +3744,29 @@ export function decodeRendererBridgeConnect(value: unknown) {
   );
   if (accepted) {
     if (item.error !== null) fail("$.error", "expected null");
+    const input = object(item.attachmentInput, "$.attachmentInput", [
+      "mode",
+      "maxChunkBytes",
+    ]);
+    const mode = enumValue(input.mode, "$.attachmentInput.mode", [
+      "native_paths",
+      "file_bytes",
+    ] as const);
+    const maxChunkBytes = positiveWireId(
+      input.maxChunkBytes,
+      "$.attachmentInput.maxChunkBytes",
+    );
+    if (BigInt(maxChunkBytes) > 128n * 1024n)
+      fail(
+        "$.attachmentInput.maxChunkBytes",
+        "chunk exceeds Bridge frame budget",
+      );
     return {
       accepted: true as const,
       contractId,
       contractRevision,
       generation: positiveWireId(item.generation, "$.generation"),
+      attachmentInput: { mode, maxChunkBytes: Number(maxChunkBytes) },
       error: null,
     };
   }
@@ -4541,34 +4566,38 @@ export function decodeAttachmentChooseResult(
     item.attachments,
     "$.attachments",
     (attachmentValue, path) => {
-      const attachment = object(attachmentValue, path, [
-        "token",
-        "kind",
-        "format",
-        "displayName",
-        "sizeBytes",
-      ]);
-      const kind = enumValue(attachment.kind, `${path}.kind`, [
+      const candidate = attachmentValue as JsonObject;
+      const kind = enumValue(candidate?.kind, `${path}.kind`, [
+        "file",
         "image",
       ] as const);
-      const format = enumValue(attachment.format, `${path}.format`, [
-        "png",
-        "jpeg",
-        "webp",
-      ] as const);
+      const keys =
+        kind === "image"
+          ? ["token", "kind", "format", "displayName", "sizeBytes"]
+          : ["token", "kind", "displayName", "sizeBytes"];
+      const attachment = object(attachmentValue, path, keys);
       const token = stringValue(attachment.token, `${path}.token`);
       if (!/^[0-9a-f]{48}$/.test(token))
         fail(`${path}.token`, "invalid attachment token");
-      return {
+      const common = {
         token,
-        kind,
-        format,
         displayName: nonEmptyString(
           attachment.displayName,
           `${path}.displayName`,
         ),
         sizeBytes: positiveWireId(attachment.sizeBytes, `${path}.sizeBytes`),
       };
+      return kind === "image"
+        ? {
+            ...common,
+            kind,
+            format: enumValue(attachment.format, `${path}.format`, [
+              "png",
+              "jpeg",
+              "webp",
+            ] as const),
+          }
+        : { ...common, kind };
     },
   );
   if (attachments.length === 0)
@@ -4586,4 +4615,32 @@ export function decodeAttachmentChooseResult(
 export function decodeAttachmentReleaseResult(value: unknown) {
   const item = object(value, "$", ["released"]);
   return { released: booleanValue(item.released, "$.released") };
+}
+
+export function decodeAttachmentReceiveResult(
+  value: unknown,
+): AttachmentReceiveResult {
+  const root = value as JsonObject;
+  if (
+    root?.status === "rejected" &&
+    (root.reason === "invalid_transfer" || root.reason === "stale_transfer")
+  ) {
+    object(value, "$", ["status", "reason"]);
+    return { status: "rejected" as const, reason: root.reason };
+  }
+  const result = decodeAttachmentChooseResult(value);
+  if (result.status === "cancelled")
+    fail("$.status", "expected ready or rejected");
+  return result;
+}
+
+export function decodeAttachmentReceiveAcceptance(value: unknown) {
+  if ((value as JsonObject)?.status === "accepted") {
+    object(value, "$", ["status"]);
+    return { status: "accepted" as const };
+  }
+  const result = decodeAttachmentReceiveResult(value);
+  if (result.status !== "rejected")
+    fail("$.status", "expected accepted or rejected");
+  return result;
 }
