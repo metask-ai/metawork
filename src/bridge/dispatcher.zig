@@ -18,7 +18,8 @@ const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const sync_product_handler_count = product_handler_count - 3;
+const async_product_handler_count = 4;
+const sync_product_handler_count = product_handler_count - async_product_handler_count;
 const max_preview_in_flight: usize = 8;
 const max_diff_in_flight: usize = 8;
 const max_attachment_in_flight: usize = 4;
@@ -233,7 +234,7 @@ pub const Dispatcher = struct {
     sequence: u64 = 0,
     acknowledged_sequence: u64 = 0,
     registered_handlers: [sync_product_handler_count]native_sdk.bridge.Handler = undefined,
-    registered_async_handlers: [4]native_sdk.bridge.AsyncHandler = undefined,
+    registered_async_handlers: [async_product_handler_count]native_sdk.bridge.AsyncHandler = undefined,
     preview_in_flight: [max_preview_in_flight]PreviewInFlight = @splat(.{}),
     next_preview_completion_id: u64 = 1,
     diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
@@ -367,6 +368,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.delete_scheduled_task, .function = deleteScheduledTask },
             .{ .name = commands.recover_scheduled_task_store, .function = recoverScheduledTaskStore },
         };
+        comptime std.debug.assert(product_specs.len == sync_product_handler_count);
         inline for (product_specs, 0..) |spec, index| self.registered_handlers[index] = .{
             .name = spec.name,
             .context = self,
@@ -5349,6 +5351,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
     const native_dispatcher = dispatcher.register(
         @import("policy.zig").product(.release),
     );
+    // Every published command must resolve exactly once, including async-only
+    // commands whose sync lookup must safely traverse the entire table.
+    for (commands.product) |command| {
+        const sync_handler = native_dispatcher.registry.find(command);
+        const async_handler = native_dispatcher.async_registry.find(command);
+        try std.testing.expect((sync_handler != null) != (async_handler != null));
+    }
     try std.testing.expect(native_dispatcher.registry.find(commands.preview_file) == null);
     try std.testing.expect(native_dispatcher.async_registry.find(commands.preview_file) != null);
     try std.testing.expect(native_dispatcher.registry.find(commands.diff_file) == null);
