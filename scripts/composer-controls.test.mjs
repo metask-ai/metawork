@@ -1665,3 +1665,24 @@ test("generic file drafts explain the current send boundary", () => {
   );
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
 });
+
+test("file drag highlights the active Composer without reading browser files", () => {
+  renderComposer({ attachmentsEnabled: true });
+  const dataTransfer = { types: ["Files"], dropEffect: "none" };
+  const enter = new window.Event("dragenter", {
+    bubbles: true,
+    cancelable: true,
+  });
+  Object.defineProperty(enter, "dataTransfer", { value: dataTransfer });
+  fireEvent(document, enter);
+  assert.ok(screen.getByText("Drop files to add"));
+  assert.equal(
+    document.querySelector(".composer-shell").dataset.fileDragActive,
+    "true",
+  );
+
+  const drop = new window.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", { value: dataTransfer });
+  fireEvent(document, drop);
+  assert.equal(screen.queryByText("Drop files to add"), null);
+});

@@ -276,6 +276,10 @@ export default function App() {
   const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const attachmentBusyRef = useRef(false);
+  const droppedAttachmentHandlerRef = useRef<(paths: string[]) => void>(
+    () => undefined,
+  );
   const [taskPending, setTaskPending] = useState<Record<string, string>>({});
   const [pendingTaskModels, setPendingTaskModels] = useState<
     Record<string, string>
@@ -1972,19 +1976,24 @@ export default function App() {
     }
   }
 
-  async function chooseAttachments() {
+  async function addAttachments(paths?: string[]) {
     if (
-      attachmentBusy ||
+      attachmentBusyRef.current ||
       bridgeUnavailable ||
       !snapshot.capabilities.attachments.enabled ||
+      !taskCanCompose ||
+      taskMutationDisabled ||
       composerDraftRef.current.kind === "skill"
     )
       return;
     const requestedScope = composerDraftScopeRef.current;
+    attachmentBusyRef.current = true;
     setAttachmentBusy(true);
     setAttachmentError(null);
     try {
-      const result = await client.chooseAttachments();
+      const result = paths
+        ? await client.addDroppedAttachments(paths)
+        : await client.chooseAttachments();
       if (result.status === "cancelled") return;
       if (result.status === "rejected") {
         setAttachmentError(result.reason);
@@ -2016,9 +2025,28 @@ export default function App() {
     } catch (error) {
       setAttachmentError(errorText(error));
     } finally {
+      attachmentBusyRef.current = false;
       setAttachmentBusy(false);
     }
   }
+
+  droppedAttachmentHandlerRef.current = (paths) => {
+    if (
+      paths.length === 0 ||
+      route !== "workbench" ||
+      settingsOpen ||
+      searchOpen
+    )
+      return;
+    void addAttachments(paths);
+  };
+
+  useEffect(() => {
+    if (!client.available()) return;
+    return client.onFileDrop((paths) => {
+      droppedAttachmentHandlerRef.current(paths);
+    });
+  }, []);
 
   async function removeAttachment(token: string) {
     const current = composerDraftRef.current;
@@ -2938,7 +2966,7 @@ export default function App() {
         )
       }
       onDraftChange={updateComposerDraft}
-      onChooseAttachments={() => void chooseAttachments()}
+      onChooseAttachments={() => void addAttachments()}
       onRemoveAttachment={(token) => void removeAttachment(token)}
       onSubmit={() => void submitRun()}
       onStop={() =>

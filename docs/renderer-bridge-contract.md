@@ -102,7 +102,7 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 
 根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, maxFiles, maxFileBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，表示当前可发送的图片分类；其他 limit 是 canonical decimal `u64` string。Renderer 只用该对象解释入口和本地 admission，Host 对 command 重新执行全部限制。
 
-`metawork.attachments.choose` 是 revision 1 async command，只接受空对象。Application 在当前 source/window authority 下打开不限制扩展名的原生多选 picker，随后由 Product Control attachment lane 完成整批 staging。结果严格为以下三种之一：
+`metawork.attachments.choose` 是 revision 1 async command，只接受空对象。Application 在当前 source/window authority 下打开不限制扩展名的原生多选 picker。`metawork.attachments.addDropped` 是同一 revision 的 async command，payload 精确为 `{ paths }`；`paths` 是 Native SDK `drop:files` 事件给 Renderer 的非空绝对路径数组，Renderer 只能在当前事件处理中提交，不得缓存或投影。Bridge 对路径数量、编码和总字节有界校验。两个入口随后都由同一个 Product Control attachment lane 完成整批 staging，结果严格为以下三种之一：
 
 ```json
 { "status": "cancelled" }

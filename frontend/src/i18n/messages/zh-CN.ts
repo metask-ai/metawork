@@ -501,6 +501,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.stop_failed": "未能确认停止请求，请刷新后重试。",
   "run.stop_requested": "正在停止当前工作…",
   "attachment.add": "添加文件",
+  "attachment.drop": "拖放文件以添加",
   "attachment.selected": "已选择的附件",
   "attachment.remove": "移除 {name}",
   "attachment.type.image": "图片",

@@ -189,7 +189,7 @@ MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorizatio
 
 ### 2.6 文件 attachment staging
 
-Attachment staging 是 Product Control 内部、非持久、无用户 identity 的候选资源 owner，不形成新的顶层 Product owner 或 Renderer 产品对象。Application 只通过 Native SDK 系统 picker 取得用户选择，并把完成一次有界读取所需的窄 selected-file capability 注入 Product；Bridge 只拥有 source/window/connection authority 以及 Renderer opaque token 到 Product staging identity 的 grant，不能持有 raw bytes、路径或 Product 内部指针。Renderer 只持 token 与安全 display metadata。
+Attachment staging 是 Product Control 内部、非持久、无用户 identity 的候选资源 owner，不形成新的顶层 Product owner 或 Renderer 产品对象。Application 的系统 picker 与 Renderer 消费的 Native SDK 文件拖放事件只产生本地路径；Renderer 仅可将拖放路径短暂提交给专用 typed Bridge command。Bridge 只拥有 source/window/connection authority 以及 Renderer opaque token 到 Product staging identity 的 grant，不缓存 raw bytes、路径或 Product 内部指针。staging 完成后 Renderer 只持 token 与安全 display metadata。
 
 Product Control 使用独立于 Run、File Preview、catalog、restore 与 MCP 的 bounded attachment lane。一次添加按批次原子 staging：worker 只读取普通非空文件，并同时服从 Product 文件数、单文件和 raw staging 总预算；文件签名只把 PNG、JPEG 或 WebP 分类为当前可发送图片，其他文件保留为不可发送的通用文件。任一候选失败必须清零本批已经读取的字节且不发布部分 token。路径只活到 worker 建立 owned bytes，不能进入日志、Snapshot、持久化或后续发送时重读；读取必须 no-follow 并在前后 stat 不变。通用文件在 Product borrow 阶段 fail closed 为 `UnsupportedType`，不得被降级成文字或伪造为已解析输入。
 

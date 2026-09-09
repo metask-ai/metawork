@@ -184,6 +184,7 @@ export function ComposerFooter({
     null,
   );
   const [composing, setComposing] = useState(false);
+  const [fileDragActive, setFileDragActive] = useState(false);
   const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
   const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
   const sendButtonRef = useRef<HTMLButtonElement>(null);
@@ -209,6 +210,11 @@ export function ComposerFooter({
   const hasGenericAttachment =
     draft.kind === "multimodal" &&
     draft.attachments.some((attachment) => attachment.kind === "file");
+  const fileDropEnabled =
+    attachmentsEnabled &&
+    draft.kind !== "skill" &&
+    !composeDisabled &&
+    !attachmentBusy;
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
   const sendEnabled = canSubmit && slashInput === null;
   const skillDraftCurrent =
@@ -229,6 +235,48 @@ export function ComposerFooter({
     candidates.find((candidate) => candidate.key === activeCandidateKey) ??
     candidates.find((candidate) => candidate.enabled) ??
     null;
+
+  useEffect(() => {
+    if (!fileDropEnabled) setFileDragActive(false);
+    let depth = 0;
+    const hasFiles = (event: DragEvent) =>
+      event.dataTransfer?.types.includes("Files") ?? false;
+    const onDragEnter = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      depth += 1;
+      if (fileDropEnabled) setFileDragActive(true);
+    };
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    };
+    const clear = (event: DragEvent) => {
+      if (!hasFiles(event) && event.type !== "dragend") return;
+      event.preventDefault();
+      depth = 0;
+      setFileDragActive(false);
+    };
+    const onDragLeave = (event: DragEvent) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setFileDragActive(false);
+    };
+    document.addEventListener("dragenter", onDragEnter);
+    document.addEventListener("dragover", onDragOver);
+    document.addEventListener("dragleave", onDragLeave);
+    document.addEventListener("drop", clear);
+    document.addEventListener("dragend", clear);
+    return () => {
+      document.removeEventListener("dragenter", onDragEnter);
+      document.removeEventListener("dragover", onDragOver);
+      document.removeEventListener("dragleave", onDragLeave);
+      document.removeEventListener("drop", clear);
+      document.removeEventListener("dragend", clear);
+    };
+  }, [fileDropEnabled]);
 
   const chooseCandidate = useCallback(
     (candidate: SlashCandidate) => {
@@ -402,7 +450,13 @@ export function ComposerFooter({
 
   return (
     <footer className="composer-bar">
-      <div className="composer-shell">
+      <div className="composer-shell" data-file-drag-active={fileDragActive}>
+        {fileDragActive && (
+          <div className="composer-file-drop" aria-hidden="true">
+            <Icon name="paperclip" />
+            <span>{t("attachment.drop")}</span>
+          </div>
+        )}
         {menuOpen && slashInput && (
           <SlashMenu
             input={slashInput}

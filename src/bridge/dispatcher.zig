@@ -233,7 +233,7 @@ pub const Dispatcher = struct {
     sequence: u64 = 0,
     acknowledged_sequence: u64 = 0,
     registered_handlers: [sync_product_handler_count]native_sdk.bridge.Handler = undefined,
-    registered_async_handlers: [3]native_sdk.bridge.AsyncHandler = undefined,
+    registered_async_handlers: [4]native_sdk.bridge.AsyncHandler = undefined,
     preview_in_flight: [max_preview_in_flight]PreviewInFlight = @splat(.{}),
     next_preview_completion_id: u64 = 1,
     diff_in_flight: [max_diff_in_flight]DiffInFlight = @splat(.{}),
@@ -386,6 +386,11 @@ pub const Dispatcher = struct {
             .name = commands.choose_attachments,
             .context = self,
             .invoke_fn = chooseAttachments,
+        };
+        self.registered_async_handlers[3] = .{
+            .name = commands.add_dropped_attachments,
+            .context = self,
+            .invoke_fn = addDroppedAttachments,
         };
         return .{
             .policy = policy,
@@ -1045,6 +1050,70 @@ pub const Dispatcher = struct {
             invocation.source.window_id,
             selected.count,
             selected.paths,
+        );
+    }
+
+    fn addDroppedAttachments(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        responder: native_sdk.bridge.AsyncResponder,
+    ) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = self.callbacks.enter() catch {
+            respondAttachmentRejected(responder, invocation.request.id, .shutting_down);
+            return;
+        };
+        defer callback.deinit();
+        self.requireWindow(invocation.source.window_id) catch {
+            respondAttachmentRejected(responder, invocation.request.id, .shutting_down);
+            return;
+        };
+        var parsed = handlers.parsePayloadWithLimit(
+            handlers.AttachmentPaths,
+            invocation.request.payload,
+            native_sdk.platform.max_drop_paths_bytes * 2,
+        ) catch {
+            respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+            return;
+        };
+        defer parsed.deinit();
+        if (parsed.value.paths.len == 0 or parsed.value.paths.len > attachment_grant.max_grants) {
+            respondAttachmentRejected(responder, invocation.request.id, .too_many_files);
+            return;
+        }
+        var path_storage: [native_sdk.platform.max_drop_paths_bytes]u8 = undefined;
+        var used: usize = 0;
+        for (parsed.value.paths, 0..) |path, index| {
+            if (path.len == 0 or !std.fs.path.isAbsolute(path) or std.mem.indexOfScalar(u8, path, '\n') != null) {
+                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+                return;
+            }
+            if (index != 0) {
+                if (used == path_storage.len) {
+                    respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+                    return;
+                }
+                path_storage[used] = '\n';
+                used += 1;
+            }
+            if (path.len > path_storage.len - used) {
+                respondAttachmentRejected(responder, invocation.request.id, .read_failed);
+                return;
+            }
+            @memcpy(path_storage[used..][0..path.len], path);
+            used += path.len;
+        }
+        const generation = self.delivery.connectedGeneration() orelse {
+            respondAttachmentRejected(responder, invocation.request.id, .shutting_down);
+            return;
+        };
+        self.beginAttachmentStaging(
+            responder,
+            invocation.request.id,
+            generation,
+            invocation.source.window_id,
+            parsed.value.paths.len,
+            path_storage[0..used],
         );
     }
 

@@ -722,7 +722,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 ### 8.2 文件附件
 
-Composer 工具带在模型控件之前提供一个带可访问名称的“添加文件”按钮，使用系统原生多选文件选择器并接受普通文件；不提供 WebView file input、拖放或粘贴替代入口。选择期间按钮进入单一 busy 状态，整批 staging 成功后才显示 chip；取消不改变草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip。
+Composer 工具带在模型控件之前提供一个带可访问名称的“添加文件”按钮，使用系统原生多选文件选择器并接受普通文件；用户也可以把操作系统文件拖入当前包含可编辑 Composer 的窗口，拖入时只在输入框范围显示克制的强调轮廓和“拖放文件以添加”提示。picker 与拖放只是取得本地路径的两个入口，之后必须进入同一批次 staging 和结果处理；不提供 WebView file input 或粘贴替代入口。处理期间按钮进入单一 busy 状态，整批 staging 成功后才显示 chip；取消不改变草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip。
 
 ready 附件按选择顺序显示可换行的紧凑 chip，包含经过 Host 校验的 basename、文件类别与格式化大小，并提供逐项移除按钮。图片额外显示已识别格式；其他文件使用通用文件图标。chip 不显示绝对路径、缩略图、hash、上传进度或 provider wire。文件名保持原文且服从普通用户内容方向规则；超长名称截断，完整安全名称通过 title 与可访问名称提供。键盘焦点按选择顺序进入移除按钮，删除后移到相邻 chip 或“添加文件”。窄窗不得因附件列表产生页面横向滚动。
 

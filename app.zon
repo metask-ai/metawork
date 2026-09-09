@@ -10,7 +10,7 @@
     },
     .platforms = .{ "macos", "windows" },
     .permissions = .{ "window", "notifications" },
-    .capabilities = .{ "webview", "js_bridge", "tray", "notifications" },
+    .capabilities = .{ "webview", "js_bridge", "file_drops", "tray", "notifications" },
     .shortcuts = .{
         .{ .id = "settings.open", .key = ",", .modifiers = .{"primary"} },
     },
@@ -56,6 +56,7 @@
             .{ .name = "metawork.files.preview", .origins = .{"zero://app"} },
             .{ .name = "metawork.files.diff", .origins = .{"zero://app"} },
             .{ .name = "metawork.attachments.choose", .origins = .{"zero://app"} },
+            .{ .name = "metawork.attachments.addDropped", .origins = .{"zero://app"} },
             .{ .name = "metawork.attachments.release", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.beginLogin", .origins = .{"zero://app"} },
             .{ .name = "metawork.account.cancelOperation", .origins = .{"zero://app"} },

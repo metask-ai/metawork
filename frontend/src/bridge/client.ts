@@ -135,6 +135,10 @@ export class BridgeClient {
     return this.bridge().on("shortcut", consume);
   }
 
+  onFileDrop(consume: (paths: string[]) => void) {
+    return this.bridge().on("drop:files", ({ paths }) => consume(paths));
+  }
+
   onWorkbenchRevision(
     consume: (revision: string) => void,
     reject: (error: unknown) => void,
@@ -737,6 +741,12 @@ export class BridgeClient {
     // leave the resulting staged grants without a Renderer consumer.
     return decodeAttachmentChooseResult(
       await this.bridge().invoke(commands.chooseAttachments, {}),
+    );
+  }
+
+  async addDroppedAttachments(paths: string[]) {
+    return decodeAttachmentChooseResult(
+      await this.bridge().invoke(commands.addDroppedAttachments, { paths }),
     );
   }
 

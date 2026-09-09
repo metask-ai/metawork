@@ -42,6 +42,7 @@ export const commands = {
   previewFile: "metawork.files.preview",
   fileChangeDiff: "metawork.files.diff",
   chooseAttachments: "metawork.attachments.choose",
+  addDroppedAttachments: "metawork.attachments.addDropped",
   releaseAttachment: "metawork.attachments.release",
   accountBeginLogin: "metawork.account.beginLogin",
   accountCancelOperation: "metawork.account.cancelOperation",

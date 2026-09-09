@@ -6942,8 +6942,37 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .composer-shell {
+  position: relative;
   width: min(100%, var(--content-measure));
   margin: 0 auto;
+}
+
+.composer-file-drop {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  display: flex;
+  min-height: 108px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+  border: 2px dashed var(--ui-action-primary);
+  border-radius: 18px;
+  color: var(--ui-action-primary);
+  background: color-mix(in srgb, var(--ui-surface-panel) 88%, transparent);
+  font-size: var(--text-label);
+  font-weight: 700;
+}
+
+.composer-file-drop svg {
+  width: 18px;
+  height: 18px;
+}
+
+.composer-shell[data-file-drag-active="true"] .ai-composer {
+  border-color: var(--ui-action-primary);
+  background: var(--ui-action-selected-surface);
 }
 
 .slash-menu {

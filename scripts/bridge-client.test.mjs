@@ -123,14 +123,34 @@ test("attachment commands use only opaque grant payloads", async () => {
             },
           ],
         };
+      if (command === "metawork.attachments.addDropped")
+        return {
+          status: "ready",
+          attachments: [
+            {
+              token: "b".repeat(48),
+              kind: "file",
+              displayName: "notes.txt",
+              sizeBytes: "64",
+            },
+          ],
+        };
       return { released: true };
     }),
   });
 
   assert.equal((await client.chooseAttachments()).status, "ready");
+  assert.equal(
+    (await client.addDroppedAttachments(["C:\\tmp\\notes.txt"])).status,
+    "ready",
+  );
   assert.deepEqual(await client.releaseAttachment(token), { released: true });
   assert.deepEqual(calls, [
     { command: "metawork.attachments.choose", payload: {} },
+    {
+      command: "metawork.attachments.addDropped",
+      payload: { paths: ["C:\\tmp\\notes.txt"] },
+    },
     { command: "metawork.attachments.release", payload: { token } },
   ]);
 });
@@ -346,6 +366,26 @@ test("native shortcut events stay behind the Bridge client boundary", () => {
 
   assert.deepEqual(received, [{ id: "settings.open" }]);
   assert.equal(removed, true);
+});
+
+test("native file drops stay behind the Bridge client boundary", () => {
+  let listener = null;
+  const client = new BridgeClient({
+    bridge: {
+      async invoke() {
+        return null;
+      },
+      on(name, consume) {
+        assert.equal(name, "drop:files");
+        listener = consume;
+        return () => undefined;
+      },
+    },
+  });
+  const received = [];
+  client.onFileDrop((paths) => received.push(paths));
+  listener({ windowId: 1, paths: ["C:\\work\\notes.txt"] });
+  assert.deepEqual(received, [["C:\\work\\notes.txt"]]);
 });
 
 test("a wedged mutation times out once and is never replayed by the Bridge client", async () => {

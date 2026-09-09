@@ -543,6 +543,7 @@ export const enUS = {
     "The stop request could not be confirmed. Refresh and try again.",
   "run.stop_requested": "Stopping the current work…",
   "attachment.add": "Add files",
+  "attachment.drop": "Drop files to add",
   "attachment.selected": "Selected attachments",
   "attachment.remove": "Remove {name}",
   "attachment.type.image": "Image",
