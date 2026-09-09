@@ -13,8 +13,8 @@ import {
   shouldDismissSidePanelForEscape,
 } from "../frontend/src/app/side-panel-interaction.ts";
 import {
-  initialTaskPanelSessionState,
-  reduceTaskPanelSession,
+  emptyTaskPanelTarget,
+  resolveTaskPanelTarget,
 } from "../frontend/src/features/task-panel/task-panel-state.ts";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -45,7 +45,7 @@ if (!HTMLElement.prototype.scrollIntoView)
 if (!HTMLElement.prototype.scrollTo)
   HTMLElement.prototype.scrollTo = () => undefined;
 
-const { cleanup, fireEvent, render, screen, within, act, waitFor } =
+const { act, cleanup, fireEvent, render, screen, waitFor, within } =
   await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 
@@ -55,8 +55,17 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { TaskOverviewView } = await vite.ssrLoadModule(
-  "/src/features/task-panel/TaskOverviewView.tsx",
+const { ToolDetailView } = await vite.ssrLoadModule(
+  "/src/features/task-panel/ToolDetailView.tsx",
+);
+const { TaskInformation } = await vite.ssrLoadModule(
+  "/src/features/tasks/TaskInformation.tsx",
+);
+const { ConversationContext } = await vite.ssrLoadModule(
+  "/src/features/composer/ConversationContext.tsx",
+);
+const { useTaskPanelTarget } = await vite.ssrLoadModule(
+  "/src/features/task-panel/useTaskPanelTarget.ts",
 );
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
@@ -168,27 +177,6 @@ function task(overrides = {}) {
   };
 }
 
-function renderTaskOverview(value, locale = "en-US") {
-  return renderToStaticMarkup(
-    createElement(
-      I18nContext.Provider,
-      {
-        value: {
-          locale,
-          setLocale() {},
-          t: (id, values) => translate(locale, id, values),
-        },
-      },
-      createElement(TaskOverviewView, {
-        task: value,
-        focusRequest: null,
-        onClose() {},
-        onFocusPending() {},
-      }),
-    ),
-  );
-}
-
 function renderTaskContent(value, locale = "en-US") {
   return renderToStaticMarkup(
     createElement(
@@ -269,320 +257,6 @@ function runProcessElement(
     }),
   );
 }
-
-test("Overview distinguishes immutable MCP authority captured at Task creation", () => {
-  assert.match(
-    renderTaskOverview(
-      task({ mcpAuthority: { kind: "ready", selection: "selected" } }),
-    ),
-    /Tools selected/,
-  );
-  assert.match(
-    renderTaskOverview(
-      task({ mcpAuthority: { kind: "ready", selection: "none" } }),
-    ),
-    /Ready · no tools selected/,
-  );
-  assert.match(
-    renderTaskOverview(
-      task({ mcpAuthority: { kind: "unavailable", selection: null } }),
-    ),
-    /Unavailable/,
-  );
-});
-
-test("Task content selection owns no layout visibility and clears on Task switch", () => {
-  const selected = reduceTaskPanelSession(initialTaskPanelSessionState, {
-    type: "resource.opened",
-    target: {
-      kind: "preview",
-      taskId: "task-a",
-      runId: "run-a",
-      resourceId: "file-a",
-      displayPath: "a.txt",
-      returnTab: "overview",
-    },
-  });
-  assert.equal("open" in selected, false);
-  assert.equal("tasks" in selected, false);
-  const changed = reduceTaskPanelSession(selected, {
-    type: "task.observed",
-    taskId: "task-b",
-  });
-  assert.equal(changed.activeTaskId, "task-b");
-  assert.equal(changed.activeTab, "overview");
-  assert.equal(changed.resource, null);
-  assert.equal(changed.review, null);
-  assert.equal(
-    reduceTaskPanelSession(changed, { type: "task.cleared" }).activeTaskId,
-    null,
-  );
-});
-
-test("Task Panel keeps one same-Run review and resource target", () => {
-  let state = reduceTaskPanelSession(initialTaskPanelSessionState, {
-    type: "review.opened",
-    target: { taskId: "task-a", runId: "run-a" },
-  });
-  state = reduceTaskPanelSession(state, {
-    type: "resource.opened",
-    target: {
-      kind: "diff",
-      taskId: "task-a",
-      runId: "run-a",
-      resourceId: "change-a",
-      displayPath: "src/a.zig",
-      returnTab: "review",
-    },
-  });
-  assert.equal(state.activeTab, "resource");
-  assert.equal(state.review?.runId, "run-a");
-  state = reduceTaskPanelSession(state, {
-    type: "resource.opened",
-    target: {
-      kind: "preview",
-      taskId: "task-a",
-      runId: "run-b",
-      resourceId: "file-b",
-      displayPath: "src/b.zig",
-      returnTab: "review",
-    },
-  });
-  assert.equal(state.review, null);
-  assert.equal(state.resource?.returnTab, "overview");
-});
-
-test("observing the same Task does not replace its active resource tab", () => {
-  let state = reduceTaskPanelSession(initialTaskPanelSessionState, {
-    type: "resource.opened",
-    target: {
-      kind: "preview",
-      taskId: "task-a",
-      runId: "run-a",
-      resourceId: "file-a",
-      displayPath: "src/a.zig",
-      returnTab: "overview",
-    },
-  });
-  state = reduceTaskPanelSession(state, {
-    type: "task.observed",
-    taskId: "task-a",
-  });
-  assert.equal(state.activeTab, "resource");
-  assert.equal(state.resource?.resourceId, "file-a");
-});
-
-test("closing a resource returns to its valid root and clears the target", () => {
-  let state = reduceTaskPanelSession(initialTaskPanelSessionState, {
-    type: "review.opened",
-    target: { taskId: "task-a", runId: "run-a" },
-  });
-  state = reduceTaskPanelSession(state, {
-    type: "resource.opened",
-    target: {
-      kind: "diff",
-      taskId: "task-a",
-      runId: "run-a",
-      resourceId: "change-a",
-      displayPath: "src/a.zig",
-      returnTab: "review",
-    },
-  });
-  state = reduceTaskPanelSession(state, {
-    type: "resource.closed",
-    taskId: "task-a",
-  });
-  assert.equal(state.activeTab, "review");
-  assert.equal(state.resource, null);
-  assert.equal(state.review?.runId, "run-a");
-});
-
-test("Overview shows Work process without eagerly mounting raw tool output", () => {
-  const markup = renderTaskOverview(
-    task({
-      runs: [
-        run({
-          id: "8",
-          usage: {
-            input: "900",
-            output: "100",
-            cacheRead: "0",
-            cacheCreation: "0",
-          },
-        }),
-        run({
-          id: "9",
-          tools: [
-            {
-              id: "tool-1",
-              order: "1",
-              name: "Bash",
-              input: "private input",
-              progress: "private progress",
-              content: "private raw output",
-              state: "completed",
-              isError: false,
-              elapsedMs: "25",
-              inputTruncated: false,
-              progressTruncated: false,
-              contentTruncated: false,
-              redacted: false,
-              fileRefs: [],
-            },
-          ],
-        }),
-      ],
-      context: {
-        pressure: {
-          sourceRunId: "9",
-          currentTokens: "90",
-          warningThreshold: "80",
-          autoCompactThreshold: "100",
-          blockingLimit: "120",
-          severity: "warning",
-        },
-        lastAutoCompact: {
-          sourceRunId: "9",
-          dropped: "4",
-          kept: "8",
-          beforeTokens: "110",
-          afterTokens: "70",
-        },
-      },
-    }),
-  );
-  assert.match(markup, />Last run</);
-  assert.match(markup, />Work process</);
-  assert.match(markup, />Bash</);
-  assert.match(markup, /aria-expanded="false"/);
-  assert.match(markup, />17</);
-  assert.match(markup, />Context is filling up</);
-  assert.match(markup, /90 tokens now · auto-compact at 100 · limit 120/);
-  assert.match(markup, />110 → 70 tokens</);
-  assert.doesNotMatch(
-    markup,
-    /1,000|private raw output|private input|INTERNAL_PROVIDER_RETRY/,
-  );
-  assert.doesNotMatch(markup, />Plan<|>Outputs<|>Files changed</);
-});
-
-test("Context and usage remains visible for cache-only usage", () => {
-  const markup = renderTaskOverview(
-    task({
-      runs: [
-        run({
-          usage: {
-            input: "0",
-            output: "0",
-            cacheRead: "9",
-            cacheCreation: "0",
-          },
-        }),
-      ],
-    }),
-  );
-  assert.match(markup, />Context and usage</);
-  assert.match(markup, />Cache read<\/dt><dd>9</);
-});
-
-test("Work process mounts and removes one Tool detail on demand", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  const value = task({
-    runs: [
-      run({
-        tools: [
-          {
-            id: "tool-1",
-            order: "1",
-            name: "Bash",
-            input: "private input",
-            progress: "private progress",
-            content: "private raw output",
-            state: "completed",
-            isError: false,
-            elapsedMs: "25",
-            inputTruncated: false,
-            progressTruncated: false,
-            contentTruncated: false,
-            redacted: false,
-            fileRefs: [],
-          },
-          {
-            id: "tool-2",
-            order: "2",
-            name: "Read",
-            input: "",
-            progress: "",
-            content: "second private output",
-            state: "completed",
-            isError: false,
-            elapsedMs: "10",
-            inputTruncated: false,
-            progressTruncated: false,
-            contentTruncated: false,
-            redacted: false,
-            fileRefs: [],
-          },
-        ],
-      }),
-    ],
-  });
-  const view = render(
-    localizedView(
-      createElement(TaskOverviewView, {
-        task: value,
-        focusRequest: null,
-        onFocusPending() {},
-      }),
-    ),
-  );
-
-  assert.equal(screen.queryByText("private raw output"), null);
-  const disclosure = screen.getByRole("button", { name: /Bash/ });
-  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
-  await user.click(disclosure);
-  assert.equal(disclosure.getAttribute("aria-expanded"), "true");
-  assert.ok(screen.getByText("private raw output"));
-  const secondDisclosure = screen.getByRole("button", { name: /Read/ });
-  await user.click(secondDisclosure);
-  assert.equal(screen.queryByText("private raw output"), null);
-  assert.ok(screen.getByText("second private output"));
-  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
-  await user.click(secondDisclosure);
-  assert.equal(screen.queryByText("second private output"), null);
-
-  await user.click(disclosure);
-  assert.ok(screen.getByText("private raw output"));
-  view.rerender(
-    localizedView(
-      createElement(TaskOverviewView, {
-        task: {
-          ...value,
-          id: "task-b",
-          runs: [
-            {
-              ...value.runs[0],
-              id: "run-b",
-              tools: [
-                {
-                  ...value.runs[0].tools[0],
-                  content: "another private output",
-                },
-              ],
-            },
-          ],
-        },
-        focusRequest: null,
-        onFocusPending() {},
-      }),
-    ),
-  );
-  assert.equal(screen.queryByText("another private output"), null);
-  assert.equal(
-    screen.getByRole("button", { name: /Bash/ }).getAttribute("aria-expanded"),
-    "false",
-  );
-});
 
 test("conversation separates commentary, Markdown response, and plain provisional output", () => {
   const active = task({
@@ -1082,57 +756,6 @@ test("Tool summary forwards exact Run, Tool, and opener identity", async () => {
   assert.equal(screen.queryByText("private input"), null);
 });
 
-test("Overview focus request opens the exact historical Tool detail once", async () => {
-  const historical = run({
-    id: "8",
-    tools: [
-      {
-        id: "tool-8",
-        order: "1",
-        name: "Bash",
-        input: "historical input",
-        progress: "",
-        content: "historical result",
-        state: "completed",
-        isError: false,
-        elapsedMs: "8",
-        inputTruncated: false,
-        progressTruncated: false,
-        contentTruncated: false,
-        redacted: false,
-        fileRefs: [],
-      },
-    ],
-  });
-  const current = run({ id: "9", tools: [] });
-  render(
-    localizedView(
-      createElement(TaskOverviewView, {
-        task: task({
-          currentRunId: "9",
-          runs: [historical, current],
-        }),
-        focusRequest: {
-          taskId: "3",
-          section: "work_process",
-          runId: "8",
-          toolId: "tool-8",
-          nonce: 1,
-        },
-        onFocusPending() {},
-      }),
-    ),
-  );
-  await new Promise((resolve) => requestAnimationFrame(resolve));
-  assert.ok(screen.getByText("Selected run"));
-  assert.equal(screen.queryByText("Last run"), null);
-  assert.ok(screen.getByText("historical input"));
-  assert.ok(screen.getByText("historical result"));
-  const toolButton = screen.getByRole("button", { name: /Bash/ });
-  assert.equal(toolButton.getAttribute("aria-expanded"), "true");
-  assert.equal(document.activeElement, toolButton);
-});
-
 test("partial output and terminal failure render one composite notice", () => {
   const value = task({
     runs: [
@@ -1292,10 +915,6 @@ test("provider failure details open for the exact historical Run", async () => {
   await user.click(summary);
   assert.equal(screen.queryByText("historical-model"), null);
   assert.equal(translate("zh-CN", "inspector.diagnostic_run"), "运行 ID");
-  assert.doesNotMatch(
-    renderTaskOverview(task({ runs: [historical] })),
-    /current security boundary|historical-model|Run information/,
-  );
 });
 
 test("inline diagnostics stay absent for other failures and preserve safe exact Run facts", async () => {
@@ -1363,9 +982,7 @@ test("typed Run activity uses safe localized labels", () => {
     runs: [thinkingRun],
   });
   const thinkingContent = renderTaskContent(thinkingTask, "zh-CN");
-  const thinkingOverview = renderTaskOverview(thinkingTask, "zh-CN");
   assert.match(thinkingContent, />正在分析</);
-  assert.match(thinkingOverview, />正在分析</);
 
   const writingTask = task({
     currentRunId: "9",
@@ -1399,10 +1016,6 @@ test("typed Run activity uses safe localized labels", () => {
       renderTaskContent(activityTask, "zh-CN"),
       new RegExp(`>${expected}<`),
     );
-    assert.match(
-      renderTaskOverview(activityTask, "zh-CN"),
-      new RegExp(`>${expected}<`),
-    );
     if (activity.kind === "retrying_provider") {
       assert.match(
         renderTaskContent(activityTask, "zh-CN"),
@@ -1423,7 +1036,6 @@ test("typed Run activity uses safe localized labels", () => {
     ],
   });
   assert.match(renderTaskContent(waitingModel, "zh-CN"), />正在等待下一步</);
-  assert.match(renderTaskOverview(waitingModel, "zh-CN"), />正在等待下一步</);
 
   const stoppingTask = task({
     currentRunId: "9",
@@ -1485,7 +1097,9 @@ test("Run file references render as preview entry without change semantics", () 
   const markup = renderTaskContent(referenced);
   assert.match(markup, />Referenced files</);
   assert.match(markup, /src\/main\.zig/);
-  assert.doesNotMatch(markup, /Files changed|modified|Output/);
+  const references = markup.match(/<footer[\s\S]*?<\/footer>/)?.[0];
+  assert.ok(references);
+  assert.doesNotMatch(references, /Files changed|modified|Output/);
 });
 
 test("Run File Changes summary is capability-gated and preserves incomplete zero-record truth", () => {
@@ -1666,40 +1280,6 @@ test("Task Panel labels current file content distinctly from recorded diffs", ()
   assert.doesNotMatch(markup, /Recorded diff|role="dialog"|backdrop/);
 });
 
-test("Task Panel exposes stable roots and one closable resource tab without a plus action", () => {
-  const markup = renderToStaticMarkup(
-    localizedView(
-      createElement(TaskPanel, {
-        activeTab: "resource",
-        resource: {
-          kind: "preview",
-          taskId: "3",
-          runId: "9",
-          resourceId: "file-1",
-          displayPath: "src/providers.zig",
-          returnTab: "overview",
-        },
-        hasReview: true,
-        hasAttention: true,
-        overview: createElement("p", null, "overview body"),
-        review: createElement("p", null, "review body"),
-        resourceView: createElement("p", null, "resource body"),
-        onActivate() {},
-        onCloseReview() {},
-        onCloseResource() {},
-        onClose() {},
-      }),
-    ),
-  );
-  assert.match(markup, /role="tablist"/);
-  assert.match(markup, />Overview</);
-  assert.match(markup, />Review</);
-  assert.match(markup, />providers\.zig</);
-  assert.match(markup, /aria-selected="true"/);
-  assert.match(markup, />resource body</);
-  assert.doesNotMatch(markup, /overview body|review body|>\+<|plus/i);
-});
-
 test("permission intervention never exposes internal Run identity", () => {
   const markup = renderToStaticMarkup(
     createElement(
@@ -1756,6 +1336,320 @@ test("Escape dismissal and focus return preserve the real Task Panel opener", ()
     ),
     fallback,
   );
+});
+
+test("detail targets resolve exact identities and degrade invalid diff to its own list", () => {
+  const value = task({
+    runs: [
+      run({
+        tools: [technicalTool({ fileRefs: [{ id: "ref-a" }] })],
+        fileChanges: { observation: "complete", changes: [{ id: "change-a" }] },
+      }),
+    ],
+  });
+  const base = { taskId: "3", runId: "9" };
+  for (const target of [
+    { ...base, kind: "tool", toolId: "tool-1" },
+    { ...base, kind: "preview", referenceId: "ref-a" },
+    { ...base, kind: "review", selectedChangeId: "change-a" },
+  ]) {
+    assert.equal(resolveTaskPanelTarget(target, value, true), target);
+    assert.equal(
+      resolveTaskPanelTarget(target, task({ ...value, id: "other" }), true)
+        .kind,
+      "empty",
+    );
+    assert.equal(
+      resolveTaskPanelTarget({ ...target, runId: "missing" }, value, true).kind,
+      "empty",
+    );
+  }
+  assert.deepEqual(
+    resolveTaskPanelTarget(
+      { ...base, kind: "review", selectedChangeId: "gone" },
+      value,
+      true,
+    ),
+    { ...base, kind: "review" },
+  );
+  assert.equal(
+    resolveTaskPanelTarget({ ...base, kind: "review" }, value, false).kind,
+    "empty",
+  );
+  assert.equal(
+    resolveTaskPanelTarget(
+      { ...base, kind: "preview", referenceId: "gone" },
+      value,
+      true,
+    ).kind,
+    "empty",
+  );
+  assert.equal(
+    resolveTaskPanelTarget(
+      { ...base, kind: "tool", toolId: "gone" },
+      value,
+      true,
+    ).kind,
+    "empty",
+  );
+});
+
+test("content targets clear on Task switch and never own layout visibility", () => {
+  let session;
+  function Harness({ value }) {
+    session = useTaskPanelTarget(value, true);
+    return createElement(
+      "button",
+      { onClick: () => session.clearTarget() },
+      session.target.kind,
+    );
+  }
+  const value = task({ runs: [run({ tools: [technicalTool()] })] });
+  const view = render(createElement(Harness, { value }));
+  assert.equal(session.target.kind, "empty");
+  assert.equal("open" in session, false);
+  fireEvent.click(screen.getByRole("button"));
+  view.rerender(
+    createElement(Harness, {
+      value: { ...value, pendingUi: { runId: "9", requestId: "p" } },
+    }),
+  );
+  assert.equal(session.target.kind, "empty");
+  assert.equal("open" in session, false);
+  // Drive the same hook used by App, including its render-time identity gate.
+  function Opener({ value, target }) {
+    const current = useTaskPanelTarget(value, true);
+    session = current;
+    return createElement(
+      "button",
+      { onClick: () => current.selectTarget(target) },
+      current.target.kind,
+    );
+  }
+  view.rerender(
+    createElement(Opener, {
+      value,
+      target: { kind: "tool", taskId: "3", runId: "9", toolId: "tool-1" },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button"));
+  assert.equal(session.target.kind, "tool");
+  view.rerender(
+    createElement(Opener, {
+      value: {
+        ...value,
+        currentRunId: "10",
+        pendingUi: { requestId: "p2", runId: "10" },
+      },
+      target: emptyTaskPanelTarget,
+    }),
+  );
+  assert.equal(session.target.kind, "tool");
+  view.rerender(
+    createElement(Opener, {
+      value: task({ id: "4" }),
+      target: emptyTaskPanelTarget,
+    }),
+  );
+  assert.equal(session.target.kind, "empty");
+  assert.equal("open" in session, false);
+  view.rerender(createElement(Opener, { value, target: emptyTaskPanelTarget }));
+  assert.equal(session.target.kind, "empty");
+  assert.equal("open" in session, false);
+});
+
+test("single Tool detail follows live props without mounting another tool or unsafe markup", () => {
+  const value = technicalTool({
+    input: "<script>input</script>",
+    progress: "progress one",
+    content: "result one",
+    redacted: true,
+    contentTruncated: true,
+  });
+  const view = render(
+    localizedView(createElement(ToolDetailView, { tool: value })),
+  );
+  assert.equal(document.querySelector("script"), null);
+  assert.ok(screen.getByText("<script>input</script>"));
+  assert.match(document.body.textContent, /shortened|hidden/);
+  view.rerender(
+    localizedView(
+      createElement(ToolDetailView, {
+        tool: { ...value, progress: "progress two", state: "running" },
+      }),
+    ),
+  );
+  assert.equal(screen.queryByText("progress one"), null);
+  assert.ok(screen.getByText("progress two"));
+  view.unmount();
+  assert.equal(screen.queryByText("result one"), null);
+});
+
+test("Run statistics remain data, not conversation content or empty disclosures", () => {
+  const zero = { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" };
+  const value = task({
+    runs: [
+      run({ id: "6", usage: zero }),
+      run({
+        id: "7",
+        phase: "running",
+        terminal: null,
+        usage: { ...zero, input: "1234567" },
+      }),
+      run({ id: "8", usage: { ...zero, cacheRead: "7654321" } }),
+      run({
+        id: "9",
+        usage: { ...zero, output: "3456789", cacheCreation: "9876543" },
+      }),
+    ],
+  });
+  const original = structuredClone(value);
+  render(taskContentElement(value));
+  assert.equal(document.querySelector(".run-usage"), null);
+  assert.doesNotMatch(
+    document.body.textContent,
+    /Usage|Cache read|Cache creation|1234567|7654321|3456789|9876543/,
+  );
+  assert.match(document.body.textContent, /Release is ready/);
+  assert.deepEqual(value, original);
+});
+
+test("task information uses a keyboard-accessible icon and retains creation MCP and readonly permission", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  for (const [mcpAuthority, expected] of [
+    [{ kind: "unavailable", selection: null }, "Unavailable"],
+    [{ kind: "ready", selection: "none" }, "Ready · no tools selected"],
+    [{ kind: "ready", selection: "selected" }, "Tools selected"],
+  ]) {
+    render(
+      localizedView(
+        createElement(TaskInformation, {
+          task: task({ mcpAuthority, permissionProfile: "approval_required" }),
+          permissionProfilesEnabled: true,
+        }),
+      ),
+    );
+    const trigger = screen.getByRole("button", { name: "Task information" });
+    assert.equal(trigger.textContent, "");
+    assert.ok(trigger.querySelector("svg"));
+    assert.ok(trigger.classList.contains("icon-button"));
+    assert.equal(trigger.title, "Task information");
+    assert.equal(screen.queryByText(expected), null);
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    assert.ok(screen.getByText(expected));
+    assert.equal(screen.queryByRole("combobox"), null);
+    assert.match(document.body.textContent, /not current connection status/);
+    await user.keyboard("{Escape}");
+    assert.equal(screen.queryByText(expected), null);
+    assert.equal(document.activeElement, trigger);
+    cleanup();
+  }
+});
+
+test("Conversation context only shows pressure; successful compaction removes the surface", async () => {
+  const compact = {
+    sourceRunId: "9",
+    beforeTokens: "54321",
+    afterTokens: "12345",
+    dropped: "17",
+    kept: "23",
+  };
+  for (const lastAutoCompact of [null, compact]) {
+    assert.equal(
+      renderToStaticMarkup(
+        localizedView(
+          createElement(ConversationContext, {
+            context: { pressure: null, lastAutoCompact },
+          }),
+        ),
+      ),
+      "",
+    );
+  }
+  const pressure = {
+    sourceRunId: "7",
+    severity: "warning",
+    currentTokens: "100",
+    warningThreshold: "90",
+    autoCompactThreshold: "200",
+    blockingLimit: "300",
+  };
+  const context = { pressure, lastAutoCompact: compact };
+  const view = render(
+    localizedView(createElement(ConversationContext, { context })),
+  );
+  const user = userEvent.setup({ document: dom.window.document });
+  const trigger = screen.getByRole("button", { name: "Context is filling up" });
+  assert.doesNotMatch(document.body.textContent, /100|54321|12345/);
+  await user.click(trigger);
+  assert.match(document.body.textContent, /Latest observation/);
+  assert.match(document.body.textContent, /100/);
+  assert.doesNotMatch(
+    document.body.textContent,
+    /%|Cache read|54321|12345|Last automatic compaction/,
+  );
+  await user.keyboard("{Escape}");
+  assert.equal(document.activeElement, trigger);
+  view.rerender(
+    localizedView(
+      createElement(ConversationContext, {
+        context: {
+          ...context,
+          pressure: { ...pressure, severity: "critical" },
+        },
+      }),
+    ),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Context compaction is approaching" }),
+  );
+  view.rerender(
+    localizedView(
+      createElement(ConversationContext, {
+        context: { pressure: null, lastAutoCompact: compact },
+      }),
+    ),
+  );
+  assert.equal(screen.queryByRole("button"), null);
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.equal(document.querySelector(".composer-context"), null);
+});
+
+test("detail pane has a close and optional review back action, never an overview or hidden roots", async () => {
+  let back = 0,
+    close = 0;
+  const view = render(
+    localizedView(
+      createElement(
+        TaskPanel,
+        {
+          title: "Review",
+          attention: createElement("button", null, "Needs your attention"),
+          onBack: () => back++,
+          onClose: () => close++,
+        },
+        createElement("p", null, "diff body"),
+      ),
+    ),
+  );
+  assert.equal(screen.queryByRole("tablist"), null);
+  assert.equal(screen.queryByText("Overview"), null);
+  fireEvent.click(screen.getByRole("button", { name: "Back to changes" }));
+  assert.equal(back, 1);
+  view.rerender(
+    localizedView(
+      createElement(
+        TaskPanel,
+        { title: "Tool details", attention: null, onClose: () => close++ },
+        createElement("p", null, "tool body"),
+      ),
+    ),
+  );
+  assert.equal(screen.queryByText("diff body"), null);
+  assert.equal(screen.queryByRole("button", { name: "Back to changes" }), null);
+  fireEvent.click(screen.getByRole("button", { name: "Close side panel" }));
+  assert.equal(close, 1);
 });
 
 async function renderAppFixture(ctx, width = 1440) {
@@ -1856,14 +1750,68 @@ async function renderAppFixture(ctx, width = 1440) {
   };
 }
 
-test("layout visibility and width survive Task changes, invalidation, and non-Task pages", async (ctx) => {
-  const { snapshot, previews, publish } = await renderAppFixture(ctx);
+test("permanent panel toggle opens an empty surface without overview or automatic reads", async (ctx) => {
+  const { snapshot, previews, diffs, publish } = await renderAppFixture(ctx);
   await screen.findByRole("button", { name: /First task/ });
   const toggle = screen.getByRole("button", { name: "Open side panel" });
   assert.equal(toggle.disabled, false);
   fireEvent.click(toggle);
   assert.ok(screen.getByText("No content to display here."));
   fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  const panel = () => within(document.querySelector("#task-panel"));
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.ok(panel().getByRole("heading", { name: "Side panel" }));
+  assert.equal(panel().queryByRole("navigation"), null);
+  assert.equal(panel().queryByText("Overview"), null);
+  assert.equal(previews.length, 0);
+  assert.equal(diffs.length, 0);
+  fireEvent.click(screen.getByRole("button", { name: "Preview a.txt" }));
+  assert.deepEqual(previews[0].ids, ["3", "7", "ref-a"]);
+  fireEvent.click(toggle);
+  await act(async () =>
+    previews[0].resolve({
+      state: "ready",
+      content: "stale body",
+      truncated: false,
+      redacted: false,
+    }),
+  );
+  assert.equal(screen.queryByText("stale body"), null);
+  fireEvent.click(toggle);
+  assert.ok(panel().getByText("No content to display here."));
+  assert.equal(previews.length, 1);
+  fireEvent.click(screen.getByRole("button", { name: /Review changes/ }));
+  fireEvent.click(panel().getByRole("button", { name: /a.txt Modified/ }));
+  assert.deepEqual(diffs[0].ids, ["3", "7", "change-a"]);
+  fireEvent.click(panel().getByRole("button", { name: "Back to changes" }));
+  assert.equal(
+    panel().queryByRole("button", { name: "Back to changes" }),
+    null,
+  );
+  fireEvent.click(toggle);
+  assert.equal(document.querySelector("#task-panel"), null);
+  fireEvent.click(toggle);
+  snapshot.tasks[0].runs = [];
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  assert.ok(panel().getByText("No content to display here."));
+  assert.equal(toggle.disabled, false);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  await act(async () =>
+    diffs[0].resolve({
+      state: "missing",
+      content: "",
+      truncated: false,
+      redacted: false,
+    }),
+  );
+  cleanup();
+});
+
+test("layout visibility and width survive Task changes, invalidation, and non-Task pages", async (ctx) => {
+  const { snapshot, previews, publish } = await renderAppFixture(ctx);
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open side panel" }));
   const shell = document.querySelector(".app-window");
   const resize = screen.getByRole("separator", { name: "Resize side panel" });
   fireEvent.keyDown(resize, { key: "ArrowLeft" });
@@ -1874,7 +1822,7 @@ test("layout visibility and width survive Task changes, invalidation, and non-Ta
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
   await waitFor(() =>
-    assert.ok(screen.queryByRole("tab", { name: /a.txt/ }) === null),
+    assert.ok(screen.queryByRole("heading", { name: "File preview" }) === null),
   );
   await act(async () =>
     previews[0].resolve({
@@ -1915,19 +1863,239 @@ test("layout visibility and width survive Task changes, invalidation, and non-Ta
   fireEvent.click(screen.getByRole("button", { name: /First task/ }));
   assert.equal(shell.getAttribute("data-right-panel-open"), "false");
   assert.equal(shell.style.getPropertyValue("--right-column-width"), width);
-  snapshot.tasks[0].pendingUi = {
-    requestId: "layout-request",
-    runId: "7",
-    order: "1",
+  cleanup();
+});
+
+test("App rejects late preview/diff responses after close, replacement, and Task switch", async (ctx) => {
+  const { snapshot, previews, diffs, publish } = await renderAppFixture(ctx);
+  const firstButton = await screen.findByRole("button", { name: /First task/ });
+  fireEvent.click(firstButton);
+  await screen.findByRole("button", { name: "Task information" });
+  assert.ok(
+    screen.getByRole("button", { name: "Open side panel" }).disabled === false,
+  );
+  const openPreview = () =>
+    fireEvent.click(screen.getByRole("button", { name: "Preview a.txt" }));
+  const ready = (content) => ({
+    state: "ready",
+    content,
+    truncated: false,
     redacted: false,
-    kind: "permission",
-    tool: "Bash",
-    args: "",
-  };
-  snapshot.tasks[0].currentRunPhase = "waiting_ui";
-  snapshot.tasks[0].runs[0].phase = "waiting_ui";
+  });
+  openPreview();
+  assert.deepEqual(previews[0].ids, ["3", "7", "ref-a"]);
+  fireEvent.click(
+    within(document.querySelector("#task-panel")).getByRole("button", {
+      name: "Close side panel",
+    }),
+  );
+  await act(async () => previews[0].resolve(ready("late after close")));
+  assert.equal(screen.queryByText("late after close"), null);
+  assert.equal(document.querySelector("#task-panel"), null);
+  openPreview();
+  // Reopening starts a new read; even a failure from it must not reopen a closed pane.
+  fireEvent.click(
+    within(document.querySelector("#task-panel")).getByRole("button", {
+      name: "Close side panel",
+    }),
+  );
+  await act(async () => previews[1].reject(new Error("late failure")));
+  assert.equal(document.querySelector("#task-panel"), null);
+  openPreview();
+  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  assert.equal(document.querySelector(".task-panel-code"), null);
+  await act(async () => previews[2].resolve(ready("late after review")));
+  assert.equal(screen.queryByText("late after review"), null);
+  fireEvent.click(
+    within(document.querySelector("#task-panel")).getByRole("button", {
+      name: /a.txt Modified/,
+    }),
+  );
+  assert.deepEqual(diffs[0].ids, ["3", "7", "change-a"]);
+  fireEvent.click(screen.getByRole("button", { name: "Back to changes" }));
+  fireEvent.click(
+    within(document.querySelector("#task-panel")).getByRole("button", {
+      name: /b.txt Modified/,
+    }),
+  );
+  await act(async () =>
+    diffs[1].resolve({
+      status: "ready",
+      content: "+chosen b",
+      complete: true,
+      redacted: false,
+    }),
+  );
+  await act(async () =>
+    diffs[0].resolve({
+      status: "ready",
+      content: "+late a",
+      complete: true,
+      redacted: false,
+    }),
+  );
+  assert.ok(screen.getByText("+chosen b"));
+  assert.equal(screen.queryByText("+late a"), null);
+  // Snapshot invalidation returns an invalid diff to its original, still valid list.
+  snapshot.tasks[0].runs[0].fileChanges.changes.pop();
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
-  assert.equal(shell.getAttribute("data-right-panel-open"), "false");
+  await waitFor(() => assert.ok(screen.queryByText("+chosen b") === null));
+  assert.ok(
+    within(document.querySelector("#task-panel")).getByRole("navigation", {
+      name: "Changed files",
+    }),
+  );
+  openPreview();
+  fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
+  await act(async () => previews[3].resolve(ready("late after switch")));
+  assert.equal(screen.queryByText("late after switch"), null);
+  assert.ok(document.querySelector("#task-panel") !== null);
+  assert.ok(
+    within(document.querySelector("#task-panel")).getByRole("heading", {
+      name: "Side panel",
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  assert.ok(document.querySelector("#task-panel") !== null);
+  assert.ok(screen.queryByText("late after switch") === null);
+  cleanup();
+});
+
+test("App attention only locates the original approval in docked and overlay layouts", async (ctx) => {
+  for (const width of [1440, 600]) {
+    const { snapshot, previews, publish } = await renderAppFixture(ctx, width);
+    // A small-window sidebar is explicitly opened only to select the Task.
+    if (width < 820)
+      fireEvent.click(
+        screen.getByRole("button", { name: "Toggle task sidebar" }),
+      );
+    fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+    const info = await screen.findByRole("button", {
+      name: "Task information",
+    });
+    info.focus();
+    snapshot.tasks[0].pendingUi = {
+      requestId: "request-1",
+      runId: "7",
+      order: "1",
+      redacted: false,
+      kind: "permission",
+      tool: "Bash",
+      args: "inspect",
+      availableChoices: ["deny_once", "allow_once"],
+    };
+    snapshot.tasks[0].currentRunPhase = "waiting_ui";
+    snapshot.tasks[0].runs[0].phase = "waiting_ui";
+    snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+    await act(async () => publish());
+    await screen.findByRole("button", { name: "Needs your attention" });
+    assert.ok(document.querySelector("#task-panel") === null);
+    assert.ok(document.activeElement === info);
+    fireEvent.click(screen.getByRole("button", { name: "Preview a.txt" }));
+    const panel = document.querySelector("#task-panel");
+    assert.equal(
+      document.querySelector(".app-window").dataset.rightPanelDocked,
+      String(width === 1440),
+    );
+    // JSDOM has no layout. Bind only the computed layout branch; browser acceptance
+    // separately checks that the real stylesheet actually chooses fixed overlay.
+    const style = window.getComputedStyle.bind(window);
+    const styleMock = ctx.mock.method(
+      window,
+      "getComputedStyle",
+      (element, ...args) =>
+        element === panel
+          ? { position: width === 1440 ? "relative" : "fixed" }
+          : style(element, ...args),
+    );
+    const locator = within(panel).getByRole("button", {
+      name: "Needs your attention",
+    });
+    assert.equal(
+      within(panel).queryByRole("button", { name: "Allow once" }),
+      null,
+    );
+    fireEvent.click(locator);
+    await act(
+      async () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    const pending = document.querySelector("#ui-request-request-1");
+    assert.ok(document.activeElement === pending);
+    assert.equal(
+      document.querySelector("#task-panel") !== null,
+      width === 1440,
+    );
+    if (width === 1440)
+      fireEvent.click(
+        within(document.querySelector("#task-panel")).getByRole("button", {
+          name: "Close side panel",
+        }),
+      );
+    await act(async () =>
+      previews[0].resolve({
+        state: "ready",
+        content: "late approval read",
+        redacted: false,
+        truncated: false,
+      }),
+    );
+    assert.ok(screen.queryByText("late approval read") === null);
+    styleMock.mock.restore();
+    cleanup();
+    ctx.mock.restoreAll();
+  }
+});
+
+test("App Escape returns to the opener, or the permanent toggle when that opener disappears", async (ctx) => {
+  const { previews } = await renderAppFixture(ctx);
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  const opener = await screen.findByRole("button", { name: "Preview a.txt" });
+  fireEvent.click(opener);
+  await act(
+    async () => new Promise((resolve) => requestAnimationFrame(resolve)),
+  );
+  const heading = screen.getByRole("heading", { name: "File preview" });
+  assert.ok(document.activeElement === heading);
+  // Nested controls can consume Escape without closing the pane.
+  const stopEscape = (event) => event.preventDefault();
+  heading.addEventListener("keydown", stopEscape);
+  fireEvent.keyDown(heading, { key: "Escape" });
+  assert.ok(document.querySelector("#task-panel") !== null);
+  heading.removeEventListener("keydown", stopEscape);
+  fireEvent.keyDown(heading, { key: "Escape" });
+  await act(
+    async () => new Promise((resolve) => requestAnimationFrame(resolve)),
+  );
+  assert.ok(document.querySelector("#task-panel") === null);
+  assert.ok(document.activeElement === opener);
+  fireEvent.click(opener);
+  await act(
+    async () => new Promise((resolve) => requestAnimationFrame(resolve)),
+  );
+  opener.disabled = true;
+  fireEvent.keyDown(screen.getByRole("heading", { name: "File preview" }), {
+    key: "Escape",
+  });
+  await act(
+    async () => new Promise((resolve) => requestAnimationFrame(resolve)),
+  );
+  assert.ok(
+    document.activeElement ===
+      screen.getByRole("button", { name: "Open side panel" }),
+  );
+  opener.disabled = false;
+  await act(async () => {
+    for (const request of previews)
+      request.resolve({
+        state: "missing",
+        content: "",
+        truncated: false,
+        redacted: false,
+      });
+  });
   cleanup();
 });

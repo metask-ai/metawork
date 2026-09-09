@@ -47,10 +47,10 @@ import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
 import { SkillsPage } from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
 import { ScheduledTasksPage } from "../features/scheduled-tasks/ScheduledTasksPage.tsx";
-import {
-  TaskOverviewView,
-  type TaskOverviewFocusRequest,
-} from "../features/task-panel/TaskOverviewView.tsx";
+import { ToolDetailView } from "../features/task-panel/ToolDetailView.tsx";
+import { TaskInformation } from "../features/tasks/TaskInformation.tsx";
+import { ConversationContext } from "../features/composer/ConversationContext.tsx";
+import { runFileReferences } from "../workbench/run-file-references.ts";
 import { TaskPanel } from "../features/task-panel/TaskPanel.tsx";
 import {
   FilePreviewView,
@@ -62,15 +62,10 @@ import {
   type FileChangeDiffViewState,
 } from "../features/task-panel/FileChangesView.tsx";
 import { sidePanelFocusReturnTarget } from "./side-panel-interaction.ts";
-import type {
-  TaskOverviewSection,
-  TaskPanelTab,
-} from "../features/task-panel/task-panel-state.ts";
-import { useTaskPanelSession } from "../features/task-panel/useTaskPanelSession.ts";
+import { useTaskPanelTarget } from "../features/task-panel/useTaskPanelTarget.ts";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
 import { TaskContent } from "../features/tasks/TaskContent.tsx";
-import { runFileReferences } from "../workbench/run-file-references.ts";
 import {
   useNewTaskDrafts,
   useTaskDrafts,
@@ -282,8 +277,6 @@ export default function App() {
   const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [accountCancelBusy, setAccountCancelBusy] = useState(false);
-  const [taskOverviewFocusRequest, setTaskOverviewFocusRequest] =
-    useState<TaskOverviewFocusRequest>(null);
   const [bridgeReady, setBridgeReady] = useState(false);
   const [bridgeGeneration, setBridgeGeneration] = useState("0");
   const [viewSyncFailed, setViewSyncFailed] = useState(false);
@@ -310,8 +303,8 @@ export default function App() {
   const workspaceBusyRef = useRef(false);
   const connectionBusyRef = useRef(false);
   const taskPanelToggle = useRef<HTMLButtonElement>(null);
+  const taskInformationTrigger = useRef<HTMLButtonElement>(null);
   const taskPanelOpener = useRef<HTMLButtonElement | null>(null);
-  const taskPanelFocusSequence = useRef(0);
   const composer = useRef<HTMLTextAreaElement>(null);
   const continuationWaiters = useRef(new Map<string, ContinuationWaiter>());
 
@@ -428,32 +421,28 @@ export default function App() {
       (candidate) => candidate.id === reference.id,
     );
     if (!selected) return;
-    taskPanelOpener.current = opener;
     setRightPanelOpen(true);
+    taskPanelOpener.current = opener;
     closeFileChanges();
-    taskPanel.openResource({
+    taskPanel.selectTarget({
       kind: "preview",
       taskId,
       runId,
-      resourceId: selected.id,
-      displayPath: selected.displayPath,
-      returnTab: "overview",
+      referenceId: selected.id,
     });
     requestFilePreview(taskId, runId, references, selected);
     window.requestAnimationFrame(() =>
-      document.getElementById("task-panel-resource-tab")?.focus(),
+      document.getElementById("task-panel-title")?.focus(),
     );
   }
 
   function selectFilePreview(reference: FileReferenceView) {
     if (filePreview.kind === "closed") return;
-    taskPanel.openResource({
+    taskPanel.selectTarget({
       kind: "preview",
       taskId: filePreview.taskId,
       runId: filePreview.runId,
-      resourceId: reference.id,
-      displayPath: reference.displayPath,
-      returnTab: taskPanel.resource?.returnTab ?? "overview",
+      referenceId: reference.id,
     });
     requestFilePreview(
       filePreview.taskId,
@@ -565,18 +554,18 @@ export default function App() {
       activeTaskIdRef.current !== taskId
     )
       return;
-    taskPanelOpener.current = opener;
     setRightPanelOpen(true);
+    taskPanelOpener.current = opener;
     closeFilePreview();
     closeFileChanges();
-    taskPanel.openReview({ taskId, runId });
+    taskPanel.selectTarget({ kind: "review", taskId, runId });
     window.requestAnimationFrame(() =>
-      document.getElementById("task-panel-review-tab")?.focus(),
+      document.getElementById("task-panel-title")?.focus(),
     );
   }
 
   function openFileChange(change: FileChangeView) {
-    const review = taskPanel.review;
+    const review = taskPanel.target.kind === "review" ? taskPanel.target : null;
     if (!review || activeTaskIdRef.current !== review.taskId) return;
     const task = snapshot.tasks.find(
       (candidate) => candidate.id === review.taskId,
@@ -587,13 +576,11 @@ export default function App() {
       (candidate) => candidate.id === change.id,
     );
     if (!recorded || !selected) return;
-    taskPanel.openResource({
-      kind: "diff",
+    taskPanel.selectTarget({
+      kind: "review",
       taskId: review.taskId,
       runId: review.runId,
-      resourceId: selected.id,
-      displayPath: selected.displayPath,
-      returnTab: "review",
+      selectedChangeId: selected.id,
     });
     requestFileChangeDiff(
       review.taskId,
@@ -603,7 +590,7 @@ export default function App() {
       selected,
     );
     window.requestAnimationFrame(() =>
-      document.getElementById("task-panel-resource-tab")?.focus(),
+      document.getElementById("task-panel-title")?.focus(),
     );
   }
 
@@ -673,66 +660,16 @@ export default function App() {
   }, [snapshot.revision, snapshot.tasks]);
 
   const panelTask = route === "workbench" ? activeTask : null;
-  const taskPanel = useTaskPanelSession(panelTask);
-  useEffect(() => {
-    closeFilePreview();
-    closeFileChanges();
-    setTaskOverviewFocusRequest(null);
-  }, [panelTask?.id]);
-  useEffect(() => {
-    if (taskPanel.review) {
-      const task = snapshot.tasks.find(
-        (candidate) => candidate.id === taskPanel.review?.taskId,
-      );
-      const run = task?.runs.find(
-        (candidate) => candidate.id === taskPanel.review?.runId,
-      );
-      if (
-        !snapshot.capabilities.typedFileChanges ||
-        !run?.fileChanges ||
-        run.fileChanges.changes.length === 0
-      ) {
-        closeFileChanges();
-        taskPanel.closeReview();
-      }
-    }
-
-    if (!taskPanel.resource) return;
-    const task = snapshot.tasks.find(
-      (candidate) => candidate.id === taskPanel.resource?.taskId,
-    );
-    const run = task?.runs.find(
-      (candidate) => candidate.id === taskPanel.resource?.runId,
-    );
-    const resourceValid =
-      taskPanel.resource.kind === "preview"
-        ? Boolean(
-            run &&
-            runFileReferences(run).some(
-              (reference) => reference.id === taskPanel.resource?.resourceId,
-            ),
-          )
-        : Boolean(
-            snapshot.capabilities.typedFileChanges &&
-            run?.fileChanges?.changes.some(
-              (change) => change.id === taskPanel.resource?.resourceId,
-            ),
-          );
-    if (resourceValid) return;
-    closeFilePreview();
-    closeFileChanges();
-    taskPanel.closeResource();
-  }, [
-    snapshot.revision,
-    snapshot.tasks,
+  const taskPanel = useTaskPanelTarget(
+    panelTask,
     snapshot.capabilities.typedFileChanges,
-    taskPanel.review?.taskId,
-    taskPanel.review?.runId,
-    taskPanel.resource?.kind,
-    taskPanel.resource?.taskId,
-    taskPanel.resource?.runId,
-    taskPanel.resource?.resourceId,
-  ]);
+  );
+  const panelTarget = taskPanel.target;
+  useEffect(() => {
+    if (panelTarget.kind !== "preview") closeFilePreview();
+    if (panelTarget.kind !== "review" || !panelTarget.selectedChangeId)
+      closeFileChanges();
+  }, [panelTarget]);
   const manualWorkspaces = useMemo(
     () =>
       snapshot.workspaces.filter((workspace) => workspace.kind === "manual"),
@@ -1181,7 +1118,6 @@ export default function App() {
   useEffect(() => {
     setEditingTitle(false);
     setConfirmDelete(false);
-    setTaskOverviewFocusRequest(null);
     taskPanelOpener.current = null;
     cancelContinuationWaitersForTask(activeTask?.id ?? null);
   }, [activeTask?.id]);
@@ -1210,25 +1146,25 @@ export default function App() {
     window.requestAnimationFrame(() => target?.focus());
   }
 
-  function openTaskPanelSection(
-    section: TaskOverviewSection,
+  function openToolDetail(
+    runId: string,
+    toolId: string,
     opener: HTMLButtonElement,
-    target?: { runId: string; toolId?: string },
   ) {
     if (!activeTask) return;
     closeFilePreview();
     closeFileChanges();
-    taskPanelOpener.current = opener;
     setRightPanelOpen(true);
-    taskPanel.openOverview();
-    taskPanelFocusSequence.current += 1;
-    setTaskOverviewFocusRequest({
+    taskPanelOpener.current = opener;
+    taskPanel.selectTarget({
+      kind: "tool",
       taskId: activeTask.id,
-      section,
-      runId: target?.runId,
-      toolId: target?.toolId,
-      nonce: taskPanelFocusSequence.current,
+      runId,
+      toolId,
     });
+    window.requestAnimationFrame(() =>
+      document.getElementById("task-panel-title")?.focus(),
+    );
   }
 
   function dismissTaskPanel(restoreFocus = true) {
@@ -1241,11 +1177,17 @@ export default function App() {
     taskPanelOpener.current = null;
     closeFilePreview();
     closeFileChanges();
-    taskPanel.close();
     setRightPanelOpen(false);
-    setTaskOverviewFocusRequest(null);
+    taskPanel.clearTarget();
     if (restoreFocus && focusWasInside && focusTarget)
       window.requestAnimationFrame(() => focusTarget.focus());
+  }
+
+  function focusPendingFromTaskPanel() {
+    const panel = document.getElementById("task-panel");
+    if (panel && window.getComputedStyle(panel).position === "fixed")
+      dismissTaskPanel(false);
+    window.requestAnimationFrame(focusPendingRequest);
   }
 
   function toggleRightPanel(opener: HTMLButtonElement) {
@@ -1260,81 +1202,16 @@ export default function App() {
     );
   }
 
-  function focusPendingFromTaskPanel() {
-    const panel = document.getElementById("task-panel");
-    if (panel && window.getComputedStyle(panel).position === "fixed")
-      dismissTaskPanel(false);
-    window.requestAnimationFrame(focusPendingRequest);
-  }
-
-  function activateTaskPanelTab(tab: TaskPanelTab) {
-    if (tab === taskPanel.activeTab) return;
-    closeFilePreview();
+  function returnToReview() {
+    if (panelTarget.kind !== "review") return;
     closeFileChanges();
-    taskPanel.activate(tab);
-    if (tab !== "resource" || !taskPanel.resource) return;
-    const target = taskPanel.resource;
-    const task = snapshot.tasks.find(
-      (candidate) => candidate.id === target.taskId,
-    );
-    const run = task?.runs.find((candidate) => candidate.id === target.runId);
-    if (!task || !run || activeTaskIdRef.current !== target.taskId) {
-      taskPanel.closeResource();
-      return;
-    }
-    if (target.kind === "preview") {
-      const references = runFileReferences(run);
-      const reference = references.find(
-        (candidate) => candidate.id === target.resourceId,
-      );
-      if (!reference) {
-        taskPanel.closeResource();
-        return;
-      }
-      requestFilePreview(task.id, run.id, references, reference);
-      return;
-    }
-    const recorded = run.fileChanges;
-    const selected = recorded?.changes.find(
-      (candidate) => candidate.id === target.resourceId,
-    );
-    if (!recorded || !selected) {
-      taskPanel.closeResource();
-      return;
-    }
-    requestFileChangeDiff(
-      task.id,
-      run.id,
-      recorded.observation,
-      recorded.changes,
-      selected,
-    );
-  }
-
-  function closeTaskPanelResource() {
-    closeFilePreview();
-    closeFileChanges();
-    taskPanel.closeResource();
-    window.requestAnimationFrame(() => {
-      const returnTab = taskPanel.resource?.returnTab ?? "overview";
-      document.getElementById(`task-panel-${returnTab}-tab`)?.focus();
+    taskPanel.selectTarget({
+      kind: "review",
+      taskId: panelTarget.taskId,
+      runId: panelTarget.runId,
     });
-  }
-
-  function closeTaskPanelReview() {
-    const keepResourceActive =
-      taskPanel.activeTab === "resource" &&
-      taskPanel.resource?.kind === "preview";
-    closeFileChanges();
-    taskPanel.closeReview();
     window.requestAnimationFrame(() =>
-      document
-        .getElementById(
-          keepResourceActive
-            ? "task-panel-resource-tab"
-            : "task-panel-overview-tab",
-        )
-        ?.focus(),
+      document.getElementById("task-panel-title")?.focus(),
     );
   }
 
@@ -2823,169 +2700,175 @@ export default function App() {
     taskId: activeTask?.id ?? null,
   });
   const composerFooter = (
-    <ComposerFooter
-      textareaRef={composer}
-      archived={Boolean(activeTask?.archived)}
-      closing={activeTask?.lifecycle === "closing"}
-      unavailable={Boolean(
-        activeTask &&
-        activeTask.lifecycle === "open" &&
-        !activeTask.continuationAvailable,
+    <>
+      {activeTask && (
+        <ConversationContext key={activeTask.id} context={activeTask.context} />
       )}
-      unavailableReason={activeTask?.continuationUnavailableReason ?? null}
-      draft={composerDraft}
-      attachmentsEnabled={snapshot.capabilities.attachments.enabled}
-      attachmentBusy={attachmentBusy}
-      attachmentError={attachmentError}
-      attachmentModelWarning={attachmentModelWarning}
-      skillCatalog={skillCatalog}
-      slashCommands={slashCommands}
-      composeDisabled={!taskCanCompose || taskMutationDisabled}
-      canSubmit={canSubmit}
-      runInFlight={Boolean(taskCanCompose && taskOperationInFlight)}
-      accessRequired={Boolean(
-        newTaskDraftActive &&
-        composerWorkspace &&
-        composerWorkspace.authorization !== "available",
-      )}
-      workspaceMissing={Boolean(!newTaskDraftActive && !composerWorkspace)}
-      workspaceLabel={
-        newTaskDraftActive && !composerWorkspace
-          ? t("workspace.default_directory")
-          : composerWorkspace
-            ? workspaceDirectoryLabel(
-                composerWorkspace,
-                t("workspace.default_directory"),
-              )
-            : t("workspace.none")
-      }
-      workspaceTitle={
-        newTaskDraftActive && !composerWorkspace
-          ? t("workspace.default_directory")
-          : composerWorkspace
-            ? workspaceDirectoryLabel(
-                composerWorkspace,
-                t("workspace.default_directory"),
-              )
-            : t("workspace.none")
-      }
-      workspaceOptions={[
-        {
-          id: automaticWorkspaceOptionId,
-          label: t("workspace.default_directory"),
-          authorization: "available" as const,
-          disabled: !snapshot.capabilities.automaticWorkspaces,
-        },
-        ...manualWorkspaces.map((workspace) => ({
-          id: workspace.id,
-          label: workspace.canonicalRoot,
-          description: workspace.displayName || undefined,
-          authorization: workspace.authorization,
-        })),
-      ]}
-      selectedWorkspaceOptionId={
-        newTaskDraftActive
-          ? (composerWorkspace?.id ?? automaticWorkspaceOptionId)
-          : ""
-      }
-      workspaceEditable={newTaskDraftActive}
-      modelLabel={
-        newTaskDraftActive ? selectedModelLabel : taskModelLabel || null
-      }
-      modelOptions={
-        newTaskDraftActive
-          ? newTaskModelState.options
-          : taskModelPolicy.showsSelector
-            ? metaskModelOptions
-            : []
-      }
-      selectedModelId={
-        newTaskDraftActive
-          ? newTaskModelState.selectedModelId
-          : displayedTaskModelId
-      }
-      modelEditable={
-        newTaskDraftActive
-          ? newTaskModelState.editable
-          : taskModelPolicy.showsSelector
-      }
-      modelSelectionDisabled={
-        bridgeUnavailable ||
-        (customCustomProviderSelected ? executionBusy : accountBusy) ||
-        (newTaskDraftActive
-          ? newTaskModelState.options.length === 0 ||
-            (!customCustomProviderSelected &&
-              snapshot.models.operation === "refreshing_catalog")
-          : !taskModelPolicy.selectable)
-      }
-      modelSelectionPending={
-        (customCustomProviderSelected ? executionBusy : accountBusy) ||
-        (newTaskDraftActive
-          ? !customCustomProviderSelected &&
-            snapshot.models.operation === "refreshing_catalog"
-          : taskModelPolicy.pending)
-      }
-      modelContextTitle={
-        newTaskDraftActive && !newTaskModelState.valid
-          ? t("settings.new_task_model_invalid")
-          : newTaskDraftActive && customCustomProviderSelected
-            ? customCustomProviderContext
-            : newTaskDraftActive
-              ? t("settings.new_task_model_help")
-              : t(
-                  taskModelSelectionMessageId(
-                    activeTask?.modelSelectionAvailability,
-                  ),
+      <ComposerFooter
+        textareaRef={composer}
+        archived={Boolean(activeTask?.archived)}
+        closing={activeTask?.lifecycle === "closing"}
+        unavailable={Boolean(
+          activeTask &&
+          activeTask.lifecycle === "open" &&
+          !activeTask.continuationAvailable,
+        )}
+        unavailableReason={activeTask?.continuationUnavailableReason ?? null}
+        draft={composerDraft}
+        attachmentsEnabled={snapshot.capabilities.attachments.enabled}
+        attachmentBusy={attachmentBusy}
+        attachmentError={attachmentError}
+        attachmentModelWarning={attachmentModelWarning}
+        skillCatalog={skillCatalog}
+        slashCommands={slashCommands}
+        composeDisabled={!taskCanCompose || taskMutationDisabled}
+        canSubmit={canSubmit}
+        runInFlight={Boolean(taskCanCompose && taskOperationInFlight)}
+        accessRequired={Boolean(
+          newTaskDraftActive &&
+          composerWorkspace &&
+          composerWorkspace.authorization !== "available",
+        )}
+        workspaceMissing={Boolean(!newTaskDraftActive && !composerWorkspace)}
+        workspaceLabel={
+          newTaskDraftActive && !composerWorkspace
+            ? t("workspace.default_directory")
+            : composerWorkspace
+              ? workspaceDirectoryLabel(
+                  composerWorkspace,
+                  t("workspace.default_directory"),
                 )
-      }
-      defaultSelectionMissing={metaskDefaultRecoveryAvailable}
-      defaultRecoveryDisabled={bridgeUnavailable || executionBusy}
-      actionDisabled={workbenchMutationDisabled || workspaceBusy}
-      stopAction={
-        activeTask?.activeOperation?.kind === "run" ||
-        activeTask?.activeOperation?.kind === "compact"
-          ? activeTask.activeOperation.kind
-          : null
-      }
-      stopDisabled={
-        bridgeUnavailable ||
-        Boolean(activeTask && activeTask.id in cancelPending) ||
-        activeTask?.currentRunPhase === "stopping" ||
-        Boolean(
-          activeTask?.activeOperation?.kind === "compact" &&
-          activeTask.compacts.find(
-            (compact) => compact.operationId === activeTask.activeOperation?.id,
-          )?.phase === "stopping",
-        )
-      }
-      onDraftChange={updateComposerDraft}
-      onChooseAttachments={() => void chooseAttachments()}
-      onRemoveAttachment={(token) => void removeAttachment(token)}
-      onSubmit={() => void submitRun()}
-      onStop={() =>
-        void (activeTask?.activeOperation?.kind === "compact"
-          ? cancelCompact()
-          : cancelRun())
-      }
-      onSlashCommand={runSlashCommand}
-      onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
-      onConfirmAccess={() => void chooseWorkspaceForDraft()}
-      onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
-      onSelectModel={(id) => {
-        if (newTaskDraftActive) {
-          const activeModel = snapshot.newTaskAdmission.activeModelRef;
-          if (activeModel)
-            setNewTaskRequestedModel(
-              id === activeModel.modelId
-                ? null
-                : { sourceId: activeModel.sourceId, modelId: id },
-            );
-          return;
+              : t("workspace.none")
         }
-        void selectModelForTask(id);
-      }}
-      onOpenModels={() => openSettings("models")}
-    />
+        workspaceTitle={
+          newTaskDraftActive && !composerWorkspace
+            ? t("workspace.default_directory")
+            : composerWorkspace
+              ? workspaceDirectoryLabel(
+                  composerWorkspace,
+                  t("workspace.default_directory"),
+                )
+              : t("workspace.none")
+        }
+        workspaceOptions={[
+          {
+            id: automaticWorkspaceOptionId,
+            label: t("workspace.default_directory"),
+            authorization: "available" as const,
+            disabled: !snapshot.capabilities.automaticWorkspaces,
+          },
+          ...manualWorkspaces.map((workspace) => ({
+            id: workspace.id,
+            label: workspace.canonicalRoot,
+            description: workspace.displayName || undefined,
+            authorization: workspace.authorization,
+          })),
+        ]}
+        selectedWorkspaceOptionId={
+          newTaskDraftActive
+            ? (composerWorkspace?.id ?? automaticWorkspaceOptionId)
+            : ""
+        }
+        workspaceEditable={newTaskDraftActive}
+        modelLabel={
+          newTaskDraftActive ? selectedModelLabel : taskModelLabel || null
+        }
+        modelOptions={
+          newTaskDraftActive
+            ? newTaskModelState.options
+            : taskModelPolicy.showsSelector
+              ? metaskModelOptions
+              : []
+        }
+        selectedModelId={
+          newTaskDraftActive
+            ? newTaskModelState.selectedModelId
+            : displayedTaskModelId
+        }
+        modelEditable={
+          newTaskDraftActive
+            ? newTaskModelState.editable
+            : taskModelPolicy.showsSelector
+        }
+        modelSelectionDisabled={
+          bridgeUnavailable ||
+          (customCustomProviderSelected ? executionBusy : accountBusy) ||
+          (newTaskDraftActive
+            ? newTaskModelState.options.length === 0 ||
+              (!customCustomProviderSelected &&
+                snapshot.models.operation === "refreshing_catalog")
+            : !taskModelPolicy.selectable)
+        }
+        modelSelectionPending={
+          (customCustomProviderSelected ? executionBusy : accountBusy) ||
+          (newTaskDraftActive
+            ? !customCustomProviderSelected &&
+              snapshot.models.operation === "refreshing_catalog"
+            : taskModelPolicy.pending)
+        }
+        modelContextTitle={
+          newTaskDraftActive && !newTaskModelState.valid
+            ? t("settings.new_task_model_invalid")
+            : newTaskDraftActive && customCustomProviderSelected
+              ? customCustomProviderContext
+              : newTaskDraftActive
+                ? t("settings.new_task_model_help")
+                : t(
+                    taskModelSelectionMessageId(
+                      activeTask?.modelSelectionAvailability,
+                    ),
+                  )
+        }
+        defaultSelectionMissing={metaskDefaultRecoveryAvailable}
+        defaultRecoveryDisabled={bridgeUnavailable || executionBusy}
+        actionDisabled={workbenchMutationDisabled || workspaceBusy}
+        stopAction={
+          activeTask?.activeOperation?.kind === "run" ||
+          activeTask?.activeOperation?.kind === "compact"
+            ? activeTask.activeOperation.kind
+            : null
+        }
+        stopDisabled={
+          bridgeUnavailable ||
+          Boolean(activeTask && activeTask.id in cancelPending) ||
+          activeTask?.currentRunPhase === "stopping" ||
+          Boolean(
+            activeTask?.activeOperation?.kind === "compact" &&
+            activeTask.compacts.find(
+              (compact) =>
+                compact.operationId === activeTask.activeOperation?.id,
+            )?.phase === "stopping",
+          )
+        }
+        onDraftChange={updateComposerDraft}
+        onChooseAttachments={() => void chooseAttachments()}
+        onRemoveAttachment={(token) => void removeAttachment(token)}
+        onSubmit={() => void submitRun()}
+        onStop={() =>
+          void (activeTask?.activeOperation?.kind === "compact"
+            ? cancelCompact()
+            : cancelRun())
+        }
+        onSlashCommand={runSlashCommand}
+        onRefreshSkillCatalog={() => void refreshComposerSkillCatalog()}
+        onConfirmAccess={() => void chooseWorkspaceForDraft()}
+        onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
+        onSelectModel={(id) => {
+          if (newTaskDraftActive) {
+            const activeModel = snapshot.newTaskAdmission.activeModelRef;
+            if (activeModel)
+              setNewTaskRequestedModel(
+                id === activeModel.modelId
+                  ? null
+                  : { sourceId: activeModel.sourceId, modelId: id },
+              );
+            return;
+          }
+          void selectModelForTask(id);
+        }}
+        onOpenModels={() => openSettings("models")}
+      />
+    </>
   );
   const filePreviewViewState: FilePreviewViewState | null =
     filePreview.kind === "closed"
@@ -3010,76 +2893,48 @@ export default function App() {
                 : "settled",
           diff: fileChanges.kind === "settled" ? fileChanges.diff : null,
         };
-  const reviewedFileChanges = (() => {
-    if (
-      !snapshot.capabilities.typedFileChanges ||
-      !taskPanel.review ||
-      taskPanel.review.taskId !== activeTask?.id
-    )
-      return null;
-    const run = activeTask.runs.find(
-      (candidate) => candidate.id === taskPanel.review?.runId,
-    );
-    return run?.fileChanges ?? null;
-  })();
-  const resourceRun =
-    taskPanel.resource && taskPanel.resource.taskId === activeTask?.id
-      ? activeTask.runs.find(
-          (candidate) => candidate.id === taskPanel.resource?.runId,
-        )
+  const panelRun =
+    panelTarget.kind === "empty"
+      ? null
+      : activeTask?.runs.find((run) => run.id === panelTarget.runId);
+  const reviewedFileChanges =
+    panelTarget.kind === "review" ? panelRun?.fileChanges : null;
+  const selectedTool =
+    panelTarget.kind === "tool"
+      ? panelRun?.tools.find((tool) => tool.id === panelTarget.toolId)
       : null;
-  const resourceExistsInSnapshot =
-    taskPanel.resource?.kind === "preview"
-      ? Boolean(
-          resourceRun &&
-          runFileReferences(resourceRun).some(
-            (reference) => reference.id === taskPanel.resource?.resourceId,
-          ),
-        )
-      : taskPanel.resource?.kind === "diff"
-        ? Boolean(
-            snapshot.capabilities.typedFileChanges &&
-            resourceRun?.fileChanges?.changes.some(
-              (change) => change.id === taskPanel.resource?.resourceId,
-            ),
-          )
-        : false;
-  const previewMatchesResource =
-    resourceExistsInSnapshot &&
-    taskPanel.resource?.kind === "preview" &&
+  const previewMatchesTarget =
+    panelTarget.kind === "preview" &&
     filePreview.kind !== "closed" &&
-    taskPanel.resource.taskId === filePreview.taskId &&
-    taskPanel.resource.runId === filePreview.runId &&
-    taskPanel.resource.resourceId === filePreview.reference.id;
-  const diffMatchesResource =
-    resourceExistsInSnapshot &&
-    taskPanel.resource?.kind === "diff" &&
+    panelTarget.taskId === filePreview.taskId &&
+    panelTarget.runId === filePreview.runId &&
+    panelTarget.referenceId === filePreview.reference.id;
+  const diffMatchesTarget =
+    panelTarget.kind === "review" &&
     fileChanges.kind !== "closed" &&
-    taskPanel.resource.taskId === fileChanges.taskId &&
-    taskPanel.resource.runId === fileChanges.runId &&
-    taskPanel.resource.resourceId === fileChanges.selected.id;
-  const taskPanelResourceView =
-    previewMatchesResource && filePreviewViewState ? (
-      <FilePreviewView
-        state={filePreviewViewState}
-        onSelect={selectFilePreview}
-        onRefresh={refreshFilePreview}
-      />
-    ) : diffMatchesResource && fileChangeDiffViewState ? (
-      <FileChangeDiffView
-        state={fileChangeDiffViewState}
-        onRefresh={refreshFileChangeDiff}
-      />
-    ) : null;
-  const renderedTaskPanelTab: TaskPanelTab =
-    taskPanel.activeTab === "review" && reviewedFileChanges === null
-      ? "overview"
-      : taskPanel.activeTab === "resource" && taskPanelResourceView === null
-        ? taskPanel.resource?.returnTab === "review" &&
-          reviewedFileChanges !== null
-          ? "review"
-          : "overview"
-        : taskPanel.activeTab;
+    panelTarget.taskId === fileChanges.taskId &&
+    panelTarget.runId === fileChanges.runId &&
+    panelTarget.selectedChangeId === fileChanges.selected.id;
+  const pendingLocator = panelTask?.pendingUi ? (
+    <button
+      type="button"
+      className="task-attention-locator focus-ring"
+      aria-label={t("inspector.needs_attention")}
+      title={t("inspector.needs_attention")}
+      onClick={focusPendingFromTaskPanel}
+    >
+      <Icon name="warning" />
+      <span>{t("inspector.needs_attention")}</span>
+    </button>
+  ) : null;
+  const panelTitle =
+    panelTarget.kind === "empty"
+      ? t("task_panel.title")
+      : panelTarget.kind === "tool"
+        ? t("task_panel.tool")
+        : panelTarget.kind === "review"
+          ? t("task_panel.review")
+          : t("file_preview.title");
 
   return (
     <AppShell
@@ -3135,6 +2990,23 @@ export default function App() {
             </button>
           </form>
         ) : undefined
+      }
+      headerActions={
+        !settingsOpen && route === "workbench" ? (
+          <>
+            {pendingLocator}
+            {activeTask && (
+              <TaskInformation
+                key={activeTask.id}
+                task={activeTask}
+                permissionProfilesEnabled={
+                  snapshot.capabilities.permissionProfiles
+                }
+                triggerRef={taskInformationTrigger}
+              />
+            )}
+          </>
+        ) : null
       }
       onSearch={() => setSearchOpen(true)}
       attentionNotice={
@@ -3280,59 +3152,45 @@ export default function App() {
       onDismissRightPanel={dismissTaskPanel}
       rightPanel={
         !settingsOpen && rightPanelOpen ? (
-          panelTask ? (
-            <TaskPanel
-              activeTab={renderedTaskPanelTab}
-              resource={taskPanel.resource}
-              hasReview={reviewedFileChanges !== null}
-              hasAttention={panelTask.pendingUi !== null}
-              overview={
-                <TaskOverviewView
-                  task={panelTask}
-                  permissionProfilesEnabled={
-                    snapshot.capabilities.permissionProfiles
-                  }
-                  focusRequest={taskOverviewFocusRequest}
-                  onFocusPending={focusPendingFromTaskPanel}
-                />
-              }
-              review={
-                reviewedFileChanges ? (
-                  <FileChangesView
-                    observation={reviewedFileChanges.observation}
-                    changes={reviewedFileChanges.changes}
-                    onSelect={openFileChange}
-                  />
-                ) : null
-              }
-              resourceView={taskPanelResourceView}
-              onActivate={activateTaskPanelTab}
-              onCloseReview={closeTaskPanelReview}
-              onCloseResource={closeTaskPanelResource}
-              onClose={dismissTaskPanel}
-            />
-          ) : (
-            <div className="task-panel-frame">
-              <header className="task-panel-tabbar">
-                <h2
-                  id="task-panel-title"
-                  tabIndex={-1}
-                  className="task-panel-empty-title"
-                >
-                  {t("task_panel.title")}
-                </h2>
-                <button
-                  type="button"
-                  className="icon-button focus-ring"
-                  aria-label={t("task_panel.close")}
-                  onClick={() => dismissTaskPanel()}
-                >
-                  <Icon name="close" />
-                </button>
-              </header>
+          <TaskPanel
+            title={panelTitle}
+            attention={pendingLocator}
+            onBack={
+              panelTarget.kind === "review" && panelTarget.selectedChangeId
+                ? returnToReview
+                : undefined
+            }
+            backLabel={t("task_panel.back_review")}
+            onClose={dismissTaskPanel}
+          >
+            {panelTarget.kind === "empty" ? (
               <p className="task-panel-empty">{t("task_panel.empty")}</p>
-            </div>
-          )
+            ) : panelTarget.kind === "tool" && selectedTool ? (
+              <ToolDetailView tool={selectedTool} />
+            ) : panelTarget.kind === "preview" &&
+              previewMatchesTarget &&
+              filePreviewViewState ? (
+              <FilePreviewView
+                state={filePreviewViewState}
+                onSelect={selectFilePreview}
+                onRefresh={refreshFilePreview}
+              />
+            ) : panelTarget.kind === "review" &&
+              panelTarget.selectedChangeId ? (
+              diffMatchesTarget && fileChangeDiffViewState ? (
+                <FileChangeDiffView
+                  state={fileChangeDiffViewState}
+                  onRefresh={refreshFileChangeDiff}
+                />
+              ) : null
+            ) : reviewedFileChanges ? (
+              <FileChangesView
+                observation={reviewedFileChanges.observation}
+                changes={reviewedFileChanges.changes}
+                onSelect={openFileChange}
+              />
+            ) : null}
+          </TaskPanel>
         ) : null
       }
       overlay={
@@ -3714,12 +3572,7 @@ export default function App() {
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 onPrepareRetry={prepareRetry}
-                onOpenTool={(runId, toolId, opener) =>
-                  openTaskPanelSection("work_process", opener, {
-                    runId,
-                    toolId,
-                  })
-                }
+                onOpenTool={openToolDetail}
                 onPreviewFile={openFilePreview}
                 onReviewFileChanges={openFileChanges}
                 onRespond={(payload) => void respondUi(payload)}
