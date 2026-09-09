@@ -71,6 +71,8 @@ function attachmentErrorMessage(reason: string): MessageId {
     read_failed: "attachment.error.read_failed",
     file_changed: "attachment.error.file_changed",
     shutting_down: "attachment.error.shutting_down",
+    invalid_transfer: "attachment.error.invalid_transfer",
+    stale_transfer: "attachment.error.stale_transfer",
   };
   return messages[reason] ?? "attachment.error.generic";
 }
@@ -112,6 +114,8 @@ export function ComposerFooter({
   stopDisabled,
   onDraftChange,
   onChooseAttachments,
+  onDropFiles,
+  onCancelAttachments,
   onRemoveAttachment,
   onSubmit,
   onStop,
@@ -168,6 +172,8 @@ export function ComposerFooter({
   stopDisabled: boolean;
   onDraftChange: (value: ComposerDraft) => void;
   onChooseAttachments: () => void;
+  onDropFiles?: (files: File[]) => void;
+  onCancelAttachments?: () => void;
   onRemoveAttachment: (token: string) => void;
   onSubmit: () => void;
   onStop: () => void;
@@ -190,6 +196,8 @@ export function ComposerFooter({
   const sendButtonRef = useRef<HTMLButtonElement>(null);
   const stopButtonRef = useRef<HTMLButtonElement>(null);
   const attachmentButtonRef = useRef<HTMLButtonElement>(null);
+  const onDropFilesRef = useRef(onDropFiles);
+  onDropFilesRef.current = onDropFiles;
   const attachmentRemoveRefs = useRef(new Map<string, HTMLElement>());
   const pendingAttachmentFocusRef = useRef<{
     removedToken: string;
@@ -264,16 +272,21 @@ export function ComposerFooter({
       depth = Math.max(0, depth - 1);
       if (depth === 0) setFileDragActive(false);
     };
+    const onDrop = (event: DragEvent) => {
+      clear(event);
+      if (fileDropEnabled && event.dataTransfer?.files.length)
+        onDropFilesRef.current?.(Array.from(event.dataTransfer.files));
+    };
     document.addEventListener("dragenter", onDragEnter);
     document.addEventListener("dragover", onDragOver);
     document.addEventListener("dragleave", onDragLeave);
-    document.addEventListener("drop", clear);
+    document.addEventListener("drop", onDrop);
     document.addEventListener("dragend", clear);
     return () => {
       document.removeEventListener("dragenter", onDragEnter);
       document.removeEventListener("dragover", onDragOver);
       document.removeEventListener("dragleave", onDragLeave);
-      document.removeEventListener("drop", clear);
+      document.removeEventListener("drop", onDrop);
       document.removeEventListener("dragend", clear);
     };
   }, [fileDropEnabled]);
@@ -727,12 +740,32 @@ export function ComposerFooter({
                   ref={attachmentButtonRef}
                   className="composer-attachment-add"
                   data-busy={attachmentBusy || undefined}
-                  aria-label={t("attachment.add")}
-                  title={t("attachment.add")}
-                  disabled={composeDisabled || attachmentBusy}
-                  onClick={onChooseAttachments}
+                  aria-label={t(
+                    attachmentBusy && onCancelAttachments
+                      ? "attachment.cancel"
+                      : "attachment.add",
+                  )}
+                  title={t(
+                    attachmentBusy && onCancelAttachments
+                      ? "attachment.cancel"
+                      : "attachment.add",
+                  )}
+                  disabled={
+                    composeDisabled || (attachmentBusy && !onCancelAttachments)
+                  }
+                  onClick={
+                    attachmentBusy ? onCancelAttachments : onChooseAttachments
+                  }
                 >
-                  <Icon name={attachmentBusy ? "loading" : "paperclip"} />
+                  <Icon
+                    name={
+                      attachmentBusy
+                        ? onCancelAttachments
+                          ? "close"
+                          : "loading"
+                        : "paperclip"
+                    }
+                  />
                 </Button>
               )}
               {modelLabel && (

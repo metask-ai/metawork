@@ -1666,9 +1666,14 @@ test("generic file drafts explain the current send boundary", () => {
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
 });
 
-test("file drag highlights the active Composer without reading browser files", () => {
-  renderComposer({ attachmentsEnabled: true });
-  const dataTransfer = { types: ["Files"], dropEffect: "none" };
+test("file drag highlights the active Composer and hands the drop files to its input owner", () => {
+  const received = [];
+  renderComposer({
+    attachmentsEnabled: true,
+    onDropFiles: (files) => received.push(files),
+  });
+  const file = new File(["abc"], "notes.txt");
+  const dataTransfer = { types: ["Files"], dropEffect: "none", files: [file] };
   const enter = new window.Event("dragenter", {
     bubbles: true,
     cancelable: true,
@@ -1685,4 +1690,27 @@ test("file drag highlights the active Composer without reading browser files", (
   Object.defineProperty(drop, "dataTransfer", { value: dataTransfer });
   fireEvent(document, drop);
   assert.equal(screen.queryByText("Drop files to add"), null);
+  assert.deepEqual(received, [[file]]);
+});
+
+test("receiving offers cancellation, keeps text editable and rejects another drop", () => {
+  let cancelled = 0;
+  const composer = renderComposer({
+    attachmentsEnabled: true,
+    attachmentBusy: true,
+    canSubmit: false,
+    onCancelAttachments: () => {
+      cancelled++;
+    },
+    onDropFiles: () => assert.fail("busy composer must not admit files"),
+  });
+  assert.equal(composer.textarea.disabled, false);
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  fireEvent.click(screen.getByRole("button", { name: "Cancel adding files" }));
+  assert.equal(cancelled, 1);
+  const drop = new window.Event("drop", { bubbles: true, cancelable: true });
+  Object.defineProperty(drop, "dataTransfer", {
+    value: { types: ["Files"], files: [new File(["abc"], "a.txt")] },
+  });
+  fireEvent(document, drop);
 });
