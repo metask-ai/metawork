@@ -144,7 +144,7 @@ test("right-side separator reverses pointer and arrow direction", () => {
   function Harness() {
     const [value, setValue] = useState(400);
     return createElement(ResizableSeparator, {
-      label: "Resize task panel",
+      label: "Resize side panel",
       value,
       minimum: 320,
       maximum: 640,
@@ -159,7 +159,7 @@ test("right-side separator reverses pointer and arrow direction", () => {
 
   render(createElement(Harness));
   const separator = screen.getByRole("separator", {
-    name: "Resize task panel",
+    name: "Resize side panel",
   });
 
   fireEvent.keyDown(separator, { key: "ArrowLeft" });
@@ -180,7 +180,7 @@ test("lost pointer capture commits and closes the active resize transaction", ()
 
   render(
     createElement(ResizableSeparator, {
-      label: "Resize task panel",
+      label: "Resize side panel",
       value: 400,
       minimum: 320,
       maximum: 640,
@@ -196,7 +196,7 @@ test("lost pointer capture commits and closes the active resize transaction", ()
     }),
   );
   const separator = screen.getByRole("separator", {
-    name: "Resize task panel",
+    name: "Resize side panel",
   });
 
   fireEvent.pointerDown(separator, { pointerId: 9, clientX: 600 });
@@ -212,14 +212,14 @@ test("an overlay Task Panel can resize back into the docked layout", () => {
   assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
 
   const separator = screen.getByRole("separator", {
-    name: "Resize task panel",
+    name: "Resize side panel",
   });
   fireEvent.keyDown(separator, { key: "ArrowRight" });
   fireEvent.keyDown(separator, { key: "ArrowRight" });
 
   assert.equal(root?.getAttribute("data-right-panel-docked"), "true");
   assert.equal(
-    screen.getByRole("separator", { name: "Resize task panel" }),
+    screen.getByRole("separator", { name: "Resize side panel" }),
     separator,
   );
   assert.equal(
@@ -233,7 +233,7 @@ test("Task Panel resize survives a dock-to-overlay transition", () => {
   assert.equal(root?.getAttribute("data-right-panel-docked"), "true");
 
   const separator = screen.getByRole("separator", {
-    name: "Resize task panel",
+    name: "Resize side panel",
   });
   fireEvent.pointerDown(separator, { pointerId: 10, clientX: 600 });
   fireEvent.pointerMove(separator, { pointerId: 10, clientX: 520 });
@@ -241,7 +241,7 @@ test("Task Panel resize survives a dock-to-overlay transition", () => {
   assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
   assert.equal(root?.getAttribute("data-resizing-right"), "true");
   assert.equal(
-    screen.getByRole("separator", { name: "Resize task panel" }),
+    screen.getByRole("separator", { name: "Resize side panel" }),
     separator,
   );
 
@@ -257,7 +257,7 @@ test("a viewport-capped overlay resizes from its rendered width", () => {
   dom.window.localStorage.setItem("metawork.panel.task.width", "640");
   const { root } = renderTaskPanelShell(650);
   const separator = screen.getByRole("separator", {
-    name: "Resize task panel",
+    name: "Resize side panel",
   });
 
   assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
@@ -275,7 +275,7 @@ test("a viewport-capped overlay resizes from its rendered width", () => {
 test("closing the Task Panel finalizes an active resize", () => {
   const { root, rerenderOpen } = renderTaskPanelShell(1200);
   const separator = screen.getByRole("separator", {
-    name: "Resize task panel",
+    name: "Resize side panel",
   });
 
   fireEvent.pointerDown(separator, { pointerId: 11, clientX: 600 });
@@ -289,7 +289,7 @@ test("closing the Task Panel finalizes an active resize", () => {
     "440",
   );
   assert.equal(
-    screen.queryByRole("separator", { name: "Resize task panel" }),
+    screen.queryByRole("separator", { name: "Resize side panel" }),
     null,
   );
 });

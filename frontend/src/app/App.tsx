@@ -61,7 +61,7 @@ import {
   FileChangesView,
   type FileChangeDiffViewState,
 } from "../features/task-panel/FileChangesView.tsx";
-import { taskPanelFocusReturnTarget } from "../features/task-panel/task-panel-interaction.ts";
+import { sidePanelFocusReturnTarget } from "./side-panel-interaction.ts";
 import type {
   TaskOverviewSection,
   TaskPanelTab,
@@ -237,6 +237,7 @@ export default function App() {
   );
   const [showArchived, setShowArchived] = useState(false);
   const [route, setRoute] = useState<ShellRoute>("workbench");
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsRestoreFocus = useRef<HTMLElement | null>(null);
   const [settingsFocus, setSettingsFocus] =
@@ -428,6 +429,7 @@ export default function App() {
     );
     if (!selected) return;
     taskPanelOpener.current = opener;
+    setRightPanelOpen(true);
     closeFileChanges();
     taskPanel.openResource({
       kind: "preview",
@@ -564,6 +566,7 @@ export default function App() {
     )
       return;
     taskPanelOpener.current = opener;
+    setRightPanelOpen(true);
     closeFilePreview();
     closeFileChanges();
     taskPanel.openReview({ taskId, runId });
@@ -669,7 +672,13 @@ export default function App() {
     });
   }, [snapshot.revision, snapshot.tasks]);
 
-  const taskPanel = useTaskPanelSession(activeTask);
+  const panelTask = route === "workbench" ? activeTask : null;
+  const taskPanel = useTaskPanelSession(panelTask);
+  useEffect(() => {
+    closeFilePreview();
+    closeFileChanges();
+    setTaskOverviewFocusRequest(null);
+  }, [panelTask?.id]);
   useEffect(() => {
     if (taskPanel.review) {
       const task = snapshot.tasks.find(
@@ -1206,10 +1215,11 @@ export default function App() {
     opener: HTMLButtonElement,
     target?: { runId: string; toolId?: string },
   ) {
-    if (!activeTask || !taskPanel.available) return;
+    if (!activeTask) return;
     closeFilePreview();
     closeFileChanges();
     taskPanelOpener.current = opener;
+    setRightPanelOpen(true);
     taskPanel.openOverview();
     taskPanelFocusSequence.current += 1;
     setTaskOverviewFocusRequest({
@@ -1224,7 +1234,7 @@ export default function App() {
   function dismissTaskPanel(restoreFocus = true) {
     const panel = document.getElementById("task-panel");
     const focusWasInside = panel?.contains(document.activeElement) === true;
-    const focusTarget = taskPanelFocusReturnTarget(
+    const focusTarget = sidePanelFocusReturnTarget(
       taskPanelOpener.current,
       taskPanelToggle.current,
     );
@@ -1232,9 +1242,22 @@ export default function App() {
     closeFilePreview();
     closeFileChanges();
     taskPanel.close();
+    setRightPanelOpen(false);
     setTaskOverviewFocusRequest(null);
     if (restoreFocus && focusWasInside && focusTarget)
       window.requestAnimationFrame(() => focusTarget.focus());
+  }
+
+  function toggleRightPanel(opener: HTMLButtonElement) {
+    if (rightPanelOpen) {
+      dismissTaskPanel(false);
+      return;
+    }
+    taskPanelOpener.current = opener;
+    setRightPanelOpen(true);
+    window.requestAnimationFrame(() =>
+      document.getElementById("task-panel-title")?.focus(),
+    );
   }
 
   function focusPendingFromTaskPanel() {
@@ -3113,37 +3136,6 @@ export default function App() {
           </form>
         ) : undefined
       }
-      headerActions={
-        !settingsOpen && route === "workbench" && activeTask ? (
-          <>
-            {taskPanel.available && (
-              <button
-                ref={taskPanelToggle}
-                className="icon-button focus-ring"
-                aria-controls="task-panel"
-                aria-expanded={taskPanel.open}
-                aria-label={t(
-                  taskPanel.open ? "task_panel.close" : "task_panel.open",
-                )}
-                title={t(
-                  taskPanel.open ? "task_panel.close" : "task_panel.open",
-                )}
-                onClick={(event) => {
-                  setTaskOverviewFocusRequest(null);
-                  if (taskPanel.open) {
-                    dismissTaskPanel(false);
-                    return;
-                  }
-                  taskPanelOpener.current = event.currentTarget;
-                  taskPanel.openOverview();
-                }}
-              >
-                <Icon name="sidebar-right" />
-              </button>
-            )}
-          </>
-        ) : null
-      }
       onSearch={() => setSearchOpen(true)}
       attentionNotice={
         commandBarStatus
@@ -3282,43 +3274,65 @@ export default function App() {
           />
         </div>
       }
-      rightPanelOpen={route === "workbench" && taskPanel.open && !settingsOpen}
+      rightPanelOpen={rightPanelOpen && !settingsOpen}
+      rightPanelToggleRef={taskPanelToggle}
+      onToggleRightPanel={toggleRightPanel}
       onDismissRightPanel={dismissTaskPanel}
       rightPanel={
-        route === "workbench" &&
-        !settingsOpen &&
-        activeTask &&
-        taskPanel.available ? (
-          <TaskPanel
-            activeTab={renderedTaskPanelTab}
-            resource={taskPanel.resource}
-            hasReview={reviewedFileChanges !== null}
-            hasAttention={activeTask.pendingUi !== null}
-            overview={
-              <TaskOverviewView
-                task={activeTask}
-                permissionProfilesEnabled={
-                  snapshot.capabilities.permissionProfiles
-                }
-                focusRequest={taskOverviewFocusRequest}
-                onFocusPending={focusPendingFromTaskPanel}
-              />
-            }
-            review={
-              reviewedFileChanges ? (
-                <FileChangesView
-                  observation={reviewedFileChanges.observation}
-                  changes={reviewedFileChanges.changes}
-                  onSelect={openFileChange}
+        !settingsOpen && rightPanelOpen ? (
+          panelTask ? (
+            <TaskPanel
+              activeTab={renderedTaskPanelTab}
+              resource={taskPanel.resource}
+              hasReview={reviewedFileChanges !== null}
+              hasAttention={panelTask.pendingUi !== null}
+              overview={
+                <TaskOverviewView
+                  task={panelTask}
+                  permissionProfilesEnabled={
+                    snapshot.capabilities.permissionProfiles
+                  }
+                  focusRequest={taskOverviewFocusRequest}
+                  onFocusPending={focusPendingFromTaskPanel}
                 />
-              ) : null
-            }
-            resourceView={taskPanelResourceView}
-            onActivate={activateTaskPanelTab}
-            onCloseReview={closeTaskPanelReview}
-            onCloseResource={closeTaskPanelResource}
-            onClose={dismissTaskPanel}
-          />
+              }
+              review={
+                reviewedFileChanges ? (
+                  <FileChangesView
+                    observation={reviewedFileChanges.observation}
+                    changes={reviewedFileChanges.changes}
+                    onSelect={openFileChange}
+                  />
+                ) : null
+              }
+              resourceView={taskPanelResourceView}
+              onActivate={activateTaskPanelTab}
+              onCloseReview={closeTaskPanelReview}
+              onCloseResource={closeTaskPanelResource}
+              onClose={dismissTaskPanel}
+            />
+          ) : (
+            <div className="task-panel-frame">
+              <header className="task-panel-tabbar">
+                <h2
+                  id="task-panel-title"
+                  tabIndex={-1}
+                  className="task-panel-empty-title"
+                >
+                  {t("task_panel.title")}
+                </h2>
+                <button
+                  type="button"
+                  className="icon-button focus-ring"
+                  aria-label={t("task_panel.close")}
+                  onClick={() => dismissTaskPanel()}
+                >
+                  <Icon name="close" />
+                </button>
+              </header>
+              <p className="task-panel-empty">{t("task_panel.empty")}</p>
+            </div>
+          )
         ) : null
       }
       overlay={

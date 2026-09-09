@@ -7737,6 +7737,18 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-micro);
 }
 
+.task-panel-empty-title {
+  flex: 1;
+  margin: 0;
+  padding: 0 12px;
+  font-size: var(--text-control);
+}
+
+.task-panel-empty {
+  padding: 16px;
+  color: var(--ui-content-muted);
+}
+
 .task-panel-frame {
   display: flex;
   height: 100%;

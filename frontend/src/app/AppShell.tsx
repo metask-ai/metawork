@@ -4,13 +4,14 @@ import {
   useState,
   type CSSProperties,
   type ReactNode,
+  type Ref,
 } from "react";
 
 import { Icon } from "../components/ui/Icon.tsx";
 import { ResizableSeparator } from "../components/ui/ResizableSeparator.tsx";
 import { WindowControls } from "../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
-import { shouldDismissTaskPanelForEscape } from "../features/task-panel/task-panel-interaction.ts";
+import { shouldDismissSidePanelForEscape } from "./side-panel-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
 import {
   readLocalPreference,
@@ -77,6 +78,8 @@ export function AppShell({
   rightPanel,
   rightPanelOpen,
   onDismissRightPanel,
+  onToggleRightPanel,
+  rightPanelToggleRef,
   overlay,
   children,
 }: {
@@ -90,6 +93,8 @@ export function AppShell({
   rightPanel: ReactNode | null;
   rightPanelOpen: boolean;
   onDismissRightPanel: (restoreFocus?: boolean) => void;
+  onToggleRightPanel: (opener: HTMLButtonElement) => void;
+  rightPanelToggleRef?: Ref<HTMLButtonElement>;
   overlay?: ReactNode;
   children: ReactNode;
 }) {
@@ -107,7 +112,7 @@ export function AppShell({
   const leftAvailable = left !== null;
   const effectiveLeftOpen = leftAvailable && leftOpen;
   const rightPanelAvailable = rightPanel !== null;
-  const effectiveRightPanelOpen = rightPanelAvailable && rightPanelOpen;
+  const effectiveRightPanelOpen = rightPanelOpen;
   const rightResizeMaximum = Math.max(
     minimumRightWidth,
     Math.min(maximumRightWidth, viewportWidth - 44),
@@ -183,7 +188,7 @@ export function AppShell({
         )
           return;
         if (
-          !shouldDismissTaskPanelForEscape(
+          !shouldDismissSidePanelForEscape(
             effectiveRightPanelOpen,
             event.key,
             event.defaultPrevented,
@@ -234,6 +239,22 @@ export function AppShell({
           inert={overlay ? true : undefined}
         >
           {headerActions}
+          <button
+            type="button"
+            ref={rightPanelToggleRef}
+            className="icon-button focus-ring"
+            aria-controls="task-panel"
+            aria-expanded={effectiveRightPanelOpen}
+            aria-label={t(
+              effectiveRightPanelOpen ? "task_panel.close" : "task_panel.open",
+            )}
+            title={t(
+              effectiveRightPanelOpen ? "task_panel.close" : "task_panel.open",
+            )}
+            onClick={(event) => onToggleRightPanel(event.currentTarget)}
+          >
+            <Icon name="sidebar-right" />
+          </button>
           <span
             className="sr-only"
             role="status"
@@ -291,7 +312,7 @@ export function AppShell({
           />
         )}
         <section className="task-stage">{children}</section>
-        {rightPanelAvailable && (effectiveRightPanelOpen || resizingRight) && (
+        {(effectiveRightPanelOpen || resizingRight) && (
           <ResizableSeparator
             className="task-panel-resize-handle"
             label={t("app.resize_task_panel")}
@@ -308,7 +329,7 @@ export function AppShell({
             onResizeEnd={() => setResizingRight(false)}
           />
         )}
-        {rightPanelAvailable && (
+        {(rightPanelAvailable || effectiveRightPanelOpen) && (
           <aside
             id="task-panel"
             className="task-panel"

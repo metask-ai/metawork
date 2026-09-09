@@ -4,8 +4,6 @@ import type { TaskView } from "../../bridge/contracts.ts";
 import {
   initialTaskPanelSessionState,
   reduceTaskPanelSession,
-  taskHasPanelFacts,
-  taskPanelOpenForTask,
   type TaskPanelResourceTarget,
   type TaskPanelReviewTarget,
   type TaskPanelTab,
@@ -17,8 +15,6 @@ export function useTaskPanelSession(task: TaskView | null) {
     initialTaskPanelSessionState,
   );
   const taskId = task?.id ?? null;
-  const available = taskHasPanelFacts(task);
-  const open = available && taskPanelOpenForTask(state, taskId);
   const stateBelongsToTask = taskId !== null && state.activeTaskId === taskId;
 
   useEffect(() => {
@@ -29,15 +25,10 @@ export function useTaskPanelSession(task: TaskView | null) {
     dispatch({
       type: "task.observed",
       taskId: task.id,
-      attentionId: task.pendingUi
-        ? `${task.pendingUi.runId}:${task.pendingUi.requestId}`
-        : null,
     });
-  }, [task?.id, task?.pendingUi?.runId, task?.pendingUi?.requestId]);
+  }, [taskId]);
 
   return {
-    available,
-    open,
     activeTab: stateBelongsToTask ? state.activeTab : "overview",
     review: stateBelongsToTask ? state.review : null,
     resource: stateBelongsToTask ? state.resource : null,
@@ -45,7 +36,7 @@ export function useTaskPanelSession(task: TaskView | null) {
       if (taskId) dispatch({ type: "overview.opened", taskId });
     },
     close() {
-      if (taskId) dispatch({ type: "panel.closed", taskId });
+      dispatch({ type: "content.cleared" });
     },
     openReview(target: TaskPanelReviewTarget) {
       dispatch({ type: "review.opened", target });

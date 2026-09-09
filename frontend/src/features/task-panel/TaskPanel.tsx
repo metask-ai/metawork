@@ -67,7 +67,7 @@ export function TaskPanel({
   const { t } = useI18n();
   return (
     <div className="task-panel-frame">
-      <h2 id="task-panel-title" className="sr-only">
+      <h2 id="task-panel-title" className="sr-only" tabIndex={-1}>
         {t("task_panel.title")}
       </h2>
       <header className="task-panel-tabbar">

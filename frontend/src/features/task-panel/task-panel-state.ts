@@ -1,5 +1,3 @@
-import type { TaskView } from "../../bridge/contracts.ts";
-
 export type TaskPanelTab = "overview" | "review" | "resource";
 
 export type TaskOverviewSection =
@@ -27,28 +25,21 @@ export type TaskPanelResourceTarget =
       resourceId: string;
     });
 
-type TaskPanelMemory = {
-  open: boolean;
-  handledAttentionIds: Readonly<Record<string, true>>;
-};
-
 export type TaskPanelSessionState = {
   activeTaskId: string | null;
   activeTab: TaskPanelTab;
   review: TaskPanelReviewTarget | null;
   resource: TaskPanelResourceTarget | null;
-  tasks: Record<string, TaskPanelMemory>;
 };
 
 export type TaskPanelSessionAction =
   | {
       type: "task.observed";
       taskId: string;
-      attentionId: string | null;
     }
   | { type: "task.cleared" }
   | { type: "overview.opened"; taskId: string }
-  | { type: "panel.closed"; taskId: string }
+  | { type: "content.cleared" }
   | { type: "review.opened"; target: TaskPanelReviewTarget }
   | { type: "review.closed"; taskId: string }
   | { type: "resource.opened"; target: TaskPanelResourceTarget }
@@ -60,24 +51,7 @@ export const initialTaskPanelSessionState: TaskPanelSessionState = {
   activeTab: "overview",
   review: null,
   resource: null,
-  tasks: {},
 };
-
-const emptyMemory: TaskPanelMemory = {
-  open: false,
-  handledAttentionIds: {},
-};
-
-export function taskHasPanelFacts(task: TaskView | null): boolean {
-  return Boolean(task && (task.pendingUi !== null || task.runs.length > 0));
-}
-
-export function taskPanelOpenForTask(
-  state: TaskPanelSessionState,
-  taskId: string | null,
-): boolean {
-  return taskId !== null && Boolean(state.tasks[taskId]?.open);
-}
 
 function targetsSameRun(
   left: { taskId: string; runId: string },
@@ -102,32 +76,17 @@ export function reduceTaskPanelSession(
   }
 
   if (action.type === "task.observed") {
-    const current = state.tasks[action.taskId] ?? emptyMemory;
-    const attentionIsNew =
-      action.attentionId !== null &&
-      current.handledAttentionIds[action.attentionId] !== true;
-    const taskChanged = state.activeTaskId !== action.taskId;
-    const nextMemory = attentionIsNew
-      ? {
-          open: true,
-          handledAttentionIds: {
-            ...current.handledAttentionIds,
-            [action.attentionId as string]: true as const,
-          },
-        }
-      : current;
-
-    if (!taskChanged && !attentionIsNew) return state;
+    if (state.activeTaskId === action.taskId) return state;
     return {
-      ...state,
+      ...initialTaskPanelSessionState,
       activeTaskId: action.taskId,
-      activeTab: taskChanged ? "overview" : state.activeTab,
-      review: taskChanged ? null : state.review,
-      resource: taskChanged ? null : state.resource,
-      tasks:
-        nextMemory === current
-          ? state.tasks
-          : { ...state.tasks, [action.taskId]: nextMemory },
+    };
+  }
+
+  if (action.type === "content.cleared") {
+    return {
+      ...initialTaskPanelSessionState,
+      activeTaskId: state.activeTaskId,
     };
   }
 
@@ -135,24 +94,12 @@ export function reduceTaskPanelSession(
     action.type === "review.opened" || action.type === "resource.opened"
       ? action.target.taskId
       : action.taskId;
-  const current = state.tasks[taskId] ?? emptyMemory;
-
-  if (action.type === "panel.closed") {
-    return {
-      ...state,
-      activeTab: "overview",
-      review: null,
-      resource: null,
-      tasks: { ...state.tasks, [taskId]: { ...current, open: false } },
-    };
-  }
 
   if (action.type === "overview.opened") {
     return {
       ...state,
       activeTaskId: taskId,
       activeTab: "overview",
-      tasks: { ...state.tasks, [taskId]: { ...current, open: true } },
     };
   }
 
@@ -163,7 +110,6 @@ export function reduceTaskPanelSession(
       activeTab: "review",
       review: action.target,
       resource: null,
-      tasks: { ...state.tasks, [taskId]: { ...current, open: true } },
     };
   }
 
@@ -182,7 +128,6 @@ export function reduceTaskPanelSession(
       activeTab: "resource",
       review,
       resource: target,
-      tasks: { ...state.tasks, [taskId]: { ...current, open: true } },
     };
   }
 

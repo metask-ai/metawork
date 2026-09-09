@@ -161,14 +161,14 @@ Workspace
 - 一体化命令栏：默认 52 px 产品视觉基线；Windows 沿用历史实现的 40 px 标题栏，macOS 交通灯安全区由 Host geometry 注入；
 - 左栏：默认 248 px；常规桌面可通过分界线在 208–360 px 内调整并保存偏好，键盘聚焦分界线后可用方向键调整；窄窗 overlay 保持固定宽度；
 - 左栏品牌区使用紧凑单行，只显示 `MetaWork` 字样，不把品牌区表现成第二层标题栏，也不重复使用首字母图标、产品说明或宣传副标题；
-- Task Panel：默认 400 px，用户可通过左侧分界线在 320–640 px 内调整并保存偏好；只有扣除已打开左栏和 Task Panel 后中央 Task stage 仍不少于 480 px 才以固定列停靠，否则改用右侧非模态 overlay。审批、活动详情、usage 或真实结果只决定模块与标签是否可用，不触发普通 Run 的自动开合；
+- Task Panel：默认 400 px，用户可通过左侧分界线在 320–640 px 内调整并保存偏好；只有扣除已打开左栏和 Task Panel 后中央 Task stage 仍不少于 480 px 才以固定列停靠，否则改用右侧非模态 overlay。内容只决定模块与标签是否可用，不决定栏的入口、显隐或宽度；
 - 已有 Task 不额外占用独立内容标题区；Task 名称只在顶部命令栏显示；
 - 中间正文推荐最大宽度：760 px；
 - 表格、diff、日志和文件预览可以使用中间区域的可用宽度；
 - Native 主窗口声明 320 × 520 logical px 的系统最小尺寸，保证窗口不能被缩到 Renderer 已定义布局下限之外；960 × 680 仍只是窄窗口回归样本，不是固定设计画布；
 - Task Panel 的停靠不使用固定 viewport 断点，而由 480 px 中央工作面下限决定；低于 820 px 时左栏和 Task Panel 互斥，低于 620 px 时 Task Panel 使用全宽 overlay；低于约 560 px 时命令栏隐藏次级文字。
 
-左栏折叠后完全隐藏并把宽度归还中央工作面，不保留 56 px 图标栏，也不用匿名图标映射任意 Task。命令栏左侧始终保留打开/关闭入口，折叠状态与桌面宽度按用户偏好保存。Task Panel 内容只决定模块、标签和入口是否可用；显隐只由用户动作、Task 切换或新的 `Needs your attention` 单次自动打开改变，并按 Task 保留当前应用会话内状态，不持久化为空面板偏好。折叠只改变视图，不改变 Task、审批或运行状态。
+左栏折叠后完全隐藏并把宽度归还中央工作面，不保留 56 px 图标栏，也不用匿名图标映射任意 Task。命令栏左侧始终保留打开/关闭入口，折叠状态与桌面宽度按用户偏好保存。右栏入口、显隐和宽度属于应用布局，Task Panel 内容只决定模块和标签是否可用；显隐保持当前窗口会话中的用户选择，不按 Task 保存，也不新增显隐持久化偏好。Task 切换、内容失效和新的待处理请求不能改变显隐；设置覆盖层及窄窗左右栏互斥规则除外。折叠只改变视图，不改变 Task、审批或运行状态。
 
 ### 4.2 窗口模型
 
@@ -193,7 +193,7 @@ Workspace
 - window-chrome bootstrap capability 不依赖 ProductDelivery connection，使登录/连接失败页仍保留系统窗口行为。它只接受 connect/sync/disconnect、Host capability gate 控制的 live-pointer drag，以及绑定当前 document generation 的 `minimize | toggle_maximize | close` 固定语义动作；不接受 window id、任意 action 或独立 state query；
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
 - 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
-- 顶部命令栏在已有 Task 且 Task Panel 可用时提供稳定的入口图标，accessible name 随状态使用 `打开任务面板 / 关闭任务面板` 并发布 `aria-expanded`；New task、无 Task 或没有任何可检查事实时不显示该按钮；
+- 顶部命令栏在主工作界面常驻右侧栏入口图标，accessible name 随状态使用 `打开右侧栏 / 关闭右侧栏` 并发布 `aria-expanded`；New task、无 Task、非任务主页面或无可检查事实时仍可打开空栏；设置等覆盖层存在时入口与底层工作区一起 inert；
 - 未登录界面的应用工具栏只保留产品 identity 与语言入口；语言不能藏进尚不可进入的设置；
 - Renderer 关闭按钮必须进入平台的 user-close 语义并遵循 manifest `close_policy = hide`，后台 Application 与计划任务继续运行；重新打开由 Native SDK 托盘菜单进入 Application 的 `showWindow`/`focusWindow` capability，显式 Quit 才进入应用 shutdown；
 - 不使用 `chromeless`；系统 resize frame、Snap Layout、拖动、双击、系统菜单、DPI 与高对比行为只按真实平台验收声明，不由 WebUI 模拟。Renderer 只绘制按钮并提交固定语义意图，不复制这些底层行为；
@@ -868,7 +868,7 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的档�
 
 > Capability：**当前**。统一 Task Panel 承载当前 Task 的 Overview、按 Run 绑定的 Review，以及一个文件或 recorded diff 资源视图；它不提供通用历史 Run 浏览、raw 事件时间线、任意文件浏览、文件编辑或 Git 操作。
 
-Task Panel 是当前 Task 的按需右侧详情容器，不是第二份回复记录、日志面板或可以自由增开页面的 IDE。New task、无 Task 和没有有效模块的普通 idle Task 默认不占用右侧空间。用户通过顶部命令栏的稳定入口打开或关闭面板；关闭面板、切换 Task 或资源失效会卸载活动详情，不能让另一 Task 的内容短暂留在 DOM 或画面中。
+右侧栏是应用布局区域，Task Panel 是其中的任务内容视图，不是第二份回复记录、日志面板或可以自由增开页面的 IDE。用户通过顶部命令栏的常驻入口打开或关闭右栏；无 Task 或非任务主页面仍可打开真实空态。关闭右栏清空目标与已读取正文；切换/删除 Task、切换主页面或资源失效只更新或清理内容，不改变显隐与宽度，不能让另一 Task 的内容短暂留在 DOM 或画面中。
 
 标签栏采用 Codex Desktop 式紧凑任务上下文，但只开放三个受控槽位：
 
@@ -895,9 +895,9 @@ Overview 承载 Needs your attention、Current activity / Last run、当前/最�
 - Work process 读取当前或最近 Run 的有界 typed Tool records；从主区 Tool 摘要进入时，可以在该 focus request 存活期间精确选择来源 Run 与 Tool，但不增加历史 Run selector。它按 Host order 显示名称、状态与真实 elapsed；input/progress/result 默认不挂载 DOM，同一时刻至多展开一个 Tool，并只在展开后以纯文本/代码面按需呈现，折叠或切换 Task/Run 后再次卸载。Tool details 不进入主对话、全局搜索或 live announcement，也不把 Tool、Bash 文本或 file reference 推断成 File change/Output；
 - Run terminal 后，已经打开的 Overview 用真实 outcome、状态和 usage 转为 Last run summary；只有 Host 发布 typed Run duration 时才显示总耗时，当前不得从 Renderer 时钟猜测；不得因为 Current activity 消失而清空内容；
 - Context and usage 显示当前 attached Conversation 的真实 pressure/auto-compact observation 和所选 Run usage；只陈述 current/auto-compact/blocking token 数、最近压缩前后 token 与 dropped/kept，不显示伪百分比、raw source Run identity 或跨 attachment 历史；
-- 用户打开 overview 后在当前 Task 内保持打开，直到主动关闭；切换 Task 时显示目标 Task 自己的会话内状态；
-- 面板关闭时，只有新的 `Needs your attention` 请求可以对当前 Task 自动打开 Overview 一次，且不能抢走主区请求的键盘焦点；用户正在阅读 Review 或资源时只在 Overview 标签显示提醒，不自动切换标签；普通运行开始、usage 更新或 terminal 都不得自动切换显隐；
-- 切换 Task 是允许重新决定布局的显式边界：新 Task 使用自己的会话内显隐状态和内容，绝不能短暂显示前一个 Task 的详情；窄窗口自动打开时使用覆盖层，不触发中栏重排；
+- 右栏显隐由应用层独立拥有，窗口会话初始关闭，随后保持用户选择，不保存每 Task 状态或新增持久化显隐偏好；
+- 新的 `Needs your attention` 请求不自动打开右栏或抢走主区请求的键盘焦点；用户正在阅读 Review 或资源时只在 Overview 标签显示提醒，不自动切换标签；普通运行开始、usage 更新或 terminal 都不得自动切换显隐；
+- 切换 Task 只切换内容身份，不能重新决定布局；设置覆盖层暂时隐藏右栏但保留选择，窄窗口仍遵守左右栏互斥和覆盖层规则；
 - Task Panel 折叠不影响通知、审批或 Task 状态；
 - 同一可操作审批只在主区请求中提供按钮，overview 只能提醒并定位，不能复制第二套操作。
 
@@ -1219,7 +1219,7 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 - 左栏与 Task Panel 的平移或列宽变化约 160–180 ms；不能使用内容状态驱动高频开合；
 - capability 到位后的新 Output 只使用约 160 ms 轻微淡入；
 - 从 New task 到运行 Task 的布局变化使用一次约 220 ms 的克制过渡：Composer 从中央主视觉落到底部，Task 内容获得空间；不散布无意义入场动画；
-- Task Panel 不随普通 Run 开始或 terminal 自动改变列宽；显隐只在用户动作、切换 Task 或新的待处理请求边界改变，避免正文高频重排；
+- Task Panel 不随普通 Run 开始或 terminal 自动改变列宽；显隐只由用户布局动作改变，设置覆盖层与窄窗左右栏互斥除外，避免正文高频重排；
 - 完成状态不使用庆祝动画；所有非必要动画为 `prefers-reduced-motion` 提供静态等价状态。
 
 ## 17. 空状态与异常状态
@@ -1375,9 +1375,9 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 状态在无颜色条件下仍可识别；
 - 长英文、中文和 pseudo-locale 不溢出；
 - `queued / running / waiting_user` 的可见 Stop 只出现在 Composer 发送位置；顶部命令栏不重复出现，`stopping` 阻止重复请求并等待真实 terminal；
-- 顶部命令栏 Task Panel 按钮可由键盘操作，`打开任务面板 / 关闭任务面板` 与 `aria-expanded` 始终匹配真实面板状态；
+- 顶部命令栏 Task Panel 按钮可由键盘操作，`打开右侧栏 / 关闭右侧栏` 与 `aria-expanded` 始终匹配真实面板状态；
 - 标签栏的 Overview、Review 与唯一资源标签可由键盘操作，关闭活动资源后返回有效来源标签；不存在加号、任意浏览、多资源标签或编辑/Git 动作；
-- 普通 Run start/terminal 不改变 Task Panel 列宽；面板关闭时新的待处理请求只自动打开 Overview 一次，用户阅读其他标签时只提醒不抢焦点；terminal 后保留 Last run summary，切换 Task 不泄漏旧详情或已读取 bytes；
+- 普通 Run start/terminal 不改变 Task Panel 列宽；无 Task 仍可通过常驻入口打开空栏，切换/删除 Task、切换主页面、内容失效与待处理请求不得改变显隐；用户阅读其他标签时只提醒不抢焦点；terminal 后保留 Last run summary，切换 Task 不泄漏旧详情或已读取 bytes；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Task Panel 关闭或 overlay 显示后功能不丢失；停靠态始终保留至少 480 px 中央工作面，低于 820 px 与左栏互斥，低于 620 px 使用全宽 overlay。
 - Windows Renderer 窗口按钮在登录页与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
 
