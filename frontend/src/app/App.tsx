@@ -3699,11 +3699,7 @@ export default function App() {
                 retryAvailable={taskCanCompose && !taskOperationInFlight}
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
-                runDiagnosticsAvailable={taskPanel.available}
                 onPrepareRetry={prepareRetry}
-                onOpenRunDiagnostics={(runId, opener) =>
-                  openTaskPanelSection("diagnostics", opener, { runId })
-                }
                 onOpenTool={(runId, toolId, opener) =>
                   openTaskPanelSection("work_process", opener, {
                     runId,

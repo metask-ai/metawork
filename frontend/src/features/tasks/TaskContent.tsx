@@ -1,4 +1,5 @@
 import { runFileReferences } from "../../workbench/run-file-references.ts";
+import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import type {
@@ -153,9 +154,7 @@ export function TaskContent({
   retryAvailable,
   responseDisabled,
   fileChangesEnabled,
-  runDiagnosticsAvailable,
   onPrepareRetry,
-  onOpenRunDiagnostics,
   onOpenTool,
   onPreviewFile,
   onReviewFileChanges,
@@ -168,9 +167,7 @@ export function TaskContent({
   retryAvailable: boolean;
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
-  runDiagnosticsAvailable: boolean;
   onPrepareRetry: (input: RunInputView) => void;
-  onOpenRunDiagnostics: (runId: string, opener: HTMLButtonElement) => void;
   onOpenTool: (
     runId: string,
     toolId: string,
@@ -456,8 +453,7 @@ export function TaskContent({
                   (isCurrent &&
                     retryAvailable &&
                     retryable(terminal.outcome)) ||
-                  (terminal.cause === "provider_failure" &&
-                    runDiagnosticsAvailable) ? (
+                  terminal.cause === "provider_failure" ? (
                     <div className="run-terminal-actions">
                       {isCurrent &&
                         retryAvailable &&
@@ -476,17 +472,7 @@ export function TaskContent({
                               : t("run.prepare_retry")}
                           </button>
                         )}
-                      {terminal.cause === "provider_failure" &&
-                        runDiagnosticsAvailable && (
-                          <button
-                            className="ai-activity-details focus-ring"
-                            onClick={(event) =>
-                              onOpenRunDiagnostics(run.id, event.currentTarget)
-                            }
-                          >
-                            {t("run.view_diagnostics")}
-                          </button>
-                        )}
+                      <RunDiagnostics run={run} />
                     </div>
                   ) : undefined
                 }

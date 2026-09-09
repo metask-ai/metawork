@@ -208,9 +208,7 @@ function renderTaskContent(value, locale = "en-US") {
         retryAvailable: false,
         responseDisabled: false,
         fileChangesEnabled: false,
-        runDiagnosticsAvailable: false,
         onPrepareRetry() {},
-        onOpenRunDiagnostics() {},
         onOpenTool() {},
         onPreviewFile() {},
         onReviewFileChanges() {},
@@ -246,9 +244,7 @@ function taskContentElement(value, revision = "1", overrides = {}) {
       retryAvailable: false,
       responseDisabled: false,
       fileChangesEnabled: false,
-      runDiagnosticsAvailable: false,
       onPrepareRetry() {},
-      onOpenRunDiagnostics() {},
       onOpenTool() {},
       onPreviewFile() {},
       onReviewFileChanges() {},
@@ -1332,7 +1328,6 @@ test("provider failure notices explain impact without duplicating diagnostics", 
 
 test("provider failure details open for the exact historical Run", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  const calls = [];
   const historical = run({
     id: "8",
     phase: "failed",
@@ -1354,55 +1349,70 @@ test("provider failure details open for the exact historical Run", async () => {
   const current = run({ id: "9" });
   const value = task({ runs: [historical, current] });
 
-  render(
-    taskContentElement(value, "1", {
-      runDiagnosticsAvailable: true,
-      onOpenRunDiagnostics: (runId, opener) => calls.push({ runId, opener }),
-    }),
-  );
-  await user.click(screen.getByRole("button", { name: "View run details" }));
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].runId, "8");
-  assert.ok(calls[0].opener instanceof HTMLButtonElement);
-  cleanup();
-
-  render(
-    localizedView(
-      createElement(TaskOverviewView, {
-        task: value,
-        focusRequest: {
-          taskId: "3",
-          section: "diagnostics",
-          runId: "8",
-          nonce: 1,
-        },
-        onFocusPending() {},
-      }),
-    ),
-  );
-  await new Promise((resolve) => requestAnimationFrame(resolve));
-  const diagnostics = screen.getByText("Run details").closest("section");
-  assert.ok(diagnostics);
-  assert.match(diagnostics.textContent, /Model service request failed/);
-  assert.doesNotMatch(
-    diagnostics.textContent,
-    /did not produce a usable response/,
-  );
+  render(taskContentElement(value));
+  const summary = screen.getByText("View run details");
+  const diagnostics = summary.closest("details");
+  assert.equal(diagnostics.open, false);
+  assert.equal(screen.queryByText("historical-model"), null);
+  await user.click(summary);
+  assert.equal(diagnostics.open, true);
   assert.match(diagnostics.textContent, /current security boundary/);
-  assert.match(diagnostics.textContent, /Run information/);
   assert.match(diagnostics.textContent, /historical-model/);
   assert.match(diagnostics.textContent, /OpenAI Responses/);
   assert.match(diagnostics.textContent, /provider_failure/);
-  assert.doesNotMatch(
-    diagnostics.textContent,
-    /Execution configuration version/,
-  );
-  assert.doesNotMatch(diagnostics.textContent, /Response result/);
-  assert.doesNotMatch(diagnostics.textContent, /Status/);
-  assert.equal(screen.queryByText("Last run"), null);
-  assert.equal(screen.queryByText("fixture-model"), null);
-  assert.equal(document.activeElement, diagnostics);
+  assert.doesNotMatch(diagnostics.textContent, /fixture-model/);
+  await user.click(summary);
+  assert.equal(screen.queryByText("historical-model"), null);
   assert.equal(translate("zh-CN", "inspector.diagnostic_run"), "运行 ID");
+  assert.doesNotMatch(
+    renderTaskOverview(task({ runs: [historical] })),
+    /current security boundary|historical-model|Run information/,
+  );
+});
+
+test("inline diagnostics stay absent for other failures and preserve safe exact Run facts", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const value = task({
+    runs: [
+      run({
+        phase: "failed",
+        execution: {
+          generation: "99",
+          protocol: "openai_responses",
+          model: "<img src=x onerror=alert(1)>",
+        },
+        terminal: terminal("failed", "provider_failure", "absent"),
+      }),
+    ],
+  });
+  render(taskContentElement(value));
+  const summary = screen.getByText("View run details");
+  assert.ok(screen.queryByText("<img src=x onerror=alert(1)>") === null);
+  summary.focus();
+  await user.click(summary);
+  assert.ok(summary.closest("details").open);
+  assert.ok(
+    screen.getByText(
+      "MetaWork did not receive additional diagnostics for this run.",
+    ),
+  );
+  assert.ok(screen.getByText("<img src=x onerror=alert(1)>"));
+  assert.ok(summary.closest("details").querySelector("img") === null);
+  await user.click(summary);
+  assert.ok(!summary.closest("details").open);
+  assert.ok(screen.queryByText("<img src=x onerror=alert(1)>") === null);
+  cleanup();
+  for (const cause of [null, "tool_failure"]) {
+    render(
+      taskContentElement(
+        task({
+          runs: [run({ phase: "failed", terminal: terminal("failed", cause) })],
+        }),
+      ),
+    );
+    assert.ok(screen.queryByText("View run details") === null);
+    cleanup();
+  }
 });
 
 test("typed Run activity uses safe localized labels", () => {

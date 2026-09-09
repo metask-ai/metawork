@@ -638,8 +638,6 @@ export const zhCN: Record<MessageId, string> = {
   "inspector.current_activity": "当前活动",
   "inspector.last_run": "上次运行",
   "inspector.selected_run": "所选运行",
-  "inspector.run_details": "运行详情",
-  "inspector.run_information": "运行信息",
   "inspector.diagnostic_code": "错误标识",
   "inspector.diagnostic_run": "运行 ID",
   "inspector.diagnostic_model": "本次运行模型",

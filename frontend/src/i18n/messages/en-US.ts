@@ -697,8 +697,6 @@ export const enUS = {
   "inspector.current_activity": "Current activity",
   "inspector.last_run": "Last run",
   "inspector.selected_run": "Selected run",
-  "inspector.run_details": "Run details",
-  "inspector.run_information": "Run information",
   "inspector.diagnostic_code": "Error identifier",
   "inspector.diagnostic_run": "Run ID",
   "inspector.diagnostic_model": "Model for this run",

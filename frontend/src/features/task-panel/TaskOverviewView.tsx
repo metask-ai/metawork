@@ -118,12 +118,6 @@ function runLabel(run: RunView): MessageId {
   }
 }
 
-function protocolMessage(
-  protocol: RunView["execution"]["protocol"],
-): MessageId {
-  return `settings.custom_provider_protocol.${protocol}`;
-}
-
 function wireInteger(value: string): bigint {
   try {
     return BigInt(value);
@@ -428,54 +422,6 @@ export function TaskOverviewView({
                 )}
               </div>
             </div>
-          </section>
-        )}
-
-        {run && providerFailureTerminal && (
-          <section
-            ref={(node) => {
-              sectionRefs.current.diagnostics = node ?? undefined;
-            }}
-            className="inspector-section inspector-run-diagnostics"
-            tabIndex={-1}
-          >
-            <p className="section-label">{t("inspector.run_details")}</p>
-            <div className="inspector-run-state">
-              <span className="inspector-state-line" aria-hidden="true" />
-              <div>
-                <strong>{t("run.provider_failure.title")}</strong>
-                <span>
-                  {t(
-                    providerFailureTerminal.diagnosticDisposition === "withheld"
-                      ? "run.provider_failure.diagnostic_withheld"
-                      : "run.provider_failure.diagnostic_absent",
-                  )}
-                </span>
-              </div>
-            </div>
-            <p className="section-label inspector-run-information-label">
-              {t("inspector.run_information")}
-            </p>
-            <dl className="inspector-diagnostic-facts">
-              <div>
-                <dt>{t("inspector.diagnostic_model")}</dt>
-                <dd>{run.execution.model}</dd>
-              </div>
-              <div>
-                <dt>{t("inspector.diagnostic_protocol")}</dt>
-                <dd>{t(protocolMessage(run.execution.protocol))}</dd>
-              </div>
-              <div>
-                <dt>{t("inspector.diagnostic_run")}</dt>
-                <dd>{run.id}</dd>
-              </div>
-              <div>
-                <dt>{t("inspector.diagnostic_code")}</dt>
-                <dd>
-                  <code>provider_failure</code>
-                </dd>
-              </div>
-            </dl>
           </section>
         )}
 

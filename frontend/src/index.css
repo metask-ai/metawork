@@ -2444,6 +2444,7 @@ button.run-process-tool:hover {
 
 .run-terminal-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -8317,52 +8318,37 @@ button.inspector-tool-summary:hover {
   color: var(--metask-state-error);
 }
 
-.inspector-diagnostic-facts {
-  display: grid;
-  margin: 8px 0 0;
-  gap: 0;
-}
-
-.inspector-diagnostic-facts > div {
-  display: grid;
-  padding: 8px 0;
-  grid-template-columns: minmax(104px, 0.8fr) minmax(0, 1.2fr);
-  gap: 14px;
-  border-bottom: 1px solid var(--ui-border);
-}
-
-.inspector-diagnostic-facts > div:last-child {
-  border-bottom: 0;
-}
-
-.inspector-diagnostic-facts dt,
-.inspector-diagnostic-facts dd {
-  min-width: 0;
-  margin: 0;
+.run-diagnostics {
   font-size: var(--text-micro);
-  line-height: 1.5;
+  color: var(--ui-content-muted);
+  max-width: 100%;
+  min-width: 0;
 }
-
-.inspector-diagnostic-facts dt {
+.run-diagnostics[open] {
+  flex-basis: 100%;
+}
+.run-diagnostics summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.task-facts {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+.task-facts > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+.task-facts dt {
   color: var(--ui-content-muted);
 }
-
-.inspector-diagnostic-facts dd {
+.task-facts dd {
+  margin: 0;
+  text-align: right;
   overflow-wrap: anywhere;
-  color: var(--ui-content-primary);
-}
-
-.inspector-diagnostic-facts code {
-  font-family: var(--font-mono);
-  font-size: inherit;
-}
-
-.inspector-run-diagnostics .inspector-state-line {
-  background: var(--metask-state-error);
-}
-
-.inspector-run-information-label {
-  margin-top: 20px;
+  font-variant-numeric: tabular-nums;
 }
 
 .inspector-context-pressure,
