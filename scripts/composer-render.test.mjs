@@ -197,6 +197,7 @@ function renderShell(
             left === undefined ? createElement("p", null, "Navigation") : left,
           rightPanel,
           rightPanelOpen,
+          onToggleRightPanel() {},
           onDismissRightPanel() {},
         },
         createElement("p", null, "Composer stage"),
@@ -243,7 +244,7 @@ function renderCompletedSurface(
               cause: null,
               diagnosticDisposition: "absent",
             },
-        usage: { input: "12", output: "5" },
+        usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
         tools: [
           {
             id: "tool-1",
@@ -285,9 +286,7 @@ function renderCompletedSurface(
         retryAvailable: true,
         responseDisabled: false,
         fileChangesEnabled: false,
-        runDiagnosticsAvailable: false,
         onPrepareRetry() {},
-        onOpenRunDiagnostics() {},
         onOpenTool() {},
         onPreviewFile() {},
         onReviewFileChanges() {},
@@ -422,10 +421,15 @@ test("Workbench keeps Search as an icon beside the sidebar control", () => {
   assert.doesNotMatch(markup, /title="Search"/);
 });
 
-test("New task does not render or reserve an empty Task Panel", () => {
+test("a closed empty side panel reserves no space but keeps its layout toggle", () => {
   const markup = renderShell(null);
   assert.doesNotMatch(markup, /id="task-panel"/);
-  assert.doesNotMatch(markup, /aria-controls="task-panel"/);
+  assert.match(markup, /aria-controls="task-panel"/);
+  assert.match(markup, /aria-label="Open side panel"/);
+  const openEmpty = renderShell(null, true);
+  assert.match(openEmpty, /id="task-panel"/);
+  assert.match(openEmpty, /data-right-panel-open="true"/);
+  assert.match(openEmpty, /aria-label="Close side panel"/);
   assert.match(markup, /data-right-panel-open="false"/);
 });
 
@@ -441,7 +445,7 @@ test("a closed Task Panel keeps its shell but unmounts its content", () => {
   );
   assert.match(open, /aria-hidden="false"/);
   assert.match(open, /Private panel body/);
-  assert.match(open, /aria-label="Resize task panel"/);
+  assert.match(open, /aria-label="Resize side panel"/);
 });
 
 test("Task Panel docking preserves the 480px central task stage", () => {

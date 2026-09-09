@@ -1,24 +1,24 @@
-export type TaskPanelFocusTarget = {
+export type SidePanelFocusTarget = {
   isConnected: boolean;
   focus: () => void;
   hasAttribute?: (name: string) => boolean;
 };
 
-function usable(target: TaskPanelFocusTarget | null): boolean {
+function usable(target: SidePanelFocusTarget | null): boolean {
   return Boolean(
     target?.isConnected && target.hasAttribute?.("disabled") !== true,
   );
 }
 
-export function taskPanelFocusReturnTarget(
-  opener: TaskPanelFocusTarget | null,
-  fallback: TaskPanelFocusTarget | null,
-): TaskPanelFocusTarget | null {
+export function sidePanelFocusReturnTarget(
+  opener: SidePanelFocusTarget | null,
+  fallback: SidePanelFocusTarget | null,
+): SidePanelFocusTarget | null {
   if (usable(opener)) return opener;
   return usable(fallback) ? fallback : null;
 }
 
-export function shouldDismissTaskPanelForEscape(
+export function shouldDismissSidePanelForEscape(
   open: boolean,
   key: string,
   defaultPrevented: boolean,

@@ -1,3 +1,5 @@
+import { RunDiagnostics } from "./RunDiagnostics.tsx";
+import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import type {
@@ -77,24 +79,6 @@ function terminalMessage(
   }
 }
 
-export function runFileReferences(run: RunView): FileReferenceView[] {
-  const seen = new Set<string>();
-  const references: FileReferenceView[] = [];
-  const tools = [...run.tools].sort((left, right) => {
-    const leftOrder = BigInt(left.order);
-    const rightOrder = BigInt(right.order);
-    return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
-  });
-  for (const tool of tools) {
-    for (const reference of tool.fileRefs) {
-      if (seen.has(reference.id)) continue;
-      seen.add(reference.id);
-      references.push(reference);
-    }
-  }
-  return references;
-}
-
 function outcomeState(
   outcome: RunOutcome,
 ): "completed" | "stopped" | "failed" | "interrupted" {
@@ -170,9 +154,7 @@ export function TaskContent({
   retryAvailable,
   responseDisabled,
   fileChangesEnabled,
-  runDiagnosticsAvailable,
   onPrepareRetry,
-  onOpenRunDiagnostics,
   onOpenTool,
   onPreviewFile,
   onReviewFileChanges,
@@ -185,9 +167,7 @@ export function TaskContent({
   retryAvailable: boolean;
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
-  runDiagnosticsAvailable: boolean;
   onPrepareRetry: (input: RunInputView) => void;
-  onOpenRunDiagnostics: (runId: string, opener: HTMLButtonElement) => void;
   onOpenTool: (
     runId: string,
     toolId: string,
@@ -291,7 +271,16 @@ export function TaskContent({
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
-        const fileReferences = runFileReferences(run);
+        const references = new Map(
+          [...runFileReferenceLinks(run)].map(([text, reference]) => [
+            text,
+            {
+              label: t("file_preview.open", { path: reference.displayPath }),
+              onOpen: (opener: HTMLButtonElement) =>
+                onPreviewFile(task.id, run.id, reference, opener),
+            },
+          ]),
+        );
         const disclosureKey = `${task.id}:${run.id}`;
         const disclosure = observeRunProcessDisclosure(
           processDisclosure.current.get(disclosureKey),
@@ -318,7 +307,11 @@ export function TaskContent({
               <Message role="assistant" className="run-narrative">
                 {run.output.commentary.map((commentary, index) =>
                   commentary ? (
-                    <Markdown className="run-commentary-item" key={index}>
+                    <Markdown
+                      className="run-commentary-item"
+                      key={index}
+                      references={references}
+                    >
                       {commentary}
                     </Markdown>
                   ) : null,
@@ -345,6 +338,9 @@ export function TaskContent({
                   onOpenTool={(tool: ToolView, opener) =>
                     onOpenTool(run.id, tool.id, opener)
                   }
+                  onPreviewFile={(reference, opener) =>
+                    onPreviewFile(task.id, run.id, reference, opener)
+                  }
                 />
                 {fileChangesEnabled && run.fileChanges && (
                   <RunFileChangesSummary
@@ -368,7 +364,7 @@ export function TaskContent({
             )}
             {presentation.responseVisible && (
               <Message role="assistant">
-                <Markdown className="agent-response">
+                <Markdown className="agent-response" references={references}>
                   {run.output.response}
                 </Markdown>
                 {run.output.redacted && (
@@ -378,37 +374,6 @@ export function TaskContent({
                 )}
               </Message>
             )}
-            {fileReferences.length > 0 && (
-              <footer className="ml-11 flex flex-wrap items-center gap-2 border-l-2 border-(--ui-border) py-1 pl-3">
-                <span className="text-xs font-medium text-(--ui-content-muted)">
-                  {t("file_preview.references")}
-                </span>
-                {fileReferences.map((reference) => (
-                  <button
-                    key={reference.id}
-                    type="button"
-                    className="focus-ring inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-lg border border-(--ui-border) bg-(--ui-surface-panel) px-3 py-2 text-xs text-(--ui-content-primary) hover:bg-(--ui-action-hover-surface)"
-                    title={reference.displayPath}
-                    aria-label={t("file_preview.open", {
-                      path: reference.displayPath,
-                    })}
-                    onClick={(event) =>
-                      onPreviewFile(
-                        task.id,
-                        run.id,
-                        reference,
-                        event.currentTarget,
-                      )
-                    }
-                  >
-                    <Icon name="skill-file" />
-                    <span className="max-w-72 truncate font-mono">
-                      {reference.displayPath}
-                    </span>
-                  </button>
-                ))}
-              </footer>
-            )}
             {!presentation.active && (
               <>
                 <RunProcess
@@ -417,6 +382,9 @@ export function TaskContent({
                   onExpandedChange={setProcessExpanded}
                   onOpenTool={(tool: ToolView, opener) =>
                     onOpenTool(run.id, tool.id, opener)
+                  }
+                  onPreviewFile={(reference, opener) =>
+                    onPreviewFile(task.id, run.id, reference, opener)
                   }
                 />
                 {fileChangesEnabled && run.fileChanges && (
@@ -473,8 +441,7 @@ export function TaskContent({
                   (isCurrent &&
                     retryAvailable &&
                     retryable(terminal.outcome)) ||
-                  (terminal.cause === "provider_failure" &&
-                    runDiagnosticsAvailable) ? (
+                  terminal.cause === "provider_failure" ? (
                     <div className="run-terminal-actions">
                       {isCurrent &&
                         retryAvailable &&
@@ -493,17 +460,7 @@ export function TaskContent({
                               : t("run.prepare_retry")}
                           </button>
                         )}
-                      {terminal.cause === "provider_failure" &&
-                        runDiagnosticsAvailable && (
-                          <button
-                            className="ai-activity-details focus-ring"
-                            onClick={(event) =>
-                              onOpenRunDiagnostics(run.id, event.currentTarget)
-                            }
-                          >
-                            {t("run.view_diagnostics")}
-                          </button>
-                        )}
+                      <RunDiagnostics run={run} />
                     </div>
                   ) : undefined
                 }

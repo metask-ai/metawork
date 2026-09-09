@@ -1,11 +1,12 @@
+import { useState } from "react";
 import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
+import { Markdown } from "../../components/ai/Markdown.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { SelectField } from "../../components/ui/select.tsx";
+import { Tabs } from "../../components/ui/tabs.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 export type FilePreviewViewState = {
-  references: FileReferenceView[];
   selected: FileReferenceView;
   phase: "loading" | "settled";
   preview: FilePreview | null;
@@ -13,14 +14,15 @@ export type FilePreviewViewState = {
 
 export function FilePreviewView({
   state,
-  onSelect,
   onRefresh,
 }: {
   state: FilePreviewViewState;
-  onSelect: (reference: FileReferenceView) => void;
   onRefresh: () => void;
 }) {
   const { t } = useI18n();
+  const [mode, setMode] = useState("preview");
+  const markdown = /\.(?:md|markdown)$/i.test(state.selected.displayPath);
+  const html = /\.html?$/i.test(state.selected.displayPath);
   const ready = state.phase === "settled" && state.preview?.state === "ready";
   const status = state.phase === "loading" ? "loading" : state.preview?.state;
   const failureMessage =
@@ -29,7 +31,10 @@ export function FilePreviewView({
       : "file_preview.state.error";
 
   return (
-    <section
+    <Tabs.Root
+      render={<section />}
+      value={mode}
+      onValueChange={(value) => setMode(String(value))}
       className="task-panel-resource-view"
       aria-labelledby="task-panel-resource-title"
       aria-live="polite"
@@ -57,27 +62,19 @@ export function FilePreviewView({
         </Button>
       </header>
 
-      {state.references.length > 1 && (
-        <div className="task-panel-resource-switcher">
-          <SelectField
-            value={state.selected.id}
-            options={state.references.map((reference) => ({
-              value: reference.id,
-              label: reference.displayPath,
-            }))}
-            aria-label={t("file_preview.references")}
-            onValueChange={(id) => {
-              const reference = state.references.find(
-                (candidate) => candidate.id === id,
-              );
-              if (reference) onSelect(reference);
-            }}
-          />
-        </div>
+      {markdown && ready && (
+        <Tabs.List
+          className="task-panel-preview-modes"
+          aria-label={t("file_preview.mode")}
+        >
+          <Tabs.Tab value="preview">{t("file_preview.rendered")}</Tabs.Tab>
+          <Tabs.Tab value="source">{t("file_preview.source")}</Tabs.Tab>
+        </Tabs.List>
       )}
 
       <p className="task-panel-resource-notice">
         {t("file_preview.current_content_notice")}
+        {html && ready && <span>{t("file_preview.html_source_only")}</span>}
       </p>
 
       <div className="task-panel-resource-body">
@@ -100,7 +97,24 @@ export function FilePreviewView({
                 )}
               </div>
             )}
-            <pre className="task-panel-code">{state.preview.content}</pre>
+            {markdown ? (
+              <>
+                <Tabs.Panel
+                  value="preview"
+                  className="task-panel-preview-document"
+                >
+                  <Markdown textResourcesOnly>{state.preview.content}</Markdown>
+                </Tabs.Panel>
+                <Tabs.Panel
+                  value="source"
+                  className="task-panel-preview-source"
+                >
+                  <pre className="task-panel-code">{state.preview.content}</pre>
+                </Tabs.Panel>
+              </>
+            ) : (
+              <pre className="task-panel-code">{state.preview.content}</pre>
+            )}
           </>
         ) : (
           <div className="task-panel-resource-state">
@@ -120,6 +134,6 @@ export function FilePreviewView({
           </div>
         )}
       </div>
-    </section>
+    </Tabs.Root>
   );
 }
