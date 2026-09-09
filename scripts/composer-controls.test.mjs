@@ -1638,6 +1638,30 @@ test("removing the last attachment returns keyboard focus to the picker", async 
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   assert.equal(
     document.activeElement,
-    screen.getByRole("button", { name: "Add images" }),
+    screen.getByRole("button", { name: "Add files" }),
   );
+});
+
+test("generic file drafts explain the current send boundary", () => {
+  renderComposer({
+    attachmentsEnabled: true,
+    canSubmit: false,
+    draft: {
+      kind: "multimodal",
+      text: "Use this file",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "file",
+          displayName: "notes.txt",
+          sizeBytes: "128",
+        },
+      ],
+    },
+  });
+  assert.match(
+    screen.getByRole("status").textContent,
+    /only images can be sent/i,
+  );
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
 });

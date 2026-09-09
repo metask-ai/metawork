@@ -542,17 +542,21 @@ export const enUS = {
   "run.stop_failed":
     "The stop request could not be confirmed. Refresh and try again.",
   "run.stop_requested": "Stopping the current work…",
-  "attachment.add": "Add images",
+  "attachment.add": "Add files",
   "attachment.selected": "Selected attachments",
   "attachment.remove": "Remove {name}",
   "attachment.type.image": "Image",
+  "attachment.type.file": "File",
+  "attachment.file_send_unavailable":
+    "Files are added to this draft, but only images can be sent right now.",
   "attachment.reload_required":
     "Attachments are not kept after reload. Add them again before sending.",
   "attachment.skill_conflict":
     "Remove the attachments before choosing a Skill, or rewrite the leading slash as ordinary text.",
   "attachment.model_warning.image":
     "This model declares that image input is unsupported. You can still send and receive the exact result.",
-  "attachment.error.unsupported_type": "Choose PNG, JPEG, or WebP files.",
+  "attachment.error.unsupported_type":
+    "One of the selected items is not a readable regular file.",
   "attachment.error.file_too_large": "One of the selected files is too large.",
   "attachment.error.too_many_files": "You can attach up to 8 files.",
   "attachment.error.staging_capacity":
@@ -1081,6 +1085,8 @@ export const enUS = {
     "The selected skill is disabled for this task.",
   "mutation.reason.invalid_skill_arguments":
     "Review the skill arguments and try again.",
+  "mutation.reason.unsupported_attachment":
+    "Only image attachments can be sent right now.",
   "mutation.reason.capacity_reached":
     "MetaWork is at capacity. Finish or close some work, then try again.",
   "mutation.reason.shutting_down":

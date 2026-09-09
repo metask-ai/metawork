@@ -335,13 +335,20 @@ export type TaskRunInput =
       attachmentTokens: string[];
     };
 
-export type AttachmentDescriptor = {
-  token: string;
-  kind: "image";
-  format: "png" | "jpeg" | "webp";
-  displayName: string;
-  sizeBytes: string;
-};
+export type AttachmentDescriptor =
+  | {
+      token: string;
+      kind: "image";
+      format: "png" | "jpeg" | "webp";
+      displayName: string;
+      sizeBytes: string;
+    }
+  | {
+      token: string;
+      kind: "file";
+      displayName: string;
+      sizeBytes: string;
+    };
 
 export type AttachmentChooseResult =
   | { status: "cancelled" }
@@ -776,7 +783,7 @@ export type WorkbenchSnapshot = {
       enabled: boolean;
       imageFormats: Array<"png" | "jpeg" | "webp">;
       maxFiles: string;
-      maxImageBytes: string;
+      maxFileBytes: string;
       maxStagedBytes: string;
     };
   };
@@ -1142,6 +1149,7 @@ export type TaskRunReason =
   | "skill_not_found"
   | "skill_unavailable"
   | "invalid_skill_arguments"
+  | "unsupported_attachment"
   | "capacity_reached"
   | "shutting_down";
 

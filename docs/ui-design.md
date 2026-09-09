@@ -720,13 +720,13 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 运行中的输入不会发送给当前 Run，也不使用未验证的 `UiBackend.poll()` 模拟实时 steering。首版 Composer 只保存 Renderer 本地草稿，发送动作保持禁用并显示 `当前任务结束后发送`；当前 Run terminal 后由用户明确发送。不得自动提交、自动启动下一次 Run，或把草稿伪装成已排队状态。`queued` 只表示唯一已提交 Run 正在等待 Host executor，不表示当前 Run 后面还有另一条队列。未来只有在 AgentCore 发布 typed steering capability 后，才设计 `排队补充` 与 `立即打断` 的不同操作。
 
-### 8.2 图片附件
+### 8.2 文件附件
 
-Composer 工具带在模型控件之前提供一个带可访问名称的“添加附件”按钮，使用 Host 原生多选文件选择器；不提供 WebView file input、拖放或粘贴替代入口。picker 只显示 PNG、JPEG 与 WebP 候选。选择期间按钮进入单一 busy 状态，整批 staging 成功后才显示 chip；取消不改变草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip。
+Composer 工具带在模型控件之前提供一个带可访问名称的“添加文件”按钮，使用系统原生多选文件选择器并接受普通文件；不提供 WebView file input、拖放或粘贴替代入口。选择期间按钮进入单一 busy 状态，整批 staging 成功后才显示 chip；取消不改变草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip。
 
-ready 附件按选择顺序显示紧凑 chip，包含经过 Host 校验的 basename、图片格式与格式化大小，并提供逐项移除按钮。chip 不显示绝对路径、缩略图、hash、上传进度或 provider wire。文件名保持原文且服从普通用户内容方向规则；超长名称中间截断，完整安全名称通过可访问文本提供。键盘焦点按选择顺序进入移除按钮，删除后移到相邻 chip 或“添加附件”。
+ready 附件按选择顺序显示可换行的紧凑 chip，包含经过 Host 校验的 basename、文件类别与格式化大小，并提供逐项移除按钮。图片额外显示已识别格式；其他文件使用通用文件图标。chip 不显示绝对路径、缩略图、hash、上传进度或 provider wire。文件名保持原文且服从普通用户内容方向规则；超长名称截断，完整安全名称通过 title 与可访问名称提供。键盘焦点按选择顺序进入移除按钮，删除后移到相邻 chip 或“添加文件”。窄窗不得因附件列表产生页面横向滚动。
 
-Text draft 可以为空，只要至少有一个 ready 附件；非空文字固定先于全部附件提交，chip 顺序就是 media part 顺序。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
+Text draft 可以为空，只要至少有一个 ready 图片附件；非空文字固定先于全部图片附件提交，chip 顺序就是 media part 顺序。当前草稿只要含有通用文件，发送按钮必须禁用并就地说明“文件已添加，但目前只有图片可以发送”；Host 仍以 typed rejection 防御绕过。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
 
 附件 token 与 metadata 只保存在当前 Renderer connection 的内存草稿；Task 切换可以保留，document generation replacement、reload 或 disconnect 后必须清除。Renderer 只允许保存一个不含名称、大小、类型和 token 的 generic marker，使 reload 后能提示“未发送的附件需要重新选择”。文字/Skill 仍按既有 tagged session storage 保存。New task 已创建但 Run 尚未接纳时，附件草稿和文字一起迁移到真实 Task；Run 被 Product 接纳后立即清空 draft chip，timeout 先 resync snapshot且不得自动重放。
 

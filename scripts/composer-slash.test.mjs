@@ -165,6 +165,21 @@ test("Run input conversion rejects unresolved Slash outside the UI layer", () =>
     }),
     null,
   );
+  assert.equal(
+    composerDraftToRunInput({
+      kind: "multimodal",
+      text: "Read this",
+      attachments: [
+        {
+          token: "c".repeat(48),
+          kind: "file",
+          displayName: "notes.txt",
+          sizeBytes: "64",
+        },
+      ],
+    }),
+    null,
+  );
 });
 
 test("desktop Command registry is explicit and excludes CLI session controls", () => {

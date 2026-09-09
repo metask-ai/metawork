@@ -52,10 +52,14 @@ function formatAttachmentSize(value: string) {
 }
 
 function attachmentTypeLabel(
-  _attachment: ComposerAttachment,
+  attachment: ComposerAttachment,
   t: ReturnType<typeof useI18n>["t"],
 ) {
-  return t("attachment.type.image");
+  return t(
+    attachment.kind === "image"
+      ? "attachment.type.image"
+      : "attachment.type.file",
+  );
 }
 
 function attachmentErrorMessage(reason: string): MessageId {
@@ -202,6 +206,9 @@ export function ComposerFooter({
   );
   const attachmentSkillConflict =
     draft.kind === "multimodal" && parseSlashInput(draft.text) !== null;
+  const hasGenericAttachment =
+    draft.kind === "multimodal" &&
+    draft.attachments.some((attachment) => attachment.kind === "file");
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
   const sendEnabled = canSubmit && slashInput === null;
   const skillDraftCurrent =
@@ -435,7 +442,11 @@ export function ComposerFooter({
                         className="composer-attachment-kind"
                         aria-hidden="true"
                       >
-                        {attachment.format.toUpperCase()}
+                        {attachment.kind === "image" ? (
+                          attachment.format.toUpperCase()
+                        ) : (
+                          <Icon name="skill-file" />
+                        )}
                       </span>
                       <span className="composer-attachment-copy">
                         <strong dir="auto" title={attachment.displayName}>
@@ -482,6 +493,11 @@ export function ComposerFooter({
               {attachmentSkillConflict && (
                 <p className="composer-attachment-notice" role="status">
                   {t("attachment.skill_conflict")}
+                </p>
+              )}
+              {hasGenericAttachment && (
+                <p className="composer-attachment-notice" role="status">
+                  {t("attachment.file_send_unavailable")}
                 </p>
               )}
               {attachmentModelWarning && (

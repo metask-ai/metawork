@@ -1,25 +1,27 @@
-//! Transient Product-owned image staging.
+//! Transient Product-owned file staging.
 const std = @import("std");
 
 pub const Format = enum { png, jpeg, webp };
+pub const Kind = enum { file, image };
 pub const State = enum { ready, borrowed };
 
 pub const Limits = struct {
     max_files: usize,
     max_display_name_bytes: usize,
-    max_image_bytes: usize,
+    max_file_bytes: usize,
     max_staged_bytes: usize,
 };
 
 pub const Candidate = struct {
     display_name: []const u8,
-    format: Format,
+    format: ?Format,
     bytes: []const u8,
 };
 
 pub const Descriptor = struct {
     id: u64,
-    format: Format,
+    kind: Kind,
+    format: ?Format,
     display_name: []const u8,
     size_bytes: u64,
 };
@@ -48,7 +50,7 @@ pub const Error = std.mem.Allocator.Error || error{
 const Entry = struct {
     id: u64,
     state: State,
-    format: Format,
+    format: ?Format,
     display_name: []u8,
     bytes: []u8,
 };
@@ -63,7 +65,7 @@ pub const Runtime = struct {
     pub fn init(allocator: std.mem.Allocator, limits: Limits) Error!Runtime {
         if (limits.max_files == 0 or
             limits.max_display_name_bytes == 0 or
-            limits.max_image_bytes == 0 or
+            limits.max_file_bytes == 0 or
             limits.max_staged_bytes == 0)
             return error.InvalidLimits;
         const slots = try allocator.alloc(?Entry, limits.max_files);
@@ -136,12 +138,13 @@ pub const Runtime = struct {
             const slot_index = self.findIndex(id) orelse return error.UnknownAttachment;
             const entry = &self.slots[slot_index].?;
             if (entry.state != .ready) return error.AttachmentBusy;
+            if (entry.format == null) return error.UnsupportedType;
             indices[index] = slot_index;
         }
         for (indices[0..ids.len], 0..) |slot_index, index| {
             const entry = &self.slots[slot_index].?;
             entry.state = .borrowed;
-            parts[index] = .{ .id = entry.id, .format = entry.format, .bytes = entry.bytes };
+            parts[index] = .{ .id = entry.id, .format = entry.format.?, .bytes = entry.bytes };
         }
         return .{ .runtime = self, .indices = indices[0..ids.len] };
     }
@@ -164,13 +167,15 @@ pub const Runtime = struct {
         if (!validDisplayName(candidate.display_name, self.limits.max_display_name_bytes))
             return error.InvalidDisplayName;
         if (candidate.bytes.len == 0) return error.EmptyFile;
-        if (candidate.bytes.len > self.limits.max_image_bytes) return error.FileTooLarge;
-        if (!matches(candidate.format, candidate.bytes)) return error.UnsupportedType;
+        if (candidate.bytes.len > self.limits.max_file_bytes) return error.FileTooLarge;
+        if (candidate.format) |format|
+            if (!matches(format, candidate.bytes)) return error.UnsupportedType;
     }
 
     fn descriptor(_: *const Runtime, entry: Entry) Descriptor {
         return .{
             .id = entry.id,
+            .kind = if (entry.format == null) .file else .image,
             .format = entry.format,
             .display_name = entry.display_name,
             .size_bytes = entry.bytes.len,
@@ -258,7 +263,7 @@ fn testLimits() Limits {
     return .{
         .max_files = 4,
         .max_display_name_bytes = 64,
-        .max_image_bytes = 64,
+        .max_file_bytes = 64,
         .max_staged_bytes = 160,
     };
 }
@@ -319,5 +324,24 @@ test "duplicate and stale identities fail before changing any state" {
         error.UnknownAttachment,
         runtime.borrow(&[_]u64{9999}, &parts, &indices),
     );
+    try std.testing.expect(runtime.release(staged[0].id));
+}
+
+test "generic files stage but cannot be borrowed as image input" {
+    var runtime = try Runtime.init(std.testing.allocator, testLimits());
+    defer runtime.deinit();
+    const candidates = [_]Candidate{.{
+        .display_name = "notes.txt",
+        .format = null,
+        .bytes = "plain text",
+    }};
+    var output: [1]Descriptor = undefined;
+    const staged = try runtime.stageBatch(&candidates, &output);
+    try std.testing.expectEqual(Kind.file, staged[0].kind);
+    try std.testing.expectEqual(@as(?Format, null), staged[0].format);
+    const ids = [_]u64{staged[0].id};
+    var parts: [1]BorrowedPart = undefined;
+    var indices: [1]usize = undefined;
+    try std.testing.expectError(error.UnsupportedType, runtime.borrow(&ids, &parts, &indices));
     try std.testing.expect(runtime.release(staged[0].id));
 }

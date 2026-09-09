@@ -98,11 +98,11 @@ response 是以下 closed union：
 
 Product Control 使用 File Changes 专用 bounded artifact lane 按 reference 读取，不扫描 Workspace 或 Git。异步 completion 在跨 Bridge 前重新校验 Task、Run、change 与 artifact identity 仍一致；Task/Run 切换、删除、shutdown 或 reference replacement 后的旧结果只能返回 `not_recorded`。任一已接纳请求必须恰好一次 terminal response；正文和 retained payload 必须落在 Native SDK async response 与 shutdown 上界内，不进入 Snapshot、Task persistence、日志或 Renderer 缓存。
 
-## 图片 attachment commands
+## 文件 attachment commands
 
-根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, maxFiles, maxImageBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，其他 limit 是 canonical decimal `u64` string；关闭时 formats 为空，其余 limit 仍发布 Host canonical policy。Renderer 只用该对象解释选择器和本地 admission，Host 对 command 重新执行全部限制。
+根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, maxFiles, maxFileBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，表示当前可发送的图片分类；其他 limit 是 canonical decimal `u64` string。Renderer 只用该对象解释入口和本地 admission，Host 对 command 重新执行全部限制。
 
-`metawork.attachments.choose` 是 revision 1 async command，只接受空对象。Application 在当前 source/window authority 下打开原生多选 picker，随后由 Product Control attachment lane 完成整批 staging。结果严格为以下三种之一：
+`metawork.attachments.choose` 是 revision 1 async command，只接受空对象。Application 在当前 source/window authority 下打开不限制扩展名的原生多选 picker，随后由 Product Control attachment lane 完成整批 staging。结果严格为以下三种之一：
 
 ```json
 { "status": "cancelled" }
@@ -123,6 +123,17 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 }
 ```
 
+通用文件 entry 不含 `format`：
+
+```json
+{
+  "token": "opaque",
+  "kind": "file",
+  "displayName": "notes.txt",
+  "sizeBytes": "42"
+}
+```
+
 ```json
 {
   "status": "rejected",
@@ -130,11 +141,11 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 }
 ```
 
-`attachments` 在 ready 时非空且保持 picker 顺序；entry 精确使用 `kind=image`，format 只接受已发布图片格式。token 是 Bridge-owned、不可猜、connection/window/document-generation-bound 的一次性 grant，不是 Product identity 或路径。整批任一候选失败只能返回单一 rejected 并释放全部 candidate，不返回 ready 与 rejected 混合集合。
+`attachments` 在 ready 时非空且保持入口顺序；entry 是严格 tagged union：`kind=image` 必须带已发布 `format`，`kind=file` 禁止 `format`。token 是 Bridge-owned、不可猜、connection/window/document-generation-bound 的一次性 grant，不是 Product identity 或路径。整批任一候选失败只能返回单一 rejected 并释放全部 candidate，不返回 ready 与 rejected 混合集合。
 
 `metawork.attachments.release` 是同步 revision 1 command，payload 精确为 `{ token }`，返回 `{ released }`。它只撤销当前 connection 拥有且尚未 borrowed/consumed 的 grant；未知、stale 或已经释放的 token 返回 released=false，不泄露其他 connection 的存在性。disconnect、document generation replacement 与 shutdown 必须等价释放该 connection 全部 grant。
 
-`metawork.tasks.run` 在既有 `text | skill` 上原地 hard cut 增加 `{ kind: "multimodal", text, attachmentTokens }`。`text` 是 string，允许为空；`attachmentTokens` 必须为非空、有界、无重复的 string array。非空 text 成为第一个 Agent part，后续 part 按 token 数组顺序；Skill 字段和 multimodal 字段不能混合。Bridge 只校验 wire 与 grant authority，Product 决定 Task/Session admission和 token 的 borrow/consume transaction。Run 接纳前失败保留 ready grant；接纳后即使 history save、enqueue、transport 或 Agent terminal 失败也不得恢复或自动重放。
+`metawork.tasks.run` 在既有 `text | skill` 上原地 hard cut 增加 `{ kind: "multimodal", text, attachmentTokens }`。`text` 是 string，允许为空；`attachmentTokens` 必须为非空、有界、无重复的 string array。非空 text 成为第一个 Agent part，后续 part 按 token 数组顺序；Skill 字段和 multimodal 字段不能混合。Bridge 只校验 wire 与 grant authority，Product 决定 Task/Session admission和 token 的 borrow/consume transaction。任一 token 指向 `kind=file` 时 Run 返回 `reason=unsupported_attachment` 且保留全部 ready grant；Run 接纳后即使 history save、enqueue、transport 或 Agent terminal 失败也不得恢复或自动重放。
 
 Run snapshot 的 `input` 对 multimodal 精确发布 `{ kind, text, attachments, redacted }`。`text` 为 nullable string；`attachments[]` entry 精确为 `{ kind, format, displayName, sizeBytes, redacted }`，顺序与已接纳 input 一致。Snapshot 与 persistence 不含 token、路径、raw bytes、Base64、digest 或 provider wire。旧 history record 没有 attachment 字段时只解释为 text/skill 旧 Run，不从正文或文件引用猜测媒体。
 

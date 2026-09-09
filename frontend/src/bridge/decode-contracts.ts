@@ -328,6 +328,7 @@ const taskRunReasons = [
   "skill_not_found",
   "skill_unavailable",
   "invalid_skill_arguments",
+  "unsupported_attachment",
   "capacity_reached",
   "shutting_down",
 ] as const;
@@ -3349,7 +3350,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const attachmentCapability = object(
     capabilityItem.attachments,
     "$.capabilities.attachments",
-    ["enabled", "imageFormats", "maxFiles", "maxImageBytes", "maxStagedBytes"],
+    ["enabled", "imageFormats", "maxFiles", "maxFileBytes", "maxStagedBytes"],
   );
   const capabilities = {
     taskHistoryPersistence: booleanValue(
@@ -3489,9 +3490,9 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
         attachmentCapability.maxFiles,
         "$.capabilities.attachments.maxFiles",
       ),
-      maxImageBytes: positiveWireId(
-        attachmentCapability.maxImageBytes,
-        "$.capabilities.attachments.maxImageBytes",
+      maxFileBytes: positiveWireId(
+        attachmentCapability.maxFileBytes,
+        "$.capabilities.attachments.maxFileBytes",
       ),
       maxStagedBytes: positiveWireId(
         attachmentCapability.maxStagedBytes,
@@ -4541,34 +4542,38 @@ export function decodeAttachmentChooseResult(
     item.attachments,
     "$.attachments",
     (attachmentValue, path) => {
-      const attachment = object(attachmentValue, path, [
-        "token",
-        "kind",
-        "format",
-        "displayName",
-        "sizeBytes",
-      ]);
-      const kind = enumValue(attachment.kind, `${path}.kind`, [
+      const candidate = attachmentValue as JsonObject;
+      const kind = enumValue(candidate?.kind, `${path}.kind`, [
+        "file",
         "image",
       ] as const);
-      const format = enumValue(attachment.format, `${path}.format`, [
-        "png",
-        "jpeg",
-        "webp",
-      ] as const);
+      const keys =
+        kind === "image"
+          ? ["token", "kind", "format", "displayName", "sizeBytes"]
+          : ["token", "kind", "displayName", "sizeBytes"];
+      const attachment = object(attachmentValue, path, keys);
       const token = stringValue(attachment.token, `${path}.token`);
       if (!/^[0-9a-f]{48}$/.test(token))
         fail(`${path}.token`, "invalid attachment token");
-      return {
+      const common = {
         token,
-        kind,
-        format,
         displayName: nonEmptyString(
           attachment.displayName,
           `${path}.displayName`,
         ),
         sizeBytes: positiveWireId(attachment.sizeBytes, `${path}.sizeBytes`),
       };
+      return kind === "image"
+        ? {
+            ...common,
+            kind,
+            format: enumValue(attachment.format, `${path}.format`, [
+              "png",
+              "jpeg",
+              "webp",
+            ] as const),
+          }
+        : { ...common, kind };
     },
   );
   if (attachments.length === 0)

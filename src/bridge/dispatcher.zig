@@ -1003,10 +1003,6 @@ pub const Dispatcher = struct {
             return;
         };
         var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
-        const filters = [_]native_sdk.platform.FileFilter{.{
-            .name = "Images",
-            .extensions = &.{ "png", "jpg", "jpeg", "webp" },
-        }};
         const selected = if (self.automation.active()) automation: {
             const paths = self.automation.attachmentPaths() orelse {
                 respondAttachmentRejected(responder, invocation.request.id, .read_failed);
@@ -1024,8 +1020,7 @@ pub const Dispatcher = struct {
             break :user self.platform.show_open_dialog_fn(
                 self.platform.context,
                 .{
-                    .title = "Choose images",
-                    .filters = &filters,
+                    .title = "Choose files",
                     .allow_directories = false,
                     .allow_multiple = true,
                 },
@@ -1043,19 +1038,38 @@ pub const Dispatcher = struct {
             respondAttachmentRejected(responder, invocation.request.id, .too_many_files);
             return;
         }
-        const completion_id = self.reserveAttachmentStaging(
+        self.beginAttachmentStaging(
             responder,
             invocation.request.id,
             generation,
             invocation.source.window_id,
+            selected.count,
+            selected.paths,
+        );
+    }
+
+    fn beginAttachmentStaging(
+        self: *Dispatcher,
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: []const u8,
+        generation: u64,
+        window_id: native_sdk.platform.WindowId,
+        path_count: usize,
+        paths: []const u8,
+    ) void {
+        const completion_id = self.reserveAttachmentStaging(
+            responder,
+            request_id,
+            generation,
+            window_id,
         ) orelse {
-            respondAttachmentRejected(responder, invocation.request.id, .staging_capacity);
+            respondAttachmentRejected(responder, request_id, .staging_capacity);
             return;
         };
         (self.requireProductControl() catch {
             self.completeAttachmentRejected(completion_id, .shutting_down);
             return;
-        }).beginAttachmentStaging(completion_id, selected.count, selected.paths) catch |err| {
+        }).beginAttachmentStaging(completion_id, path_count, paths) catch |err| {
             self.completeAttachmentRejected(completion_id, switch (err) {
                 error.ShuttingDown => .shutting_down,
                 error.Capacity, error.OutOfMemory => .staging_capacity,
@@ -1202,11 +1216,14 @@ pub const Dispatcher = struct {
         writer.writeAll("{\"status\":\"ready\",\"attachments\":[") catch return responderEncodingFailure(responder, request_id);
         for (descriptors, issued, 0..) |descriptor, grant, index| {
             if (index != 0) writer.writeByte(',') catch return responderEncodingFailure(responder, request_id);
-            writer.print("{{\"token\":\"{s}\",\"kind\":\"{s}\",\"format\":\"{s}\",\"displayName\":", .{
+            writer.print("{{\"token\":\"{s}\",\"kind\":\"{s}\"", .{
                 grant.token,
-                "image",
-                @tagName(descriptor.format),
+                @tagName(descriptor.kind),
             }) catch return responderEncodingFailure(responder, request_id);
+            if (descriptor.format) |format|
+                writer.print(",\"format\":\"{s}\"", .{@tagName(format)}) catch
+                    return responderEncodingFailure(responder, request_id);
+            writer.writeAll(",\"displayName\":") catch return responderEncodingFailure(responder, request_id);
             std.json.Stringify.value(descriptor.display_name, .{}, &writer) catch return responderEncodingFailure(responder, request_id);
             writer.print(",\"sizeBytes\":\"{d}\"}}", .{descriptor.size_bytes}) catch return responderEncodingFailure(responder, request_id);
         }
@@ -4096,6 +4113,7 @@ fn taskRunRejection(err: anyerror) ?[]const u8 {
         error.SkillNotFound => "skill_not_found",
         error.SkillUnavailable => "skill_unavailable",
         error.InvalidSkillArguments => "invalid_skill_arguments",
+        error.UnsupportedType => "unsupported_attachment",
         error.RunCapacity, error.QueueFull, error.ProjectionCapacity => "capacity_reached",
         error.ExecutorShuttingDown => "shutting_down",
         else => null,

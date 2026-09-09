@@ -7279,15 +7279,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .composer-attachments {
   display: flex;
   padding: 3px 5px 0;
-  overflow-x: auto;
+  flex-wrap: wrap;
   gap: 7px;
-  scrollbar-width: thin;
 }
 
 .composer-attachment {
   display: grid;
-  min-width: 172px;
+  min-width: min(172px, 100%);
   max-width: 248px;
+  flex: 1 1 172px;
   padding: 6px 5px 6px 8px;
   grid-template-columns: auto minmax(0, 1fr) 24px;
   align-items: center;
@@ -7303,6 +7303,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-family: var(--font-mono);
   font-size: var(--text-micro);
   font-weight: 760;
+}
+
+.composer-attachment-kind svg {
+  display: block;
+  width: 16px;
+  height: 16px;
 }
 
 .composer-attachment-copy {
