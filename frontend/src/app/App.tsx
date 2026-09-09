@@ -69,10 +69,8 @@ import type {
 import { useTaskPanelSession } from "../features/task-panel/useTaskPanelSession.ts";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
-import {
-  TaskContent,
-  runFileReferences,
-} from "../features/tasks/TaskContent.tsx";
+import { TaskContent } from "../features/tasks/TaskContent.tsx";
+import { runFileReferences } from "../workbench/run-file-references.ts";
 import {
   useNewTaskDrafts,
   useTaskDrafts,

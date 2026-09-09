@@ -1,3 +1,4 @@
+import { runFileReferences } from "../../workbench/run-file-references.ts";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import type {
@@ -75,24 +76,6 @@ function terminalMessage(
     case "dependency_contract_failure":
       return "run.terminal.partial_failed";
   }
-}
-
-export function runFileReferences(run: RunView): FileReferenceView[] {
-  const seen = new Set<string>();
-  const references: FileReferenceView[] = [];
-  const tools = [...run.tools].sort((left, right) => {
-    const leftOrder = BigInt(left.order);
-    const rightOrder = BigInt(right.order);
-    return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
-  });
-  for (const tool of tools) {
-    for (const reference of tool.fileRefs) {
-      if (seen.has(reference.id)) continue;
-      seen.add(reference.id);
-      references.push(reference);
-    }
-  }
-  return references;
 }
 
 function outcomeState(
