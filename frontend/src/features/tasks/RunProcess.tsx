@@ -1,6 +1,10 @@
 import { useId, type ReactNode } from "react";
 
-import type { RunActivity, ToolView } from "../../bridge/contracts.ts";
+import type {
+  FileReferenceView,
+  RunActivity,
+  ToolView,
+} from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
@@ -146,9 +150,14 @@ function ProcessHeader({
 function ProcessTool({
   tool,
   onOpen,
+  onPreviewFile,
 }: {
   tool: ToolView;
   onOpen?: (opener: HTMLButtonElement) => void;
+  onPreviewFile?: (
+    reference: FileReferenceView,
+    opener: HTMLButtonElement,
+  ) => void;
 }) {
   const { locale, t } = useI18n();
   const elapsed = BigInt(tool.elapsedMs);
@@ -184,6 +193,25 @@ function ProcessTool({
       ) : (
         <div className="run-process-tool">{content}</div>
       )}
+      {onPreviewFile && tool.fileRefs.length > 0 && (
+        <div className="run-process-files">
+          {tool.fileRefs.map((reference) => (
+            <button
+              key={reference.id}
+              type="button"
+              className="run-process-file focus-ring"
+              title={reference.displayPath}
+              aria-label={t("file_preview.open", {
+                path: reference.displayPath,
+              })}
+              onClick={(event) => onPreviewFile(reference, event.currentTarget)}
+            >
+              <Icon name="skill-file" />
+              <span>{reference.displayPath}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </li>
   );
 }
@@ -208,11 +236,16 @@ export function RunProcess({
   expanded,
   onExpandedChange,
   onOpenTool,
+  onPreviewFile,
 }: {
   presentation: RunPresentation;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
   onOpenTool?: (tool: ToolView, opener: HTMLButtonElement) => void;
+  onPreviewFile?: (
+    reference: FileReferenceView,
+    opener: HTMLButtonElement,
+  ) => void;
 }) {
   const { locale, t } = useI18n();
   const bodyId = useId();
@@ -255,6 +288,7 @@ export function RunProcess({
                       ? (opener) => onOpenTool(tool, opener)
                       : undefined
                   }
+                  onPreviewFile={onPreviewFile}
                 />
               ))}
             </ul>

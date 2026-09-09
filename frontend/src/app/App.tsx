@@ -50,7 +50,7 @@ import { ScheduledTasksPage } from "../features/scheduled-tasks/ScheduledTasksPa
 import { ToolDetailView } from "../features/task-panel/ToolDetailView.tsx";
 import { TaskInformation } from "../features/tasks/TaskInformation.tsx";
 import { ConversationContext } from "../features/composer/ConversationContext.tsx";
-import { runFileReferences } from "../workbench/run-file-references.ts";
+import { findRunFileReference } from "../workbench/run-file-references.ts";
 import { TaskPanel } from "../features/task-panel/TaskPanel.tsx";
 import {
   FilePreviewView,
@@ -195,7 +195,6 @@ type ContinuationWaiter = {
 type FilePreviewIdentity = {
   taskId: string;
   runId: string;
-  references: FileReferenceView[];
   reference: FileReferenceView;
   requestGeneration: number;
 };
@@ -343,7 +342,6 @@ export default function App() {
   function requestFilePreview(
     taskId: string,
     runId: string,
-    references: FileReferenceView[],
     reference: FileReferenceView,
   ) {
     const requestGeneration = filePreviewGeneration.current + 1;
@@ -351,7 +349,6 @@ export default function App() {
     const identity: FilePreviewIdentity = {
       taskId,
       runId,
-      references,
       reference,
       requestGeneration,
     };
@@ -416,10 +413,7 @@ export default function App() {
     const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
     const run = task?.runs.find((candidate) => candidate.id === runId);
     if (!task || !run || activeTaskIdRef.current !== taskId) return;
-    const references = runFileReferences(run);
-    const selected = references.find(
-      (candidate) => candidate.id === reference.id,
-    );
+    const selected = findRunFileReference(run, reference.id);
     if (!selected) return;
     setRightPanelOpen(true);
     taskPanelOpener.current = opener;
@@ -430,25 +424,9 @@ export default function App() {
       runId,
       referenceId: selected.id,
     });
-    requestFilePreview(taskId, runId, references, selected);
+    requestFilePreview(taskId, runId, selected);
     window.requestAnimationFrame(() =>
       document.getElementById("task-panel-title")?.focus(),
-    );
-  }
-
-  function selectFilePreview(reference: FileReferenceView) {
-    if (filePreview.kind === "closed") return;
-    taskPanel.selectTarget({
-      kind: "preview",
-      taskId: filePreview.taskId,
-      runId: filePreview.runId,
-      referenceId: reference.id,
-    });
-    requestFilePreview(
-      filePreview.taskId,
-      filePreview.runId,
-      filePreview.references,
-      reference,
     );
   }
 
@@ -457,7 +435,6 @@ export default function App() {
     requestFilePreview(
       filePreview.taskId,
       filePreview.runId,
-      filePreview.references,
       filePreview.reference,
     );
   }
@@ -621,15 +598,14 @@ export default function App() {
       const run = task?.runs.find(
         (candidate) => candidate.id === current.runId,
       );
-      const references = run ? runFileReferences(run) : [];
-      const reference = references.find(
-        (candidate) => candidate.id === current.reference.id,
-      );
+      const reference = run
+        ? findRunFileReference(run, current.reference.id)
+        : undefined;
       if (!task || !run || !reference) {
         filePreviewGeneration.current += 1;
         return { kind: "closed" };
       }
-      return { ...current, references, reference };
+      return { ...current, reference };
     });
   }, [snapshot.revision, snapshot.tasks]);
 
@@ -2874,7 +2850,6 @@ export default function App() {
     filePreview.kind === "closed"
       ? null
       : {
-          references: filePreview.references,
           selected: filePreview.reference,
           phase: filePreview.kind === "loading" ? "loading" : "settled",
           preview: filePreview.kind === "loading" ? null : filePreview.preview,
@@ -3172,7 +3147,6 @@ export default function App() {
               filePreviewViewState ? (
               <FilePreviewView
                 state={filePreviewViewState}
-                onSelect={selectFilePreview}
                 onRefresh={refreshFilePreview}
               />
             ) : panelTarget.kind === "review" &&

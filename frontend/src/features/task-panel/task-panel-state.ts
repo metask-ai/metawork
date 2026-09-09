@@ -1,4 +1,5 @@
 import type { TaskView } from "../../bridge/contracts.ts";
+import { findRunFileReference } from "../../workbench/run-file-references.ts";
 
 type RunTarget = { taskId: string; runId: string };
 export type TaskPanelTarget =
@@ -20,9 +21,7 @@ export function resolveTaskPanelTarget(
   const run = task.runs.find((candidate) => candidate.id === target.runId);
   if (!run) return emptyTaskPanelTarget;
   if (target.kind === "preview")
-    return run.tools.some((tool) =>
-      tool.fileRefs.some((reference) => reference.id === target.referenceId),
-    )
+    return findRunFileReference(run, target.referenceId)
       ? target
       : emptyTaskPanelTarget;
   if (target.kind === "tool")

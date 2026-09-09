@@ -1053,7 +1053,7 @@ test("typed Run activity uses safe localized labels", () => {
   assert.doesNotMatch(stoppingContent, />正在分析</);
 });
 
-test("Run file references render as preview entry without change semantics", () => {
+test("Run file previews belong to expanded tool operations, never a reply footer", () => {
   const referenced = task({
     currentRunId: "0",
     currentRunPhase: null,
@@ -1067,39 +1067,63 @@ test("Run file references render as preview entry without change semantics", () 
           redacted: false,
           provisionalRedacted: false,
         },
-        tools: [
-          {
-            id: "tool-1",
-            order: "1",
-            name: "Read",
-            input: "{}",
-            progress: "",
-            content: "ok",
-            state: "completed",
-            isError: false,
-            elapsedMs: "1",
-            inputTruncated: false,
-            progressTruncated: false,
-            contentTruncated: false,
-            redacted: false,
+        tools: Array.from({ length: 8 }, (_, index) =>
+          technicalTool({
+            id: `tool-${index}`,
+            order: String(index + 1),
             fileRefs: [
               {
-                id: "file-1",
-                title: "main.zig",
-                displayPath: "src/main.zig",
+                id: `file-${index}`,
+                title: "index.html",
+                displayPath: "index.html",
               },
             ],
-          },
-        ],
+          }),
+        ),
       }),
     ],
   });
-  const markup = renderTaskContent(referenced);
-  assert.match(markup, />Referenced files</);
-  assert.match(markup, /src\/main\.zig/);
-  const references = markup.match(/<footer[\s\S]*?<\/footer>/)?.[0];
-  assert.ok(references);
-  assert.doesNotMatch(references, /Files changed|modified|Output/);
+  const previews = [],
+    details = [];
+  render(
+    taskContentElement(referenced, "1", {
+      onPreviewFile: (...args) => previews.push(args),
+      onOpenTool: (...args) => details.push(args),
+    }),
+  );
+  assert.equal(document.querySelector(".ai-exchange footer"), null);
+  assert.equal(
+    screen.queryByRole("button", { name: "Preview index.html" }),
+    null,
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Work process/ }));
+  const rows = [...document.querySelectorAll(".run-process-tools > li")];
+  assert.equal(rows.length, 8);
+  for (const [index, row] of rows.entries()) {
+    const preview = within(row).getByRole("button", {
+      name: "Preview index.html",
+    });
+    const detail = within(row).getByRole("button", {
+      name: "View details for Read",
+    });
+    assert.equal(preview.parentElement.closest("button"), null);
+    fireEvent.click(preview);
+    assert.equal(details.length, index);
+    assert.deepEqual(previews[index].slice(0, 3), [
+      "3",
+      "9",
+      referenced.runs[0].tools[index].fileRefs[0],
+    ]);
+    assert.equal(previews[index][3], preview);
+    fireEvent.click(detail);
+    assert.deepEqual(details[index], ["9", `tool-${index}`, detail]);
+  }
+  fireEvent.click(screen.getByRole("button", { name: /Work process/ }));
+  assert.equal(
+    screen.queryByRole("button", { name: "Preview index.html" }),
+    null,
+  );
+  assert.equal(document.querySelector(".ai-exchange footer"), null);
 });
 
 test("Run File Changes summary is capability-gated and preserves incomplete zero-record truth", () => {
@@ -1243,18 +1267,6 @@ test("Task Panel labels current file content distinctly from recorded diffs", ()
     localizedView(
       createElement(FilePreviewView, {
         state: {
-          references: [
-            {
-              id: "file-1",
-              title: "main.zig",
-              displayPath: "src/main.zig",
-            },
-            {
-              id: "file-2",
-              title: "types.zig",
-              displayPath: "src/types.zig",
-            },
-          ],
           selected: {
             id: "file-1",
             title: "main.zig",
@@ -1268,14 +1280,13 @@ test("Task Panel labels current file content distinctly from recorded diffs", ()
             redacted: false,
           },
         },
-        onSelect() {},
         onRefresh() {},
       }),
     ),
   );
   assert.match(markup, />Current file</);
   assert.match(markup, /Current contents; they may differ/);
-  assert.match(markup, /aria-label="Referenced files"/);
+  assert.doesNotMatch(markup, /role="combobox"|Referenced files/);
   assert.match(markup, /const ready = true;/);
   assert.doesNotMatch(markup, /Recorded diff|role="dialog"|backdrop/);
 });
@@ -1750,6 +1761,19 @@ async function renderAppFixture(ctx, width = 1440) {
   };
 }
 
+// Preview entry points are available only after explicitly expanding the process.
+function filePreviewOpener(path) {
+  const name = `Preview ${path}`;
+  if (!screen.queryByRole("button", { name })) {
+    const header = document.querySelector(
+      '.run-process-header[aria-expanded="false"]',
+    );
+    assert.ok(header);
+    fireEvent.click(header);
+  }
+  return screen.getByRole("button", { name });
+}
+
 test("permanent panel toggle opens an empty surface without overview or automatic reads", async (ctx) => {
   const { snapshot, previews, diffs, publish } = await renderAppFixture(ctx);
   await screen.findByRole("button", { name: /First task/ });
@@ -1765,7 +1789,7 @@ test("permanent panel toggle opens an empty surface without overview or automati
   assert.equal(panel().queryByText("Overview"), null);
   assert.equal(previews.length, 0);
   assert.equal(diffs.length, 0);
-  fireEvent.click(screen.getByRole("button", { name: "Preview a.txt" }));
+  fireEvent.click(filePreviewOpener("a.txt"));
   assert.deepEqual(previews[0].ids, ["3", "7", "ref-a"]);
   fireEvent.click(toggle);
   await act(async () =>
@@ -1817,7 +1841,7 @@ test("layout visibility and width survive Task changes, invalidation, and non-Ta
   fireEvent.keyDown(resize, { key: "ArrowLeft" });
   const width = shell.style.getPropertyValue("--right-column-width");
   assert.equal(width, "416px");
-  fireEvent.click(screen.getByRole("button", { name: "Preview a.txt" }));
+  fireEvent.click(filePreviewOpener("a.txt"));
   snapshot.tasks[0].runs[0].tools = [];
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
@@ -1874,8 +1898,7 @@ test("App rejects late preview/diff responses after close, replacement, and Task
   assert.ok(
     screen.getByRole("button", { name: "Open side panel" }).disabled === false,
   );
-  const openPreview = () =>
-    fireEvent.click(screen.getByRole("button", { name: "Preview a.txt" }));
+  const openPreview = () => fireEvent.click(filePreviewOpener("a.txt"));
   const ready = (content) => ({
     state: "ready",
     content,
@@ -1962,6 +1985,44 @@ test("App rejects late preview/diff responses after close, replacement, and Task
   cleanup();
 });
 
+test("App previews exact operation references, rejects superseded reads, and refreshes only the current file", async (ctx) => {
+  const { previews } = await renderAppFixture(ctx);
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  const openers = [filePreviewOpener("a.txt"), filePreviewOpener("b.txt")];
+  fireEvent.click(openers[0]);
+  fireEvent.click(openers[1]);
+  assert.deepEqual(
+    previews.map((request) => request.ids),
+    [
+      ["3", "7", "ref-a"],
+      ["3", "7", "ref-b"],
+    ],
+  );
+  const ready = (content) => ({
+    state: "ready",
+    content,
+    redacted: false,
+    truncated: false,
+  });
+  await act(async () => previews[1].resolve(ready("selected reference")));
+  await act(async () => previews[0].resolve(ready("superseded reference")));
+  assert.ok(screen.getByText("selected reference"));
+  assert.equal(screen.queryByText("superseded reference"), null);
+  const panel = within(document.querySelector("#task-panel"));
+  assert.equal(panel.queryByRole("combobox"), null);
+  fireEvent.click(panel.getByRole("button", { name: "Refresh" }));
+  assert.deepEqual(previews[2].ids, ["3", "7", "ref-b"]);
+  assert.equal(screen.queryByText("selected reference"), null);
+  await act(async () => previews[2].resolve(ready("refreshed reference")));
+  assert.ok(screen.getByText("refreshed reference"));
+  fireEvent.click(panel.getByRole("button", { name: "Close side panel" }));
+  fireEvent.click(openers[1]);
+  assert.deepEqual(previews[3].ids, ["3", "7", "ref-b"]);
+  assert.equal(screen.queryByText("refreshed reference"), null);
+  await act(async () => previews[3].resolve(ready("explicit reread")));
+  assert.ok(screen.getByText("explicit reread"));
+});
+
 test("App attention only locates the original approval in docked and overlay layouts", async (ctx) => {
   for (const width of [1440, 600]) {
     const { snapshot, previews, publish } = await renderAppFixture(ctx, width);
@@ -1992,7 +2053,7 @@ test("App attention only locates the original approval in docked and overlay lay
     await screen.findByRole("button", { name: "Needs your attention" });
     assert.ok(document.querySelector("#task-panel") === null);
     assert.ok(document.activeElement === info);
-    fireEvent.click(screen.getByRole("button", { name: "Preview a.txt" }));
+    fireEvent.click(filePreviewOpener("a.txt"));
     const panel = document.querySelector("#task-panel");
     assert.equal(
       document.querySelector(".app-window").dataset.rightPanelDocked,
@@ -2053,7 +2114,7 @@ test("App attention only locates the original approval in docked and overlay lay
 test("App Escape returns to the opener, or the permanent toggle when that opener disappears", async (ctx) => {
   const { previews } = await renderAppFixture(ctx);
   fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
-  const opener = await screen.findByRole("button", { name: "Preview a.txt" });
+  const opener = filePreviewOpener("a.txt");
   fireEvent.click(opener);
   await act(
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
@@ -2076,7 +2137,10 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
   await act(
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
   );
-  opener.disabled = true;
+  fireEvent.click(
+    document.querySelector('.run-process-header[aria-expanded="true"]'),
+  );
+  assert.equal(opener.isConnected, false);
   fireEvent.keyDown(screen.getByRole("heading", { name: "File preview" }), {
     key: "Escape",
   });
@@ -2087,7 +2151,6 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
     document.activeElement ===
       screen.getByRole("button", { name: "Open side panel" }),
   );
-  opener.disabled = false;
   await act(async () => {
     for (const request of previews)
       request.resolve({

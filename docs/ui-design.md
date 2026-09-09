@@ -525,7 +525,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 7.1 内容模型
 
-Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Assistant process narrative → Live status → Intervention → Response → File references → Technical work evidence → Terminal notice`，不存在的部分不占位。process narrative 按 Host 保存的 closed commentary group 顺序连续承载多个 Markdown block，并在其后承载未定性的可回滚 provisional，是用户理解 Agent 当前方向的主阅读内容；block 只用正文留白区分，不增加卡片、时间戳、Tool 标签或阶段标题。live status 是位于当前过程底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 才承载按 Host order 排列的 Tool 摘要，并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Response 是已由 Host 定性为 final/partial 的正式主阅读内容。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
+Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Assistant process narrative → Live status → Intervention → Response → Technical work evidence → Terminal notice`，不存在的部分不占位。process narrative 按 Host 保存的 closed commentary group 顺序连续承载多个 Markdown block，并在其后承载未定性的可回滚 provisional，是用户理解 Agent 当前方向的主阅读内容；block 只用正文留白区分，不增加卡片、时间戳、Tool 标签或阶段标题。live status 是位于当前过程底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 才承载按 Host order 排列的 Tool 摘要，并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Response 是已由 Host 定性为 final/partial 的正式主阅读内容。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
 
 ### 7.2 Agent 对话渲染机制
 
@@ -557,8 +557,7 @@ AgentCore typed CoreEvent
 | Active process surface   | Run 为 queued/running/waiting UI/stopping                  | 唯一 live status 原位替换；存在 Tool 时同一 surface 才可展开技术行   |
 | Intervention             | 当前 Run 存在 pending UI                                   | 只显示唯一可操作控件，不伪装成 Assistant 文本                        |
 | Response                 | Host 已发布非空 final/partial response                     | 安全 Markdown；出现不等于正式 Product terminal 已发布                |
-| File references          | Host 发布可预览 reference                                  | 属于该 Run 的结果上下文，不推断 FileChange/Output                    |
-| Terminal process surface | Run 已 terminal 且存在 Tool record                         | 位于 response/reference 之后，弱化为默认折叠的“工作过程 · N 项操作”  |
+| Terminal process surface | Run 已 terminal 且存在 Tool record                         | 位于 response 之后，弱化为默认折叠的“工作过程 · N 项操作”  |
 | Terminal notice          | partial、非 completed outcome 或完成但无 response          | 与 partial 合并为唯一准确提示，不重复成功结果                        |
 
 `RunProcess` 是 active 与 terminal 共用的同一 presentation surface，但生命周期位置和职责不同：
@@ -569,17 +568,15 @@ active Run:
   RunProcess = live status header + optional collapsed Tool body
   intervention
   response
-  references
 
 terminal Run:
   narrative
   response
-  references
   RunProcess = weak technical summary + optional collapsed Tool body
   terminal notice
 ```
 
-active→terminal 时，live activity 必须消失，technical evidence 移到正式回复和文件引用之后；Task+Run disclosure choice 保持不变，不因 revision、Tool completion 或 terminal 自动展开/折叠。没有 Tool 的 terminal Run 不保留空 process surface。
+active→terminal 时，live activity 必须消失，technical evidence 移到正式回复之后；Task+Run disclosure choice 保持不变，不因 revision、Tool completion 或 terminal 自动展开/折叠。没有 Tool 的 terminal Run 不保留空 process surface。
 
 #### Output projection 与可见迁移
 
@@ -877,7 +874,7 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的档�
 - Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后只读展示固定 permission profile（受 capability gate 控制）与创建时 MCP 三态，不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
 - pendingUi 派生“需要处理”定位入口，不存已读或自动展开记忆；只有原始主区审批提供操作按钮。用户点击定位时，overlay 先关闭再滚动/聚焦原请求；停靠面板保持。新请求自身不触发滚动、焦点移动或面板开合，全宽覆盖时定位入口仍可达。
 
-右栏显隐不属于内容目标。内容可以为空、当前文件预览、指定 Tool 详情或同 Run 修改审查，各内容互斥挂载；未选择有效对象时呈现通用空态。文件引用和记录审查保留所属 Run 的原有入口，Tool 保留工作过程定位入口；不扫描文件系统、不自动读取正文。目标只保存身份，不复制 Tool 或 Snapshot 正文。Review 包含记录列表和可选的单条 recorded diff，返回差异来源列表不保留隐藏 diff 正文；不维护并行标签或旧概览兼容开关。
+右栏显隐不属于内容目标。内容可以为空、当前文件预览、指定 Tool 详情或同 Run 修改审查，各内容互斥挂载；未选择有效对象时呈现通用空态。文件预览和 Tool 详情保留工作过程的对应操作入口，记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。目标只保存身份，不复制 Tool 或 Snapshot 正文。Review 包含记录列表和可选的单条 recorded diff，返回差异来源列表不保留隐藏 diff 正文；不维护并行标签或旧概览兼容开关。
 
 打开任何对象替换当前模式；差异可返回该 Run 的有效 Review 列表。关闭右栏清空目标和正文；再次打开保持空态，只有显式选择具体对象才展示详情，不恢复旧正文。切换 Task 清空旧目标，右栏保持用户已选择的显隐；无 Task 或离开任务页面时呈现空态。普通 Run 开始、终态和 Snapshot revision 不关闭仍有效的详情。失效 diff 回到仍有效的原 Review 列表，列表或其他目标失效则清空目标；目标有效性不控制右栏显隐。
 
@@ -889,12 +886,12 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
 ## 12. 文件预览、文件变更与结果文件
 
-### 12.1 相关文件预览
+### 12.1 文件预览
 
 > Capability：**当前**。入口只来自 AgentCore 已发布并由 Workbench 持久化的结构化 `tool_result.file_refs`；它是按需读取当前文件内容的只读能力，不是 Files changed 或 Output。
 
-- 每个 Run 按 `tool order → fileRefs order` 聚合并按稳定 reference id 去重，在 Assistant 回复之后显示紧凑的“相关文件”footer；没有结构化引用时不显示入口，不展示 Tool 卡片、kind、range、language、变更类型或 Run ID；
-- 文件按钮显示 Workspace 相对 `displayPath`，具备至少 44px 点击高度、可见键盘焦点和完整 accessible name；点击后在 Task Panel 打开独占文件预览。多文件时在资源标题下使用同一 Run 的紧凑选择器，不增加标签；
+- 文件预览入口仅出现在用户已展开的工作过程对应工具操作旁，按该 Tool 的 `fileRefs` 顺序显示；与 Tool 详情按钮独立，不嵌套交互控件。没有结构化引用时不占位，不把全部引用聚合到回复 footer 或右栏列表；不同操作保留各自的引用来源，不按名称合并，不从正文或 Tool 文本识别路径；
+- 文件按钮显示 Host 提供的 `displayPath`，具备至少 44px 点击高度、可见键盘焦点和完整 accessible name，长路径在窄窗内可换行。点击后按精确引用身份在 Task Panel 打开独占预览；正文只显示所选文件，不提供全部引用选择器。切换文件从对应工具操作的入口发起，不需要先打开 Tool 详情；
 - 资源标题区明确标为“当前文件”，显示当前路径和刷新动作；正文固定说明“显示当前文件内容，不是本次运行时的版本”。正文使用中性等宽文本、保留空白并允许自身横向滚动；不做语法高亮、diff、行号、range 高亮、自动刷新或文件 watcher；
 - UI-only `loading` 不进入 Host wire；Host 状态精确映射为 `ready | missing | restricted | unsupported | changing | error`。`changing` 与 `error` 可以显式重试，其他非 ready 状态只解释原因且正文必须为空；`truncated` 和 `redacted` 以文字说明，不只依赖颜色；
 - Renderer 每次打开、切换文件或刷新都推进 request generation。关闭预览或面板、切换对象或 Task、reference 从新 snapshot 消失或后续请求开始后，旧 Promise 即使完成也不得覆盖当前内容；非活动资源正文必须卸载并清除已读取 bytes，显式重开时重新请求；

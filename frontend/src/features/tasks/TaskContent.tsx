@@ -1,4 +1,3 @@
-import { runFileReferences } from "../../workbench/run-file-references.ts";
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
@@ -271,7 +270,6 @@ export function TaskContent({
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
-        const fileReferences = runFileReferences(run);
         const disclosureKey = `${task.id}:${run.id}`;
         const disclosure = observeRunProcessDisclosure(
           processDisclosure.current.get(disclosureKey),
@@ -325,6 +323,9 @@ export function TaskContent({
                   onOpenTool={(tool: ToolView, opener) =>
                     onOpenTool(run.id, tool.id, opener)
                   }
+                  onPreviewFile={(reference, opener) =>
+                    onPreviewFile(task.id, run.id, reference, opener)
+                  }
                 />
                 {fileChangesEnabled && run.fileChanges && (
                   <RunFileChangesSummary
@@ -358,37 +359,6 @@ export function TaskContent({
                 )}
               </Message>
             )}
-            {fileReferences.length > 0 && (
-              <footer className="ml-11 flex flex-wrap items-center gap-2 border-l-2 border-(--ui-border) py-1 pl-3">
-                <span className="text-xs font-medium text-(--ui-content-muted)">
-                  {t("file_preview.references")}
-                </span>
-                {fileReferences.map((reference) => (
-                  <button
-                    key={reference.id}
-                    type="button"
-                    className="focus-ring inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-lg border border-(--ui-border) bg-(--ui-surface-panel) px-3 py-2 text-xs text-(--ui-content-primary) hover:bg-(--ui-action-hover-surface)"
-                    title={reference.displayPath}
-                    aria-label={t("file_preview.open", {
-                      path: reference.displayPath,
-                    })}
-                    onClick={(event) =>
-                      onPreviewFile(
-                        task.id,
-                        run.id,
-                        reference,
-                        event.currentTarget,
-                      )
-                    }
-                  >
-                    <Icon name="skill-file" />
-                    <span className="max-w-72 truncate font-mono">
-                      {reference.displayPath}
-                    </span>
-                  </button>
-                ))}
-              </footer>
-            )}
             {!presentation.active && (
               <>
                 <RunProcess
@@ -397,6 +367,9 @@ export function TaskContent({
                   onExpandedChange={setProcessExpanded}
                   onOpenTool={(tool: ToolView, opener) =>
                     onOpenTool(run.id, tool.id, opener)
+                  }
+                  onPreviewFile={(reference, opener) =>
+                    onPreviewFile(task.id, run.id, reference, opener)
                   }
                 />
                 {fileChangesEnabled && run.fileChanges && (

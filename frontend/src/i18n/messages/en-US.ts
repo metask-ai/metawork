@@ -642,7 +642,6 @@ export const enUS = {
   "file_preview.title": "File preview",
   "file_preview.loading": "Loading preview…",
   "file_preview.close": "Close file preview",
-  "file_preview.references": "Referenced files",
   "file_preview.open": "Preview {path}",
   "file_preview.refresh": "Refresh",
   "file_preview.retry": "Retry",

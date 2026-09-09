@@ -1,11 +1,9 @@
 import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { SelectField } from "../../components/ui/select.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 export type FilePreviewViewState = {
-  references: FileReferenceView[];
   selected: FileReferenceView;
   phase: "loading" | "settled";
   preview: FilePreview | null;
@@ -13,11 +11,9 @@ export type FilePreviewViewState = {
 
 export function FilePreviewView({
   state,
-  onSelect,
   onRefresh,
 }: {
   state: FilePreviewViewState;
-  onSelect: (reference: FileReferenceView) => void;
   onRefresh: () => void;
 }) {
   const { t } = useI18n();
@@ -56,25 +52,6 @@ export function FilePreviewView({
           {t("file_preview.refresh")}
         </Button>
       </header>
-
-      {state.references.length > 1 && (
-        <div className="task-panel-resource-switcher">
-          <SelectField
-            value={state.selected.id}
-            options={state.references.map((reference) => ({
-              value: reference.id,
-              label: reference.displayPath,
-            }))}
-            aria-label={t("file_preview.references")}
-            onValueChange={(id) => {
-              const reference = state.references.find(
-                (candidate) => candidate.id === id,
-              );
-              if (reference) onSelect(reference);
-            }}
-          />
-        </div>
-      )}
 
       <p className="task-panel-resource-notice">
         {t("file_preview.current_content_notice")}

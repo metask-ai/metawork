@@ -2372,6 +2372,39 @@ button.run-process-tool:hover {
   white-space: nowrap;
 }
 
+.run-process-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 12px;
+  padding-left: 15px;
+}
+
+.run-process-file {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ui-content-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  text-align: left;
+  cursor: pointer;
+}
+
+.run-process-file:hover {
+  background: var(--ui-action-hover-surface);
+}
+
+.run-process-file > span {
+  overflow-wrap: anywhere;
+}
+
 .ai-message[data-role="assistant"][data-streaming="true"]::after {
   display: inline-block;
   width: 5px;
@@ -7939,16 +7972,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-panel-review-header p {
   margin: 4px 0 0;
   color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-}
-
-.task-panel-resource-switcher {
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--ui-border);
-}
-
-.task-panel-resource-switcher [role="combobox"] {
-  font-family: var(--font-mono);
   font-size: var(--text-micro);
 }
 

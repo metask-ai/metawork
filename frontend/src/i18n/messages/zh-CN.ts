@@ -586,7 +586,6 @@ export const zhCN: Record<MessageId, string> = {
   "file_preview.title": "文件预览",
   "file_preview.loading": "正在加载预览…",
   "file_preview.close": "关闭文件预览",
-  "file_preview.references": "相关文件",
   "file_preview.open": "预览 {path}",
   "file_preview.refresh": "刷新",
   "file_preview.retry": "重试",
