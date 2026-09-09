@@ -1156,6 +1156,7 @@ function renderComposer(overrides = {}) {
       unavailableReason: null,
       draft,
       attachmentsEnabled: false,
+      attachmentMaxFileBytes: "3750000",
       attachmentBusy: false,
       attachmentError: null,
       attachmentModelWarning: null,
@@ -1664,6 +1665,28 @@ test("generic file drafts explain the current send boundary", () => {
     /only images can be sent/i,
   );
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+});
+
+test("file size rejection displays the Host limit and preserves ready chips", () => {
+  renderComposer({
+    attachmentsEnabled: true,
+    attachmentMaxFileBytes: "3750000",
+    attachmentError: "file_too_large",
+    draft: {
+      kind: "multimodal",
+      text: "keep draft",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "file",
+          displayName: "ready.txt",
+          sizeBytes: "25",
+        },
+      ],
+    },
+  });
+  assert.match(screen.getByRole("alert").textContent, /3\.75 MB/);
+  assert.ok(screen.getByText("ready.txt"));
 });
 
 test("file drag highlights the active Composer and hands the drop files to its input owner", () => {

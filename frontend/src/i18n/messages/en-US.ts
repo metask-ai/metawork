@@ -563,7 +563,8 @@ export const enUS = {
     "This model declares that image input is unsupported. You can still send and receive the exact result.",
   "attachment.error.unsupported_type":
     "One of the selected items is not a readable regular file.",
-  "attachment.error.file_too_large": "One of the selected files is too large.",
+  "attachment.error.file_too_large":
+    "A selected file exceeds the per-file limit ({limit} MB).",
   "attachment.error.too_many_files": "You can attach up to 8 files.",
   "attachment.error.staging_capacity":
     "There is not enough attachment space. Remove a file and try again.",

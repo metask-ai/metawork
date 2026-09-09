@@ -518,7 +518,8 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.model_warning.image":
     "此模型声明不支持图片输入；仍可发送，并以实际返回结果为准。",
   "attachment.error.unsupported_type": "所选项目中有无法读取的普通文件。",
-  "attachment.error.file_too_large": "所选文件中有文件超过大小限制。",
+  "attachment.error.file_too_large":
+    "所选文件超过单文件大小上限（{limit} MB）。",
   "attachment.error.too_many_files": "最多可添加 8 个文件。",
   "attachment.error.staging_capacity": "附件暂存空间不足，请移除文件后重试。",
   "attachment.error.read_failed": "无法读取所选文件中的某个文件。",

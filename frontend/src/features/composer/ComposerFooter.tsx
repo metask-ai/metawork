@@ -85,6 +85,7 @@ export function ComposerFooter({
   unavailableReason,
   draft,
   attachmentsEnabled,
+  attachmentMaxFileBytes,
   attachmentBusy,
   attachmentError,
   attachmentModelWarning,
@@ -133,6 +134,7 @@ export function ComposerFooter({
   unavailableReason: TaskView["continuationUnavailableReason"];
   draft: ComposerDraft;
   attachmentsEnabled: boolean;
+  attachmentMaxFileBytes: string;
   attachmentBusy: boolean;
   attachmentError: string | null;
   attachmentModelWarning: "image" | null;
@@ -837,7 +839,11 @@ export function ComposerFooter({
         </Composer>
         {attachmentError && (
           <p className="composer-attachment-error" role="alert">
-            {t(attachmentErrorMessage(attachmentError))}
+            {t(attachmentErrorMessage(attachmentError), {
+              limit: (
+                Number(attachmentMaxFileBytes) / 1_000_000
+              ).toLocaleString(),
+            })}
           </p>
         )}
         <WorkspaceContextSelector

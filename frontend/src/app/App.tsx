@@ -2903,6 +2903,7 @@ export default function App() {
       unavailableReason={activeTask?.continuationUnavailableReason ?? null}
       draft={composerDraft}
       attachmentsEnabled={snapshot.capabilities.attachments.enabled}
+      attachmentMaxFileBytes={snapshot.capabilities.attachments.maxFileBytes}
       attachmentBusy={attachmentBusy}
       attachmentError={attachmentError}
       attachmentModelWarning={attachmentModelWarning}
