@@ -51,7 +51,7 @@ flowchart TB
 这是逻辑边界图，不等于源码目录图或进程图：
 
 1. Application 组装 Bridge、Product 与 Agent，执行平台生命周期和已定义的跨 owner 顺序；它不是业务 owner，也不形成统一 facade；
-2. Renderer 只通过 Renderer Bridge 访问 Host，不能直接调用 Product、Agent、Native SDK 或 OS；
+2. Renderer 的产品操作只通过 Renderer Bridge 访问 Host，不能直接调用 Product、Agent 或任意 OS API；它可以消费 `app.zon` 已开放且 Native SDK 明确面向 System WebView 的 UI/input surface，这类消费不授予 Product authority 或通用系统执行权；
 3. Product 包含 Account 与 Product Control 两个 named owner，不代表统一 module；Product Control 直接消费 Agent 公共执行能力；
 4. Agent 是独立于 Product 的 MetaWork-owned 执行边界，也是 AgentCore SDK/ABI 的唯一正式消费者；
 5. Native SDK compatibility 是 Application-owned 的受限消费路径，不是新的顶层 owner、平台层或 SDK 替代品；
@@ -65,11 +65,13 @@ flowchart TB
 
 Renderer 拥有 WebUI 页面、布局、交互、结构化 Agent 工作展示和纯 UI 临时状态。它可以缓存 canonical Product projection，但不能成为 Workspace、Task、Run、Account、Agent execution、持久化历史、permission 或原生窗口状态的唯一 owner；WebView reload 或重连后必须能够从 Host Snapshot 重建界面。
 
-Renderer 按不可信调用方处理。它不访问任意文件或进程，不持久保存或投影 Provider credential，不持有原生 identity/handle 或系统 capability，不执行窗口、托盘、快捷键等平台 effect，也不根据 DOM、Toast、URL、显示文本或本地缓存发明 Product policy。用户在 Custom Provider 表单中显式填写的 API Key 只允许停留到一次 create/replace command 提交完成，之后必须从表单状态清除；该窄例外不赋予 Renderer credential authority。
+Renderer 是随 MetaWork 桌面应用一同构建、签名和发布的可信 UI 实现，不作为与 Host 对立的恶意安全主体。它可以消费 `app.zon` 已开放且 Native SDK 明确面向 System WebView 的 UI/input surface，并在用户显式交互的有界生命周期内持有对应领域合同允许的 UI 输入或本地资源 locator；本地路径是否可以进入某个 typed command 由对应领域合同决定，不因数据先到达 Renderer 就要求 Native SDK 提供功能重复的 Host-only 接口。credential、raw file content 与原生 handle 仍只按各自明确合同处理，这一定位不授予通用访问权。
+
+可信 UI 身份不使 Renderer 成为 Product authority、credential store 或原生系统 effect owner。Renderer 不访问任意文件或进程，不持有原生 identity/handle，不执行未登记的窗口、托盘、快捷键等平台 effect，也不根据 DOM、Toast、URL、显示文本或本地缓存发明 Product policy。Bridge 对 payload 的严格解码和 Host 对 identity、revision、membership、资源范围与时效的重新校验用于维护 owner、处理陈旧 UI 状态、实现错误隔离并拒绝格式错误，不以 Renderer 是恶意代码为前提。用户在 Custom Provider 表单中显式填写的 API Key 只允许停留到一次 create/replace command 提交完成，之后必须从表单状态清除；该窄例外不赋予 Renderer credential authority。
 
 ### 3.2 Bridge
 
-Bridge 是 Renderer 与可信 Host 之间的唯一通信边界。产品命令面只严格解码、校验 source/window authority、dispatch typed command 并运输 Snapshot/Event；受限平台 capability 面只接受已登记的封闭 intent 并交给 Application。两面可以复用 transport 和 origin policy，但不共享产品状态或系统执行 authority。
+Bridge 是 Renderer 与 Host 之间的唯一产品通信边界。产品命令面只严格解码、校验 source/window authority、dispatch typed command 并运输 Snapshot/Event；受限平台 capability 面只接受已登记的封闭 intent 并交给 Application。两面可以复用 transport 和 origin policy，但不共享产品状态或系统执行 authority。
 
 Bridge 不决定 Task admission、Workspace authority、Agent cancellation、credential replacement、持久化或恢复，不持有 AgentCore handle、Product 内部指针或系统 handle。除 Custom Provider create/replace command 的调用期 API Key 外，Bridge 不接收 raw secret；该命令只做严格解码、边界校验和同步转交，不记录、缓存、投影或返回 secret。连接、command catalog、wire、snapshot identity、retry 和 fail-closed 规则只由[Renderer Bridge 合同](renderer-bridge-contract.md)定义。
 
@@ -87,13 +89,14 @@ AgentCore 拥有 provider 调用、agent loop、Conversation、Session、CoreEve
 
 ### 3.5 Native SDK
 
-Native SDK 是 Application 消费的外部桌面依赖。Application 通过其 Runtime API 执行生命周期、窗口、System WebView、菜单、托盘、快捷键、dialog、notification、timer、credential 和其他系统 effect，并把 Product 所需能力收窄成 MetaWork-owned capability。Product owner 不依赖 Native SDK Runtime 类型，Renderer 不因呈现平台 UI 而取得原生 authority。
+Native SDK 是 MetaWork 消费的外部桌面依赖。Application 通过其 Runtime API 执行生命周期、窗口、System WebView、菜单、托盘、快捷键、dialog、notification、timer、credential 和其他系统 effect，并把 Product 所需能力收窄成 MetaWork-owned capability；Renderer 可以消费 manifest 已开放、SDK 明确面向 WebView 的 presentation/input API。Product owner 不依赖 Native SDK Runtime 类型，Renderer 使用这些 UI/input API 也不因此取得原生 effect 或 Product authority。
 
 Native SDK Bridge API 是独立的正式 transport surface，不属于系统 effect 入口。Bridge 和 Application 只能消费完成 transport authority 所需的公开 contract、data-only DTO 与 opaque identifier；这些值不授予任意系统执行权，也不得传播到 Product owner。
 
 | Native SDK surface | 允许消费者 | 边界 |
 | --- | --- | --- |
 | Runtime API | Application | 正常系统 effect 与 SDK-owned runtime state |
+| WebView UI/input API | Renderer、browser-side Bridge | 只消费 `app.zon` 已开放的呈现与用户输入能力，不授予 Product authority 或通用系统 effect |
 | Bridge API / data-only DTO | Bridge、Application | transport、source/window authority 与无执行权数据 |
 | `PlatformServices` public primitive | 已登记一级 compatibility seam | 只补 Runtime API 的明确缺口 |
 | 公开 OS API / platform handle | 已登记二级 compatibility seam | 只补 SDK 也未提供原语的明确缺口 |
@@ -156,7 +159,7 @@ Storage 当前不进入生产 Application/Product 运行图。直接 SQLite back
 
 ## 4. 跨模块合同
 
-- Renderer → Bridge 只提交产品语义命令或已登记的封闭平台 intent；不得携带平台实现名、任意 action、系统 handle、物理路径或任意执行配置。唯一 secret-bearing 产品命令是用户显式触发的 Custom Provider create/replace，其 API Key 只能作为有界字段一次性转交 Models credential mutation；
+- Renderer → Bridge 只提交产品语义命令或已登记的封闭平台 intent；不得携带平台实现名、任意 action、系统 handle 或任意执行配置。用户通过已开放 Native SDK UI/input surface 明确选择的物理路径，只能进入对应领域明确登记、容量有界的 typed command；路径值本身不建立 Workspace trust、文件读取成功或其他 Product authority，Host 必须按该领域合同重新校验。唯一 secret-bearing 产品命令是用户显式触发的 Custom Provider create/replace，其 API Key 只能作为有界字段一次性转交 Models credential mutation；
 - Bridge → Product 只提交严格解码后的 typed command；业务拒绝由 Product 返回 typed result，malformed payload、伪造 ownership 与 authority failure 由 Bridge fail closed；
 - Product → Bridge 只发布 canonical、无 secret projection；Bridge 只拥有编码后的 transport bytes、connection/snapshot identity 与 delivery 状态；
 - Product Control → Agent 只经 Agent 公共执行表面，Agent → AgentCore 是唯一 typed SDK/ABI 路径；Application 只管理 Agent composition、lifecycle 和 event-ready wake；
@@ -179,7 +182,8 @@ Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通�
 
 ## 6. 安全边界
 
-- Renderer 和所有 Bridge payload 都按不可信输入处理；command 默认拒绝，dev/release origin 分离，Host 重新校验 window、identity、ownership、generation、membership、资源范围与时效；
+- Renderer 是可信应用组件；所有 Bridge payload 仍按可陈旧、可畸形的边界输入严格解码。command 默认拒绝，dev/release origin 分离，Host 重新校验 window、identity、ownership、generation、membership、资源范围与时效；这些校验维护 Product owner 与运行时一致性，不把 Renderer 定义为独立敌对安全主体；
+- Renderer-facing Native SDK API 是否可以交付路径、文件条目或其他本地输入，由具体产品合同按用户手势、生命周期、容量和后续 Host 校验定义；不得仅因数据先到达 Renderer 就要求 Native SDK 再提供语义重复的 Host-only API，也不得由此推导出通用任意文件或系统 effect 接口；
 - trusted Workspace 只能由 Host 原生选择和确认产生的 capability 授权；Renderer 不能提交路径、boolean 或显示名称自行建立 trust；
 - credential 和 secret 默认只能存在于对应 Product owner、系统 credential storage 和执行所需的 Application-owned bounded copy。用户显式填写的 Custom Provider API Key 可以短暂存在于 Renderer password form 与专用 create/replace Bridge command；提交后必须立即清除表单状态并交给 Models 写入系统 credential storage。Bridge 不得记录、缓存、投影或返回该字段；任何 secret 仍不得进入 event、snapshot、日志、raw diagnostic、产品历史、checkpoint record 或持久化 metadata；
 - production protocol、endpoint、model 与 credential authority 只能来自 Product Models、Account/MCP 等对应合同；Custom Provider 表单只负责创建或替换 Models-owned source，不能把 API Key、arbitrary URL 或临时字段直接注入 Run；

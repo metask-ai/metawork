@@ -294,7 +294,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 安全
 
-- Renderer 按不可信调用方处理；
+- Renderer 是随 MetaWork 桌面应用一同构建、签名和发布的可信 UI 组件，精确定位以[高层架构](architecture.md#31-renderer)为准；Bridge payload 仍必须严格解码，Host 仍负责 Product authority、陈旧状态、归属、容量与生命周期校验；
+- Renderer 可以消费 `app.zon` 已开放的 Native SDK WebView UI/input surface，并按具体领域合同短暂转交用户明确选择的本地输入，但不因此取得通用任意文件、进程或 OS action 能力；
 - Host 命令默认拒绝，只开放白名单；
 - 校验来源、payload、Workspace、Task/Run 归属和权限；
 - production 执行配置只由 Models 的 Metask provider 或 custom source registry 解析，并经主线程一致性提交链安装到 Product Control；禁止环境默认值、Renderer 临时字段或 Bridge payload 直接注入 Run。Renderer 可以通过 Custom Provider typed mutation提交 protocol、Base URL 与一次性 API Key，但 Models 必须重新校验、写入 registry/vault，并只从已提交 authority 生成执行配置；

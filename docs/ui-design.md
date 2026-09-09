@@ -299,7 +299,7 @@ Skills                                                              10
 
 导入 drawer：
 
-- `Import skill` 打开同一 drawer 体系，首屏突出 Host 原生 `Choose .skill or .zip`，次级入口为 `Choose folder`；当前 Native SDK 没有可信 drop capability，因此不显示不可兑现的拖放热区，也不提供 GitHub、skills.sh、URL、市场或代理配置；
+- `Import skill` 打开同一 drawer 体系，首屏突出 Host 原生 `Choose .skill or .zip`，次级入口为 `Choose folder`；当前产品合同尚未开放 Skill 导入拖放，因此不显示不可兑现的拖放热区，也不提供 GitHub、skills.sh、URL、市场或代理配置；Renderer 与 Native SDK UI/input 的边界以[高层架构](architecture.md#31-renderer)为准；
 - Native 选择先生成 window-bound、一次性 staged capability；Renderer 只消费 opaque preview identity。Preview 显示名称、description、`SKILL.md`、文件清单、总大小、候选 invocation 和机械安全检查结果；导出同样通过 Host 原生目录选择取得一次性目标 authority，由 Host 生成规范文件名并写入，不让 Renderer提交路径；
 - 用户选择 `Personal` 或一个已注册且已授权的 Manual Workspace。范围默认沿用页面筛选，但必须在最终确认中可见；没有合法目标时安装保持禁用并提供恢复动作；
 - 同名目录、相同 invocation、project override 或 external asset 都必须在确认前说明精确影响，安全默认是取消；不提供自动重命名 invocation、静默覆盖或“仍然继续”绕过失败；
