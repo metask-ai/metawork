@@ -6740,10 +6740,25 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: 0.9em;
 }
 
-.ai-markdown a {
+.ai-markdown a,
+.ai-markdown .ai-markdown-reference {
   color: var(--ui-action-primary);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.ai-markdown .ai-markdown-reference {
+  display: inline;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  font: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .ai-markdown table {

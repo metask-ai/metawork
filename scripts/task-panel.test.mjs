@@ -1126,6 +1126,63 @@ test("Run file previews belong to expanded tool operations, never a reply footer
   assert.equal(document.querySelector(".ai-exchange footer"), null);
 });
 
+test("conversation references stay in their owning Run and become plain text when invalidated", () => {
+  const referenced = task({
+    currentRunId: "0",
+    currentRunPhase: null,
+    runs: ["9", "10"].map((id) =>
+      run({
+        id,
+        output: {
+          commentary: [],
+          response: "已生成 `report.txt`。",
+          responseKind: "final",
+          provisional: "",
+          redacted: false,
+          provisionalRedacted: false,
+        },
+        tools: [
+          technicalTool({
+            fileRefs: [
+              {
+                id: `ref-${id}`,
+                title: "report.txt",
+                displayPath: "report.txt",
+              },
+            ],
+          }),
+        ],
+      }),
+    ),
+  });
+  const opened = [];
+  const props = { onPreviewFile: (...args) => opened.push(args) };
+  const view = render(taskContentElement(referenced, "1", props));
+  const openers = screen.getAllByRole("button", { name: "Preview report.txt" });
+  fireEvent.click(openers[0]);
+  fireEvent.click(openers[1]);
+  assert.deepEqual(
+    opened.map(([taskId, runId, reference]) => [taskId, runId, reference.id]),
+    [
+      ["3", "9", "ref-9"],
+      ["3", "10", "ref-10"],
+    ],
+  );
+  const next = structuredClone(referenced);
+  next.runs[0].tools = [];
+  view.rerender(taskContentElement(next, "2", props));
+  assert.equal(
+    screen.getAllByRole("button", { name: "Preview report.txt" }).length,
+    1,
+  );
+  assert.equal(document.querySelectorAll(".agent-response code").length, 2);
+  assert.equal(
+    document.querySelector(".agent-response").querySelector("button"),
+    null,
+  );
+  assert.equal(document.querySelector(".run-process-files"), null);
+});
+
 test("Run File Changes summary is capability-gated and preserves incomplete zero-record truth", () => {
   const recorded = task({
     runs: [
@@ -1663,7 +1720,7 @@ test("detail pane has a close and optional review back action, never an overview
   assert.equal(close, 1);
 });
 
-async function renderAppFixture(ctx, width = 1440) {
+async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
   Object.defineProperty(window, "innerWidth", {
     configurable: true,
     value: width,
@@ -1686,6 +1743,7 @@ async function renderAppFixture(ctx, width = 1440) {
   );
   const first = snapshot.tasks[0];
   first.title = "First task";
+  Object.assign(first.runs[0], runOverrides);
   first.runs[0].tools = [
     technicalTool({
       fileRefs: [
@@ -1983,6 +2041,62 @@ test("App rejects late preview/diff responses after close, replacement, and Task
   assert.ok(document.querySelector("#task-panel") !== null);
   assert.ok(screen.queryByText("late after switch") === null);
   cleanup();
+});
+
+test("conversation file links preview directly without expanding tools and return focus on Escape", async (ctx) => {
+  const { previews } = await renderAppFixture(ctx, 1440, {
+    output: {
+      commentary: ["正在处理 `a.txt`。"],
+      response: "已生成：`a.txt`、[查看 B](b.txt)。",
+      responseKind: "final",
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  assert.equal(
+    document.querySelector(".run-process-header").getAttribute("aria-expanded"),
+    "false",
+  );
+  assert.equal(document.querySelector(".run-process-files"), null);
+  const narrative = document.querySelector(".run-commentary-item");
+  const response = document.querySelector(".agent-response");
+  const first = within(narrative).getByRole("button", {
+    name: "Preview a.txt",
+  });
+  const second = within(response).getByRole("button", {
+    name: "Preview b.txt",
+  });
+  assert.ok(within(response).getByRole("button", { name: "Preview a.txt" }));
+  fireEvent.click(first);
+  fireEvent.click(second);
+  assert.deepEqual(
+    previews.map((request) => request.ids),
+    [
+      ["3", "7", "ref-a"],
+      ["3", "7", "ref-b"],
+    ],
+  );
+  const ready = (content) => ({
+    state: "ready",
+    content,
+    redacted: false,
+    truncated: false,
+  });
+  await act(async () => previews[1].resolve(ready("B content")));
+  await act(async () => previews[0].resolve(ready("stale A")));
+  assert.ok(screen.getByText("B content"));
+  assert.equal(screen.queryByText("stale A"), null);
+  fireEvent.keyDown(screen.getByRole("heading", { name: "File preview" }), {
+    key: "Escape",
+  });
+  await act(
+    async () => new Promise((resolve) => requestAnimationFrame(resolve)),
+  );
+  assert.equal(document.activeElement, second);
+  assert.equal(document.querySelector("#task-panel"), null);
+  assert.equal(document.querySelector(".run-process-files"), null);
 });
 
 test("App previews exact operation references, rejects superseded reads, and refreshes only the current file", async (ctx) => {

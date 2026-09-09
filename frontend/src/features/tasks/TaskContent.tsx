@@ -1,4 +1,5 @@
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
+import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import type {
@@ -270,6 +271,16 @@ export function TaskContent({
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
+        const references = new Map(
+          [...runFileReferenceLinks(run)].map(([text, reference]) => [
+            text,
+            {
+              label: t("file_preview.open", { path: reference.displayPath }),
+              onOpen: (opener: HTMLButtonElement) =>
+                onPreviewFile(task.id, run.id, reference, opener),
+            },
+          ]),
+        );
         const disclosureKey = `${task.id}:${run.id}`;
         const disclosure = observeRunProcessDisclosure(
           processDisclosure.current.get(disclosureKey),
@@ -296,7 +307,11 @@ export function TaskContent({
               <Message role="assistant" className="run-narrative">
                 {run.output.commentary.map((commentary, index) =>
                   commentary ? (
-                    <Markdown className="run-commentary-item" key={index}>
+                    <Markdown
+                      className="run-commentary-item"
+                      key={index}
+                      references={references}
+                    >
                       {commentary}
                     </Markdown>
                   ) : null,
@@ -349,7 +364,7 @@ export function TaskContent({
             )}
             {presentation.responseVisible && (
               <Message role="assistant">
-                <Markdown className="agent-response">
+                <Markdown className="agent-response" references={references}>
                   {run.output.response}
                 </Markdown>
                 {run.output.redacted && (
