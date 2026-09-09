@@ -89,10 +89,23 @@ test.after(async () => {
   dom.window.close();
 });
 
+function terminal(
+  outcome = "completed",
+  cause = null,
+  diagnosticDisposition = "absent",
+) {
+  return { outcome, cause, diagnosticDisposition };
+}
+
 function run(overrides = {}) {
   return {
     id: "9",
     phase: "completed",
+    execution: {
+      generation: "7",
+      protocol: "anthropic_messages",
+      model: "fixture-model",
+    },
     input: {
       kind: "text",
       text: "Inspect the release",
@@ -107,8 +120,7 @@ function run(overrides = {}) {
       provisionalRedacted: false,
     },
     activity: null,
-    outcome: "completed",
-    cause: null,
+    terminal: terminal(),
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
     tools: [],
     ...overrides,
@@ -149,8 +161,6 @@ function task(overrides = {}) {
     archived: false,
     currentRunId: "0",
     currentRunPhase: null,
-    lastRunOutcome: null,
-    cause: null,
     context: { pressure: null, lastAutoCompact: null },
     runs: [],
     pendingUi: null,
@@ -198,7 +208,9 @@ function renderTaskContent(value, locale = "en-US") {
         retryAvailable: false,
         responseDisabled: false,
         fileChangesEnabled: false,
+        runDiagnosticsAvailable: false,
         onPrepareRetry() {},
+        onOpenRunDiagnostics() {},
         onOpenTool() {},
         onPreviewFile() {},
         onReviewFileChanges() {},
@@ -234,7 +246,9 @@ function taskContentElement(value, revision = "1", overrides = {}) {
       retryAvailable: false,
       responseDisabled: false,
       fileChangesEnabled: false,
+      runDiagnosticsAvailable: false,
       onPrepareRetry() {},
+      onOpenRunDiagnostics() {},
       onOpenTool() {},
       onPreviewFile() {},
       onReviewFileChanges() {},
@@ -494,7 +508,6 @@ test("Overview shows Work process without eagerly mounting raw tool output", () 
           ],
         }),
       ],
-      lastRunOutcome: "completed",
       context: {
         pressure: {
           sourceRunId: "9",
@@ -654,7 +667,7 @@ test("conversation separates commentary, Markdown response, and plain provisiona
     runs: [
       run({
         phase: "running",
-        outcome: null,
+        terminal: null,
         activity: { kind: "writing_response" },
         output: {
           commentary: ["Checked **two files**."],
@@ -698,7 +711,7 @@ test("conversation separates commentary, Markdown response, and plain provisiona
 test("live revisions extend the narrative while replacing one bottom status in place", () => {
   const activeRun = run({
     phase: "running",
-    outcome: null,
+    terminal: null,
     activity: { kind: "thinking" },
     output: {
       commentary: ["I will inspect the structure."],
@@ -759,7 +772,7 @@ test("live revisions extend the narrative while replacing one bottom status in p
 test("discarded provisional output disappears on the next Snapshot revision", () => {
   const activeRun = run({
     phase: "running",
-    outcome: null,
+    terminal: null,
     activity: { kind: "writing_response" },
     output: {
       commentary: [],
@@ -803,7 +816,7 @@ test("Run status keeps technical Tool summaries behind explicit disclosure", asy
   const expandedChanges = [];
   const value = run({
     phase: "running",
-    outcome: null,
+    terminal: null,
     activity: { kind: "executing_tools", inFlight: "1" },
     output: {
       commentary: ["Checked **two files**."],
@@ -921,7 +934,7 @@ test("technical process disclosure remains user-controlled across revisions and 
     runs: [
       run({
         phase: "running",
-        outcome: null,
+        terminal: null,
         activity: { kind: "writing_response" },
         output: {
           commentary: ["Checking the workspace"],
@@ -977,7 +990,7 @@ test("technical process disclosure remains user-controlled across revisions and 
 test("successful terminal keeps commentary visible and technical process collapsed", () => {
   const activeRun = run({
     phase: "running",
-    outcome: null,
+    terminal: null,
     activity: { kind: "writing_response" },
     output: {
       commentary: ["Working through the task"],
@@ -1001,7 +1014,7 @@ test("successful terminal keeps commentary visible and technical process collaps
         ...activeRun,
         phase: "completed",
         activity: null,
-        outcome: "completed",
+        terminal: terminal(),
         output: {
           ...activeRun.output,
           response: "Final response",
@@ -1021,7 +1034,7 @@ test("successful terminal keeps commentary visible and technical process collaps
 test("terminal transition preserves reading position without expanding technical details", () => {
   const activeRun = run({
     phase: "running",
-    outcome: null,
+    terminal: null,
     activity: { kind: "thinking" },
     output: {
       commentary: ["Evidence the reader is reviewing"],
@@ -1055,7 +1068,7 @@ test("terminal transition preserves reading position without expanding technical
             ...activeRun,
             phase: "completed",
             activity: null,
-            outcome: "completed",
+            terminal: terminal(),
             output: {
               ...activeRun.output,
               response: "Final response",
@@ -1103,7 +1116,7 @@ test("Tool summary forwards exact Run, Tool, and opener identity", async () => {
     runs: [
       run({
         phase: "running",
-        outcome: null,
+        terminal: null,
         activity: { kind: "executing_tools", inFlight: "1" },
         tools: [
           {
@@ -1187,6 +1200,8 @@ test("Overview focus request opens the exact historical Tool detail once", async
     ),
   );
   await new Promise((resolve) => requestAnimationFrame(resolve));
+  assert.ok(screen.getByText("Selected run"));
+  assert.equal(screen.queryByText("Last run"), null);
   assert.ok(screen.getByText("historical input"));
   assert.ok(screen.getByText("historical result"));
   const toolButton = screen.getByRole("button", { name: /Bash/ });
@@ -1199,8 +1214,7 @@ test("partial output and terminal failure render one composite notice", () => {
     runs: [
       run({
         phase: "failed",
-        outcome: "failed",
-        cause: "timeout",
+        terminal: terminal("failed", "timeout"),
         output: {
           commentary: [],
           response: "An incomplete answer",
@@ -1221,11 +1235,6 @@ test("partial output and terminal failure render one composite notice", () => {
 test("typed Agent failures render accurate recovery guidance", () => {
   const cases = [
     [
-      "provider_failure",
-      "The model service returned an error while generating the response.",
-      "模型服务在生成回复时返回错误",
-    ],
-    [
       "tool_failure",
       "Tool execution failed and could not recover.",
       "工具执行失败且未能恢复",
@@ -1239,7 +1248,7 @@ test("typed Agent failures render accurate recovery guidance", () => {
 
   for (const [cause, expectedEnglish, expectedChinese] of cases) {
     const value = task({
-      runs: [run({ phase: "failed", outcome: "failed", cause })],
+      runs: [run({ phase: "failed", terminal: terminal("failed", cause) })],
     });
     assert.match(
       renderTaskContent(value),
@@ -1252,11 +1261,155 @@ test("typed Agent failures render accurate recovery guidance", () => {
   }
 });
 
+test("provider failure notices explain impact without duplicating diagnostics", () => {
+  const failedWithoutResponse = task({
+    runs: [
+      run({
+        phase: "failed",
+        output: {
+          commentary: [],
+          response: "",
+          responseKind: null,
+          provisional: "",
+          redacted: false,
+          provisionalRedacted: false,
+        },
+        terminal: terminal("failed", "provider_failure"),
+      }),
+    ],
+  });
+  const absent = renderTaskContent(failedWithoutResponse);
+  assert.match(absent, />Model service request failed</);
+  assert.match(absent, /This run did not produce a usable response\./);
+  assert.doesNotMatch(
+    absent,
+    /MetaWork did not receive additional diagnostics for this run\./,
+  );
+  render(
+    taskContentElement(failedWithoutResponse, "1", {
+      retryAvailable: true,
+    }),
+  );
+  assert.ok(
+    screen.getByRole("button", { name: "Copy instruction to Composer" }),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Use instruction again" }),
+    null,
+  );
+  cleanup();
+
+  const partialWithWithheldDiagnostic = task({
+    runs: [
+      run({
+        phase: "failed",
+        output: {
+          commentary: [],
+          response: "Partial result",
+          responseKind: "partial",
+          provisional: "",
+          redacted: false,
+          provisionalRedacted: false,
+        },
+        terminal: terminal("failed", "provider_failure", "withheld"),
+      }),
+    ],
+  });
+  const withheld = renderTaskContent(partialWithWithheldDiagnostic);
+  assert.match(withheld, /produced only a partial response/);
+  assert.doesNotMatch(withheld, /current security boundary/);
+
+  for (const unsupportedGuess of [
+    /401/i,
+    /rate limit/i,
+    /network/i,
+    /api key/i,
+  ]) {
+    assert.doesNotMatch(absent, unsupportedGuess);
+    assert.doesNotMatch(withheld, unsupportedGuess);
+  }
+});
+
+test("provider failure details open for the exact historical Run", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const calls = [];
+  const historical = run({
+    id: "8",
+    phase: "failed",
+    execution: {
+      generation: "4",
+      protocol: "openai_responses",
+      model: "historical-model",
+    },
+    output: {
+      commentary: [],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+    terminal: terminal("failed", "provider_failure", "withheld"),
+  });
+  const current = run({ id: "9" });
+  const value = task({ runs: [historical, current] });
+
+  render(
+    taskContentElement(value, "1", {
+      runDiagnosticsAvailable: true,
+      onOpenRunDiagnostics: (runId, opener) => calls.push({ runId, opener }),
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "View run details" }));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].runId, "8");
+  assert.ok(calls[0].opener instanceof HTMLButtonElement);
+  cleanup();
+
+  render(
+    localizedView(
+      createElement(TaskOverviewView, {
+        task: value,
+        focusRequest: {
+          taskId: "3",
+          section: "diagnostics",
+          runId: "8",
+          nonce: 1,
+        },
+        onFocusPending() {},
+      }),
+    ),
+  );
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  const diagnostics = screen.getByText("Run details").closest("section");
+  assert.ok(diagnostics);
+  assert.match(diagnostics.textContent, /Model service request failed/);
+  assert.doesNotMatch(
+    diagnostics.textContent,
+    /did not produce a usable response/,
+  );
+  assert.match(diagnostics.textContent, /current security boundary/);
+  assert.match(diagnostics.textContent, /Run information/);
+  assert.match(diagnostics.textContent, /historical-model/);
+  assert.match(diagnostics.textContent, /OpenAI Responses/);
+  assert.match(diagnostics.textContent, /provider_failure/);
+  assert.doesNotMatch(
+    diagnostics.textContent,
+    /Execution configuration version/,
+  );
+  assert.doesNotMatch(diagnostics.textContent, /Response result/);
+  assert.doesNotMatch(diagnostics.textContent, /Status/);
+  assert.equal(screen.queryByText("Last run"), null);
+  assert.equal(screen.queryByText("fixture-model"), null);
+  assert.equal(document.activeElement, diagnostics);
+  assert.equal(translate("zh-CN", "inspector.diagnostic_run"), "运行 ID");
+});
+
 test("typed Run activity uses safe localized labels", () => {
   const thinkingRun = run({
     phase: "running",
     activity: { kind: "thinking" },
-    outcome: null,
+    terminal: null,
     output: {
       commentary: [],
       response: "",
@@ -1283,7 +1436,7 @@ test("typed Run activity uses safe localized labels", () => {
       run({
         phase: "running",
         activity: { kind: "writing_response" },
-        outcome: null,
+        terminal: null,
       }),
     ],
   });
@@ -1302,7 +1455,7 @@ test("typed Run activity uses safe localized labels", () => {
     const activityTask = task({
       currentRunId: "9",
       currentRunPhase: "running",
-      runs: [run({ phase: "running", activity, outcome: null })],
+      runs: [run({ phase: "running", activity, terminal: null })],
     });
     assert.match(
       renderTaskContent(activityTask, "zh-CN"),
@@ -1327,7 +1480,7 @@ test("typed Run activity uses safe localized labels", () => {
       run({
         phase: "running",
         activity: { kind: "waiting_model" },
-        outcome: null,
+        terminal: null,
       }),
     ],
   });
@@ -1341,7 +1494,7 @@ test("typed Run activity uses safe localized labels", () => {
       run({
         phase: "stopping",
         activity: { kind: "stopping" },
-        outcome: null,
+        terminal: null,
       }),
     ],
   });

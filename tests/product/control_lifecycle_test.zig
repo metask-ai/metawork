@@ -1534,7 +1534,7 @@ test "accepted Task deletion advances after checkpoint quiescence without a seco
     fake_core.waitCheckpointExportEntered();
     // Product terminal publication must not wait for the same executor job's
     // controlled checkpoint export to be released.
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     try workbench.setTaskArchived(task_id, true);
     try workbench.deleteTask(task_id);
     try waitControlSnapshot(&workbench, "\"deletionStatus\":\"deleting\"");
@@ -1901,7 +1901,7 @@ test "recovery enqueue failure releases the job lease and remains retryable" {
     try waitTaskSnapshot(
         &restored,
         "\"title\":\"restore blocker two\"",
-        "\"lastRunOutcome\":\"completed\"",
+        "\"terminal\":{\"outcome\":\"completed\"",
     );
     try std.testing.expectEqual(
         workspace_id,
@@ -2082,7 +2082,7 @@ test "untrusted Task history preserves checkpoint orphans without blocking a new
     try installControlExecution(&workbench);
     const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "Continue without saved history" });
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     const continued = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -2126,7 +2126,7 @@ test "unavailable checkpoint store does not close Task admission" {
     try installControlExecution(&workbench);
     const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "checkpoint store unavailable" });
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     try std.testing.expectEqual(@as(usize, 1), fake_core.session_created);
     try std.testing.expectEqual(@as(usize, 0), fake_core.checkpoint_exports);
 }
@@ -2418,13 +2418,13 @@ test "scheduled noninteractive permission request automatically stops the Produc
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 1), abort_calls_after_drain);
 
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"stopped\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"stopped\"");
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"lastRunOutcome\":\"stopped\",\"cause\":\"permission_required\"",
+        "\"terminal\":{\"outcome\":\"stopped\",\"cause\":\"permission_required\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -2587,7 +2587,7 @@ test "scheduled durable admission failure does not block an interactive Product 
         .{ .interactive = null },
     );
     _ = try workbench.runTask(task_id, .{ .text = "Continue interactively" });
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     const continued = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -2809,7 +2809,7 @@ test "interactive Product Task remains accepted when history commit outcome is u
         .{ .interactive = null },
     );
     _ = try workbench.runTask(task_id, .{ .text = "Remain accepted" });
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     fake_core.lock();
     const run_calls = fake_core.run_calls;
@@ -2895,7 +2895,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expectEqual(@as(usize, 1), acceptance.count);
     try std.testing.expect(!workbench.releaseAttachment(ids[0]));
     try std.testing.expect(!workbench.releaseAttachment(ids[1]));
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
@@ -3052,7 +3052,7 @@ test "Product Control pins an async catalog and admits typed Skill through the e
     } });
     try waitControlSnapshot(
         &workbench,
-        "\"lastRunOutcome\":\"completed\"",
+        "\"terminal\":{\"outcome\":\"completed\"",
     );
     try waitControlSnapshot(
         &workbench,
@@ -3454,7 +3454,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
 
     try workbench.renameTask(second_task, "Preset title");
     _ = try workbench.runTask(second_task, .{ .text = "must not replace preset" });
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     var preset_title_snapshot: [128 * 1024]u8 = undefined;
     const preset_title_snapshot_bytes = try workbench.writeSnapshot(&preset_title_snapshot);
     try std.testing.expect(
@@ -3481,7 +3481,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
     );
     fake_core.releaseControlled();
     fake_core.waitCompletionEntered();
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     try waitHistoryNeedle(
         &workbench,
         &persistence,
@@ -4080,7 +4080,7 @@ test "Product Control refreshes a Task only from the committed Workspace catalog
     fake_core.releaseControlled();
     try waitControlSnapshot(
         &workbench,
-        "\"lastRunOutcome\":\"completed\"",
+        "\"terminal\":{\"outcome\":\"completed\"",
     );
 
     fake_core.setCatalogPlan(.healthy);
@@ -4187,7 +4187,7 @@ test "Task deletion releases an idle Session without blocking the caller" {
     const task_id = try workbench.createTask(productControlTaskInput());
     const run_id = try workbench.runTask(task_id, .{ .text = "finish before deletion" });
     try workbench.cancel(task_id, run_id);
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"cancelled\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"cancelled\"");
     try workbench.setTaskArchived(task_id, true);
     try workbench.deleteTask(task_id);
     try waitTaskDeleted(&workbench, task_id);
@@ -4227,7 +4227,7 @@ test "Workspace removal interrupts live Runs without deleting Task history" {
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
 
     try workbench.removeWorkspace(workspace_id);
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"interrupted\"");
     try waitControlSnapshot(&workbench, "\"lifecycle\":\"open\"");
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
@@ -4297,11 +4297,11 @@ test "Product Control cancel of a completed Run is an idempotent no-op" {
         task_id,
         .{ .text = "finish before cancel arrives" },
     );
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     const revision = workbench.currentRevision();
     try workbench.cancel(task_id, run_id);
     try std.testing.expectEqual(revision, workbench.currentRevision());
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 }
 
 test "Product Control manual compact uses the active operation lane and appends history" {
@@ -4338,7 +4338,7 @@ test "Product Control manual compact uses the active operation lane and appends 
         workbench.compactTaskAtBinding(task_id, 1),
     );
     _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     _ = try workbench.compactTaskAtBinding(task_id, 1);
     try waitControlSnapshot(&workbench, "\"phase\":\"compacted\"");
@@ -4411,7 +4411,7 @@ test "compact queue rejection persists a legal terminal record and returns its o
     const blocking_task = try workbench.createTask(productControlTaskInput());
     const queued_task = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(compact_task, .{ .text = "establish conversation" });
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
@@ -4477,7 +4477,7 @@ test "Product Control compact cancellation and Task deletion wait for the Agent 
 
     const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
     const operation_id = try workbench.compactTaskAtBinding(task_id, 1);
@@ -4529,7 +4529,7 @@ test "Product Control terminal compact result wins a too-late cancellation race"
 
     const task_id = try workbench.createTask(productControlTaskInput());
     _ = try workbench.runTask(task_id, .{ .text = "establish conversation" });
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
     fake_core.setSessionPlan(.controlled);
     fake_core.rearmControlled();
     fake_core.forceNextCompactAbortStatus(wire.STATUS_TOO_LATE);
@@ -4582,13 +4582,13 @@ test "Product Control cancels a queued compact without entering AgentCore" {
     try waitTaskSnapshot(
         &workbench,
         "\"title\":\"blocking target\"",
-        "\"lastRunOutcome\":\"completed\"",
+        "\"terminal\":{\"outcome\":\"completed\"",
     );
     _ = try workbench.runTask(compact_task_id, .{ .text = "second conversation" });
     try waitTaskSnapshot(
         &workbench,
         "\"title\":\"compact target\"",
-        "\"lastRunOutcome\":\"completed\"",
+        "\"terminal\":{\"outcome\":\"completed\"",
     );
 
     fake_core.setSessionPlan(.controlled);
@@ -4610,7 +4610,7 @@ test "Product Control cancels a queued compact without entering AgentCore" {
     try std.testing.expectEqual(@as(usize, 0), compact_abort_calls);
 
     try workbench.cancel(blocking_task_id, blocking_run_id);
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"cancelled\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"cancelled\"");
 }
 
 test "Product Control shutdown terminates a waiting UI Run before joining workers" {
@@ -4635,7 +4635,7 @@ test "Product Control shutdown terminates a waiting UI Run before joining worker
     _ = try workbench.runTask(task_id, .{ .text = "wait for shutdown" });
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"waiting_ui\"");
     workbench.shutdownExecutor();
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"interrupted\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"interrupted\"");
     try waitControlSnapshot(&workbench, "\"continuationAvailable\":false");
 }
 
@@ -4692,7 +4692,7 @@ test "late event from a finalized Run is dropped and newer active work continues
     );
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     fake_core.releaseControlled();
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 
     fake_core.rearmControlled();
     _ = try workbench.runTask(task_id, .{ .text = "new active work" });
@@ -4716,5 +4716,5 @@ test "late event from a finalized Run is dropped and newer active work continues
     try std.testing.expect(std.mem.indexOf(u8, open_snapshot, "\"lifecycle\":\"open\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, open_snapshot, "\"currentRunPhase\":\"running\"") != null);
     fake_core.releaseControlled();
-    try waitControlSnapshot(&workbench, "\"lastRunOutcome\":\"completed\"");
+    try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 }

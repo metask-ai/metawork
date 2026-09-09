@@ -8,10 +8,21 @@ import {
 } from "../frontend/src/features/tasks/run-presentation.ts";
 import { RevisionNotificationQueue } from "../frontend/src/bridge/revision-notification.ts";
 
+function terminal(outcome, cause = null) {
+  return { outcome, cause, diagnosticDisposition: "absent" };
+}
+
 function run(overrides = {}) {
   return {
     id: "7",
     phase: "running",
+    permissionProfile: "approval_required",
+    permissionInteraction: "interactive",
+    execution: {
+      generation: "1",
+      protocol: "anthropic_messages",
+      model: "fixture-model",
+    },
     input: { kind: "text", text: "Build it", redacted: false },
     output: {
       commentary: [],
@@ -22,10 +33,10 @@ function run(overrides = {}) {
       provisionalRedacted: false,
     },
     activity: { kind: "waiting_model" },
-    outcome: null,
-    cause: null,
+    terminal: null,
     usage: { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" },
     tools: [],
+    fileChanges: null,
     ...overrides,
   };
 }
@@ -113,7 +124,7 @@ test("successful final response compresses process evidence without a duplicate 
         provisionalRedacted: false,
       },
       activity: null,
-      outcome: "completed",
+      terminal: terminal("completed"),
       tools: [tool("read", "1")],
     }),
   );
@@ -127,8 +138,7 @@ test("failure, missing response, and partial response keep truthful terminal tre
     run({
       phase: "failed",
       activity: null,
-      outcome: "failed",
-      cause: "agent_failure",
+      terminal: terminal("failed", "agent_failure"),
     }),
   );
   assert.equal(failed.processVisible, false);
@@ -146,7 +156,7 @@ test("failure, missing response, and partial response keep truthful terminal tre
         provisionalRedacted: false,
       },
       activity: null,
-      outcome: "interrupted",
+      terminal: terminal("interrupted"),
     }),
   );
   assert.equal(partial.responseVisible, true);
@@ -160,7 +170,7 @@ test("technical process stays collapsed by default while activity remains visibl
       tools: [tool("read", "1", "running")],
     }),
   );
-  const terminal = deriveRunPresentation(
+  const terminalPresentation = deriveRunPresentation(
     run({
       phase: "completed",
       output: {
@@ -172,13 +182,13 @@ test("technical process stays collapsed by default while activity remains visibl
         provisionalRedacted: false,
       },
       activity: null,
-      outcome: "completed",
+      terminal: terminal("completed"),
       tools: [tool("read", "1")],
     }),
   );
   assert.equal(active.processVisible, true);
   assert.equal(active.processCanCollapse, true);
-  assert.equal(terminal.processVisible, true);
+  assert.equal(terminalPresentation.processVisible, true);
 });
 
 test("Run disclosure remains collapsed unless the user explicitly opens it", () => {

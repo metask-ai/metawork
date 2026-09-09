@@ -531,7 +531,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.process.tool_step_one": "{count} 项操作",
   "run.process.tool_step_many": "{count} 项操作",
   "run.process.open_tool": "查看 {name} 的详情",
-  "run.prepare_retry": "再次使用这条指令",
+  "run.prepare_retry": "重新填入指令",
   "run.retry_help": "将这条指令复制到输入区供你检查，不会自动发送。",
   "run.review_draft": "检查当前草稿",
   "run.review_draft_help": "保留当前草稿不变，并将焦点移到输入区。",
@@ -539,6 +539,17 @@ export const zhCN: Record<MessageId, string> = {
   "run.draft_preserved": "已保留当前输入区草稿，未作修改。",
   "run.retry_too_long":
     "这条指令超出输入区长度限制，请改写一条更短的后续指令。",
+  "run.provider_failure.title": "模型服务请求失败",
+  "run.provider_failure.no_response_impact": "本次运行未生成可用回复。",
+  "run.provider_failure.partial_impact":
+    "本次运行只生成了部分回复，内容可能不完整。",
+  "run.provider_failure.diagnostic_absent":
+    "MetaWork 未收到本次运行的附加诊断。",
+  "run.provider_failure.diagnostic_withheld":
+    "MetaWork 收到了附加技术诊断，但当前安全边界不允许在界面展示其内容。",
+  "run.provider_failure.review_tool_effects":
+    "再次执行前请检查工作过程，避免重复执行已完成的操作。",
+  "run.view_diagnostics": "查看运行详情",
   "slash.title": "输入区动作",
   "slash.group.commands": "命令",
   "slash.group.skills": "Skills",
@@ -626,6 +637,13 @@ export const zhCN: Record<MessageId, string> = {
   "inspector.view_request": "查看请求",
   "inspector.current_activity": "当前活动",
   "inspector.last_run": "上次运行",
+  "inspector.selected_run": "所选运行",
+  "inspector.run_details": "运行详情",
+  "inspector.run_information": "运行信息",
+  "inspector.diagnostic_code": "错误标识",
+  "inspector.diagnostic_run": "运行 ID",
+  "inspector.diagnostic_model": "本次运行模型",
+  "inspector.diagnostic_protocol": "执行协议",
   "inspector.work_process": "工作过程",
   "inspector.tool.running": "运行中",
   "inspector.tool.completed": "已完成",
@@ -918,8 +936,7 @@ export const zhCN: Record<MessageId, string> = {
   "cause.queue_capacity_failure": "工作台容量已满",
   "cause.ui_pipeline_failure": "回复传递失败",
   "cause.agent_failure": "Agent 执行失败，请查看工作过程后重试",
-  "cause.provider_failure":
-    "模型服务在生成回复时返回错误，请重试；若仍失败，请检查模型服务配置",
+  "cause.provider_failure": "模型服务请求失败",
   "cause.tool_failure": "工具执行失败且未能恢复，请查看工作过程后重试",
   "cause.image_input_unsupported":
     "当前模型不支持图片输入，请更换支持图片的模型并重新选择图片",

@@ -480,6 +480,20 @@ export const runCauses = [
 
 export type RunCause = (typeof runCauses)[number];
 
+export type RunOutcome =
+  | "completed"
+  | "stopped"
+  | "cancelled"
+  | "interrupted"
+  | "failed"
+  | "dependency_contract_failure";
+
+export type RunTerminal = {
+  outcome: RunOutcome;
+  cause: RunCause | null;
+  diagnosticDisposition: "absent" | "withheld";
+};
+
 export type RunOutput = {
   commentary: string[];
   response: string;
@@ -512,18 +526,15 @@ export type RunView = {
   phase: RunPhase;
   permissionProfile: PermissionProfile;
   permissionInteraction: PermissionInteraction;
+  execution: {
+    generation: string;
+    protocol: Protocol;
+    model: string;
+  };
   input: RunInputView;
   output: RunOutput;
   activity: RunActivity | null;
-  outcome:
-    | "completed"
-    | "stopped"
-    | "cancelled"
-    | "interrupted"
-    | "failed"
-    | "dependency_contract_failure"
-    | null;
-  cause: RunCause | null;
+  terminal: RunTerminal | null;
   usage: {
     input: string;
     output: string;
@@ -707,8 +718,6 @@ export type TaskView = {
   activeOperation: ActiveOperation | null;
   currentRunId: string;
   currentRunPhase: NonTerminalRunPhase | null;
-  lastRunOutcome: RunView["outcome"];
-  cause: RunView["cause"];
   context: ConversationContext;
   runs: RunView[];
   compacts: CompactView[];

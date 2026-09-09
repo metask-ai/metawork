@@ -580,7 +580,7 @@ export const enUS = {
   "run.process.tool_step_one": "{count} operation",
   "run.process.tool_step_many": "{count} operations",
   "run.process.open_tool": "View details for {name}",
-  "run.prepare_retry": "Use instruction again",
+  "run.prepare_retry": "Copy instruction to Composer",
   "run.retry_help":
     "Copies this instruction to the Composer for review. Nothing is sent automatically.",
   "run.review_draft": "Review current draft",
@@ -591,6 +591,18 @@ export const enUS = {
   "run.draft_preserved": "Your current Composer draft was kept unchanged.",
   "run.retry_too_long":
     "This instruction is too long for the Composer. Write a shorter follow-up instead.",
+  "run.provider_failure.title": "Model service request failed",
+  "run.provider_failure.no_response_impact":
+    "This run did not produce a usable response.",
+  "run.provider_failure.partial_impact":
+    "This run produced only a partial response, which may be incomplete.",
+  "run.provider_failure.diagnostic_absent":
+    "MetaWork did not receive additional diagnostics for this run.",
+  "run.provider_failure.diagnostic_withheld":
+    "MetaWork received additional technical diagnostics, but the current security boundary does not allow their contents to be shown here.",
+  "run.provider_failure.review_tool_effects":
+    "Review the work process before running again to avoid repeating completed operations.",
+  "run.view_diagnostics": "View run details",
   "slash.title": "Composer actions",
   "slash.group.commands": "Commands",
   "slash.group.skills": "Skills",
@@ -684,6 +696,13 @@ export const enUS = {
   "inspector.view_request": "View request",
   "inspector.current_activity": "Current activity",
   "inspector.last_run": "Last run",
+  "inspector.selected_run": "Selected run",
+  "inspector.run_details": "Run details",
+  "inspector.run_information": "Run information",
+  "inspector.diagnostic_code": "Error identifier",
+  "inspector.diagnostic_run": "Run ID",
+  "inspector.diagnostic_model": "Model for this run",
+  "inspector.diagnostic_protocol": "Execution protocol",
   "inspector.work_process": "Work process",
   "inspector.tool.running": "Running",
   "inspector.tool.completed": "Completed",
@@ -1002,8 +1021,7 @@ export const enUS = {
   "cause.ui_pipeline_failure": "Response delivery failed",
   "cause.agent_failure":
     "Agent execution failed. Review the work process and try again.",
-  "cause.provider_failure":
-    "The model service returned an error while generating the response. Try again; if it continues, check the model service configuration.",
+  "cause.provider_failure": "Model service request failed",
   "cause.tool_failure":
     "Tool execution failed and could not recover. Review the work process and try again.",
   "cause.image_input_unsupported":

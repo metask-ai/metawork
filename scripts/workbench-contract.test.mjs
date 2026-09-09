@@ -51,6 +51,10 @@ function clone(value) {
   return structuredClone(value);
 }
 
+function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
+  return { outcome, cause, diagnosticDisposition };
+}
+
 test("the canonical Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 
@@ -429,12 +433,9 @@ test("resource-limited Run terminal crosses the Host to Renderer contract", () =
   task.activeOperation = null;
   task.currentRunId = "0";
   task.currentRunPhase = null;
-  task.lastRunOutcome = "stopped";
-  task.cause = "resource_limit";
   task.runs[0].phase = "stopped";
   task.runs[0].activity = null;
-  task.runs[0].outcome = "stopped";
-  task.runs[0].cause = "resource_limit";
+  task.runs[0].terminal = terminal("stopped", "resource_limit");
 
   assert.deepEqual(decodeWorkbenchSnapshot(resourceLimited), resourceLimited);
 });
@@ -451,12 +452,9 @@ test("typed Agent failures cross the Host to Renderer contract", () => {
     task.activeOperation = null;
     task.currentRunId = "0";
     task.currentRunPhase = null;
-    task.lastRunOutcome = "failed";
-    task.cause = cause;
     task.runs[0].phase = "failed";
     task.runs[0].activity = null;
-    task.runs[0].outcome = "failed";
-    task.runs[0].cause = cause;
+    task.runs[0].terminal = terminal("failed", cause);
 
     assert.deepEqual(decodeWorkbenchSnapshot(agentFailure), agentFailure);
   }
@@ -1184,10 +1182,7 @@ test("Conversation recovery projection is one coherent continuation state", () =
   task.currentRunPhase = null;
   task.runs[0].phase = "interrupted";
   task.runs[0].activity = null;
-  task.runs[0].outcome = "interrupted";
-  task.runs[0].cause = "app_shutdown";
-  task.lastRunOutcome = "interrupted";
-  task.cause = "app_shutdown";
+  task.runs[0].terminal = terminal("interrupted", "app_shutdown");
   task.binding.availability = "unavailable";
   task.binding.unavailableReason = "runtime_detached";
   task.continuationAvailable = false;
@@ -1243,8 +1238,7 @@ test("Task deletion exposes one product-level progress and retry fact", () => {
   deleting.tasks[0].currentRunPhase = null;
   deleting.tasks[0].runs[0].phase = "completed";
   deleting.tasks[0].runs[0].activity = null;
-  deleting.tasks[0].runs[0].outcome = "completed";
-  deleting.tasks[0].lastRunOutcome = "completed";
+  deleting.tasks[0].runs[0].terminal = terminal("completed");
   deleting.tasks[0].continuationAvailable = false;
   deleting.tasks[0].continuationUnavailableReason = "closing";
   assert.deepEqual(decodeWorkbenchSnapshot(deleting), deleting);
@@ -1278,10 +1272,9 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   task.activeOperation = null;
   task.currentRunId = "0";
   task.currentRunPhase = null;
-  task.lastRunOutcome = "completed";
   task.runs[0].phase = "completed";
   task.runs[0].activity = null;
-  task.runs[0].outcome = "completed";
+  task.runs[0].terminal = terminal("completed");
   task.compacts.push({
     operationId: "11",
     afterRunId: "7",
@@ -1333,7 +1326,7 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
     id: "8",
     phase: "running",
     activity: { kind: "waiting_model" },
-    outcome: null,
+    terminal: null,
   });
   simultaneous.tasks[0].currentRunId = "8";
   simultaneous.tasks[0].currentRunPhase = "running";
@@ -1491,6 +1484,58 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   delete legacyRunInput.tasks[0].runs[0].input;
   assert.throws(() => decodeWorkbenchSnapshot(legacyRunInput), /expected keys/);
 
+  const retiredRunTerminalFields = clone(fixture);
+  retiredRunTerminalFields.tasks[0].runs[0].outcome = null;
+  retiredRunTerminalFields.tasks[0].runs[0].cause = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(retiredRunTerminalFields),
+    /expected keys/,
+  );
+
+  const retiredTaskTerminalSummary = clone(fixture);
+  retiredTaskTerminalSummary.tasks[0].lastRunOutcome = null;
+  retiredTaskTerminalSummary.tasks[0].cause = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(retiredTaskTerminalSummary),
+    /expected keys/,
+  );
+
+  const missingRunExecution = clone(fixture);
+  delete missingRunExecution.tasks[0].runs[0].execution;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(missingRunExecution),
+    /expected keys/,
+  );
+
+  const invalidExecutionGeneration = clone(fixture);
+  invalidExecutionGeneration.tasks[0].runs[0].execution.generation = "0";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(invalidExecutionGeneration),
+    /positive wire integer/,
+  );
+
+  const invalidDiagnosticDisposition = clone(fixture);
+  invalidDiagnosticDisposition.tasks[0].runs[0].phase = "failed";
+  invalidDiagnosticDisposition.tasks[0].runs[0].activity = null;
+  invalidDiagnosticDisposition.tasks[0].runs[0].terminal = terminal(
+    "failed",
+    "provider_failure",
+    "raw",
+  );
+  assert.throws(
+    () => decodeWorkbenchSnapshot(invalidDiagnosticDisposition),
+    /unexpected value/,
+  );
+
+  const missingTerminal = clone(fixture);
+  missingTerminal.tasks[0].runs[0].phase = "failed";
+  missingTerminal.tasks[0].runs[0].activity = null;
+  missingTerminal.tasks[0].runs[0].terminal = null;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(missingTerminal),
+    /failed Run phase and outcome must agree/,
+  );
+
   const legacyAccountGeneration = clone(fixture);
   legacyAccountGeneration.account.metaskExecutionGeneration = "0";
   assert.throws(
@@ -1646,7 +1691,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const terminalCurrentRun = clone(fixture);
   terminalCurrentRun.tasks[0].currentRunPhase = "completed";
   terminalCurrentRun.tasks[0].runs[0].phase = "completed";
-  terminalCurrentRun.tasks[0].runs[0].outcome = "completed";
+  terminalCurrentRun.tasks[0].runs[0].terminal = terminal("completed");
   terminalCurrentRun.tasks[0].runs[0].activity = null;
   assert.throws(
     () => decodeWorkbenchSnapshot(terminalCurrentRun),
@@ -1654,7 +1699,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   );
 
   const nonTerminalOutcome = clone(fixture);
-  nonTerminalOutcome.tasks[0].runs[0].outcome = "completed";
+  nonTerminalOutcome.tasks[0].runs[0].terminal = terminal("completed");
   assert.throws(
     () => decodeWorkbenchSnapshot(nonTerminalOutcome),
     /non-terminal Run cannot have an outcome/,
@@ -1662,7 +1707,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const mismatchedTerminalOutcome = clone(fixture);
   mismatchedTerminalOutcome.tasks[0].runs[0].phase = "failed";
-  mismatchedTerminalOutcome.tasks[0].runs[0].outcome = "completed";
+  mismatchedTerminalOutcome.tasks[0].runs[0].terminal = terminal("completed");
   assert.throws(
     () => decodeWorkbenchSnapshot(mismatchedTerminalOutcome),
     /failed Run phase and outcome must agree/,

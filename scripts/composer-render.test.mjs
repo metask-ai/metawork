@@ -221,6 +221,11 @@ function renderCompletedSurface(
       {
         id: "9",
         phase: pendingUi ? "waiting_ui" : "completed",
+        execution: {
+          generation: "1",
+          protocol: "anthropic_messages",
+          model: "fixture-model",
+        },
         input,
         output: {
           commentary: [],
@@ -231,8 +236,13 @@ function renderCompletedSurface(
           provisionalRedacted: false,
         },
         activity: pendingUi ? { kind: "waiting_user" } : null,
-        outcome: pendingUi ? null : "completed",
-        cause: null,
+        terminal: pendingUi
+          ? null
+          : {
+              outcome: "completed",
+              cause: null,
+              diagnosticDisposition: "absent",
+            },
         usage: { input: "12", output: "5" },
         tools: [
           {
@@ -274,9 +284,13 @@ function renderCompletedSurface(
         composerHasDraft: false,
         retryAvailable: true,
         responseDisabled: false,
+        fileChangesEnabled: false,
+        runDiagnosticsAvailable: false,
         onPrepareRetry() {},
+        onOpenRunDiagnostics() {},
         onOpenTool() {},
         onPreviewFile() {},
+        onReviewFileChanges() {},
         onRespond() {},
         renderPendingUi() {
           return createElement("div", null, "Pending decision");
@@ -777,8 +791,6 @@ test("Task list shows tasks from different workspaces without workspace controls
     currentRunPhase: null,
     activeOperation: null,
     recentOrder,
-    lastRunOutcome: null,
-    cause: null,
     runs: [],
     compacts: [],
     pendingUi: null,
@@ -807,8 +819,6 @@ test("Task list disambiguates duplicate titles with their own paths", () => {
     currentRunPhase: null,
     activeOperation: null,
     recentOrder: id,
-    lastRunOutcome: null,
-    cause: null,
     runs: [],
     compacts: [],
     pendingUi: null,

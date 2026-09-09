@@ -12207,6 +12207,12 @@ test "released Task credential is permanently scrubbed from every product projec
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"diagnosticDisposition\":\"withheld\"") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, snapshot, "\"lastRunOutcome\"") == null,
+    );
     control.endExecutionReplacementNoFail();
 }
 
@@ -14820,7 +14826,7 @@ test "projection failure after Agent terminal becomes a product failure" {
     var snapshot_storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"lastRunOutcome\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"terminal\":{\"outcome\":\"failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"cause\":\"event_pipeline_failure\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"continuationAvailable\":true") != null);
 }
@@ -14849,9 +14855,8 @@ test "event drain barrier atomically publishes terminal product state" {
     var pending_storage: [96 * 1024]u8 = undefined;
     const pending = try control.writeSnapshot(&pending_storage);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"phase\":\"running\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, pending, "\"lastRunOutcome\":null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, pending, "\"outcome\":null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, pending, "\"cause\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "\"terminal\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "\"lastRunOutcome\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "\"continuationAvailable\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "final assistant suffix") == null);
 
@@ -14864,9 +14869,7 @@ test "event drain barrier atomically publishes terminal product state" {
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeSnapshot(&terminal_storage);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"phase\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"lastRunOutcome\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"outcome\":\"failed\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"cause\":\"timeout\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal, "\"terminal\":{\"outcome\":\"failed\",\"cause\":\"timeout\",\"diagnosticDisposition\":\"absent\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "\"continuationAvailable\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal, "final assistant suffix") != null);
 }

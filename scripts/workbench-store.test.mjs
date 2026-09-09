@@ -19,8 +19,6 @@ function task(id, workspaceId, archived = false) {
     archived,
     currentRunId: "0",
     currentRunPhase: null,
-    lastRunOutcome: null,
-    cause: null,
     runs: [],
     pendingUi: null,
   };

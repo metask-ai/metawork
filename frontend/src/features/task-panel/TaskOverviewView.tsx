@@ -118,6 +118,12 @@ function runLabel(run: RunView): MessageId {
   }
 }
 
+function protocolMessage(
+  protocol: RunView["execution"]["protocol"],
+): MessageId {
+  return `settings.custom_provider_protocol.${protocol}`;
+}
+
 function wireInteger(value: string): bigint {
   try {
     return BigInt(value);
@@ -318,6 +324,10 @@ export function TaskOverviewView({
     {},
   );
   const run = selectedRun(task, focusRequest);
+  const latestRun = task.runs.at(-1) ?? null;
+  const runIsLatest = run !== null && run.id === latestRun?.id;
+  const providerFailureTerminal =
+    run?.terminal?.cause === "provider_failure" ? run.terminal : null;
   const activityMessage = run ? runActivityMessage(run) : null;
   const activityDetail = run ? runActivityDetail(run, locale, t) : null;
   const tools = useMemo(() => (run ? orderedTools(run) : []), [run]);
@@ -385,7 +395,7 @@ export function TaskOverviewView({
           </section>
         )}
 
-        {run && (
+        {run && !providerFailureTerminal && (
           <section
             ref={(node) => {
               sectionRefs.current.summary = node ?? undefined;
@@ -398,7 +408,9 @@ export function TaskOverviewView({
               {t(
                 isActiveRun(run)
                   ? "inspector.current_activity"
-                  : "inspector.last_run",
+                  : runIsLatest
+                    ? "inspector.last_run"
+                    : "inspector.selected_run",
               )}
             </p>
             <div className="inspector-run-state">
@@ -411,9 +423,59 @@ export function TaskOverviewView({
                 {isActiveRun(run) && activityDetail && (
                   <span>{activityDetail}</span>
                 )}
-                {run.cause && <small>{t(`cause.${run.cause}`)}</small>}
+                {run.terminal?.cause && (
+                  <small>{t(`cause.${run.terminal.cause}`)}</small>
+                )}
               </div>
             </div>
+          </section>
+        )}
+
+        {run && providerFailureTerminal && (
+          <section
+            ref={(node) => {
+              sectionRefs.current.diagnostics = node ?? undefined;
+            }}
+            className="inspector-section inspector-run-diagnostics"
+            tabIndex={-1}
+          >
+            <p className="section-label">{t("inspector.run_details")}</p>
+            <div className="inspector-run-state">
+              <span className="inspector-state-line" aria-hidden="true" />
+              <div>
+                <strong>{t("run.provider_failure.title")}</strong>
+                <span>
+                  {t(
+                    providerFailureTerminal.diagnosticDisposition === "withheld"
+                      ? "run.provider_failure.diagnostic_withheld"
+                      : "run.provider_failure.diagnostic_absent",
+                  )}
+                </span>
+              </div>
+            </div>
+            <p className="section-label inspector-run-information-label">
+              {t("inspector.run_information")}
+            </p>
+            <dl className="inspector-diagnostic-facts">
+              <div>
+                <dt>{t("inspector.diagnostic_model")}</dt>
+                <dd>{run.execution.model}</dd>
+              </div>
+              <div>
+                <dt>{t("inspector.diagnostic_protocol")}</dt>
+                <dd>{t(protocolMessage(run.execution.protocol))}</dd>
+              </div>
+              <div>
+                <dt>{t("inspector.diagnostic_run")}</dt>
+                <dd>{run.id}</dd>
+              </div>
+              <div>
+                <dt>{t("inspector.diagnostic_code")}</dt>
+                <dd>
+                  <code>provider_failure</code>
+                </dd>
+              </div>
+            </dl>
           </section>
         )}
 

@@ -2437,13 +2437,51 @@ button.run-process-tool:hover {
   margin-top: 2px;
 }
 
-.ai-activity-retry {
-  border: 0;
+.run-terminal-detail {
+  display: grid !important;
+  gap: 3px;
+}
+
+.run-terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.run-terminal-activity {
+  grid-template-columns: 10px minmax(0, 1fr);
+}
+
+.run-terminal-activity .ai-activity-action {
+  min-width: 0;
+  grid-column: 2;
+}
+
+.ai-activity-retry,
+.ai-activity-details {
+  min-height: 44px;
+  padding: 9px 11px;
+  border-radius: 7px;
   color: var(--ui-action-primary);
   background: transparent;
   font: inherit;
   font-weight: 650;
   cursor: pointer;
+}
+
+.ai-activity-retry {
+  border: 0;
+}
+
+.ai-activity-details {
+  border: 1px solid var(--ui-border);
+  color: var(--ui-content-secondary);
+  background: var(--ui-surface-panel);
+}
+
+.ai-activity-details:hover {
+  border-color: var(--ui-action-primary);
+  color: var(--ui-action-primary);
 }
 
 .task-skill-input,
@@ -2481,6 +2519,10 @@ button.run-process-tool:hover {
 
   .ai-message[data-role="user"] {
     max-width: 88%;
+  }
+
+  .run-terminal-actions {
+    flex-wrap: wrap;
   }
 }
 
@@ -8273,6 +8315,54 @@ button.inspector-tool-summary:hover {
 
 .inspector-run-state small {
   color: var(--metask-state-error);
+}
+
+.inspector-diagnostic-facts {
+  display: grid;
+  margin: 8px 0 0;
+  gap: 0;
+}
+
+.inspector-diagnostic-facts > div {
+  display: grid;
+  padding: 8px 0;
+  grid-template-columns: minmax(104px, 0.8fr) minmax(0, 1.2fr);
+  gap: 14px;
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.inspector-diagnostic-facts > div:last-child {
+  border-bottom: 0;
+}
+
+.inspector-diagnostic-facts dt,
+.inspector-diagnostic-facts dd {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-micro);
+  line-height: 1.5;
+}
+
+.inspector-diagnostic-facts dt {
+  color: var(--ui-content-muted);
+}
+
+.inspector-diagnostic-facts dd {
+  overflow-wrap: anywhere;
+  color: var(--ui-content-primary);
+}
+
+.inspector-diagnostic-facts code {
+  font-family: var(--font-mono);
+  font-size: inherit;
+}
+
+.inspector-run-diagnostics .inspector-state-line {
+  background: var(--metask-state-error);
+}
+
+.inspector-run-information-label {
+  margin-top: 20px;
 }
 
 .inspector-context-pressure,
