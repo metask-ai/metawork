@@ -26,6 +26,7 @@ import {
   type RunActivity,
   type RunView,
   type AttachmentChooseResult,
+  type AttachmentReceiveResult,
   type ScheduledTaskView,
   type PersistenceRecoveryOutcome,
   type SkillCatalogView,
@@ -3723,12 +3724,17 @@ export function decodeExecutionCommandResult(
 }
 
 export function decodeRendererBridgeConnect(value: unknown) {
+  const acceptedValue = booleanValue(
+    (value as JsonObject)?.accepted,
+    "$.accepted",
+  );
   const item = object(value, "$", [
     "accepted",
     "contractId",
     "contractRevision",
     "generation",
     "error",
+    ...(acceptedValue ? ["attachmentInput"] : []),
   ]);
   const accepted = booleanValue(item.accepted, "$.accepted");
   const contractId = stringValue(item.contractId, "$.contractId");
@@ -3738,11 +3744,29 @@ export function decodeRendererBridgeConnect(value: unknown) {
   );
   if (accepted) {
     if (item.error !== null) fail("$.error", "expected null");
+    const input = object(item.attachmentInput, "$.attachmentInput", [
+      "mode",
+      "maxChunkBytes",
+    ]);
+    const mode = enumValue(input.mode, "$.attachmentInput.mode", [
+      "native_paths",
+      "file_bytes",
+    ] as const);
+    const maxChunkBytes = positiveWireId(
+      input.maxChunkBytes,
+      "$.attachmentInput.maxChunkBytes",
+    );
+    if (BigInt(maxChunkBytes) > 128n * 1024n)
+      fail(
+        "$.attachmentInput.maxChunkBytes",
+        "chunk exceeds Bridge frame budget",
+      );
     return {
       accepted: true as const,
       contractId,
       contractRevision,
       generation: positiveWireId(item.generation, "$.generation"),
+      attachmentInput: { mode, maxChunkBytes: Number(maxChunkBytes) },
       error: null,
     };
   }
@@ -4591,4 +4615,32 @@ export function decodeAttachmentChooseResult(
 export function decodeAttachmentReleaseResult(value: unknown) {
   const item = object(value, "$", ["released"]);
   return { released: booleanValue(item.released, "$.released") };
+}
+
+export function decodeAttachmentReceiveResult(
+  value: unknown,
+): AttachmentReceiveResult {
+  const root = value as JsonObject;
+  if (
+    root?.status === "rejected" &&
+    (root.reason === "invalid_transfer" || root.reason === "stale_transfer")
+  ) {
+    object(value, "$", ["status", "reason"]);
+    return { status: "rejected" as const, reason: root.reason };
+  }
+  const result = decodeAttachmentChooseResult(value);
+  if (result.status === "cancelled")
+    fail("$.status", "expected ready or rejected");
+  return result;
+}
+
+export function decodeAttachmentReceiveAcceptance(value: unknown) {
+  if ((value as JsonObject)?.status === "accepted") {
+    object(value, "$", ["status"]);
+    return { status: "accepted" as const };
+  }
+  const result = decodeAttachmentReceiveResult(value);
+  if (result.status !== "rejected")
+    fail("$.status", "expected accepted or rejected");
+  return result;
 }

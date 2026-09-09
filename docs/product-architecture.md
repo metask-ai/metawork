@@ -189,9 +189,11 @@ MCP apply、catalog refresh、durable OAuth mutation 与运行时 reauthorizatio
 
 ### 2.6 文件 attachment staging
 
-Attachment staging 是 Product Control 内部、非持久、无用户 identity 的候选资源 owner，不形成新的顶层 Product owner 或 Renderer 产品对象。Application 的系统 picker 与 Renderer 消费的 Native SDK 文件拖放事件只产生本地路径；Renderer 仅可将拖放路径短暂提交给专用 typed Bridge command。Bridge 只拥有 source/window/connection authority 以及 Renderer opaque token 到 Product staging identity 的 grant，不缓存 raw bytes、路径或 Product 内部指针。staging 完成后 Renderer 只持 token 与安全 display metadata。
+Attachment staging 是 Product Control 内部、非持久、无用户 identity 的候选资源 owner，不形成新的顶层 Product owner 或 Renderer 产品对象。输入可以是系统 picker/Native SDK 拖放提供的本地路径，或 Renderer 从本次 DOM File 提取的有界字节块。Application 在 Bridge handshake 中选择唯一拖放入口，不把平台模式写入 Product Snapshot。Bridge 只拥有 source/window/connection authority、批次关联及 Renderer opaque token 到 Product staging identity 的 grant，不跨调用缓存 raw bytes、路径或 Product 内部指针。staging 完成后 Renderer 只持 token 与安全 display metadata。
 
-Product Control 使用独立于 Run、File Preview、catalog、restore 与 MCP 的 bounded attachment lane。一次添加按批次原子 staging：worker 只读取普通非空文件，并同时服从 Product 文件数、单文件和 raw staging 总预算；文件签名只把 PNG、JPEG 或 WebP 分类为当前可发送图片，其他文件保留为不可发送的通用文件。任一候选失败必须清零本批已经读取的字节且不发布部分 token。路径只活到 worker 建立 owned bytes，不能进入日志、Snapshot、持久化或后续发送时重读；读取必须 no-follow 并在前后 stat 不变。通用文件在 Product borrow 阶段 fail closed 为 `UnsupportedType`，不得被降级成文字或伪造为已解析输入。
+路径输入使用独立于 Run、File Preview、catalog、restore 与 MCP 的 bounded attachment lane；worker 只读取普通非空文件，读取必须 no-follow 并在前后 stat 不变，路径只活到建立 owned bytes，不进入日志、Snapshot、持久化或发送时重读。字节输入只接收本次 File 提供的内容，不宣称具备路径身份、no-follow 或前后 stat 保证；每个主窗口连接至多一个接收批次，Product 在开始时预留完整文件数和字节预算，严格按文件顺序及连续 offset 写入 Product-owned buffer。预留和 ready/borrowed 附件共用总配额，不能被 picker 最终 staging 绕过；该配额不等于包含路径 worker 和运输临时缓冲的进程总内存上限。
+
+两个入口都按整批原子 staging，服从相同的文件数、单文件和总容量限制，并共用签名分类：PNG、JPEG 或 WebP 为当前可发送图片，其他文件为不可发送的通用文件。字节输入完成时原子转移缓冲区所有权，不再复制整批 raw bytes；grant 发布失败释放整批资源。任一批次失败不能发布部分 token，不改变此前 ready 附件。取消可撤销本批接收或已完成但尚未消费的 grant，不能撤销已接纳 Run；生命周期清理与完成在主线程线性化。通用文件在 Product borrow 阶段 fail closed 为 `UnsupportedType`，不得降级成文字或伪造为已解析输入。
 
 staging 状态精确为 `staging | ready | borrowed | consumed | released | failed`。Bridge 在 `tasks.run` 前校验 token 属于当前 connection/window、均为 ready 且不重复；Product Task 在同一 admission 内 borrow bytes、构造有序 Agent `RunInput.multimodal` 并完成 `prepareRun`。Run 写入当前进程 Product Runtime 的接纳点是 token 消费 linearization point：此前失败恢复全部 staging 为 ready，此后无论 history save、enqueue、transport 或 Agent terminal 如何收口都不得恢复或自动重放 token。Agent 在 `prepareRun` 返回后已拥有编码输入，Product 必须清零 raw staging；enqueue 失败形成既有 pre-execution interrupted Run。
 

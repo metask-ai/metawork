@@ -27,6 +27,7 @@ test("Renderer Bridge connect negotiates the exact contract before returning a g
         contractRevision: 1,
         generation: "3",
         error: null,
+        attachmentInput: { mode: "native_paths", maxChunkBytes: "131072" },
       };
     }),
   });
@@ -368,12 +369,19 @@ test("native shortcut events stay behind the Bridge client boundary", () => {
   assert.equal(removed, true);
 });
 
-test("native file drops stay behind the Bridge client boundary", () => {
+test("native file drops stay behind the Bridge client boundary", async () => {
   let listener = null;
   const client = new BridgeClient({
     bridge: {
       async invoke() {
-        return null;
+        return {
+          accepted: true,
+          contractId: "metawork.renderer-bridge",
+          contractRevision: 1,
+          generation: "3",
+          error: null,
+          attachmentInput: { mode: "native_paths", maxChunkBytes: "131072" },
+        };
       },
       on(name, consume) {
         assert.equal(name, "drop:files");
@@ -383,6 +391,7 @@ test("native file drops stay behind the Bridge client boundary", () => {
     },
   });
   const received = [];
+  await client.connect();
   client.onFileDrop((paths) => received.push(paths));
   listener({ windowId: 1, paths: ["C:\\work\\notes.txt"] });
   assert.deepEqual(received, [["C:\\work\\notes.txt"]]);

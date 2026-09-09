@@ -10,6 +10,7 @@ const Grant = struct {
     attachment_id: u64,
     generation: u64,
     window_id: native_sdk.platform.WindowId,
+    receive_batch_id: ?u64 = null,
 };
 
 pub const Issued = struct {
@@ -142,6 +143,23 @@ pub const State = struct {
         return count;
     }
 
+    pub fn tagReceiveBatch(self: *State, ids: []const u64, batch_id: u64) void {
+        for (ids) |id| self.slots[self.findId(id).?].?.receive_batch_id = batch_id;
+    }
+
+    pub fn takeReceiveBatch(self: *State, generation: u64, window_id: native_sdk.platform.WindowId, batch_id: u64, output: []u64) []const u64 {
+        var count: usize = 0;
+        for (&self.slots) |*slot| {
+            const grant = slot.* orelse continue;
+            if (grant.generation != generation or grant.window_id != window_id or grant.receive_batch_id != batch_id) continue;
+            std.debug.assert(count < output.len);
+            output[count] = grant.attachment_id;
+            count += 1;
+            slot.* = null;
+        }
+        return output[0..count];
+    }
+
     fn emptyIndex(self: *const State) ?usize {
         for (self.slots, 0..) |slot, index| if (slot == null) return index;
         return null;
@@ -237,4 +255,28 @@ test "attachment grant teardown drains every staged Product identity" {
     var drained: [max_grants]u64 = undefined;
     try std.testing.expectEqualSlices(u64, &.{ 31, 32 }, state.takeAll(&drained));
     try std.testing.expectEqual(@as(usize, max_grants), state.freeCount());
+}
+
+test "batch cancellation excludes consumed grants and other batches or connections" {
+    const Random = struct {
+        next: u8 = 1,
+        fn fill(context: ?*anyopaque, output: []u8) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            @memset(output, self.next);
+            self.next += 1;
+            return true;
+        }
+    };
+    var state: State = .{};
+    var random = Random{};
+    var storage: [3]Issued = undefined;
+    const issued = try state.issueBatch(2, 3, &.{ 10, 11, 12 }, &storage, &random, Random.fill);
+    state.tagReceiveBatch(&.{ 10, 11 }, 1);
+    state.tagReceiveBatch(&.{12}, 2);
+    state.consume(&.{issued[0].token}, 2, 3);
+    var ids: [max_grants]u64 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), state.takeReceiveBatch(1, 3, 1, &ids).len);
+    try std.testing.expectEqual(@as(usize, 0), state.takeReceiveBatch(2, 4, 1, &ids).len);
+    try std.testing.expectEqualSlices(u64, &.{11}, state.takeReceiveBatch(2, 3, 1, &ids));
+    try std.testing.expectEqualSlices(u64, &.{12}, try state.resolve(&.{issued[2].token}, 2, 3, &ids));
 }

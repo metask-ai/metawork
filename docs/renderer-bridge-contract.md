@@ -102,7 +102,9 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 
 根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, maxFiles, maxFileBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，表示当前可发送的图片分类；其他 limit 是 canonical decimal `u64` string。Renderer 只用该对象解释入口和本地 admission，Host 对 command 重新执行全部限制。
 
-`metawork.attachments.choose` 是 revision 1 async command，只接受空对象。Application 在当前 source/window authority 下打开不限制扩展名的原生多选 picker。`metawork.attachments.addDropped` 是同一 revision 的 async command，payload 精确为 `{ paths }`；`paths` 是 Native SDK `drop:files` 事件给 Renderer 的非空绝对路径数组，Renderer 只能在当前事件处理中提交，不得缓存或投影。Bridge 对路径数量、编码和总字节有界校验。两个入口随后都由同一个 Product Control attachment lane 完成整批 staging，结果严格为以下三种之一：
+成功的 `metawork.events.connect` 响应增加 `attachmentInput = { mode, maxChunkBytes }`，拒绝响应不带该字段。Application 选择 `mode = native_paths | file_bytes`。`maxChunkBytes` 是非零 canonical decimal raw-byte 上限，不能超过单次 Bridge frame 预算；它只约束字节入口，不是 Product capability。Renderer 每个平台只消费一个拖放入口，不监听另一入口作重试或超时 fallback。
+
+`metawork.attachments.choose` 是 revision 1 async command，只接受空对象。Application 在当前 source/window authority 下打开不限制扩展名的原生多选 picker。`metawork.attachments.addDropped` 是同一 revision 的 async command，payload 精确为 `{ paths }`；`paths` 是 Native SDK `drop:files` 事件给 Renderer 的非空绝对路径数组，Renderer 只能在当前事件处理中提交，不得缓存或投影。Bridge 对路径数量、编码和总字节有界校验。路径入口随后由同一个 Product Control attachment lane 完成整批 staging，结果严格为以下三种之一：
 
 ```json
 { "status": "cancelled" }
@@ -142,6 +144,19 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 ```
 
 `attachments` 在 ready 时非空且保持入口顺序；entry 是严格 tagged union：`kind=image` 必须带已发布 `format`，`kind=file` 禁止 `format`。token 是 Bridge-owned、不可猜、connection/window/document-generation-bound 的一次性 grant，不是 Product identity 或路径。整批任一候选失败只能返回单一 rejected 并释放全部 candidate，不返回 ready 与 rejected 混合集合。
+
+`file_bytes` 模式使用同一 revision 的四个同步 typed commands。它们只在当前连接和实际 source window 下接受调用，Host 在主线程线性化生命周期；不接收 Renderer 提供的 window identity：
+
+| Command | 精确 payload | 结果 |
+| --- | --- | --- |
+| `metawork.attachments.beginReceive` | `{ generation, batchId, files: [{ name, sizeBytes }] }` | `{ status: "accepted" }` 或 rejected |
+| `metawork.attachments.appendReceive` | `{ generation, batchId, fileIndex, offset, dataBase64 }` | `{ status: "accepted" }` 或 rejected |
+| `metawork.attachments.finishReceive` | `{ generation, batchId }` | 上述 ready 或 rejected |
+| `metawork.attachments.cancelReceive` | `{ generation, batchId }` | `{ released }` |
+
+`generation`、`batchId` 是非零 canonical decimal u64；`sizeBytes`、`offset` 是 canonical decimal u64，offset 可为零。`fileIndex` 为零起始 JSON u32，必须对应当前接收文件。batchId 由 Renderer 在 begin 前按连接单调分配；Host 用有界水位拒绝重复或迟到 begin，包括 cancel 先到的批次。每次只传一个原始块，等 accepted 后才读下一块；文件顺序、offset、声明长度和 Base64 必须严格一致，不接受空块、重复、跳跃或超限数据。Host 根据接收字节分类，不信任 MIME/扩展名；不把 DOM File 冒充具备本地路径身份验证的文件。begin 在读取前预留整个批次的 Product 配额，finish 才发布 grant。资源拒绝复用上述 reason；传输顺序或内容错误为 `invalid_transfer`，未知/过期批次为 `stale_transfer`。畸形 wire、错误 source/window/generation 属于 Bridge command failure。
+
+cancel 释放本批 Product 接收资源或本批已发布但未消费的 grant；未知批次返回 released=false，并阻止同 ID 的迟到 begin。它不能撤销已接纳 Run，也不能释放其他 generation 的批次。begin/append/finish 不自动重试；客户端超时、读取错误或用户取消都定向 cancel，无法确认清理则替换现有 connection，清除旧附件并提示重新选择。断连、document replacement、关闭和 shutdown 必须释放全部接收资源。Host 不新增 TTL 或定时重试；冻结 Renderer 最多保留一个配额内批次直到显式或生命周期清理。完成响应迟到不得在已取消 UI 操作中插入 chip；移交草稿后则由既有 attachment release/consume 负责。
 
 `metawork.attachments.release` 是同步 revision 1 command，payload 精确为 `{ token }`，返回 `{ released }`。它只撤销当前 connection 拥有且尚未 borrowed/consumed 的 grant；未知、stale 或已经释放的 token 返回 released=false，不泄露其他 connection 的存在性。disconnect、document generation replacement 与 shutdown 必须等价释放该 connection 全部 grant。
 

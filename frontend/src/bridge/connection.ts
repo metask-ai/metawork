@@ -114,8 +114,9 @@ export class WorkbenchConnection {
     }
   }
 
-  async retry() {
+  async retry(options: { replaceConnection?: boolean } = {}) {
     if (this.stopped) throw new Error("Workbench connection is stopped");
+    if (options.replaceConnection) await this.disconnectCurrent();
     this.demand.resetRetry();
     this.callbacks.onViewSyncFailed(false);
     if (this.generation !== "0") {

@@ -23,6 +23,7 @@ const sync_product_handler_count = product_handler_count - async_product_handler
 const max_preview_in_flight: usize = 8;
 const max_diff_in_flight: usize = 8;
 const max_attachment_in_flight: usize = 4;
+pub const attachment_chunk_bytes = 128 * 1024;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
@@ -55,6 +56,7 @@ pub const WindowChromeControlAction = enum {
 };
 
 pub const Platform = struct {
+    attachment_input: enum { native_paths, file_bytes } = .native_paths,
     context: ?*anyopaque,
     wake_fn: *const fn (?*anyopaque) anyerror!void,
     emit_fn: *const fn (
@@ -229,6 +231,8 @@ pub const Dispatcher = struct {
     grants: workspace_grant.State = .{},
     skill_grants: skill_grant.State = .{},
     attachment_grants: attachment_grant.State = .{},
+    receive_high_water: u64 = 0,
+    receive_active: ?struct { batch_id: u64, product_id: u64 } = null,
     window_chrome_generation: u64 = 0,
     window_chrome_connected: bool = false,
     sequence: u64 = 0,
@@ -350,6 +354,10 @@ pub const Dispatcher = struct {
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.release_attachment, .function = releaseAttachment },
+            .{ .name = commands.begin_attachment_receive, .function = beginAttachmentReceive },
+            .{ .name = commands.append_attachment_receive, .function = appendAttachmentReceive },
+            .{ .name = commands.finish_attachment_receive, .function = finishAttachmentReceive },
+            .{ .name = commands.cancel_attachment_receive, .function = cancelAttachmentReceive },
             .{ .name = commands.select_task_model, .function = selectTaskModel },
             .{ .name = commands.restore_task, .function = restoreTask },
             .{ .name = commands.compact, .function = compactTask },
@@ -438,6 +446,11 @@ pub const Dispatcher = struct {
     }
 
     fn releaseAllAttachmentGrants(self: *Dispatcher) void {
+        if (self.receive_active) |receive| {
+            if (self.control) |workbench| _ = workbench.cancelAttachmentReceive(receive.product_id);
+        }
+        self.receive_active = null;
+        self.receive_high_water = 0;
         var ids: [attachment_grant.max_grants]u64 = undefined;
         const taken = self.attachment_grants.takeAll(&ids);
         const workbench = self.control orelse return;
@@ -573,8 +586,8 @@ pub const Dispatcher = struct {
         try self.platform.wake_fn(self.platform.context);
         return std.fmt.bufPrint(
             output,
-            "{{\"accepted\":true,\"contractId\":\"{s}\",\"contractRevision\":{d},\"generation\":\"{d}\",\"error\":null}}",
-            .{ commands.contract_id, commands.contract_revision, generation },
+            "{{\"accepted\":true,\"contractId\":\"{s}\",\"contractRevision\":{d},\"generation\":\"{d}\",\"error\":null,\"attachmentInput\":{{\"mode\":\"{s}\",\"maxChunkBytes\":\"{d}\"}}}}",
+            .{ commands.contract_id, commands.contract_revision, generation, @tagName(self.platform.attachment_input), attachment_chunk_bytes },
         );
     }
 
@@ -985,6 +998,123 @@ pub const Dispatcher = struct {
         responder.success(request_id, writer.buffered()) catch {};
     }
 
+    fn requireReceiveKey(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation_text: []const u8, batch_text: []const u8) !struct { generation: u64, batch_id: u64 } {
+        try self.requireBootstrapWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        if (self.platform.attachment_input != .file_bytes) return error.InvalidBridgePayload;
+        const generation = try handlers.parseWireId(generation_text);
+        const batch_id = try handlers.parseWireId(batch_text);
+        if (batch_id == 0) return error.InvalidBridgeId;
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+        return .{ .generation = generation, .batch_id = batch_id };
+    }
+
+    fn receiveRejected(output: []u8, err: anyerror) ![]const u8 {
+        const reason: []const u8 = switch (err) {
+            error.FileTooLarge => "file_too_large",
+            error.TooManyFiles => "too_many_files",
+            error.StagingCapacity, error.OutOfMemory, error.IdentityExhausted => "staging_capacity",
+            error.ExecutorShuttingDown => "shutting_down",
+            error.StaleTransfer => "stale_transfer",
+            error.EmptyFile, error.InvalidDisplayName => "read_failed",
+            else => "invalid_transfer",
+        };
+        return std.fmt.bufPrint(output, "{{\"status\":\"rejected\",\"reason\":\"{s}\"}}", .{reason});
+    }
+
+    fn beginAttachmentReceive(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayloadWithLimit(handlers.AttachmentReceiveBegin, invocation.request.payload, 32 * 1024);
+        defer parsed.deinit();
+        const key = try self.requireReceiveKey(invocation, parsed.value.generation, parsed.value.batchId);
+        if (key.batch_id <= self.receive_high_water) return receiveRejected(output, error.StaleTransfer);
+        self.receive_high_water = key.batch_id;
+        if (self.receive_active != null) return receiveRejected(output, error.StagingCapacity);
+        var files: [attachment_grant.max_grants]product_control.AttachmentReceiveFile = undefined;
+        if (parsed.value.files.len == 0 or parsed.value.files.len > files.len) return receiveRejected(output, error.TooManyFiles);
+        for (parsed.value.files, 0..) |file, index| {
+            const size = handlers.parseWireId(file.sizeBytes) catch return receiveRejected(output, error.InvalidTransfer);
+            files[index] = .{ .display_name = file.name, .size_bytes = std.math.cast(usize, size) orelse return receiveRejected(output, error.FileTooLarge) };
+        }
+        const workbench = try self.requireProductControl();
+        const id = workbench.beginAttachmentReceive(files[0..parsed.value.files.len]) catch |err| return receiveRejected(output, err);
+        self.receive_active = .{ .batch_id = key.batch_id, .product_id = id };
+        return "{\"status\":\"accepted\"}";
+    }
+
+    fn appendAttachmentReceive(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayloadWithLimit(handlers.AttachmentReceiveAppend, invocation.request.payload, 192 * 1024);
+        defer parsed.deinit();
+        const key = try self.requireReceiveKey(invocation, parsed.value.generation, parsed.value.batchId);
+        const active = self.receive_active orelse return receiveRejected(output, error.StaleTransfer);
+        if (active.batch_id != key.batch_id) return receiveRejected(output, error.StaleTransfer);
+        const offset = handlers.parseWireId(parsed.value.offset) catch return receiveRejected(output, error.InvalidTransfer);
+        var bytes: [attachment_chunk_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &bytes);
+        const decoder = std.base64.standard.Decoder;
+        const size = decoder.calcSizeForSlice(parsed.value.dataBase64) catch return receiveRejected(output, error.InvalidTransfer);
+        if (size == 0 or size > bytes.len) return receiveRejected(output, error.InvalidTransfer);
+        decoder.decode(bytes[0..size], parsed.value.dataBase64) catch return receiveRejected(output, error.InvalidTransfer);
+        const workbench = try self.requireProductControl();
+        workbench.appendAttachmentReceive(active.product_id, parsed.value.fileIndex, std.math.cast(usize, offset) orelse return receiveRejected(output, error.InvalidTransfer), bytes[0..size]) catch |err| return receiveRejected(output, err);
+        return "{\"status\":\"accepted\"}";
+    }
+
+    fn finishAttachmentReceive(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.AttachmentReceiveKey, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requireReceiveKey(invocation, parsed.value.generation, parsed.value.batchId);
+        const active = self.receive_active orelse return receiveRejected(output, error.StaleTransfer);
+        if (active.batch_id != key.batch_id) return receiveRejected(output, error.StaleTransfer);
+        const workbench = try self.requireProductControl();
+        var descriptors: [attachment_grant.max_grants]product_control.AttachmentDescriptor = undefined;
+        const ready = workbench.finishAttachmentReceive(active.product_id, &descriptors) catch |err| return receiveRejected(output, err);
+        self.receive_active = null;
+        var ids: [attachment_grant.max_grants]u64 = undefined;
+        for (ready, 0..) |descriptor, index| ids[index] = descriptor.id;
+        var issued_storage: [attachment_grant.max_grants]attachment_grant.Issued = undefined;
+        const issued = self.attachment_grants.issueBatch(key.generation, invocation.source.window_id, ids[0..ready.len], &issued_storage, self.platform.context, self.platform.random_fn) catch {
+            self.releaseAttachmentDescriptors(ready);
+            return receiveRejected(output, error.StagingCapacity);
+        };
+        self.attachment_grants.tagReceiveBatch(ids[0..ready.len], key.batch_id);
+        errdefer _ = self.cancelReceiveBatch(key.generation, invocation.source.window_id, key.batch_id);
+        return encodeAttachmentsReady(output, ready, issued);
+    }
+
+    fn cancelReceiveBatch(self: *Dispatcher, generation: u64, window_id: native_sdk.platform.WindowId, batch_id: u64) bool {
+        const workbench = self.control orelse return false;
+        var released = false;
+        if (self.receive_active) |active| if (active.batch_id == batch_id) {
+            released = workbench.cancelAttachmentReceive(active.product_id);
+            self.receive_active = null;
+        };
+        var ids: [attachment_grant.max_grants]u64 = undefined;
+        for (self.attachment_grants.takeReceiveBatch(generation, window_id, batch_id, &ids)) |id| {
+            released = workbench.releaseAttachment(id) or released;
+        }
+        self.receive_high_water = @max(self.receive_high_water, batch_id);
+        return released;
+    }
+
+    fn cancelAttachmentReceive(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.AttachmentReceiveKey, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requireReceiveKey(invocation, parsed.value.generation, parsed.value.batchId);
+        return std.fmt.bufPrint(output, "{{\"released\":{}}}", .{self.cancelReceiveBatch(key.generation, invocation.source.window_id, key.batch_id)});
+    }
+
     fn chooseAttachments(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -1283,23 +1413,27 @@ pub const Dispatcher = struct {
         issued: []const attachment_grant.Issued,
     ) void {
         var buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        writer.writeAll("{\"status\":\"ready\",\"attachments\":[") catch return responderEncodingFailure(responder, request_id);
+        const encoded = encodeAttachmentsReady(&buffer, descriptors, issued) catch return responderEncodingFailure(responder, request_id);
+        responder.success(request_id, encoded) catch {};
+    }
+
+    fn encodeAttachmentsReady(output: []u8, descriptors: []const product_control.AttachmentDescriptor, issued: []const attachment_grant.Issued) ![]const u8 {
+        var writer = std.Io.Writer.fixed(output);
+        try writer.writeAll("{\"status\":\"ready\",\"attachments\":[");
         for (descriptors, issued, 0..) |descriptor, grant, index| {
-            if (index != 0) writer.writeByte(',') catch return responderEncodingFailure(responder, request_id);
-            writer.print("{{\"token\":\"{s}\",\"kind\":\"{s}\"", .{
+            if (index != 0) try writer.writeByte(',');
+            try writer.print("{{\"token\":\"{s}\",\"kind\":\"{s}\"", .{
                 grant.token,
                 @tagName(descriptor.kind),
-            }) catch return responderEncodingFailure(responder, request_id);
+            });
             if (descriptor.format) |format|
-                writer.print(",\"format\":\"{s}\"", .{@tagName(format)}) catch
-                    return responderEncodingFailure(responder, request_id);
-            writer.writeAll(",\"displayName\":") catch return responderEncodingFailure(responder, request_id);
-            std.json.Stringify.value(descriptor.display_name, .{}, &writer) catch return responderEncodingFailure(responder, request_id);
-            writer.print(",\"sizeBytes\":\"{d}\"}}", .{descriptor.size_bytes}) catch return responderEncodingFailure(responder, request_id);
+                try writer.print(",\"format\":\"{s}\"", .{@tagName(format)});
+            try writer.writeAll(",\"displayName\":");
+            try std.json.Stringify.value(descriptor.display_name, .{}, &writer);
+            try writer.print(",\"sizeBytes\":\"{d}\"}}", .{descriptor.size_bytes});
         }
-        writer.writeAll("]}") catch return responderEncodingFailure(responder, request_id);
-        responder.success(request_id, writer.buffered()) catch {};
+        try writer.writeAll("]}");
+        return writer.buffered();
     }
 
     fn responderEncodingFailure(
@@ -5118,6 +5252,100 @@ test "automation attachment path batches preserve platform selection cardinality
     try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths(""));
     try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths("/tmp/one.png\n"));
     try std.testing.expectEqual(@as(?usize, null), countAutomationAttachmentPaths("\n/tmp/two.jpg"));
+}
+
+test "file receive dispatch scopes cancellation, response loss and generation cleanup" {
+    const fixture = @import("lifecycle_fixture");
+    var wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("attachment_receive.fixture"), .{});
+    defer wire.deinit();
+    var fixture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer fixture_arena.deinit();
+    const Host = struct {
+        fn wake(_: ?*anyopaque) anyerror!void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
+        fn cancel(_: ?*anyopaque, _: u64) anyerror!void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, out: []u8) bool {
+            @memset(out, 7);
+            return true;
+        }
+    };
+    fixture.fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
+    var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
+        .attachment_input = .file_bytes,
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        // This test dispatches only the byte-input commands, never OS effects.
+        .show_open_dialog_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_sync_fn = undefined,
+        .window_chrome_begin_drag_fn = undefined,
+        .window_chrome_control_fn = undefined,
+        .window_chrome_disconnect_fn = undefined,
+    }, .{}, 3);
+    defer {
+        dispatcher.deinit();
+        workbench.shutdownExecutor();
+        runtime.shutdown() catch unreachable;
+        workbench.deinit();
+        runtime.deinit();
+    }
+    const native = dispatcher.register(@import("policy.zig").product(.release));
+    const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    var output: [16 * 1024]u8 = undefined;
+    const connect_request = "{\"id\":\"c\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}";
+    const connected = native.dispatch(connect_request, source, &output);
+    const expected_connect = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("connect").?, .{});
+    try std.testing.expect(std.mem.indexOf(u8, connected, expected_connect) != null);
+    const Driver = struct {
+        fn run(n: native_sdk.bridge.Dispatcher, s: native_sdk.bridge.Source, out: []u8, command: []const u8, payload: []const u8, expected: []const u8) !void {
+            var request_buffer: [2048]u8 = undefined;
+            const request = try std.fmt.bufPrint(&request_buffer, "{{\"id\":\"r\",\"command\":\"metawork.attachments.{s}\",\"payload\":{s}}}", .{ command, payload });
+            const result = n.dispatch(request, s, out);
+            try std.testing.expect(std.mem.indexOf(u8, result, expected) != null);
+        }
+    };
+    const key = "{\"generation\":\"1\",\"batchId\":\"1\"}";
+    const begin = "{\"generation\":\"1\",\"batchId\":\"1\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}";
+    try Driver.run(native, source, &output, "cancelReceive", key, "\"released\":false");
+    try Driver.run(native, source, &output, "beginReceive", begin, "stale_transfer");
+    const begin2 = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("begin").?, .{});
+    try Driver.run(native, source, &output, "beginReceive", begin2, "accepted");
+    try std.testing.expectEqual(@as(usize, 3), workbench.attachments.used_bytes);
+    try Driver.run(native, .{ .origin = "zero://app", .window_id = 4 }, &output, "cancelReceive", "{\"generation\":\"1\",\"batchId\":\"2\"}", "handler_failed");
+    try Driver.run(native, source, &output, "appendReceive", "{\"generation\":\"1\",\"batchId\":\"2\",\"fileIndex\":0,\"offset\":\"1\",\"dataBase64\":\"YWJj\"}", "invalid_transfer");
+    try Driver.run(native, source, &output, "appendReceive", "{\"generation\":\"1\",\"batchId\":\"2\",\"fileIndex\":0,\"offset\":\"0\",\"dataBase64\":\"?\"}", "invalid_transfer");
+    const append = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("append").?, .{});
+    try Driver.run(native, source, &output, "appendReceive", append, "accepted");
+    const key2 = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("key").?, .{});
+    // Ignore the finish response, as if transport delivery was lost.
+    const expected_ready = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("ready").?, .{});
+    try Driver.run(native, source, &output, "finishReceive", key2, expected_ready);
+    try Driver.run(native, source, &output, "finishReceive", key2, "stale_transfer");
+    try Driver.run(native, source, &output, "cancelReceive", key2, "\"released\":true");
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    try Driver.run(native, source, &output, "beginReceive", "{\"generation\":\"1\",\"batchId\":\"3\",\"files\":[{\"name\":\"a\",\"sizeBytes\":\"3\"}]}", "accepted");
+    _ = native.dispatch(connect_request, source, &output);
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    try Driver.run(native, source, &output, "beginReceive", "{\"generation\":\"2\",\"batchId\":\"1\",\"files\":[{\"name\":\"a\",\"sizeBytes\":\"3\"}]}", "accepted");
+    try Driver.run(native, source, &output, "cancelReceive", key, "handler_failed");
+    try std.testing.expectEqual(@as(usize, 3), workbench.attachments.used_bytes);
+    dispatcher.breakConnection();
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
 }
 
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {

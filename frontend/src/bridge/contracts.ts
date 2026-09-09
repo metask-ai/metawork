@@ -365,6 +365,10 @@ export type AttachmentChooseResult =
         | "shutting_down";
     };
 
+export type AttachmentReceiveResult =
+  | AttachmentChooseResult
+  | { status: "rejected"; reason: "invalid_transfer" | "stale_transfer" };
+
 export type ScheduledTaskRecurrence =
   | { kind: "once"; atUnixSeconds: string }
   | {

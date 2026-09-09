@@ -2046,7 +2046,7 @@ export default function App() {
     return client.onFileDrop((paths) => {
       droppedAttachmentHandlerRef.current(paths);
     });
-  }, []);
+  }, [bridgeGeneration]);
 
   async function removeAttachment(token: string) {
     const current = composerDraftRef.current;

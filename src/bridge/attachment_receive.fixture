@@ -1,0 +1,7 @@
+{
+  "connect": {"accepted":true,"contractId":"metawork.renderer-bridge","contractRevision":1,"generation":"1","error":null,"attachmentInput":{"mode":"file_bytes","maxChunkBytes":"131072"}},
+  "begin": {"generation":"1","batchId":"2","files":[{"name":"a.txt","sizeBytes":"3"}]},
+  "append": {"generation":"1","batchId":"2","fileIndex":0,"offset":"0","dataBase64":"YWJj"},
+  "key": {"generation":"1","batchId":"2"},
+  "ready": {"status":"ready","attachments":[{"token":"070707070707070707070707070707070707070707070707","kind":"file","displayName":"a.txt","sizeBytes":"3"}]}
+}

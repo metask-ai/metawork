@@ -353,6 +353,19 @@ pub const FileChangeDiffRequest = struct {
 };
 pub const AttachmentRelease = struct { token: []const u8 };
 pub const AttachmentPaths = struct { paths: []const []const u8 };
+pub const AttachmentReceiveKey = struct { generation: []const u8, batchId: []const u8 };
+pub const AttachmentReceiveBegin = struct {
+    generation: []const u8,
+    batchId: []const u8,
+    files: []const struct { name: []const u8, sizeBytes: []const u8 },
+};
+pub const AttachmentReceiveAppend = struct {
+    generation: []const u8,
+    batchId: []const u8,
+    fileIndex: u32,
+    offset: []const u8,
+    dataBase64: []const u8,
+};
 pub const TaskRename = struct { taskId: []const u8, title: []const u8 };
 pub const TaskArchive = struct { taskId: []const u8, archived: bool };
 pub const TaskDelete = struct { taskId: []const u8 };
