@@ -411,13 +411,7 @@ pub const Lane = struct {
     }
 };
 
-fn detectFormat(bytes: []const u8) ?attachment.Format {
-    if (bytes.len >= 8 and std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n")) return .png;
-    if (bytes.len >= 3 and bytes[0] == 0xff and bytes[1] == 0xd8 and bytes[2] == 0xff) return .jpeg;
-    if (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and
-        std.mem.eql(u8, bytes[8..12], "WEBP")) return .webp;
-    return null;
-}
+const detectFormat = attachment.detectFormat;
 
 test "attachment staging detects every published image signature and rejects PDF" {
     try std.testing.expectEqual(

@@ -20,6 +20,7 @@ pub const TaskRunInput = runtime_impl.TaskRunInput;
 pub const AttachmentFormat = product_attachment.Format;
 pub const AttachmentCandidate = product_attachment.Candidate;
 pub const AttachmentDescriptor = product_attachment.Descriptor;
+pub const AttachmentReceiveFile = product_attachment.ReceiveFile;
 pub const TaskModelSelectionInput = runtime_impl.TaskModelSelectionInput;
 pub const NewTaskModelSelectionInput = runtime_impl.NewTaskModelSelectionInput;
 pub const NewTaskAdmissionView = runtime_impl.NewTaskAdmissionView;

@@ -18,6 +18,14 @@ pub const Candidate = struct {
     bytes: []const u8,
 };
 
+pub const ReceiveFile = struct { display_name: []const u8, size_bytes: usize };
+const Receive = struct {
+    id: u64,
+    entries: []Entry,
+    file_index: usize = 0,
+    offset: usize = 0,
+};
+
 pub const Descriptor = struct {
     id: u64,
     kind: Kind,
@@ -45,6 +53,8 @@ pub const Error = std.mem.Allocator.Error || error{
     UnknownAttachment,
     AttachmentBusy,
     DuplicateAttachment,
+    InvalidTransfer,
+    StaleTransfer,
 };
 
 const Entry = struct {
@@ -61,6 +71,8 @@ pub const Runtime = struct {
     slots: []?Entry,
     used_bytes: usize = 0,
     next_id: u64 = 1,
+    receiving: ?Receive = null,
+    next_receive_id: u64 = 1,
 
     pub fn init(allocator: std.mem.Allocator, limits: Limits) Error!Runtime {
         if (limits.max_files == 0 or
@@ -74,9 +86,92 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        if (self.receiving) |receive| _ = self.cancelReceive(receive.id);
         for (self.slots) |*slot| if (slot.*) |*entry| self.destroyEntry(entry);
         self.allocator.free(self.slots);
         self.* = undefined;
+    }
+
+    /// Reserve the same slots and byte budget used by ready attachments.
+    pub fn beginReceive(self: *Runtime, files: []const ReceiveFile) Error!u64 {
+        if (self.receiving != null) return error.StagingCapacity;
+        if (files.len == 0) return error.EmptyBatch;
+        if (files.len > self.limits.max_files) return error.TooManyFiles;
+        if (self.freeSlotCount() < files.len) return error.StagingCapacity;
+        if (self.next_receive_id == 0) return error.IdentityExhausted;
+        var total: usize = 0;
+        for (files) |file| {
+            if (!validDisplayName(file.display_name, self.limits.max_display_name_bytes)) return error.InvalidDisplayName;
+            if (file.size_bytes == 0) return error.EmptyFile;
+            if (file.size_bytes > self.limits.max_file_bytes) return error.FileTooLarge;
+            if (file.size_bytes > self.limits.max_staged_bytes - self.used_bytes - total) return error.StagingCapacity;
+            total += file.size_bytes;
+        }
+        const entries = try self.allocator.alloc(Entry, files.len);
+        var created: usize = 0;
+        errdefer {
+            for (entries[0..created]) |*entry| self.destroyEntry(entry);
+            self.allocator.free(entries);
+        }
+        for (files, entries) |file, *entry| {
+            const name = try self.allocator.dupe(u8, file.display_name);
+            errdefer self.allocator.free(name);
+            const bytes = try self.allocator.alloc(u8, file.size_bytes);
+            @memset(bytes, 0);
+            entry.* = .{ .id = 0, .state = .ready, .format = null, .display_name = name, .bytes = bytes };
+            self.used_bytes += bytes.len;
+            created += 1;
+        }
+        const id = self.next_receive_id;
+        self.next_receive_id +%= 1;
+        self.receiving = .{ .id = id, .entries = entries };
+        return id;
+    }
+
+    pub fn appendReceive(self: *Runtime, id: u64, file_index: usize, offset: usize, bytes: []const u8) Error!void {
+        const receive = if (self.receiving) |*value| value else return error.StaleTransfer;
+        if (receive.id != id) return error.StaleTransfer;
+        if (file_index != receive.file_index or offset != receive.offset or file_index >= receive.entries.len or bytes.len == 0)
+            return error.InvalidTransfer;
+        const target = receive.entries[file_index].bytes;
+        if (bytes.len > target.len - offset) return error.InvalidTransfer;
+        @memcpy(target[offset..][0..bytes.len], bytes);
+        receive.offset += bytes.len;
+        if (receive.offset == target.len) {
+            receive.file_index += 1;
+            receive.offset = 0;
+        }
+    }
+
+    /// No allocation or raw-byte copy at the commit point.
+    pub fn finishReceive(self: *Runtime, id: u64, output: []Descriptor) Error![]const Descriptor {
+        const receive = self.receiving orelse return error.StaleTransfer;
+        if (receive.id != id) return error.StaleTransfer;
+        if (receive.file_index != receive.entries.len) return error.InvalidTransfer;
+        if (output.len < receive.entries.len) return error.TooManyFiles;
+        if (self.next_id == 0 or receive.entries.len - 1 > std.math.maxInt(u64) - self.next_id) return error.IdentityExhausted;
+        for (receive.entries, 0..) |entry, index| {
+            const slot = self.emptyIndex().?;
+            var ready = entry;
+            ready.id = self.next_id;
+            self.next_id +%= 1;
+            ready.format = detectFormat(ready.bytes);
+            self.slots[slot] = ready;
+            output[index] = self.descriptor(ready);
+        }
+        const count = receive.entries.len;
+        self.allocator.free(receive.entries);
+        self.receiving = null;
+        return output[0..count];
+    }
+
+    pub fn cancelReceive(self: *Runtime, id: u64) bool {
+        const receive = self.receiving orelse return false;
+        if (receive.id != id) return false;
+        for (receive.entries) |*entry| self.destroyEntry(entry);
+        self.allocator.free(receive.entries);
+        self.receiving = null;
+        return true;
     }
 
     pub fn stageBatch(
@@ -197,7 +292,7 @@ pub const Runtime = struct {
         for (self.slots) |slot| if (slot == null) {
             count += 1;
         };
-        return count;
+        return count - if (self.receiving) |receive| receive.entries.len else @as(usize, 0);
     }
 
     fn emptyIndex(self: *const Runtime) ?usize {
@@ -259,6 +354,13 @@ fn matches(format: Format, bytes: []const u8) bool {
     };
 }
 
+pub fn detectFormat(bytes: []const u8) ?Format {
+    inline for (.{ Format.png, Format.jpeg, Format.webp }) |format| {
+        if (matches(format, bytes)) return format;
+    }
+    return null;
+}
+
 fn testLimits() Limits {
     return .{
         .max_files = 4,
@@ -266,6 +368,58 @@ fn testLimits() Limits {
         .max_file_bytes = 64,
         .max_staged_bytes = 160,
     };
+}
+
+test "receive reserves shared capacity and adopts buffers without a raw copy" {
+    var runtime = try Runtime.init(std.testing.allocator, testLimits());
+    defer runtime.deinit();
+    const id = try runtime.beginReceive(&.{
+        .{ .display_name = "a.txt", .size_bytes = 3 },
+        .{ .display_name = "b.png", .size_bytes = 8 },
+    });
+    const original = runtime.receiving.?.entries[0].bytes.ptr;
+    try std.testing.expectEqual(@as(usize, 11), runtime.used_bytes);
+    var output: [4]Descriptor = undefined;
+    try std.testing.expectError(error.StagingCapacity, runtime.stageBatch(&.{
+        .{ .display_name = "1", .format = null, .bytes = "x" },
+        .{ .display_name = "2", .format = null, .bytes = "x" },
+        .{ .display_name = "3", .format = null, .bytes = "x" },
+    }, &output));
+    try std.testing.expectError(error.InvalidTransfer, runtime.appendReceive(id, 1, 0, "x"));
+    try runtime.appendReceive(id, 0, 0, "a");
+    try std.testing.expectError(error.InvalidTransfer, runtime.appendReceive(id, 0, 0, "a"));
+    try std.testing.expectError(error.InvalidTransfer, runtime.finishReceive(id, &output));
+    try runtime.appendReceive(id, 0, 1, "bc");
+    try runtime.appendReceive(id, 1, 0, "\x89PNG\r\n\x1a\n");
+    const ready = try runtime.finishReceive(id, &output);
+    try std.testing.expectEqual(Kind.file, ready[0].kind);
+    try std.testing.expectEqual(Kind.image, ready[1].kind);
+    try std.testing.expect(original == runtime.slots[runtime.findIndex(ready[0].id).?].?.bytes.ptr);
+    try std.testing.expectEqual(@as(usize, 11), runtime.used_bytes);
+    try std.testing.expectError(error.StaleTransfer, runtime.finishReceive(id, &output));
+    for (ready) |descriptor| try std.testing.expect(runtime.release(descriptor.id));
+    try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
+}
+
+test "receive cancellation and allocation failures return all reservations" {
+    const Scenario = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var runtime = try Runtime.init(allocator, testLimits());
+            defer runtime.deinit();
+            const id = try runtime.beginReceive(&.{
+                .{ .display_name = "a", .size_bytes = 60 },
+                .{ .display_name = "b", .size_bytes = 60 },
+            });
+            var output: [1]Descriptor = undefined;
+            try std.testing.expectError(error.StagingCapacity, runtime.stageBatch(&.{.{ .display_name = "c", .format = null, .bytes = "x" ** 50 }}, &output));
+            try std.testing.expect(!runtime.cancelReceive(id + 1));
+            try std.testing.expect(runtime.cancelReceive(id));
+            try std.testing.expect(!runtime.cancelReceive(id));
+            try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
+            try std.testing.expectEqual(@as(usize, 4), runtime.freeSlotCount());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
 }
 
 test "staging validates signatures and rolls back a failed batch atomically" {

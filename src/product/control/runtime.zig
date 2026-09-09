@@ -1946,6 +1946,25 @@ pub const Runtime = struct {
         return self.attachments.release(id);
     }
 
+    pub fn beginAttachmentReceive(self: *Runtime, files: []const product_attachment.ReceiveFile) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        return self.attachments.beginReceive(files);
+    }
+
+    pub fn appendAttachmentReceive(self: *Runtime, id: u64, file_index: usize, offset: usize, bytes: []const u8) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        return self.attachments.appendReceive(id, file_index, offset, bytes);
+    }
+
+    pub fn finishAttachmentReceive(self: *Runtime, id: u64, output: []product_attachment.Descriptor) Error![]const product_attachment.Descriptor {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        return self.attachments.finishReceive(id, output);
+    }
+
+    pub fn cancelAttachmentReceive(self: *Runtime, id: u64) bool {
+        return self.attachments.cancelReceive(id);
+    }
+
     pub fn hasEnabledScheduledTasks(self: *Runtime) bool {
         return self.schedule.hasEnabled();
     }
@@ -5081,6 +5100,7 @@ pub const Runtime = struct {
         });
         if (self.executor_shutdown) return;
         self.shutting_down = true;
+        if (self.attachments.receiving) |receive| _ = self.attachments.cancelReceive(receive.id);
         if (self.mcp) |*runtime| runtime.beginShutdown();
         self.schedule.cancelTimer();
         self.skill.beginShutdown();
