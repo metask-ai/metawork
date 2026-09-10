@@ -8073,8 +8073,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-canvas);
 }
 
-.task-panel-resource-header,
-.task-panel-review-header {
+.task-panel-resource-header {
   padding: 14px 16px;
   border-bottom: 1px solid var(--ui-border);
 }
@@ -8099,8 +8098,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-weight: 650;
 }
 
-.task-panel-resource-header h3,
-.task-panel-review-header h3 {
+.task-panel-resource-header h3 {
   margin: 5px 0 0;
   color: var(--ui-content-primary);
   font-size: var(--text-control);
@@ -8108,8 +8106,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-panel-resource-header h3,
-.task-panel-resource-header p,
-.task-panel-change-group > p {
+.task-panel-resource-header p {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -8117,20 +8114,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .task-panel-resource-header h3,
 .task-panel-resource-header p,
-.task-panel-change-group > p,
 .task-panel-code {
   font-family: var(--font-mono);
 }
 
-.task-panel-resource-header p,
-.task-panel-review-header p {
+.task-panel-resource-header p {
   margin: 4px 0 0;
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
 }
 
-.task-panel-resource-notice,
-.task-panel-review-warning {
+.task-panel-resource-notice {
   margin: 0;
   padding: 9px 16px;
   border-bottom: 1px solid var(--ui-border);
@@ -8143,13 +8137,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   display: flex;
   flex-direction: column;
   gap: 2px;
-}
-
-.task-panel-review-warning {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  color: var(--ui-content-warning);
 }
 
 .task-panel-resource-body {
@@ -8244,81 +8231,278 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   white-space: pre;
 }
 
-.task-panel-diff {
-  padding: 0;
-}
-
-.task-panel-diff > span {
-  display: block;
-  min-height: 23px;
-  padding: 0 16px;
-  white-space: pre;
-}
-
-.task-panel-review {
-  height: 100%;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.task-panel-review-header p {
-  line-height: 1.5;
-}
-
-.task-panel-change-list {
+.file-changes-review {
   display: grid;
-  padding: 10px;
-  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-canvas);
 }
 
-.task-panel-change-group {
+.file-changes-review-header {
+  display: flex;
+  min-height: 72px;
+  padding: 12px 20px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-surface-panel);
+}
+
+.file-changes-review-header > div {
+  min-width: 0;
+}
+
+.file-changes-review-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  font-weight: 650;
+}
+
+.file-changes-review-header h1,
+.file-changes-review-diff-header h2 {
+  overflow: hidden;
+  margin: 4px 0 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-changes-review-header h1 {
+  font-size: 18px;
+}
+
+.file-changes-review-header h1:focus-visible {
+  outline: 2px solid var(--ui-action-primary);
+  outline-offset: 3px;
+}
+
+.file-changes-review-header p,
+.file-changes-review-diff-header p {
+  overflow: hidden;
+  margin: 3px 0 0;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-changes-review-close {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  color: var(--ui-content-muted);
+  background: transparent;
+}
+
+.file-changes-review-close:hover {
+  color: var(--ui-content-primary);
+  background: var(--ui-action-hover-surface);
+}
+
+.file-changes-review-layout {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+}
+
+.file-changes-review-index {
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+  border-right: 1px solid var(--ui-border);
+  background: var(--ui-surface-panel-2);
+}
+
+.file-changes-review-group {
   overflow: hidden;
   border: 1px solid var(--ui-border);
   border-radius: 9px;
   background: var(--ui-surface-panel);
 }
 
-.task-panel-change-group > p {
+.file-changes-review-group + .file-changes-review-group {
+  margin-top: 8px;
+}
+
+.file-changes-review-group h3 {
+  overflow: hidden;
   margin: 0;
   padding: 9px 11px;
   border-bottom: 1px solid var(--ui-border);
-  color: var(--ui-content-primary);
+  font-family: var(--font-mono);
   font-size: var(--text-micro);
   font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.task-panel-change-group button {
+.file-changes-review-record {
   display: grid;
   width: 100%;
-  min-height: 44px;
+  min-height: 48px;
   padding: 8px 11px;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
   border: 0;
   color: var(--ui-content-primary);
   background: transparent;
   text-align: left;
 }
 
-.task-panel-change-group button + button {
+.file-changes-review-record + .file-changes-review-record {
   border-top: 1px solid var(--ui-border);
 }
 
-.task-panel-change-group button:hover {
+.file-changes-review-record:hover {
   background: var(--ui-action-hover-surface);
 }
 
-.task-panel-change-group button span,
-.task-panel-change-group button small {
+.file-changes-review-record[aria-current="true"] {
+  background: var(--ui-action-selected-surface);
+  box-shadow: inset 3px 0 var(--ui-action-primary);
+}
+
+.file-changes-review-record > svg {
+  margin-top: 2px;
+}
+
+.file-changes-review-record span,
+.file-changes-review-record strong,
+.file-changes-review-record small {
+  display: block;
+  min-width: 0;
+}
+
+.file-changes-review-record strong,
+.file-changes-review-record small {
   overflow: hidden;
   font-size: var(--text-micro);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.task-panel-change-group button small {
+.file-changes-review-record small {
+  margin-top: 3px;
   color: var(--ui-content-muted);
+}
+
+.file-changes-review-diff {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.file-changes-review-diff-header {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.file-changes-review-diff-header h2 {
+  font-family: var(--font-mono);
+  font-size: var(--text-control);
+}
+
+.file-changes-review-meta {
+  display: flex;
+  margin-top: 8px;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+}
+
+.file-changes-review-warning,
+.file-changes-review-flags {
+  display: flex;
+  padding: 8px 18px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+}
+
+.file-changes-review-warning {
+  color: var(--ui-content-warning);
+}
+
+.file-changes-review-diff-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.file-changes-review-state {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  padding: 24px;
+  place-items: center;
+  color: var(--ui-content-muted);
+  text-align: center;
+}
+
+.file-changes-review-state span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.file-changes-review-state p {
+  margin: 0 0 14px;
+}
+
+.file-changes-review-code {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  flex: 1;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.75;
+  tab-size: 4;
+  white-space: pre;
+}
+
+.file-changes-review-code > span {
+  display: block;
+  min-width: max-content;
+  min-height: 23px;
+  padding: 0 18px;
+}
+
+@media (max-width: 700px) {
+  .file-changes-review-header {
+    min-height: 64px;
+    padding: 10px 14px;
+  }
+
+  .file-changes-review-layout {
+    grid-template-rows: minmax(116px, 32vh) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .file-changes-review-index {
+    border-right: 0;
+    border-bottom: 1px solid var(--ui-border);
+  }
 }
 
 .task-sync-failure {

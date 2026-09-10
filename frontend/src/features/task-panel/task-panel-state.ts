@@ -5,8 +5,7 @@ type RunTarget = { taskId: string; runId: string };
 export type TaskPanelTarget =
   | { kind: "empty" }
   | (RunTarget & { kind: "preview"; referenceId: string })
-  | (RunTarget & { kind: "tool"; toolId: string })
-  | (RunTarget & { kind: "review"; selectedChangeId?: string });
+  | (RunTarget & { kind: "tool"; toolId: string });
 
 export const emptyTaskPanelTarget: TaskPanelTarget = { kind: "empty" };
 
@@ -14,7 +13,6 @@ export const emptyTaskPanelTarget: TaskPanelTarget = { kind: "empty" };
 export function resolveTaskPanelTarget(
   target: TaskPanelTarget,
   task: TaskView | null,
-  typedFileChanges: boolean,
 ): TaskPanelTarget {
   if (target.kind === "empty") return target;
   if (!task || target.taskId !== task.id) return emptyTaskPanelTarget;
@@ -24,18 +22,7 @@ export function resolveTaskPanelTarget(
     return findRunFileReference(run, target.referenceId)
       ? target
       : emptyTaskPanelTarget;
-  if (target.kind === "tool")
-    return run.tools.some((tool) => tool.id === target.toolId)
-      ? target
-      : emptyTaskPanelTarget;
-  if (!typedFileChanges || !run.fileChanges?.changes.length)
-    return emptyTaskPanelTarget;
-  if (
-    target.selectedChangeId &&
-    !run.fileChanges.changes.some(
-      (change) => change.id === target.selectedChangeId,
-    )
-  )
-    return { kind: "review", taskId: task.id, runId: run.id };
-  return target;
+  return run.tools.some((tool) => tool.id === target.toolId)
+    ? target
+    : emptyTaskPanelTarget;
 }
