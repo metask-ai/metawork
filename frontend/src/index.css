@@ -1956,7 +1956,6 @@ summary::-webkit-details-marker {
 }
 
 .selection-menu-content {
-  z-index: 120;
   min-width: min(var(--anchor-width), calc(100vw - 24px));
   max-height: min(360px, var(--available-height));
   overflow: hidden;

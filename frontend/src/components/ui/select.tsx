@@ -92,7 +92,7 @@ export const Select = {
     ...props
   }: ComponentProps<typeof BaseSelect.Positioner>) => (
     <BaseSelect.Positioner
-      className={cn("z-50 outline-none", className)}
+      className={cn("z-[120] outline-none", className)}
       sideOffset={4}
       {...props}
     />

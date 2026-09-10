@@ -144,7 +144,7 @@ function searchElement(props) {
   );
 }
 
-test("SelectionMenu uses combobox semantics and keyboard selection", async () => {
+test("SelectionMenu portals above Settings and supports keyboard selection", async () => {
   const selected = [];
   const user = userEvent.setup({ document: dom.window.document });
   renderMenu((value) => selected.push(value));
@@ -154,6 +154,12 @@ test("SelectionMenu uses combobox semantics and keyboard selection", async () =>
   const listbox = await screen.findByRole("listbox");
   assert.equal(trigger.getAttribute("aria-expanded"), "true");
   assert.ok(listbox);
+  const popup = listbox.parentElement;
+  assert.equal(popup?.classList.contains("selection-menu-content"), true);
+  const positioner = popup?.parentElement;
+  assert.ok(positioner);
+  assert.equal(positioner.classList.contains("z-[120]"), true);
+  assert.equal(positioner.classList.contains("z-50"), false);
 
   await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
   assert.deepEqual(selected, ["bravo"]);
