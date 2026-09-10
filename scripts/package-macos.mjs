@@ -28,6 +28,10 @@ import {
   verifyStagedMacosAppIcon,
 } from "./native-sdk-compat/macos-icon-composer.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
+import {
+  stageAgentCoreRuntimeAssets,
+  verifyAgentCoreRuntimeAssets,
+} from "./agentcore-runtime-assets.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -795,7 +799,12 @@ function notarizeDiskImage(identity, distributionDiskImagePath) {
   return { artifactPath: distributionDiskImagePath, digest, submission };
 }
 
-function buildPackagedMacosApp(identity, distribution, appIconArtifact) {
+async function buildPackagedMacosApp(
+  identity,
+  distribution,
+  appIconArtifact,
+  agentCoreBundle,
+) {
   runNode("scripts/build.mjs", ["release", distribution.targetId]);
   rmSync(packagedAppPath, { recursive: true, force: true });
   runNative([
@@ -809,7 +818,35 @@ function buildPackagedMacosApp(identity, distribution, appIconArtifact) {
   ]);
   stageMacosAppIcon(appIconArtifact, packagedAppPath);
   stageMacosTrayIcon();
+  const executableDirectory = path.join(packagedAppPath, "Contents", "MacOS");
+  const runtimeAssetOptions = {
+    licenseDirectory: path.join(
+      packagedAppPath,
+      "Contents",
+      "Resources",
+      "licenses",
+    ),
+  };
+  await stageAgentCoreRuntimeAssets(
+    agentCoreBundle,
+    executableDirectory,
+    runtimeAssetOptions,
+  );
+  await verifyAgentCoreRuntimeAssets(
+    agentCoreBundle,
+    executableDirectory,
+    runtimeAssetOptions,
+  );
   verifyPackagedMacosExecutableArchitecture(distribution.executable);
+  const ripgrepPath = path.join(executableDirectory, "rg");
+  signWithDeveloperId(ripgrepPath, identity, {
+    identifier: `${localProductIdentity.bundleId}.agentcore.rg`,
+  });
+  verifyDeveloperIdSignature(
+    ripgrepPath,
+    identity,
+    `${localProductIdentity.bundleId}.agentcore.rg`,
+  );
   signWithDeveloperId(packagedAppPath, identity, {
     preserveEntitlements: true,
   });
@@ -821,10 +858,14 @@ async function packageMacos(selection) {
   const distributions = macosPackageTargetIds(selection).map(
     macosDistributionForAgentCoreTarget,
   );
+  const agentCoreBundles = new Map();
   for (const distribution of distributions) {
-    await verifyStagedAgentCoreBundle(repositoryRoot, {
-      targetId: distribution.targetId,
-    });
+    agentCoreBundles.set(
+      distribution.targetId,
+      await verifyStagedAgentCoreBundle(repositoryRoot, {
+        targetId: distribution.targetId,
+      }),
+    );
   }
   const appIconArtifact = compileMacosAppIcon(
     macosIconComposerSourcePath,
@@ -833,10 +874,11 @@ async function packageMacos(selection) {
   try {
     const identity = resolveDistributionIdentity();
     for (const distribution of distributions) {
-      const signature = buildPackagedMacosApp(
+      const signature = await buildPackagedMacosApp(
         identity,
         distribution,
         appIconArtifact,
+        agentCoreBundles.get(distribution.targetId),
       );
       createDistributionDiskImage(identity, distribution.diskImagePath);
       const notarized = notarizeDiskImage(identity, distribution.diskImagePath);

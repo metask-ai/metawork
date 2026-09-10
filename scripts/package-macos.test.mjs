@@ -156,6 +156,18 @@ test("macOS packaging has one public owner and signs only after resource staging
     "stageMacosAppIcon(appIconArtifact, packagedAppPath);",
   );
   const stagingIndex = packageScript.indexOf("stageMacosTrayIcon();");
+  const agentCoreStagingIndex = packageScript.indexOf(
+    "await stageAgentCoreRuntimeAssets(",
+  );
+  const agentCoreVerificationIndex = packageScript.indexOf(
+    "await verifyAgentCoreRuntimeAssets(",
+  );
+  const licenseResourceIndex = packageScript.indexOf(
+    '"Resources",\n      "licenses",',
+  );
+  const ripgrepSigningIndex = packageScript.indexOf(
+    "signWithDeveloperId(ripgrepPath",
+  );
   const architectureIndex = packageScript.indexOf(
     "verifyPackagedMacosExecutableArchitecture(distribution.executable);",
   );
@@ -164,9 +176,18 @@ test("macOS packaging has one public owner and signs only after resource staging
   );
   assert.notEqual(appIconStagingIndex, -1);
   assert.notEqual(stagingIndex, -1);
+  assert.notEqual(agentCoreStagingIndex, -1);
+  assert.notEqual(agentCoreVerificationIndex, -1);
+  assert.notEqual(licenseResourceIndex, -1);
+  assert.notEqual(ripgrepSigningIndex, -1);
   assert.notEqual(architectureIndex, -1);
   assert.notEqual(signingIndex, -1);
   assert.ok(appIconStagingIndex < stagingIndex);
+  assert.ok(stagingIndex < agentCoreStagingIndex);
+  assert.ok(licenseResourceIndex < agentCoreStagingIndex);
+  assert.ok(agentCoreStagingIndex < agentCoreVerificationIndex);
+  assert.ok(agentCoreVerificationIndex < ripgrepSigningIndex);
+  assert.ok(ripgrepSigningIndex < signingIndex);
   assert.ok(appIconStagingIndex < architectureIndex);
   assert.ok(appIconStagingIndex < signingIndex);
   assert.ok(stagingIndex < signingIndex);

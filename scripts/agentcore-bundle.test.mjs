@@ -352,6 +352,23 @@ test("deploys only pinned runtime assets and rejects missing or tampered deploym
   );
 });
 
+test("supports packaging the runtime license outside the executable directory", async (t) => {
+  const candidate = await fixture(t);
+  const bundle = await validateAgentCoreBundle(candidate.root, injectedChecks);
+  const destination = await mkdtemp(
+    path.join(tmpdir(), "metawork-runtime-layout-"),
+  );
+  t.after(() => rm(destination, { recursive: true, force: true }));
+  const executableDirectory = path.join(destination, "bin");
+  const licenseDirectory = path.join(destination, "resources", "licenses");
+  const options = { licenseDirectory };
+
+  await stageAgentCoreRuntimeAssets(bundle, executableDirectory, options);
+  assert.deepEqual(await readdir(executableDirectory), ["rg.exe"]);
+  assert.deepEqual(await readdir(licenseDirectory), ["ripgrep-LICENSE-MIT"]);
+  await verifyAgentCoreRuntimeAssets(bundle, executableDirectory, options);
+});
+
 test("staged preflight refuses a retired revision lock", async (t) => {
   const candidate = await fixture(t);
   const root = await repository(t, candidate.manifest);

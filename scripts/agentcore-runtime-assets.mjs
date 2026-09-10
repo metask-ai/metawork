@@ -24,25 +24,39 @@ async function verifyFile(filePath, expected) {
 export async function verifyAgentCoreRuntimeAssets(
   bundle,
   executableDirectory,
+  options = {},
 ) {
-  for (const file of bundle.runtimeFiles)
+  for (const file of bundle.runtimeFiles) {
+    const destinationDirectory =
+      file.path === "bin/ripgrep-LICENSE-MIT"
+        ? (options.licenseDirectory ?? executableDirectory)
+        : executableDirectory;
     await verifyFile(
-      path.join(executableDirectory, path.basename(file.path)),
+      path.join(destinationDirectory, path.basename(file.path)),
       file.sha256,
     );
+  }
 }
 
-export async function stageAgentCoreRuntimeAssets(bundle, executableDirectory) {
-  await mkdir(executableDirectory, { recursive: true });
+export async function stageAgentCoreRuntimeAssets(
+  bundle,
+  executableDirectory,
+  options = {},
+) {
   for (const file of bundle.runtimeFiles) {
     const source = path.join(bundle.root, file.path);
     await verifyFile(source, file.sha256);
+    const destinationDirectory =
+      file.path === "bin/ripgrep-LICENSE-MIT"
+        ? (options.licenseDirectory ?? executableDirectory)
+        : executableDirectory;
+    await mkdir(destinationDirectory, { recursive: true });
     const destination = path.join(
-      executableDirectory,
+      destinationDirectory,
       path.basename(file.path),
     );
     await copyFile(source, destination);
     if (file.path === "bin/rg") await chmod(destination, 0o755);
   }
-  await verifyAgentCoreRuntimeAssets(bundle, executableDirectory);
+  await verifyAgentCoreRuntimeAssets(bundle, executableDirectory, options);
 }
