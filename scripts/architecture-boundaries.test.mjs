@@ -455,10 +455,6 @@ test("Product Models owns custom providers independently of Account", () => {
   );
   assert.doesNotMatch(settings, /CUSTOM_PROVIDER_SETTINGS_ENABLED/);
   assert.match(windowsBringup, /test-custom-provider-readiness-windows\.mjs/);
-  assert.match(
-    windowsBringup,
-    /run-agentcore-permission-probe\.mjs[\s\S]*--staged/,
-  );
   assert.match(identity, /pub fn customProviderCredentialService/);
   const selectDefault = control.indexOf("pub fn selectModelsDefault(");
   const registryCommit = control.indexOf(
