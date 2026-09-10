@@ -45,9 +45,23 @@ const bundle = await validateAgentCoreBundle(bundleRoot, {
   expectedManifest: lock.manifest,
   expectedManifestBytes: lock.bytes,
 });
-if (!["aarch64-macos", "x86_64-macos"].includes(targetId))
+const supportedTargetIds =
+  process.platform === "win32"
+    ? process.arch === "arm64"
+      ? ["aarch64-windows-gnu", "x86_64-windows-gnu"]
+      : process.arch === "x64"
+        ? ["x86_64-windows-gnu"]
+        : []
+    : process.platform === "darwin"
+      ? process.arch === "arm64"
+        ? ["aarch64-macos", "x86_64-macos"]
+        : process.arch === "x64"
+          ? ["x86_64-macos"]
+          : []
+      : [];
+if (!supportedTargetIds.includes(targetId))
   throw new Error(
-    `permission probe evidence is defined only for macOS bundles, received ${bundle.target}`,
+    `permission probe cannot execute ${bundle.target} on ${process.platform}/${process.arch}`,
   );
 
 const scratch = await realpath(
@@ -64,6 +78,16 @@ await writeFile(path.join(workspace, "edit-target.txt"), "before");
 
 function shellQuote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function powershellQuote(value) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function createFileCommand(file) {
+  if (process.platform === "win32")
+    return `powershell -NoProfile -Command "Set-Content -LiteralPath ${powershellQuote(file)} -Value '' -NoNewline"`;
+  return `touch ${shellQuote(file)}`;
 }
 
 const effects = {
@@ -100,13 +124,13 @@ const effects = {
   accept_bash: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "accept-bash.txt"))}`,
+      command: createFileCommand(path.join(workspace, "accept-bash.txt")),
     },
   },
   full_bash: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "full-bash.txt"))}`,
+      command: createFileCommand(path.join(workspace, "full-bash.txt")),
     },
   },
   full_outside_write: {
@@ -126,31 +150,33 @@ const effects = {
   deny_full_bash: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "deny-full-bash.txt"))}`,
+      command: createFileCommand(path.join(workspace, "deny-full-bash.txt")),
     },
   },
   ask_full_bash: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "ask-full-bash.txt"))}`,
+      command: createFileCommand(path.join(workspace, "ask-full-bash.txt")),
     },
   },
   allow_accept_bash: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "allow-accept-bash.txt"))}`,
+      command: createFileCommand(path.join(workspace, "allow-accept-bash.txt")),
     },
   },
   ask_over_allow_bash: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "ask-over-allow.txt"))}`,
+      command: createFileCommand(path.join(workspace, "ask-over-allow.txt")),
     },
   },
   deny_over_ask_allow_bash: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "deny-over-ask-allow.txt"))}`,
+      command: createFileCommand(
+        path.join(workspace, "deny-over-ask-allow.txt"),
+      ),
     },
   },
   session_grant: {
@@ -177,7 +203,7 @@ const effects = {
   auto_bash: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "auto-bash.txt"))}`,
+      command: createFileCommand(path.join(workspace, "auto-bash.txt")),
     },
   },
   dont_ask_write: {
@@ -190,31 +216,33 @@ const effects = {
   dont_ask_bash: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "dont-ask-bash.txt"))}`,
+      command: createFileCommand(path.join(workspace, "dont-ask-bash.txt")),
     },
   },
   shell_disabled: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "shell-disabled.txt"))}`,
+      command: createFileCommand(path.join(workspace, "shell-disabled.txt")),
     },
   },
   sandbox_inside: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "sandbox-inside.txt"))}`,
+      command: createFileCommand(path.join(workspace, "sandbox-inside.txt")),
     },
   },
   sandbox_outside: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(outside, "sandbox-outside.txt"))}`,
+      command: createFileCommand(path.join(outside, "sandbox-outside.txt")),
     },
   },
   unrestricted_outside: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(outside, "unrestricted-outside.txt"))}`,
+      command: createFileCommand(
+        path.join(outside, "unrestricted-outside.txt"),
+      ),
     },
   },
   restore_grant: {
@@ -227,13 +255,15 @@ const effects = {
   restore_full_seed: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "restore-full-seed.txt"))}`,
+      command: createFileCommand(path.join(workspace, "restore-full-seed.txt")),
     },
   },
   restore_full_after: {
     tool: "Bash",
     arguments: {
-      command: `touch ${shellQuote(path.join(workspace, "restore-full-after.txt"))}`,
+      command: createFileCommand(
+        path.join(workspace, "restore-full-after.txt"),
+      ),
     },
   },
   restore_full_to_accept_seed: {
@@ -478,9 +508,10 @@ pub fn build(b: *std.Build) void {
     { cwd: consumerRoot, label: "isolated AgentCore permission probe" },
   );
   if (requestError) throw requestError;
-  if (requestCount !== 57)
+  const expectedRequestCount = process.platform === "win32" ? 53 : 57;
+  if (requestCount !== expectedRequestCount)
     throw new Error(
-      `permission probe observed ${requestCount} provider requests instead of 57`,
+      `permission probe observed ${requestCount} provider requests instead of ${expectedRequestCount}`,
     );
 
   const expectedPresent = [
@@ -489,11 +520,16 @@ pub fn build(b: *std.Build) void {
     path.join(workspace, "accept-bash.txt"),
     path.join(workspace, "full-bash.txt"),
     path.join(outside, "full-outside-write.txt"),
+    ...(process.platform === "win32"
+      ? [path.join(workspace, ".git", "config")]
+      : []),
     path.join(workspace, "ask-full-bash.txt"),
     path.join(workspace, "allow-accept-bash.txt"),
     path.join(workspace, "ask-over-allow.txt"),
     path.join(outside, "session-grant.txt"),
-    path.join(workspace, "sandbox-inside.txt"),
+    ...(process.platform === "win32"
+      ? []
+      : [path.join(workspace, "sandbox-inside.txt")]),
     path.join(outside, "unrestricted-outside.txt"),
     path.join(outside, "restore-grant.txt"),
     path.join(workspace, "restore-full-seed.txt"),
@@ -504,11 +540,16 @@ pub fn build(b: *std.Build) void {
     path.join(workspace, "auto-bash.txt"),
   ];
   const expectedAbsent = [
-    path.join(workspace, ".git", "config"),
+    ...(process.platform === "win32"
+      ? []
+      : [path.join(workspace, ".git", "config")]),
     path.join(workspace, "deny-full-bash.txt"),
     path.join(outside, "unavailable.txt"),
     path.join(workspace, "shell-disabled.txt"),
     path.join(workspace, "deny-over-ask-allow.txt"),
+    ...(process.platform === "win32"
+      ? [path.join(workspace, "sandbox-inside.txt")]
+      : []),
     path.join(outside, "sandbox-outside.txt"),
     path.join(workspace, "dont-ask-write.txt"),
     path.join(workspace, "dont-ask-bash.txt"),

@@ -183,6 +183,8 @@ Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 
 
 当前锁定 macOS canonical bundle 的 source-free probe 使用 realpath 后的同一 canonical Workspace，已证明以下外部事实：`accept_edits` 自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 和明确有副作用的 Bash 发布同步 permission request；`full_access` 直接允许同一 Bash 和 Workspace 外 Write，但 `.git/config` 等 Core protected path 仍请求 callback；显式规则优先于 mode，重叠规则按 deny > ask > allow 收口，callback unavailable 不执行待决 effect；`allow_session` 的 `exact_arguments` grant 在同一 Session 复用并随 same-profile checkpoint restore 恢复，而未产生 grant 的 `full_access` restore 不伪造规则。`auto` 对代表性 Write/Bash 仍请求，`dont_ask` 不请求但拒绝 effect。跨 `accept_edits ↔ full_access` restore 产生不可消费的 degraded report；MetaWork 必须销毁 candidate，不能据此实现 profile mutation。精确 artifact identity 只由对应 target lock 定义；替换 artifact 后必须重新取得行为证据。
 
+当前锁定 Windows x86_64 canonical bundle 已由同一 source-free probe 验证两档映射、显式规则优先级、callback unavailable、Session grant、same-profile restore 与跨 profile restore fail-closed。平台差异必须保留为证据：Windows 上 `full_access` 对 `.git/config` 使用普通 built-in classification 并直接执行，不产生 macOS 上的 core-protected callback；`SHELL_SANDBOXED` 在 Session create 时以 `UnsupportedOs` 明确拒绝。MetaWork 两档都使用 `SHELL_UNRESTRICTED`，且产品从不把 profile 描述成 Sandbox；这些差异不改变当前产品映射，也不得被 UI 隐藏为虚假的跨平台同构。
+
 ### Host tools
 
 当前锁定合同的 Host tool callback 同样携带 validated `RunContext`，但这只补齐 wire identity，不自动建立 MetaWork 的产品工具、安全与路由政策。当前产品 Runtime 配置仍必须保持 `host_tool_count = 0`；MetaWork Agent 在 Agent 模块中统一注册并允许固定 built-in 集合，Product Control 和 Application 不持有 profile 或 wire name。启用正式 Host tools 属于独立 capability Gate，不在本次 ABI 迁移中顺带开放。
