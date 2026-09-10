@@ -721,6 +721,17 @@ export const enUS = {
   "inspector.tool.failed": "Failed",
   "inspector.tool.elapsed": "{duration} ms",
   "inspector.tool.input": "Input",
+  "inspector.tool.command": "Command",
+  "inspector.tool.exit_code": "Exit code: {code}",
+  "inspector.tool.stdout": "Standard output",
+  "inspector.tool.stderr": "Standard error",
+  "inspector.tool.stdout_empty": "No standard output captured.",
+  "inspector.tool.stderr_empty": "No standard error captured.",
+  "inspector.tool.stdout_incomplete":
+    "Standard output is incomplete or truncated.",
+  "inspector.tool.stderr_incomplete":
+    "Standard error is incomplete or truncated.",
+  "inspector.tool.raw_details": "Raw details",
   "inspector.tool.progress": "Progress",
   "inspector.tool.result": "Result",
   "inspector.tool.truncated": "Some tool details were shortened.",

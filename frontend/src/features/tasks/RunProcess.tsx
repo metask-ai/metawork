@@ -191,7 +191,16 @@ function ProcessTool({
   const content = (
     <>
       <span className="run-process-tool-mark" aria-hidden="true" />
-      <span className="run-process-tool-name">{tool.name}</span>
+      <span className="run-process-tool-label">
+        <span className="run-process-tool-name">{tool.name}</span>
+        {tool.bash?.description && (
+          <span className="run-process-tool-description">
+            {tool.bash.description.length > 160
+              ? `${tool.bash.description.slice(0, 160)}…`
+              : tool.bash.description}
+          </span>
+        )}
+      </span>
       <span className="run-process-tool-meta">
         <span>{t(toolStateMessage(tool))}</span>
         {tool.state !== "running" && elapsed > 0n && (
@@ -219,6 +228,13 @@ function ProcessTool({
         </button>
       ) : (
         <div className="run-process-tool">{content}</div>
+      )}
+      {tool.progress && (
+        <p className="run-process-tool-progress">
+          {tool.progress.length > 240
+            ? `${tool.progress.slice(0, 240)}…`
+            : tool.progress}
+        </p>
       )}
       {onPreviewFile && tool.fileRefs.length > 0 && (
         <div className="run-process-files">

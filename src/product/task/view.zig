@@ -434,6 +434,7 @@ fn writeRun(
             return error.SnapshotTooLarge;
         writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
         try text_projection.writeJson(writer, tool.name);
+        const presentation_redacted = try writeBashPresentation(writer, text_projection, tool);
         writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
         try text_projection.writeJson(writer, tool.input);
         writer.writeAll(",\"progress\":") catch return error.SnapshotTooLarge;
@@ -447,7 +448,7 @@ fn writeRun(
             tool.input_truncated,
             tool.progress_truncated,
             tool.content_truncated,
-            tool.redacted,
+            tool.redacted or presentation_redacted,
         }) catch return error.SnapshotTooLarge;
         var file_ref_count: usize = 0;
         if (tool.file_refs) |refs| for (refs) |*file_ref_entry| {
@@ -468,6 +469,90 @@ fn writeRun(
     writer.writeAll("],\"fileChanges\":") catch return error.SnapshotTooLarge;
     try writeFileChanges(writer, text_projection, run);
     writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+const BashInput = struct {
+    command: []const u8,
+    description: ?[]const u8 = null,
+};
+
+// Only this exact, foreground result envelope is interpreted. Other tool
+// results (including background jobs) retain their existing raw detail view.
+const BashResult = struct {
+    schema_version: []const u8,
+    stdout: []const u8,
+    stdout_encoding: []const u8,
+    stdout_capture_complete: bool,
+    stdout_truncated: bool,
+    stderr: []const u8,
+    stderr_encoding: []const u8,
+    stderr_capture_complete: bool,
+    stderr_truncated: bool,
+    exit_code: i32,
+
+    fn supported(self: BashResult) bool {
+        return std.mem.eql(u8, self.schema_version, "metacodes.bash-result.v2") and
+            std.mem.eql(u8, self.stdout_encoding, "utf-8") and
+            std.mem.eql(u8, self.stderr_encoding, "utf-8");
+    }
+};
+
+fn writeBashPresentation(
+    writer: *std.Io.Writer,
+    text: TextProjection,
+    tool: *const task_state.ToolView,
+) Error!bool {
+    writer.writeAll(",\"bash\":") catch return error.SnapshotTooLarge;
+    if (!std.mem.eql(u8, tool.name, "Bash")) {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return false;
+    }
+    // Parsing is bounded independently of raw evidence retention. The scanner
+    // borrows unescaped strings and uses this scratch only when decoding needs
+    // storage. Exhaustion is an unavailable presentation, never a Run failure.
+    var scratch: [128 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var allocator = std.heap.FixedBufferAllocator.init(&scratch);
+    const options = std.json.ParseOptions{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed };
+    var redacted = false;
+    writer.writeAll("{\"command\":") catch return error.SnapshotTooLarge;
+    const input = if (!tool.input_truncated and tool.input.len <= scratch.len)
+        std.json.parseFromSlice(BashInput, allocator.allocator(), tool.input, options) catch null
+    else
+        null;
+    if (input) |parsed| {
+        defer parsed.deinit();
+        redacted = text.containsSensitive(parsed.value.command);
+        try text.writeJson(writer, parsed.value.command);
+        writer.writeAll(",\"description\":") catch return error.SnapshotTooLarge;
+        if (parsed.value.description) |description| {
+            redacted = redacted or text.containsSensitive(description);
+            try text.writeJson(writer, description);
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null,\"description\":null") catch return error.SnapshotTooLarge;
+    allocator.reset();
+    writer.writeAll(",\"result\":") catch return error.SnapshotTooLarge;
+    const result = if (tool.state != .running and !tool.content_truncated and tool.content.len <= scratch.len)
+        std.json.parseFromSlice(BashResult, allocator.allocator(), tool.content, options) catch null
+    else
+        null;
+    if (result) |parsed| {
+        defer parsed.deinit();
+        const value = parsed.value;
+        if (value.supported()) {
+            redacted = redacted or text.containsSensitive(value.stdout) or text.containsSensitive(value.stderr);
+            writer.print("{{\"exitCode\":{d},\"stdout\":", .{value.exit_code}) catch return error.SnapshotTooLarge;
+            try text.writeJson(writer, value.stdout);
+            writer.writeAll(",\"stderr\":") catch return error.SnapshotTooLarge;
+            try text.writeJson(writer, value.stderr);
+            writer.print(",\"stdoutIncomplete\":{},\"stderrIncomplete\":{}}}", .{
+                value.stdout_truncated or !value.stdout_capture_complete,
+                value.stderr_truncated or !value.stderr_capture_complete,
+            }) catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+    return redacted;
 }
 
 fn writeRunOutput(

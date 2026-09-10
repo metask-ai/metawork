@@ -381,6 +381,8 @@ set typed TerminationSignal if absent
 
 ### notification、projection 与 Renderer transport
 
+Product 对精确 Bash input 的 command/description 和前台 `metacodes.bash-result.v2` UTF-8 stdout/stderr、完整性标记、非空 i32 exit_code 做有界展示转换。未知版本、其他 encoding、缺字段、解析预算耗尽或原始内容截断时不解释结果，仍保留安全原始详情；转换不参与 Agent 执行、状态推断或文件变更判定。退出码为零不等于 Run 完成，未捕获输出不证明目录为空。解析后字段再次经过 Host credential 清洗。
+
 event 入泵后 ownership 已经转移给 Agent event pump。`EventReadyNotifier` 只返回 `scheduled`、`already_pending` 或 `unavailable`；Application 使用原子 pending gate 将重复 Native `services.wake()` 合并为 `already_pending`，并在调用 Product Control 固定 drain 前清 gate，避免 producer 与 consumer 交错时丢 wake。Agent 对 `unavailable` 按 composition 提供的 retry interval 和 deadline 同步重试；deadline 耗尽后 callback 才返回 fatal 并记录 typed `event_consumer_notification_failure`。失败不会撤销已经完成的 pump ownership transfer，事件仍由 pump 负责释放或交给 canonical consumer。
 
 callback 返回后的 Product Task event application failure 仍由 Product Control 按 Run identity 请求 Agent 终止，并使用不含 Product Control 名称的 `event_pump_failure.consumer_rejected`；这不是 Bridge failure。如果 Agent terminal 已先发布，Product Control 还必须独立保存 projection failure 产品事实，在 event drain 后把 Run 暴露为 `event_pipeline_failure` 并禁止 continuation，不能把已经太晚的 termination request 当作唯一收口。Renderer response、revision、snapshot 和 connection/generation failure 则形成 typed transport report，由 Product Control policy 决定 reject/retry/detach。当前所有 Renderer transport stage 都明确不返回 `request_run_termination`；Renderer detach/reload 不得杀死后台 Run。

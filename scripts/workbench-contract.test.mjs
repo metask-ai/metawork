@@ -83,6 +83,54 @@ function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
   return { outcome, cause, diagnosticDisposition };
 }
 
+test("typed Bash presentation rejects contradictory or malformed detail", () => {
+  const candidate = clone(fixture);
+  const tool = {
+    id: "bash-detail",
+    order: "1",
+    name: "Bash",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        stdoutIncomplete: false,
+        stderrIncomplete: false,
+      },
+    },
+    input: "{}",
+    progress: "",
+    content: "raw",
+    state: "completed",
+    isError: false,
+    elapsedMs: "1",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+    fileRefs: [],
+  };
+  candidate.tasks[0].runs[0].tools = [tool];
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  for (const mutate of [
+    (t) => delete t.bash,
+    (t) => (t.name = "Read"),
+    (t) => (t.inputTruncated = true),
+    (t) => (t.contentTruncated = true),
+    (t) => (t.state = "running"),
+    (t) => (t.bash.command = null),
+    (t) => (t.bash.result.exitCode = 2147483648),
+    (t) => (t.bash.result.stdoutIncomplete = "false"),
+    (t) => (t.bash.extra = true),
+  ]) {
+    const invalid = clone(candidate);
+    mutate(invalid.tasks[0].runs[0].tools[0]);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+});
+
 test("the canonical Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
 
@@ -384,6 +432,7 @@ test("file references expose only preview identity and presentation", () => {
       id: "tool-1",
       order: "1",
       name: "Read",
+      bash: null,
       input: "{}",
       progress: "",
       content: "ok",
@@ -1753,6 +1802,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     id: "tool-mismatch",
     order: "1",
     name: "Bash",
+    bash: null,
     input: "false",
     progress: "",
     content: "exit 1",
@@ -1887,6 +1937,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     id: "tool-1",
     order: "1",
     name: "Read",
+    bash: null,
     input: "",
     progress: "",
     content: "done",
@@ -1955,6 +2006,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     id: "tool-1",
     order: "1",
     name: "Read",
+    bash: null,
     input: "",
     progress: "",
     content: "done",

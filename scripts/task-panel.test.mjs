@@ -140,6 +140,7 @@ function technicalTool(overrides = {}) {
     id: "tool-1",
     order: "1",
     name: "Read",
+    bash: null,
     input: "",
     progress: "",
     content: "",
@@ -154,6 +155,78 @@ function technicalTool(overrides = {}) {
     ...overrides,
   };
 }
+
+test("Bash detail shows known fields with collapsed raw evidence and explicit empty streams", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "raw envelope",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: {
+        exitCode: 0,
+        stdout: "",
+        stderr: "partial warning",
+        stdoutIncomplete: false,
+        stderrIncomplete: true,
+      },
+    },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.ok(screen.getByText("pwd"));
+  assert.ok(screen.getByText("No standard output captured."));
+  assert.ok(screen.getByText("partial warning"));
+  assert.equal(view.container.querySelector("details").open, false);
+  assert.ok(
+    view.container
+      .querySelector("details")
+      .textContent.includes("raw envelope"),
+  );
+  view.rerender(
+    localizedView(
+      createElement(ToolDetailView, { tool: { ...tool, bash: null } }),
+    ),
+  );
+  assert.equal(view.container.querySelector("details"), null);
+  assert.ok(screen.getByText("raw envelope"));
+});
+
+test("expanded process shows bounded descriptions and progress without interpreting text", () => {
+  const value = run({
+    tools: [
+      technicalTool({
+        name: "Bash",
+        progress: "<script>" + "x".repeat(500),
+        bash: {
+          command: "pwd",
+          description: "Inspect " + "d".repeat(300),
+          result: null,
+        },
+      }),
+    ],
+  });
+  const view = render(
+    localizedView(
+      createElement(RunProcess, {
+        presentation: deriveRunPresentation(value),
+        expanded: true,
+        onExpandedChange() {},
+      }),
+    ),
+  );
+  assert.equal(
+    view.container.querySelector(".run-process-tool-description").textContent
+      .length,
+    161,
+  );
+  assert.equal(
+    view.container.querySelector(".run-process-tool-progress").textContent
+      .length,
+    241,
+  );
+  assert.equal(view.container.querySelector("script"), null);
+});
 
 function task(overrides = {}) {
   return {
@@ -538,7 +611,7 @@ test("Run status keeps technical Tool summaries behind explicit disclosure", asy
   assert.equal(screen.queryByText("two files", { selector: "strong" }), null);
   assert.equal(screen.queryByText("Live **plain text**"), null);
   assert.equal(screen.queryByText("private input"), null);
-  assert.equal(screen.queryByText("private progress"), null);
+  assert.ok(screen.getByText("private progress"));
   assert.equal(screen.queryByText("private result"), null);
 
   await user.click(

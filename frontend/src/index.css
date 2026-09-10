@@ -2473,6 +2473,31 @@ button.run-process-tool:hover {
   color: var(--metask-state-error);
 }
 
+.run-process-tool-label {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.run-process-tool-description,
+.run-process-tool-progress {
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.run-process-tool-progress {
+  margin: 0 0 8px 16px;
+}
+
+.tool-raw-details > summary {
+  min-height: 44px;
+  padding-block: 12px;
+  cursor: pointer;
+  color: var(--ui-content-muted);
+}
+
 .run-process-tool-name {
   overflow: hidden;
   color: var(--ui-content-muted);

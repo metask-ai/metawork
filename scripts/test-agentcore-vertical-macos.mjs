@@ -184,6 +184,7 @@ const responses = [
         process.platform === "win32"
           ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
           : "sleep 0.4; echo agentcore-vertical-bash-ok",
+      description: "Check the command output",
     },
     "I’ve checked the input; now I’m running a focused verification.",
   ),
@@ -643,6 +644,20 @@ try {
         throw new Error(`${name} omitted projection safety flag ${field}`);
     if (evidence && !tool.content.includes(evidence))
       throw new Error(`${name} result omitted ${evidence}`);
+    if (name === "Bash") {
+      const raw = JSON.parse(tool.content);
+      if (
+        raw.schema_version !== "metacodes.bash-result.v2" ||
+        tool.bash?.result?.exitCode !== 0 ||
+        !tool.bash.result.stdout.includes("agentcore-vertical-bash-ok") ||
+        tool.bash.description !== "Check the command output" ||
+        tool.bash.result.stdoutIncomplete ||
+        tool.bash.result.stderrIncomplete
+      )
+        throw new Error(
+          "foreground Bash did not expose exact readable evidence",
+        );
+    }
   }
   if (
     process.platform === "win32" &&
@@ -1684,6 +1699,7 @@ async function captureVisual(
   height,
   openSettings = false,
   openSearch = false,
+  selectFirstTask = false,
 ) {
   if (visualCaptureDir === null) return;
   if (process.platform === "darwin" && (openSettings || openSearch)) return;

@@ -45,6 +45,8 @@ Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`
 
 每个 Task 精确发布 `context = { pressure, lastAutoCompact }`。pressure 为 null，或 `{ sourceRunId, currentTokens, warningThreshold, autoCompactThreshold, blockingLimit, severity }`；lastAutoCompact 为 null，或 `{ sourceRunId, dropped, kept, beforeTokens, afterTokens }`。所有计量使用 canonical decimal wire integer，sourceRunId 必须引用同一 Task 的 Run history；threshold 顺序、severity 与 token 数必须一致。context 属于当前 attached Conversation，可跨同一 Session 的 Run 保留，但 Task detach/replacement/restart 后两项均为空，且 detached Task 不得发布 observation。该 surface 不运输 raw CoreEvent tag、transition sequence、private reasoning、provider diagnostic 或 `file_changes`。
 
+Tool 的 `bash` 必填且 nullable，只由 Host 为精确 `Bash` identifier 投影：`{ command: string | null, description: string | null, result: null | { exitCode: i32, stdout: string, stderr: string, stdoutIncomplete: boolean, stderrIncomplete: boolean } }`。description 依附已解析的 command；运行中的 Tool 或截断的原始 content 不得提供 result，截断的 input 不得提供 command。未知、超出解析预算或不完整的 envelope 保留原始安全证据而不猜测可读字段；解码后的文本仍受 credential 清洗。DTO 不改变 Tool state、Run activity、terminal、fileRefs 或持久化格式。
+
 `output`、`activity`、`tools` 与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位、active→terminal process surface 迁移和 full Snapshot 渲染机制由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
 
 ## File preview command
