@@ -58,13 +58,11 @@ import {
   type FilePreviewViewState,
 } from "../features/task-panel/FilePreviewView.tsx";
 import {
-  FileChangesReview,
-  type FileChangesReviewState,
-} from "../features/tasks/FileChangesReview.tsx";
-import {
-  sidePanelFocusReturnTarget,
-  type SidePanelFocusTarget,
-} from "./side-panel-interaction.ts";
+  FileChangeDiffView,
+  FileChangesView,
+  type FileChangeDiffViewState,
+} from "../features/task-panel/FileChangesView.tsx";
+import { sidePanelFocusReturnTarget } from "./side-panel-interaction.ts";
 import { useTaskPanelTarget } from "../features/task-panel/useTaskPanelTarget.ts";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
@@ -248,7 +246,7 @@ export default function App() {
   const [route, setRoute] = useState<ShellRoute>("workbench");
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const settingsRestoreFocus = useRef<SidePanelFocusTarget | null>(null);
+  const settingsRestoreFocus = useRef<HTMLElement | null>(null);
   const [settingsFocus, setSettingsFocus] =
     useState<SettingsFocusTarget>("title");
   const [accountSetupRedirected, setAccountSetupRedirected] = useState(false);
@@ -328,7 +326,6 @@ export default function App() {
   const taskPanelToggle = useRef<HTMLButtonElement>(null);
   const taskInformationTrigger = useRef<HTMLButtonElement>(null);
   const taskPanelOpener = useRef<HTMLButtonElement | null>(null);
-  const fileChangesReviewOpener = useRef<HTMLButtonElement | null>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const continuationWaiters = useRef(new Map<string, ContinuationWaiter>());
 
@@ -442,7 +439,6 @@ export default function App() {
     if (!selected) return;
     setRightPanelOpen(true);
     taskPanelOpener.current = opener;
-    fileChangesReviewOpener.current = null;
     clearFileChanges();
     taskPanel.selectTarget({
       kind: "preview",
@@ -468,19 +464,6 @@ export default function App() {
   function clearFileChanges() {
     fileChangesGeneration.current += 1;
     setFileChanges({ kind: "closed" });
-  }
-
-  function dismissFileChangesReview(restoreFocus = true) {
-    const review = document.getElementById("file-changes-review");
-    const focusWasInside = review?.contains(document.activeElement) === true;
-    const focusTarget = sidePanelFocusReturnTarget(
-      fileChangesReviewOpener.current,
-      taskPanelToggle.current,
-    );
-    fileChangesReviewOpener.current = null;
-    clearFileChanges();
-    if (restoreFocus && focusWasInside && focusTarget)
-      window.requestAnimationFrame(() => focusTarget.focus());
   }
 
   function requestFileChangeDiff(
@@ -570,42 +553,43 @@ export default function App() {
       activeTaskIdRef.current !== taskId
     )
       return;
-    fileChangesReviewOpener.current = null;
+    setRightPanelOpen(true);
+    taskPanelOpener.current = opener;
+    closeFilePreview();
     clearFileChanges();
-    fileChangesReviewOpener.current = opener;
-    const changes = orderedFileChanges(recorded.changes);
-    requestFileChangeDiff(
-      taskId,
-      runId,
-      recorded.observation,
-      changes,
-      changes[0],
+    taskPanel.selectTarget({ kind: "review", taskId, runId });
+    window.requestAnimationFrame(() =>
+      document.getElementById("task-panel-title")?.focus(),
     );
   }
 
   function openFileChange(change: FileChangeView) {
-    if (
-      fileChanges.kind === "closed" ||
-      activeTaskIdRef.current !== fileChanges.taskId
-    )
-      return;
+    const review = taskPanel.target.kind === "review" ? taskPanel.target : null;
+    if (!review || activeTaskIdRef.current !== review.taskId) return;
     const task = snapshot.tasks.find(
-      (candidate) => candidate.id === fileChanges.taskId,
+      (candidate) => candidate.id === review.taskId,
     );
-    const run = task?.runs.find(
-      (candidate) => candidate.id === fileChanges.runId,
-    );
+    const run = task?.runs.find((candidate) => candidate.id === review.runId);
     const recorded = run?.fileChanges;
     const selected = recorded?.changes.find(
       (candidate) => candidate.id === change.id,
     );
     if (!recorded || !selected) return;
+    taskPanel.selectTarget({
+      kind: "review",
+      taskId: review.taskId,
+      runId: review.runId,
+      selectedChangeId: selected.id,
+    });
     requestFileChangeDiff(
-      fileChanges.taskId,
-      fileChanges.runId,
+      review.taskId,
+      review.runId,
       recorded.observation,
       orderedFileChanges(recorded.changes),
       selected,
+    );
+    window.requestAnimationFrame(() =>
+      document.getElementById("task-panel-title")?.focus(),
     );
   }
 
@@ -624,7 +608,6 @@ export default function App() {
     filePreviewGeneration.current += 1;
     setFilePreview({ kind: "closed" });
     clearFileChanges();
-    fileChangesReviewOpener.current = null;
   }, [activeTask?.id]);
 
   useEffect(() => {
@@ -662,12 +645,6 @@ export default function App() {
       );
       if (!task || !run || !recorded || !selected) {
         fileChangesGeneration.current += 1;
-        const focusTarget = sidePanelFocusReturnTarget(
-          fileChangesReviewOpener.current,
-          taskPanelToggle.current,
-        );
-        fileChangesReviewOpener.current = null;
-        window.requestAnimationFrame(() => focusTarget?.focus());
         return { kind: "closed" };
       }
       return {
@@ -680,10 +657,15 @@ export default function App() {
   }, [snapshot.revision, snapshot.tasks]);
 
   const panelTask = route === "workbench" ? activeTask : null;
-  const taskPanel = useTaskPanelTarget(panelTask);
+  const taskPanel = useTaskPanelTarget(
+    panelTask,
+    snapshot.capabilities.typedFileChanges,
+  );
   const panelTarget = taskPanel.target;
   useEffect(() => {
     if (panelTarget.kind !== "preview") closeFilePreview();
+    if (panelTarget.kind !== "review" || !panelTarget.selectedChangeId)
+      clearFileChanges();
   }, [panelTarget]);
   const manualWorkspaces = useMemo(
     () =>
@@ -1150,7 +1132,6 @@ export default function App() {
     setEditingTitle(false);
     setConfirmDelete(false);
     taskPanelOpener.current = null;
-    fileChangesReviewOpener.current = null;
     cancelContinuationWaitersForTask(activeTask?.id ?? null);
   }, [activeTask?.id]);
 
@@ -1185,7 +1166,6 @@ export default function App() {
   ) {
     if (!activeTask) return;
     closeFilePreview();
-    fileChangesReviewOpener.current = null;
     clearFileChanges();
     setRightPanelOpen(true);
     taskPanelOpener.current = opener;
@@ -1209,6 +1189,7 @@ export default function App() {
     );
     taskPanelOpener.current = null;
     closeFilePreview();
+    clearFileChanges();
     setRightPanelOpen(false);
     taskPanel.clearTarget();
     if (restoreFocus && focusWasInside && focusTarget)
@@ -1229,6 +1210,19 @@ export default function App() {
     }
     taskPanelOpener.current = opener;
     setRightPanelOpen(true);
+    window.requestAnimationFrame(() =>
+      document.getElementById("task-panel-title")?.focus(),
+    );
+  }
+
+  function returnToReview() {
+    if (panelTarget.kind !== "review") return;
+    clearFileChanges();
+    taskPanel.selectTarget({
+      kind: "review",
+      taskId: panelTarget.taskId,
+      runId: panelTarget.runId,
+    });
     window.requestAnimationFrame(() =>
       document.getElementById("task-panel-title")?.focus(),
     );
@@ -1659,18 +1653,9 @@ export default function App() {
   function openSettings(target: SettingsFocusTarget = "title") {
     if (!settingsOpen) {
       settingsRestoreFocus.current =
-        fileChanges.kind === "closed"
-          ? document.activeElement instanceof HTMLElement
-            ? document.activeElement
-            : null
-          : sidePanelFocusReturnTarget(
-              fileChangesReviewOpener.current,
-              taskPanelToggle.current,
-            );
-    }
-    if (fileChanges.kind !== "closed") {
-      fileChangesReviewOpener.current = null;
-      clearFileChanges();
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
     }
     setSettingsFocus(target);
     setSettingsOpen(true);
@@ -2985,14 +2970,11 @@ export default function App() {
           phase: filePreview.kind === "loading" ? "loading" : "settled",
           preview: filePreview.kind === "loading" ? null : filePreview.preview,
         };
-  const fileChangesReviewState: FileChangesReviewState | null =
+  const fileChangeDiffViewState: FileChangeDiffViewState | null =
     fileChanges.kind === "closed"
       ? null
       : {
-          taskId: fileChanges.taskId,
-          runId: fileChanges.runId,
           observation: fileChanges.observation,
-          changes: fileChanges.changes,
           selected: fileChanges.selected,
           phase:
             fileChanges.kind === "loading"
@@ -3006,6 +2988,8 @@ export default function App() {
     panelTarget.kind === "empty"
       ? null
       : activeTask?.runs.find((run) => run.id === panelTarget.runId);
+  const reviewedFileChanges =
+    panelTarget.kind === "review" ? panelRun?.fileChanges : null;
   const selectedTool =
     panelTarget.kind === "tool"
       ? panelRun?.tools.find((tool) => tool.id === panelTarget.toolId)
@@ -3016,6 +3000,12 @@ export default function App() {
     panelTarget.taskId === filePreview.taskId &&
     panelTarget.runId === filePreview.runId &&
     panelTarget.referenceId === filePreview.reference.id;
+  const diffMatchesTarget =
+    panelTarget.kind === "review" &&
+    fileChanges.kind !== "closed" &&
+    panelTarget.taskId === fileChanges.taskId &&
+    panelTarget.runId === fileChanges.runId &&
+    panelTarget.selectedChangeId === fileChanges.selected.id;
   const pendingLocator = panelTask?.pendingUi ? (
     <button
       type="button"
@@ -3033,7 +3023,9 @@ export default function App() {
       ? t("task_panel.title")
       : panelTarget.kind === "tool"
         ? t("task_panel.tool")
-        : t("file_preview.title");
+        : panelTarget.kind === "review"
+          ? t("task_panel.review")
+          : t("file_preview.title");
 
   return (
     <AppShell
@@ -3254,6 +3246,12 @@ export default function App() {
           <TaskPanel
             title={panelTitle}
             attention={pendingLocator}
+            onBack={
+              panelTarget.kind === "review" && panelTarget.selectedChangeId
+                ? returnToReview
+                : undefined
+            }
+            backLabel={t("task_panel.back_review")}
             onClose={dismissTaskPanel}
           >
             {panelTarget.kind === "empty" ? (
@@ -3267,6 +3265,20 @@ export default function App() {
                 key={`${panelTarget.taskId}:${panelTarget.runId}:${panelTarget.referenceId}`}
                 state={filePreviewViewState}
                 onRefresh={refreshFilePreview}
+              />
+            ) : panelTarget.kind === "review" &&
+              panelTarget.selectedChangeId ? (
+              diffMatchesTarget && fileChangeDiffViewState ? (
+                <FileChangeDiffView
+                  state={fileChangeDiffViewState}
+                  onRetry={retryFileChangeDiff}
+                />
+              ) : null
+            ) : reviewedFileChanges ? (
+              <FileChangesView
+                observation={reviewedFileChanges.observation}
+                changes={orderedFileChanges(reviewedFileChanges.changes)}
+                onSelect={openFileChange}
               />
             ) : null}
           </TaskPanel>
@@ -3426,13 +3438,6 @@ export default function App() {
             onSetDefaultPermissionProfile={(profile) =>
               void setDefaultPermissionProfile(profile)
             }
-          />
-        ) : fileChangesReviewState ? (
-          <FileChangesReview
-            state={fileChangesReviewState}
-            onSelect={openFileChange}
-            onRetry={retryFileChangeDiff}
-            onClose={dismissFileChangesReview}
           />
         ) : null
       }

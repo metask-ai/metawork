@@ -6,17 +6,30 @@ export function TaskPanel({
   title,
   children,
   attention,
+  onBack,
+  backLabel,
   onClose,
 }: {
   title: string;
   children: ReactNode;
   attention: ReactNode;
+  onBack?: () => void;
+  backLabel?: string;
   onClose: () => void;
 }) {
   const { t } = useI18n();
   return (
     <div className="task-panel-frame">
       <header className="task-panel-header">
+        {onBack && (
+          <button
+            type="button"
+            className="text-button focus-ring"
+            onClick={onBack}
+          >
+            {backLabel ?? t("task_panel.back_review")}
+          </button>
+        )}
         <h2 id="task-panel-title" tabIndex={-1}>
           {title}
         </h2>

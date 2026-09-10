@@ -6,16 +6,21 @@ import {
   type TaskPanelTarget,
 } from "./task-panel-state.ts";
 
-export function useTaskPanelTarget(task: TaskView | null) {
+export function useTaskPanelTarget(
+  task: TaskView | null,
+  typedFileChanges: boolean,
+) {
   const [stored, setTarget] = useState<TaskPanelTarget>(emptyTaskPanelTarget);
-  const target = resolveTaskPanelTarget(stored, task);
+  const target = resolveTaskPanelTarget(stored, task, typedFileChanges);
   useEffect(() => {
-    setTarget((current) => resolveTaskPanelTarget(current, task));
-  }, [task]);
+    setTarget((current) =>
+      resolveTaskPanelTarget(current, task, typedFileChanges),
+    );
+  }, [task, typedFileChanges]);
   return {
     target,
     selectTarget(next: TaskPanelTarget) {
-      setTarget(resolveTaskPanelTarget(next, task));
+      setTarget(resolveTaskPanelTarget(next, task, typedFileChanges));
     },
     clearTarget() {
       setTarget(emptyTaskPanelTarget);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 
 import type {
   FileChangeDiffResult,
@@ -8,13 +8,13 @@ import type {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
-import { parseUnifiedDiff, type UnifiedDiffRow } from "./unified-diff.ts";
+import {
+  parseUnifiedDiff,
+  type UnifiedDiffRow,
+} from "../tasks/unified-diff.ts";
 
-export type FileChangesReviewState = {
-  taskId: string;
-  runId: string;
+export type FileChangeDiffViewState = {
   observation: RunFileChanges["observation"];
-  changes: FileChangeView[];
   selected: FileChangeView;
   phase: "loading" | "settled" | "failed";
   diff: FileChangeDiffResult | null;
@@ -114,7 +114,7 @@ function UnifiedDiff({ content }: { content: string }) {
   const rows = useMemo(() => parseUnifiedDiff(content), [content]);
   return (
     <div
-      className="file-changes-review-code"
+      className="task-panel-unified-diff"
       role="table"
       aria-label={t("file_changes.diff.content")}
     >
@@ -125,34 +125,49 @@ function UnifiedDiff({ content }: { content: string }) {
   );
 }
 
-function ChangeIndex({
+export function FileChangesView({
+  observation,
   changes,
-  selected,
   onSelect,
 }: {
+  observation: RunFileChanges["observation"];
   changes: FileChangeView[];
-  selected: FileChangeView;
   onSelect: (change: FileChangeView) => void;
 }) {
   const { t } = useI18n();
   const groups = groupChanges(changes);
 
   return (
-    <nav
-      className="file-changes-review-index"
-      aria-label={t("file_changes.changed_files")}
+    <section
+      className="task-panel-review"
+      aria-labelledby="task-panel-review-title"
     >
-      {groups.map((group) => (
-        <section className="file-changes-review-group" key={group.path}>
-          <h3 title={group.path}>{group.path}</h3>
-          {group.changes.map((change, index) => {
-            const active = change.id === selected.id;
-            return (
+      <header className="task-panel-review-header">
+        <span className="task-panel-resource-kind">
+          <Icon name="file-diff" />
+          {t("task_panel.recorded_changes")}
+        </span>
+        <h3 id="task-panel-review-title">{t("file_changes.review_title")}</h3>
+        <p>{t("file_changes.recorded_notice")}</p>
+      </header>
+      {observation === "incomplete" && (
+        <div className="task-panel-review-warning" role="status">
+          <Icon name="warning" />
+          {t("file_changes.incomplete_notice")}
+        </div>
+      )}
+      <nav
+        className="task-panel-change-list"
+        aria-label={t("file_changes.changed_files")}
+      >
+        {groups.map((group) => (
+          <section className="task-panel-change-group" key={group.path}>
+            <h4 title={group.path}>{group.path}</h4>
+            {group.changes.map((change, index) => (
               <button
                 key={change.id}
                 type="button"
-                className="file-changes-review-record focus-ring"
-                aria-current={active ? "true" : undefined}
+                className="focus-ring"
                 aria-label={`${group.path} ${t(kindMessage(change.kind))}${
                   group.changes.length > 1
                     ? ` ${t("file_changes.change_index", { index: index + 1 })}`
@@ -178,20 +193,21 @@ function ChangeIndex({
                     </small>
                   )}
                 </span>
+                <Icon name="chevron-right" />
               </button>
-            );
-          })}
-        </section>
-      ))}
-    </nav>
+            ))}
+          </section>
+        ))}
+      </nav>
+    </section>
   );
 }
 
-function RecordedDiff({
+export function FileChangeDiffView({
   state,
   onRetry,
 }: {
-  state: FileChangesReviewState;
+  state: FileChangeDiffViewState;
   onRetry: () => void;
 }) {
   const { t } = useI18n();
@@ -205,46 +221,44 @@ function RecordedDiff({
 
   return (
     <section
-      className="file-changes-review-diff"
-      aria-labelledby="file-changes-review-diff-title"
+      className="task-panel-resource-view"
+      aria-labelledby="task-panel-resource-title"
       aria-live="polite"
       aria-busy={state.phase === "loading"}
     >
-      <header className="file-changes-review-diff-header">
-        <span className="file-changes-review-eyebrow">
-          <Icon name="file-diff" />
-          {t("file_changes.recorded_diff")}
-        </span>
-        <h2
-          id="file-changes-review-diff-title"
-          title={state.selected.displayPath}
-        >
-          {state.selected.displayPath}
-        </h2>
-        {state.selected.fromDisplayPath && (
-          <p title={state.selected.fromDisplayPath}>
-            {state.selected.fromDisplayPath} → {state.selected.displayPath}
-          </p>
-        )}
-        <div className="file-changes-review-meta">
-          <span className={kindColor(state.selected.kind)}>
-            {t(kindMessage(state.selected.kind))}
+      <header className="task-panel-resource-header">
+        <div className="task-panel-resource-identity">
+          <span className="task-panel-resource-kind">
+            <Icon name="file-diff" />
+            {t("task_panel.recorded_diff")}
           </span>
-          {state.selected.status === "partial" && (
-            <span>{t("file_changes.status.partial")}</span>
+          <h3 id="task-panel-resource-title" title={state.selected.displayPath}>
+            {state.selected.displayPath}
+          </h3>
+          {state.selected.fromDisplayPath && (
+            <p title={state.selected.fromDisplayPath}>
+              {state.selected.fromDisplayPath} → {state.selected.displayPath}
+            </p>
           )}
-          <span>{t("file_changes.recorded_notice")}</span>
         </div>
       </header>
+      <p className="task-panel-resource-notice">
+        <span className={kindColor(state.selected.kind)}>
+          {t(kindMessage(state.selected.kind))}
+          {state.selected.status === "partial" &&
+            ` · ${t("file_changes.status.partial")}`}
+        </span>
+        <span>{t("file_changes.recorded_notice")}</span>
+      </p>
       {state.observation === "incomplete" && (
-        <div className="file-changes-review-warning" role="status">
+        <div className="task-panel-review-warning" role="status">
           <Icon name="warning" />
           {t("file_changes.incomplete_notice")}
         </div>
       )}
-      <div className="file-changes-review-diff-body">
+      <div className="task-panel-resource-body">
         {state.phase === "loading" ? (
-          <div className="file-changes-review-state">
+          <div className="task-panel-resource-state">
             <span>
               <Icon name="loading" />
               {t("file_changes.loading")}
@@ -253,7 +267,7 @@ function RecordedDiff({
         ) : ready && state.diff?.status === "ready" ? (
           <>
             {(!state.diff.complete || state.diff.redacted) && (
-              <div className="file-changes-review-flags">
+              <div className="task-panel-resource-flags">
                 {!state.diff.complete && (
                   <span>{t("file_changes.diff.incomplete")}</span>
                 )}
@@ -265,7 +279,7 @@ function RecordedDiff({
             <UnifiedDiff content={state.diff.content} />
           </>
         ) : (
-          <div className="file-changes-review-state">
+          <div className="task-panel-resource-state">
             <div>
               <p>
                 {state.phase === "failed"
@@ -289,76 +303,5 @@ function RecordedDiff({
         )}
       </div>
     </section>
-  );
-}
-
-export function FileChangesReview({
-  state,
-  onSelect,
-  onRetry,
-  onClose,
-}: {
-  state: FileChangesReviewState;
-  onSelect: (change: FileChangeView) => void;
-  onRetry: () => void;
-  onClose: () => void;
-}) {
-  const { t } = useI18n();
-  const title = useRef<HTMLHeadingElement>(null);
-  const fileCount = new Set(state.changes.map((change) => change.displayPath))
-    .size;
-
-  useEffect(() => title.current?.focus(), []);
-
-  return (
-    <div
-      id="file-changes-review"
-      className="file-changes-review"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="file-changes-review-title"
-      data-task-id={state.taskId}
-      data-run-id={state.runId}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape" || event.defaultPrevented) return;
-        event.preventDefault();
-        event.stopPropagation();
-        onClose();
-      }}
-    >
-      <header className="file-changes-review-header">
-        <div>
-          <span className="file-changes-review-eyebrow">
-            <Icon name="file-diff" />
-            {t("file_changes.recorded_changes")}
-          </span>
-          <h1 id="file-changes-review-title" ref={title} tabIndex={-1}>
-            {t("file_changes.review_title")}
-          </h1>
-          <p>
-            {t("file_changes.summary", {
-              fileCount,
-              changeCount: state.changes.length,
-            })}
-          </p>
-        </div>
-        <button
-          type="button"
-          className="file-changes-review-close focus-ring"
-          aria-label={t("file_changes.close")}
-          onClick={onClose}
-        >
-          <Icon name="close" />
-        </button>
-      </header>
-      <div className="file-changes-review-layout">
-        <ChangeIndex
-          changes={state.changes}
-          selected={state.selected}
-          onSelect={onSelect}
-        />
-        <RecordedDiff state={state} onRetry={onRetry} />
-      </div>
-    </div>
   );
 }
