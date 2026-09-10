@@ -437,6 +437,12 @@ export function SettingsPage({
         label: t(`permission.profile.${profile}`),
         description: t(`permission.profile.${profile}.help`),
         descriptionKind: "text",
+        trailing:
+          profile === "full_access" ? (
+            <span className="permission-profile-risk" aria-hidden="true">
+              <Icon name="warning" />
+            </span>
+          ) : undefined,
       })),
     [permissionProfiles.available, t],
   );

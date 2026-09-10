@@ -779,19 +779,22 @@ export const zhCN: Record<MessageId, string> = {
   "settings.models_reset_failed": "模型配置恢复失败，请重试。",
   "permission.profile.approval_required": "请求批准",
   "permission.profile.approval_required.help":
-    "常规工作区编辑自动执行；当前策略未覆盖的操作会先征求你的决定。",
+    "常规工作区编辑自动执行；当前策略之外的其他操作需要批准。",
   "permission.profile.full_access": "完全访问",
   "permission.profile.full_access.help":
-    "MetaWork 不为此 Task 提供工具权限保护。",
+    "MetaWork 跳过常规工具操作的批准；AgentCore 核心保护及系统或服务权限仍可阻止操作。",
   "permission.new_task.label": "权限策略",
-  "permission.new_task.help": "仅适用于此 Task，创建后不可更改。",
+  "permission.new_task.help": "此权限在 Task 创建时确定。",
   "permission.task.label": "权限策略",
+  "permission.task.help": "创建此 Task 时已固定；修改默认策略不会影响它。",
+  "permission.task.full_access.help":
+    "创建时已固定；跳过常规批准，但 AgentCore 与系统保护仍然有效。",
   "permission.default.label": "新 Task 默认策略",
   "permission.default.help":
     "只影响之后创建的 Task；已有 Task 保留创建时的策略。",
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
-    "完全访问仍受操作系统权限和外部服务访问范围约束；它不是 root 权限，也不是沙箱设置。",
+    "完全访问会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",
   "permission.default_updated": "已更新权限默认策略。",
   "permission.default_update_failed": "MetaWork 无法更新权限默认策略。",
   "settings.default_model_for_new_tasks": "新任务默认模型",
@@ -1007,8 +1010,10 @@ export const zhCN: Record<MessageId, string> = {
   "scheduled.instruction_help":
     "如需使用某个全局 Skill，直接在任务指令中说明即可。",
   "scheduled.permission": "权限",
-  "scheduled.permission_help":
-    "任务将无人值守运行；操作超出此权限范围时会停止，并等待你处理。",
+  "scheduled.permission.approval_required.help":
+    "任务将无人值守运行；需要批准的操作会停止运行并进入“需要处理”，不会等待远程批准。",
+  "scheduled.permission.full_access.help":
+    "任务将无人值守并跳过 MetaWork 常规批准；AgentCore 核心保护或系统、服务限制仍可能使运行停止并需要处理。",
   "scheduled.when": "运行时间",
   "scheduled.recurrence.once": "仅一次",
   "scheduled.recurrence.interval": "重复",

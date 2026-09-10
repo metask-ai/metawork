@@ -845,21 +845,25 @@ export const enUS = {
     "Could not recover model configuration. Try again.",
   "permission.profile.approval_required": "Request approval",
   "permission.profile.approval_required.help":
-    "Routine workspace edits run automatically. MetaWork asks before operations the current policy does not cover.",
+    "Routine workspace edits run automatically. Other operations outside this policy require approval.",
   "permission.profile.full_access": "Full access",
   "permission.profile.full_access.help":
-    "MetaWork does not apply tool permission checks for this Task.",
+    "MetaWork skips approval for routine tool operations. AgentCore protections and system or service permissions can still block them.",
   "permission.new_task.label": "Permission policy",
   "permission.new_task.help":
-    "Applies to this Task and cannot be changed after it is created.",
+    "This permission is set when the Task is created.",
   "permission.task.label": "Permission policy",
+  "permission.task.help":
+    "Fixed when this Task was created. Changing the default does not affect it.",
+  "permission.task.full_access.help":
+    "Fixed at creation. Routine approval is skipped; AgentCore and system protections still apply.",
   "permission.default.label": "Default for new Tasks",
   "permission.default.help":
     "This choice applies only when you create a new Task. Existing Tasks keep their original policy.",
   "permission.menu_help":
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":
-    "Full access still follows operating system permissions and service access. It is not root access or a sandbox setting.",
+    "Full access skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
   "permission.default_updated": "Permission default updated.",
   "permission.default_update_failed":
     "MetaWork could not update the permission default.",
@@ -1116,8 +1120,10 @@ export const enUS = {
   "scheduled.instruction_help":
     "If a global Skill should be used, describe that in the instruction.",
   "scheduled.permission": "Permissions",
-  "scheduled.permission_help":
-    "Runs unattended. If an action is outside this profile, the run stops and needs your attention.",
+  "scheduled.permission.approval_required.help":
+    "Runs unattended. An operation that needs approval stops the run and marks it as needing attention; it does not wait for remote approval.",
+  "scheduled.permission.full_access.help":
+    "Runs unattended and skips routine MetaWork approval. AgentCore protections or system and service restrictions can still stop the run and require attention.",
   "scheduled.when": "When",
   "scheduled.recurrence.once": "Once",
   "scheduled.recurrence.interval": "Repeat",

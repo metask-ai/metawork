@@ -1695,12 +1695,41 @@ test("task information uses a keyboard-accessible icon and retains creation MCP 
     await user.keyboard("{Enter}");
     assert.ok(screen.getByText(expected));
     assert.equal(screen.queryByRole("combobox"), null);
+    assert.match(
+      document.body.textContent,
+      /Fixed when this Task was created.*default does not affect it/,
+    );
     assert.match(document.body.textContent, /not current connection status/);
     await user.keyboard("{Escape}");
     assert.equal(screen.queryByText(expected), null);
     assert.equal(document.activeElement, trigger);
     cleanup();
   }
+});
+
+test("task information keeps the full-access boundary visible without a mutation control", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+
+  render(
+    localizedView(
+      createElement(TaskInformation, {
+        task: task({ permissionProfile: "full_access" }),
+        permissionProfilesEnabled: true,
+      }),
+    ),
+  );
+  await user.click(screen.getByRole("button", { name: "Task information" }));
+  assert.ok(screen.getByText("Full access"));
+  assert.match(
+    document.body.textContent,
+    /Routine approval is skipped.*AgentCore and system protections still apply/,
+  );
+  assert.equal(screen.queryByRole("combobox"), null);
+  assert.ok(
+    document.querySelector(
+      '.task-permission-fact > span[data-profile="full_access"] svg',
+    ),
+  );
 });
 
 test("Conversation context only shows pressure; successful compaction removes the surface", async () => {
