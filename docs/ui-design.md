@@ -639,7 +639,7 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 - terminal cause 使用最具体的稳定本地化文案：`provider_failure` 显示“模型服务请求失败”，并在同一 notice 中说明本次 Run 未生成可用回复或只生成了可能不完整的部分回复；`tool_failure` 说明工具失败且 Agent 未能恢复，`image_input_unsupported` 明确要求更换支持图片的模型并重新选择图片；不得把三者统一写成“检查模型或网络”，也不得直接展示 provider raw body；
 - `provider_failure` 的主区 notice 只表达失败原因、回复影响和匹配的恢复动作，不重复技术诊断边界；若该 Run 已有 Tool 记录，重试前提醒用户先检查工作过程，避免重复外部 effect；
 - 失败 Run 的主区“查看运行详情”是该 notice 下的默认折叠 disclosure，仅展开时挂载诊断边界与精确 provenance：`absent` 表示 MetaWork 未收到该 Run 的附加诊断，`withheld` 表示当前安全边界不允许显示已收到的附加技术诊断；均不得猜测 401、API Key、限流、网络或设置问题。字段仅为稳定错误标识、精确 Run ID、该 Run 的 model 和 protocol，不使用当前 Task binding 或 Models 默认值，不默认展示 execution generation；折叠卸载诊断正文。只有当前 Task 真实可重试且输入区无待保留草稿时才沿用既有“准备重试”流程，动作文字必须明确只把指令重新填入 Composer；详情入口本身不触发重试、设置跳转、模型测试或任何外部操作；
-- Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。
+- Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。同步失败或 Bridge 不可用时，保留已有内容，但 active Run 的唯一状态改为“状态尚未同步”、停止活动动效并暂停耗时外推；恢复后以新 Host Snapshot 为准，不因静默时长推断 Agent 卡死，也不自动终止或重跑。停止命令尚未应答时显示“正在请求停止”；应答不等于终态，正式 stopping/terminal 仍由 Host 确认，失败沿用当前 Task 的操作反馈。
 
 ### 7.6 滚动与密度
 

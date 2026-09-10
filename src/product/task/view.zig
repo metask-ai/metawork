@@ -436,11 +436,13 @@ fn writeRun(
         try text_projection.writeJson(writer, tool.name);
         const presentation_redacted = try writeBashPresentation(writer, text_projection, tool);
         writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
-        try text_projection.writeJson(writer, tool.input);
+        // Decoding can reveal a credential hidden behind JSON escapes. Do not
+        // expose its reconstructible raw representation in secondary details.
+        try text_projection.writeJson(writer, if (presentation_redacted) "***" else tool.input);
         writer.writeAll(",\"progress\":") catch return error.SnapshotTooLarge;
         try text_projection.writeJson(writer, tool.progress);
         writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
-        try text_projection.writeJson(writer, tool.content);
+        try text_projection.writeJson(writer, if (presentation_redacted) "***" else tool.content);
         writer.print(",\"state\":\"{s}\",\"isError\":{},\"elapsedMs\":\"{d}\",\"inputTruncated\":{},\"progressTruncated\":{},\"contentTruncated\":{},\"redacted\":{},\"fileRefs\":[", .{
             @tagName(tool.state),
             tool.is_error,

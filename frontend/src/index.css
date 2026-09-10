@@ -2358,6 +2358,7 @@ summary::-webkit-details-marker {
 }
 
 button.run-process-header {
+  min-height: 44px;
   cursor: pointer;
 }
 
@@ -2458,6 +2459,7 @@ button.run-process-header:hover {
 }
 
 button.run-process-tool {
+  min-height: 44px;
   cursor: pointer;
 }
 

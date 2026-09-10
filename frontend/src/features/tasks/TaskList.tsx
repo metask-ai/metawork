@@ -24,6 +24,7 @@ export function TaskList({
   onToggleArchived,
   onTaskAction,
   taskMutationDisabled,
+  synchronized = true,
 }: {
   tasks: TaskView[];
   workspaces: WorkspaceView[];
@@ -33,6 +34,7 @@ export function TaskList({
   onToggleArchived: () => void;
   onTaskAction: (task: TaskView, action: TaskMenuAction) => void;
   taskMutationDisabled: boolean;
+  synchronized?: boolean;
 }) {
   const { locale, t } = useI18n();
   const [seenCompletionKeys, setSeenCompletionKeys] = useState<Set<string>>(
@@ -130,6 +132,7 @@ export function TaskList({
                 <span>{task.title || t("task.item", { id: task.id })}</span>
                 <TaskSignals
                   task={task}
+                  synchronized={synchronized}
                   completionSeen={seenCompletionKeys.has(
                     taskCompletionNotificationKey(task) ?? "",
                   )}
@@ -236,14 +239,17 @@ export function TaskSignals({
   task,
   completionSeen = false,
   showCompleted = true,
+  synchronized = true,
 }: {
   task: TaskView;
   completionSeen?: boolean;
   showCompleted?: boolean;
+  synchronized?: boolean;
 }) {
   const { t } = useI18n();
   const signals = taskSignals(task);
   const state = taskDisplayState(task);
+  if (!synchronized && (signals.running || signals.attention)) return null;
   const signal = signals.attention
     ? "attention"
     : signals.running

@@ -3213,6 +3213,7 @@ export default function App() {
                 onToggleArchived={() => setShowArchived((shown) => !shown)}
                 onTaskAction={handleTaskAction}
                 taskMutationDisabled={workbenchMutationDisabled}
+                synchronized={!bridgeUnavailable}
               />
             </div>
           </div>
@@ -3652,6 +3653,10 @@ export default function App() {
               <TaskContent
                 task={activeTask}
                 snapshotReceivedAt={workbench.snapshotReceivedAt}
+                synchronized={!bridgeUnavailable}
+                requestingStop={Boolean(
+                  activeTask && activeTask.id in cancelPending,
+                )}
                 revision={snapshot.revision}
                 composerHasDraft={composerDraftHasContent(composerDraft)}
                 retryAvailable={taskCanCompose && !taskOperationInFlight}

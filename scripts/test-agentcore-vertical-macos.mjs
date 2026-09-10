@@ -456,7 +456,8 @@ try {
     throw new Error(
       `Run history lost its typed Skill input: ${JSON.stringify(submittedRun.input)}`,
     );
-  await captureVisual("running", 1320, 812);
+  await captureVisual("running", 1320, 812, false, false, true);
+  await captureVisual("running-narrow", 390, 812);
   let visualAttentionCaptured = false;
   const answered = new Set();
   const observedRunRevisions = new Map();
@@ -576,6 +577,9 @@ try {
     productDeliveryEmitCount() - deliveryCountBeforeRun,
   );
   await captureVisual("terminal", 1320, 812);
+  await captureVisual("terminal-narrow", 390, 812);
+  await captureVisual("bash-detail", 1320, 812, false, false, false, true);
+  await captureVisual("bash-detail-narrow", 390, 812);
   await captureVisual("settings", 1320, 812, true);
   if (run.terminal?.cause !== null)
     throw new Error(
@@ -1700,6 +1704,7 @@ async function captureVisual(
   openSettings = false,
   openSearch = false,
   selectFirstTask = false,
+  openBashDetail = false,
 ) {
   if (visualCaptureDir === null) return;
   if (process.platform === "darwin" && (openSettings || openSearch)) return;
@@ -1747,6 +1752,7 @@ async function captureVisual(
   if (openSettings) args.push("-OpenSettings");
   if (selectFirstTask) args.push("-SelectFirstTask");
   if (openSearch) args.push("-OpenSearch");
+  if (openBashDetail) args.push("-OpenBashDetail");
   await execFileAsync(
     "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     args,

@@ -13921,6 +13921,8 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
             const command = bash.object.get("command").?.string;
             try std.testing.expect(std.mem.indexOf(u8, command, "SECRET-KEY") == null);
             try std.testing.expect(projected.object.get("redacted").?.bool);
+            try std.testing.expectEqualStrings("***", projected.object.get("input").?.string);
+            try std.testing.expectEqualStrings("***", projected.object.get("content").?.string);
             try std.testing.expectEqualStrings("Inspect workspace", bash.object.get("description").?.string);
         }
         const result = bash.object.get("result").?;

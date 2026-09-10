@@ -392,6 +392,75 @@ test("elapsed display advances without snapshots, rebases on receipt and disappe
   view.unmount();
 });
 
+test("unsynchronized status pauses elapsed and resumes only from the received Host sample", (ctx) => {
+  let now = 1000,
+    tick,
+    cleared = 0;
+  ctx.mock.method(performance, "now", () => now);
+  ctx.mock.method(window, "setInterval", (callback) => {
+    tick = callback;
+    return 1;
+  });
+  ctx.mock.method(window, "clearInterval", () => {
+    cleared++;
+  });
+  const active = run({
+    phase: "running",
+    activity: { kind: "waiting_model" },
+    terminal: null,
+  });
+  const element = (
+    synchronized,
+    elapsedMs = "120000",
+    snapshotReceivedAt = 1000,
+    requestingStop = false,
+  ) =>
+    localizedView(
+      createElement(RunProcess, {
+        presentation: deriveRunPresentation(active),
+        synchronized,
+        elapsedMs,
+        snapshotReceivedAt,
+        requestingStop,
+        expanded: false,
+        onExpandedChange() {},
+      }),
+    );
+  const view = render(element(true));
+  now = 15000;
+  act(() => tick());
+  view.rerender(element(false));
+  assert.ok(screen.getByText("Status not synchronized"));
+  assert.equal(
+    view.container.querySelector(".run-process").dataset.active,
+    "false",
+  );
+  assert.equal(cleared, 1);
+  now = 90000;
+  view.rerender(element(false));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 2:14",
+  );
+  view.rerender(element(true, "209000", 90000));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 3:29",
+  );
+  now = 92000;
+  act(() => tick());
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 3:31",
+  );
+  view.rerender(element(true, "211000", 92000, true));
+  assert.ok(screen.getByText("Requesting stop…"));
+  assert.equal(
+    view.container.querySelectorAll(".run-process-heading").length,
+    1,
+  );
+});
+
 test("queued and starting are distinct and missing Host timing is not invented", () => {
   const queued = run({
     phase: "queued",
@@ -2061,6 +2130,7 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
     title: "Second task",
   });
   let onRevision;
+  let snapshotFailure = false;
   const previews = [],
     diffs = [];
   for (const [name, fn] of Object.entries({
@@ -2074,7 +2144,10 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
     connect: async () => "1",
     disconnect: async () => {},
     ping: async () => {},
-    fetchSnapshot: async () => structuredClone(snapshot),
+    fetchSnapshot: async () => {
+      if (snapshotFailure) throw new Error("fixture synchronization failure");
+      return structuredClone(snapshot);
+    },
     previewFile: (...ids) =>
       new Promise((resolve, reject) => previews.push({ ids, resolve, reject })),
     fileChangeDiff: (...ids) =>
@@ -2087,8 +2160,103 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
     previews,
     diffs,
     publish: () => onRevision(snapshot.revision),
+    setSnapshotFailure: (value) => {
+      snapshotFailure = value;
+    },
   };
 }
+
+test("App marks retained Run state unsynchronized and disables stop until refresh succeeds", async (ctx) => {
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(
+    ctx,
+    1440,
+    {
+      elapsedMs: "10000",
+      phase: "running",
+      terminal: null,
+      activity: { kind: "waiting_model" },
+    },
+  );
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  setSnapshotFailure(true);
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  assert.ok(await screen.findByText("Status not synchronized"));
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    true,
+  );
+  assert.equal(document.querySelector(".run-process").dataset.active, "false");
+  assert.equal(
+    document.querySelectorAll('.task-signal[data-signal="running"]').length,
+    0,
+  );
+  setSnapshotFailure(false);
+  snapshot.tasks[0].runs[0].elapsedMs = "90000";
+  await act(async () => publish());
+  await waitFor(() =>
+    assert.ok(screen.queryByText("Status not synchronized") === null),
+  );
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    false,
+  );
+});
+
+test("App stop request remains bound to its Task and never fabricates a terminal", async (ctx) => {
+  const { snapshot, publish } = await renderAppFixture(ctx, 1440, {
+    elapsedMs: "10000",
+    phase: "running",
+    terminal: null,
+    activity: { kind: "waiting_model" },
+  });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let resolveStop, rejectStop;
+  const calls = [];
+  ctx.mock.method(BridgeClient.prototype, "cancel", (...ids) => {
+    calls.push(ids);
+    return new Promise((resolve, reject) => {
+      resolveStop = resolve;
+      rejectStop = reject;
+    });
+  });
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  assert.deepEqual(calls, [["3", "7"]]);
+  assert.ok(screen.getByText("Requesting stop…"));
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    true,
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
+  assert.ok(screen.queryByText("Requesting stop…") === null);
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    false,
+  );
+  await act(async () => rejectStop(new Error("fixture stop failure")));
+  assert.ok(screen.queryByText(/stop request could not be confirmed/) === null);
+  fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  assert.ok(
+    screen.getAllByText(/stop request could not be confirmed/).length > 0,
+  );
+  assert.ok(screen.queryByText("Work stopped") === null);
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  await act(async () => resolveStop());
+  assert.ok(screen.queryByText("Work stopped") === null);
+  Object.assign(snapshot.tasks[0].runs[0], {
+    phase: "stopping",
+    activity: { kind: "stopping" },
+  });
+  snapshot.tasks[0].currentRunPhase = "stopping";
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  assert.ok(await screen.findByText("Stopping"));
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    true,
+  );
+});
 
 // Preview entry points are available only after explicitly expanding the process.
 function filePreviewOpener(path) {
