@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 import type {
   FileChangeDiffResult,
@@ -8,6 +8,7 @@ import type {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
+import { parseUnifiedDiff, type UnifiedDiffRow } from "./unified-diff.ts";
 
 export type FileChangesReviewState = {
   taskId: string;
@@ -51,19 +52,77 @@ function kindColor(kind: FileChangeView["kind"]): string {
   }
 }
 
-function diffLineColor(line: string): string {
-  if (line.startsWith("+++") || line.startsWith("---"))
-    return "text-(--ui-content-muted)";
-  if (line.startsWith("+")) return "text-(--ui-content-success)";
-  if (line.startsWith("-")) return "text-(--ui-content-error)";
-  if (line.startsWith("@@")) return "text-(--ui-action-selected-content)";
-  return "text-(--ui-content-primary)";
-}
-
 function unavailableMessage(
   reason: Extract<FileChangeDiffResult, { status: "unavailable" }>["reason"],
 ): MessageId {
   return `file_changes.diff.${reason}`;
+}
+
+type Translate = ReturnType<typeof useI18n>["t"];
+
+function DiffRow({ row, t }: { row: UnifiedDiffRow; t: Translate }) {
+  if (row.kind === "gap")
+    return (
+      <div className="file-changes-diff-row" data-kind="gap" role="row">
+        <span role="cell">
+          {t("file_changes.diff.unchanged_lines", { count: row.count })}
+        </span>
+      </div>
+    );
+  if (
+    row.kind === "metadata" ||
+    row.kind === "hunk" ||
+    row.kind === "no-newline" ||
+    row.kind === "raw"
+  )
+    return (
+      <div className="file-changes-diff-row" data-kind={row.kind} role="row">
+        <code role="cell">{row.text || " "}</code>
+      </div>
+    );
+  return (
+    <div className="file-changes-diff-row" data-kind={row.kind} role="row">
+      <span
+        className="file-changes-diff-line-number"
+        role="cell"
+        aria-label={
+          row.oldLine === null
+            ? undefined
+            : t("file_changes.diff.old_line", { line: row.oldLine })
+        }
+      >
+        {row.oldLine ?? ""}
+      </span>
+      <span
+        className="file-changes-diff-line-number"
+        role="cell"
+        aria-label={
+          row.newLine === null
+            ? undefined
+            : t("file_changes.diff.new_line", { line: row.newLine })
+        }
+      >
+        {row.newLine ?? ""}
+      </span>
+      <code role="cell">{row.text || " "}</code>
+    </div>
+  );
+}
+
+function UnifiedDiff({ content }: { content: string }) {
+  const { t } = useI18n();
+  const rows = useMemo(() => parseUnifiedDiff(content), [content]);
+  return (
+    <div
+      className="file-changes-review-code"
+      role="table"
+      aria-label={t("file_changes.diff.content")}
+    >
+      {rows.map((row, index) => (
+        <DiffRow row={row} t={t} key={`${index}:${row.kind}`} />
+      ))}
+    </div>
+  );
 }
 
 function ChangeIndex({
@@ -203,13 +262,7 @@ function RecordedDiff({
                 )}
               </div>
             )}
-            <pre className="file-changes-review-code">
-              {state.diff.content.split("\n").map((line, index) => (
-                <span className={diffLineColor(line)} key={`${index}:${line}`}>
-                  {line || " "}
-                </span>
-              ))}
-            </pre>
+            <UnifiedDiff content={state.diff.content} />
           </>
         ) : (
           <div className="file-changes-review-state">

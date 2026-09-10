@@ -1306,6 +1306,11 @@ test("full-width review keeps repeated records beside the selected recorded diff
   assert.match(document.body.textContent, /Known sensitive content was hidden/);
   assert.match(document.body.textContent, /-secret/);
   assert.match(document.body.textContent, /\+safe/);
+  assert.ok(screen.getByRole("table", { name: "Recorded unified diff" }));
+  assert.ok(screen.getByLabelText("Old line 1"));
+  assert.ok(screen.getByLabelText("New line 1"));
+  assert.ok(document.querySelector('[data-kind="deletion"]'));
+  assert.ok(document.querySelector('[data-kind="addition"]'));
   assert.doesNotMatch(document.body.textContent, /Accept|Reject|Revert|Stage/);
   assert.equal(
     screen
@@ -1324,6 +1329,66 @@ test("full-width review keeps repeated records beside the selected recorded diff
   fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
   assert.equal(closed, 1);
   view.unmount();
+});
+
+test("recorded diff failures expose only valid retry actions", () => {
+  const change = {
+    id: "change-1",
+    order: "1",
+    kind: "modified",
+    status: "applied",
+    displayPath: "src/main.ts",
+    fromDisplayPath: null,
+    beforeBytes: "1",
+    afterBytes: "2",
+    diffAvailable: true,
+    diffComplete: true,
+    redacted: false,
+  };
+  const review = (phase, diff) =>
+    renderToStaticMarkup(
+      localizedView(
+        createElement(FileChangesReview, {
+          state: {
+            taskId: "3",
+            runId: "7",
+            observation: "complete",
+            changes: [change],
+            selected: change,
+            phase,
+            diff,
+          },
+          onSelect() {},
+          onRetry() {},
+          onClose() {},
+        }),
+      ),
+    );
+
+  assert.match(review("loading", null), /Loading recorded diff/);
+  assert.match(review("failed", null), /could not be loaded/);
+  assert.match(review("failed", null), />Retry</);
+  assert.match(
+    review("settled", {
+      status: "unavailable",
+      reason: "capacity",
+      content: "",
+    }),
+    /temporarily unavailable[\s\S]*>Retry</,
+  );
+  for (const [reason, message] of [
+    ["not_recorded", "No recorded diff is available"],
+    ["missing", "The recorded diff is no longer available"],
+    ["corrupt", "did not pass integrity checks"],
+  ]) {
+    const markup = review("settled", {
+      status: "unavailable",
+      reason,
+      content: "",
+    });
+    assert.match(markup, new RegExp(message));
+    assert.doesNotMatch(markup, />Retry</);
+  }
 });
 
 test("Task Panel labels current file content distinctly from recorded diffs", () => {

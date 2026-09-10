@@ -8471,21 +8471,84 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .file-changes-review-code {
   min-width: 0;
   min-height: 0;
-  margin: 0;
   flex: 1;
   overflow: auto;
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-canvas);
   font-family: var(--font-mono);
   font-size: 13px;
-  line-height: 1.75;
   tab-size: 4;
+}
+
+.file-changes-diff-row {
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  min-height: 23px;
+  grid-template-columns: 52px 52px minmax(max-content, 1fr);
+  line-height: 23px;
+}
+
+.file-changes-diff-row > code {
+  min-width: max-content;
+  padding: 0 14px;
+  border-left: 1px solid var(--ui-border);
+  color: inherit;
+  font: inherit;
   white-space: pre;
 }
 
-.file-changes-review-code > span {
+.file-changes-diff-line-number {
+  padding: 0 8px;
+  border-right: 1px solid var(--ui-border);
+  color: var(--ui-content-muted);
+  text-align: right;
+  user-select: none;
+}
+
+.file-changes-diff-row[data-kind="addition"] {
+  color: var(--ui-content-success);
+  background: color-mix(in srgb, var(--metask-state-complete) 10%, transparent);
+}
+
+.file-changes-diff-row[data-kind="deletion"] {
+  color: var(--ui-content-error);
+  background: color-mix(in srgb, var(--metask-state-error) 10%, transparent);
+}
+
+.file-changes-diff-row[data-kind="hunk"] > code,
+.file-changes-diff-row[data-kind="metadata"] > code,
+.file-changes-diff-row[data-kind="raw"] > code,
+.file-changes-diff-row[data-kind="no-newline"] > code {
+  grid-column: 1 / -1;
+  border-left: 0;
+}
+
+.file-changes-diff-row[data-kind="metadata"] {
+  color: var(--ui-content-muted);
+  background: var(--ui-surface-panel-2);
+}
+
+.file-changes-diff-row[data-kind="hunk"] {
+  color: var(--ui-action-selected-content);
+  background: var(--ui-action-selected-surface);
+}
+
+.file-changes-diff-row[data-kind="no-newline"] {
+  color: var(--ui-content-muted);
+  font-style: italic;
+}
+
+.file-changes-diff-row[data-kind="gap"] {
   display: block;
-  min-width: max-content;
-  min-height: 23px;
-  padding: 0 18px;
+  padding: 5px 14px;
+  border-top: 1px solid var(--ui-border);
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-content-muted);
+  background: var(--ui-surface-panel-2);
+  font-family: var(--font-sans);
+  font-size: var(--text-micro);
+  line-height: 18px;
 }
 
 @media (max-width: 700px) {
@@ -8502,6 +8565,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   .file-changes-review-index {
     border-right: 0;
     border-bottom: 1px solid var(--ui-border);
+  }
+
+  .file-changes-diff-row {
+    grid-template-columns: 42px 42px minmax(max-content, 1fr);
   }
 }
 

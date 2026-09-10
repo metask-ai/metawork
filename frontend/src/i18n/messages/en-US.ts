@@ -704,6 +704,10 @@ export const enUS = {
   "file_changes.diff.corrupt":
     "The recorded diff did not pass integrity checks",
   "file_changes.diff.error": "The recorded diff could not be loaded",
+  "file_changes.diff.content": "Recorded unified diff",
+  "file_changes.diff.old_line": "Old line {line}",
+  "file_changes.diff.new_line": "New line {line}",
+  "file_changes.diff.unchanged_lines": "{count} unmodified lines",
   "task.jump_latest": "Jump to latest",
   "inspector.mcp_authority": "MCP at creation",
   "inspector.mcp_selected": "Tools selected",
