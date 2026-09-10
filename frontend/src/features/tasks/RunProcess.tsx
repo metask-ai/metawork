@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 
 import type {
   FileReferenceView,
@@ -8,7 +8,7 @@ import type {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
-import type { RunPresentation } from "./run-presentation.ts";
+import { runElapsedSeconds, type RunPresentation } from "./run-presentation.ts";
 
 function toolActivityMessage(name: string | null): MessageId {
   switch (name) {
@@ -36,6 +36,7 @@ function activityMessage(
 ): MessageId {
   switch (activity.kind) {
     case "queued":
+      return "run.activity.queued";
     case "starting":
       return "run.activity.starting";
     case "waiting_model":
@@ -100,6 +101,7 @@ function ProcessHeader({
   active,
   title,
   detail,
+  elapsed,
   collapsible,
   expanded,
   controls,
@@ -108,6 +110,7 @@ function ProcessHeader({
   active: boolean;
   title: ReactNode;
   detail: ReactNode;
+  elapsed: ReactNode;
   collapsible: boolean;
   expanded: boolean;
   controls: string;
@@ -124,6 +127,7 @@ function ProcessHeader({
         <strong>{title}</strong>
         {detail && <small>{detail}</small>}
       </span>
+      {elapsed}
       {collapsible && (
         <span className="run-process-chevron">
           <Icon name="chevron" />
@@ -144,6 +148,29 @@ function ProcessHeader({
     </button>
   ) : (
     <div className="run-process-header">{content}</div>
+  );
+}
+
+function RunElapsed({
+  elapsedMs,
+  receivedAt,
+}: {
+  elapsedMs: string;
+  receivedAt: number;
+}) {
+  const { locale, t } = useI18n();
+  const [now, setNow] = useState(() => performance.now());
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(performance.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
+  const seconds = runElapsedSeconds(elapsedMs, receivedAt, now);
+  const duration = `${formatInteger(locale, seconds / 60n)}:${String(seconds % 60n).padStart(2, "0")}`;
+  // Outside the live region: elapsed seconds are not progress.
+  return (
+    <small className="run-process-elapsed" aria-live="off">
+      {t("run.elapsed", { duration })}
+    </small>
   );
 }
 
@@ -233,12 +260,16 @@ function terminalDetail(
 
 export function RunProcess({
   presentation,
+  elapsedMs = null,
+  snapshotReceivedAt = null,
   expanded,
   onExpandedChange,
   onOpenTool,
   onPreviewFile,
 }: {
   presentation: RunPresentation;
+  elapsedMs?: string | null;
+  snapshotReceivedAt?: number | null;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
   onOpenTool?: (tool: ToolView, opener: HTMLButtonElement) => void;
@@ -270,6 +301,13 @@ export function RunProcess({
         active={presentation.active}
         title={title}
         detail={detail}
+        elapsed={
+          presentation.active &&
+          elapsedMs !== null &&
+          snapshotReceivedAt !== null ? (
+            <RunElapsed elapsedMs={elapsedMs} receivedAt={snapshotReceivedAt} />
+          ) : null
+        }
         collapsible={presentation.processCanCollapse}
         expanded={showBody}
         controls={bodyId}

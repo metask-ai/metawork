@@ -301,6 +301,7 @@ pub const SkillExportResult = skill_runtime.ExportResult;
 pub const SkillImportPreview = skill_runtime.Preview;
 
 pub const Configuration = struct {
+    run_clock: task_runtime.RunClock = .{},
     change_notifier: ChangeNotifier = .{},
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
@@ -1026,6 +1027,7 @@ pub const PreparedCustomProviderBinding =
     execution_state.PreparedCustomProviderBinding;
 
 pub const Runtime = struct {
+    run_clock: task_runtime.RunClock,
     allocator: std.mem.Allocator,
     io: std.Io,
     agent_runtime: *lifecycle.Runtime,
@@ -1288,6 +1290,7 @@ pub const Runtime = struct {
             .schedule = schedule,
             .skill = skill,
             .change_notifier = configuration.change_notifier,
+            .run_clock = configuration.run_clock,
             .executor = executor,
             .attachment_executor = attachment_executor,
             .attachment_lane = attachment_lane,
@@ -5384,6 +5387,7 @@ pub const Runtime = struct {
 
     fn taskRuntimeProjectionEffects(self: *Runtime) task_runtime.ProjectionEffects {
         return .{
+            .now_ms = self.run_clock.now(),
             .context = self,
             .authority_fn = taskProjectionAuthority,
             .text = self.taskTextProjection(),
@@ -6252,6 +6256,7 @@ pub const Runtime = struct {
 
     fn taskRuntimeOperationEffects(self: *Runtime) task_runtime.OperationEffects {
         return .{
+            .run_clock = self.run_clock,
             .text = self.taskRuntimeTextProjection(),
             .release = self.taskRuntimeReleaseEffects(),
             .executor = .{
@@ -12456,6 +12461,43 @@ test "streaming Run events do not reorder Task navigation" {
     defer usage.deinit();
     try control.applyEvent(&usage);
     try std.testing.expectEqual(before, control.task_runtime.tasks[0].?.durable.recent_order);
+}
+
+test "Run elapsed projection samples an injected clock without publishing revisions" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const Clock = struct {
+        fn now(context: ?*anyopaque) ?u64 {
+            const value: *u64 = @ptrCast(@alignCast(context.?));
+            return value.*;
+        }
+    };
+    var now: u64 = 1250;
+    control.run_clock = .{ .context = &now, .now_ms_fn = Clock.now };
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    run.admitted_at_ms = 1000;
+    var storage: [96 * 1024]u8 = undefined;
+    for ([_]task_test_state.ActiveRunPhase{ .queued, .running, .waiting_ui, .stopping }) |phase| {
+        run.active_phase = phase;
+        try std.testing.expectEqual(@as(?u64, 250), task_test_state.runElapsedMs(run, now));
+    }
+    const first = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\"elapsedMs\":\"250\"") != null);
+    const revision = control.revision;
+    now = 135000;
+    const second = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, second, "\"elapsedMs\":\"134000\"") != null);
+    try std.testing.expectEqual(revision, control.revision);
+    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, 999));
+    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, null));
+    run.terminal_payload = .{ .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+    run.terminal_publication.store(.published, .release);
+    try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
+    run.terminal_observed = true;
+    run.event_stream_finalized = true;
+    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, now));
+    run.admitted_at_ms = null;
+    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, now));
 }
 
 test "thinking and assistant chunks update distinct safe projections" {

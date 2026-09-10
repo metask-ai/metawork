@@ -120,6 +120,7 @@ pub const PendingUiProjection = struct {
 };
 
 pub const Input = struct {
+    now_ms: ?u64 = null,
     task: *const task_state.Task,
     recovery: task_recovery.Projection,
     model_selection_availability: ModelSelectionAvailability,
@@ -229,7 +230,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
                 task_state.runProjectionFacts(run)
         else
             task_state.runProjectionFacts(run);
-        try writeRun(writer, input.text, run, projection);
+        try writeRun(writer, input.text, run, projection, input.now_ms);
     }
     writer.writeAll("],\"compacts\":[") catch return error.SnapshotTooLarge;
     var compact_count: usize = 0;
@@ -328,6 +329,7 @@ fn writeRun(
     text_projection: TextProjection,
     run: *const task_state.RunRecord,
     projection: task_state.RunProjectionFacts,
+    now_ms: ?u64,
 ) Error!void {
     const terminal = projection.terminal;
     writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
@@ -339,7 +341,12 @@ fn writeRun(
         @tagName(run.execution_protocol),
     }) catch return error.SnapshotTooLarge;
     try text_projection.writeJson(writer, run.execution_model);
-    writer.writeAll("},\"input\":") catch return error.SnapshotTooLarge;
+    writer.writeAll("},\"elapsedMs\":") catch return error.SnapshotTooLarge;
+    if (if (terminal == null) task_state.runElapsedMs(run, now_ms) else null) |elapsed|
+        writer.print("\"{d}\"", .{elapsed}) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
     switch (run.input) {
         .text => |text| {
             writer.writeAll("{\"kind\":\"text\",\"text\":") catch

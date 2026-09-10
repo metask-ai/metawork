@@ -431,6 +431,8 @@ export const zhCN: Record<MessageId, string> = {
   "task.phase.failed": "失败",
   "run.activity.thinking": "正在分析",
   "run.activity.writing_response": "正在组织回复",
+  "run.activity.queued": "排队中",
+  "run.elapsed": "本轮已用时 {duration}",
   "run.activity.starting": "正在准备",
   "run.activity.executing_tools": "正在处理",
   "run.activity.inspecting_workspace": "正在检查工作区",

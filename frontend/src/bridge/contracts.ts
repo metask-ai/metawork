@@ -542,6 +542,7 @@ export type RunActivity =
   | { kind: "stopping" };
 
 export type RunView = {
+  elapsedMs: string | null;
   id: string;
   phase: RunPhase;
   permissionProfile: PermissionProfile;

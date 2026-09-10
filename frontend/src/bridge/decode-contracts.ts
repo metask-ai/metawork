@@ -1619,6 +1619,7 @@ function decodeTool(value: unknown, path: string): ToolView {
 
 function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
+    "elapsedMs",
     "id",
     "phase",
     "permissionProfile",
@@ -1720,7 +1721,19 @@ function decodeRun(value: unknown, path: string): RunView {
     ),
   };
   const activity = decodeRunActivity(item.activity, `${path}.activity`);
+  const elapsedMs =
+    item.elapsedMs === null
+      ? null
+      : wireId(item.elapsedMs, `${path}.elapsedMs`);
+  if (
+    elapsedMs !== null &&
+    (elapsedMs.length > 20 ||
+      (elapsedMs.length === 20 && elapsedMs > "18446744073709551615"))
+  )
+    fail(`${path}.elapsedMs`, "expected u64 elapsed milliseconds");
   const isTerminal = terminal !== null;
+  if (isTerminal && elapsedMs !== null)
+    fail(path, "terminal Run cannot expose active elapsed time");
   if (isTerminal !== (activity === null))
     fail(path, "Run phase and activity must describe the same terminal state");
   if (phase === "queued" && activity?.kind !== "queued")
@@ -1757,6 +1770,7 @@ function decodeRun(value: unknown, path: string): RunView {
     input: decodeRunInput(item.input, `${path}.input`),
     output,
     activity,
+    elapsedMs,
     terminal,
     usage: {
       input: wireId(usage.input, `${path}.usage.input`),

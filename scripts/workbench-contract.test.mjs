@@ -51,6 +51,34 @@ function clone(value) {
   return structuredClone(value);
 }
 
+test("Run elapsed time is nullable, bounded, and unavailable for terminal history", () => {
+  for (const value of [null, "0", "134000"]) {
+    const candidate = clone(fixture);
+    const run = candidate.tasks[0].runs[0];
+    run.phase = "running";
+    run.activity = { kind: "thinking" };
+    run.terminal = null;
+    run.elapsedMs = value;
+    assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  }
+  for (const value of [undefined, "-1", "01", "18446744073709551616", 1200]) {
+    const candidate = clone(fixture);
+    candidate.tasks[0].runs[0].elapsedMs = value;
+    assert.throws(() => decodeWorkbenchSnapshot(candidate));
+  }
+  const candidate = clone(fixture);
+  const run = candidate.tasks[0].runs[0];
+  run.phase = "completed";
+  run.activity = null;
+  run.output.provisional = "";
+  run.terminal = terminal("completed");
+  run.elapsedMs = "1200";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(candidate),
+    /terminal Run cannot expose active elapsed/,
+  );
+});
+
 function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
   return { outcome, cause, diagnosticDisposition };
 }

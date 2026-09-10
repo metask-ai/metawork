@@ -2346,7 +2346,7 @@ summary::-webkit-details-marker {
   width: 100%;
   min-height: 36px;
   padding: 6px 2px;
-  grid-template-columns: 7px minmax(0, 1fr) auto;
+  grid-template-columns: 7px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   border: 0;
@@ -2387,6 +2387,13 @@ button.run-process-header:hover {
   min-width: 0;
   align-items: baseline;
   gap: 8px;
+}
+
+.run-process-elapsed {
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 
 .run-process-heading strong {

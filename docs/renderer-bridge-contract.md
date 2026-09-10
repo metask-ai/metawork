@@ -25,6 +25,8 @@ Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的
 
 ## 3. Renderer Bridge wire contract
 
+Run 的 `elapsedMs` 是 nullable canonical decimal `u64` string：表示 Host 在本次 Snapshot 采样时，从本轮接纳起经过的单调时间，包含排队、批准等待和重试。正式 terminal 或没有可靠计时事实时必须为 null，不从历史补写。它不是事件活跃度、完成比例或剩余时间；时钟推进不发布 revision。Renderer 仅用本次 Snapshot 的本地接收时刻外推低频显示，reload 必须重新采样，不能从组件挂载时起算或将显示时间写回 Host。
+
 `metawork.tasks.create` 的 execution admission 字段精确为 `expectedExecutionGeneration + expectedSelectionRevision + modelSelection`，三者必须同时存在，其中前两者来自同一份根 `newTaskAdmission` snapshot 且均为非零 canonical wire id。`modelSelection` 精确为 `null | { targetModelRef: { sourceId, modelId }, expectedSourceGeneration, expectedCatalogGeneration }`：null 表示采用 active default；非 null 表示只为本次新 Task 选择同一 active source 中的另一个当前 ready 模型。Host 在创建事务中同时 compare-and-swap当前 active generation 与 selection revision，并对 override 重新校验 active source、protocol、source generation 与 catalog generation/membership；缺字段、revision/generation 已变化、跨 source 或模型已失效均 fail closed，绝不回退默认模型。这样同一 execution authority 内默认模型变化可以保持 generation 稳定，同时不会让旧 Renderer snapshot 静默采用新的默认模型，也不会把单 Task 选择写回 global default。
 
 每个 Task 根对象必须发布 Host-owned `modelSelectionAvailability`，精确取 `available | catalog_loading | catalog_unavailable | execution_replacing | runtime_detached | unsupported_source | authority_changed`。Product Control 根据 Task binding、当前 installed execution、replacement 与 Models catalog 的跨 owner 事实一次性计算；Renderer 只消费该枚举决定菜单可编辑、暂时禁用或只读及其原因，不得再比较根 `models`、`newTaskAdmission` 与 Task 字段重建 authority。缺失或未知值属于 snapshot contract failure。

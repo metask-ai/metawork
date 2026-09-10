@@ -608,6 +608,10 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 
 真实 Provider 没有提交新 commentary 或 provisional 时，主阅读流保持不变，只显示当前 canonical activity 和按需技术证据。Renderer 不重复状态行、不从 Tool 结果生成总结、不展示 thinking 正文，也不通过动画、计时器或伪百分比制造推进感。scripted Provider vertical 证明的是这套机制可以持续交付已存在的事实，不代表真实 Provider 的叙事频率。
 
+#### 本轮耗时
+
+活动状态旁可以弱化显示 Host 采样的“本轮已用时”，包含排队、等待批准和重试；仅表示经过时间，不表示进展或健康。Renderer 从完整 Snapshot 的本地接收时刻低频外推，切换 Task 不重新起算，reload 后使用新 Host 样本；terminal 后移除，不新增历史耗时展示。计时必须位于状态读屏 live region 之外，不触发逐秒播报、自动滚动或逐秒 Snapshot；计时变化不能用来生成叙事、推进状态或判断超时。排队与启动使用不同文案。
+
 ### 7.3 用户指令
 
 - 使用浅紫色“任务指令”区块，最大宽度约为正文的 72%，靠右但不使用聊天尾巴、头像或左右双方气泡布局，也不重复显示“你”等归属标签；在窄窗口下可以放宽到约 88%；

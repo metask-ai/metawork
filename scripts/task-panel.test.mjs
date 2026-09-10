@@ -226,6 +226,7 @@ function taskContentElement(value, revision = "1", overrides = {}) {
   return localizedView(
     createElement(TaskContent, {
       task: value,
+      snapshotReceivedAt: null,
       revision,
       composerHasDraft: false,
       retryAvailable: false,
@@ -257,6 +258,86 @@ function runProcessElement(
     }),
   );
 }
+
+test("elapsed display advances without snapshots, rebases on receipt and disappears at terminal", (context) => {
+  let now = 1000;
+  let tick;
+  let cleared = 0;
+  context.mock.method(performance, "now", () => now);
+  context.mock.method(window, "setInterval", (callback) => {
+    tick = callback;
+    return 1;
+  });
+  context.mock.method(window, "clearInterval", () => {
+    cleared++;
+  });
+  const element = (value, elapsedMs, snapshotReceivedAt) =>
+    localizedView(
+      createElement(RunProcess, {
+        presentation: deriveRunPresentation(value),
+        elapsedMs,
+        snapshotReceivedAt,
+        expanded: false,
+        onExpandedChange() {},
+      }),
+    );
+  const active = run({
+    phase: "running",
+    activity: { kind: "thinking" },
+    terminal: null,
+  });
+  const view = render(element(active, "120000", 1000));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 2:00",
+  );
+  assert.equal(
+    view.container
+      .querySelector(".run-process-elapsed")
+      .closest('[aria-live="polite"]'),
+    null,
+  );
+  now = 15000;
+  act(() => tick());
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 2:14",
+  );
+  view.rerender(element(active, "134000", 15000));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 2:14",
+  );
+  view.rerender(element(active, "6000", 15000));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 0:06",
+  );
+  view.rerender(element(run(), null, 15000));
+  assert.equal(view.container.querySelector(".run-process-elapsed"), null);
+  assert.equal(cleared, 1);
+  view.unmount();
+});
+
+test("queued and starting are distinct and missing Host timing is not invented", () => {
+  const queued = run({
+    phase: "queued",
+    activity: { kind: "queued" },
+    terminal: null,
+  });
+  const markup = renderToStaticMarkup(runProcessElement(queued));
+  assert.match(markup, />Queued</);
+  assert.doesNotMatch(markup, /run-process-elapsed/);
+  const starting = run({
+    phase: "running",
+    activity: { kind: "starting" },
+    terminal: null,
+  });
+  assert.match(
+    renderToStaticMarkup(runProcessElement(starting)),
+    />Getting started</,
+  );
+});
 
 test("conversation separates commentary, Markdown response, and plain provisional output", () => {
   const active = task({

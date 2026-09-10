@@ -464,6 +464,8 @@ export const enUS = {
   "task.phase.failed": "Failed",
   "run.activity.thinking": "Analyzing",
   "run.activity.writing_response": "Preparing a response",
+  "run.activity.queued": "Queued",
+  "run.elapsed": "Turn elapsed {duration}",
   "run.activity.starting": "Getting started",
   "run.activity.executing_tools": "Working",
   "run.activity.inspecting_workspace": "Inspecting the workspace",

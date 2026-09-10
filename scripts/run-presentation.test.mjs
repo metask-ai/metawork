@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deriveRunPresentation,
+  runElapsedSeconds,
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
 } from "../frontend/src/features/tasks/run-presentation.ts";
@@ -11,6 +12,16 @@ import { RevisionNotificationQueue } from "../frontend/src/bridge/revision-notif
 function terminal(outcome, cause = null) {
   return { outcome, cause, diagnosticDisposition: "absent" };
 }
+
+test("elapsed time uses the snapshot receipt rather than component mount or event count", () => {
+  assert.equal(runElapsedSeconds("120000", 1000, 1500), 120n);
+  assert.equal(runElapsedSeconds("120000", 1000, 15000), 134n);
+  assert.equal(runElapsedSeconds("120000", 1000, 500), 120n);
+  assert.equal(
+    runElapsedSeconds("18446744073709551615", 0, 1000),
+    18446744073709552n,
+  );
+});
 
 function run(overrides = {}) {
   return {

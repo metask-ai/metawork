@@ -24,6 +24,18 @@ export type RunPresentation = {
   toolCount: number;
 };
 
+/** A display estimate since a Host sample, never a liveness observation. */
+export function runElapsedSeconds(
+  elapsedMs: string,
+  receivedAt: number,
+  now: number,
+): bigint {
+  return (
+    (BigInt(elapsedMs) + BigInt(Math.floor(Math.max(0, now - receivedAt)))) /
+    1000n
+  );
+}
+
 function fallbackActivity(phase: RunPhase): RunActivity | null {
   switch (phase) {
     case "queued":

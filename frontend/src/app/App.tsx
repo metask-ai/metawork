@@ -1029,6 +1029,7 @@ export default function App() {
           dispatchWorkbench({
             type: "snapshot.accepted",
             snapshot: next,
+            receivedAt: performance.now(),
             generation,
           });
           const pendingTaskId = pendingTaskSelection.current;
@@ -3650,6 +3651,7 @@ export default function App() {
             <>
               <TaskContent
                 task={activeTask}
+                snapshotReceivedAt={workbench.snapshotReceivedAt}
                 revision={snapshot.revision}
                 composerHasDraft={composerDraftHasContent(composerDraft)}
                 retryAvailable={taskCanCompose && !taskOperationInFlight}

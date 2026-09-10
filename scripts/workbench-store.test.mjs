@@ -70,6 +70,28 @@ test("pending scopes isolate unrelated mutations and reject duplicate admission"
   assert.equal(pending.end("task:4"), true);
 });
 
+test("snapshot receipt time survives task selection and rejects stale generations", () => {
+  const accepted = workbenchReducer(initialWorkbenchState, {
+    type: "snapshot.accepted",
+    receivedAt: 1000,
+    snapshot: snapshot("1", [task("2", "1")]),
+  });
+  const selected = workbenchReducer(accepted, {
+    type: "task.selected",
+    taskId: "2",
+  });
+  assert.equal(selected.snapshotReceivedAt, 1000);
+  assert.equal(
+    workbenchReducer(selected, {
+      type: "snapshot.accepted",
+      receivedAt: 9000,
+      generation: "stale",
+      snapshot: snapshot("2", [task("2", "1")]),
+    }),
+    selected,
+  );
+});
+
 test("a new connection generation invalidates the previous Workbench projection", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "generation.started",
@@ -77,6 +99,7 @@ test("a new connection generation invalidates the previous Workbench projection"
   });
   const hydrated = workbenchReducer(accepted, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     generation: "1",
     snapshot: snapshot("1", [task("2", "1")]),
   });
@@ -103,6 +126,7 @@ test("a late snapshot from an older generation is ignored", () => {
   });
   const stale = workbenchReducer(current, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     generation: "1",
     snapshot: snapshot("1", [task("stale", "1")]),
   });
@@ -118,6 +142,7 @@ test("a signed-out Host snapshot restores an active Run instead of hiding it", (
   };
   const restored = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("1", [running]),
   });
   const signedOutSnapshot = {
@@ -129,6 +154,7 @@ test("a signed-out Host snapshot restores an active Run instead of hiding it", (
   };
   const signedOut = workbenchReducer(restored, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: signedOutSnapshot,
   });
 
@@ -144,6 +170,7 @@ test("a signed-out Host snapshot restores an active Run instead of hiding it", (
 test("snapshot hydration stays on New task until the user selects a Task", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("1", [task("2", "1"), task("3", "2")]),
   });
   assert.equal(accepted.activeTaskId, null);
@@ -157,6 +184,7 @@ test("snapshot hydration stays on New task until the user selects a Task", () =>
 
   const refreshed = workbenchReducer(selected, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("2", [task("3", "2"), task("4", "1")]),
   });
   assert.equal(refreshed.activeTaskId, "3");
@@ -181,6 +209,7 @@ test("an automatic Task route survives refresh independently of the draft Worksp
   };
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: automaticSnapshot,
   });
   const selected = workbenchReducer(accepted, {
@@ -191,6 +220,7 @@ test("an automatic Task route survives refresh independently of the draft Worksp
 
   const refreshed = workbenchReducer(selected, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: { ...automaticSnapshot, revision: "2" },
   });
   assert.equal(refreshed.activeTaskId, "3");
@@ -199,6 +229,7 @@ test("an automatic Task route survives refresh independently of the draft Worksp
 test("the Workbench store rejects unknown Tasks and never switches history implicitly", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("1", [task("2", "1"), task("3", "1"), task("4", "2")]),
   });
   const selected = workbenchReducer(accepted, {
@@ -214,11 +245,13 @@ test("the Workbench store rejects unknown Tasks and never switches history impli
   );
   const removed = workbenchReducer(selected, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("2", [task("4", "2"), task("3", "1")]),
   });
   assert.equal(removed.activeTaskId, "3");
   const disappeared = workbenchReducer(selected, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("3", [task("4", "2")]),
   });
   assert.equal(disappeared.activeTaskId, null);
@@ -227,6 +260,7 @@ test("the Workbench store rejects unknown Tasks and never switches history impli
 test("a new Task stays a Renderer draft until first send creates an authoritative Task", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("1", [task("2", "1")]),
   });
   const draft = workbenchReducer(accepted, {
@@ -239,6 +273,7 @@ test("a new Task stays a Renderer draft until first send creates an authoritativ
 
   const refreshed = workbenchReducer(draft, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("2", [task("2", "1"), task("3", "2")]),
   });
   assert.equal(refreshed.activeTaskId, null);
@@ -265,6 +300,7 @@ test("an unscoped New task survives snapshots without inventing a Workspace", ()
 
   const refreshed = workbenchReducer(draft, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("1", [task("2", "1")]),
   });
   assert.equal(refreshed.activeTaskId, null);
@@ -275,10 +311,12 @@ test("an unscoped New task survives snapshots without inventing a Workspace", ()
 test("a removed Workspace leaves orphan history unselected until reauthorization", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("1", [task("2", "1")]),
   });
   const removed = workbenchReducer(accepted, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("2", [task("2", "1")], []),
   });
   assert.equal(removed.activeTaskId, null);
@@ -291,6 +329,7 @@ test("a removed Workspace leaves orphan history unselected until reauthorization
 test("removing a Workspace keeps its New task draft identity", () => {
   const accepted = workbenchReducer(initialWorkbenchState, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("1", [], ["1"]),
   });
   const draft = workbenchReducer(accepted, {
@@ -299,6 +338,7 @@ test("removing a Workspace keeps its New task draft identity", () => {
   });
   const removed = workbenchReducer(draft, {
     type: "snapshot.accepted",
+    receivedAt: 0,
     snapshot: snapshot("2", [], []),
   });
   assert.equal(removed.draftWorkspaceId, "1");

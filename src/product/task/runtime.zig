@@ -305,6 +305,17 @@ pub const WorkspaceOrderEffect = struct {
     }
 };
 
+/// Run timing is a display-only observation supplied by Application. It never
+/// schedules work or determines liveness, cancellation, or terminal outcome.
+pub const RunClock = struct {
+    context: ?*anyopaque = null,
+    now_ms_fn: ?*const fn (?*anyopaque) ?u64 = null,
+
+    pub fn now(self: RunClock) ?u64 {
+        return if (self.now_ms_fn) |now_fn| now_fn(self.context) else null;
+    }
+};
+
 pub const OperationEffects = struct {
     text: TextProjection,
     release: ReleaseEffects,
@@ -312,6 +323,7 @@ pub const OperationEffects = struct {
     worker: WorkerResources,
     limits: OperationLimits,
     run_acceptance: RunAcceptanceEffect = .{},
+    run_clock: RunClock = .{},
 };
 
 pub const RunError = agent.Error || std.mem.Allocator.Error || error{
@@ -589,6 +601,7 @@ pub const PreparedRun = struct {
             self.effects.text.discardPrevious(self.previous_title);
         self.effects.run_acceptance.accept();
         const run_record = &self.task.durable.runs[self.slot].?;
+        run_record.admitted_at_ms = self.effects.run_clock.now();
         self.effects.executor.enqueue(
             run_record,
             self.job,
@@ -913,6 +926,7 @@ pub const RecoveryAdmissionEffects = struct {
 };
 
 pub const ProjectionEffects = struct {
+    now_ms: ?u64 = null,
     context: *anyopaque,
     authority_fn: *const fn (*anyopaque, ProjectionAuthorityQuery) ProjectionAuthority,
     text: task_view.TextProjection,
@@ -2942,6 +2956,7 @@ pub const Runtime = struct {
             const recovery = self.recoveryProjectionWithAuthority(task, external);
             task_view.writeProjection(writer, .{
                 .task = task,
+                .now_ms = effects.now_ms,
                 .recovery = recovery,
                 .model_selection_availability = external.model_selection_availability,
                 .shutting_down = external.shutting_down,

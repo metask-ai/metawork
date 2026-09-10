@@ -157,6 +157,7 @@ function TaskInput({ input }: { input: RunInputView }) {
 
 export function TaskContent({
   task,
+  snapshotReceivedAt,
   revision,
   composerHasDraft,
   retryAvailable,
@@ -170,6 +171,7 @@ export function TaskContent({
   renderPendingUi,
 }: {
   task: TaskView | null;
+  snapshotReceivedAt: number | null;
   revision: string;
   composerHasDraft: boolean;
   retryAvailable: boolean;
@@ -341,6 +343,8 @@ export function TaskContent({
               <>
                 <RunProcess
                   presentation={presentation}
+                  elapsedMs={run.elapsedMs}
+                  snapshotReceivedAt={snapshotReceivedAt}
                   expanded={disclosure.expanded}
                   onExpandedChange={setProcessExpanded}
                   onOpenTool={(tool: ToolView, opener) =>
