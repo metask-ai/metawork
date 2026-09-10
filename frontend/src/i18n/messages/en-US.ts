@@ -1,5 +1,6 @@
 export const enUS = {
   "app.name": "MetaWork",
+  "app.account_and_application_menu": "Account and application menu",
   "app.toggle_sidebar": "Toggle task sidebar",
   "app.resize_sidebar": "Resize task sidebar",
   "app.resize_task_panel": "Resize side panel",
@@ -19,6 +20,8 @@ export const enUS = {
   "common.remove": "Remove",
   "common.cancel": "Cancel",
   "common.close": "Close",
+  "about.menu_item": "About",
+  "about.version": "Version",
   "connection.connecting": "Connecting to the Workbench…",
   "connection.connected": "Workbench connected.",
   "connection.recovered": "Workbench connection recovered.",
@@ -783,7 +786,6 @@ export const enUS = {
   "search.kind.task": "Task",
   "search.kind.instruction": "Instruction",
   "search.kind.completion": "Completion",
-  "account.menu": "Metask account menu",
   "account.connected": "Metask connected",
   "account.connection_attention": "Sign-in needs attention",
   "account.logout_short": "Sign out…",

@@ -78,6 +78,21 @@ test("release version has one manifest owner and exact package mirrors", () => {
   assert.equal(lock.version, appVersion);
   assert.equal(lock.packages[""].version, appVersion);
   assert.equal(lock.packages.frontend.version, appVersion);
+
+  const viteConfig = read("frontend/vite.config.ts");
+  const rendererIdentity = read("frontend/src/app/product-identity.ts");
+  assert.match(
+    viteConfig,
+    /readNativePackageManifest\(repositoryRoot\)\.metadata/,
+  );
+  assert.match(
+    viteConfig,
+    /__METAWORK_PRODUCT_VERSION__:\s*JSON\.stringify\(productMetadata\.version\)/,
+  );
+  assert.match(
+    rendererIdentity,
+    /productVersion = __METAWORK_PRODUCT_VERSION__/,
+  );
 });
 
 test("artifact identities preserve development and isolate automation namespaces", () => {

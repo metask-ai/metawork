@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { AccountView } from "../../bridge/contracts.ts";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
@@ -6,6 +6,7 @@ import { Button } from "../../components/ui/button.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import { AboutMetaWorkDialog } from "./AboutMetaWorkDialog.tsx";
 
 export function AccountIdentity({
   account,
@@ -27,7 +28,9 @@ export function AccountIdentity({
   onLogout: () => void;
 }) {
   const { t } = useI18n();
+  const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const authenticated = account.state === "authenticated";
   const identityName = authenticated
@@ -60,7 +63,7 @@ export function AccountIdentity({
             <Menu.Positioner side="top" align="end" sideOffset={8}>
               <Menu.Popup
                 className="account-menu"
-                aria-label={t("account.menu")}
+                aria-label={t("app.account_and_application_menu")}
               >
                 {authenticated && (
                   <div className="account-menu-heading">
@@ -87,6 +90,10 @@ export function AccountIdentity({
                     {t("account.cancel")}
                   </Menu.Item>
                 )}
+                {(account.state === "signed_out" ||
+                  (account.state === "authorizing" && account.canCancel)) && (
+                  <Menu.Separator />
+                )}
                 <Menu.Item
                   className="account-menu-item focus-ring"
                   onClick={() => choose(onOpenSettings)}
@@ -94,22 +101,33 @@ export function AccountIdentity({
                   <Icon name="settings" />
                   {t("settings.title")}
                 </Menu.Item>
+                <Menu.Item
+                  className="account-menu-item focus-ring"
+                  onClick={() => choose(() => setAboutOpen(true))}
+                >
+                  <Icon name="info" />
+                  {t("about.menu_item")}
+                </Menu.Item>
                 {authenticated && (
-                  <Menu.Item
-                    className="account-menu-item is-danger focus-ring"
-                    disabled={disabled}
-                    onClick={() => choose(() => setConfirmSignOut(true))}
-                  >
-                    {t("account.logout_short")}
-                  </Menu.Item>
+                  <>
+                    <Menu.Separator />
+                    <Menu.Item
+                      className="account-menu-item is-danger focus-ring"
+                      disabled={disabled}
+                      onClick={() => choose(() => setConfirmSignOut(true))}
+                    >
+                      {t("account.logout_short")}
+                    </Menu.Item>
+                  </>
                 )}
               </Menu.Popup>
             </Menu.Positioner>
           </Menu.Portal>
           <Menu.Trigger
+            ref={trigger}
             className="account-identity-trigger focus-ring"
             data-active={active}
-            aria-label={t("account.menu")}
+            aria-label={t("app.account_and_application_menu")}
           >
             <span className="account-avatar" aria-hidden="true">
               {initial}
@@ -122,6 +140,15 @@ export function AccountIdentity({
           </Menu.Trigger>
         </div>
       </Menu.Root>
+
+      <AboutMetaWorkDialog
+        open={aboutOpen}
+        onOpenChange={(nextOpen) => {
+          setAboutOpen(nextOpen);
+          if (!nextOpen)
+            window.requestAnimationFrame(() => trigger.current?.focus());
+        }}
+      />
 
       <AlertDialog.Root
         open={authenticated && confirmSignOut}

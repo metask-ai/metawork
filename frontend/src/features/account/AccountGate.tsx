@@ -1,9 +1,13 @@
+import { useRef, useState } from "react";
+
 import type { AccountView } from "../../bridge/contracts.ts";
 import { Button } from "../../components/ui/button.tsx";
+import { Icon } from "../../components/ui/Icon.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { WindowControls } from "../../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../../components/ui/WindowTitlebar.tsx";
 import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
+import { AboutMetaWorkDialog } from "./AboutMetaWorkDialog.tsx";
 
 type Props = {
   account: AccountView;
@@ -39,6 +43,8 @@ export function AccountGate({
   onCancel,
 }: Props) {
   const { locale, setLocale, t } = useI18n();
+  const aboutTrigger = useRef<HTMLButtonElement>(null);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const authorizing = account.state === "authorizing";
   const signedOut = account.state === "signed_out";
   const title = signedOut
@@ -165,8 +171,25 @@ export function AccountGate({
             <p className="account-gate-source">{t(connectionSourceId)}</p>
           )}
           <p className="account-gate-security">{t("account.gate.privacy")}</p>
+          <button
+            ref={aboutTrigger}
+            type="button"
+            className="account-gate-about focus-ring"
+            onClick={() => setAboutOpen(true)}
+          >
+            <Icon name="info" />
+            {t("about.menu_item")}
+          </button>
         </div>
       </section>
+      <AboutMetaWorkDialog
+        open={aboutOpen}
+        onOpenChange={(nextOpen) => {
+          setAboutOpen(nextOpen);
+          if (!nextOpen)
+            window.requestAnimationFrame(() => aboutTrigger.current?.focus());
+        }}
+      />
     </main>
   );
 }

@@ -6,6 +6,8 @@ import { JSDOM } from "jsdom";
 import { createElement } from "react";
 import { createServer } from "vite";
 
+import { readNativePackageManifest } from "./package-metadata.mjs";
+
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   pretendToBeVisual: true,
   url: "http://localhost/",
@@ -40,7 +42,8 @@ if (!HTMLElement.prototype.setPointerCapture)
 if (!HTMLElement.prototype.releasePointerCapture)
   HTMLElement.prototype.releasePointerCapture = () => undefined;
 
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { cleanup, render, screen, waitFor } =
+  await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 
 const vite = await createServer({
@@ -51,6 +54,9 @@ const vite = await createServer({
 });
 const { AccountIdentity } = await vite.ssrLoadModule(
   "/src/features/account/AccountIdentity.tsx",
+);
+const { AccountGate } = await vite.ssrLoadModule(
+  "/src/features/account/AccountGate.tsx",
 );
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
@@ -65,6 +71,8 @@ const account = {
   state: "authenticated",
   displayName: "Metask User",
 };
+const productVersion = readNativePackageManifest(process.cwd()).metadata
+  .version;
 
 function renderIdentity(callbacks, accountView = account) {
   return render(
@@ -81,7 +89,11 @@ function renderIdentity(callbacks, accountView = account) {
         account: accountView,
         active: false,
         disabled: false,
+        cancelDisabled: false,
         onBeginLogin() {},
+        onCancel() {},
+        onOpenSettings() {},
+        onLogout() {},
         ...callbacks,
       }),
     ),
@@ -103,7 +115,7 @@ test("signed-out account identity separates account, status, and login action", 
   );
 
   const trigger = screen.getByRole("button", {
-    name: "Metask account menu",
+    name: "Account and application menu",
   });
   assert.match(trigger.textContent, /Metask/);
   assert.match(trigger.textContent, /Not signed in/);
@@ -113,7 +125,7 @@ test("signed-out account identity separates account, status, and login action", 
   await user.click(trigger);
 
   const menu = await screen.findByRole("menu", {
-    name: "Metask account menu",
+    name: "Account and application menu",
   });
   assert.doesNotMatch(menu.textContent, /Metask account/);
   assert.doesNotMatch(menu.textContent, /Not signed in/);
@@ -137,7 +149,9 @@ test("account-menu sign out confirms in place without opening settings", async (
     },
   });
 
-  await user.click(screen.getByRole("button", { name: "Metask account menu" }));
+  await user.click(
+    screen.getByRole("button", { name: "Account and application menu" }),
+  );
   await user.click(await screen.findByRole("menuitem", { name: "Sign out…" }));
 
   const confirmation = await screen.findByRole("alertdialog");
@@ -151,7 +165,9 @@ test("account-menu sign out confirms in place without opening settings", async (
   assert.equal(screen.queryByRole("alertdialog"), null);
   assert.deepEqual(calls, { settings: 0, logout: 0 });
 
-  await user.click(screen.getByRole("button", { name: "Metask account menu" }));
+  await user.click(
+    screen.getByRole("button", { name: "Account and application menu" }),
+  );
   await user.click(await screen.findByRole("menuitem", { name: "Sign out…" }));
   await user.click(
     await screen.findByRole("button", {
@@ -161,4 +177,96 @@ test("account-menu sign out confirms in place without opening settings", async (
 
   assert.deepEqual(calls, { settings: 0, logout: 1 });
   assert.equal(screen.queryByRole("alertdialog"), null);
+});
+
+test("about MetaWork keeps version metadata in the dialog and returns focus", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const { container } = renderIdentity({});
+  const trigger = screen.getByRole("button", {
+    name: "Account and application menu",
+  });
+
+  await user.click(trigger);
+  await user.click(
+    await screen.findByRole("menuitem", { name: "About" }),
+  );
+
+  const dialog = await screen.findByRole("dialog", {
+    name: "MetaWork",
+  });
+  assert.doesNotMatch(dialog.textContent, /native desktop workbench/iu);
+  assert.match(
+    dialog.textContent,
+    new RegExp(productVersion.replaceAll(".", "\\."), "u"),
+  );
+  assert.equal(dialog.querySelector(".about-dialog-mark img") !== null, true);
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  await waitFor(() => assert.equal(dom.window.document.activeElement, trigger));
+  assert.equal(container.querySelector(".account-menu"), null);
+});
+
+test("authorization without cancellation keeps app actions available without an empty group", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  renderIdentity(
+    {},
+    {
+      state: "authorizing",
+      displayName: "",
+      canCancel: false,
+    },
+  );
+
+  await user.click(
+    screen.getByRole("button", { name: "Account and application menu" }),
+  );
+  const menu = await screen.findByRole("menu", {
+    name: "Account and application menu",
+  });
+  assert.equal(menu.querySelector('[role="separator"]'), null);
+  await user.click(screen.getByRole("menuitem", { name: "About" }));
+  assert.notEqual(
+    await screen.findByRole("dialog", { name: "MetaWork" }),
+    null,
+  );
+});
+
+test("standalone sign-in surface keeps About available without Workbench state", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(AccountGate, {
+        account: { state: "signed_out", displayName: "" },
+        beginLoginDisabled: false,
+        cancelDisabled: false,
+        connectionFailed: false,
+        connectionRetryable: false,
+        connectionTitleId: "connection.failed",
+        connectionHelpId: "connection.failed_help",
+        reconnecting: false,
+        notice: "",
+        onReconnect() {},
+        onBeginLogin() {},
+        onCancel() {},
+      }),
+    ),
+  );
+
+  await user.click(screen.getByRole("button", { name: "About" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "MetaWork",
+  });
+  assert.match(
+    dialog.textContent,
+    new RegExp(productVersion.replaceAll(".", "\\."), "u"),
+  );
 });

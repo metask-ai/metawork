@@ -2,6 +2,7 @@ import type { MessageId } from "./en-US.ts";
 
 export const zhCN: Record<MessageId, string> = {
   "app.name": "MetaWork",
+  "app.account_and_application_menu": "账户与应用菜单",
   "app.toggle_sidebar": "切换任务侧栏",
   "app.resize_sidebar": "调整任务侧栏宽度",
   "app.resize_task_panel": "调整右侧栏宽度",
@@ -21,6 +22,8 @@ export const zhCN: Record<MessageId, string> = {
   "common.remove": "删除",
   "common.cancel": "取消",
   "common.close": "关闭",
+  "about.menu_item": "关于",
+  "about.version": "版本",
   "connection.connecting": "正在连接工作台…",
   "connection.connected": "工作台已连接。",
   "connection.recovered": "工作台连接已恢复。",
@@ -719,7 +722,6 @@ export const zhCN: Record<MessageId, string> = {
   "search.kind.task": "任务",
   "search.kind.instruction": "要求",
   "search.kind.completion": "完成内容",
-  "account.menu": "Metask 账号菜单",
   "account.connected": "Metask 已连接",
   "account.connection_attention": "登录状态需要处理",
   "account.logout_short": "退出登录…",

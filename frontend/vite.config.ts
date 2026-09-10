@@ -1,11 +1,17 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import rootPackage from "../package.json" with { type: "json" };
+import { readNativePackageManifest } from "../scripts/package-metadata.mjs";
 import { cspPlaceholder, developmentCsp, releaseCsp } from "./csp.mjs";
+
+const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
+const productMetadata = readNativePackageManifest(repositoryRoot).metadata;
 
 export default defineConfig(({ command }) => ({
   define: {
+    __METAWORK_PRODUCT_VERSION__: JSON.stringify(productMetadata.version),
     __NATIVE_SDK_VERSION__: JSON.stringify(
       rootPackage.devDependencies["@native-sdk/cli"],
     ),
