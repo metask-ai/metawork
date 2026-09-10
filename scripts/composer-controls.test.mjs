@@ -1649,10 +1649,10 @@ test("removing the last attachment returns keyboard focus to the picker", async 
   );
 });
 
-test("generic file drafts explain the current send boundary", () => {
+test("validated text file drafts are sendable with an explicit instruction", () => {
   renderComposer({
     attachmentsEnabled: true,
-    canSubmit: false,
+    canSubmit: true,
     draft: {
       kind: "multimodal",
       text: "Use this file",
@@ -1666,10 +1666,28 @@ test("generic file drafts explain the current send boundary", () => {
       ],
     },
   });
-  assert.match(
-    screen.getByRole("status").textContent,
-    /only images can be sent/i,
-  );
+  assert.equal(screen.queryByRole("status"), null);
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false);
+});
+
+test("text file drafts quietly require an explicit user instruction", () => {
+  renderComposer({
+    attachmentsEnabled: true,
+    canSubmit: false,
+    draft: {
+      kind: "multimodal",
+      text: " \n",
+      attachments: [
+        {
+          token: "a".repeat(48),
+          kind: "file",
+          displayName: "notes.txt",
+          sizeBytes: "128",
+        },
+      ],
+    },
+  });
+  assert.equal(screen.queryByRole("status"), null);
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
 });
 
@@ -1693,6 +1711,14 @@ test("file size rejection displays the Host limit and preserves ready chips", ()
   });
   assert.match(screen.getByRole("alert").textContent, /3\.75 MB/);
   assert.ok(screen.getByText("ready.txt"));
+});
+
+test("text file size rejection remains actionable", () => {
+  renderComposer({
+    attachmentsEnabled: true,
+    attachmentError: "text_file_too_large",
+  });
+  assert.match(screen.getByRole("alert").textContent, /too large/i);
 });
 
 test("file drag highlights the active Composer and hands the drop files to its input owner", () => {

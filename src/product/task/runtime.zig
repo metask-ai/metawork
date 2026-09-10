@@ -195,7 +195,7 @@ pub const AttachmentKind = task_state.AttachmentKind;
 pub const AttachmentFormat = task_state.AttachmentFormat;
 pub const MultimodalAttachment = struct {
     kind: AttachmentKind,
-    format: AttachmentFormat,
+    format: ?AttachmentFormat,
     display_name: []const u8,
     bytes: []const u8,
 };
@@ -327,6 +327,7 @@ pub const RunError = agent.Error || std.mem.Allocator.Error || error{
     SkillNotFound,
     SkillUnavailable,
     InvalidSkillArguments,
+    MissingInstruction,
     RunCapacity,
     RunGenerationExhausted,
     TaskPersistenceFailed,
@@ -1233,7 +1234,8 @@ pub const Runtime = struct {
         var access_live = true;
         errdefer if (access_live) access.deinit();
         try applyPendingModel(self, task, &access, effects);
-        const agent_input = try validateRunInput(task, input, effects.limits);
+        var input_parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
+        const agent_input = try validateRunInput(task, input, effects.limits, &input_parts);
         const run_id = try access.prepareRun(agent_input);
         var prepared = true;
         errdefer if (prepared)
@@ -4673,12 +4675,12 @@ fn validateRunInput(
     task: *const task_state.Task,
     input: RunInput,
     limits: OperationLimits,
+    parts: *[agent.multimodal_input_limits.max_parts]agent.InputPart,
 ) RunError!agent.RunInput {
     return switch (input) {
         .text => |value| .{ .text = value },
         .multimodal => |multimodal| blk: {
             if (multimodal.attachments.len == 0) return error.InvalidRunInput;
-            var parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
             var part_count: usize = 0;
             if (multimodal.text.len != 0) {
                 parts[part_count] = .{ .text = multimodal.text };
@@ -4686,19 +4688,31 @@ fn validateRunInput(
             }
             if (multimodal.attachments.len > parts.len - part_count)
                 return error.RunInputTooLarge;
+            var has_text_attachment = false;
             for (multimodal.attachments) |item| {
                 parts[part_count] = switch (item.kind) {
                     .image => .{ .image = .{
-                        .format = switch (item.format) {
+                        .format = switch (item.format orelse return error.InvalidRunInput) {
                             .png => .png,
                             .jpeg => .jpeg,
                             .webp => .webp,
                         },
                         .bytes = item.bytes,
                     } },
+                    .file => text: {
+                        if (item.format != null) return error.InvalidRunInput;
+                        has_text_attachment = true;
+                        break :text .{ .text_attachment = .{
+                            .display_name = item.display_name,
+                            .bytes = item.bytes,
+                        } };
+                    },
                 };
                 part_count += 1;
             }
+            if (has_text_attachment and
+                std.mem.trim(u8, multimodal.text, " \t\r\n").len == 0)
+                return error.MissingInstruction;
             break :blk .{ .multimodal = parts[0..part_count] };
         },
         .skill => |skill_input| blk: {

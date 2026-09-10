@@ -1012,6 +1012,7 @@ pub const Dispatcher = struct {
     fn receiveRejected(output: []u8, err: anyerror) ![]const u8 {
         const reason: []const u8 = switch (err) {
             error.FileTooLarge => "file_too_large",
+            error.TextFileTooLarge => "text_file_too_large",
             error.TooManyFiles => "too_many_files",
             error.StagingCapacity, error.OutOfMemory, error.IdentityExhausted => "staging_capacity",
             error.ExecutorShuttingDown => "shutting_down",
@@ -1076,7 +1077,11 @@ pub const Dispatcher = struct {
         if (active.batch_id != key.batch_id) return receiveRejected(output, error.StaleTransfer);
         const workbench = try self.requireProductControl();
         var descriptors: [attachment_grant.max_grants]product_control.AttachmentDescriptor = undefined;
-        const ready = workbench.finishAttachmentReceive(active.product_id, &descriptors) catch |err| return receiveRejected(output, err);
+        const ready = workbench.finishAttachmentReceive(active.product_id, &descriptors) catch |err| {
+            _ = workbench.cancelAttachmentReceive(active.product_id);
+            self.receive_active = null;
+            return receiveRejected(output, err);
+        };
         self.receive_active = null;
         var ids: [attachment_grant.max_grants]u64 = undefined;
         for (ready, 0..) |descriptor, index| ids[index] = descriptor.id;
@@ -4318,6 +4323,7 @@ fn taskRunRejection(err: anyerror) ?[]const u8 {
         error.SkillNotFound => "skill_not_found",
         error.SkillUnavailable => "skill_unavailable",
         error.InvalidSkillArguments => "invalid_skill_arguments",
+        error.MissingInstruction => "missing_instruction",
         error.UnsupportedType => "unsupported_attachment",
         error.RunCapacity, error.QueueFull, error.ProjectionCapacity => "capacity_reached",
         error.ExecutorShuttingDown => "shutting_down",

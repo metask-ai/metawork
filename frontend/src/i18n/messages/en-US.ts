@@ -552,9 +552,7 @@ export const enUS = {
   "attachment.selected": "Selected attachments",
   "attachment.remove": "Remove {name}",
   "attachment.type.image": "Image",
-  "attachment.type.file": "File",
-  "attachment.file_send_unavailable":
-    "Files are added to this draft, but only images can be sent right now.",
+  "attachment.type.file": "Text file",
   "attachment.reload_required":
     "Attachments are not kept after reload. Add them again before sending.",
   "attachment.skill_conflict":
@@ -562,9 +560,10 @@ export const enUS = {
   "attachment.model_warning.image":
     "This model declares that image input is unsupported. You can still send and receive the exact result.",
   "attachment.error.unsupported_type":
-    "One of the selected items is not a readable regular file.",
+    "A selected file is neither a supported image nor valid UTF-8 text.",
   "attachment.error.file_too_large":
     "A selected file exceeds the per-file limit ({limit} MB).",
+  "attachment.error.text_file_too_large": "A selected text file is too large.",
   "attachment.error.too_many_files": "You can attach up to 8 files.",
   "attachment.error.staging_capacity":
     "There is not enough attachment space. Remove a file and try again.",
@@ -1084,8 +1083,10 @@ export const enUS = {
     "The selected skill is disabled for this task.",
   "mutation.reason.invalid_skill_arguments":
     "Review the skill arguments and try again.",
+  "mutation.reason.missing_instruction":
+    "Describe what you want the Agent to do with the attached text.",
   "mutation.reason.unsupported_attachment":
-    "Only image attachments can be sent right now.",
+    "The attachment is no longer a supported image or UTF-8 text file.",
   "mutation.reason.capacity_reached":
     "MetaWork is at capacity. Finish or close some work, then try again.",
   "mutation.reason.shutting_down":

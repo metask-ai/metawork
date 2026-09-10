@@ -96,6 +96,7 @@ pub const Error = lifecycle.Error || product_attachment.Error || product_schedul
     SkillNotFound,
     SkillUnavailable,
     InvalidSkillArguments,
+    MissingInstruction,
     RecoveryUnavailable,
     RestoreAttemptExhausted,
     UnsupportedBuiltinProfile,
@@ -127,6 +128,7 @@ pub const Limits = struct {
     max_attachments_per_draft: usize = 8,
     max_attachment_display_name_bytes: usize = 512,
     max_attachment_file_bytes: usize = lifecycle.multimodal_input_limits.max_image_raw_bytes,
+    max_text_attachment_file_bytes: usize = 64 * 1024,
     max_staged_attachment_bytes: usize = 32 * 1024 * 1024,
     max_assistant_message_bytes: usize = 256 * 1024,
     max_tool_field_bytes: usize = 256 * 1024,
@@ -1092,6 +1094,8 @@ pub const Runtime = struct {
             limits.max_attachments_per_draft >= lifecycle.multimodal_input_limits.max_parts or
             limits.max_attachment_display_name_bytes == 0 or
             limits.max_attachment_file_bytes == 0 or
+            limits.max_text_attachment_file_bytes == 0 or
+            limits.max_text_attachment_file_bytes > limits.max_attachment_file_bytes or
             limits.max_staged_attachment_bytes == 0 or
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
@@ -1143,6 +1147,7 @@ pub const Runtime = struct {
             .max_files = limits.max_attachments_per_draft,
             .max_display_name_bytes = limits.max_attachment_display_name_bytes,
             .max_file_bytes = limits.max_attachment_file_bytes,
+            .max_text_file_bytes = limits.max_text_attachment_file_bytes,
             .max_staged_bytes = limits.max_staged_attachment_bytes,
         });
         errdefer attachments.deinit();
@@ -1378,6 +1383,7 @@ pub const Runtime = struct {
                 .max_files = self.limits.max_attachments_per_draft,
                 .max_display_name_bytes = self.limits.max_attachment_display_name_bytes,
                 .max_file_bytes = self.limits.max_attachment_file_bytes,
+                .max_text_file_bytes = self.limits.max_text_attachment_file_bytes,
                 .max_staged_bytes = self.limits.max_staged_attachment_bytes,
             },
         });
@@ -1401,6 +1407,7 @@ pub const Runtime = struct {
                 const rejection: AttachmentStagingRejection = switch (err) {
                     error.TooManyFiles => .too_many_files,
                     error.FileTooLarge => .file_too_large,
+                    error.TextFileTooLarge => .text_file_too_large,
                     error.StagingCapacity, error.OutOfMemory => .staging_capacity,
                     else => .unsupported_type,
                 };
@@ -3571,16 +3578,24 @@ pub const Runtime = struct {
                     &borrowed_indices,
                 );
                 for (borrowed_parts[0..multimodal.attachment_ids.len], 0..) |part, index| {
-                    const descriptor = self.attachments.descriptorFor(part.id) orelse unreachable;
-                    multimodal_items[index] = .{
-                        .kind = .image,
-                        .format = switch (part.format) {
-                            .png => .png,
-                            .jpeg => .jpeg,
-                            .webp => .webp,
+                    const descriptor = self.attachments.descriptorFor(part.attachmentId()) orelse unreachable;
+                    multimodal_items[index] = switch (part) {
+                        .image => |image| .{
+                            .kind = .image,
+                            .format = switch (image.format) {
+                                .png => .png,
+                                .jpeg => .jpeg,
+                                .webp => .webp,
+                            },
+                            .display_name = descriptor.display_name,
+                            .bytes = image.bytes,
                         },
-                        .display_name = descriptor.display_name,
-                        .bytes = part.bytes,
+                        .text => |text| .{
+                            .kind = .file,
+                            .format = null,
+                            .display_name = descriptor.display_name,
+                            .bytes = text.bytes,
+                        },
                     };
                 }
                 break :input .{ .multimodal = .{

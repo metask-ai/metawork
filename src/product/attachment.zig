@@ -9,12 +9,12 @@ pub const Limits = struct {
     max_files: usize,
     max_display_name_bytes: usize,
     max_file_bytes: usize,
+    max_text_file_bytes: usize,
     max_staged_bytes: usize,
 };
 
 pub const Candidate = struct {
     display_name: []const u8,
-    format: ?Format,
     bytes: []const u8,
 };
 
@@ -34,10 +34,22 @@ pub const Descriptor = struct {
     size_bytes: u64,
 };
 
-pub const BorrowedPart = struct {
-    id: u64,
-    format: Format,
-    bytes: []const u8,
+pub const BorrowedPart = union(enum) {
+    image: struct {
+        id: u64,
+        format: Format,
+        bytes: []const u8,
+    },
+    text: struct {
+        id: u64,
+        bytes: []const u8,
+    },
+
+    pub fn attachmentId(self: BorrowedPart) u64 {
+        return switch (self) {
+            inline else => |part| part.id,
+        };
+    }
 };
 
 pub const Error = std.mem.Allocator.Error || error{
@@ -47,6 +59,7 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidDisplayName,
     EmptyFile,
     FileTooLarge,
+    TextFileTooLarge,
     UnsupportedType,
     StagingCapacity,
     IdentityExhausted,
@@ -78,6 +91,8 @@ pub const Runtime = struct {
         if (limits.max_files == 0 or
             limits.max_display_name_bytes == 0 or
             limits.max_file_bytes == 0 or
+            limits.max_text_file_bytes == 0 or
+            limits.max_text_file_bytes > limits.max_file_bytes or
             limits.max_staged_bytes == 0)
             return error.InvalidLimits;
         const slots = try allocator.alloc(?Entry, limits.max_files);
@@ -150,12 +165,20 @@ pub const Runtime = struct {
         if (receive.file_index != receive.entries.len) return error.InvalidTransfer;
         if (output.len < receive.entries.len) return error.TooManyFiles;
         if (self.next_id == 0 or receive.entries.len - 1 > std.math.maxInt(u64) - self.next_id) return error.IdentityExhausted;
+        for (receive.entries) |*entry| {
+            entry.format = self.classify(.{
+                .display_name = entry.display_name,
+                .bytes = entry.bytes,
+            }) catch |err| {
+                _ = self.cancelReceive(id);
+                return err;
+            };
+        }
         for (receive.entries, 0..) |entry, index| {
             const slot = self.emptyIndex().?;
             var ready = entry;
             ready.id = self.next_id;
             self.next_id +%= 1;
-            ready.format = detectFormat(ready.bytes);
             self.slots[slot] = ready;
             output[index] = self.descriptor(ready);
         }
@@ -190,7 +213,7 @@ pub const Runtime = struct {
             _ = self.release(output[created].id);
         };
         for (candidates, 0..) |candidate, index| {
-            try self.validate(candidate);
+            const format = try self.classify(candidate);
             if (candidate.bytes.len > self.limits.max_staged_bytes - self.used_bytes)
                 return error.StagingCapacity;
             if (self.next_id == 0) return error.IdentityExhausted;
@@ -207,7 +230,7 @@ pub const Runtime = struct {
             self.slots[slot_index] = .{
                 .id = id,
                 .state = .ready,
-                .format = candidate.format,
+                .format = format,
                 .display_name = display_name,
                 .bytes = bytes,
             };
@@ -233,13 +256,15 @@ pub const Runtime = struct {
             const slot_index = self.findIndex(id) orelse return error.UnknownAttachment;
             const entry = &self.slots[slot_index].?;
             if (entry.state != .ready) return error.AttachmentBusy;
-            if (entry.format == null) return error.UnsupportedType;
             indices[index] = slot_index;
         }
         for (indices[0..ids.len], 0..) |slot_index, index| {
             const entry = &self.slots[slot_index].?;
             entry.state = .borrowed;
-            parts[index] = .{ .id = entry.id, .format = entry.format.?, .bytes = entry.bytes };
+            parts[index] = if (entry.format) |format|
+                .{ .image = .{ .id = entry.id, .format = format, .bytes = entry.bytes } }
+            else
+                .{ .text = .{ .id = entry.id, .bytes = entry.bytes } };
         }
         return .{ .runtime = self, .indices = indices[0..ids.len] };
     }
@@ -258,13 +283,18 @@ pub const Runtime = struct {
         return self.descriptor(self.slots[index].?);
     }
 
-    fn validate(self: *const Runtime, candidate: Candidate) Error!void {
+    fn classify(self: *const Runtime, candidate: Candidate) Error!?Format {
         if (!validDisplayName(candidate.display_name, self.limits.max_display_name_bytes))
             return error.InvalidDisplayName;
         if (candidate.bytes.len == 0) return error.EmptyFile;
         if (candidate.bytes.len > self.limits.max_file_bytes) return error.FileTooLarge;
-        if (candidate.format) |format|
-            if (!matches(format, candidate.bytes)) return error.UnsupportedType;
+        if (detectFormat(candidate.bytes)) |format| return format;
+        if (candidate.bytes.len > self.limits.max_text_file_bytes)
+            return error.TextFileTooLarge;
+        if (!std.unicode.utf8ValidateSlice(candidate.bytes) or
+            std.mem.indexOfScalar(u8, candidate.bytes, 0) != null)
+            return error.UnsupportedType;
+        return null;
     }
 
     fn descriptor(_: *const Runtime, entry: Entry) Descriptor {
@@ -366,6 +396,7 @@ fn testLimits() Limits {
         .max_files = 4,
         .max_display_name_bytes = 64,
         .max_file_bytes = 64,
+        .max_text_file_bytes = 32,
         .max_staged_bytes = 160,
     };
 }
@@ -381,9 +412,9 @@ test "receive reserves shared capacity and adopts buffers without a raw copy" {
     try std.testing.expectEqual(@as(usize, 11), runtime.used_bytes);
     var output: [4]Descriptor = undefined;
     try std.testing.expectError(error.StagingCapacity, runtime.stageBatch(&.{
-        .{ .display_name = "1", .format = null, .bytes = "x" },
-        .{ .display_name = "2", .format = null, .bytes = "x" },
-        .{ .display_name = "3", .format = null, .bytes = "x" },
+        .{ .display_name = "1", .bytes = "x" },
+        .{ .display_name = "2", .bytes = "x" },
+        .{ .display_name = "3", .bytes = "x" },
     }, &output));
     try std.testing.expectError(error.InvalidTransfer, runtime.appendReceive(id, 1, 0, "x"));
     try runtime.appendReceive(id, 0, 0, "a");
@@ -411,7 +442,7 @@ test "receive cancellation and allocation failures return all reservations" {
                 .{ .display_name = "b", .size_bytes = 60 },
             });
             var output: [1]Descriptor = undefined;
-            try std.testing.expectError(error.StagingCapacity, runtime.stageBatch(&.{.{ .display_name = "c", .format = null, .bytes = "x" ** 50 }}, &output));
+            try std.testing.expectError(error.TextFileTooLarge, runtime.stageBatch(&.{.{ .display_name = "c", .bytes = "x" ** 50 }}, &output));
             try std.testing.expect(!runtime.cancelReceive(id + 1));
             try std.testing.expect(runtime.cancelReceive(id));
             try std.testing.expect(!runtime.cancelReceive(id));
@@ -426,8 +457,8 @@ test "staging validates signatures and rolls back a failed batch atomically" {
     var runtime = try Runtime.init(std.testing.allocator, testLimits());
     defer runtime.deinit();
     const candidates = [_]Candidate{
-        .{ .display_name = "ok.png", .format = .png, .bytes = "\x89PNG\r\n\x1a\npayload" },
-        .{ .display_name = "bad.jpg", .format = .jpeg, .bytes = "not an image" },
+        .{ .display_name = "ok.png", .bytes = "\x89PNG\r\n\x1a\npayload" },
+        .{ .display_name = "bad.jpg", .bytes = "\xffnot an image" },
     };
     var output: [2]Descriptor = undefined;
     try std.testing.expectError(error.UnsupportedType, runtime.stageBatch(&candidates, &output));
@@ -439,8 +470,8 @@ test "borrow rollback preserves ready entries and consume releases the batch" {
     var runtime = try Runtime.init(std.testing.allocator, testLimits());
     defer runtime.deinit();
     const candidates = [_]Candidate{
-        .{ .display_name = "a.webp", .format = .webp, .bytes = "RIFFxxxxWEBPdata" },
-        .{ .display_name = "b.png", .format = .png, .bytes = "\x89PNG\r\n\x1a\ndata" },
+        .{ .display_name = "a.webp", .bytes = "RIFFxxxxWEBPdata" },
+        .{ .display_name = "b.png", .bytes = "\x89PNG\r\n\x1a\ndata" },
     };
     var output: [2]Descriptor = undefined;
     const staged = try runtime.stageBatch(&candidates, &output);
@@ -462,7 +493,6 @@ test "duplicate and stale identities fail before changing any state" {
     defer runtime.deinit();
     const candidate = [_]Candidate{.{
         .display_name = "photo.jpg",
-        .format = .jpeg,
         .bytes = "\xff\xd8\xffpayload",
     }};
     var output: [1]Descriptor = undefined;
@@ -481,12 +511,11 @@ test "duplicate and stale identities fail before changing any state" {
     try std.testing.expect(runtime.release(staged[0].id));
 }
 
-test "generic files stage but cannot be borrowed as image input" {
+test "validated text files stage and borrow as text input" {
     var runtime = try Runtime.init(std.testing.allocator, testLimits());
     defer runtime.deinit();
     const candidates = [_]Candidate{.{
         .display_name = "notes.txt",
-        .format = null,
         .bytes = "plain text",
     }};
     var output: [1]Descriptor = undefined;
@@ -496,6 +525,41 @@ test "generic files stage but cannot be borrowed as image input" {
     const ids = [_]u64{staged[0].id};
     var parts: [1]BorrowedPart = undefined;
     var indices: [1]usize = undefined;
-    try std.testing.expectError(error.UnsupportedType, runtime.borrow(&ids, &parts, &indices));
+    var borrow = try runtime.borrow(&ids, &parts, &indices);
+    try std.testing.expectEqualStrings("plain text", parts[0].text.bytes);
+    borrow.rollback();
     try std.testing.expect(runtime.release(staged[0].id));
+}
+
+test "text classification enforces UTF-8 NUL and the dedicated size limit" {
+    var runtime = try Runtime.init(std.testing.allocator, testLimits());
+    defer runtime.deinit();
+    var output: [1]Descriptor = undefined;
+    try std.testing.expectError(error.UnsupportedType, runtime.stageBatch(&.{.{
+        .display_name = "invalid.txt",
+        .bytes = "\xff",
+    }}, &output));
+    try std.testing.expectError(error.UnsupportedType, runtime.stageBatch(&.{.{
+        .display_name = "nul.txt",
+        .bytes = "a\x00b",
+    }}, &output));
+    try std.testing.expectError(error.TextFileTooLarge, runtime.stageBatch(&.{.{
+        .display_name = "large.txt",
+        .bytes = "x" ** 33,
+    }}, &output));
+    const image = try runtime.stageBatch(&.{.{
+        .display_name = "large.png",
+        .bytes = "\x89PNG\r\n\x1a\n" ++ "x" ** 40,
+    }}, &output);
+    try std.testing.expectEqual(Kind.image, image[0].kind);
+    try std.testing.expect(runtime.release(image[0].id));
+
+    const receive_id = try runtime.beginReceive(&.{.{
+        .display_name = "received.txt",
+        .size_bytes = 1,
+    }});
+    try runtime.appendReceive(receive_id, 0, 0, "\xff");
+    try std.testing.expectError(error.UnsupportedType, runtime.finishReceive(receive_id, &output));
+    try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
+    try std.testing.expect(runtime.receiving == null);
 }

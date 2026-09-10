@@ -358,6 +358,7 @@ export type AttachmentChooseResult =
       reason:
         | "unsupported_type"
         | "file_too_large"
+        | "text_file_too_large"
         | "too_many_files"
         | "staging_capacity"
         | "read_failed"
@@ -457,13 +458,21 @@ export type RunInputView =
   | {
       kind: "multimodal";
       text: string | null;
-      attachments: Array<{
-        kind: "image";
-        format: "png" | "jpeg" | "webp";
-        displayName: string;
-        sizeBytes: string;
-        redacted: boolean;
-      }>;
+      attachments: Array<
+        | {
+            kind: "image";
+            format: "png" | "jpeg" | "webp";
+            displayName: string;
+            sizeBytes: string;
+            redacted: boolean;
+          }
+        | {
+            kind: "file";
+            displayName: string;
+            sizeBytes: string;
+            redacted: boolean;
+          }
+      >;
       redacted: boolean;
     };
 
@@ -1153,6 +1162,7 @@ export type TaskRunReason =
   | "skill_not_found"
   | "skill_unavailable"
   | "invalid_skill_arguments"
+  | "missing_instruction"
   | "unsupported_attachment"
   | "capacity_reached"
   | "shutting_down";

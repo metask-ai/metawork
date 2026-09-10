@@ -125,10 +125,18 @@ function TaskInput({ input }: { input: RunInputView }) {
               role="listitem"
               key={`${attachment.displayName}:${index}`}
             >
-              <span aria-hidden="true">{attachment.format.toUpperCase()}</span>
+              <span aria-hidden="true">
+                {attachment.kind === "image" ? (
+                  attachment.format.toUpperCase()
+                ) : (
+                  <Icon name="skill-file" />
+                )}
+              </span>
               <strong dir="auto">{attachment.displayName}</strong>
               <small>
-                {`${t("attachment.type.image")} · ${attachment.format.toUpperCase()}`}
+                {attachment.kind === "image"
+                  ? `${t("attachment.type.image")} · ${attachment.format.toUpperCase()}`
+                  : t("attachment.type.file")}
                 {` · ${formatAttachmentSize(attachment.sizeBytes)}`}
               </small>
             </span>
