@@ -1664,7 +1664,7 @@ test("validated text file drafts are sendable with an explicit instruction", () 
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false);
 });
 
-test("text file drafts require an explicit user instruction", () => {
+test("text file drafts quietly require an explicit user instruction", () => {
   renderComposer({
     attachmentsEnabled: true,
     canSubmit: false,
@@ -1681,10 +1681,7 @@ test("text file drafts require an explicit user instruction", () => {
       ],
     },
   });
-  assert.match(
-    screen.getByRole("status").textContent,
-    /describe what you want the Agent to do/i,
-  );
+  assert.equal(screen.queryByRole("status"), null);
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
 });
 

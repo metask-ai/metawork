@@ -509,7 +509,6 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.remove": "移除 {name}",
   "attachment.type.image": "图片",
   "attachment.type.file": "文本文件",
-  "attachment.file_instruction_required": "请说明希望 Agent 如何处理所附文本。",
   "attachment.reload_required":
     "附件不会在重新载入后保留，请重新添加后再发送。",
   "attachment.skill_conflict":

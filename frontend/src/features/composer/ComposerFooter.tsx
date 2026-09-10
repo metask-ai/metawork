@@ -218,10 +218,6 @@ export function ComposerFooter({
   );
   const attachmentSkillConflict =
     draft.kind === "multimodal" && parseSlashInput(draft.text) !== null;
-  const textAttachmentNeedsInstruction =
-    draft.kind === "multimodal" &&
-    draft.attachments.some((attachment) => attachment.kind === "file") &&
-    draft.text.trim().length === 0;
   const fileDropEnabled =
     attachmentsEnabled &&
     draft.kind !== "skill" &&
@@ -564,11 +560,6 @@ export function ComposerFooter({
               {attachmentSkillConflict && (
                 <p className="composer-attachment-notice" role="status">
                   {t("attachment.skill_conflict")}
-                </p>
-              )}
-              {textAttachmentNeedsInstruction && (
-                <p className="composer-attachment-notice" role="status">
-                  {t("attachment.file_instruction_required")}
                 </p>
               )}
               {attachmentModelWarning && (

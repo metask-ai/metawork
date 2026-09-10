@@ -553,8 +553,6 @@ export const enUS = {
   "attachment.remove": "Remove {name}",
   "attachment.type.image": "Image",
   "attachment.type.file": "Text file",
-  "attachment.file_instruction_required":
-    "Describe what you want the Agent to do with the attached text.",
   "attachment.reload_required":
     "Attachments are not kept after reload. Add them again before sending.",
   "attachment.skill_conflict":
