@@ -245,13 +245,13 @@ Compact 的 `Queued / Compacting / Stopping` 不是由 Worker 直接覆盖同一
 
 ### Agent Session 多模态输入
 
-Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本或带 `ImageFormat` 的非空图片文件字节。图片格式为 PNG、JPEG、GIF、WebP；调用方负责图片文件字节与声明格式相符。允许纯图片及图文交错；既有 Text/Skill 语义保持不变。该入口不接受文档、URL、路径、file ID、调用方 Base64、Skill 与媒体混合或音视频。Product 附件能力只消费其中 PNG、JPEG 与 WebP，并固定为可空文字 part 后接 attachment chip 顺序；GIF 与正文内图文交错仍只属于 Agent 公共能力，不据此宣称 Renderer 已开放。
+Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本、带来源名称的非空 UTF-8 文本附件，或带 `ImageFormat` 的非空图片文件字节。图片格式为 PNG、JPEG、GIF、WebP；调用方负责图片文件字节与声明格式相符。允许纯图片及图文交错；既有 Text/Skill 语义保持不变。该入口不接受 document part、URL、路径、file ID、调用方 Base64、Skill 与附件混合或音视频。Product 附件能力只消费其中 PNG、JPEG、WebP 与至多 64 KiB 的无 NUL UTF-8 文本，并固定为可空用户文字 part 后接 attachment chip 顺序；含文本附件时 Product 必须要求非空用户指令。GIF 与正文内图文交错仍只属于 Agent 公共能力，不据此宣称 Renderer 已开放。
 
-调用方只需保证输入 slice 和字节活到 `prepareRun` 返回。Agent 直接从 borrowed 图片字节编码到 owned 标准 Base64，不额外持有一份 raw 副本；通过官方 `textPart`、`imagePart` 和 `runMultimodal` 传入 Core。公共输入类型不暴露 SDK wire。Provider 协议编码和 Core 模型媒体能力判断仍由 AgentCore 负责；Host 不导入 Account 元数据、不猜模型能力，也不丢弃媒体、自动重试或切换模型。
+调用方只需保证输入 slice 和字节活到 `prepareRun` 返回。Agent 直接从 borrowed 图片字节编码到 owned 标准 Base64，不额外持有一份 raw 副本；文本附件则在同一次 owned allocation 中加入固定的不可信资料声明、经校验的来源名称和字节长度，并与用户指令保持独立 `textPart`。全部输入通过官方 `textPart`、`imagePart` 和 `runMultimodal` 传入 Core，公共输入类型不暴露 SDK wire，也不增加 AgentCore ABI 或 Provider-specific document path。Provider 协议编码和 Core 模型媒体能力判断仍由 AgentCore 负责；Host 不导入 Account 元数据、不猜模型能力，也不丢弃媒体、自动重试或切换模型。
 
-单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量；当前单图对应 3.75 MB raw image 的标准 Base64。Host 的总 prompt 核算包括文本、Base64 和 media type 字节；全部文本合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 默认 64 MiB，约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方 raw bytes、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在 owned allocation 前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
+单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量；当前单图对应 3.75 MB raw image 的标准 Base64。Host 的总 prompt 核算包括用户文字、文本附件封装与正文、Base64 和 media type 字节；全部 text part 合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 默认 64 MiB，约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方 raw bytes、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在 owned allocation 前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
 
-`image_input_unsupported` 只在本次 Run 含图片时作为 typed admission 拒绝，并映射为同名 Product cause；Session 保持 reusable。文本-only、Text、Skill 或其他 operation 不因认识该 status 而放行。当前锁定的 ABI revision 15 不定义 document part 或文档能力拒绝 status。非 OK result 的可读边界由 ABI 合同规定。图片历史保持由 Core 所有；MetaWork 不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，也不删除媒体以换取保存成功。调用方应显式配置足够的 checkpoint 限额，否则沿既有 typed failure 返回。
+`image_input_unsupported` 只在本次 Run 含图片时作为 typed admission 拒绝，并映射为同名 Product cause；Session 保持 reusable。文本附件最终是普通 text part，不借用该 status。文本-only、Text、Skill 或其他 operation 不因认识该 status 而放行。当前锁定的 ABI revision 15 不定义 document part 或文档能力拒绝 status。非 OK result 的可读边界由 ABI 合同规定。附件历史保持由 Core 所有；MetaWork 不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，也不删除输入以换取保存成功。调用方应显式配置足够的 checkpoint 限额，否则沿既有 typed failure 返回。
 
 ### 每 Session 规则
 
@@ -261,7 +261,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 - run ID 单调且与 Session 绑定；
 - queued Run 不接触 AgentCore mutable state；
 - queued Text/Skill input 在复制前按 Host byte limit、catalog identity 和参数数量拒绝，保证 executor 有界时输入内存也有明确上限；
-- multimodal input 在任何 owned allocation 前校验 parts、文本和编码图片上限，并预留 Runtime 共享输入预算；预算覆盖并发 prepare、Queued 与 Running，失败回滚及终止释放均恰好一次；
+- multimodal input 在任何 owned allocation 前校验 parts、文本附件名称与正文、全部文本和编码图片上限，并预留 Runtime 共享输入预算；预算覆盖并发 prepare、Queued 与 Running，失败回滚及终止释放均恰好一次；
 - active Run 独占 Session Conversation；
 - active compact 同样独占 Session Conversation；Host operation ID 在独立 compact ID space 中严格递增，pre-admission rejection 不消费 ID，admitted terminal path 消费 ID；
 - callback context 与 Session handle 具有独立 lifetime guard；
@@ -271,7 +271,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 
 正式 Host 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI 等待没有 deadline：response、cancel、close 或 shutdown 之一在 callback 返回前收敛等待；人类决策不由 Host 过期。
 
-当前实现由 Product Control 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun(RunInput)` 并把 Product Control-owned job 放入自身 bounded Executor。`RunInput` 只有 Text 与 typed Skill 两个分支；Agent 在 admission 时有界深拷贝整个输入，Skill argument JSON 只通过官方 SDK encoder 在同步 `SessionApi.runSkill` 调用边界内生成，旧 `session_run` 和 slash 字符串不进入 Agent。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。`beginRun()` 失败会在同一 Session lock 下返回 typed completion disposition，Product Control 据此生成 pre-execution terminal payload，不再额外读取 Session snapshot。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
+当前实现由 Product Control 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun(RunInput)` 并把 Product Control-owned job 放入自身 bounded Executor。`RunInput` 只有 Text、typed Skill 与上述 multimodal 三个分支；Agent 在 admission 时有界深拷贝整个输入，Skill argument JSON 只通过官方 SDK encoder 在同步 `SessionApi.runSkill` 调用边界内生成，旧 `session_run` 和 slash 字符串不进入 Agent。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。`beginRun()` 失败会在同一 Session lock 下返回 typed completion disposition，Product Control 据此生成 pre-execution terminal payload，不再额外读取 Session snapshot。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
 
 ### Skill catalog ownership
 

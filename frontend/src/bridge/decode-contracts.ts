@@ -329,6 +329,7 @@ const taskRunReasons = [
   "skill_not_found",
   "skill_unavailable",
   "invalid_skill_arguments",
+  "missing_instruction",
   "unsupported_attachment",
   "capacity_reached",
   "shutting_down",
@@ -511,26 +512,20 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
       item.attachments,
       `${path}.attachments`,
       (attachmentValue, attachmentPath) => {
-        const attachment = object(attachmentValue, attachmentPath, [
-          "kind",
-          "format",
-          "displayName",
-          "sizeBytes",
-          "redacted",
-        ]);
+        const candidate = attachmentValue as JsonObject;
         const attachmentKind = enumValue(
-          attachment.kind,
+          candidate?.kind,
           `${attachmentPath}.kind`,
-          ["image"] as const,
+          ["image", "file"] as const,
         );
-        const format = enumValue(
-          attachment.format,
-          `${attachmentPath}.format`,
-          ["png", "jpeg", "webp"] as const,
+        const attachment = object(
+          attachmentValue,
+          attachmentPath,
+          attachmentKind === "image"
+            ? ["kind", "format", "displayName", "sizeBytes", "redacted"]
+            : ["kind", "displayName", "sizeBytes", "redacted"],
         );
-        return {
-          kind: attachmentKind,
-          format,
+        const common = {
           displayName: nonEmptyString(
             attachment.displayName,
             `${attachmentPath}.displayName`,
@@ -544,6 +539,17 @@ function decodeRunInput(value: unknown, path: string): RunInputView {
             `${attachmentPath}.redacted`,
           ),
         };
+        return attachmentKind === "image"
+          ? {
+              kind: attachmentKind,
+              format: enumValue(attachment.format, `${attachmentPath}.format`, [
+                "png",
+                "jpeg",
+                "webp",
+              ] as const),
+              ...common,
+            }
+          : { kind: attachmentKind, ...common };
       },
     );
     if (attachments.length === 0)
@@ -4553,6 +4559,7 @@ export function decodeAttachmentChooseResult(
       reason: enumValue(item.reason, "$.reason", [
         "unsupported_type",
         "file_too_large",
+        "text_file_too_large",
         "too_many_files",
         "staging_capacity",
         "read_failed",

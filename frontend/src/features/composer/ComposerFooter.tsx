@@ -66,6 +66,7 @@ function attachmentErrorMessage(reason: string): MessageId {
   const messages: Record<string, MessageId> = {
     unsupported_type: "attachment.error.unsupported_type",
     file_too_large: "attachment.error.file_too_large",
+    text_file_too_large: "attachment.error.text_file_too_large",
     too_many_files: "attachment.error.too_many_files",
     staging_capacity: "attachment.error.staging_capacity",
     read_failed: "attachment.error.read_failed",
@@ -217,9 +218,10 @@ export function ComposerFooter({
   );
   const attachmentSkillConflict =
     draft.kind === "multimodal" && parseSlashInput(draft.text) !== null;
-  const hasGenericAttachment =
+  const textAttachmentNeedsInstruction =
     draft.kind === "multimodal" &&
-    draft.attachments.some((attachment) => attachment.kind === "file");
+    draft.attachments.some((attachment) => attachment.kind === "file") &&
+    draft.text.trim().length === 0;
   const fileDropEnabled =
     attachmentsEnabled &&
     draft.kind !== "skill" &&
@@ -564,9 +566,9 @@ export function ComposerFooter({
                   {t("attachment.skill_conflict")}
                 </p>
               )}
-              {hasGenericAttachment && (
+              {textAttachmentNeedsInstruction && (
                 <p className="composer-attachment-notice" role="status">
-                  {t("attachment.file_send_unavailable")}
+                  {t("attachment.file_instruction_required")}
                 </p>
               )}
               {attachmentModelWarning && (

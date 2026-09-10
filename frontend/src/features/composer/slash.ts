@@ -43,10 +43,12 @@ export const emptyComposerDraft = (): ComposerDraft => ({
 });
 
 export function composerDraftHasContent(draft: ComposerDraft) {
+  if (draft.kind === "skill") return true;
+  if (draft.text.trim().length > 0) return true;
   return (
-    draft.kind === "skill" ||
-    draft.text.trim().length > 0 ||
-    (draft.kind === "multimodal" && draft.attachments.length > 0)
+    draft.kind === "multimodal" &&
+    draft.attachments.length > 0 &&
+    !draft.attachments.some((attachment) => attachment.kind === "file")
   );
 }
 
@@ -86,7 +88,8 @@ export function composerDraftToRunInput(
       : { kind: "text", text: draft.text };
   if (draft.kind === "multimodal")
     return draft.attachments.length === 0 ||
-      draft.attachments.some((attachment) => attachment.kind === "file") ||
+      (draft.attachments.some((attachment) => attachment.kind === "file") &&
+        draft.text.trim().length === 0) ||
       parseSlashInput(draft.text)
       ? null
       : {
