@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-10
+
+### Added
+
+- 新增 Composer 文件附件，支持通过系统选择器添加 PNG、JPEG、WebP 与 UTF-8 文本，并在 Windows 支持文件拖放；附件以有界、原子的 staging 流程接入 Run。
+- 新增 New Task 模型选择，可在当前 execution source 与 catalog authority 内为单个 Task 覆盖默认模型。
+- 新增 Run 失败诊断，在所属 Run 内呈现稳定终态原因，并明确附加诊断是否因安全边界未投影。
+
+### Changed
+
+- 简化 Task 详情：移除低价值 overview，将只读任务信息内联到会话，并由右侧面板按需承载 Tool detail 与文件预览；Markdown 预览支持切换源码。
+- AgentCore hard cut 到 ABI v1 revision 15，不再接受 PDF/document part；图片仍使用媒体 part，UTF-8 文本附件编码为受限的普通文本 part。
+
+### Fixed
+
+- 修复会话文件引用无法打开预览，以及侧栏布局与 Task 内容耦合的问题。
+- 补齐附件大小限制展示，并移除重复的文本附件提示。
+- 修复下拉选择器被浮层遮挡，以及生产 CSS 构建守卫仍要求已废弃响应式断点的问题。
+
 ## [0.1.7] - 2026-09-05
 
 ### Added
@@ -185,7 +204,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.7...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/metask-ai/metawork/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/metask-ai/metawork/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/metask-ai/metawork/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/metask-ai/metawork/compare/v0.1.4...v0.1.5
