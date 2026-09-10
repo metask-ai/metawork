@@ -2163,6 +2163,13 @@ summary::-webkit-details-marker {
   font-weight: 620;
 }
 
+.permission-profile-risk {
+  display: inline-flex;
+  align-items: center;
+  color: var(--metask-state-warning);
+  font-size: var(--text-body);
+}
+
 @keyframes selection-trigger-spin {
   to {
     transform: rotate(360deg);
@@ -5698,6 +5705,21 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-top: 1px solid var(--ui-border);
 }
 
+.scheduled-permission-help {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.scheduled-permission-help svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.scheduled-permission-help[data-profile="full_access"] svg {
+  color: var(--metask-state-warning);
+}
+
 .scheduled-editor label > span,
 .scheduled-editor-section > h3 {
   margin: 0;
@@ -8023,6 +8045,29 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   text-align: right;
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
+}
+
+.task-permission-fact {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+
+.task-permission-fact > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.task-permission-fact > span[data-profile="full_access"] svg {
+  color: var(--metask-state-warning);
+}
+
+.task-permission-fact small {
+  max-width: 210px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  line-height: 1.35;
 }
 .tool-detail-view {
   height: 100%;

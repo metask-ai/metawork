@@ -867,7 +867,19 @@ export function ScheduledTasksPage({
                     }),
                   )}
                 />
-                <small>{t("scheduled.permission_help")}</small>
+                <small
+                  className="scheduled-permission-help"
+                  data-profile={draft.permissionProfile}
+                >
+                  <Icon
+                    name={
+                      draft.permissionProfile === "full_access"
+                        ? "warning"
+                        : "info"
+                    }
+                  />
+                  {t(`scheduled.permission.${draft.permissionProfile}.help`)}
+                </small>
               </section>
 
               <section

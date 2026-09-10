@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const agentcore = @import("metask_agentcore");
 const wire = agentcore.types;
 
@@ -296,12 +297,15 @@ fn createSession(
     return session orelse error.MissingSession;
 }
 
-fn expectShellDisabledRejected(
+fn expectShellPolicyRejected(
     api: agentcore.Api,
     runtime: *wire.RuntimeHandle,
     allowed_tools: *const [4]wire.BytesViewV1,
+    shell_policy: u32,
+    expected_diagnostic: []const u8,
+    scenario: []const u8,
 ) !void {
-    const host = makeHost(wire.PERMISSION_FULL_ACCESS, wire.SHELL_DISABLED, null, allowed_tools);
+    const host = makeHost(wire.PERMISSION_FULL_ACCESS, shell_policy, null, allowed_tools);
     var probe = Probe{ .behavior = .unavailable };
     const callbacks = makeCallbacks(&probe);
     var config = std.mem.zeroes(wire.SessionCreateConfigV1);
@@ -313,11 +317,11 @@ fn expectShellDisabledRejected(
     defer releaseOwned(api, &diagnostic);
     const status = api.session().create()(runtime, &config, &callbacks, &session, &diagnostic);
     if (status != wire.STATUS_INVALID_ARGUMENT or session != null)
-        return error.ShellDisabledWasNotRejected;
+        return error.ShellPolicyWasNotRejected;
     const message = try agentcore.borrowedBytes(.{ .ptr = diagnostic.ptr, .len = diagnostic.len });
-    if (std.mem.indexOf(u8, message, "ShellToolDisabled") == null)
-        return error.UnexpectedShellDisabledDiagnostic;
-    std.debug.print("scenario=shell_disabled create=invalid_argument diagnostic=ShellToolDisabled\n", .{});
+    if (std.mem.indexOf(u8, message, expected_diagnostic) == null)
+        return error.UnexpectedShellPolicyDiagnostic;
+    std.debug.print("scenario={s} create=invalid_argument diagnostic={s}\n", .{ scenario, expected_diagnostic });
 }
 
 fn run(
@@ -643,7 +647,11 @@ pub fn main() !void {
     try runFresh(api, core_runtime, &builtin_tools, "accept_bash", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "full_bash", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
     try runFresh(api, core_runtime, &builtin_tools, "full_outside_write", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
-    try runFresh(api, core_runtime, &builtin_tools, "full_protected_write", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .deny_once, 1, 1, .callback);
+    if (builtin.os.tag == .windows) {
+        try runFresh(api, core_runtime, &builtin_tools, "full_protected_write", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
+    } else {
+        try runFresh(api, core_runtime, &builtin_tools, "full_protected_write", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .deny_once, 1, 1, .callback);
+    }
     try runFresh(api, core_runtime, &builtin_tools, "deny_full_bash", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .deny_bash, .unavailable, 0, 1, .explicit_deny);
     try runFresh(api, core_runtime, &builtin_tools, "ask_full_bash", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .ask_bash, .allow_once, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "allow_accept_bash", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .allow_bash, .unavailable, 0, 1, .explicit_allow);
@@ -655,9 +663,13 @@ pub fn main() !void {
     try runFresh(api, core_runtime, &builtin_tools, "auto_bash", wire.PERMISSION_AUTO, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "dont_ask_write", wire.PERMISSION_DONT_ASK, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .mode_fallback);
     try runFresh(api, core_runtime, &builtin_tools, "dont_ask_bash", wire.PERMISSION_DONT_ASK, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .mode_fallback);
-    try expectShellDisabledRejected(api, core_runtime, &builtin_tools);
-    try runFresh(api, core_runtime, &builtin_tools, "sandbox_inside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_SANDBOXED, .none, .unavailable, 0, 1, .builtin_classification);
-    try runFresh(api, core_runtime, &builtin_tools, "sandbox_outside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_SANDBOXED, .none, .unavailable, 0, 1, .builtin_classification);
+    try expectShellPolicyRejected(api, core_runtime, &builtin_tools, wire.SHELL_DISABLED, "ShellToolDisabled", "shell_disabled");
+    if (builtin.os.tag == .windows) {
+        try expectShellPolicyRejected(api, core_runtime, &builtin_tools, wire.SHELL_SANDBOXED, "UnsupportedOs", "sandbox_unsupported");
+    } else {
+        try runFresh(api, core_runtime, &builtin_tools, "sandbox_inside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_SANDBOXED, .none, .unavailable, 0, 1, .builtin_classification);
+        try runFresh(api, core_runtime, &builtin_tools, "sandbox_outside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_SANDBOXED, .none, .unavailable, 0, 1, .builtin_classification);
+    }
     try runFresh(api, core_runtime, &builtin_tools, "unrestricted_outside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
     try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_ACCEPT_EDITS, "restore_grant", "restore_grant", .allow_session, 1, 1, .unavailable, 0, .callback, .session_allow);
     try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_FULL_ACCESS, "restore_full_seed", "restore_full_after", .unavailable, 0, 0, .unavailable, 0, .builtin_classification, .builtin_classification);

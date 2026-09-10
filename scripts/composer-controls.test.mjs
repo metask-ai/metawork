@@ -1117,7 +1117,7 @@ test("Settings changes only the future Task permission default in one action", a
   assert.ok(screen.getByRole("link", { name: "Permissions" }));
   assert.match(
     document.querySelector(".permission-policy-boundary").textContent,
-    /not root access or a sandbox setting/,
+    /AgentCore protections.*not root access or a sandbox/,
   );
   const trigger = screen.getByRole("combobox", {
     name: "Default for new Tasks",

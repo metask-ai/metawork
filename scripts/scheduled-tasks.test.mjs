@@ -279,6 +279,10 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
   );
   await user.click(screen.getByRole("combobox", { name: "Permissions" }));
   await user.keyboard("{ArrowDown}{Enter}");
+  assert.match(
+    dialog.textContent,
+    /skips routine MetaWork approval.*still stop the run and require attention/,
+  );
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => assert.ok(created));
   assert.equal("target" in created, false);
@@ -327,6 +331,10 @@ test("schedule editor controls have explicit semantics and no native chrome", ()
   assert.equal(
     screen.getByRole("combobox", { name: "Permissions" }).textContent,
     "Request approval",
+  );
+  assert.match(
+    dialog.textContent,
+    /needs approval stops the run.*does not wait for remote approval/,
   );
   assert.ok(screen.getByRole("heading", { level: 3, name: "When" }));
   assert.equal(dialog.querySelectorAll("fieldset, legend").length, 0);

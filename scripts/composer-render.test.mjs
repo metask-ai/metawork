@@ -623,8 +623,22 @@ test("new Task exposes one immutable permission choice without a trust prompt", 
   });
   assert.match(markup, /Permission policy/);
   assert.match(markup, /Request approval/);
-  assert.match(markup, /cannot be changed after it is created/);
+  assert.match(markup, /set when the Task is created/);
   assert.doesNotMatch(markup, /trust this workspace|alertdialog/i);
+});
+
+test("new Task explains full access without claiming to bypass core protections", () => {
+  const markup = renderNewTaskView(null, {
+    permissionProfiles: ["approval_required", "full_access"],
+    permissionProfile: "full_access",
+  });
+  assert.match(markup, /AgentCore protections/);
+  assert.match(markup, /permission-profile-risk/);
+  assert.match(markup, /service authorization.*process identity/);
+  assert.doesNotMatch(
+    markup,
+    /grants root|bypasses AgentCore|trust this workspace/i,
+  );
 });
 
 test("New task keeps the titlebar quiet while a real Task retains context", () => {

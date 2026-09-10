@@ -44,7 +44,21 @@ export function TaskInformation({
               {permissionProfilesEnabled && (
                 <div>
                   <dt>{t("permission.task.label")}</dt>
-                  <dd>{t(`permission.profile.${task.permissionProfile}`)}</dd>
+                  <dd className="task-permission-fact">
+                    <span data-profile={task.permissionProfile}>
+                      {task.permissionProfile === "full_access" && (
+                        <Icon name="warning" />
+                      )}
+                      {t(`permission.profile.${task.permissionProfile}`)}
+                    </span>
+                    <small>
+                      {t(
+                        task.permissionProfile === "full_access"
+                          ? "permission.task.full_access.help"
+                          : "permission.task.help",
+                      )}
+                    </small>
+                  </dd>
                 </div>
               )}
             </dl>

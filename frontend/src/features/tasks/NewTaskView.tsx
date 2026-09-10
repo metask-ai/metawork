@@ -5,6 +5,7 @@ import {
   SelectionMenu,
   type SelectionMenuOption,
 } from "../../components/ui/SelectionMenu.tsx";
+import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 export function NewTaskView({
@@ -27,6 +28,12 @@ export function NewTaskView({
       label: t(`permission.profile.${profile}`),
       description: t(`permission.profile.${profile}.help`),
       descriptionKind: "text",
+      trailing:
+        profile === "full_access" ? (
+          <span className="permission-profile-risk" aria-hidden="true">
+            <Icon name="warning" />
+          </span>
+        ) : undefined,
     }),
   );
 
@@ -63,6 +70,12 @@ export function NewTaskView({
                   onPermissionProfileChange(value as PermissionProfile)
                 }
               />
+              {permissionProfile === "full_access" && (
+                <p className="permission-policy-boundary">
+                  <Icon name="warning" />
+                  {t("permission.full_access.boundary")}
+                </p>
+              )}
             </div>
           )}
           {composer}

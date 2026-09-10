@@ -179,20 +179,18 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 ### 5.5 审批与输入
 
 - Authority、Interaction Policy 与 Sandbox 是三个独立维度：Authority 决定 Task 已取得的 Workspace、Shell、Skill、MCP 与系统能力；Interaction Policy 决定未覆盖操作是否询问；Sandbox 只描述执行时的物理约束。产品、UI 和验证不得把三者合并成一个“安全模式”；
-- 目标 `PermissionProfile` 是 MetaWork-owned 的产品策略，预设为 `approval_required | standard | full_access`。`approval_required` 表示常规 Workspace 编辑自动、其他当前策略未覆盖操作请求批准；`standard` 表示常规本地工作自动、只有具备可靠 typed risk/effect 的操作请求批准；`full_access` 表示不提供 MetaWork tool permission 保护，仍受操作系统权限约束。内部 AgentCore enum、ShellPolicy 和 rule schema 不得成为 Renderer 产品词汇；
-- 当前正式 Session 按 Task-owned profile 使用 `approval_required → accept_edits + unrestricted` 或 `full_access → full_access + unrestricted`；前者会自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 与明确有副作用的 Bash 发布同步 permission request，后者不提供 MetaWork tool permission 保护。两者都不是 Sandbox 或运行不可信 Workspace 的安全保证；
-- 首个产品切片只开放 `approval_required | full_access`，默认保持 `approval_required`，用户可以在 Settings 改变后续新 Task 默认值，并在 New task 对本次 Task 覆盖；选择 `full_access` 的同一动作就是该 Task 的明确授权，不追加确认 modal。`standard` 在 typed risk/effect、执行前 commit boundary、Bash 限制说明和 fail-closed 验证完成前保持隐藏；产品不显示 disabled 空壳；
-- 首个切片中 profile 在 Task 创建后不可变：Task 保存 effective profile，每个 Run 保存 provenance，checkpoint restore 必须使用同一 profile；归档 Task 阻止新 Run，删除 Task 收口 Session 并永久移除该 profile authority。当前 AgentCore ABI 没有 idle permission-mode mutation，跨 mode restore 也不产生可消费的 typed report；因此不能用 Session-local shadow state、规则拼装或 checkpoint replacement 模拟切换。未来只有取得新的 canonical capability 并完成撤权生效点验证后，已有 idle Task 才可显示切换入口；
+- `PermissionProfile` 是 MetaWork-owned 的产品策略，当前只定义 `approval_required | full_access`。`approval_required` 表示常规 Workspace 编辑自动、其他当前策略未覆盖操作请求批准；`full_access` 表示 MetaWork 不再为常规工具操作请求批准，但 AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。内部 AgentCore enum、ShellPolicy 和 rule schema 不得成为 Renderer 产品词汇；
+- 正式 Session 按 Task-owned profile 使用 `approval_required → accept_edits + unrestricted` 或 `full_access → full_access + unrestricted`；前者会自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 与明确有副作用的 Bash 发布同步 permission request。两档都不是 Sandbox、root 或运行不可信 Workspace 的安全保证；
+- 默认保持 `approval_required`。Settings 只改变后续新 Task 的默认值，New task 可以为本次 Task 覆盖；选择 `full_access` 的同一动作就是该 Task 的明确授权，不追加确认 modal。产品不得显示第三档、disabled 空壳或额外的启用开关；
+- profile 在 Task 创建后不可变：Task 保存 effective profile，每个 Run 保存 provenance，checkpoint restore 必须使用同一 profile；归档 Task 阻止新 Run，删除 Task 收口 Session 并永久移除该 profile authority。已有 Task 只读显示自己的 profile，不得用 Session-local shadow state、规则拼装或 checkpoint replacement 模拟切换；
 - Shell 是广泛执行 authority。`unrestricted` 只表示获准 Bash 不经过 AgentCore file sandbox，不等于 root，也不决定是否询问；产品不得以 Bash 前缀、命令字符串分类或 `exact_arguments` Session grant 宣称可靠 effect 边界；
 - 用户在 Settings 或 New task 选择更宽松 profile 的动作本身构成相应默认或本次 Task 授权，不追加第二个确认 modal；Settings 改回更严格 profile 只影响后续 Task，既有 Task 可以归档以立即禁止新 Run，并通过删除永久撤销。当前 Task 不提供伪切换；
 - 用户可以响应当前 typed permission；结构化 Agent 问答、计划批准或拒绝只有在对应 built-in/control capability 进入 MetaWork 产品集合并通过验收后才显示；
 - 审批和回答必须绑定 Task、Run 和请求标识，拒绝过期或重复响应；
 - 同步等待必须支持 deadline、用户取消、Task close 和 Application shutdown 唤醒；
 - 同步等待区间发生 Host/Core crash 后，Run 标记 `interrupted`，工具不得自动执行；
-- 目标产品支持用户主动创建和撤销 Host-owned 持久权限规则，但 UI 只能在 Host 声明当前请求可形成安全、范围明确的规则时显示 `Always allow`；
-- 持久规则必须绑定稳定 Workspace identity、tool identity 与版本、operation 和规范化资源约束，并定义 Workspace、tool、脚本内容或安全能力变化时的失效规则；
-- strict Workspace security 和对应规则匹配/审计能力未通过验证前，不得开放 Workspace 级文件持久规则；受控进程、process tree、network 和 environment 边界未通过独立验证前，不得开放项目脚本、Bash 或 Network 持久规则。这里约束的是可复用的细粒度规则，不把目标 `full_access` profile 伪装成一组已验证的持久规则；
-- async pending、跨重启恢复和 subagent suspend 只有在 AgentCore 发布明确 capability 后才能进入产品范围。
+- 当前产品不创建、管理或展示跨 Session 持久权限规则；AgentCore candidate 只能形成当前 Session scope choice，不得被 Renderer 显示成永久授权，也不得被 Host 复制成平行规则存储；
+- async pending、跨重启 pending request 恢复和 subagent suspend 不属于当前产品范围。
 
 ### 5.6 命令执行
 
@@ -368,7 +366,7 @@ Windows x86_64 GNU 已进入当前开发 baseline；Windows arm64 GNU 已接入 
 
 ### 7.5 后续产品能力
 
-`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查已进入当前产品；未来独立的 idle mutation、`standard` 所需的 typed risk/effect 和执行前 commit boundary，以及 async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入，均按独立 capability 与阶段推进，不能反向伪装成当前 v1 已具备。
+`PermissionProfile` 的 Task-create owner、same-profile fresh/restore、Run provenance 与 Scheduled noninteractive，以及 typed File Changes 审查已进入当前产品；async pending、更完整的跨重启 execution rebind、strict Workspace security、正式 Host tools、typed Output、plan progress/approval、custom UI、远程 artifact 发布与正式更新、独立 AgentCore Worker 和 Linux 接入均未进入当前产品，不能反向伪装成已具备。
 
 具体验证矩阵见 [当前验证规范](validation.md)。
 
