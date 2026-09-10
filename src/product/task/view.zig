@@ -358,10 +358,11 @@ fn writeRun(
             writer.writeAll(",\"attachments\":[") catch return error.SnapshotTooLarge;
             for (multimodal.attachments, 0..) |item, index| {
                 if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                writer.print("{{\"kind\":\"{s}\",\"format\":\"{s}\",\"displayName\":", .{
-                    @tagName(item.kind),
-                    @tagName(item.format),
-                }) catch return error.SnapshotTooLarge;
+                writer.print("{{\"kind\":\"{s}\"", .{@tagName(item.kind)}) catch
+                    return error.SnapshotTooLarge;
+                if (item.format) |format| writer.print(",\"format\":\"{s}\"", .{@tagName(format)}) catch
+                    return error.SnapshotTooLarge;
+                writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
                 try text_projection.writeJson(writer, item.display_name);
                 writer.print(",\"sizeBytes\":\"{d}\",\"redacted\":{}}}", .{
                     item.size_bytes,

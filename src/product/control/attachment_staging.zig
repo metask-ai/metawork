@@ -8,6 +8,7 @@ pub const worker_count: usize = 2;
 pub const Rejection = enum {
     unsupported_type,
     file_too_large,
+    text_file_too_large,
     too_many_files,
     staging_capacity,
     read_failed,
@@ -146,11 +147,9 @@ const Job = struct {
                 self.rejection = .file_changed;
                 return;
             }
-            const format = detectFormat(bytes);
             self.candidates.len += 1;
             self.candidates[self.candidates.len - 1] = .{
                 .display_name = display_name,
-                .format = format,
                 .bytes = bytes,
             };
             total += size;
@@ -234,10 +233,10 @@ test "attachment staging lane classifies an ordered file batch" {
     try std.testing.expectEqual(@as(u64, 7), taken.completion.completion_id);
     try std.testing.expectEqual(@as(?Rejection, null), taken.completion.rejection);
     try std.testing.expectEqual(@as(usize, 2), taken.completion.candidates.len);
-    try std.testing.expectEqual(@as(?attachment.Format, .png), taken.completion.candidates[0].format);
     try std.testing.expectEqualStrings("picture.png", taken.completion.candidates[0].display_name);
-    try std.testing.expectEqual(@as(?attachment.Format, null), taken.completion.candidates[1].format);
+    try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\nbody", taken.completion.candidates[0].bytes);
     try std.testing.expectEqualStrings("notes.txt", taken.completion.candidates[1].display_name);
+    try std.testing.expectEqualStrings("plain text", taken.completion.candidates[1].bytes);
 }
 
 test "attachment staging lane rejects a mixed empty-file batch atomically" {
@@ -297,6 +296,7 @@ fn testLimits() attachment.Limits {
         .max_files = 4,
         .max_display_name_bytes = 128,
         .max_file_bytes = 1024,
+        .max_text_file_bytes = 64,
         .max_staged_bytes = 4096,
     };
 }
@@ -410,25 +410,6 @@ pub const Lane = struct {
         self.mutex.unlock(self.io);
     }
 };
-
-const detectFormat = attachment.detectFormat;
-
-test "attachment staging detects every published image signature and rejects PDF" {
-    try std.testing.expectEqual(
-        attachment.Format.png,
-        detectFormat("\x89PNG\r\n\x1a\npayload").?,
-    );
-    try std.testing.expectEqual(
-        attachment.Format.jpeg,
-        detectFormat("\xff\xd8\xffpayload").?,
-    );
-    try std.testing.expectEqual(
-        attachment.Format.webp,
-        detectFormat("RIFFxxxxWEBPpayload").?,
-    );
-    try std.testing.expectEqual(@as(?attachment.Format, null), detectFormat("%PDF-1.7\npayload"));
-    try std.testing.expectEqual(@as(?attachment.Format, null), detectFormat("GIF89a"));
-}
 
 fn metadataChanged(before: std.Io.File.Stat, after: std.Io.File.Stat) bool {
     return before.inode != after.inode or before.size != after.size or

@@ -592,7 +592,7 @@ pub const RunInputWire = struct {
 
 pub const AttachmentWire = struct {
     kind: []const u8,
-    format: []const u8,
+    format: ?[]const u8 = null,
     display_name: []const u8,
     size_bytes: u64,
     redacted: bool,
@@ -1033,7 +1033,7 @@ fn projectRun(
             const items = try allocator.alloc(AttachmentWire, multimodal.attachments.len);
             for (items, multimodal.attachments) |*target, item| target.* = .{
                 .kind = @tagName(item.kind),
-                .format = @tagName(item.format),
+                .format = if (item.format) |format| @tagName(format) else null,
                 .display_name = item.display_name,
                 .size_bytes = item.size_bytes,
                 .redacted = item.redacted,
@@ -1576,8 +1576,12 @@ fn restoreRunInput(
         for (wire_items, items) |wire_item, *item| {
             const kind = parseEnum(task_state.AttachmentKind, wire_item.kind) orelse
                 return error.TaskStoreCorrupt;
-            const format = parseEnum(task_state.AttachmentFormat, wire_item.format) orelse
-                return error.TaskStoreCorrupt;
+            const format = if (wire_item.format) |value|
+                parseEnum(task_state.AttachmentFormat, value) orelse
+                    return error.TaskStoreCorrupt
+            else
+                null;
+            if ((kind == .image) != (format != null)) return error.TaskStoreCorrupt;
             item.* = .{
                 .kind = kind,
                 .format = format,
@@ -2843,10 +2847,14 @@ fn validateRunInput(input: RunInputWire, limits: Limits) !void {
             return error.Invalid;
         for (items) |item| {
             if (!validText(item.display_name, limits.max_tool_field_bytes, false) or
-                item.size_bytes == 0 or
-                !std.mem.eql(u8, item.kind, "image") or
-                !oneOf(item.format, &.{ "png", "jpeg", "webp" }))
+                item.size_bytes == 0)
                 return error.Invalid;
+            if (std.mem.eql(u8, item.kind, "image")) {
+                const format = item.format orelse return error.Invalid;
+                if (!oneOf(format, &.{ "png", "jpeg", "webp" })) return error.Invalid;
+            } else if (!std.mem.eql(u8, item.kind, "file") or item.format != null) {
+                return error.Invalid;
+            }
         }
         return;
     }

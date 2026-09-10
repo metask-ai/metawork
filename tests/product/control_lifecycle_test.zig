@@ -2855,7 +2855,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
             .queue_capacity = 2,
             .max_workspaces = 1,
             .max_tasks = 1,
-            .max_runs_per_task = 2,
+            .max_runs_per_task = 3,
             .max_tools_per_run = 1,
         },
         .{ .directories = .{ .automatic_workspace_root = &automatic_root } },
@@ -2864,8 +2864,8 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try installControlExecution(&workbench);
 
     const candidates = [_]product_control.AttachmentCandidate{
-        .{ .display_name = "diagram.png", .format = .png, .bytes = "\x89PNG\r\n\x1a\nbody" },
-        .{ .display_name = "brief.webp", .format = .webp, .bytes = "RIFFxxxxWEBPbody" },
+        .{ .display_name = "diagram.png", .bytes = "\x89PNG\r\n\x1a\nbody" },
+        .{ .display_name = "brief.webp", .bytes = "RIFFxxxxWEBPbody" },
     };
     var descriptor_storage: [2]product_control.AttachmentDescriptor = undefined;
     const descriptors = try workbench.stageAttachments(&candidates, &descriptor_storage);
@@ -2909,7 +2909,6 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
 
     const pure_media = [_]product_control.AttachmentCandidate{.{
         .display_name = "photo.jpg",
-        .format = .jpeg,
         .bytes = "\xff\xd8\xffbody",
     }};
     var pure_descriptor_storage: [1]product_control.AttachmentDescriptor = undefined;
@@ -2935,6 +2934,45 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         pure_snapshot,
         "\"input\":{\"kind\":\"multimodal\",\"text\":null,\"attachments\":[{\"kind\":\"image\",\"format\":\"jpeg\",\"displayName\":\"photo.jpg\",\"sizeBytes\":\"7\",\"redacted\":false}],\"redacted\":false}",
     ) != null);
+
+    const text_files = [_]product_control.AttachmentCandidate{.{
+        .display_name = "notes.md",
+        .bytes = "untrusted reference text",
+    }};
+    var text_descriptor_storage: [1]product_control.AttachmentDescriptor = undefined;
+    const text_descriptors = try workbench.stageAttachments(
+        &text_files,
+        &text_descriptor_storage,
+    );
+    const text_ids = [_]u64{text_descriptors[0].id};
+    try std.testing.expectError(error.MissingInstruction, workbench.runTask(task_id, .{
+        .multimodal = .{ .text = " \r\n", .attachment_ids = &text_ids },
+    }));
+    try std.testing.expect(workbench.releaseAttachment(text_ids[0]));
+
+    const retry_descriptors = try workbench.stageAttachments(
+        &text_files,
+        &text_descriptor_storage,
+    );
+    const retry_ids = [_]u64{retry_descriptors[0].id};
+    const text_run_id = try workbench.runTask(task_id, .{ .multimodal = .{
+        .text = "Summarize this file",
+        .attachment_ids = &retry_ids,
+    } });
+    const text_terminal = try std.fmt.bufPrint(
+        &terminal_needle,
+        "\"id\":\"{d}\",\"phase\":\"completed\"",
+        .{text_run_id},
+    );
+    try waitControlSnapshot(&workbench, text_terminal);
+    const text_snapshot = try workbench.writeSnapshot(&snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        text_snapshot,
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize this file\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"notes.md\",\"sizeBytes\":\"24\",\"redacted\":false}],\"redacted\":false}",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_snapshot, "untrusted reference text") == null);
+    try std.testing.expect(!workbench.releaseAttachment(retry_ids[0]));
 }
 
 test "bounded executor rejects overflow and close cancels a queued Run" {
