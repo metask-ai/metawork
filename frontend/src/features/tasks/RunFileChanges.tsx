@@ -22,7 +22,6 @@ export function RunFileChangesSummary({
     return null;
 
   const fileCount = formatInteger(locale, BigInt(uniqueFiles));
-  const changeCount = formatInteger(locale, BigInt(fileChanges.changes.length));
   const incomplete = fileChanges.observation === "incomplete";
 
   return (
@@ -45,7 +44,7 @@ export function RunFileChangesSummary({
             ? t("file_changes.incomplete_empty")
             : incomplete
               ? t("file_changes.summary_incomplete", { fileCount })
-              : t("file_changes.summary", { fileCount, changeCount })}
+              : t("file_changes.summary", { fileCount })}
         </span>
       </span>
       {fileChanges.changes.length > 0 && (

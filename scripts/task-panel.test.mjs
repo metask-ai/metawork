@@ -1215,7 +1215,8 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     taskContentElement(recorded, "1", { fileChangesEnabled: true }),
   );
   assert.match(visible, />File changes</);
-  assert.match(visible, />1 files · 1 changes</);
+  assert.match(visible, />Changed files: 1</);
+  assert.doesNotMatch(visible, /1 changes/);
   assert.match(visible, />Review changes</);
 
   const incomplete = task({
@@ -1232,7 +1233,7 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   assert.doesNotMatch(incompleteMarkup, />Review changes</);
 });
 
-test("Task Panel review renders repeated records as one continuous diff document", async () => {
+test("Task Panel review groups repeated records into one continuous file diff", async () => {
   const changes = [
     {
       id: "change-1",
@@ -1294,8 +1295,11 @@ test("Task Panel review renders repeated records as one continuous diff document
     document.body.textContent,
     /Some file change records may be missing/,
   );
-  assert.match(document.body.textContent, /Change 1/);
-  assert.match(document.body.textContent, /Change 2/);
+  assert.doesNotMatch(document.body.textContent, /Change 1|Change 2/);
+  assert.equal(
+    document.querySelectorAll(".task-panel-change-section").length,
+    1,
+  );
   assert.match(document.body.textContent, /Recorded diff is incomplete/);
   assert.match(document.body.textContent, /Known sensitive content was hidden/);
   assert.match(document.body.textContent, /-secret/);
@@ -1309,12 +1313,53 @@ test("Task Panel review renders repeated records as one continuous diff document
 
   const user = userEvent.setup({ document: dom.window.document });
   await user.click(
-    within(document.querySelector('[data-change-id="change-2"]')).getByRole(
+    within(document.querySelector('[data-file-path="src/main.zig"]')).getByRole(
       "button",
       { name: "Load recorded diff" },
     ),
   );
   assert.equal(loaded, changes[1]);
+  view.rerender(
+    localizedView(
+      createElement(FileChangesView, {
+        observation: "incomplete",
+        changes,
+        diffs: {
+          "change-1": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -1 +1 @@\n-secret\n+safe",
+              complete: false,
+              redacted: true,
+            },
+          },
+          "change-2": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -8 +8 @@\n-old name\n+new name",
+              complete: true,
+              redacted: false,
+            },
+          },
+        },
+        onLoad(change) {
+          loaded = change;
+        },
+      }),
+    ),
+  );
+  assert.equal(
+    document.querySelectorAll(".task-panel-change-section").length,
+    1,
+  );
+  assert.equal(
+    screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
+    1,
+  );
+  assert.match(document.body.textContent, /\+new name/);
+  assert.match(document.body.textContent, /\+2−2/);
   assert.equal(screen.queryByText("Back to changes"), null);
   assert.doesNotMatch(document.body.textContent, /Accept|Reject|Revert|Stage/);
   view.unmount();

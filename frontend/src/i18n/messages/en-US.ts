@@ -674,14 +674,13 @@ export const enUS = {
     "The file changed while it was being read. Try again.",
   "file_preview.state.error": "File preview failed",
   "file_changes.title": "File changes",
-  "file_changes.summary": "{fileCount} files · {changeCount} changes",
+  "file_changes.summary": "Changed files: {fileCount}",
   "file_changes.summary_incomplete":
-    "{fileCount} files · the record may be incomplete",
+    "Changed files: {fileCount} · the record may be incomplete",
   "file_changes.incomplete_empty": "The file change record may be incomplete",
   "file_changes.review": "Review changes",
   "file_changes.incomplete_notice":
     "Some file change records may be missing. The changes shown below are still available for review.",
-  "file_changes.change_index": "Change {index}",
   "file_changes.load_diff": "Load recorded diff",
   "file_changes.kind.created": "Added",
   "file_changes.kind.modified": "Modified",
@@ -698,6 +697,8 @@ export const enUS = {
   "file_changes.diff.corrupt":
     "The recorded diff did not pass integrity checks",
   "file_changes.diff.error": "The recorded diff could not be loaded",
+  "file_changes.diff.group_unavailable":
+    "Part of the recorded diff is unavailable",
   "file_changes.diff.content": "Recorded unified diff",
   "file_changes.diff.old_line": "Old line {line}",
   "file_changes.diff.new_line": "New line {line}",

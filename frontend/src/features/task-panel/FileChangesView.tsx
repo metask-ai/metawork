@@ -135,72 +135,118 @@ function useLoadWhenVisible(
   return section;
 }
 
-function RecordedDiffSection({
-  change,
+type FileChangeGroup = {
+  displayPath: string;
+  changes: FileChangeView[];
+};
+
+function groupFileChanges(changes: FileChangeView[]): FileChangeGroup[] {
+  const groups = new Map<string, FileChangeGroup>();
+  for (const change of changes) {
+    const group = groups.get(change.displayPath);
+    if (group) group.changes.push(change);
+    else
+      groups.set(change.displayPath, {
+        displayPath: change.displayPath,
+        changes: [change],
+      });
+  }
+  return [...groups.values()];
+}
+
+function groupedKind(changes: FileChangeView[]): FileChangeView["kind"] {
+  const first = changes[0]!;
+  const last = changes.at(-1)!;
+  if (last.kind === "deleted") return "deleted";
+  if (first.kind === "created") return "created";
+  if (changes.some((change) => change.kind === "moved")) return "moved";
+  return "modified";
+}
+
+function RecordedFileSection({
+  group,
   index,
-  repeatIndex,
-  repeatCount,
-  state,
+  diffs,
   onLoad,
 }: {
-  change: FileChangeView;
+  group: FileChangeGroup;
   index: number;
-  repeatIndex: number;
-  repeatCount: number;
-  state: FileChangeDiffViewState;
-  onLoad: () => void;
+  diffs: Record<string, FileChangeDiffViewState>;
+  onLoad: (change: FileChangeView) => void;
 }) {
   const { t } = useI18n();
-  const section = useLoadWhenVisible(state.phase, onLoad);
-  const readyDiff =
+  const records = group.changes.map((change) => ({
+    change,
+    state: diffs[change.id] ?? ({ phase: "idle", diff: null } as const),
+  }));
+  const loading = records.some(({ state }) => state.phase === "loading");
+  const nextIdle = loading
+    ? undefined
+    : records.find(({ state }) => state.phase === "idle");
+  const section = useLoadWhenVisible(nextIdle ? "idle" : "settled", () => {
+    if (nextIdle) onLoad(nextIdle.change);
+  });
+  const readyDiffs = records.flatMap(({ state }) =>
     state.phase === "settled" && state.diff.status === "ready"
-      ? state.diff
-      : null;
-  const rows = useMemo(
-    () => (readyDiff ? parseUnifiedDiff(readyDiff.content) : []),
-    [readyDiff],
+      ? [state.diff]
+      : [],
   );
+  const rows = readyDiffs.flatMap((diff) => parseUnifiedDiff(diff.content));
   const additions = rows.filter((row) => row.kind === "addition").length;
   const deletions = rows.filter((row) => row.kind === "deletion").length;
-  const unavailable =
-    state.phase === "settled" && state.diff.status === "unavailable"
-      ? state.diff
-      : null;
-  const retryable =
-    state.phase === "failed" || unavailable?.reason === "capacity";
+  const failures = records.filter(
+    ({ state }) =>
+      state.phase === "failed" ||
+      (state.phase === "settled" && state.diff.status === "unavailable"),
+  );
+  const retryable = failures.find(
+    ({ state }) =>
+      state.phase === "failed" ||
+      (state.phase === "settled" &&
+        state.diff.status === "unavailable" &&
+        state.diff.reason === "capacity"),
+  );
+  const failureMessage = (() => {
+    if (failures.length !== 1) return t("file_changes.diff.group_unavailable");
+    const [{ state }] = failures;
+    if (state.phase === "failed") return t("file_changes.diff.error");
+    if (state.phase === "settled" && state.diff.status === "unavailable")
+      return t(unavailableMessage(state.diff.reason));
+    return t("file_changes.diff.group_unavailable");
+  })();
+  const kind = groupedKind(group.changes);
+  const partial = group.changes.some((change) => change.status === "partial");
+  const fromDisplayPath = group.changes.find(
+    (change) => change.fromDisplayPath,
+  )?.fromDisplayPath;
   const headingId = `file-change-heading-${index}`;
 
   return (
     <section
       ref={section}
       className="task-panel-change-section"
-      data-change-id={change.id}
+      data-change-id={group.changes[0]!.id}
+      data-file-path={group.displayPath}
       aria-labelledby={headingId}
-      aria-busy={state.phase === "loading"}
+      aria-busy={loading}
     >
       <header className="task-panel-change-header">
         <div className="task-panel-change-identity">
-          <h4 id={headingId} title={change.displayPath}>
-            {change.displayPath}
+          <h4 id={headingId} title={group.displayPath}>
+            {group.displayPath}
           </h4>
-          {change.fromDisplayPath && (
-            <small title={change.fromDisplayPath}>
-              {change.fromDisplayPath} → {change.displayPath}
+          {fromDisplayPath && (
+            <small title={fromDisplayPath}>
+              {fromDisplayPath} → {group.displayPath}
             </small>
           )}
         </div>
         <div className="task-panel-change-meta">
-          <span className={kindColor(change.kind)}>
-            {t(kindMessage(change.kind))}
-            {change.status === "partial" &&
-              ` · ${t("file_changes.status.partial")}`}
+          <span className={kindColor(kind)}>
+            {t(kindMessage(kind))}
+            {partial && ` · ${t("file_changes.status.partial")}`}
           </span>
-          {repeatCount > 1 && (
-            <span>
-              {t("file_changes.change_index", { index: repeatIndex })}
-            </span>
-          )}
-          {readyDiff && (
+          {readyDiffs.length > 0 && (
             <span
               className="task-panel-change-stats"
               aria-label={t("file_changes.diff.stats", {
@@ -215,54 +261,46 @@ function RecordedDiffSection({
         </div>
       </header>
       <div className="task-panel-change-diff" aria-live="polite">
-        {state.phase === "idle" ? (
-          <div className="task-panel-change-state">
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={onLoad}
-            >
-              {t("file_changes.load_diff")}
-            </Button>
+        {readyDiffs.some((diff) => !diff.complete || diff.redacted) && (
+          <div className="task-panel-resource-flags">
+            {readyDiffs.some((diff) => !diff.complete) && (
+              <span>{t("file_changes.diff.incomplete")}</span>
+            )}
+            {readyDiffs.some((diff) => diff.redacted) && (
+              <span>{t("file_changes.diff.redacted")}</span>
+            )}
           </div>
-        ) : state.phase === "loading" ? (
+        )}
+        {rows.length > 0 && <UnifiedDiff rows={rows} />}
+        {loading ? (
           <div className="task-panel-change-state">
             <span>
               <Icon name="loading" />
               {t("file_changes.loading")}
             </span>
           </div>
-        ) : readyDiff ? (
-          <>
-            {(!readyDiff.complete || readyDiff.redacted) && (
-              <div className="task-panel-resource-flags">
-                {!readyDiff.complete && (
-                  <span>{t("file_changes.diff.incomplete")}</span>
-                )}
-                {readyDiff.redacted && (
-                  <span>{t("file_changes.diff.redacted")}</span>
-                )}
-              </div>
-            )}
-            <UnifiedDiff rows={rows} />
-          </>
-        ) : (
+        ) : nextIdle ? (
+          <div className="task-panel-change-state">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => onLoad(nextIdle.change)}
+            >
+              {t("file_changes.load_diff")}
+            </Button>
+          </div>
+        ) : null}
+        {failures.length > 0 && (
           <div className="task-panel-change-state">
             <div>
-              <p>
-                {state.phase === "failed"
-                  ? t("file_changes.diff.error")
-                  : unavailable
-                    ? t(unavailableMessage(unavailable.reason))
-                    : t("file_changes.diff.not_recorded")}
-              </p>
+              <p>{failureMessage}</p>
               {retryable && (
                 <Button
                   type="button"
                   variant="secondary"
                   size="sm"
-                  onClick={onLoad}
+                  onClick={() => onLoad(retryable.change)}
                 >
                   {t("file_changes.retry")}
                 </Button>
@@ -287,13 +325,7 @@ export function FileChangesView({
   onLoad: (change: FileChangeView) => void;
 }) {
   const { t } = useI18n();
-  const repeatCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const change of changes)
-      counts.set(change.displayPath, (counts.get(change.displayPath) ?? 0) + 1);
-    return counts;
-  }, [changes]);
-  const repeatIndexes = new Map<string, number>();
+  const groups = useMemo(() => groupFileChanges(changes), [changes]);
 
   return (
     <section
@@ -307,21 +339,15 @@ export function FileChangesView({
         </div>
       )}
       <div className="task-panel-review-document">
-        {changes.map((change, index) => {
-          const repeatIndex = (repeatIndexes.get(change.displayPath) ?? 0) + 1;
-          repeatIndexes.set(change.displayPath, repeatIndex);
-          return (
-            <RecordedDiffSection
-              key={change.id}
-              change={change}
-              index={index}
-              repeatIndex={repeatIndex}
-              repeatCount={repeatCounts.get(change.displayPath) ?? 1}
-              state={diffs[change.id] ?? { phase: "idle", diff: null }}
-              onLoad={() => onLoad(change)}
-            />
-          );
-        })}
+        {groups.map((group, index) => (
+          <RecordedFileSection
+            key={group.displayPath}
+            group={group}
+            index={index}
+            diffs={diffs}
+            onLoad={onLoad}
+          />
+        ))}
       </div>
     </section>
   );

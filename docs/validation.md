@@ -106,7 +106,7 @@ artifact refresh、checksum 或 lock 更新本身不要求修改本文。精确 
 
 PermissionProfile 的最小充分证据必须跨越实际 owner：candidate probe 固定所采用 `PermissionMode + ShellPolicy` 的代表性 tool/effect 行为；Agent tests 固定配置编码、typed request/provenance、same-profile fresh/restore 与 noninteractive stop fact；Product lifecycle 固定默认值只影响新 Task、Task/Run provenance、archive/delete，以及 Scheduled occurrence 由生产 event consumer 自动 abort 后形成 `permission_required → needs_attention`；Renderer/Bridge tests 固定 capability gate、只读 effective profile、单次选择动作和合法历史 snapshot。Schedule definition update 只影响后续 occurrence，不能改写历史 Task profile 或使 Renderer 拒绝合法 snapshot。`standard` 在 typed risk/effect 和执行前 commit boundary 未经独立 fixture 证明前必须保持隐藏。
 
-File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、连续 Review 的首条立即读取、后续可见区块按需读取、逐记录异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
+File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固定 oversized/capacity degradation 只命中 classifier-confirmed `file_changes` 并发布 monotonic loss fact；Product lifecycle 固定协议矩阵、stable order/dedup、depth、容量、redaction、artifact identity、恢复/orphan/delete/shutdown；Bridge/Renderer 固定严格 DTO、capability gate、连续 Review 的首条立即读取、同路径记录聚合、后续可见区块逐条按需读取、聚合前逐记录异步 stale response 和响应式审查视图；真实 AgentCore desktop vertical 必须由 canonical bundle 的 Edit/Write 产生 typed observation，并通过 `metawork.files.diff` 读回已记录 diff。静态 fixture、Tool 文本、Workspace 扫描或 Git diff 不能替代该纵向证据。
 
 ## Storage 基础层验证
 
