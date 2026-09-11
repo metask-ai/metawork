@@ -81,7 +81,7 @@ test("shows only provable equal unchanged gaps between valid hunks", () => {
   );
 });
 
-test("degrades malformed hunks to inert raw text without invented gaps", () => {
+test("preserves visible line semantics in malformed hunks without invented coordinates", () => {
   const rows = parseUnifiedDiff(
     [
       "@@ -1,2 +1,2 @@",
@@ -95,13 +95,25 @@ test("degrades malformed hunks to inert raw text without invented gaps", () => {
   );
   assert.deepEqual(
     rows.slice(0, 3).map((row) => row.kind),
-    ["raw", "raw", "raw"],
+    ["hunk", "deletion", "addition"],
   );
+  assert.deepEqual(rows[1], {
+    kind: "deletion",
+    text: "-old",
+    oldLine: null,
+    newLine: null,
+  });
+  assert.deepEqual(rows[2], {
+    kind: "addition",
+    text: "+new",
+    oldLine: null,
+    newLine: null,
+  });
   assert.equal(
     rows.some((row) => row.kind === "gap"),
     false,
   );
-  assert.equal(rows.filter((row) => row.kind === "hunk").length, 1);
+  assert.equal(rows.filter((row) => row.kind === "hunk").length, 2);
   assert.deepEqual(rows.at(-1), {
     kind: "raw",
     text: "@@ -999999999999999999999 +1 @@",

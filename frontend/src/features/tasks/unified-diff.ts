@@ -93,14 +93,32 @@ function provenGap(
   return oldGap > 0 && oldGap === newGap ? oldGap : 0;
 }
 
-function rawHunk(
+function degradedHunk(
   header: HunkHeader,
   lines: ParsedHunkLine[],
 ): { rows: UnifiedDiffRow[]; end: null } {
   return {
     rows: [
-      { kind: "raw", text: header.text },
-      ...lines.map((line) => ({ kind: "raw" as const, text: line.text })),
+      {
+        kind: "hunk",
+        text: header.text,
+        oldStart: header.oldStart,
+        newStart: header.newStart,
+      },
+      ...lines.map((line): UnifiedDiffRow => {
+        if (
+          line.kind === "context" ||
+          line.kind === "addition" ||
+          line.kind === "deletion"
+        )
+          return {
+            kind: line.kind,
+            text: line.text,
+            oldLine: null,
+            newLine: null,
+          };
+        return { kind: line.kind, text: line.text };
+      }),
     ],
     end: null,
   };
@@ -121,7 +139,7 @@ function renderHunk(
     switch (line.kind) {
       case "context":
         if (oldConsumed >= header.oldCount || newConsumed >= header.newCount)
-          return rawHunk(header, lines);
+          return degradedHunk(header, lines);
         parsed.push({
           kind: "context",
           text: line.text,
@@ -134,7 +152,7 @@ function renderHunk(
         newLine += 1;
         break;
       case "deletion":
-        if (oldConsumed >= header.oldCount) return rawHunk(header, lines);
+        if (oldConsumed >= header.oldCount) return degradedHunk(header, lines);
         parsed.push({
           kind: "deletion",
           text: line.text,
@@ -145,7 +163,7 @@ function renderHunk(
         oldLine += 1;
         break;
       case "addition":
-        if (newConsumed >= header.newCount) return rawHunk(header, lines);
+        if (newConsumed >= header.newCount) return degradedHunk(header, lines);
         parsed.push({
           kind: "addition",
           text: line.text,
@@ -159,12 +177,12 @@ function renderHunk(
         parsed.push({ kind: "no-newline", text: line.text });
         break;
       case "raw":
-        return rawHunk(header, lines);
+        return degradedHunk(header, lines);
     }
   }
 
   if (oldConsumed !== header.oldCount || newConsumed !== header.newCount)
-    return rawHunk(header, lines);
+    return degradedHunk(header, lines);
 
   const gap = provenGap(previousEnd, header);
   return {

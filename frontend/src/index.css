@@ -8390,12 +8390,20 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .file-changes-diff-row[data-kind="addition"] {
   color: var(--ui-content-success);
-  background: color-mix(in srgb, var(--metask-state-complete) 10%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--metask-state-complete) 16%,
+    var(--ui-surface-canvas)
+  );
 }
 
 .file-changes-diff-row[data-kind="deletion"] {
   color: var(--ui-content-error);
-  background: color-mix(in srgb, var(--metask-state-error) 10%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--metask-state-error) 16%,
+    var(--ui-surface-canvas)
+  );
 }
 
 .file-changes-diff-row[data-kind="hunk"] > code,
