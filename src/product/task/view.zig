@@ -189,6 +189,11 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         input.recovery.recovery_available,
         task.durable.archived,
     }) catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"unreadCompletionRunId\":") catch return error.SnapshotTooLarge;
+    if (task_policy.unreadCompletionRunId(task)) |run_id|
+        writer.print("\"{d}\"", .{run_id}) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"restorePermission\":") catch return error.SnapshotTooLarge;
     if (task.runtime.last_restore_permission) |summary| {
         writer.print("{{\"restoredRules\":\"{d}\",\"invalidatedRules\":\"{d}\"}}", .{

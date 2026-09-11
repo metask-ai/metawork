@@ -15,6 +15,7 @@ import {
   decodeTaskCompactResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
+  decodeTaskCompletionSeenResult,
   decodeSkillDetailResult,
   decodeSkillExportResult,
   decodeSkillImportPreview,
@@ -154,6 +155,46 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   assert.throws(
     () => decodeWorkbenchSnapshot(impossibleRecovery),
     /recovery requires recoverable persistence health/,
+  );
+});
+
+test("completion receipt is a strict latest terminal completed Run identity", () => {
+  const completed = clone(fixture);
+  const task = completed.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.runs[0].phase = "completed";
+  task.runs[0].activity = null;
+  task.runs[0].terminal = terminal("completed");
+  task.unreadCompletionRunId = task.runs[0].id;
+  assert.deepEqual(decodeWorkbenchSnapshot(completed), completed);
+
+  for (const mutate of [
+    (candidate) => (candidate.tasks[0].unreadCompletionRunId = "99"),
+    (candidate) => (candidate.tasks[0].runs[0].terminal = terminal("failed")),
+    (candidate) => (candidate.tasks[0].archived = true),
+    (candidate) => delete candidate.tasks[0].unreadCompletionRunId,
+  ]) {
+    const invalid = clone(completed);
+    mutate(invalid);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+
+  assert.deepEqual(
+    decodeTaskCompletionSeenResult(
+      { taskId: "3", runId: "7", marked: false },
+      "3",
+      "7",
+    ),
+    { taskId: "3", runId: "7", marked: false },
+  );
+  assert.throws(() =>
+    decodeTaskCompletionSeenResult(
+      { taskId: "3", runId: "8", marked: true },
+      "3",
+      "7",
+    ),
   );
 });
 

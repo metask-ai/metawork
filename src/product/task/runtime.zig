@@ -1891,8 +1891,22 @@ pub const Runtime = struct {
             return error.TaskBusy;
         if (task.durable.archived == archived) return false;
         task.durable.archived = archived;
+        if (archived) acknowledgeLatestCompletion(task);
         if (!archived and task.deletion == .failed) task.deletion = .idle;
         task.durable.recent_order = self.takeRecentOrder();
+        return true;
+    }
+
+    pub fn markCompletionSeen(self: *Runtime, task_id: u64, run_id: u64) bool {
+        if (run_id == 0) return false;
+        const task = self.find(task_id) orelse return false;
+        if (task.durable.archived or task.deletion == .deleting) return false;
+        const latest = task_policy.latestTerminalRun(task.durable.runs) orelse return false;
+        const terminal = task_state.productTerminalFacts(latest) orelse unreachable;
+        if (latest.id != run_id or terminal.outcome != .completed or
+            task.durable.completion_seen_run_id == run_id)
+            return false;
+        task.durable.completion_seen_run_id = run_id;
         return true;
     }
 
@@ -5063,6 +5077,13 @@ fn cancelTaskAutomaticTitles(task: *task_state.Task) void {
         run.automatic_title.cancel_requested.store(true, .release);
         task_execution.publishAutomaticTitleFallback(run);
     }
+}
+
+fn acknowledgeLatestCompletion(task: *task_state.Task) void {
+    const latest = task_policy.latestTerminalRun(task.durable.runs) orelse return;
+    const terminal = task_state.productTerminalFacts(latest) orelse unreachable;
+    if (terminal.outcome == .completed)
+        task.durable.completion_seen_run_id = latest.id;
 }
 
 fn requestRunTermination(

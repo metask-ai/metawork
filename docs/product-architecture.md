@@ -133,6 +133,8 @@ Automatic admission 在完成上述证明后才创建候选目录、临时 Works
 
 每个 Task 在创建时取得 owned ExecutionConfig 和 immutable binding epoch。默认配置变化不热替换已有 Task；显式改变 Task execution 必须在 Task idle、authority 精确且持久化 candidate 可提交时形成新的 binding。Run、manual compact 与 Conversation recovery 共享 Task-owned active-operation 槽；删除和 Session replacement 是独立生命周期用例，必须与该槽互斥并等待已有 operation 收口，不能通过不同入口并发改变同一个 attachment。
 
+Product Task 还拥有绑定 Run identity 的 completion receipt。durable `completion_seen_run_id` 只记录 Renderer 已明确观察的当前最新 terminal `completed` Run；Product projection 只在该 Run identity 与 receipt 不同且它仍是最新 terminal outcome 时发布未读 identity。acknowledgement 必须同时携带 Task/Run identity，迟到、重复、其他 outcome、已删除 Task 或已被新 terminal Run 取代的请求无副作用；它不改变 Task `recent_order`。归档在同一 Task mutation 中确认当前 completion。Renderer 只报告中央 Task 工作面是否真正暴露，不从本地缓存、选择状态或时间推断 canonical receipt。
+
 PermissionProfile 与 ExecutionConfig 分别拥有自己的产品事实：Product Control 只持后续新 Task 的默认值，并在 Task create admission 时复制；Product Task 持有创建后不可变的 effective profile、interaction fact 与逐 Run provenance。当前开放 `approval_required | full_access`，两者分别映射 AgentCore `accept_edits | full_access`，ShellPolicy 均保持 `unrestricted`；该映射不创建 Sandbox、Workspace trust 或持久 permission rule。默认值变化不改写已有 Task，fresh create 与 checkpoint restore 必须提交同一 profile；当前 ABI 没有可消费的 idle mode mutation，不能用规则拼装、Renderer preference 或跨 profile restore 模拟。
 
 Automatic Workspace record 只有在 owning Task 已物理删除且相关 Run event、worker、Session 和 catalog lease 全部 quiescent 后才能释放。真实目录不因 Task 删除、shutdown 或重启被递归删除，也不能通过扫描遗留目录猜测或恢复 Product record。
@@ -277,6 +279,8 @@ Task 删除是跨持久化、checkpoint、event、Session 和 worker reference �
 非健康 history store 的显式 recovery 必须校验全局 revision，并由 Product 编码当前内存 Workspace/Task snapshot；Application 只能把当前 canonical 文件改名为唯一 quarantine artifact，再通过既有 durable atomic replace 安装该 candidate。读取/codec 失败时当前内存为空，因此形成 canonical empty history；write failure 或 outcome unknown 时保存当前进程仍持有的有效历史。失败不得清空内存或删除原文件，outcome unknown 继续发布 typed health；只有 committed 才恢复 ready。Renderer 不接触文件名、路径或 bytes，quarantine artifact 不进入 snapshot、日志或自动清理。
 
 交互式 Product Task mutation 以内存 Runtime 为当前进程真源，持久化是 best-effort projection；保存失败不得回滚已经接纳的新建、Run、模型选择、权限响应、重命名、归档、取消或 Workspace 导航 mutation。Schedule occurrence 是独立的无人值守边界：Product Control 必须为其 Task create、命名与 Run intent 注入 required durable effect，任一步未可靠提交都拒绝本次 occurrence，Schedule 按既有 transaction 进入可诊断状态，但不得冻结其他 Product Task。若 required commit 明确失败，Control 回滚候选并删除仍可证明未发布的 Automatic Workspace 空目录；若结果不确定，Control 同样回滚内存 Task/Run/Workspace 候选但必须保留物理目录，因为 canonical store 可能已经引用它。两种拒绝都保持 occurrence `task_id = 0`，不得伪造 interrupted Run 或 terminal cause。Task 物理删除仍遵守 §4.2 的 commit-before-release 边界。
+
+completion receipt 是上述 best-effort Task projection 的低频视图事实。acknowledgement 只修改当前内存 Task 并发布 revision，不得为每个前台完成额外强制重写完整 history store；它随下一次既有 Task durable commit 或 clean shutdown 的最终 commit 合并写入。异常强杀可以丢失尚未进入 durable boundary 的最后一条 receipt，但不得损坏或回滚 Task/Run 历史。旧 Task record 缺少 receipt 字段时，必须在恢复出 canonical Task 并完成无 live owner 的 interrupted normalization 后，把当时最新 terminal `completed` Run 初始化为已读；当前 writer 始终写出明确数字，避免升级后把全部历史完成误报为新提醒。
 
 store 读取上限为 16 MiB。commit 必须在同一目录完成 durable atomic replace，并区分 `committed | failed | outcome_unknown`；临时文件命名、frame header、checksum 算法和 codec 内部布局由唯一实现与测试拥有，不在本文镜像。
 

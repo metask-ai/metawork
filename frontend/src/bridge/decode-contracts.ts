@@ -2298,6 +2298,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "continuationUnavailableReason",
     "continuationRecoveryAvailable",
     "archived",
+    "unreadCompletionRunId",
     "restorePermission",
     "activeOperation",
     "currentRunId",
@@ -2411,6 +2412,32 @@ function decodeTask(value: unknown, path: string): TaskView {
   if (continuationAvailable !== (continuationUnavailableReason === null))
     fail(path, "continuation availability and unavailable reason must agree");
   const archived = booleanValue(item.archived, `${path}.archived`);
+  const unreadCompletionRunId =
+    item.unreadCompletionRunId === null
+      ? null
+      : positiveWireId(
+          item.unreadCompletionRunId,
+          `${path}.unreadCompletionRunId`,
+        );
+  if (unreadCompletionRunId !== null) {
+    let latestTerminal: RunView | null = null;
+    for (const run of runs) {
+      if (
+        run.terminal !== null &&
+        (latestTerminal === null || BigInt(run.id) > BigInt(latestTerminal.id))
+      )
+        latestTerminal = run;
+    }
+    if (
+      archived ||
+      latestTerminal?.id !== unreadCompletionRunId ||
+      latestTerminal.terminal?.outcome !== "completed"
+    )
+      fail(
+        `${path}.unreadCompletionRunId`,
+        "unread completion must reference the latest terminal completed Run",
+      );
+  }
   if (!archived && deletionStatus !== "idle")
     fail(path, "only an archived Task can have deletion state");
   if (deletionStatus === "deleting" && lifecycle !== "closing")
@@ -2616,6 +2643,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     continuationUnavailableReason,
     continuationRecoveryAvailable,
     archived,
+    unreadCompletionRunId,
     restorePermission,
     activeOperation,
     currentRunId,
@@ -4324,6 +4352,23 @@ export function decodeTaskRunResult(
     taskId,
     runId: null,
     reason: enumValue(item.reason, "$.reason", taskRunReasons),
+  };
+}
+
+export function decodeTaskCompletionSeenResult(
+  value: unknown,
+  expectedTaskId: string,
+  expectedRunId: string,
+) {
+  const item = object(value, "$", ["taskId", "runId", "marked"]);
+  const taskId = positiveWireId(item.taskId, "$.taskId");
+  const runId = positiveWireId(item.runId, "$.runId");
+  if (taskId !== expectedTaskId || runId !== expectedRunId)
+    fail("$", "completion receipt response identity mismatch");
+  return {
+    taskId,
+    runId,
+    marked: booleanValue(item.marked, "$.marked"),
   };
 }
 

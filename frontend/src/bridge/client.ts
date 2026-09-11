@@ -42,6 +42,7 @@ import {
   decodeTaskCompactResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
+  decodeTaskCompletionSeenResult,
   decodeTaskModelSelectionResult,
   decodeScheduledTaskMutationResult,
   decodeScheduledTaskEnabledResult,
@@ -937,6 +938,14 @@ export class BridgeClient {
       }),
       taskId,
       archived,
+    );
+  }
+
+  async markTaskCompletionSeen(taskId: string, runId: string) {
+    return decodeTaskCompletionSeenResult(
+      await this.invoke(commands.markTaskCompletionSeen, { taskId, runId }),
+      taskId,
+      runId,
     );
   }
 

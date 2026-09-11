@@ -596,6 +596,7 @@ pub const UiRecord = struct {
 pub const DurableTaskRecord = struct {
     id: u64,
     recent_order: u64,
+    completion_seen_run_id: u64 = 0,
     execution_generation: u64,
     execution_protocol: Protocol,
     execution_model: []u8,

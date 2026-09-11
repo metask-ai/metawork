@@ -80,6 +80,7 @@ pub const cancel = "metawork.tasks.cancel";
 pub const respond_ui = "metawork.tasks.respondUi";
 pub const rename_task = "metawork.tasks.rename";
 pub const archive_task = "metawork.tasks.archive";
+pub const mark_task_completion_seen = "metawork.tasks.markCompletionSeen";
 pub const delete_task = "metawork.tasks.delete";
 pub const recover_task_history = "metawork.tasks.recoverHistory";
 pub const create_scheduled_task = "metawork.scheduledTasks.create";
@@ -167,6 +168,7 @@ pub const product = [_][]const u8{
     respond_ui,
     rename_task,
     archive_task,
+    mark_task_completion_seen,
     delete_task,
     recover_task_history,
     create_scheduled_task,

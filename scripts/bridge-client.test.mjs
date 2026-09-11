@@ -105,6 +105,37 @@ test("Product store recovery uses revision-bound typed commands", async () => {
   ]);
 });
 
+test("Task completion acknowledgement preserves exact Task and Run identity", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { taskId: "11", runId: "17", marked: true };
+    }),
+  });
+
+  assert.deepEqual(await client.markTaskCompletionSeen("11", "17"), {
+    taskId: "11",
+    runId: "17",
+    marked: true,
+  });
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.tasks.markCompletionSeen",
+      payload: { taskId: "11", runId: "17" },
+    },
+  ]);
+
+  const mismatched = new BridgeClient({
+    bridge: bridgeWith(async () => ({
+      taskId: "11",
+      runId: "18",
+      marked: false,
+    })),
+  });
+  await assert.rejects(mismatched.markTaskCompletionSeen("11", "17"));
+});
+
 test("attachment commands use only opaque grant payloads", async () => {
   const calls = [];
   const token = "a".repeat(48);
