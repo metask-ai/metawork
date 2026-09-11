@@ -47,7 +47,9 @@ const vite = await createServer({
 const { ResizableSeparator } = await vite.ssrLoadModule(
   "/src/components/ui/ResizableSeparator.tsx",
 );
-const { AppShell } = await vite.ssrLoadModule("/src/app/AppShell.tsx");
+const { AppShell, isTaskStageExposed } = await vite.ssrLoadModule(
+  "/src/app/AppShell.tsx",
+);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -60,6 +62,23 @@ test.afterEach(() => {
   });
 });
 test.after(() => vite.close());
+
+test("Task stage exposure excludes every full-covering surface", () => {
+  const visible = {
+    viewportWidth: 1200,
+    leftOpen: true,
+    rightPanelOpen: true,
+    rightPanelDocked: true,
+    overlayOpen: false,
+  };
+  assert.equal(isTaskStageExposed(visible), true);
+  assert.equal(isTaskStageExposed({ ...visible, overlayOpen: true }), false);
+  assert.equal(isTaskStageExposed({ ...visible, viewportWidth: 700 }), false);
+  assert.equal(
+    isTaskStageExposed({ ...visible, rightPanelDocked: false }),
+    false,
+  );
+});
 
 function renderTaskPanelShell(viewportWidth) {
   Object.defineProperty(dom.window, "innerWidth", {

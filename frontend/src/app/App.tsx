@@ -10,6 +10,14 @@ import {
 
 import { AppShell } from "./AppShell.tsx";
 import {
+  documentHasAttention,
+  subscribeDocumentAttention,
+} from "./document-attention.ts";
+import {
+  completionAcknowledgementCandidate,
+  completionReminderSuppressionTaskId,
+} from "./completion-receipt.ts";
+import {
   attentionStatus,
   publishStatus,
   quietStatus,
@@ -252,6 +260,14 @@ export default function App() {
     useState<SettingsFocusTarget>("title");
   const [accountSetupRedirected, setAccountSetupRedirected] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [taskStageExposed, setTaskStageExposed] = useState(false);
+  const [documentAttention, setDocumentAttention] = useState(() =>
+    typeof document === "undefined" ? false : documentHasAttention(document),
+  );
+  const [
+    completionAcknowledgementFailure,
+    setCompletionAcknowledgementFailure,
+  ] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [skillsQuery, setSkillsQuery] = useState("");
   const [mcpQuery, setMcpQuery] = useState("");
@@ -752,6 +768,46 @@ export default function App() {
     taskDrafts.invalidateAttachments,
   ]);
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
+  const completionAcknowledgement = completionAcknowledgementCandidate({
+    task: newTaskDraftActive ? null : activeTask,
+    workbenchRoute: route === "workbench",
+    settingsOpen,
+    searchOpen,
+    modalOpen: confirmDelete,
+    taskStageExposed,
+    documentAttention,
+    bridgeAvailable: !bridgeUnavailable,
+  });
+  const suppressedCompletionTaskId = completionReminderSuppressionTaskId(
+    completionAcknowledgement,
+    completionAcknowledgementFailure,
+  );
+
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof window === "undefined")
+      return;
+    return subscribeDocumentAttention(document, window, setDocumentAttention);
+  }, []);
+
+  useEffect(() => {
+    if (completionAcknowledgement === null) return;
+    const { taskId, runId, key } = completionAcknowledgement;
+    let current = true;
+    setCompletionAcknowledgementFailure((failure) =>
+      failure === key ? null : failure,
+    );
+    void client
+      .markTaskCompletionSeen(taskId, runId)
+      .then(({ marked }) => {
+        if (current && !marked) setCompletionAcknowledgementFailure(key);
+      })
+      .catch(() => {
+        if (current) setCompletionAcknowledgementFailure(key);
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, completionAcknowledgement?.key]);
   const hasTasks = snapshot.tasks.length !== 0;
   const snapshotAcceptedForCurrentGeneration =
     workbench.connectionGeneration !== "0" &&
@@ -3214,6 +3270,7 @@ export default function App() {
                     ? activeTask.id
                     : null
                 }
+                suppressedCompletionTaskId={suppressedCompletionTaskId}
                 showArchived={showArchived}
                 onSelectTask={openTask}
                 onToggleArchived={() => setShowArchived((shown) => !shown)}
@@ -3240,6 +3297,7 @@ export default function App() {
       }
       rightPanelOpen={rightPanelOpen && !settingsOpen}
       rightPanelToggleRef={taskPanelToggle}
+      onTaskStageExposureChange={setTaskStageExposed}
       onToggleRightPanel={toggleRightPanel}
       onDismissRightPanel={dismissTaskPanel}
       rightPanel={

@@ -235,6 +235,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 标题栏只承载 Renderer 绘制的窗口按钮、当前 Task 名称、搜索与异常状态等全局入口；不重复说明 Task 的 Workspace，正常连接状态、语言选择和工程诊断也不长期占据主视觉；
 - 界面在任一时刻只突出一个与当前阶段一致的主动作；独立的导航和设置入口可以持续可见，但不得与主动作竞争；
 - 首个正式版本采用单主窗口；多个 Task 可以后台运行，切换 Task 不停止执行；
+- 成功完成提醒是绑定最新 terminal `completed` Run 的一次性未读产品事实，不是 Renderer 会话内装饰状态。用户只有在对应 Task 的中央工作面真实可见且应用位于前台时才确认该 Run；后台完成、全局页面、设置/搜索、窄窗侧栏或全宽 Task Panel 覆盖期间都不得误清。确认结果随 Task 历史在正常关闭后恢复，新成功 Run 使用新 identity 再次提醒；归档 Task 等价于明确处理当前完成提醒。该 receipt 不改变 Task 最近顺序，Renderer 不使用 `localStorage`、时间戳或标题推断；
 - Renderer reload、断开连接以及 Bridge revision/snapshot failure 默认只影响视图同步和重连，不得终止后台 Agent Run；只有 Workbench 根据 canonical 产品状态作出的显式 termination 决策才能请求结束 Run；
 - 左栏直接列出 canonical snapshot 中 owning Workspace 仍被投影的全部 Task，不提供全局 Workspace 切换器；每个 Task 的路径由自身上下文决定，后台请求不能因路径不同而从导航中消失。已移除 Workspace 的历史 Task 仍由 Workbench 保存，但随 Workspace 退出活动导航，重新授权恢复同一稳定 Workspace identity 后才重新出现；
 - Task 是可持续补充、归档和删除的产品对象；Task lifecycle、当前 Run phase 和最近一次 Run outcome 是三类独立状态，Renderer 只能从 Workbench projection 派生展示标签；

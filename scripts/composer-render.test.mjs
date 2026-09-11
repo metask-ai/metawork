@@ -323,7 +323,7 @@ function renderNewTaskView(composer = null, overrides = {}) {
   );
 }
 
-function renderTaskList(tasks) {
+function renderTaskList(tasks, props = {}) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -340,6 +340,7 @@ function renderTaskList(tasks) {
         showArchived: false,
         onSelectTask() {},
         onToggleArchived() {},
+        ...props,
       }),
     ),
   );
@@ -805,6 +806,7 @@ test("Task list shows tasks from different workspaces without workspace controls
     deletionStatus: "idle",
     continuationAvailable: true,
     archived: false,
+    unreadCompletionRunId: null,
     currentRunId: "0",
     currentRunPhase: null,
     activeOperation: null,
@@ -833,6 +835,7 @@ test("Task list keeps duplicate titles free of workspace metadata", () => {
     deletionStatus: "idle",
     continuationAvailable: true,
     archived: false,
+    unreadCompletionRunId: null,
     currentRunId: "0",
     currentRunPhase: null,
     activeOperation: null,
@@ -851,5 +854,41 @@ test("Task list keeps duplicate titles free of workspace metadata", () => {
   assert.doesNotMatch(
     markup,
     /task-list-meta|\/repo\/alpha|\/repo\/beta|Default/,
+  );
+});
+
+test("Task completion dot consumes only the canonical unread receipt", () => {
+  const completed = {
+    id: "1",
+    title: "Completed task",
+    workspaceId: "workspace-a",
+    lifecycle: "open",
+    deletionStatus: "idle",
+    continuationAvailable: true,
+    archived: false,
+    unreadCompletionRunId: "9",
+    currentRunId: "0",
+    currentRunPhase: null,
+    activeOperation: null,
+    recentOrder: "1",
+    runs: [
+      {
+        id: "9",
+        terminal: { outcome: "completed", cause: null },
+      },
+    ],
+    compacts: [],
+    pendingUi: null,
+    uiHistory: [],
+  };
+
+  assert.match(renderTaskList([completed]), /task-notification-dot/);
+  assert.doesNotMatch(
+    renderTaskList([completed], { suppressedCompletionTaskId: "1" }),
+    /task-notification-dot/,
+  );
+  assert.doesNotMatch(
+    renderTaskList([{ ...completed, unreadCompletionRunId: null }]),
+    /task-notification-dot/,
   );
 });
