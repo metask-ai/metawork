@@ -6,7 +6,7 @@ export type TaskPanelTarget =
   | { kind: "empty" }
   | (RunTarget & { kind: "preview"; referenceId: string })
   | (RunTarget & { kind: "tool"; toolId: string })
-  | (RunTarget & { kind: "review"; selectedChangeId?: string });
+  | (RunTarget & { kind: "review" });
 
 export const emptyTaskPanelTarget: TaskPanelTarget = { kind: "empty" };
 
@@ -30,12 +30,5 @@ export function resolveTaskPanelTarget(
       : emptyTaskPanelTarget;
   if (!typedFileChanges || !run.fileChanges?.changes.length)
     return emptyTaskPanelTarget;
-  if (
-    target.selectedChangeId &&
-    !run.fileChanges.changes.some(
-      (change) => change.id === target.selectedChangeId,
-    )
-  )
-    return { kind: "review", taskId: task.id, runId: run.id };
   return target;
 }
