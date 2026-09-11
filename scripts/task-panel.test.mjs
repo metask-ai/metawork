@@ -155,6 +155,23 @@ function technicalTool(overrides = {}) {
   };
 }
 
+function fileChange(overrides = {}) {
+  return {
+    id: "change-1",
+    order: "1",
+    kind: "modified",
+    status: "applied",
+    displayPath: "src/main.ts",
+    fromDisplayPath: null,
+    beforeBytes: "1",
+    afterBytes: "2",
+    diffAvailable: true,
+    diffComplete: true,
+    redacted: false,
+    ...overrides,
+  };
+}
+
 function task(overrides = {}) {
   return {
     id: "3",
@@ -1300,6 +1317,19 @@ test("Task Panel review groups repeated records into one continuous file diff", 
     document.querySelectorAll(".task-panel-change-section").length,
     1,
   );
+  assert.equal(
+    document.querySelector(".task-panel-change-kind").dataset.kind,
+    "moved",
+  );
+  assert.equal(
+    document.querySelector(".task-panel-change-kind > [aria-hidden=true]")
+      .textContent,
+    "R",
+  );
+  assert.equal(
+    document.querySelector(".task-panel-change-partial").title,
+    "The change may not have been fully applied",
+  );
   assert.match(document.body.textContent, /Recorded diff is incomplete/);
   assert.match(document.body.textContent, /Known sensitive content was hidden/);
   assert.match(document.body.textContent, /-secret/);
@@ -1363,6 +1393,97 @@ test("Task Panel review groups repeated records into one continuous file diff", 
   assert.equal(screen.queryByText("Back to changes"), null);
   assert.doesNotMatch(document.body.textContent, /Accept|Reject|Revert|Stage/);
   view.unmount();
+});
+
+test("file headers independently collapse their diff with pointer and keyboard", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const changes = [
+    fileChange({ id: "change-a", displayPath: "src/a.ts" }),
+    fileChange({
+      id: "change-b",
+      order: "2",
+      kind: "created",
+      displayPath: "src/b.ts",
+    }),
+    fileChange({
+      id: "change-c",
+      order: "3",
+      kind: "deleted",
+      displayPath: "src/c.ts",
+    }),
+  ];
+  render(
+    localizedView(
+      createElement(FileChangesView, {
+        observation: "complete",
+        changes,
+        diffs: {
+          "change-a": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -1 +1 @@\n-old a\n+new a",
+              complete: true,
+              redacted: false,
+            },
+          },
+          "change-b": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -1 +1 @@\n-old b\n+new b",
+              complete: true,
+              redacted: false,
+            },
+          },
+          "change-c": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -1 +0,0 @@\n-old c",
+              complete: true,
+              redacted: false,
+            },
+          },
+        },
+        onLoad() {},
+      }),
+    ),
+  );
+
+  const first = screen.getByRole("button", { name: "src/a.ts" });
+  const second = screen.getByRole("button", { name: "src/b.ts" });
+  const third = screen.getByRole("button", { name: "src/c.ts" });
+  assert.equal(first.getAttribute("aria-expanded"), "true");
+  assert.equal(second.getAttribute("aria-expanded"), "true");
+  assert.equal(third.getAttribute("aria-expanded"), "true");
+  assert.deepEqual(
+    [...document.querySelectorAll(".task-panel-change-kind")].map(
+      (element) => element.firstElementChild.textContent,
+    ),
+    ["M", "A", "D"],
+  );
+  assert.equal(
+    screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
+    3,
+  );
+
+  await user.click(first);
+  assert.equal(first.getAttribute("aria-expanded"), "false");
+  assert.equal(second.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
+    2,
+  );
+  assert.ok(screen.getByText("+new b"));
+
+  first.focus();
+  await user.keyboard("{Enter}");
+  assert.equal(first.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
+    3,
+  );
 });
 
 test("continuous Review requests an idle record when its section nears the viewport", async () => {

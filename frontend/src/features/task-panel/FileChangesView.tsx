@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   FileChangeDiffResult,
@@ -33,6 +33,19 @@ function kindColor(kind: FileChangeView["kind"]): string {
       return "text-(--ui-action-selected-content)";
     case "moved":
       return "text-(--ui-content-muted)";
+  }
+}
+
+function kindLetter(kind: FileChangeView["kind"]): "A" | "M" | "D" | "R" {
+  switch (kind) {
+    case "created":
+      return "A";
+    case "modified":
+      return "M";
+    case "deleted":
+      return "D";
+    case "moved":
+      return "R";
   }
 }
 
@@ -175,6 +188,7 @@ function RecordedFileSection({
   onLoad: (change: FileChangeView) => void;
 }) {
   const { t } = useI18n();
+  const [expanded, setExpanded] = useState(true);
   const records = group.changes.map((change) => ({
     change,
     state: diffs[change.id] ?? ({ phase: "idle", diff: null } as const),
@@ -183,9 +197,12 @@ function RecordedFileSection({
   const nextIdle = loading
     ? undefined
     : records.find(({ state }) => state.phase === "idle");
-  const section = useLoadWhenVisible(nextIdle ? "idle" : "settled", () => {
-    if (nextIdle) onLoad(nextIdle.change);
-  });
+  const section = useLoadWhenVisible(
+    expanded && nextIdle ? "idle" : "settled",
+    () => {
+      if (nextIdle) onLoad(nextIdle.change);
+    },
+  );
   const readyDiffs = records.flatMap(({ state }) =>
     state.phase === "settled" && state.diff.status === "ready"
       ? [state.diff]
@@ -220,6 +237,9 @@ function RecordedFileSection({
     (change) => change.fromDisplayPath,
   )?.fromDisplayPath;
   const headingId = `file-change-heading-${index}`;
+  const diffId = `file-change-diff-${index}`;
+  const kindId = `file-change-kind-${index}`;
+  const partialId = `file-change-partial-${index}`;
 
   return (
     <section
@@ -231,20 +251,50 @@ function RecordedFileSection({
       aria-busy={loading}
     >
       <header className="task-panel-change-header">
-        <div className="task-panel-change-identity">
-          <h4 id={headingId} title={group.displayPath}>
-            {group.displayPath}
-          </h4>
-          {fromDisplayPath && (
-            <small title={fromDisplayPath}>
-              {fromDisplayPath} → {group.displayPath}
-            </small>
-          )}
-        </div>
-        <div className="task-panel-change-meta">
-          <span className={kindColor(kind)}>
-            {t(kindMessage(kind))}
-            {partial && ` · ${t("file_changes.status.partial")}`}
+        <button
+          type="button"
+          className="task-panel-change-toggle"
+          aria-expanded={expanded}
+          aria-controls={diffId}
+          aria-labelledby={headingId}
+          aria-describedby={`${kindId}${partial ? ` ${partialId}` : ""}`}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <span
+            id={kindId}
+            className={`task-panel-change-kind ${kindColor(kind)}`}
+            data-kind={kind}
+          >
+            <span aria-hidden="true">{kindLetter(kind)}</span>
+            <span className="sr-only">{t(kindMessage(kind))}</span>
+          </span>
+          <span className="task-panel-change-identity">
+            <span className="task-panel-change-title-line">
+              <span
+                id={headingId}
+                className="task-panel-change-title"
+                title={group.displayPath}
+              >
+                {group.displayPath}
+              </span>
+              {partial && (
+                <span
+                  id={partialId}
+                  className="task-panel-change-partial"
+                  title={t("file_changes.status.partial_warning")}
+                >
+                  <Icon name="warning" />
+                  <span className="sr-only">
+                    {t("file_changes.status.partial_warning")}
+                  </span>
+                </span>
+              )}
+            </span>
+            {fromDisplayPath && (
+              <small title={fromDisplayPath}>
+                {fromDisplayPath} → {group.displayPath}
+              </small>
+            )}
           </span>
           {readyDiffs.length > 0 && (
             <span
@@ -258,9 +308,17 @@ function RecordedFileSection({
               <span>−{deletions}</span>
             </span>
           )}
-        </div>
+          <span className="task-panel-change-chevron" aria-hidden="true">
+            <Icon name="chevron" />
+          </span>
+        </button>
       </header>
-      <div className="task-panel-change-diff" aria-live="polite">
+      <div
+        id={diffId}
+        className="task-panel-change-diff"
+        aria-live="polite"
+        hidden={!expanded}
+      >
         {readyDiffs.some((diff) => !diff.complete || diff.redacted) && (
           <div className="task-panel-resource-flags">
             {readyDiffs.some((diff) => !diff.complete) && (

@@ -6916,7 +6916,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     animation: none;
   }
 
-  .run-process-chevron svg {
+  .run-process-chevron svg,
+  .task-panel-change-chevron svg {
     transition: none;
   }
 }
@@ -8264,23 +8265,80 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   position: sticky;
   z-index: 2;
   top: 0;
-  display: grid;
   min-width: 0;
-  padding: 9px 12px 8px;
-  gap: 5px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-surface-panel);
 }
 
+.task-panel-change-toggle {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 12px 8px;
+  grid-template-areas: "kind identity stats chevron";
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 8px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-panel-change-toggle:hover {
+  background: var(--ui-action-hover-surface);
+}
+
+.task-panel-change-toggle:focus-visible {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: -2px;
+}
+
+.task-panel-change-kind {
+  display: block;
+  width: 16px;
+  grid-area: kind;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 18px;
+  text-align: center;
+}
+
 .task-panel-change-identity {
+  grid-area: identity;
   min-width: 0;
 }
 
-.task-panel-change-identity h4 {
-  margin: 0;
+.task-panel-change-title-line {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 5px;
+  line-height: 18px;
+}
+
+.task-panel-change-title {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
   color: var(--ui-content-primary);
   font-size: var(--text-micro);
   font-weight: 650;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-panel-change-partial {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+  color: var(--ui-content-warning);
+  font-size: 12px;
 }
 
 .task-panel-change-identity small {
@@ -8290,21 +8348,37 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-micro);
 }
 
-.task-panel-change-meta {
-  display: flex;
-  min-width: 0;
+.task-panel-change-chevron {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  grid-area: chevron;
+  align-self: start;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 10px;
+  justify-content: center;
   color: var(--ui-content-muted);
-  font-size: var(--text-micro);
+}
+
+.task-panel-change-chevron svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 140ms ease;
+}
+
+.task-panel-change-toggle[aria-expanded="false"]
+  .task-panel-change-chevron
+  svg {
+  transform: rotate(-90deg);
 }
 
 .task-panel-change-stats {
   display: inline-flex;
-  margin-left: auto;
+  grid-area: stats;
+  align-items: baseline;
   gap: 7px;
+  font-size: var(--text-micro);
   font-variant-numeric: tabular-nums;
+  line-height: 18px;
 }
 
 .task-panel-change-stats > span:first-child {

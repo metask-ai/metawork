@@ -626,7 +626,7 @@ export const zhCN: Record<MessageId, string> = {
   "file_changes.kind.modified": "已修改",
   "file_changes.kind.deleted": "已删除",
   "file_changes.kind.moved": "已移动",
-  "file_changes.status.partial": "部分应用",
+  "file_changes.status.partial_warning": "更改可能未完整应用",
   "file_changes.loading": "正在加载已记录差异…",
   "file_changes.retry": "重试",
   "file_changes.diff.incomplete": "已记录差异不完整",

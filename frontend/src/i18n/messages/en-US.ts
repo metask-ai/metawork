@@ -686,7 +686,8 @@ export const enUS = {
   "file_changes.kind.modified": "Modified",
   "file_changes.kind.deleted": "Deleted",
   "file_changes.kind.moved": "Moved",
-  "file_changes.status.partial": "Partially applied",
+  "file_changes.status.partial_warning":
+    "The change may not have been fully applied",
   "file_changes.loading": "Loading recorded diff…",
   "file_changes.retry": "Retry",
   "file_changes.diff.incomplete": "Recorded diff is incomplete",
