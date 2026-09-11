@@ -184,6 +184,7 @@ const responses = [
         process.platform === "win32"
           ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
           : "sleep 0.4; echo agentcore-vertical-bash-ok",
+      description: "Check the command output",
     },
     "I’ve checked the input; now I’m running a focused verification.",
   ),
@@ -455,7 +456,8 @@ try {
     throw new Error(
       `Run history lost its typed Skill input: ${JSON.stringify(submittedRun.input)}`,
     );
-  await captureVisual("running", 1320, 812);
+  await captureVisual("running", 1320, 812, false, false, true);
+  await captureVisual("running-narrow", 390, 812);
   let visualAttentionCaptured = false;
   const answered = new Set();
   const observedRunRevisions = new Map();
@@ -575,6 +577,9 @@ try {
     productDeliveryEmitCount() - deliveryCountBeforeRun,
   );
   await captureVisual("terminal", 1320, 812);
+  await captureVisual("terminal-narrow", 390, 812);
+  await captureVisual("bash-detail", 1320, 812, false, false, false, true);
+  await captureVisual("bash-detail-narrow", 390, 812);
   await captureVisual("settings", 1320, 812, true);
   if (run.terminal?.cause !== null)
     throw new Error(
@@ -643,6 +648,20 @@ try {
         throw new Error(`${name} omitted projection safety flag ${field}`);
     if (evidence && !tool.content.includes(evidence))
       throw new Error(`${name} result omitted ${evidence}`);
+    if (name === "Bash") {
+      const raw = JSON.parse(tool.content);
+      if (
+        raw.schema_version !== "metacodes.bash-result.v2" ||
+        tool.bash?.result?.exitCode !== 0 ||
+        !tool.bash.result.stdout.includes("agentcore-vertical-bash-ok") ||
+        tool.bash.description !== "Check the command output" ||
+        tool.bash.result.stdoutIncomplete ||
+        tool.bash.result.stderrIncomplete
+      )
+        throw new Error(
+          "foreground Bash did not expose exact readable evidence",
+        );
+    }
   }
   if (
     process.platform === "win32" &&
@@ -1684,6 +1703,8 @@ async function captureVisual(
   height,
   openSettings = false,
   openSearch = false,
+  selectFirstTask = false,
+  openBashDetail = false,
 ) {
   if (visualCaptureDir === null) return;
   if (process.platform === "darwin" && (openSettings || openSearch)) return;
@@ -1731,6 +1752,7 @@ async function captureVisual(
   if (openSettings) args.push("-OpenSettings");
   if (selectFirstTask) args.push("-SelectFirstTask");
   if (openSearch) args.push("-OpenSearch");
+  if (openBashDetail) args.push("-OpenBashDetail");
   await execFileAsync(
     "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     args,

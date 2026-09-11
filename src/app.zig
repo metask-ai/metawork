@@ -519,6 +519,10 @@ pub fn run(init: std.process.Init) !void {
             .arm = app_platform.Adapter.armScheduledTaskTimer,
             .cancel = app_platform.Adapter.cancelScheduledTaskTimer,
         },
+        .run_clock = .{
+            .context = &app.platform,
+            .now_ms_fn = app_platform.Adapter.runNowMonotonicMs,
+        },
         .mcp_refresh_timer = .{
             .context = &app.platform,
             .enabled = true,

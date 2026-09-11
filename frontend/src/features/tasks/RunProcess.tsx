@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 
 import type {
   FileReferenceView,
@@ -8,7 +8,7 @@ import type {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
-import type { RunPresentation } from "./run-presentation.ts";
+import { runElapsedSeconds, type RunPresentation } from "./run-presentation.ts";
 
 function toolActivityMessage(name: string | null): MessageId {
   switch (name) {
@@ -36,6 +36,7 @@ function activityMessage(
 ): MessageId {
   switch (activity.kind) {
     case "queued":
+      return "run.activity.queued";
     case "starting":
       return "run.activity.starting";
     case "waiting_model":
@@ -100,6 +101,7 @@ function ProcessHeader({
   active,
   title,
   detail,
+  elapsed,
   collapsible,
   expanded,
   controls,
@@ -108,6 +110,7 @@ function ProcessHeader({
   active: boolean;
   title: ReactNode;
   detail: ReactNode;
+  elapsed: ReactNode;
   collapsible: boolean;
   expanded: boolean;
   controls: string;
@@ -124,6 +127,7 @@ function ProcessHeader({
         <strong>{title}</strong>
         {detail && <small>{detail}</small>}
       </span>
+      {elapsed}
       {collapsible && (
         <span className="run-process-chevron">
           <Icon name="chevron" />
@@ -147,6 +151,34 @@ function ProcessHeader({
   );
 }
 
+function RunElapsed({
+  elapsedMs,
+  receivedAt,
+  synchronized,
+}: {
+  elapsedMs: string;
+  receivedAt: number;
+  synchronized: boolean;
+}) {
+  const { locale, t } = useI18n();
+  const [now, setNow] = useState(() =>
+    synchronized ? performance.now() : receivedAt,
+  );
+  useEffect(() => {
+    if (!synchronized) return;
+    const interval = window.setInterval(() => setNow(performance.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [synchronized]);
+  const seconds = runElapsedSeconds(elapsedMs, receivedAt, now);
+  const duration = `${formatInteger(locale, seconds / 60n)}:${String(seconds % 60n).padStart(2, "0")}`;
+  // Outside the live region: elapsed seconds are not progress.
+  return (
+    <small className="run-process-elapsed" aria-live="off">
+      {t("run.elapsed", { duration })}
+    </small>
+  );
+}
+
 function ProcessTool({
   tool,
   onOpen,
@@ -164,7 +196,16 @@ function ProcessTool({
   const content = (
     <>
       <span className="run-process-tool-mark" aria-hidden="true" />
-      <span className="run-process-tool-name">{tool.name}</span>
+      <span className="run-process-tool-label">
+        <span className="run-process-tool-name">{tool.name}</span>
+        {tool.bash?.description && (
+          <span className="run-process-tool-description">
+            {tool.bash.description.length > 160
+              ? `${tool.bash.description.slice(0, 160)}…`
+              : tool.bash.description}
+          </span>
+        )}
+      </span>
       <span className="run-process-tool-meta">
         <span>{t(toolStateMessage(tool))}</span>
         {tool.state !== "running" && elapsed > 0n && (
@@ -192,6 +233,13 @@ function ProcessTool({
         </button>
       ) : (
         <div className="run-process-tool">{content}</div>
+      )}
+      {tool.progress && (
+        <p className="run-process-tool-progress">
+          {tool.progress.length > 240
+            ? `${tool.progress.slice(0, 240)}…`
+            : tool.progress}
+        </p>
       )}
       {onPreviewFile && tool.fileRefs.length > 0 && (
         <div className="run-process-files">
@@ -233,12 +281,20 @@ function terminalDetail(
 
 export function RunProcess({
   presentation,
+  elapsedMs = null,
+  snapshotReceivedAt = null,
+  synchronized = true,
+  requestingStop = false,
   expanded,
   onExpandedChange,
   onOpenTool,
   onPreviewFile,
 }: {
   presentation: RunPresentation;
+  elapsedMs?: string | null;
+  snapshotReceivedAt?: number | null;
+  synchronized?: boolean;
+  requestingStop?: boolean;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
   onOpenTool?: (tool: ToolView, opener: HTMLButtonElement) => void;
@@ -252,24 +308,45 @@ export function RunProcess({
   if (!presentation.processVisible) return null;
 
   const activity = presentation.activity;
-  const title = activity
-    ? t(activityMessage(activity, presentation.runningToolName))
-    : t("run.process.title");
-  const detail = activity
-    ? activityDetail(activity, locale, t)
-    : terminalDetail(presentation, locale, t);
+  const unsynchronized = presentation.active && !synchronized;
+  const stopPending =
+    presentation.active && requestingStop && activity?.kind !== "stopping";
+  const title = unsynchronized
+    ? t("run.activity.unsynchronized")
+    : stopPending
+      ? t("run.activity.requesting_stop")
+      : activity
+        ? t(activityMessage(activity, presentation.runningToolName))
+        : t("run.process.title");
+  const detail =
+    unsynchronized || stopPending
+      ? null
+      : activity
+        ? activityDetail(activity, locale, t)
+        : terminalDetail(presentation, locale, t);
   const showBody = expanded && presentation.processCanCollapse;
 
   return (
     <section
       className="run-process"
-      data-active={presentation.active}
+      data-active={presentation.active && synchronized}
       data-expanded={showBody}
     >
       <ProcessHeader
-        active={presentation.active}
+        active={presentation.active && synchronized}
         title={title}
         detail={detail}
+        elapsed={
+          presentation.active &&
+          elapsedMs !== null &&
+          snapshotReceivedAt !== null ? (
+            <RunElapsed
+              elapsedMs={elapsedMs}
+              receivedAt={snapshotReceivedAt}
+              synchronized={synchronized}
+            />
+          ) : null
+        }
         collapsible={presentation.processCanCollapse}
         expanded={showBody}
         controls={bodyId}

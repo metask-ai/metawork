@@ -29,7 +29,7 @@ type SnapshotChunk = {
   data: string;
 };
 
-const maxSnapshotBytes = 8 * 1024 * 1024;
+const maxSnapshotBytes = 64 * 1024 * 1024;
 const maxSnapshotChunkBytes = 256 * 1024;
 
 function invalidSnapshot(diagnostic: string): never {

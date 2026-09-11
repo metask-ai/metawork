@@ -285,6 +285,17 @@ export type FileChangeDiffResult =
     };
 
 export type ToolView = {
+  bash: {
+    command: string | null;
+    description: string | null;
+    result: {
+      exitCode: number;
+      stdout: string;
+      stderr: string;
+      stdoutIncomplete: boolean;
+      stderrIncomplete: boolean;
+    } | null;
+  } | null;
   id: string;
   order: string;
   name: string;
@@ -542,6 +553,7 @@ export type RunActivity =
   | { kind: "stopping" };
 
 export type RunView = {
+  elapsedMs: string | null;
   id: string;
   phase: RunPhase;
   permissionProfile: PermissionProfile;

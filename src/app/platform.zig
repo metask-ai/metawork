@@ -184,6 +184,12 @@ pub const Adapter = struct {
         return @intCast(seconds);
     }
 
+    pub fn runNowMonotonicMs(context: ?*anyopaque) ?u64 {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        const nanoseconds = std.Io.Timestamp.now(self.io, .boot).nanoseconds;
+        return std.math.cast(u64, @divFloor(nanoseconds, std.time.ns_per_ms));
+    }
+
     pub fn nowUnixMilliseconds(self: *const Adapter) ?u64 {
         const nanoseconds = std.Io.Timestamp.now(self.io, .real).nanoseconds;
         if (nanoseconds < 0) return null;

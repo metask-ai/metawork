@@ -1566,6 +1566,7 @@ export function decodeFileChangeDiff(value: unknown): FileChangeDiffResult {
 
 function decodeTool(value: unknown, path: string): ToolView {
   const item = object(value, path, [
+    "bash",
     "id",
     "order",
     "name",
@@ -1589,7 +1590,15 @@ function decodeTool(value: unknown, path: string): ToolView {
   const isError = booleanValue(item.isError, `${path}.isError`);
   if ((state === "failed") !== isError)
     fail(path, "tool failure state and error flag must agree");
+  const bash = decodeBashPresentation(item.bash, `${path}.bash`);
+  if (bash !== null && item.name !== "Bash")
+    fail(path, "Bash presentation requires Bash identity");
+  if (bash?.result && (state === "running" || item.contentTruncated === true))
+    fail(path, "unfinished or truncated tools cannot expose a Bash result");
+  if (bash !== null && bash.command !== null && item.inputTruncated === true)
+    fail(path, "truncated tool input cannot expose a Bash command");
   return {
+    bash,
     id: stringValue(item.id, `${path}.id`),
     order: positiveWireId(item.order, `${path}.order`),
     name: stringValue(item.name, `${path}.name`),
@@ -1617,8 +1626,57 @@ function decodeTool(value: unknown, path: string): ToolView {
   };
 }
 
+function decodeBashPresentation(
+  value: unknown,
+  path: string,
+): ToolView["bash"] {
+  if (value === null) return null;
+  const item = object(value, path, ["command", "description", "result"]);
+  const command =
+    item.command === null ? null : stringValue(item.command, `${path}.command`);
+  const description =
+    item.description === null
+      ? null
+      : stringValue(item.description, `${path}.description`);
+  if (command === null && description !== null)
+    fail(path, "description requires a parsed command");
+  if (item.result === null) return { command, description, result: null };
+  const result = object(item.result, `${path}.result`, [
+    "exitCode",
+    "stdout",
+    "stderr",
+    "stdoutIncomplete",
+    "stderrIncomplete",
+  ]);
+  const exitCode = numberValue(result.exitCode, `${path}.result.exitCode`);
+  if (
+    !Number.isInteger(exitCode) ||
+    exitCode < -2147483648 ||
+    exitCode > 2147483647
+  )
+    fail(path, "expected i32 exit code");
+  return {
+    command,
+    description,
+    result: {
+      exitCode,
+      stdout: stringValue(result.stdout, `${path}.result.stdout`),
+      stderr: stringValue(result.stderr, `${path}.result.stderr`),
+      stdoutIncomplete: booleanValue(
+        result.stdoutIncomplete,
+        `${path}.result.stdoutIncomplete`,
+      ),
+      stderrIncomplete: booleanValue(
+        result.stderrIncomplete,
+        `${path}.result.stderrIncomplete`,
+      ),
+    },
+  };
+}
+
 function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
+    "elapsedMs",
     "id",
     "phase",
     "permissionProfile",
@@ -1720,7 +1778,19 @@ function decodeRun(value: unknown, path: string): RunView {
     ),
   };
   const activity = decodeRunActivity(item.activity, `${path}.activity`);
+  const elapsedMs =
+    item.elapsedMs === null
+      ? null
+      : wireId(item.elapsedMs, `${path}.elapsedMs`);
+  if (
+    elapsedMs !== null &&
+    (elapsedMs.length > 20 ||
+      (elapsedMs.length === 20 && elapsedMs > "18446744073709551615"))
+  )
+    fail(`${path}.elapsedMs`, "expected u64 elapsed milliseconds");
   const isTerminal = terminal !== null;
+  if (isTerminal && elapsedMs !== null)
+    fail(path, "terminal Run cannot expose active elapsed time");
   if (isTerminal !== (activity === null))
     fail(path, "Run phase and activity must describe the same terminal state");
   if (phase === "queued" && activity?.kind !== "queued")
@@ -1757,6 +1827,7 @@ function decodeRun(value: unknown, path: string): RunView {
     input: decodeRunInput(item.input, `${path}.input`),
     output,
     activity,
+    elapsedMs,
     terminal,
     usage: {
       input: wireId(usage.input, `${path}.usage.input`),

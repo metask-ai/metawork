@@ -600,13 +600,17 @@ Renderer 每次只读取当前完整 `RunOutput`，不在本地累积 text chunk
 
 非 terminal Run 必须有唯一 canonical activity；terminal Run 必须没有 activity。Renderer 不复制 activity 状态机，只把 Host activity 本地化并做两项有界派生：phase 缺失时只能使用同 phase 的防御性通用标签，`executing_tools` 且恰有一个真实 running Tool 时可以把固定 Tool identifier 映射为“检查工作区”“更新内容”或“运行操作”。多个、零个或未知 Tool 时回退到 canonical activity，不读取参数、结果或历史 Tool 推断 Agent 当前意图。
 
-Tool start/progress/result 只更新同一 Tool record 和 process surface，不在主阅读流追加行。active Run 中展开技术过程只用于检查当前证据；terminal 后相同 Tool records 转为弱化历史摘要。主区 Tool 行只显示名称、状态和 Host elapsed；input/progress/result 只在用户点击对应 Tool 后于 Task Panel 挂载，并且同刻至多一个对象详情。
+Tool start/progress/result 只更新同一 Tool record 和 process surface，不在主阅读流追加行。active Run 中展开技术过程只用于检查当前证据；terminal 后相同 Tool records 转为弱化历史摘要。展开后的 Tool 行显示名称、状态、Host elapsed，并可附 Host 安全 description、有限 progress 摘录和已有 fileRefs；完整输入和结果在用户点击对应 Tool 后于 Task Panel 挂载，同刻至多一个对象详情。
 
 #### Snapshot revision、阅读位置与稀疏输出
 
 ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新的完整 Snapshot 到达。Renderer 对每个 Snapshot 重新执行纯派生：commentary block 稳定追加、provisional 原位变化、activity 原位替换、Tool 行按 Host order 更新，不能把 revision 数或事件次数显示成进度。用户正在 following latest 时才自动滚动；用户上滚后任何流式更新都不得抢回位置，只显示 `Jump to latest`。
 
 真实 Provider 没有提交新 commentary 或 provisional 时，主阅读流保持不变，只显示当前 canonical activity 和按需技术证据。Renderer 不重复状态行、不从 Tool 结果生成总结、不展示 thinking 正文，也不通过动画、计时器或伪百分比制造推进感。scripted Provider vertical 证明的是这套机制可以持续交付已存在的事实，不代表真实 Provider 的叙事频率。
+
+#### 本轮耗时
+
+活动状态旁可以弱化显示 Host 采样的“本轮已用时”，包含排队、等待批准和重试；仅表示经过时间，不表示进展或健康。Renderer 从完整 Snapshot 的本地接收时刻低频外推，切换 Task 不重新起算，reload 后使用新 Host 样本；terminal 后移除，不新增历史耗时展示。计时必须位于状态读屏 live region 之外，不触发逐秒播报、自动滚动或逐秒 Snapshot；计时变化不能用来生成叙事、推进状态或判断超时。排队与启动使用不同文案。
 
 ### 7.3 用户指令
 
@@ -629,13 +633,13 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 ### 7.5 当前状态、请求与结果
 
 - active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。`executing_tools` 且恰有一个 typed running Tool 时，Renderer 可以依据固定 Tool identifier 映射为“检查工作区”“更新内容”“运行操作”等宽泛但真实的用户文案；不满足条件时回退到 canonical activity，不在主状态中暴露原始 Tool 名称、参数或命令；
-- Tool 摘要属于次要 technical work evidence，active 与 terminal Run 都默认折叠；用户明确展开后，主区 Tool 行只显示名称、状态与 Host 提供的真实 elapsed，不带入 input/progress/result、usage 或 Run ID。terminal 摘要弱化为“工作过程 · N 项操作”，不单独强调已被整个 Run 恢复的 Tool failure；失败事实仍在展开详情中保留。disclosure choice 按 Task+Run 仅存于当前 Renderer 会话，不写入 Bridge 或持久化，也不随 revision 或终态自动翻转；late terminal observation 不得重新打开 live 状态；
+- Tool 摘要属于次要 technical work evidence，active 与 terminal Run 都默认折叠；展开内容遵守本节 Tool 证据规则，不带入完整 input/result、usage 或 Run ID。terminal 摘要弱化为“工作过程 · N 项操作”，不单独强调已被整个 Run 恢复的 Tool failure；失败事实仍在展开详情中保留。disclosure choice 按 Task+Run 仅存于当前 Renderer 会话，不写入 Bridge 或持久化，也不随 revision 或终态自动翻转；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - terminal cause 使用最具体的稳定本地化文案：`provider_failure` 显示“模型服务请求失败”，并在同一 notice 中说明本次 Run 未生成可用回复或只生成了可能不完整的部分回复；`tool_failure` 说明工具失败且 Agent 未能恢复，`image_input_unsupported` 明确要求更换支持图片的模型并重新选择图片；不得把三者统一写成“检查模型或网络”，也不得直接展示 provider raw body；
 - `provider_failure` 的主区 notice 只表达失败原因、回复影响和匹配的恢复动作，不重复技术诊断边界；若该 Run 已有 Tool 记录，重试前提醒用户先检查工作过程，避免重复外部 effect；
 - 失败 Run 的主区“查看运行详情”是该 notice 下的默认折叠 disclosure，仅展开时挂载诊断边界与精确 provenance：`absent` 表示 MetaWork 未收到该 Run 的附加诊断，`withheld` 表示当前安全边界不允许显示已收到的附加技术诊断；均不得猜测 401、API Key、限流、网络或设置问题。字段仅为稳定错误标识、精确 Run ID、该 Run 的 model 和 protocol，不使用当前 Task binding 或 Models 默认值，不默认展示 execution generation；折叠卸载诊断正文。只有当前 Task 真实可重试且输入区无待保留草稿时才沿用既有“准备重试”流程，动作文字必须明确只把指令重新填入 Composer；详情入口本身不触发重试、设置跳转、模型测试或任何外部操作；
-- Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。
+- Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。同步失败或 Bridge 不可用时，保留已有内容，但 active Run 的唯一状态改为“状态尚未同步”、停止活动动效并暂停耗时外推；恢复后以新 Host Snapshot 为准，不因静默时长推断 Agent 卡死，也不自动终止或重跑。停止命令尚未应答时显示“正在请求停止”；应答不等于终态，正式 stopping/terminal 仍由 Host 确认，失败沿用当前 Task 的操作反馈。
 
 ### 7.6 滚动与密度
 
@@ -820,7 +824,7 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的两�
 
 > Capability：**当前**。右侧栏是应用三栏布局的辅助容器，Task Panel 是其中承载任务内容的视图；布局开关不属于该视图或任一具体功能，不提供概览根页、日志时间线、任意文件浏览、文件编辑或 Git 操作。
 
-主阅读流拥有叙事、唯一 live status、审批和失败恢复。默认折叠的 Work process 只显示所属 Run 的 Tool 顺序、名称、状态和 Host elapsed；点击后打开精确 `taskId + runId + toolId` 的单条详情，并随 Snapshot 更新。不复制整份 Tool 列表，不从 Tool 内容推断 Agent 发言、File Changes 或 Output。input/progress/result 仅在活动详情中以纯文本/代码面挂载，不进入全局搜索或 live announcement。
+主阅读流拥有叙事、唯一 live status、审批和失败恢复。默认折叠的 Work process 展开规则见 §7.2；点击后打开精确 `taskId + runId + toolId` 的单条详情，并随 Snapshot 更新。不复制整份 Tool 列表，不从 Tool 内容推断 Agent 发言、File Changes 或 Output。完整 input/progress/result 仅在活动详情中以纯文本/代码面挂载，不进入全局搜索或 live announcement。Host 提供可读 Bash 字段时，详情优先呈现 command、exit code、stdout/stderr，并明确空输出及不完整捕获；安全原始详情置于可展开区域。不可解释的结果直接保留安全原始详情，不从空输出推断目录为空或任务完成。
 
 信息按事实的生命周期放置：
 

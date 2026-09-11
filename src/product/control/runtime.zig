@@ -301,6 +301,7 @@ pub const SkillExportResult = skill_runtime.ExportResult;
 pub const SkillImportPreview = skill_runtime.Preview;
 
 pub const Configuration = struct {
+    run_clock: task_runtime.RunClock = .{},
     change_notifier: ChangeNotifier = .{},
     directories: AppDirectories = .{},
     schedule_timer: ScheduleTimer = .{},
@@ -1026,6 +1027,7 @@ pub const PreparedCustomProviderBinding =
     execution_state.PreparedCustomProviderBinding;
 
 pub const Runtime = struct {
+    run_clock: task_runtime.RunClock,
     allocator: std.mem.Allocator,
     io: std.Io,
     agent_runtime: *lifecycle.Runtime,
@@ -1288,6 +1290,7 @@ pub const Runtime = struct {
             .schedule = schedule,
             .skill = skill,
             .change_notifier = configuration.change_notifier,
+            .run_clock = configuration.run_clock,
             .executor = executor,
             .attachment_executor = attachment_executor,
             .attachment_lane = attachment_lane,
@@ -5384,6 +5387,7 @@ pub const Runtime = struct {
 
     fn taskRuntimeProjectionEffects(self: *Runtime) task_runtime.ProjectionEffects {
         return .{
+            .now_ms = self.run_clock.now(),
             .context = self,
             .authority_fn = taskProjectionAuthority,
             .text = self.taskTextProjection(),
@@ -6252,6 +6256,7 @@ pub const Runtime = struct {
 
     fn taskRuntimeOperationEffects(self: *Runtime) task_runtime.OperationEffects {
         return .{
+            .run_clock = self.run_clock,
             .text = self.taskRuntimeTextProjection(),
             .release = self.taskRuntimeReleaseEffects(),
             .executor = .{
@@ -8232,6 +8237,11 @@ fn fileChangeSnapshotAdditionalBytes(limits: Limits) ?usize {
 }
 
 fn worstCaseSnapshotBytes(limits: Limits) ?usize {
+    // The 6x bound also covers raw + readable Bash text: readable fields are
+    // emitted only from valid JSON. Its raw re-encoding and selected decoded
+    // strings each fit 3x source bytes (including the "***" redaction marker).
+    // JSON control escapes already occupy bytes in that source; they cannot
+    // independently incur another 6x expansion in the decoded representation.
     var total = std.math.mul(usize, limits.max_projection_bytes, json_string_expansion) catch return null;
     total = std.math.add(
         usize,
@@ -12458,6 +12468,43 @@ test "streaming Run events do not reorder Task navigation" {
     try std.testing.expectEqual(before, control.task_runtime.tasks[0].?.durable.recent_order);
 }
 
+test "Run elapsed projection samples an injected clock without publishing revisions" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const Clock = struct {
+        fn now(context: ?*anyopaque) ?u64 {
+            const value: *u64 = @ptrCast(@alignCast(context.?));
+            return value.*;
+        }
+    };
+    var now: u64 = 1250;
+    control.run_clock = .{ .context = &now, .now_ms_fn = Clock.now };
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    run.admitted_at_ms = 1000;
+    var storage: [96 * 1024]u8 = undefined;
+    for ([_]task_test_state.ActiveRunPhase{ .queued, .running, .waiting_ui, .stopping }) |phase| {
+        run.active_phase = phase;
+        try std.testing.expectEqual(@as(?u64, 250), task_test_state.runElapsedMs(run, now));
+    }
+    const first = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\"elapsedMs\":\"250\"") != null);
+    const revision = control.revision;
+    now = 135000;
+    const second = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(u8, second, "\"elapsedMs\":\"134000\"") != null);
+    try std.testing.expectEqual(revision, control.revision);
+    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, 999));
+    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, null));
+    run.terminal_payload = .{ .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+    run.terminal_publication.store(.published, .release);
+    try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
+    run.terminal_observed = true;
+    run.event_stream_finalized = true;
+    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, now));
+    run.admitted_at_ms = null;
+    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, now));
+}
+
 test "thinking and assistant chunks update distinct safe projections" {
     var control = try testRuntime();
     defer control.deinit();
@@ -13799,6 +13846,94 @@ test "permission provenance projection keeps typed fields bounded and non-persis
     try std.testing.expect(projected.used_session_rule);
     try std.testing.expectEqualStrings("Bash", projected.toolName());
     try std.testing.expect(!@hasField(task_persistence.RunWire, "permission_provenance"));
+}
+
+test "Bash presentation interprets only bounded known evidence and sanitizes decoded text" {
+    const cases = [_]struct {
+        version: []const u8 = "metacodes.bash-result.v2",
+        encoding: []const u8 = "utf-8",
+        content_truncated: bool = false,
+        input_truncated: bool = false,
+        name: []const u8 = "Bash",
+        supported: bool = true,
+        stdout: []const u8 = "",
+        raw: ?[]const u8 = null,
+    }{
+        .{},
+        .{ .version = "future", .supported = false },
+        .{ .encoding = "base64", .supported = false },
+        .{ .content_truncated = true, .supported = false },
+        .{ .input_truncated = true },
+        .{ .name = "Read", .supported = false },
+        .{ .stdout = "control\x01\n\r\t\\\" 界 SECRET-KEY" },
+        .{ .raw = "{broken", .supported = false },
+        .{ .raw = "{\"schema_version\":\"metacodes.bash-result.v2\"}", .supported = false },
+    };
+    for (cases) |case| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const content = try std.json.Stringify.valueAlloc(std.testing.allocator, .{
+            .schema_version = case.version,
+            .stdout = case.stdout,
+            .stderr = "partial warning",
+            .stdout_encoding = case.encoding,
+            .stderr_encoding = "utf-8",
+            .stdout_capture_complete = true,
+            .stderr_capture_complete = false,
+            .stdout_truncated = false,
+            .stderr_truncated = false,
+            .exit_code = @as(i32, 2),
+            .unknown_metadata = "ignored",
+        }, .{});
+        defer std.testing.allocator.free(content);
+        const event = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .tool_result = .{
+            .id = "bash-presentation",
+            .name = case.name,
+            .input = "{\"command\":\"echo \\u0053ECRET-KEY\",\"description\":\"Inspect workspace\"}",
+            .content = case.raw orelse content,
+            .is_error = true,
+            .elapsed_ms = @as(u64, 12),
+        } }, .{});
+        defer std.testing.allocator.free(event);
+        var envelope = try testEnvelope(3, 7, event);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+        const tool = &control.task_runtime.tasks[0].?.durable.runs[0].?.tools[0].?;
+        tool.input_truncated = case.input_truncated;
+        tool.content_truncated = case.content_truncated;
+        var storage: [96 * 1024]u8 = undefined;
+        const snapshot = try control.writeSnapshot(&storage);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer parsed.deinit();
+        const projected = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items[0];
+        const bash = projected.object.get("bash").?;
+        const tool_json = try std.json.Stringify.valueAlloc(std.testing.allocator, projected, .{});
+        defer std.testing.allocator.free(tool_json);
+        try std.testing.expect(tool_json.len <= tool_snapshot_overhead +
+            json_string_expansion * (tool.id.len + tool.name.len + tool.input.len + tool.progress.len + tool.content.len));
+        if (!std.mem.eql(u8, case.name, "Bash")) {
+            try std.testing.expect(bash == .null);
+            continue;
+        }
+        if (case.input_truncated) {
+            try std.testing.expect(bash.object.get("command").? == .null);
+        } else {
+            const command = bash.object.get("command").?.string;
+            try std.testing.expect(std.mem.indexOf(u8, command, "SECRET-KEY") == null);
+            try std.testing.expect(projected.object.get("redacted").?.bool);
+            try std.testing.expectEqualStrings("***", projected.object.get("input").?.string);
+            try std.testing.expectEqualStrings("***", projected.object.get("content").?.string);
+            try std.testing.expectEqualStrings("Inspect workspace", bash.object.get("description").?.string);
+        }
+        const result = bash.object.get("result").?;
+        if (case.supported) {
+            try std.testing.expectEqual(@as(i64, 2), result.object.get("exitCode").?.integer);
+            if (case.stdout.len == 0) try std.testing.expectEqualStrings("", result.object.get("stdout").?.string);
+            try std.testing.expect(!result.object.get("stdoutIncomplete").?.bool);
+            try std.testing.expect(result.object.get("stderrIncomplete").?.bool);
+        } else try std.testing.expect(result == .null);
+        try std.testing.expectEqualStrings("failed", projected.object.get("state").?.string);
+    }
 }
 
 test "Runtime projects tools and full-width usage without parsing protocol in Renderer" {

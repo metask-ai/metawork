@@ -36,6 +36,7 @@ pub const CheckpointEffects = runtime.CheckpointEffects;
 pub const SessionReleaseOutcome = runtime.SessionReleaseOutcome;
 pub const DeletionEffects = runtime.DeletionEffects;
 pub const OperationEffects = runtime.OperationEffects;
+pub const RunClock = runtime.RunClock;
 pub const ReleaseEffects = runtime.ReleaseEffects;
 pub const RecoveryAuthorityQuery = runtime.RecoveryAuthorityQuery;
 pub const RecoveryExternalAuthority = runtime.RecoveryExternalAuthority;

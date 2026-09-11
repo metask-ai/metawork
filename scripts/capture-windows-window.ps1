@@ -9,7 +9,8 @@ param(
     [int]$Height,
     [switch]$OpenSettings,
     [switch]$SelectFirstTask,
-    [switch]$OpenSearch
+    [switch]$OpenSearch,
+    [switch]$OpenBashDetail
 )
 
 $ErrorActionPreference = 'Stop'
@@ -106,7 +107,7 @@ function Invoke-MetaWorkControlKey([byte]$virtualKey) {
 }
 
 if ($SelectFirstTask) {
-    Invoke-MetaWorkClick ($rect.Left + 120) ($rect.Top + 350)
+    Invoke-MetaWorkClick ($rect.Left + 120) ($rect.Top + 320)
     Start-Sleep -Milliseconds 450
 }
 
@@ -122,6 +123,30 @@ if ($OpenSearch) {
     Start-Sleep -Milliseconds 120
     Invoke-MetaWorkControlKey 0x4B
     Start-Sleep -Milliseconds 450
+}
+
+if ($OpenBashDetail) {
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($window)
+    $buttons = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Button
+    )
+    function Invoke-MetaWorkNamedButton([string]$pattern) {
+        $items = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttons)
+        foreach ($item in $items) {
+            if ($item.Current.Name -match $pattern) {
+                $point = $item.GetClickablePoint()
+                Invoke-MetaWorkClick ([int]$point.X) ([int]$point.Y)
+                Start-Sleep -Milliseconds 450
+                return
+            }
+        }
+        throw "MetaWork visual target not found: $pattern"
+    }
+    Invoke-MetaWorkNamedButton '\u5de5\u4f5c\u8fc7\u7a0b|Work process'
+    Invoke-MetaWorkNamedButton '\u67e5\u770b Bash \u7684\u8be6\u60c5|View details for Bash'
 }
 
 $directory = Split-Path -Parent $OutputPath

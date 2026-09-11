@@ -140,6 +140,7 @@ function technicalTool(overrides = {}) {
     id: "tool-1",
     order: "1",
     name: "Read",
+    bash: null,
     input: "",
     progress: "",
     content: "",
@@ -154,6 +155,78 @@ function technicalTool(overrides = {}) {
     ...overrides,
   };
 }
+
+test("Bash detail shows known fields with collapsed raw evidence and explicit empty streams", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "raw envelope",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: {
+        exitCode: 0,
+        stdout: "",
+        stderr: "partial warning",
+        stdoutIncomplete: false,
+        stderrIncomplete: true,
+      },
+    },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.ok(screen.getByText("pwd"));
+  assert.ok(screen.getByText("No standard output captured."));
+  assert.ok(screen.getByText("partial warning"));
+  assert.equal(view.container.querySelector("details").open, false);
+  assert.ok(
+    view.container
+      .querySelector("details")
+      .textContent.includes("raw envelope"),
+  );
+  view.rerender(
+    localizedView(
+      createElement(ToolDetailView, { tool: { ...tool, bash: null } }),
+    ),
+  );
+  assert.equal(view.container.querySelector("details"), null);
+  assert.ok(screen.getByText("raw envelope"));
+});
+
+test("expanded process shows bounded descriptions and progress without interpreting text", () => {
+  const value = run({
+    tools: [
+      technicalTool({
+        name: "Bash",
+        progress: "<script>" + "x".repeat(500),
+        bash: {
+          command: "pwd",
+          description: "Inspect " + "d".repeat(300),
+          result: null,
+        },
+      }),
+    ],
+  });
+  const view = render(
+    localizedView(
+      createElement(RunProcess, {
+        presentation: deriveRunPresentation(value),
+        expanded: true,
+        onExpandedChange() {},
+      }),
+    ),
+  );
+  assert.equal(
+    view.container.querySelector(".run-process-tool-description").textContent
+      .length,
+    161,
+  );
+  assert.equal(
+    view.container.querySelector(".run-process-tool-progress").textContent
+      .length,
+    241,
+  );
+  assert.equal(view.container.querySelector("script"), null);
+});
 
 function task(overrides = {}) {
   return {
@@ -226,6 +299,7 @@ function taskContentElement(value, revision = "1", overrides = {}) {
   return localizedView(
     createElement(TaskContent, {
       task: value,
+      snapshotReceivedAt: null,
       revision,
       composerHasDraft: false,
       retryAvailable: false,
@@ -257,6 +331,155 @@ function runProcessElement(
     }),
   );
 }
+
+test("elapsed display advances without snapshots, rebases on receipt and disappears at terminal", (context) => {
+  let now = 1000;
+  let tick;
+  let cleared = 0;
+  context.mock.method(performance, "now", () => now);
+  context.mock.method(window, "setInterval", (callback) => {
+    tick = callback;
+    return 1;
+  });
+  context.mock.method(window, "clearInterval", () => {
+    cleared++;
+  });
+  const element = (value, elapsedMs, snapshotReceivedAt) =>
+    localizedView(
+      createElement(RunProcess, {
+        presentation: deriveRunPresentation(value),
+        elapsedMs,
+        snapshotReceivedAt,
+        expanded: false,
+        onExpandedChange() {},
+      }),
+    );
+  const active = run({
+    phase: "running",
+    activity: { kind: "thinking" },
+    terminal: null,
+  });
+  const view = render(element(active, "120000", 1000));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 2:00",
+  );
+  assert.equal(
+    view.container
+      .querySelector(".run-process-elapsed")
+      .closest('[aria-live="polite"]'),
+    null,
+  );
+  now = 15000;
+  act(() => tick());
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 2:14",
+  );
+  view.rerender(element(active, "134000", 15000));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 2:14",
+  );
+  view.rerender(element(active, "6000", 15000));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 0:06",
+  );
+  view.rerender(element(run(), null, 15000));
+  assert.equal(view.container.querySelector(".run-process-elapsed"), null);
+  assert.equal(cleared, 1);
+  view.unmount();
+});
+
+test("unsynchronized status pauses elapsed and resumes only from the received Host sample", (ctx) => {
+  let now = 1000,
+    tick,
+    cleared = 0;
+  ctx.mock.method(performance, "now", () => now);
+  ctx.mock.method(window, "setInterval", (callback) => {
+    tick = callback;
+    return 1;
+  });
+  ctx.mock.method(window, "clearInterval", () => {
+    cleared++;
+  });
+  const active = run({
+    phase: "running",
+    activity: { kind: "waiting_model" },
+    terminal: null,
+  });
+  const element = (
+    synchronized,
+    elapsedMs = "120000",
+    snapshotReceivedAt = 1000,
+    requestingStop = false,
+  ) =>
+    localizedView(
+      createElement(RunProcess, {
+        presentation: deriveRunPresentation(active),
+        synchronized,
+        elapsedMs,
+        snapshotReceivedAt,
+        requestingStop,
+        expanded: false,
+        onExpandedChange() {},
+      }),
+    );
+  const view = render(element(true));
+  now = 15000;
+  act(() => tick());
+  view.rerender(element(false));
+  assert.ok(screen.getByText("Status not synchronized"));
+  assert.equal(
+    view.container.querySelector(".run-process").dataset.active,
+    "false",
+  );
+  assert.equal(cleared, 1);
+  now = 90000;
+  view.rerender(element(false));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 2:14",
+  );
+  view.rerender(element(true, "209000", 90000));
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 3:29",
+  );
+  now = 92000;
+  act(() => tick());
+  assert.equal(
+    view.container.querySelector(".run-process-elapsed").textContent,
+    "Turn elapsed 3:31",
+  );
+  view.rerender(element(true, "211000", 92000, true));
+  assert.ok(screen.getByText("Requesting stop…"));
+  assert.equal(
+    view.container.querySelectorAll(".run-process-heading").length,
+    1,
+  );
+});
+
+test("queued and starting are distinct and missing Host timing is not invented", () => {
+  const queued = run({
+    phase: "queued",
+    activity: { kind: "queued" },
+    terminal: null,
+  });
+  const markup = renderToStaticMarkup(runProcessElement(queued));
+  assert.match(markup, />Queued</);
+  assert.doesNotMatch(markup, /run-process-elapsed/);
+  const starting = run({
+    phase: "running",
+    activity: { kind: "starting" },
+    terminal: null,
+  });
+  assert.match(
+    renderToStaticMarkup(runProcessElement(starting)),
+    />Getting started</,
+  );
+});
 
 test("conversation separates commentary, Markdown response, and plain provisional output", () => {
   const active = task({
@@ -457,7 +680,7 @@ test("Run status keeps technical Tool summaries behind explicit disclosure", asy
   assert.equal(screen.queryByText("two files", { selector: "strong" }), null);
   assert.equal(screen.queryByText("Live **plain text**"), null);
   assert.equal(screen.queryByText("private input"), null);
-  assert.equal(screen.queryByText("private progress"), null);
+  assert.ok(screen.getByText("private progress"));
   assert.equal(screen.queryByText("private result"), null);
 
   await user.click(
@@ -1907,6 +2130,7 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
     title: "Second task",
   });
   let onRevision;
+  let snapshotFailure = false;
   const previews = [],
     diffs = [];
   for (const [name, fn] of Object.entries({
@@ -1920,7 +2144,10 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
     connect: async () => "1",
     disconnect: async () => {},
     ping: async () => {},
-    fetchSnapshot: async () => structuredClone(snapshot),
+    fetchSnapshot: async () => {
+      if (snapshotFailure) throw new Error("fixture synchronization failure");
+      return structuredClone(snapshot);
+    },
     previewFile: (...ids) =>
       new Promise((resolve, reject) => previews.push({ ids, resolve, reject })),
     fileChangeDiff: (...ids) =>
@@ -1933,8 +2160,103 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
     previews,
     diffs,
     publish: () => onRevision(snapshot.revision),
+    setSnapshotFailure: (value) => {
+      snapshotFailure = value;
+    },
   };
 }
+
+test("App marks retained Run state unsynchronized and disables stop until refresh succeeds", async (ctx) => {
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(
+    ctx,
+    1440,
+    {
+      elapsedMs: "10000",
+      phase: "running",
+      terminal: null,
+      activity: { kind: "waiting_model" },
+    },
+  );
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  setSnapshotFailure(true);
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  assert.ok(await screen.findByText("Status not synchronized"));
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    true,
+  );
+  assert.equal(document.querySelector(".run-process").dataset.active, "false");
+  assert.equal(
+    document.querySelectorAll('.task-signal[data-signal="running"]').length,
+    0,
+  );
+  setSnapshotFailure(false);
+  snapshot.tasks[0].runs[0].elapsedMs = "90000";
+  await act(async () => publish());
+  await waitFor(() =>
+    assert.ok(screen.queryByText("Status not synchronized") === null),
+  );
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    false,
+  );
+});
+
+test("App stop request remains bound to its Task and never fabricates a terminal", async (ctx) => {
+  const { snapshot, publish } = await renderAppFixture(ctx, 1440, {
+    elapsedMs: "10000",
+    phase: "running",
+    terminal: null,
+    activity: { kind: "waiting_model" },
+  });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let resolveStop, rejectStop;
+  const calls = [];
+  ctx.mock.method(BridgeClient.prototype, "cancel", (...ids) => {
+    calls.push(ids);
+    return new Promise((resolve, reject) => {
+      resolveStop = resolve;
+      rejectStop = reject;
+    });
+  });
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  assert.deepEqual(calls, [["3", "7"]]);
+  assert.ok(screen.getByText("Requesting stop…"));
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    true,
+  );
+  fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
+  assert.ok(screen.queryByText("Requesting stop…") === null);
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    false,
+  );
+  await act(async () => rejectStop(new Error("fixture stop failure")));
+  assert.ok(screen.queryByText(/stop request could not be confirmed/) === null);
+  fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  assert.ok(
+    screen.getAllByText(/stop request could not be confirmed/).length > 0,
+  );
+  assert.ok(screen.queryByText("Work stopped") === null);
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  await act(async () => resolveStop());
+  assert.ok(screen.queryByText("Work stopped") === null);
+  Object.assign(snapshot.tasks[0].runs[0], {
+    phase: "stopping",
+    activity: { kind: "stopping" },
+  });
+  snapshot.tasks[0].currentRunPhase = "stopping";
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  assert.ok(await screen.findByText("Stopping"));
+  assert.equal(
+    screen.getByRole("button", { name: "Stop task" }).disabled,
+    true,
+  );
+});
 
 // Preview entry points are available only after explicitly expanding the process.
 function filePreviewOpener(path) {

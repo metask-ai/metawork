@@ -3,6 +3,7 @@ import { navigableTasks } from "./task-visibility.ts";
 
 export type WorkbenchState = {
   snapshot: WorkbenchSnapshot;
+  snapshotReceivedAt: number | null;
   connectionGeneration: string;
   snapshotGeneration: string | null;
   activeTaskId: string | null;
@@ -18,6 +19,7 @@ export type WorkbenchAction =
   | {
       type: "snapshot.accepted";
       snapshot: WorkbenchSnapshot;
+      receivedAt: number;
       generation?: string;
     }
   | { type: "task.selected"; taskId: string }
@@ -25,6 +27,7 @@ export type WorkbenchAction =
   | { type: "task.draft.closed" };
 
 export const initialWorkbenchState: WorkbenchState = {
+  snapshotReceivedAt: null,
   snapshot: {
     revision: "0",
     capabilities: {
@@ -167,6 +170,7 @@ export function workbenchReducer(
       connectionGeneration: action.generation,
       snapshotGeneration: null,
       snapshot: initialWorkbenchState.snapshot,
+      snapshotReceivedAt: null,
       activeTaskId: null,
       draftOpen: false,
       draftWorkspaceId: null,
@@ -180,6 +184,7 @@ export function workbenchReducer(
     return {
       ...state,
       snapshot: action.snapshot,
+      snapshotReceivedAt: action.receivedAt,
       snapshotGeneration: generation,
       activeTaskId: null,
       // A removed Workspace loses authorization, but its local draft identity
@@ -198,6 +203,7 @@ export function workbenchReducer(
   const activeTaskId = activeTaskStillExists ? state.activeTaskId : null;
   return {
     snapshot: action.snapshot,
+    snapshotReceivedAt: action.receivedAt,
     connectionGeneration: state.connectionGeneration,
     snapshotGeneration: generation,
     activeTaskId,

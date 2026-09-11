@@ -475,6 +475,8 @@ pub const CheckpointPostprocess = struct {
 };
 
 pub const RunRecord = struct {
+    /// Runtime-only monotonic admission time. Never restored from history.
+    admitted_at_ms: ?u64 = null,
     id: u64,
     generation: u64,
     execution_generation: u64,
@@ -644,6 +646,14 @@ pub const RunProjectionFacts = struct {
     activity: ?RunActivity,
     terminal: ?ProductTerminalFacts,
 };
+
+pub fn runElapsedMs(run: *const RunRecord, now_ms: ?u64) ?u64 {
+    if (runProjectionFacts(run).terminal != null) return null;
+    const started = run.admitted_at_ms orelse return null;
+    const now = now_ms orelse return null;
+    if (now < started) return null;
+    return now - started;
+}
 
 pub const CompactProjectionFacts = struct {
     phase: CompactPhase,

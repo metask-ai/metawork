@@ -51,9 +51,85 @@ function clone(value) {
   return structuredClone(value);
 }
 
+test("Run elapsed time is nullable, bounded, and unavailable for terminal history", () => {
+  for (const value of [null, "0", "134000"]) {
+    const candidate = clone(fixture);
+    const run = candidate.tasks[0].runs[0];
+    run.phase = "running";
+    run.activity = { kind: "thinking" };
+    run.terminal = null;
+    run.elapsedMs = value;
+    assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  }
+  for (const value of [undefined, "-1", "01", "18446744073709551616", 1200]) {
+    const candidate = clone(fixture);
+    candidate.tasks[0].runs[0].elapsedMs = value;
+    assert.throws(() => decodeWorkbenchSnapshot(candidate));
+  }
+  const candidate = clone(fixture);
+  const run = candidate.tasks[0].runs[0];
+  run.phase = "completed";
+  run.activity = null;
+  run.output.provisional = "";
+  run.terminal = terminal("completed");
+  run.elapsedMs = "1200";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(candidate),
+    /terminal Run cannot expose active elapsed/,
+  );
+});
+
 function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
   return { outcome, cause, diagnosticDisposition };
 }
+
+test("typed Bash presentation rejects contradictory or malformed detail", () => {
+  const candidate = clone(fixture);
+  const tool = {
+    id: "bash-detail",
+    order: "1",
+    name: "Bash",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        stdoutIncomplete: false,
+        stderrIncomplete: false,
+      },
+    },
+    input: "{}",
+    progress: "",
+    content: "raw",
+    state: "completed",
+    isError: false,
+    elapsedMs: "1",
+    inputTruncated: false,
+    progressTruncated: false,
+    contentTruncated: false,
+    redacted: false,
+    fileRefs: [],
+  };
+  candidate.tasks[0].runs[0].tools = [tool];
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  for (const mutate of [
+    (t) => delete t.bash,
+    (t) => (t.name = "Read"),
+    (t) => (t.inputTruncated = true),
+    (t) => (t.contentTruncated = true),
+    (t) => (t.state = "running"),
+    (t) => (t.bash.command = null),
+    (t) => (t.bash.result.exitCode = 2147483648),
+    (t) => (t.bash.result.stdoutIncomplete = "false"),
+    (t) => (t.bash.extra = true),
+  ]) {
+    const invalid = clone(candidate);
+    mutate(invalid.tasks[0].runs[0].tools[0]);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+});
 
 test("the canonical Workbench fixture decodes without normalization", () => {
   assert.deepEqual(decodeWorkbenchSnapshot(fixture), fixture);
@@ -356,6 +432,7 @@ test("file references expose only preview identity and presentation", () => {
       id: "tool-1",
       order: "1",
       name: "Read",
+      bash: null,
       input: "{}",
       progress: "",
       content: "ok",
@@ -1725,6 +1802,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     id: "tool-mismatch",
     order: "1",
     name: "Bash",
+    bash: null,
     input: "false",
     progress: "",
     content: "exit 1",
@@ -1859,6 +1937,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     id: "tool-1",
     order: "1",
     name: "Read",
+    bash: null,
     input: "",
     progress: "",
     content: "done",
@@ -1927,6 +2006,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     id: "tool-1",
     order: "1",
     name: "Read",
+    bash: null,
     input: "",
     progress: "",
     content: "done",
