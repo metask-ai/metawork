@@ -54,6 +54,7 @@ import { ConversationContext } from "../features/composer/ConversationContext.ts
 import { findRunFileReference } from "../workbench/run-file-references.ts";
 import { TaskPanel } from "../features/task-panel/TaskPanel.tsx";
 import {
+  FilePreviewRefreshAction,
   FilePreviewView,
   type FilePreviewViewState,
 } from "../features/task-panel/FilePreviewView.tsx";
@@ -3023,7 +3024,9 @@ export default function App() {
         ? t("task_panel.tool")
         : panelTarget.kind === "review"
           ? t("file_changes.review")
-          : t("file_preview.title");
+          : previewMatchesTarget && filePreviewViewState
+            ? filePreviewViewState.selected.displayPath
+            : t("file_preview.title");
 
   return (
     <AppShell
@@ -3245,6 +3248,17 @@ export default function App() {
           <TaskPanel
             title={panelTitle}
             attention={pendingLocator}
+            fileTitle={panelTarget.kind === "preview"}
+            actions={
+              panelTarget.kind === "preview" &&
+              previewMatchesTarget &&
+              filePreviewViewState ? (
+                <FilePreviewRefreshAction
+                  state={filePreviewViewState}
+                  onRefresh={refreshFilePreview}
+                />
+              ) : null
+            }
             onClose={dismissTaskPanel}
           >
             {panelTarget.kind === "empty" ? (
@@ -3257,7 +3271,7 @@ export default function App() {
               <FilePreviewView
                 key={`${panelTarget.taskId}:${panelTarget.runId}:${panelTarget.referenceId}`}
                 state={filePreviewViewState}
-                onRefresh={refreshFilePreview}
+                onRetry={refreshFilePreview}
               />
             ) : panelTarget.kind === "review" && reviewMatchesTarget ? (
               <FileChangesView

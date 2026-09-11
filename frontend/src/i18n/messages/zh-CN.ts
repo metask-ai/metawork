@@ -606,11 +606,7 @@ export const zhCN: Record<MessageId, string> = {
   "file_preview.mode": "文件展示模式",
   "file_preview.rendered": "预览",
   "file_preview.source": "源码",
-  "file_preview.html_source_only":
-    "尚未支持 HTML 页面预览。当前显示源码，不执行脚本或加载资源。",
   "file_preview.retry": "重试",
-  "file_preview.current_content_notice":
-    "当前内容；可能不同于本次 Run 执行时的文件版本。",
   "file_preview.state.truncated": "预览内容已截断",
   "file_preview.state.redacted": "已隐藏已知敏感内容",
   "file_preview.state.missing": "文件已不可用",
@@ -688,7 +684,6 @@ export const zhCN: Record<MessageId, string> = {
   "task_panel.open": "打开右侧栏",
   "task_panel.tool": "工具详情",
   "task_panel.close": "关闭右侧栏",
-  "task_panel.current_file": "当前文件",
   "approval.response_required": "需要回复",
   "approval.allow_tool": "允许 {tool}？",
   "approval.arguments": "参数",
