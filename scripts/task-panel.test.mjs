@@ -70,7 +70,7 @@ const { useTaskPanelTarget } = await vite.ssrLoadModule(
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
-const { FileChangesView, FileChangeDiffView } = await vite.ssrLoadModule(
+const { FileChangesView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FileChangesView.tsx",
 );
 const { FilePreviewView } = await vite.ssrLoadModule(
@@ -227,6 +227,23 @@ test("expanded process shows bounded descriptions and progress without interpret
   );
   assert.equal(view.container.querySelector("script"), null);
 });
+
+function fileChange(overrides = {}) {
+  return {
+    id: "change-1",
+    order: "1",
+    kind: "modified",
+    status: "applied",
+    displayPath: "src/main.ts",
+    fromDisplayPath: null,
+    beforeBytes: "1",
+    afterBytes: "2",
+    diffAvailable: true,
+    diffComplete: true,
+    redacted: false,
+    ...overrides,
+  };
+}
 
 function task(overrides = {}) {
   return {
@@ -1410,6 +1427,7 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   const recorded = task({
     runs: [
       run({
+        tools: [technicalTool()],
         fileChanges: {
           observation: "complete",
           changes: [
@@ -1438,8 +1456,16 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     taskContentElement(recorded, "1", { fileChangesEnabled: true }),
   );
   assert.match(visible, />File changes</);
-  assert.match(visible, />1 files · 1 changes</);
+  assert.match(visible, />1 file</);
+  assert.doesNotMatch(visible, /1 changes/);
   assert.match(visible, />Review changes</);
+  assert.match(
+    visible,
+    /<button[^>]*>.*File changes.*Review changes.*<\/button>/,
+  );
+  assert.ok(
+    visible.indexOf(">File changes<") < visible.indexOf(">Work process<"),
+  );
 
   const incomplete = task({
     runs: [
@@ -1455,7 +1481,7 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   assert.doesNotMatch(incompleteMarkup, />Review changes</);
 });
 
-test("Task Panel review keeps repeated records and only mounts the active view", async () => {
+test("Task Panel review groups repeated records into one continuous file diff", async () => {
   const changes = [
     {
       id: "change-1",
@@ -1484,62 +1510,325 @@ test("Task Panel review keeps repeated records and only mounts the active view",
       redacted: false,
     },
   ];
-  let selected = null;
+  let loaded = null;
   const view = render(
     localizedView(
       createElement(FileChangesView, {
         observation: "incomplete",
         changes,
-        onSelect(change) {
-          selected = change;
+        diffs: {
+          "change-1": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -1 +1 @@\n-secret\n+safe",
+              complete: false,
+              redacted: true,
+            },
+          },
+          "change-2": { phase: "idle", diff: null },
+        },
+        onLoad(change) {
+          loaded = change;
         },
       }),
     ),
   );
 
-  assert.ok(screen.getByRole("navigation", { name: "Changed files" }));
+  assert.equal(screen.queryByRole("navigation"), null);
+  assert.equal(screen.queryByRole("heading", { name: "Review changes" }), null);
+  assert.equal(screen.queryByText("Recorded changes"), null);
   assert.ok(screen.getByRole("status"));
   assert.match(
     document.body.textContent,
     /Some file change records may be missing/,
   );
-  assert.match(document.body.textContent, /Change 1/);
-  assert.match(document.body.textContent, /Change 2/);
-  assert.equal(screen.queryByText("-secret"), null);
-
-  const user = userEvent.setup({ document: dom.window.document });
-  await user.click(
-    screen.getByRole("button", {
-      name: /src\/main\.zig Moved Change 2/,
-    }),
+  assert.doesNotMatch(document.body.textContent, /Change 1|Change 2/);
+  assert.equal(
+    document.querySelectorAll(".task-panel-change-section").length,
+    1,
   );
-  assert.equal(selected, changes[1]);
-
-  view.rerender(
-    localizedView(
-      createElement(FileChangeDiffView, {
-        state: {
-          observation: "incomplete",
-          selected: changes[0],
-          phase: "settled",
-          diff: {
-            status: "ready",
-            content: "@@ -1 +1 @@\n-secret\n+safe",
-            complete: false,
-            redacted: true,
-          },
-        },
-        onRefresh() {},
-      }),
-    ),
+  assert.equal(
+    document.querySelector(".task-panel-change-kind").dataset.kind,
+    "moved",
   );
-  assert.match(document.body.textContent, /Recorded diff/);
-  assert.match(document.body.textContent, /not a workspace net diff/);
+  assert.equal(
+    document.querySelector(".task-panel-change-kind > [aria-hidden=true]")
+      .textContent,
+    "R",
+  );
+  assert.equal(
+    document.querySelector(".task-panel-change-partial").title,
+    "The change may not have been fully applied",
+  );
   assert.match(document.body.textContent, /Recorded diff is incomplete/);
   assert.match(document.body.textContent, /Known sensitive content was hidden/);
   assert.match(document.body.textContent, /-secret/);
   assert.match(document.body.textContent, /\+safe/);
+  assert.equal(screen.queryByText("@@ -1 +1 @@"), null);
+  assert.match(document.body.textContent, /\+1−1/);
+  assert.ok(screen.getByRole("table", { name: "Recorded unified diff" }));
+  assert.ok(screen.getByLabelText("Old line 1"));
+  assert.ok(screen.getByLabelText("New line 1"));
+  assert.ok(document.querySelector('[data-kind="deletion"]'));
+  assert.ok(document.querySelector('[data-kind="addition"]'));
+
+  const user = userEvent.setup({ document: dom.window.document });
+  await user.click(
+    within(document.querySelector('[data-file-path="src/main.zig"]')).getByRole(
+      "button",
+      { name: "Load recorded diff" },
+    ),
+  );
+  assert.equal(loaded, changes[1]);
+  view.rerender(
+    localizedView(
+      createElement(FileChangesView, {
+        observation: "incomplete",
+        changes,
+        diffs: {
+          "change-1": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -1 +1 @@\n-secret\n+safe",
+              complete: false,
+              redacted: true,
+            },
+          },
+          "change-2": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -8 +8 @@\n-old name\n+new name",
+              complete: true,
+              redacted: false,
+            },
+          },
+        },
+        onLoad(change) {
+          loaded = change;
+        },
+      }),
+    ),
+  );
+  assert.equal(
+    document.querySelectorAll(".task-panel-change-section").length,
+    1,
+  );
+  assert.equal(
+    screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
+    1,
+  );
+  assert.match(document.body.textContent, /\+new name/);
+  assert.match(document.body.textContent, /\+2−2/);
+  assert.equal(screen.queryByText("Back to changes"), null);
   assert.doesNotMatch(document.body.textContent, /Accept|Reject|Revert|Stage/);
+  view.unmount();
+});
+
+test("file headers independently collapse their diff with pointer and keyboard", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const changes = [
+    fileChange({ id: "change-a", displayPath: "src/a.ts" }),
+    fileChange({
+      id: "change-b",
+      order: "2",
+      kind: "created",
+      displayPath: "src/b.ts",
+    }),
+    fileChange({
+      id: "change-c",
+      order: "3",
+      kind: "deleted",
+      displayPath: "src/c.ts",
+    }),
+  ];
+  render(
+    localizedView(
+      createElement(FileChangesView, {
+        observation: "complete",
+        changes,
+        diffs: {
+          "change-a": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -1 +1 @@\n-old a\n+new a",
+              complete: true,
+              redacted: false,
+            },
+          },
+          "change-b": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -1 +1 @@\n-old b\n+new b",
+              complete: true,
+              redacted: false,
+            },
+          },
+          "change-c": {
+            phase: "settled",
+            diff: {
+              status: "ready",
+              content: "@@ -1 +0,0 @@\n-old c",
+              complete: true,
+              redacted: false,
+            },
+          },
+        },
+        onLoad() {},
+      }),
+    ),
+  );
+
+  const first = screen.getByRole("button", { name: "src/a.ts" });
+  const second = screen.getByRole("button", { name: "src/b.ts" });
+  const third = screen.getByRole("button", { name: "src/c.ts" });
+  assert.equal(first.getAttribute("aria-expanded"), "true");
+  assert.equal(second.getAttribute("aria-expanded"), "true");
+  assert.equal(third.getAttribute("aria-expanded"), "true");
+  assert.deepEqual(
+    [...document.querySelectorAll(".task-panel-change-kind")].map(
+      (element) => element.firstElementChild.textContent,
+    ),
+    ["M", "A", "D"],
+  );
+  assert.equal(
+    screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
+    3,
+  );
+
+  await user.click(first);
+  assert.equal(first.getAttribute("aria-expanded"), "false");
+  assert.equal(second.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
+    2,
+  );
+  assert.ok(screen.getByText("+new b"));
+
+  first.focus();
+  await user.keyboard("{Enter}");
+  assert.equal(first.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
+    3,
+  );
+});
+
+test("continuous Review requests an idle record when its section nears the viewport", async () => {
+  const previousGlobal = globalThis.IntersectionObserver;
+  const previousWindow = window.IntersectionObserver;
+  const observers = [];
+  class TestIntersectionObserver {
+    constructor(callback, options) {
+      this.callback = callback;
+      this.options = options;
+      observers.push(this);
+    }
+    observe(element) {
+      this.element = element;
+    }
+    disconnect() {}
+  }
+  globalThis.IntersectionObserver = TestIntersectionObserver;
+  window.IntersectionObserver = TestIntersectionObserver;
+  let loaded = null;
+  try {
+    render(
+      localizedView(
+        createElement(FileChangesView, {
+          observation: "complete",
+          changes: [
+            {
+              id: "lazy-change",
+              order: "1",
+              kind: "created",
+              status: "applied",
+              displayPath: "src/lazy.ts",
+              fromDisplayPath: null,
+              beforeBytes: "0",
+              afterBytes: "1",
+              diffAvailable: true,
+              diffComplete: true,
+              redacted: false,
+            },
+          ],
+          diffs: { "lazy-change": { phase: "idle", diff: null } },
+          onLoad(change) {
+            loaded = change.id;
+          },
+        }),
+      ),
+    );
+    assert.equal(observers.length, 1);
+    assert.equal(observers[0].element.dataset.changeId, "lazy-change");
+    assert.ok(
+      observers[0].options.root.classList.contains("task-panel-review"),
+    );
+    await act(async () => observers[0].callback([{ isIntersecting: true }]));
+    assert.equal(loaded, "lazy-change");
+  } finally {
+    cleanup();
+    if (previousGlobal === undefined) delete globalThis.IntersectionObserver;
+    else globalThis.IntersectionObserver = previousGlobal;
+    if (previousWindow === undefined) delete window.IntersectionObserver;
+    else window.IntersectionObserver = previousWindow;
+  }
+});
+
+test("recorded diff failures expose only valid retry actions", () => {
+  const change = {
+    id: "change-1",
+    order: "1",
+    kind: "modified",
+    status: "applied",
+    displayPath: "src/main.ts",
+    fromDisplayPath: null,
+    beforeBytes: "1",
+    afterBytes: "2",
+    diffAvailable: true,
+    diffComplete: true,
+    redacted: false,
+  };
+  const diffView = (phase, diff) =>
+    renderToStaticMarkup(
+      localizedView(
+        createElement(FileChangesView, {
+          observation: "complete",
+          changes: [change],
+          diffs: { [change.id]: { phase, diff } },
+          onLoad() {},
+        }),
+      ),
+    );
+
+  assert.match(diffView("loading", null), /Loading recorded diff/);
+  assert.match(diffView("failed", null), /could not be loaded/);
+  assert.match(diffView("failed", null), />Retry</);
+  assert.match(
+    diffView("settled", {
+      status: "unavailable",
+      reason: "capacity",
+      content: "",
+    }),
+    /temporarily unavailable[\s\S]*>Retry</,
+  );
+  for (const [reason, message] of [
+    ["not_recorded", "No recorded diff is available"],
+    ["missing", "The recorded diff is no longer available"],
+    ["corrupt", "did not pass integrity checks"],
+  ]) {
+    const markup = diffView("settled", {
+      status: "unavailable",
+      reason,
+      content: "",
+    });
+    assert.match(markup, new RegExp(message));
+    assert.doesNotMatch(markup, />Retry</);
+  }
 });
 
 test("Task Panel labels current file content distinctly from recorded diffs", () => {
@@ -1717,7 +2006,7 @@ test("Escape dismissal and focus return preserve the real Task Panel opener", ()
   );
 });
 
-test("detail targets resolve exact identities and degrade invalid diff to its own list", () => {
+test("detail targets resolve exact identities for one continuous review", () => {
   const value = task({
     runs: [
       run({
@@ -1730,7 +2019,7 @@ test("detail targets resolve exact identities and degrade invalid diff to its ow
   for (const target of [
     { ...base, kind: "tool", toolId: "tool-1" },
     { ...base, kind: "preview", referenceId: "ref-a" },
-    { ...base, kind: "review", selectedChangeId: "change-a" },
+    { ...base, kind: "review" },
   ]) {
     assert.equal(resolveTaskPanelTarget(target, value, true), target);
     assert.equal(
@@ -1743,14 +2032,6 @@ test("detail targets resolve exact identities and degrade invalid diff to its ow
       "empty",
     );
   }
-  assert.deepEqual(
-    resolveTaskPanelTarget(
-      { ...base, kind: "review", selectedChangeId: "gone" },
-      value,
-      true,
-    ),
-    { ...base, kind: "review" },
-  );
   assert.equal(
     resolveTaskPanelTarget({ ...base, kind: "review" }, value, false).kind,
     "empty",
@@ -2024,9 +2305,8 @@ test("Conversation context only shows pressure; successful compaction removes th
   assert.equal(document.querySelector(".composer-context"), null);
 });
 
-test("detail pane has a close and optional review back action, never an overview or hidden roots", async () => {
-  let back = 0,
-    close = 0;
+test("detail pane has one close action and no review navigation layer", async () => {
+  let close = 0;
   const view = render(
     localizedView(
       createElement(
@@ -2034,7 +2314,6 @@ test("detail pane has a close and optional review back action, never an overview
         {
           title: "Review",
           attention: createElement("button", null, "Needs your attention"),
-          onBack: () => back++,
           onClose: () => close++,
         },
         createElement("p", null, "diff body"),
@@ -2043,8 +2322,7 @@ test("detail pane has a close and optional review back action, never an overview
   );
   assert.equal(screen.queryByRole("tablist"), null);
   assert.equal(screen.queryByText("Overview"), null);
-  fireEvent.click(screen.getByRole("button", { name: "Back to changes" }));
-  assert.equal(back, 1);
+  assert.equal(screen.queryByText("Back to changes"), null);
   view.rerender(
     localizedView(
       createElement(
@@ -2095,11 +2373,11 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
     observation: "complete",
     changes: [
       {
-        id: "change-a",
-        order: "1",
+        id: "change-b",
+        order: "2",
         kind: "modified",
         status: "applied",
-        displayPath: "a.txt",
+        displayPath: "b.txt",
         fromDisplayPath: null,
         beforeBytes: "1",
         afterBytes: "2",
@@ -2108,11 +2386,11 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
         redacted: false,
       },
       {
-        id: "change-b",
-        order: "2",
+        id: "change-a",
+        order: "1",
         kind: "modified",
         status: "applied",
-        displayPath: "b.txt",
+        displayPath: "a.txt",
         fromDisplayPath: null,
         beforeBytes: "1",
         afterBytes: "2",
@@ -2271,7 +2549,7 @@ function filePreviewOpener(path) {
   return screen.getByRole("button", { name });
 }
 
-test("permanent panel toggle opens an empty surface without overview or automatic reads", async (ctx) => {
+test("permanent panel toggle opens a continuous Review and clears it on close", async (ctx) => {
   const { snapshot, previews, diffs, publish } = await renderAppFixture(ctx);
   await screen.findByRole("button", { name: /First task/ });
   const toggle = screen.getByRole("button", { name: "Open side panel" });
@@ -2301,17 +2579,60 @@ test("permanent panel toggle opens an empty surface without overview or automati
   fireEvent.click(toggle);
   assert.ok(panel().getByText("No content to display here."));
   assert.equal(previews.length, 1);
-  fireEvent.click(screen.getByRole("button", { name: /Review changes/ }));
-  fireEvent.click(panel().getByRole("button", { name: /a.txt Modified/ }));
+  const reviewOpener = screen.getByRole("button", { name: /Review changes/ });
+  fireEvent.click(reviewOpener);
+  assert.equal(diffs.length, 1);
   assert.deepEqual(diffs[0].ids, ["3", "7", "change-a"]);
-  fireEvent.click(panel().getByRole("button", { name: "Back to changes" }));
-  assert.equal(
-    panel().queryByRole("button", { name: "Back to changes" }),
-    null,
+  assert.ok(panel().getByRole("heading", { name: "Review changes" }));
+  assert.equal(panel().queryByText("Recorded changes"), null);
+  assert.equal(panel().queryByRole("navigation"), null);
+  assert.equal(panel().queryByText("Back to changes"), null);
+  assert.deepEqual(
+    [...document.querySelectorAll(".task-panel-change-section")].map(
+      (element) => element.dataset.changeId,
+    ),
+    ["change-a", "change-b"],
   );
-  fireEvent.click(toggle);
+  await act(async () =>
+    diffs[0].resolve({
+      status: "unavailable",
+      reason: "capacity",
+      content: "",
+    }),
+  );
+  fireEvent.click(
+    within(document.querySelector('[data-change-id="change-a"]')).getByRole(
+      "button",
+      { name: "Retry" },
+    ),
+  );
+  assert.deepEqual(diffs[1].ids, ["3", "7", "change-a"]);
+  await act(async () =>
+    diffs[1].resolve({
+      status: "ready",
+      content: "@@ -1 +1 @@\n-old a\n+first a",
+      complete: true,
+      redacted: false,
+    }),
+  );
+  assert.ok(panel().getByText("+first a"));
+  fireEvent.click(
+    within(document.querySelector('[data-change-id="change-b"]')).getByRole(
+      "button",
+      { name: "Load recorded diff" },
+    ),
+  );
+  assert.deepEqual(diffs[2].ids, ["3", "7", "change-b"]);
+  const closeReview = panel().getByRole("button", { name: "Close side panel" });
+  closeReview.focus();
+  fireEvent.click(closeReview);
+  await act(
+    async () => new Promise((resolve) => window.requestAnimationFrame(resolve)),
+  );
+  assert.equal(document.activeElement === reviewOpener, true);
   assert.equal(document.querySelector("#task-panel"), null);
   fireEvent.click(toggle);
+  assert.ok(panel().getByText("No content to display here."));
   snapshot.tasks[0].runs = [];
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
@@ -2319,10 +2640,10 @@ test("permanent panel toggle opens an empty surface without overview or automati
   assert.equal(toggle.disabled, false);
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
   await act(async () =>
-    diffs[0].resolve({
-      state: "missing",
-      content: "",
-      truncated: false,
+    diffs[2].resolve({
+      status: "ready",
+      content: "+late b",
+      complete: true,
       redacted: false,
     }),
   );
@@ -2387,7 +2708,7 @@ test("layout visibility and width survive Task changes, invalidation, and non-Ta
   cleanup();
 });
 
-test("App rejects late preview/diff responses after close, replacement, and Task switch", async (ctx) => {
+test("App keeps per-record diffs independent and rejects stale review responses", async (ctx) => {
   const { snapshot, previews, diffs, publish } = await renderAppFixture(ctx);
   const firstButton = await screen.findByRole("button", { name: /First task/ });
   fireEvent.click(firstButton);
@@ -2422,22 +2743,19 @@ test("App rejects late preview/diff responses after close, replacement, and Task
   await act(async () => previews[1].reject(new Error("late failure")));
   assert.equal(document.querySelector("#task-panel"), null);
   openPreview();
-  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  fireEvent.click(screen.getByRole("button", { name: /Review changes/ }));
   assert.equal(document.querySelector(".task-panel-code"), null);
+  assert.equal(diffs.length, 1);
+  assert.deepEqual(diffs[0].ids, ["3", "7", "change-a"]);
   await act(async () => previews[2].resolve(ready("late after review")));
   assert.equal(screen.queryByText("late after review"), null);
   fireEvent.click(
-    within(document.querySelector("#task-panel")).getByRole("button", {
-      name: /a.txt Modified/,
-    }),
+    within(document.querySelector('[data-change-id="change-b"]')).getByRole(
+      "button",
+      { name: "Load recorded diff" },
+    ),
   );
-  assert.deepEqual(diffs[0].ids, ["3", "7", "change-a"]);
-  fireEvent.click(screen.getByRole("button", { name: "Back to changes" }));
-  fireEvent.click(
-    within(document.querySelector("#task-panel")).getByRole("button", {
-      name: /b.txt Modified/,
-    }),
-  );
+  assert.deepEqual(diffs[1].ids, ["3", "7", "change-b"]);
   await act(async () =>
     diffs[1].resolve({
       status: "ready",
@@ -2446,6 +2764,7 @@ test("App rejects late preview/diff responses after close, replacement, and Task
       redacted: false,
     }),
   );
+  assert.ok(screen.getByText("+chosen b"));
   await act(async () =>
     diffs[0].resolve({
       status: "ready",
@@ -2454,17 +2773,20 @@ test("App rejects late preview/diff responses after close, replacement, and Task
       redacted: false,
     }),
   );
+  assert.ok(screen.getByText("+late a"));
   assert.ok(screen.getByText("+chosen b"));
-  assert.equal(screen.queryByText("+late a"), null);
-  // Snapshot invalidation returns an invalid diff to its original, still valid list.
-  snapshot.tasks[0].runs[0].fileChanges.changes.pop();
+  // Snapshot invalidation prunes one record without closing the remaining Review.
+  snapshot.tasks[0].runs[0].fileChanges.changes =
+    snapshot.tasks[0].runs[0].fileChanges.changes.filter(
+      (change) => change.id !== "change-b",
+    );
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
   await waitFor(() => assert.ok(screen.queryByText("+chosen b") === null));
-  assert.ok(
-    within(document.querySelector("#task-panel")).getByRole("navigation", {
-      name: "Changed files",
-    }),
+  assert.ok(screen.getByText("+late a"));
+  assert.equal(
+    document.querySelectorAll(".task-panel-change-section").length,
+    1,
   );
   openPreview();
   fireEvent.click(screen.getByRole("button", { name: /Second task/ }));

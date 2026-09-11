@@ -833,9 +833,9 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的两�
 - Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后只读展示固定 permission profile（受 capability gate 控制）与创建时 MCP 三态，不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
 - pendingUi 派生“需要处理”定位入口，不存已读或自动展开记忆；只有原始主区审批提供操作按钮。用户点击定位时，overlay 先关闭再滚动/聚焦原请求；停靠面板保持。新请求自身不触发滚动、焦点移动或面板开合，全宽覆盖时定位入口仍可达。
 
-右栏显隐不属于内容目标。内容可以为空、当前文件预览、指定 Tool 详情或同 Run 修改审查，各内容互斥挂载；未选择有效对象时呈现通用空态。文件预览以对话内联引用为主要入口并保留工作过程的辅助入口，Tool 详情保留对应操作入口，记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。目标只保存身份，不复制 Tool 或 Snapshot 正文。Review 包含记录列表和可选的单条 recorded diff，返回差异来源列表不保留隐藏 diff 正文；不维护并行标签或旧概览兼容开关。
+右栏显隐不属于内容目标。内容可以为空、当前文件预览、指定 Tool 详情或同 Run 修改审查，各内容互斥挂载；未选择有效对象时呈现通用空态。文件预览以对话内联引用为主要入口并保留工作过程的辅助入口，Tool 详情保留对应操作入口，记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。目标只保存身份，不复制 Tool 或 Snapshot 正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；不建立记录列表、单条详情页、返回层级、并行标签或旧概览兼容开关。
 
-打开任何对象替换当前模式；差异可返回该 Run 的有效 Review 列表。关闭右栏清空目标和正文；再次打开保持空态，只有显式选择具体对象才展示详情，不恢复旧正文。切换 Task 清空旧目标，右栏保持用户已选择的显隐；无 Task 或离开任务页面时呈现空态。普通 Run 开始、终态和 Snapshot revision 不关闭仍有效的详情。失效 diff 回到仍有效的原 Review 列表，列表或其他目标失效则清空目标；目标有效性不控制右栏显隐。
+打开任何对象替换当前模式。关闭右栏清空目标和正文；再次打开保持空态，只有显式选择具体对象才展示详情，不恢复旧正文。切换 Task 清空旧目标，右栏保持用户已选择的显隐；无 Task 或离开任务页面时呈现空态。普通 Run 开始、终态和 Snapshot revision 不关闭仍有效的详情。Review 中单条记录失效只移除该记录及正文；所属 Run、全部记录或其他目标失效才清空目标；目标有效性不控制右栏显隐。
 
 身份有效性必须在渲染前判定，不能仅依赖 effect 清理。文件读取与 diff 请求继续使用精确身份和递增 request generation；关闭、替换、Task 切换与目标失效后，晚到成功或失败都不能覆盖新内容。非活动正文卸载、已读取 bytes 清除；不声称已取消 Host IO。显式重开/刷新重新请求。
 
@@ -864,11 +864,12 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
 > Capability：File Changes **当前**；typed Output **未来**。File Changes 只消费 AgentCore typed `file_changes` observation，不能从 Tool 文本、Bash 输出、Git、文件后缀或 File Preview reference 推断。它是已记录副作用的审查视图，不承诺 Workspace 当前净状态。
 
-- 每个 Run 在 Assistant response 后显示紧凑的“文件更改”摘要。至少一条记录时显示唯一文件数、修改记录数和“审查更改”；`incomplete` 且零记录时只显示明确警告，不提供空 Review 动作；其他零记录状态不占位；
-- “审查更改”在 Task Panel 打开 Review 列表，只显示该 Run 的 recorded changes 索引；选择一条记录后在同一审查流程内按需显示 recorded diff。关闭面板、返回列表或切换对象/Task，目标 Run/记录消失或后续请求开始，都必须使旧 diff Promise stale，不能覆盖新选择；
-- Review 按 `displayPath` 视觉分组，同一路径多次修改保留独立记录和稳定顺序；created、modified、deleted、moved 与 partial 使用文字和图标，moved 同时显示 `from → to`，不能只靠颜色；
-- diff 只通过 `metawork.files.diff` 按需读取 Product 已记录的 credential-safe unified diff。`diffComplete=false`、redacted、observation incomplete、not recorded、capacity、missing 与 corrupt 都显示明确说明；正文使用等宽文本并在自身区域横向滚动；
-- 第一版不合并为 Git 净 diff，不汇总可能失真的 Run 级增删行数，不扫描 Workspace，不重读当前文件，也不提供 Accept/Reject、revert、stage 或 Output 标记；
+- 每个 Run 在 Assistant response 后、terminal“工作过程”之前显示紧凑的单行“文件更改”入口，使结果审查保持主于次要技术证据。至少一条记录时，整行使用一个原生按钮，只显示中性 diff 图标、“文件更改 · 唯一文件数”和“审查更改”动作；不使用卡片、图标底板、过程竖线或第二行状态，也不暴露内部修改记录次数。`incomplete` 在同一行明确提示记录可能不完整；`incomplete` 且零记录时只显示非交互警告，不提供空 Review 动作；其他零记录状态不占位；
+- “审查更改”在既有右侧 Task Panel 打开，不建立独立 route 或占用整个工作区。Review 绑定一个明确 Task + Run，Task Panel 顶栏直接使用“审查更改”标题，下面立即进入按文件首次出现顺序排列的连续差异文档；不重复显示类型、标题或常规说明区。打开即请求并展示首个文件的首条 diff，同文件后续记录在该文件区块接近可见区域时按稳定 `order` 逐条接入，后续文件纵向衔接，不经过列表页、单条详情页或返回动作。打开时显式展开右栏；关闭或 Escape 返回真实入口并恢复焦点，入口失效时回到稳定 Task Panel 开关；
+- 每个文件使用一个克制文件头区分身份和边界：文件名前以 Git 惯例的 `A/M/D/R` 等宽字母和对应语义色表示聚合后的 created/modified/deleted/moved，不再重复状态文字；partial 是正交的异常事实，只在文件名后显示 warning 图标，并以“更改可能未完整应用”的可访问说明解释。文件头继续显示完整可取得的 `displayPath`、moved 的 `from → to` 与增删摘要，不显示同路径记录序号。文件默认展开，整个文件头是带 `aria-expanded` 的原生按钮，点击、Enter 或 Space 只折叠/展开所属文件的 diff、加载状态和错误说明，文件身份及增删摘要保持可见；折叠状态只属于当前挂载的 Review，不持久化，也不触发尚未开始的按需读取。ready 后可从已经汇入该文件区块的 recorded diff 派生增删行数，但不得据此宣称 Workspace、Git 或 Run 的当前净变化。区块使用分隔线形成连续文档，不包装成可导航卡片；底层多条记录、稳定顺序、独立读取失败与 stale identity 不得因呈现聚合而丢失。停靠、左栏互斥和窄窗全宽 overlay 仅沿用 Task Panel 的统一响应式规则；
+- diff 只通过 `metawork.files.diff` 读取 Product 已记录的 credential-safe unified diff。首条立即读取；其余区块仅在进入或接近 Review 可见区域时各自按需读取，不因打开而批量预取。已读取正文只在当前挂载的 Review 内并存，不形成跨次打开的 Renderer cache。每条请求绑定精确 `taskId + runId + changeId + request generation`；关闭右栏、切换对象/Task、目标 Run/记录消失或同记录后续请求开始，都必须使对应旧 Promise stale，不能覆盖其他记录或新 Review；
+- ready diff 使用等宽 unified-diff 视图，显示新旧双行号与整行增删背景；Renderer 使用 hunk header 计算行号和可证明的未修改行缺口，但不重复显示原始 `@@ … @@` 文本。长行在正文区域横向滚动，路径可截断但必须能取得完整值。malformed 或未识别行安全降级为原文，不执行正文或依赖颜色表达唯一语义；
+- `diffComplete=false`、redacted、observation incomplete、not recorded、capacity、missing 与 corrupt 都显示明确说明；ready artifact 不提供刷新，只有瞬时 capacity 或普通请求失败提供重试。第一版不合并为累计或 Git 净 diff，不汇总可能失真的 Run 级增删行数，不扫描 Workspace，不重读当前文件，也不提供语法 token 高亮、Accept/Reject、revert、stage 或 Output 标记；
 - `Outputs` 仍指用户关心的最终交付文件、链接或结构化结果。不能仅凭 created 记录自动判断它是 Output；需要未来 typed Output 标记或用户明确标记。
 
 ### 12.3 Output 卡片
@@ -1289,7 +1290,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - one-time permission；
 - permission 请求只针对当前 authority 未覆盖且执行层能兑现的决定；Workspace picker、Task profile、MCP/Skill authority 与系统授权不重复请求；
 - capability 未验收时 Plan、plan approval、跨 Session 持久授权与 Output 完全不出现；File Changes 只在 Host `typedFileChanges=true` 时出现；
-- File Changes 覆盖 created/modified/deleted/moved、applied/partial、同路径多次修改、嵌套 Agent 记录、diff incomplete/redacted、observation incomplete、零记录丢失、missing/corrupt/capacity、Task 切换 stale response，以及宽窗/窄窗、键盘焦点和无颜色状态；
+- File Changes 覆盖 created/modified/deleted/moved、applied/partial、同路径多记录聚合且底层身份独立、嵌套 Agent 记录、diff incomplete/redacted、observation incomplete、零记录丢失、missing/corrupt/capacity、Task 切换 stale response，以及宽窗/窄窗、键盘焦点和无颜色状态；
 - 对应 capability 未来验收后，Plan 创建/更新、计划确认与 Output 的目标状态按各章节启用；
 - 后台 Task 通知；
 - Renderer reload 和视图重新同步。
@@ -1314,7 +1315,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 长英文、中文和 pseudo-locale 不溢出；
 - `queued / running / waiting_user` 的可见 Stop 只出现在 Composer 发送位置；顶部命令栏不重复出现，`stopping` 阻止重复请求并等待真实 terminal；
 - 右侧栏常驻开关可由键盘操作，无 Task 时也能独立开合；Task 切换、删除、目标失效不改变布局显隐或宽度；任务信息纯图标、上下文压力提醒与审批定位入口可由键盘操作，缺少 pressure 时不显示上下文入口；Run 用量和历史 auto compact 不独立展示；
-- 右侧仅挂载一个对象详情；关闭回到真实 opener，opener 失效时回到稳定 Task Panel 开关；Review 差异可返回同 Run 列表；嵌套控件优先消费 Escape；
+- 右侧仅挂载一个 Tool、当前文件详情或同 Run File Changes Review；关闭回到真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 关闭右栏并回到真实对话入口；
 - 普通 Run start/terminal、新 pendingUi 和 usage revision 不自动开合右栏、不抢焦点；切换 Task、关闭或对象失效不泄漏旧详情和已读取 bytes，晚到 Promise 不覆盖新对象；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Task Panel 关闭或 overlay 显示后功能不丢失；停靠态始终保留至少 480 px 中央工作面，低于 820 px 与左栏互斥，低于 620 px 使用全宽 overlay。
 - Windows Renderer 窗口按钮在登录页与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
