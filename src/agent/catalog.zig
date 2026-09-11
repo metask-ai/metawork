@@ -89,14 +89,45 @@ pub const Acquisition = struct {
     }
 };
 
+pub const Source = struct {
+    canonical_root: []const u8,
+    scope: SourceScope,
+    source_instance_id: []const u8,
+};
+
+pub const QueryTarget = union(enum) {
+    /// The existing default-only management view. The current SDK has no
+    /// personal-only discovery mode; additional sources are rejected here.
+    management,
+    workspace: struct {
+        canonical_root: []const u8,
+        epoch: []const u8,
+    },
+};
+
 pub const Query = struct {
-    workspace_root: []const u8,
     canonical_user_home: []const u8,
-    workspace_epoch: []const u8,
+    target: QueryTarget,
+    additional_sources: []const Source = &.{},
+
+    pub fn workspaceRoot(self: Query) []const u8 {
+        return switch (self.target) {
+            .management => self.canonical_user_home,
+            .workspace => |workspace| workspace.canonical_root,
+        };
+    }
+
+    pub fn workspaceEpoch(self: Query) []const u8 {
+        return switch (self.target) {
+            .management => "",
+            .workspace => |workspace| workspace.epoch,
+        };
+    }
 };
 
 pub const Error = error{
     InvalidCatalogQuery,
+    CatalogSourcesUnsupported,
     InvalidCatalogDescriptor,
     DuplicateCatalogIdentity,
     SkillCatalogInvalid,
@@ -116,6 +147,7 @@ const LeaseStorage = struct {
     api: sdk.Api,
     owner: *anyopaque,
     raw: *wire.SkillCatalogHandle,
+    target: std.meta.Tag(QueryTarget),
     workspace_root: []u8,
     canonical_user_home: []u8,
     workspace_epoch: []u8,
@@ -128,13 +160,28 @@ pub fn query(
     owner: *anyopaque,
     input: Query,
 ) (Error || std.mem.Allocator.Error)!Acquisition {
-    if (!validQuery(input)) return error.InvalidCatalogQuery;
+    try validateQuery(input);
+
+    const sources = try allocator.alloc(wire.SkillSourceV1, input.additional_sources.len);
+    defer allocator.free(sources);
+    for (input.additional_sources, sources) |source, *encoded| {
+        encoded.* = std.mem.zeroes(wire.SkillSourceV1);
+        encoded.struct_size = @sizeOf(wire.SkillSourceV1);
+        encoded.scope_code = switch (source.scope) {
+            .user => wire.SKILL_SOURCE_USER,
+            .workspace => wire.SKILL_SOURCE_WORKSPACE,
+        };
+        encoded.root = sdk.bytesView(source.canonical_root);
+        encoded.source_instance_id = sdk.bytesView(source.source_instance_id);
+    }
 
     var query_input = std.mem.zeroes(wire.SkillCatalogQueryV1);
     query_input.struct_size = @sizeOf(wire.SkillCatalogQueryV1);
-    query_input.workspace_root = sdk.bytesView(input.workspace_root);
+    query_input.workspace_root = sdk.bytesView(input.workspaceRoot());
     query_input.workspace_home = sdk.bytesView(input.canonical_user_home);
-    query_input.workspace_epoch = sdk.bytesView(input.workspace_epoch);
+    query_input.workspace_epoch = sdk.bytesView(input.workspaceEpoch());
+    query_input.additional_sources = if (sources.len == 0) null else sources.ptr;
+    query_input.additional_source_count = @intCast(sources.len);
 
     var raw: ?*wire.SkillCatalogHandle = null;
     var descriptor = emptyOwnedBytes();
@@ -211,14 +258,15 @@ pub fn belongsTo(lease: *const Lease, owner: *const anyopaque) bool {
     return leaseStorageConst(lease).owner == owner;
 }
 
-pub fn matches(
+pub fn matchesSession(
     lease: *const Lease,
     workspace_root: []const u8,
     canonical_user_home: []const u8,
     workspace_epoch: []const u8,
 ) bool {
     const owned = leaseStorageConst(lease);
-    return std.mem.eql(u8, owned.workspace_root, workspace_root) and
+    return owned.target == .workspace and
+        std.mem.eql(u8, owned.workspace_root, workspace_root) and
         std.mem.eql(u8, owned.canonical_user_home, canonical_user_home) and
         std.mem.eql(u8, owned.workspace_epoch, workspace_epoch);
 }
@@ -335,20 +383,21 @@ fn createLease(
 ) std.mem.Allocator.Error!*Lease {
     const owned = try allocator.create(LeaseStorage);
     errdefer allocator.destroy(owned);
-    const workspace_root = try allocator.dupe(u8, input.workspace_root);
+    const workspace_root = try allocator.dupe(u8, input.workspaceRoot());
     errdefer allocator.free(workspace_root);
     const canonical_user_home = try allocator.dupe(
         u8,
         input.canonical_user_home,
     );
     errdefer allocator.free(canonical_user_home);
-    const workspace_epoch = try allocator.dupe(u8, input.workspace_epoch);
+    const workspace_epoch = try allocator.dupe(u8, input.workspaceEpoch());
     errdefer allocator.free(workspace_epoch);
     owned.* = .{
         .allocator = allocator,
         .api = api,
         .owner = owner,
         .raw = raw,
+        .target = std.meta.activeTag(input.target),
         .workspace_root = workspace_root,
         .canonical_user_home = canonical_user_home,
         .workspace_epoch = workspace_epoch,
@@ -356,12 +405,31 @@ fn createLease(
     return @ptrCast(owned);
 }
 
-fn validQuery(input: Query) bool {
-    return input.workspace_root.len != 0 and
-        input.canonical_user_home.len != 0 and
-        std.unicode.utf8ValidateSlice(input.workspace_root) and
-        std.unicode.utf8ValidateSlice(input.canonical_user_home) and
-        std.unicode.utf8ValidateSlice(input.workspace_epoch);
+/// Validate the bounded input before any filesystem traversal or wire allocation.
+pub fn validateQuery(input: Query) Error!void {
+    if (input.additional_sources.len > wire.MAX_SKILL_SOURCES_V1)
+        return error.CatalogResourceLimit;
+    var remaining: u64 = wire.MAX_SESSION_METADATA_BYTES_V1;
+    try chargeText(&remaining, input.canonical_user_home, true);
+    try chargeText(&remaining, input.workspaceRoot(), true);
+    try chargeText(&remaining, input.workspaceEpoch(), false);
+    if (!std.fs.path.isAbsolute(input.canonical_user_home) or
+        !std.fs.path.isAbsolute(input.workspaceRoot())) return error.InvalidCatalogQuery;
+    for (input.additional_sources) |source| {
+        try chargeText(&remaining, source.canonical_root, true);
+        try chargeText(&remaining, source.source_instance_id, true);
+        if (!std.fs.path.isAbsolute(source.canonical_root)) return error.InvalidCatalogQuery;
+    }
+    if (input.target == .management and input.additional_sources.len != 0)
+        return error.CatalogSourcesUnsupported;
+}
+
+fn chargeText(remaining: *u64, value: []const u8, nonempty: bool) Error!void {
+    if (value.len > remaining.*) return error.CatalogResourceLimit;
+    remaining.* -= value.len;
+    if ((nonempty and value.len == 0) or
+        std.mem.indexOfScalar(u8, value, 0) != null or
+        !std.unicode.utf8ValidateSlice(value)) return error.InvalidCatalogQuery;
 }
 
 fn catalogStatusError(status: sdk.Status) Error {
@@ -397,14 +465,10 @@ fn releaseOwned(api: sdk.Api, buffer: *wire.OwnedBytesV1) void {
 }
 
 test "session-independent catalog queries may omit an external epoch" {
-    try std.testing.expect(validQuery(.{
-        .workspace_root = "/home/metawork",
-        .canonical_user_home = "/home/metawork",
-        .workspace_epoch = "",
-    }));
-    try std.testing.expect(!validQuery(.{
-        .workspace_root = "",
-        .canonical_user_home = "/home/metawork",
-        .workspace_epoch = "",
+    const root = if (@import("builtin").os.tag == .windows) "C:\\metawork" else "/home/metawork";
+    try validateQuery(.{ .canonical_user_home = root, .target = .management });
+    try std.testing.expectError(error.InvalidCatalogQuery, validateQuery(.{
+        .canonical_user_home = root,
+        .target = .{ .workspace = .{ .canonical_root = "", .epoch = "" } },
     }));
 }

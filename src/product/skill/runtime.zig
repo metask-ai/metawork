@@ -151,9 +151,14 @@ const CatalogJob = struct {
         );
         std.debug.assert(claimed == null);
         self.outcome = if (self.catalog_port.query(.{
-            .workspace_root = self.canonical_root,
             .canonical_user_home = self.canonical_user_home,
-            .workspace_epoch = self.epoch_token,
+            .target = switch (self.scope) {
+                .personal => .management,
+                .workspace => .{ .workspace = .{
+                    .canonical_root = self.canonical_root,
+                    .epoch = self.epoch_token,
+                } },
+            },
         })) |acquisition|
             .{ .success = acquisition }
         else |_|
@@ -1429,12 +1434,12 @@ const TestHarness = struct {
     ) anyerror!agent.CatalogAcquisition {
         const self: *TestHarness = @ptrCast(@alignCast(context));
         self.query_count += 1;
-        std.debug.assert(input.workspace_root.len <= self.last_root.len);
-        std.debug.assert(input.workspace_epoch.len <= self.last_epoch.len);
-        @memcpy(self.last_root[0..input.workspace_root.len], input.workspace_root);
-        self.last_root_len = input.workspace_root.len;
-        @memcpy(self.last_epoch[0..input.workspace_epoch.len], input.workspace_epoch);
-        self.last_epoch_len = input.workspace_epoch.len;
+        std.debug.assert(input.workspaceRoot().len <= self.last_root.len);
+        std.debug.assert(input.workspaceEpoch().len <= self.last_epoch.len);
+        @memcpy(self.last_root[0..input.workspaceRoot().len], input.workspaceRoot());
+        self.last_root_len = input.workspaceRoot().len;
+        @memcpy(self.last_epoch[0..input.workspaceEpoch().len], input.workspaceEpoch());
+        self.last_epoch_len = input.workspaceEpoch().len;
         return error.QueryFailed;
     }
 

@@ -48,6 +48,8 @@ pub const CatalogProjection = catalog.Projection;
 pub const CatalogLease = catalog.Lease;
 pub const CatalogAcquisition = catalog.Acquisition;
 pub const CatalogQuery = catalog.Query;
+pub const CatalogSource = catalog.Source;
+pub const CatalogQueryTarget = catalog.QueryTarget;
 pub const McpCatalogProjection = mcp_catalog.Projection;
 pub const McpCatalogServer = mcp_catalog.Server;
 pub const McpCatalogTool = mcp_catalog.Tool;
@@ -409,6 +411,7 @@ pub const Error = error{
     InvalidWorkspace,
     WorkspaceNotTrusted,
     InvalidCatalogQuery,
+    CatalogSourcesUnsupported,
     InvalidCatalogDescriptor,
     DuplicateCatalogIdentity,
     SkillCatalogInvalid,
@@ -871,7 +874,7 @@ pub const Session = struct {
         skill_policy: SkillPolicyInput,
     ) (Error || std.mem.Allocator.Error)!void {
         if (!catalog.belongsTo(lease, self.agent_runtime) or
-            !catalog.matches(
+            !catalog.matchesSession(
                 lease,
                 self.workspace_root,
                 self.workspace_home,
