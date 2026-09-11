@@ -674,9 +674,9 @@ export const enUS = {
     "The file changed while it was being read. Try again.",
   "file_preview.state.error": "File preview failed",
   "file_changes.title": "File changes",
-  "file_changes.summary": "Changed files: {fileCount}",
-  "file_changes.summary_incomplete":
-    "Changed files: {fileCount} · the record may be incomplete",
+  "file_changes.file_count.one": "{fileCount} file",
+  "file_changes.file_count.other": "{fileCount} files",
+  "file_changes.incomplete_label": "Record may be incomplete",
   "file_changes.incomplete_empty": "The file change record may be incomplete",
   "file_changes.review": "Review changes",
   "file_changes.incomplete_notice":

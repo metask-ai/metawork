@@ -1204,6 +1204,7 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
   const recorded = task({
     runs: [
       run({
+        tools: [technicalTool()],
         fileChanges: {
           observation: "complete",
           changes: [
@@ -1232,9 +1233,16 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     taskContentElement(recorded, "1", { fileChangesEnabled: true }),
   );
   assert.match(visible, />File changes</);
-  assert.match(visible, />Changed files: 1</);
+  assert.match(visible, />1 file</);
   assert.doesNotMatch(visible, /1 changes/);
   assert.match(visible, />Review changes</);
+  assert.match(
+    visible,
+    /<button[^>]*>.*File changes.*Review changes.*<\/button>/,
+  );
+  assert.ok(
+    visible.indexOf(">File changes<") < visible.indexOf(">Work process<"),
+  );
 
   const incomplete = task({
     runs: [
@@ -2383,7 +2391,7 @@ test("App keeps per-record diffs independent and rejects stale review responses"
   await act(async () => previews[1].reject(new Error("late failure")));
   assert.equal(document.querySelector("#task-panel"), null);
   openPreview();
-  fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+  fireEvent.click(screen.getByRole("button", { name: /Review changes/ }));
   assert.equal(document.querySelector(".task-panel-code"), null);
   assert.equal(diffs.length, 1);
   assert.deepEqual(diffs[0].ids, ["3", "7", "change-a"]);

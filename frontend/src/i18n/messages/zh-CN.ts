@@ -615,8 +615,9 @@ export const zhCN: Record<MessageId, string> = {
   "file_preview.state.changing": "读取期间文件发生变化，请重试。",
   "file_preview.state.error": "文件预览失败",
   "file_changes.title": "文件更改",
-  "file_changes.summary": "已更改 {fileCount} 个文件",
-  "file_changes.summary_incomplete": "已更改 {fileCount} 个文件 · 记录可能不完整",
+  "file_changes.file_count.one": "{fileCount} 个文件",
+  "file_changes.file_count.other": "{fileCount} 个文件",
+  "file_changes.incomplete_label": "记录可能不完整",
   "file_changes.incomplete_empty": "文件修改记录可能不完整",
   "file_changes.review": "审查更改",
   "file_changes.incomplete_notice":

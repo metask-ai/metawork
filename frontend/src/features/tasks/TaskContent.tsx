@@ -384,6 +384,14 @@ export function TaskContent({
             )}
             {!presentation.active && (
               <>
+                {fileChangesEnabled && run.fileChanges && (
+                  <RunFileChangesSummary
+                    fileChanges={run.fileChanges}
+                    onReview={(opener) =>
+                      onReviewFileChanges(task.id, run.id, opener)
+                    }
+                  />
+                )}
                 <RunProcess
                   presentation={presentation}
                   expanded={disclosure.expanded}
@@ -395,14 +403,6 @@ export function TaskContent({
                     onPreviewFile(task.id, run.id, reference, opener)
                   }
                 />
-                {fileChangesEnabled && run.fileChanges && (
-                  <RunFileChangesSummary
-                    fileChanges={run.fileChanges}
-                    onReview={(opener) =>
-                      onReviewFileChanges(task.id, run.id, opener)
-                    }
-                  />
-                )}
               </>
             )}
             {presentation.showTerminalNotice && terminal && (
