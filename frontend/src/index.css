@@ -6347,16 +6347,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   white-space: nowrap;
 }
 
-.task-list-meta {
-  display: block;
-  overflow: hidden;
-  margin-top: 4px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .task-signal {
   display: grid;
   width: 18px;

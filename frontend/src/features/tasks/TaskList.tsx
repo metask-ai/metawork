@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 
-import type { TaskView, WorkspaceView } from "../../bridge/contracts.ts";
+import type { TaskView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
@@ -10,14 +10,12 @@ import {
   taskCompletionNotificationKey,
   taskDisplayState,
   taskSignals,
-  workspaceDirectoryLabel,
 } from "../../workbench/selectors.ts";
 
 export type TaskMenuAction = "rename" | "archive" | "delete";
 
 export function TaskList({
   tasks,
-  workspaces,
   activeTaskId,
   showArchived,
   onSelectTask,
@@ -27,7 +25,6 @@ export function TaskList({
   synchronized = true,
 }: {
   tasks: TaskView[];
-  workspaces: WorkspaceView[];
   activeTaskId: string | null;
   showArchived: boolean;
   onSelectTask: (id: string) => void;
@@ -48,25 +45,6 @@ export function TaskList({
     0,
   );
   const archivedCount = tasks.filter((task) => task.archived).length;
-  const visibleTasks = groupedTasks.flatMap((group) => group.tasks);
-  const titleCounts = new Map<string, number>();
-  for (const task of visibleTasks) {
-    const title = task.title.trim();
-    if (title) titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1);
-  }
-  const workspacesById = new Map(
-    workspaces.map((workspace) => [workspace.id, workspace]),
-  );
-  const workspaceContextByTaskId = new Map<string, string>();
-  for (const task of visibleTasks) {
-    if ((titleCounts.get(task.title.trim()) ?? 0) < 2) continue;
-    const workspace = workspacesById.get(task.workspaceId);
-    if (!workspace) continue;
-    workspaceContextByTaskId.set(
-      task.id,
-      workspaceDirectoryLabel(workspace, t("workspace.default_directory")),
-    );
-  }
 
   const menuTask =
     menuTaskId === null
@@ -138,14 +116,6 @@ export function TaskList({
                   )}
                 />
               </span>
-              {workspaceContextByTaskId.has(task.id) && (
-                <span
-                  className="task-list-meta"
-                  title={workspaceContextByTaskId.get(task.id)}
-                >
-                  {workspaceContextByTaskId.get(task.id)}
-                </span>
-              )}
             </button>
           ))}
         </section>

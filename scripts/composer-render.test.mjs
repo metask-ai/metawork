@@ -323,7 +323,7 @@ function renderNewTaskView(composer = null, overrides = {}) {
   );
 }
 
-function renderTaskList(tasks, workspaces = []) {
+function renderTaskList(tasks) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -336,7 +336,6 @@ function renderTaskList(tasks, workspaces = []) {
       },
       createElement(TaskList, {
         tasks,
-        workspaces,
         activeTaskId: null,
         showArchived: false,
         onSelectTask() {},
@@ -825,7 +824,7 @@ test("Task list shows tasks from different workspaces without workspace controls
   assert.doesNotMatch(markup, /workspace-card|workspace-picker|>Add</);
 });
 
-test("Task list disambiguates duplicate titles with their own paths", () => {
+test("Task list keeps duplicate titles free of workspace metadata", () => {
   const task = (id, workspaceId) => ({
     id,
     title: "Review changes",
@@ -843,22 +842,14 @@ test("Task list disambiguates duplicate titles with their own paths", () => {
     pendingUi: null,
     uiHistory: [],
   });
-  const markup = renderTaskList(
-    [task("2", "workspace-a"), task("1", "workspace-b")],
-    [
-      {
-        id: "workspace-a",
-        kind: "manual",
-        canonicalRoot: "/repo/alpha",
-      },
-      {
-        id: "workspace-b",
-        kind: "manual",
-        canonicalRoot: "/repo/beta",
-      },
-    ],
-  );
+  const markup = renderTaskList([
+    task("2", "workspace-a"),
+    task("1", "workspace-b"),
+  ]);
 
-  assert.match(markup, /\/repo\/alpha/);
-  assert.match(markup, /\/repo\/beta/);
+  assert.equal((markup.match(/Review changes/g) ?? []).length, 2);
+  assert.doesNotMatch(
+    markup,
+    /task-list-meta|\/repo\/alpha|\/repo\/beta|Default/,
+  );
 });

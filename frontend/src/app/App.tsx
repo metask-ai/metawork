@@ -3209,7 +3209,6 @@ export default function App() {
                 )}
               <TaskList
                 tasks={navigableTaskItems}
-                workspaces={snapshot.workspaces}
                 activeTaskId={
                   route === "workbench" && activeTask !== null
                     ? activeTask.id
