@@ -1342,6 +1342,7 @@ test("Task Panel review groups repeated records into one continuous file diff", 
   assert.match(document.body.textContent, /Known sensitive content was hidden/);
   assert.match(document.body.textContent, /-secret/);
   assert.match(document.body.textContent, /\+safe/);
+  assert.equal(screen.queryByText("@@ -1 +1 @@"), null);
   assert.match(document.body.textContent, /\+1−1/);
   assert.ok(screen.getByRole("table", { name: "Recorded unified diff" }));
   assert.ok(screen.getByLabelText("Old line 1"));

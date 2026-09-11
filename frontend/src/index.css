@@ -8480,7 +8480,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   );
 }
 
-.file-changes-diff-row[data-kind="hunk"] > code,
 .file-changes-diff-row[data-kind="metadata"] > code,
 .file-changes-diff-row[data-kind="raw"] > code,
 .file-changes-diff-row[data-kind="no-newline"] > code {
@@ -8491,11 +8490,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .file-changes-diff-row[data-kind="metadata"] {
   color: var(--ui-content-muted);
   background: var(--ui-surface-panel-2);
-}
-
-.file-changes-diff-row[data-kind="hunk"] {
-  color: var(--ui-action-selected-content);
-  background: var(--ui-action-selected-surface);
 }
 
 .file-changes-diff-row[data-kind="no-newline"] {

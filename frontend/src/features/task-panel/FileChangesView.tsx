@@ -58,6 +58,7 @@ function unavailableMessage(
 type Translate = ReturnType<typeof useI18n>["t"];
 
 function DiffRow({ row, t }: { row: UnifiedDiffRow; t: Translate }) {
+  if (row.kind === "hunk") return null;
   if (row.kind === "gap")
     return (
       <div className="file-changes-diff-row" data-kind="gap" role="row">
@@ -68,7 +69,6 @@ function DiffRow({ row, t }: { row: UnifiedDiffRow; t: Translate }) {
     );
   if (
     row.kind === "metadata" ||
-    row.kind === "hunk" ||
     row.kind === "no-newline" ||
     row.kind === "raw"
   )

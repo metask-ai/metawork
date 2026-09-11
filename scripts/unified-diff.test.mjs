@@ -81,6 +81,48 @@ test("shows only provable equal unchanged gaps between valid hunks", () => {
   );
 });
 
+test("recovers the recorded diff producer's symmetric inclusive hunk counts", () => {
+  const rows = parseUnifiedDiff(
+    [
+      "@@ -6,4 +8,4 @@",
+      " visible",
+      "-old",
+      "+new",
+      " trailing",
+      "@@ -20 +22 @@",
+      "-later",
+      "+updated",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(rows[1], {
+    kind: "context",
+    text: " visible",
+    oldLine: 6,
+    newLine: 8,
+  });
+  assert.deepEqual(rows[2], {
+    kind: "deletion",
+    text: "-old",
+    oldLine: 7,
+    newLine: null,
+  });
+  assert.deepEqual(rows[3], {
+    kind: "addition",
+    text: "+new",
+    oldLine: null,
+    newLine: 9,
+  });
+  assert.deepEqual(rows[4], {
+    kind: "context",
+    text: " trailing",
+    oldLine: 8,
+    newLine: 10,
+  });
+  assert.equal(rows.at(-2).oldLine, 20);
+  assert.equal(rows.at(-1).newLine, 22);
+});
+
 test("preserves visible line semantics in malformed hunks without invented coordinates", () => {
   const rows = parseUnifiedDiff(
     [

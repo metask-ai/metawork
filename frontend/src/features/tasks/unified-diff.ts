@@ -181,7 +181,13 @@ function renderHunk(
     }
   }
 
-  if (oldConsumed !== header.oldCount || newConsumed !== header.newCount)
+  const exactCounts =
+    oldConsumed === header.oldCount && newConsumed === header.newCount;
+  const recordedDiffInclusiveCount =
+    oldConsumed + 1 === header.oldCount &&
+    newConsumed + 1 === header.newCount &&
+    parsed.at(-1)?.kind === "context";
+  if (!exactCounts && !recordedDiffInclusiveCount)
     return degradedHunk(header, lines);
 
   const gap = provenGap(previousEnd, header);
@@ -197,8 +203,8 @@ function renderHunk(
       ...parsed,
     ],
     end: {
-      old: header.oldStart + header.oldCount,
-      new: header.newStart + header.newCount,
+      old: header.oldStart + oldConsumed,
+      new: header.newStart + newConsumed,
     },
   };
 }
