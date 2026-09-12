@@ -73,7 +73,7 @@ const { TaskContent } = await vite.ssrLoadModule(
 const { FileChangesView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FileChangesView.tsx",
 );
-const { FilePreviewView } = await vite.ssrLoadModule(
+const { FilePreviewRefreshAction, FilePreviewView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FilePreviewView.tsx",
 );
 const { TaskPanel } = await vite.ssrLoadModule(
@@ -1831,16 +1831,46 @@ test("recorded diff failures expose only valid retry actions", () => {
   }
 });
 
-test("Task Panel labels current file content distinctly from recorded diffs", () => {
+function filePreviewElement(state, onRefresh = () => {}) {
+  return localizedView(
+    createElement(
+      "div",
+      null,
+      createElement(FilePreviewRefreshAction, { state, onRefresh }),
+      createElement(FilePreviewView, { state, onRetry: onRefresh }),
+    ),
+  );
+}
+
+test("Task Panel renders file content without explanatory chrome", () => {
+  const state = {
+    selected: {
+      id: "file-1",
+      title: "main.zig",
+      displayPath: "src/main.zig",
+    },
+    phase: "settled",
+    preview: {
+      state: "ready",
+      content: "const ready = true;",
+      truncated: false,
+      redacted: false,
+    },
+  };
+  render(filePreviewElement(state));
+  assert.ok(screen.getByRole("button", { name: "Refresh" }));
+  assert.equal(screen.queryByRole("button", { name: "Preview details" }), null);
+  assert.equal(screen.queryByText("Recorded diff"), null);
+  assert.ok(screen.getByText("const ready = true;"));
+  assert.equal(screen.queryByRole("combobox"), null);
+});
+
+test("file preview actions and content remain independently composable", () => {
   const markup = renderToStaticMarkup(
     localizedView(
       createElement(FilePreviewView, {
         state: {
-          selected: {
-            id: "file-1",
-            title: "main.zig",
-            displayPath: "src/main.zig",
-          },
+          selected: { id: "file-1", displayPath: "main.zig" },
           phase: "settled",
           preview: {
             state: "ready",
@@ -1849,15 +1879,15 @@ test("Task Panel labels current file content distinctly from recorded diffs", ()
             redacted: false,
           },
         },
-        onRefresh() {},
+        onRetry() {},
       }),
     ),
   );
-  assert.match(markup, />Current file</);
-  assert.match(markup, /Current contents; they may differ/);
-  assert.doesNotMatch(markup, /role="combobox"|Referenced files/);
   assert.match(markup, /const ready = true;/);
-  assert.doesNotMatch(markup, /Recorded diff|role="dialog"|backdrop/);
+  assert.doesNotMatch(
+    markup,
+    /Preview details|Refresh|task-panel-resource-header/,
+  );
 });
 
 test("Markdown preview renders documents, switches to source, and preserves mode while refreshing", () => {
@@ -1869,13 +1899,7 @@ test("Markdown preview renders documents, switches to source, and preserves mode
     preview: { state: "ready", content, truncated: true, redacted: true },
   };
   let refreshes = 0;
-  const element = (next) =>
-    localizedView(
-      createElement(FilePreviewView, {
-        state: next,
-        onRefresh: () => refreshes++,
-      }),
-    );
+  const element = (next) => filePreviewElement(next, () => refreshes++);
   const view = render(element(state));
   assert.ok(screen.getByRole("heading", { name: "API guide" }));
   assert.ok(screen.getByRole("table"));
@@ -1916,33 +1940,27 @@ test("Markdown preview renders documents, switches to source, and preserves mode
   assert.ok(screen.getByRole("heading", { name: "Updated" }));
 });
 
-test("text and HTML stay inert source; unsupported HTML rendering is explicit", () => {
+test("text and HTML stay inert source without extra preview chrome", () => {
   for (const path of ["notes.txt", "script.js", "page.html", "page.HTM"]) {
     const content =
       '<h1>Page</h1><script>window.zero.invoke("attack")</script><img src="https://example.com/track.png">';
-    render(
-      localizedView(
-        createElement(FilePreviewView, {
-          state: {
-            selected: { id: path, displayPath: path, title: path },
-            phase: "settled",
-            preview: {
-              state: "ready",
-              content,
-              redacted: false,
-              truncated: false,
-            },
-          },
-          onRefresh() {},
-        }),
-      ),
-    );
+    const state = {
+      selected: { id: path, displayPath: path, title: path },
+      phase: "settled",
+      preview: {
+        state: "ready",
+        content,
+        redacted: false,
+        truncated: false,
+      },
+    };
+    render(filePreviewElement(state));
     assert.equal(document.querySelector("pre").textContent, content);
     assert.equal(document.querySelector("h1, script, img, iframe"), null);
     assert.equal(screen.queryByRole("tablist"), null);
     assert.equal(
-      Boolean(screen.queryByText(/HTML page preview is not yet supported/)),
-      /\.html?$/i.test(path),
+      screen.queryByRole("button", { name: "Preview details" }),
+      null,
     );
     cleanup();
   }
@@ -2664,7 +2682,7 @@ test("layout visibility and width survive Task changes, invalidation, and non-Ta
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
   await waitFor(() =>
-    assert.ok(screen.queryByRole("heading", { name: "File preview" }) === null),
+    assert.ok(screen.queryByRole("heading", { name: "a.txt" }) === null),
   );
   await act(async () =>
     previews[0].resolve({
@@ -2849,7 +2867,7 @@ test("conversation file links preview directly without expanding tools and retur
   await act(async () => previews[0].resolve(ready("stale A")));
   assert.ok(screen.getByText("B content"));
   assert.equal(screen.queryByText("stale A"), null);
-  fireEvent.keyDown(screen.getByRole("heading", { name: "File preview" }), {
+  fireEvent.keyDown(screen.getByRole("heading", { name: "b.txt" }), {
     key: "Escape",
   });
   await act(
@@ -3027,7 +3045,7 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
   await act(
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
   );
-  const heading = screen.getByRole("heading", { name: "File preview" });
+  const heading = screen.getByRole("heading", { name: "a.txt" });
   assert.ok(document.activeElement === heading);
   // Nested controls can consume Escape without closing the pane.
   const stopEscape = (event) => event.preventDefault();
@@ -3049,7 +3067,7 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
     document.querySelector('.run-process-header[aria-expanded="true"]'),
   );
   assert.equal(opener.isConnected, false);
-  fireEvent.keyDown(screen.getByRole("heading", { name: "File preview" }), {
+  fireEvent.keyDown(screen.getByRole("heading", { name: "a.txt" }), {
     key: "Escape",
   });
   await act(

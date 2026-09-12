@@ -1,24 +1,18 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useRef, useState, type MouseEvent } from "react";
 
-import type { TaskView, WorkspaceView } from "../../bridge/contracts.ts";
+import type { TaskView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
-import {
-  taskGroups,
-  taskCompletionNotificationKey,
-  taskDisplayState,
-  taskSignals,
-  workspaceDirectoryLabel,
-} from "../../workbench/selectors.ts";
+import { taskGroups, taskSignals } from "../../workbench/selectors.ts";
 
 export type TaskMenuAction = "rename" | "archive" | "delete";
 
 export function TaskList({
   tasks,
-  workspaces,
   activeTaskId,
+  suppressedCompletionTaskId = null,
   showArchived,
   onSelectTask,
   onToggleArchived,
@@ -27,8 +21,8 @@ export function TaskList({
   synchronized = true,
 }: {
   tasks: TaskView[];
-  workspaces: WorkspaceView[];
   activeTaskId: string | null;
+  suppressedCompletionTaskId?: string | null;
   showArchived: boolean;
   onSelectTask: (id: string) => void;
   onToggleArchived: () => void;
@@ -37,9 +31,6 @@ export function TaskList({
   synchronized?: boolean;
 }) {
   const { locale, t } = useI18n();
-  const [seenCompletionKeys, setSeenCompletionKeys] = useState<Set<string>>(
-    () => new Set(),
-  );
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   const menuAnchor = useRef<HTMLElement | null>(null);
   const groupedTasks = taskGroups(tasks, showArchived);
@@ -48,25 +39,6 @@ export function TaskList({
     0,
   );
   const archivedCount = tasks.filter((task) => task.archived).length;
-  const visibleTasks = groupedTasks.flatMap((group) => group.tasks);
-  const titleCounts = new Map<string, number>();
-  for (const task of visibleTasks) {
-    const title = task.title.trim();
-    if (title) titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1);
-  }
-  const workspacesById = new Map(
-    workspaces.map((workspace) => [workspace.id, workspace]),
-  );
-  const workspaceContextByTaskId = new Map<string, string>();
-  for (const task of visibleTasks) {
-    if ((titleCounts.get(task.title.trim()) ?? 0) < 2) continue;
-    const workspace = workspacesById.get(task.workspaceId);
-    if (!workspace) continue;
-    workspaceContextByTaskId.set(
-      task.id,
-      workspaceDirectoryLabel(workspace, t("workspace.default_directory")),
-    );
-  }
 
   const menuTask =
     menuTaskId === null
@@ -78,33 +50,6 @@ export function TaskList({
     menuAnchor.current = event.currentTarget;
     setMenuTaskId(taskId);
   }
-
-  useEffect(() => {
-    const currentCompletionKeys = new Set(
-      tasks
-        .map(taskCompletionNotificationKey)
-        .filter((key): key is string => key !== null),
-    );
-    const activeTask =
-      activeTaskId === null
-        ? null
-        : (tasks.find((task) => task.id === activeTaskId) ?? null);
-    const activeCompletionKey =
-      activeTask === null ? null : taskCompletionNotificationKey(activeTask);
-
-    setSeenCompletionKeys((previous) => {
-      const next = new Set(
-        [...previous].filter((key) => currentCompletionKeys.has(key)),
-      );
-      if (activeCompletionKey !== null) next.add(activeCompletionKey);
-      if (
-        next.size === previous.size &&
-        [...next].every((key) => previous.has(key))
-      )
-        return previous;
-      return next;
-    });
-  }, [activeTaskId, tasks]);
 
   return (
     <nav className="task-list" aria-label={t("task.list")}>
@@ -133,19 +78,9 @@ export function TaskList({
                 <TaskSignals
                   task={task}
                   synchronized={synchronized}
-                  completionSeen={seenCompletionKeys.has(
-                    taskCompletionNotificationKey(task) ?? "",
-                  )}
+                  completionSuppressed={suppressedCompletionTaskId === task.id}
                 />
               </span>
-              {workspaceContextByTaskId.has(task.id) && (
-                <span
-                  className="task-list-meta"
-                  title={workspaceContextByTaskId.get(task.id)}
-                >
-                  {workspaceContextByTaskId.get(task.id)}
-                </span>
-              )}
             </button>
           ))}
         </section>
@@ -237,18 +172,17 @@ export function TaskList({
 
 export function TaskSignals({
   task,
-  completionSeen = false,
+  completionSuppressed = false,
   showCompleted = true,
   synchronized = true,
 }: {
   task: TaskView;
-  completionSeen?: boolean;
+  completionSuppressed?: boolean;
   showCompleted?: boolean;
   synchronized?: boolean;
 }) {
   const { t } = useI18n();
   const signals = taskSignals(task);
-  const state = taskDisplayState(task);
   if (!synchronized && (signals.running || signals.attention)) return null;
   const signal = signals.attention
     ? "attention"
@@ -256,10 +190,9 @@ export function TaskSignals({
       ? "running"
       : signals.failed
         ? "failed"
-        : state.kind === "outcome" &&
-            state.value === "completed" &&
+        : task.unreadCompletionRunId !== null &&
             showCompleted &&
-            !completionSeen
+            !completionSuppressed
           ? "completed"
           : null;
   if (signal === null) return null;

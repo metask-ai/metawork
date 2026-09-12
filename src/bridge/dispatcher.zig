@@ -367,6 +367,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.respond_ui, .function = respondUi },
             .{ .name = commands.rename_task, .function = renameTask },
             .{ .name = commands.archive_task, .function = archiveTask },
+            .{ .name = commands.mark_task_completion_seen, .function = markTaskCompletionSeen },
             .{ .name = commands.delete_task, .function = deleteTask },
             .{ .name = commands.recover_task_history, .function = recoverTaskHistory },
             .{ .name = commands.create_scheduled_task, .function = createScheduledTask },
@@ -3929,6 +3930,25 @@ pub const Dispatcher = struct {
         );
     }
 
+    fn markTaskCompletionSeen(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.TaskIdentity, invocation.request.payload);
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const run_id = try handlers.parseWireId(parsed.value.runId);
+        if (task_id == 0 or run_id == 0) return error.InvalidBridgeId;
+        const marked = (try self.requireProductControl()).markTaskCompletionSeen(task_id, run_id);
+        if (marked) self.notifyCommitted();
+        return std.fmt.bufPrint(
+            output,
+            "{{\"taskId\":\"{d}\",\"runId\":\"{d}\",\"marked\":{}}}",
+            .{ task_id, run_id, marked },
+        );
+    }
+
     fn deleteTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
@@ -5996,6 +6016,25 @@ test "Dispatcher validates authority before domain calls and preserves committed
         snapshot,
         "\"permissionProfile\":\"approval_required\"",
     ) != null);
+
+    const wake_calls_before_receipt = harness.wake_calls;
+    const unseen_completion = native_dispatcher.dispatch(
+        "{\"id\":\"completion-seen\",\"command\":\"metawork.tasks.markCompletionSeen\",\"payload\":{\"taskId\":\"1\",\"runId\":\"7\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        unseen_completion,
+        "\"taskId\":\"1\",\"runId\":\"7\",\"marked\":false",
+    ) != null);
+    try std.testing.expectEqual(wake_calls_before_receipt, harness.wake_calls);
+    const invalid_completion = native_dispatcher.dispatch(
+        "{\"id\":\"completion-invalid\",\"command\":\"metawork.tasks.markCompletionSeen\",\"payload\":{\"taskId\":\"1\",\"runId\":\"0\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, invalid_completion, "\"handler_failed\"") != null);
 
     harness.account_result = .acceptedAttempt(57);
     const metask_default = native_dispatcher.dispatch(

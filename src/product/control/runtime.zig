@@ -1007,6 +1007,7 @@ test "Task aggregate separates Task runtime ownership from product history" {
         "id",
         "workspace_id",
         "binding_epoch",
+        "completion_seen_run_id",
         "title",
         "runs",
         "compacts",
@@ -3911,6 +3912,18 @@ pub const Runtime = struct {
             self.commitTaskStateNoFail();
             self.bumpRevision();
         }
+    }
+
+    pub fn markTaskCompletionSeen(
+        self: *Runtime,
+        task_id: u64,
+        run_id: u64,
+    ) bool {
+        if (self.shutting_down) return false;
+        self.syncLifecycle();
+        const marked = self.task_runtime.markCompletionSeen(task_id, run_id);
+        if (marked) self.bumpRevision();
+        return marked;
     }
 
     pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
@@ -9204,6 +9217,45 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
     );
 }
 
+test "Task completion receipt is identity-bound idempotent and order-neutral" {
+    var control = try testRuntime();
+    defer control.deinit();
+
+    const task = &control.task_runtime.tasks[0].?;
+    const run = &task.durable.runs[0].?;
+    _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
+    finalizeTestTerminalEvents(&control);
+
+    try std.testing.expectEqual(@as(?u64, 7), task_test_policy.unreadCompletionRunId(task));
+    const recent_order = task.durable.recent_order;
+    const revision = control.currentRevision();
+    try std.testing.expect(!control.markTaskCompletionSeen(3, 6));
+    try std.testing.expectEqual(revision, control.currentRevision());
+    try std.testing.expect(control.markTaskCompletionSeen(3, 7));
+    try std.testing.expectEqual(revision + 1, control.currentRevision());
+    try std.testing.expectEqual(recent_order, task.durable.recent_order);
+    try std.testing.expectEqual(@as(?u64, null), task_test_policy.unreadCompletionRunId(task));
+    try std.testing.expect(!control.markTaskCompletionSeen(3, 7));
+    try std.testing.expectEqual(revision + 1, control.currentRevision());
+
+    run.id = 8;
+    try std.testing.expectEqual(@as(?u64, 8), task_test_policy.unreadCompletionRunId(task));
+    try std.testing.expect(!control.markTaskCompletionSeen(3, 7));
+    try std.testing.expect(control.markTaskCompletionSeen(3, 8));
+    task.durable.completion_seen_run_id = 0;
+    run.terminal_payload.phase = .failed;
+    run.terminal_payload.outcome = .failed;
+    try std.testing.expectEqual(@as(?u64, null), task_test_policy.unreadCompletionRunId(task));
+    try std.testing.expect(!control.markTaskCompletionSeen(3, 8));
+    run.terminal_payload.phase = .completed;
+    run.terminal_payload.outcome = .completed;
+    try control.setTaskArchived(3, true);
+    try std.testing.expectEqual(@as(u64, 8), task.durable.completion_seen_run_id);
+    try std.testing.expectEqual(@as(?u64, null), task_test_policy.unreadCompletionRunId(task));
+    task.durable.completion_seen_run_id = 0;
+    try std.testing.expect(!control.markTaskCompletionSeen(3, 8));
+}
+
 test "Restore permission stats are projected as runtime health" {
     var control = try testRuntime();
     defer control.deinit();
@@ -9297,6 +9349,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         terminal_state.value.tasks[0].runs[0].outcome = "completed";
         terminal_state.value.tasks[0].runs[0].file_change_observation = "complete";
         terminal_state.value.tasks[0].active_operation = null;
+        terminal_state.value.tasks[0].completion_seen_run_id = null;
         const terminal_bytes = try task_persistence.encode(
             terminal_storage,
             terminal_state.value,
@@ -9316,6 +9369,8 @@ test "Task state round trip restores product history without fabricating a Sessi
             return error.TestUnexpectedResult;
         const terminal_run = findRun(terminal_task.durable.runs, 7) orelse
             return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u64, 7), terminal_task.durable.completion_seen_run_id);
+        try std.testing.expectEqual(@as(?u64, null), task_test_policy.unreadCompletionRunId(terminal_task));
         try std.testing.expectEqual(RunPhase.completed, runPhase(terminal_run));
         try std.testing.expectEqual(task_test_state.AssistantOutputKind.final, terminal_run.assistant_output_kind.?);
         try std.testing.expectEqual(@as(?usize, 0), terminal_run.assistant_output_start);
@@ -9477,6 +9532,41 @@ test "Task state round trip restores product history without fabricating a Sessi
     );
     defer deleted_restore.deinit();
     try std.testing.expect(deleted_restore.task_runtime.find(3) == null);
+}
+
+test "clean shutdown persists an acknowledged completion without an eager commit" {
+    const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TestTaskPersistence{ .storage = persistence_storage };
+
+    {
+        var source = try testRuntime();
+        defer source.deinit();
+        source.task_persistence = persistence.capability(null);
+        source.task_persistence_health = .ready;
+        const run = &source.task_runtime.tasks[0].?.durable.runs[0].?;
+        _ = commitTerminal(run, .completed, .completed, null, .reusable, "", false);
+        finalizeTestTerminalEvents(&source);
+        const commits_before_mark = persistence.commits;
+        try std.testing.expect(source.markTaskCompletionSeen(3, 7));
+        try std.testing.expectEqual(commits_before_mark, persistence.commits);
+        source.shutdownExecutor();
+        try std.testing.expectEqual(commits_before_mark + 1, persistence.commits);
+    }
+
+    var restored = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        testLimits(),
+        .{ .task_persistence = persistence.capability(
+            persistence.storage[0..persistence.len],
+        ) },
+    );
+    defer restored.deinit();
+    const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 7), task.durable.completion_seen_run_id);
+    try std.testing.expectEqual(@as(?u64, null), task_test_policy.unreadCompletionRunId(task));
 }
 
 test "one damaged Task record does not poison surviving history" {

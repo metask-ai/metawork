@@ -478,6 +478,7 @@ pub const WorkspaceWire = struct {
 pub const TaskWire = struct {
     id: u64,
     recent_order: u64,
+    completion_seen_run_id: ?u64 = null,
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_root: []const u8,
@@ -862,6 +863,7 @@ pub fn projectTask(
     return .{
         .id = task.durable.id,
         .recent_order = task.durable.recent_order,
+        .completion_seen_run_id = task.durable.completion_seen_run_id,
         .workspace_id = task.durable.workspace_id,
         .workspace_epoch = task.durable.workspace_epoch,
         .workspace_root = task.durable.workspace_root,
@@ -1280,6 +1282,8 @@ pub fn restoreTask(
         runs[index] = try restoreRun(projection, run);
         restored_runs += 1;
     }
+    const completion_seen_run_id = wire.completion_seen_run_id orelse
+        legacyCompletionSeenRunId(runs);
 
     const compacts = try projection.allocator.alloc(
         ?task_state.CompactRecord,
@@ -1309,6 +1313,7 @@ pub fn restoreTask(
         .durable = .{
             .id = wire.id,
             .recent_order = wire.recent_order,
+            .completion_seen_run_id = completion_seen_run_id,
             .execution_generation = wire.binding.execution_generation,
             .execution_protocol = execution_protocol,
             .execution_model = execution_model,
@@ -1551,6 +1556,20 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .terminal_diagnostic = diagnostic,
         .next_activity_order = wire.next_activity_order,
     };
+}
+
+fn legacyCompletionSeenRunId(runs: []?task_state.RunRecord) u64 {
+    var latest: ?*const task_state.RunRecord = null;
+    for (runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (task_state.productTerminalFacts(run) == null) continue;
+        if (latest == null or run.id > latest.?.id) latest = run;
+    }
+    const run = latest orelse return 0;
+    return if (task_state.productTerminalFacts(run).?.outcome == .completed)
+        run.id
+    else
+        0;
 }
 
 fn restoreRunInput(
@@ -2575,6 +2594,8 @@ fn validate(state: *const StateWire, limits: Limits) !void {
 fn validateTask(task: TaskWire, limits: Limits) !void {
     var max_generation: u64 = 0;
     var active_count: usize = 0;
+    var completion_seen_valid = task.completion_seen_run_id == null or
+        task.completion_seen_run_id.? == 0;
     for (task.runs, 0..) |run, index| {
         if (run.id == 0 or run.generation == 0 or run.execution_generation == 0 or
             !oneOf(run.execution_protocol, &.{ "openai_responses", "anthropic_messages", "openai_chat_completions", "gemini_native" }) or
@@ -2689,6 +2710,12 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         if (terminal) {
             if (!validRunTerminalState(run.phase, run.outcome))
                 return error.Invalid;
+            if (task.completion_seen_run_id != null and
+                task.completion_seen_run_id.? == run.id and
+                run.outcome != null and
+                std.mem.eql(u8, run.outcome.?, "completed") and
+                run.event_projection_failure == null)
+                completion_seen_valid = true;
             if (run.file_change_observation) |observation|
                 if (std.mem.eql(u8, observation, "collecting"))
                     return error.Invalid;
@@ -2724,6 +2751,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         })) return error.Invalid;
         max_generation = @max(max_generation, run.generation);
     }
+    if (!completion_seen_valid) return error.Invalid;
     if (task.next_run_generation < max_generation) return error.Invalid;
     for (task.compacts, 0..) |compact, index| {
         if (compact.id == 0 or compact.after_run_id == 0 or
@@ -3736,6 +3764,13 @@ test "task store rejects states that would violate the product contract" {
     };
     try validate(&state, testLimits());
 
+    tasks[0].completion_seen_run_id = 1;
+    try validate(&state, testLimits());
+    tasks[0].completion_seen_run_id = 2;
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    tasks[0].completion_seen_run_id = 0;
+    try validate(&state, testLimits());
+
     runs[0].assistant = "note done";
     runs[0].assistant_output_start = 5;
     runs[0].commentary_ends = &.{5};
@@ -3770,6 +3805,12 @@ test "task store rejects states that would violate the product contract" {
 
     runs[0].event_projection_failure = "unknown";
     try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].event_projection_failure = null;
+
+    tasks[0].completion_seen_run_id = 1;
+    runs[0].event_projection_failure = "dependency_contract_failure";
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    tasks[0].completion_seen_run_id = 0;
     runs[0].event_projection_failure = null;
 
     var mixed_tasks = [_]TaskWire{ tasks[0], tasks[0] };

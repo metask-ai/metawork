@@ -323,7 +323,7 @@ function renderNewTaskView(composer = null, overrides = {}) {
   );
 }
 
-function renderTaskList(tasks, workspaces = []) {
+function renderTaskList(tasks, props = {}) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -336,11 +336,11 @@ function renderTaskList(tasks, workspaces = []) {
       },
       createElement(TaskList, {
         tasks,
-        workspaces,
         activeTaskId: null,
         showArchived: false,
         onSelectTask() {},
         onToggleArchived() {},
+        ...props,
       }),
     ),
   );
@@ -806,6 +806,7 @@ test("Task list shows tasks from different workspaces without workspace controls
     deletionStatus: "idle",
     continuationAvailable: true,
     archived: false,
+    unreadCompletionRunId: null,
     currentRunId: "0",
     currentRunPhase: null,
     activeOperation: null,
@@ -825,7 +826,7 @@ test("Task list shows tasks from different workspaces without workspace controls
   assert.doesNotMatch(markup, /workspace-card|workspace-picker|>Add</);
 });
 
-test("Task list disambiguates duplicate titles with their own paths", () => {
+test("Task list keeps duplicate titles free of workspace metadata", () => {
   const task = (id, workspaceId) => ({
     id,
     title: "Review changes",
@@ -834,6 +835,7 @@ test("Task list disambiguates duplicate titles with their own paths", () => {
     deletionStatus: "idle",
     continuationAvailable: true,
     archived: false,
+    unreadCompletionRunId: null,
     currentRunId: "0",
     currentRunPhase: null,
     activeOperation: null,
@@ -843,22 +845,72 @@ test("Task list disambiguates duplicate titles with their own paths", () => {
     pendingUi: null,
     uiHistory: [],
   });
-  const markup = renderTaskList(
-    [task("2", "workspace-a"), task("1", "workspace-b")],
-    [
+  const markup = renderTaskList([
+    task("2", "workspace-a"),
+    task("1", "workspace-b"),
+  ]);
+
+  assert.equal((markup.match(/Review changes/g) ?? []).length, 2);
+  assert.doesNotMatch(
+    markup,
+    /task-list-meta|\/repo\/alpha|\/repo\/beta|Default/,
+  );
+});
+
+test("Sidebar typography reserves bold weight for the product identity", async () => {
+  const stylesheet = await readFile(
+    new URL("../frontend/src/index.css", import.meta.url),
+    "utf8",
+  );
+  assert.match(stylesheet, /\.sidebar-capability\s*\{[^}]*font-weight: 500/s);
+  assert.match(stylesheet, /\.task-group h3\s*\{[^}]*font-weight: 500/s);
+  assert.match(stylesheet, /\.section-label\s*\{[^}]*font-weight: 500/s);
+  assert.match(
+    stylesheet,
+    /\.task-list-row > span:first-child\s*\{[^}]*font-weight: 400/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.task-list-item\[aria-current="page"\] \.task-list-row > span:first-child\s*\{[^}]*font-weight: 500/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.account-identity-copy strong\s*\{[^}]*font-weight: 500/s,
+  );
+});
+
+test("Task completion dot consumes only the canonical unread receipt", () => {
+  const completed = {
+    id: "1",
+    title: "Completed task",
+    workspaceId: "workspace-a",
+    lifecycle: "open",
+    deletionStatus: "idle",
+    continuationAvailable: true,
+    archived: false,
+    unreadCompletionRunId: "9",
+    currentRunId: "0",
+    currentRunPhase: null,
+    activeOperation: null,
+    recentOrder: "1",
+    runs: [
       {
-        id: "workspace-a",
-        kind: "manual",
-        canonicalRoot: "/repo/alpha",
-      },
-      {
-        id: "workspace-b",
-        kind: "manual",
-        canonicalRoot: "/repo/beta",
+        id: "9",
+        terminal: { outcome: "completed", cause: null },
       },
     ],
-  );
+    compacts: [],
+    pendingUi: null,
+    uiHistory: [],
+  };
 
-  assert.match(markup, /\/repo\/alpha/);
-  assert.match(markup, /\/repo\/beta/);
+  assert.match(renderTaskList([completed]), /task-notification-dot/);
+  assert.doesNotMatch(
+    renderTaskList([completed], { suppressedCompletionTaskId: "1" }),
+    /task-notification-dot/,
+  );
+  assert.doesNotMatch(
+    renderTaskList([{ ...completed, unreadCompletionRunId: null }]),
+    /task-notification-dot/,
+  );
 });

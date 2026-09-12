@@ -81,6 +81,7 @@ export const commands = {
   respondUi: "metawork.tasks.respondUi",
   renameTask: "metawork.tasks.rename",
   archiveTask: "metawork.tasks.archive",
+  markTaskCompletionSeen: "metawork.tasks.markCompletionSeen",
   deleteTask: "metawork.tasks.delete",
   recoverTaskHistory: "metawork.tasks.recoverHistory",
   createScheduledTask: "metawork.scheduledTasks.create",

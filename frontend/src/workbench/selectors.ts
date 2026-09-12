@@ -168,16 +168,6 @@ export function taskSignals(task: TaskView): TaskSignals {
   };
 }
 
-/**
- * Stable identity for the one-shot completion reminder in the task list.
- * A new Run gets a new identity, so a later completion can be unread again.
- */
-export function taskCompletionNotificationKey(task: TaskView): string | null {
-  const completedRun = lastTerminalRun(task);
-  if (completedRun?.terminal?.outcome !== "completed") return null;
-  return completedRun ? `${task.id}:${completedRun.id}` : null;
-}
-
 export function workspaceDirectoryLabel(
   workspace: Pick<WorkspaceView, "kind" | "canonicalRoot">,
   defaultLabel: string,

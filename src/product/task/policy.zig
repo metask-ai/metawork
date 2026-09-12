@@ -381,6 +381,28 @@ pub fn lastTerminalFacts(
     return if (latest) |run| task_state.productTerminalFacts(run) else null;
 }
 
+pub fn latestTerminalRun(
+    runs: []?task_state.RunRecord,
+) ?*const task_state.RunRecord {
+    var latest: ?*const task_state.RunRecord = null;
+    for (runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (task_state.productTerminalFacts(run) == null) continue;
+        if (latest == null or run.id > latest.?.id) latest = run;
+    }
+    return latest;
+}
+
+pub fn unreadCompletionRunId(task: *const task_state.Task) ?u64 {
+    if (task.durable.archived) return null;
+    const run = latestTerminalRun(task.durable.runs) orelse return null;
+    const terminal = task_state.productTerminalFacts(run) orelse unreachable;
+    if (terminal.outcome != .completed or
+        task.durable.completion_seen_run_id == run.id)
+        return null;
+    return run.id;
+}
+
 pub fn currentRunProjection(
     task: *const task_state.Task,
 ) ?task_state.RunProjectionFacts {

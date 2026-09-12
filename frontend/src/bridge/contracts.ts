@@ -743,6 +743,7 @@ export type TaskView = {
     | null;
   continuationRecoveryAvailable: boolean;
   archived: boolean;
+  unreadCompletionRunId: string | null;
   restorePermission: {
     restoredRules: string;
     invalidatedRules: string;
@@ -1192,6 +1193,12 @@ export type TaskRunResult =
       runId: null;
       reason: TaskRunReason;
     };
+
+export type TaskCompletionSeenResult = {
+  taskId: string;
+  runId: string;
+  marked: boolean;
+};
 
 export type TaskModelSelectionReason =
   | "model_changed"

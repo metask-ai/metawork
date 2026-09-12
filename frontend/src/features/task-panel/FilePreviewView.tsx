@@ -14,15 +14,14 @@ export type FilePreviewViewState = {
 
 export function FilePreviewView({
   state,
-  onRefresh,
+  onRetry,
 }: {
   state: FilePreviewViewState;
-  onRefresh: () => void;
+  onRetry: () => void;
 }) {
   const { t } = useI18n();
   const [mode, setMode] = useState("preview");
   const markdown = /\.(?:md|markdown)$/i.test(state.selected.displayPath);
-  const html = /\.html?$/i.test(state.selected.displayPath);
   const ready = state.phase === "settled" && state.preview?.state === "ready";
   const status = state.phase === "loading" ? "loading" : state.preview?.state;
   const failureMessage =
@@ -36,32 +35,9 @@ export function FilePreviewView({
       value={mode}
       onValueChange={(value) => setMode(String(value))}
       className="task-panel-resource-view"
-      aria-labelledby="task-panel-resource-title"
       aria-live="polite"
       aria-busy={state.phase === "loading"}
     >
-      <header className="task-panel-resource-header">
-        <div className="task-panel-resource-identity">
-          <span className="task-panel-resource-kind">
-            <Icon name="skill-file" />
-            {t("task_panel.current_file")}
-          </span>
-          <h3 id="task-panel-resource-title" title={state.selected.displayPath}>
-            {state.selected.displayPath}
-          </h3>
-        </div>
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          disabled={state.phase === "loading"}
-          onClick={onRefresh}
-        >
-          <Icon name="refresh" />
-          {t("file_preview.refresh")}
-        </Button>
-      </header>
-
       {markdown && ready && (
         <Tabs.List
           className="task-panel-preview-modes"
@@ -71,11 +47,6 @@ export function FilePreviewView({
           <Tabs.Tab value="source">{t("file_preview.source")}</Tabs.Tab>
         </Tabs.List>
       )}
-
-      <p className="task-panel-resource-notice">
-        {t("file_preview.current_content_notice")}
-        {html && ready && <span>{t("file_preview.html_source_only")}</span>}
-      </p>
 
       <div className="task-panel-resource-body">
         {status === "loading" ? (
@@ -125,7 +96,7 @@ export function FilePreviewView({
                   type="button"
                   variant="secondary"
                   size="sm"
-                  onClick={onRefresh}
+                  onClick={onRetry}
                 >
                   {t("file_preview.retry")}
                 </Button>
@@ -135,5 +106,28 @@ export function FilePreviewView({
         )}
       </div>
     </Tabs.Root>
+  );
+}
+
+export function FilePreviewRefreshAction({
+  state,
+  onRefresh,
+}: {
+  state: FilePreviewViewState;
+  onRefresh: () => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <button
+      type="button"
+      className="task-panel-header-action focus-ring"
+      aria-label={t("file_preview.refresh")}
+      title={t("file_preview.refresh")}
+      disabled={state.phase === "loading"}
+      onClick={onRefresh}
+    >
+      <Icon name="refresh" />
+    </button>
   );
 }

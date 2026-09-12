@@ -392,7 +392,7 @@ summary::-webkit-details-marker {
   color: var(--ui-content-muted);
   background: transparent;
   font-size: var(--text-control);
-  font-weight: 650;
+  font-weight: 500;
   text-align: left;
 }
 
@@ -503,7 +503,7 @@ summary::-webkit-details-marker {
   margin: 0 8px 6px;
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
-  font-weight: 680;
+  font-weight: 500;
   letter-spacing: 0.04em;
 }
 
@@ -588,7 +588,7 @@ summary::-webkit-details-marker {
 .account-identity-copy strong {
   overflow: hidden;
   font-size: var(--text-label);
-  font-weight: 680;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -742,9 +742,11 @@ summary::-webkit-details-marker {
 }
 
 .about-dialog-build {
+  display: grid;
   margin: 24px 0 0;
   padding: 14px 0 0;
   border-top: 1px solid var(--ui-border);
+  gap: 6px;
 }
 
 .about-dialog-build > div {
@@ -762,6 +764,8 @@ summary::-webkit-details-marker {
 
 .about-dialog-build dd {
   margin: 0;
+  font-size: var(--text-label);
+  font-weight: 500;
 }
 
 .about-dialog-build code {
@@ -6259,7 +6263,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin: 0;
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -6342,19 +6346,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-list-row > span:first-child {
   overflow: hidden;
   font-size: var(--text-control);
-  font-weight: 620;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.task-list-meta {
-  display: block;
-  overflow: hidden;
-  margin-top: 4px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.task-list-item[aria-current="page"] .task-list-row > span:first-child {
+  font-weight: 500;
 }
 
 .task-signal {
@@ -8000,13 +7998,20 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-width: 0;
   flex: 1;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-label);
   font-weight: 650;
+}
+.task-panel-header .task-panel-file-title {
+  font-family: var(--font-mono);
 }
 .task-panel-header h2:focus-visible {
   outline: 2px solid var(--ui-action-primary);
   outline-offset: 3px;
 }
+.task-panel-header-action,
 .task-panel-close {
   display: grid;
   width: 32px;
@@ -8018,6 +8023,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-muted);
   background: transparent;
 }
+.task-panel-header-action:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+.task-panel-header-action:not(:disabled):hover,
 .task-panel-close:hover {
   background: var(--ui-action-hover-surface);
 }
@@ -8153,40 +8163,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-canvas);
 }
 
-.task-panel-resource-header {
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--ui-border);
-}
-
-.task-panel-resource-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.task-panel-resource-identity {
-  min-width: 0;
-}
-
-.task-panel-resource-kind {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  font-weight: 650;
-}
-
-.task-panel-resource-header h3 {
-  margin: 5px 0 0;
-  color: var(--ui-content-primary);
-  font-size: var(--text-control);
-  font-weight: 680;
-}
-
-.task-panel-resource-header h3,
-.task-panel-resource-header p,
 .task-panel-change-identity h4,
 .task-panel-change-identity small {
   overflow: hidden;
@@ -8194,21 +8170,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   white-space: nowrap;
 }
 
-.task-panel-resource-header h3,
-.task-panel-resource-header p,
 .task-panel-change-identity h4,
 .task-panel-change-identity small,
 .task-panel-code {
   font-family: var(--font-mono);
 }
 
-.task-panel-resource-header p {
-  margin: 4px 0 0;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-}
-
-.task-panel-resource-notice,
 .task-panel-review-warning {
   margin: 0;
   padding: 9px 16px;
@@ -8216,12 +8183,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
   line-height: 1.5;
-}
-
-.task-panel-resource-notice {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
 }
 
 .task-panel-review-warning {

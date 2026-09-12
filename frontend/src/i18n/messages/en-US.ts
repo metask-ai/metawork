@@ -21,6 +21,8 @@ export const enUS = {
   "common.cancel": "Cancel",
   "common.close": "Close",
   "about.menu_item": "About",
+  "about.developer": "Developer",
+  "about.developer_name": "Metask",
   "about.version": "Version",
   "connection.connecting": "Connecting to the Workbench…",
   "connection.connected": "Workbench connected.",
@@ -665,11 +667,7 @@ export const enUS = {
   "file_preview.mode": "File display mode",
   "file_preview.rendered": "Preview",
   "file_preview.source": "Source",
-  "file_preview.html_source_only":
-    "HTML page preview is not yet supported. Showing source; scripts and resources are not loaded.",
   "file_preview.retry": "Retry",
-  "file_preview.current_content_notice":
-    "Current contents; they may differ from the file when this run executed.",
   "file_preview.state.truncated": "Preview truncated",
   "file_preview.state.redacted": "Known sensitive content was hidden",
   "file_preview.state.missing": "File is no longer available",
@@ -755,7 +753,6 @@ export const enUS = {
   "task_panel.open": "Open side panel",
   "task_panel.tool": "Tool details",
   "task_panel.close": "Close side panel",
-  "task_panel.current_file": "Current file",
   "approval.response_required": "Response required",
   "approval.allow_tool": "Allow {tool}?",
   "approval.arguments": "Arguments",

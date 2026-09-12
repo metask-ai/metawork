@@ -93,6 +93,7 @@
             .{ .name = "metawork.tasks.respondUi", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.rename", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.archive", .origins = .{"zero://app"} },
+            .{ .name = "metawork.tasks.markCompletionSeen", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.delete", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.recoverHistory", .origins = .{"zero://app"} },
             .{ .name = "metawork.scheduledTasks.create", .origins = .{"zero://app"} },

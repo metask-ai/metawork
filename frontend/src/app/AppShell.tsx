@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -37,6 +38,26 @@ export function shouldDockTaskPanel(
   rightWidth: number,
 ) {
   return viewportWidth - leftWidth - rightWidth >= minimumTaskStageWidth;
+}
+
+export function isTaskStageExposed({
+  viewportWidth,
+  leftOpen,
+  rightPanelOpen,
+  rightPanelDocked,
+  overlayOpen,
+}: {
+  viewportWidth: number;
+  leftOpen: boolean;
+  rightPanelOpen: boolean;
+  rightPanelDocked: boolean;
+  overlayOpen: boolean;
+}) {
+  return (
+    !overlayOpen &&
+    !(leftOpen && viewportWidth < 820) &&
+    !(rightPanelOpen && !rightPanelDocked)
+  );
 }
 
 function clampLeftWidth(value: number) {
@@ -80,6 +101,7 @@ export function AppShell({
   onDismissRightPanel,
   onToggleRightPanel,
   rightPanelToggleRef,
+  onTaskStageExposureChange,
   overlay,
   children,
 }: {
@@ -95,6 +117,7 @@ export function AppShell({
   onDismissRightPanel: (restoreFocus?: boolean) => void;
   onToggleRightPanel: (opener: HTMLButtonElement) => void;
   rightPanelToggleRef?: Ref<HTMLButtonElement>;
+  onTaskStageExposureChange?: (exposed: boolean) => void;
   overlay?: ReactNode;
   children: ReactNode;
 }) {
@@ -125,7 +148,18 @@ export function AppShell({
       effectiveLeftOpen ? leftWidth : 0,
       rightWidth,
     );
+  const taskStageExposed = isTaskStageExposed({
+    viewportWidth,
+    leftOpen: effectiveLeftOpen,
+    rightPanelOpen: effectiveRightPanelOpen,
+    rightPanelDocked,
+    overlayOpen: Boolean(overlay),
+  });
   const attentionDetails = useRef<HTMLDetailsElement>(null);
+
+  useLayoutEffect(() => {
+    onTaskStageExposureChange?.(taskStageExposed);
+  }, [onTaskStageExposureChange, taskStageExposed]);
 
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 819px)");
