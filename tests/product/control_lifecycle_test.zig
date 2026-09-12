@@ -4310,7 +4310,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
     try std.testing.expectEqual(@as(usize, 2), catalog_releases);
 }
 
-test "Product Control refreshes a Task only from the committed Workspace catalog while idle" {
+test "Product Control refreshes an idle Task from committed policy after an enablement write failure" {
     fake_core.reset();
     fake_core.setCatalogPlan(.query_failure);
     const runtime = try createTestComposition(.{
@@ -4389,10 +4389,44 @@ test "Product Control refreshes a Task only from the committed Workspace catalog
     const workspace_epoch = try workbench.workspaceEpoch(workspace_id);
     try workbench.refreshWorkspaceCatalog(workspace_id, workspace_epoch);
     _ = try waitCatalogReady(&workbench, workspace_id);
+    var persistence_dir = std.testing.tmpDir(.{});
+    defer persistence_dir.cleanup();
+    var blocked_dir = std.testing.tmpDir(.{});
+    defer blocked_dir.cleanup();
+    try blocked_dir.dir.createDir(std.testing.io, product_skill.enablement.file_name, .default_dir);
+    // Keep all new persistence effects in test-owned directories. The store
+    // capability is borrowed only inside this scope and restored before close.
+    const original_dir = skill_enablement_store.dir;
+    defer skill_enablement_store.dir = original_dir;
+    skill_enablement_store.dir = persistence_dir.dir;
+    const selection = try workbench.setSkillEnabled(.{
+        .scope = .{ .project = .{ .workspace_id = workspace_id, .expected_workspace_epoch = workspace_epoch } },
+        .skill_policy_key = "review",
+        .state = .disabled,
+        .expected_catalog_revision = fixture.fixture_catalog_revision,
+        .expected_selection_revision = 1,
+    });
+    const enable: product_control.SkillEnablementMutation = .{
+        .scope = .{ .project = .{ .workspace_id = workspace_id, .expected_workspace_epoch = workspace_epoch } },
+        .skill_policy_key = "review",
+        .state = .enabled,
+        .expected_catalog_revision = fixture.fixture_catalog_revision,
+        .expected_selection_revision = selection,
+    };
+    skill_enablement_store.dir = blocked_dir.dir;
+    try std.testing.expectError(error.WriteFailed, workbench.setSkillEnabled(enable));
+    skill_enablement_store.dir = persistence_dir.dir;
+    try workbench.refreshWorkspaceCatalog(workspace_id, workspace_epoch);
+    const refreshed = try waitCatalogReady(&workbench, workspace_id);
+    try std.testing.expectEqual(selection, refreshed.selection_revision.?);
+    try std.testing.expect(!refreshed.skills[0].enabled);
     try workbench.refreshTaskCatalog(
         task_id,
         try workbench.taskBindingEpoch(task_id),
     );
+    try std.testing.expect(!(try workbench.taskCatalog(task_id)).skills[0].enabled);
+    try std.testing.expectEqual(selection + 1, try workbench.setSkillEnabled(enable));
+    try std.testing.expect(!(try workbench.taskCatalog(task_id)).skills[0].enabled);
     fake_core.lock();
     const refreshes = fake_core.catalog_refreshes;
     fake_core.unlock();

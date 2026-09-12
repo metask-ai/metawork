@@ -2825,12 +2825,17 @@ pub const Runtime = struct {
                     return error.WorkspaceEpochMismatch;
             },
         }
-        const next_revision = try self.skill.setEnabled(
+        const previous_health = self.skill.enablementHealth();
+        const next_revision = self.skill.setEnabled(
             mutation,
             self.skillProjectionBudget(),
             catalogSnapshotLimits(self.limits),
-        );
-        if (next_revision != mutation.expected_selection_revision)
+        ) catch |err| {
+            if (self.skill.enablementHealth() != previous_health) self.bumpRevision();
+            return err;
+        };
+        if (next_revision != mutation.expected_selection_revision or
+            self.skill.enablementHealth() != previous_health)
             self.bumpRevision();
         return next_revision;
     }
@@ -2891,7 +2896,7 @@ pub const Runtime = struct {
         );
         const workspace = self.workspace.facts(facts.workspace_id) orelse
             return error.WorkspaceUnavailable;
-        if (self.skill.enablementHealth() != .ready)
+        if (!self.skill.enablementTrusted())
             return error.RecoveryUnavailable;
         if (workspace.kind != .manual) return error.CatalogUnavailable;
         if (workspace.epoch != facts.workspace_epoch)
@@ -10677,6 +10682,52 @@ test "unknown Skill enablement persistence outcome freezes authorities" {
             .expected_selection_revision = 1,
         }),
     );
+}
+
+test "Skill enablement retries a definite file write failure without discarding committed policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var file_store = try skill_runtime.EnablementFileStore.init(std.testing.io, directory_storage[0..directory_len]);
+    defer file_store.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
+    control.skill.testSetEnablementPersistence(&file_store);
+    try installTestCommittedSkillAuthorities(&control);
+
+    // A directory at the canonical file name makes atomic rename fail before
+    // publication on every platform, without a production fault-injection port.
+    try tmp.dir.createDir(std.testing.io, "skill-enablement.json", .default_dir);
+    const disable: SkillEnablementMutation = .{
+        .scope = .personal,
+        .skill_policy_key = "review",
+        .state = .disabled,
+        .expected_catalog_revision = "catalog-1",
+        .expected_selection_revision = 1,
+    };
+    const before_failure = control.revision;
+    try std.testing.expectError(error.WriteFailed, control.setSkillEnabled(disable));
+    try std.testing.expectEqual(before_failure + 1, control.revision);
+    try std.testing.expectEqual(SkillEnablementHealth.write_failed, control.skill.enablementHealth());
+    try std.testing.expect(control.skill.personalCatalogProjection().skills[0].enabled);
+    try std.testing.expect(testWorkspaceSkillProjection(&control).skills[0].enabled);
+    var no_op = disable;
+    no_op.state = .enabled;
+    try std.testing.expectEqual(@as(u64, 1), try control.setSkillEnabled(no_op));
+    try std.testing.expectEqual(SkillEnablementHealth.write_failed, control.skill.enablementHealth());
+    try std.testing.expectEqual(before_failure + 1, control.revision);
+    try std.testing.expectError(error.WriteFailed, control.setSkillEnabled(disable));
+    try std.testing.expectEqual(before_failure + 1, control.revision);
+
+    try tmp.dir.deleteDir(std.testing.io, "skill-enablement.json");
+    try std.testing.expectEqual(@as(u64, 2), try control.setSkillEnabled(disable));
+    try std.testing.expectEqual(SkillEnablementHealth.ready, control.skill.enablementHealth());
+    try std.testing.expect(!control.skill.personalCatalogProjection().skills[0].enabled);
+    try std.testing.expect(!testWorkspaceSkillProjection(&control).skills[0].enabled);
+    const saved = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "review") != null);
 }
 
 test "Workspace Skill enablement uses double revision CAS and leaves pinned catalogs unchanged" {

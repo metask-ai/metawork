@@ -66,7 +66,7 @@ pub fn matchManagedContribution(
     if (origin(purpose, skill) == null) return .unproven;
     if (std.mem.eql(u8, skill.source_instance_id, expected_source.id()))
         return if (skill.source_scope == expected_source.scope()) .matched else .unproven;
-    return if (origin(purpose, skill) != null) .different else .unproven;
+    return .different;
 }
 
 pub fn issueMatchesManaged(purpose: QueryPurpose, expected_source: ManagedSource, entry: []const u8, issue: catalog.CatalogIssueProjection) bool {
@@ -80,6 +80,15 @@ pub const EnablementPersistenceFailure = struct {
     health: state.EnablementHealth,
     invalidate_authorities: bool,
 };
+
+/// Enablement installs a candidate only after commit. A definite write failure
+/// therefore leaves the previous policy authoritative, unlike outcome unknown.
+pub fn enablementTrusted(health: state.EnablementHealth) bool {
+    return switch (health) {
+        .ready, .write_failed => true,
+        .unavailable, .read_failed, .corrupt, .outcome_unknown => false,
+    };
+}
 
 pub fn managementHealthAfterPersistenceFailure(
     err: anyerror,
@@ -121,7 +130,7 @@ pub fn compileCatalogSnapshot(
     limits: catalog.Limits,
     available_projection_bytes: usize,
 ) (catalog.Error || error{PersistenceFailed})!catalog.Snapshot {
-    if (enablement_health != .ready) return error.PersistenceFailed;
+    if (!enablementTrusted(enablement_health)) return error.PersistenceFailed;
     var disabled_skill_policy_keys: std.ArrayList([]const u8) = .empty;
     defer disabled_skill_policy_keys.deinit(allocator);
     for (source.skills) |skill|
@@ -361,4 +370,17 @@ test "catalog compilation applies user and Workspace enablement policy" {
     try std.testing.expect(!personal.skills[0].enabled);
     try std.testing.expectEqual(@as(u64, 3), project.selection_revision);
     try std.testing.expect(project.skills[0].enabled);
+
+    var after_write_failure = try compileCatalogSnapshot(
+        allocator,
+        source,
+        &store,
+        .write_failed,
+        .personal,
+        limits,
+        limits.max_catalog_projection_bytes,
+    );
+    defer after_write_failure.deinit();
+    try std.testing.expectEqual(personal.selection_revision, after_write_failure.selection_revision);
+    try std.testing.expect(!after_write_failure.skills[0].enabled);
 }

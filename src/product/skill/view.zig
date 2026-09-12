@@ -361,7 +361,7 @@ fn writeAssetTail(
         if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
         try input.text.writeJson(writer, name);
     }
-    const enablement_available = input.state.enablement_health == .ready and
+    const enablement_available = policy.enablementTrusted(input.state.enablement_health) and
         input.state.source_settings != null and snapshot != null;
     const selection_revision = if (enablement_available and runtime_skill != null)
         snapshot.?.selection_revision
@@ -728,6 +728,26 @@ test "same-name external winner is not suppressed or attached to a managed asset
     try std.testing.expectEqualStrings("external-review", external.get("skillId").?.string);
     try std.testing.expect(external.get("canSetEnabled").?.bool);
     try std.testing.expect(!external.get("canExport").?.bool and !external.get("canReimport").?.bool and !external.get("canUninstall").?.bool);
+    skills[0].enabled = false;
+    product_state.catalog.slot.committed.snapshot.selection_revision = try product_state.enablement_store.applyUser(.{
+        .skill_policy_key = "review",
+        .enabled = false,
+        .expected_revision = 1,
+    });
+    for ([_]state.EnablementHealth{ .write_failed, .outcome_unknown }) |health| {
+        product_state.enablement_health = health;
+        writer = std.Io.Writer.fixed(&buffer);
+        try writeManagementProjection(&writer, input);
+        var failed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+        defer failed.deinit();
+        const failed_external = failed.value.object.get("assets").?.array.items[1].object;
+        try std.testing.expectEqual(health == .write_failed, failed_external.get("canSetEnabled").?.bool);
+        if (health == .write_failed) {
+            try std.testing.expect(!failed_external.get("enabled").?.bool);
+            try std.testing.expectEqualStrings("disabled", failed_external.get("enablementState").?.string);
+        } else try std.testing.expect(failed_external.get("enabled").? == .null);
+    }
+    product_state.enablement_health = .ready;
     skills[0].source_instance_id = "agents.workspace.default";
     writer = std.Io.Writer.fixed(&buffer);
     try writeManagementProjection(&writer, input);

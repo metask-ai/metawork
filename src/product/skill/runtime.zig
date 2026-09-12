@@ -789,6 +789,10 @@ pub const Runtime = struct {
         return self.state.enablement_health;
     }
 
+    pub fn enablementTrusted(self: *const Runtime) bool {
+        return policy.enablementTrusted(self.state.enablement_health);
+    }
+
     pub fn managementHealth(self: *const Runtime) state.ManagementHealth {
         return self.state.management_health;
     }
@@ -1077,7 +1081,7 @@ pub const Runtime = struct {
         budget: ProjectionBudget,
         snapshot_limits: catalog.Limits,
     ) EnablementError!u64 {
-        if (self.state.enablement_health != .ready or
+        if (!self.enablementTrusted() or
             self.state.enablement_file_store == null)
             return error.PersistenceFailed;
         const control: *state.CatalogControl = switch (mutation.scope) {
@@ -1194,21 +1198,15 @@ pub const Runtime = struct {
         workspaces: EnablementWorkspaces,
         budget: ProjectionBudget,
     ) void {
-        if (self.state.enablement_health != .ready or
+        if (!self.enablementTrusted() or
             self.state.enablement_file_store == null)
             return;
         var active_workspaces: std.ArrayList(enablement.WorkspaceIdentity) = .empty;
         defer active_workspaces.deinit(self.allocator);
         for (0..workspaces.slot_count) |index|
             if (workspaces.get(index)) |identity|
-                active_workspaces.append(self.allocator, identity) catch {
-                    self.state.enablement_health = .write_failed;
-                    return;
-                };
-        var candidate = self.state.enablement_store.clone() catch {
-            self.state.enablement_health = .write_failed;
-            return;
-        };
+                active_workspaces.append(self.allocator, identity) catch return;
+        var candidate = self.state.enablement_store.clone() catch return;
         var candidate_owned = true;
         defer if (candidate_owned) candidate.deinit();
         if (!candidate.reconcile(active_workspaces.items)) return;
@@ -1402,6 +1400,7 @@ pub const Runtime = struct {
         self.state.enablement_store.deinit();
         self.state.enablement_store = candidate.*;
         candidate.* = undefined;
+        self.state.enablement_health = .ready;
     }
 
     fn managementContext(self: *Runtime) management_runtime.Context {
@@ -1541,6 +1540,9 @@ pub const Runtime = struct {
         err: anyerror,
         budget: ProjectionBudget,
     ) void {
+        // Allocation/encoding can fail before FileStore.commit is attempted.
+        // Those errors say nothing about canonical persistence health.
+        if (err != error.WriteFailed and err != error.PersistenceOutcomeUnknown) return;
         const decision = policy.enablementPersistenceFailure(err);
         self.state.enablement_health = decision.health;
         if (!decision.invalidate_authorities) return;
@@ -1919,6 +1921,53 @@ fn exerciseManagementCommitFailure(
             101,
         ),
     );
+}
+
+test "enablement reconciliation preparation failures preserve committed policy and persistence health" {
+    const Fixture = struct {
+        fn workspace(_: *const anyopaque, _: usize) ?enablement.WorkspaceIdentity {
+            return .{ .workspace_id = 7, .workspace_epoch = 3 };
+        }
+    };
+    for ([_]state.EnablementHealth{ .ready, .write_failed }) |health| {
+        for (0..3) |failure_step| {
+            var harness: TestHarness = .{};
+            var runtime = try testRuntime(&harness);
+            defer runtime.deinit();
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var file_store: enablement.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+            runtime.testSetEnablementPersistence(&file_store);
+            runtime.state.enablement_health = health;
+            _ = try runtime.state.enablement_store.applyWorkspace(.{
+                .identity = .{ .workspace_id = 7, .workspace_epoch = 3 },
+                .skill_policy_key = "review",
+                .state = .disabled,
+                .expected_revision = 1,
+            });
+            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+            {
+                // Exercise active-set allocation, Store.clone, and the final
+                // encode-buffer allocation independently.
+                if (failure_step == 1)
+                    runtime.state.enablement_store.allocator = failing.allocator()
+                else
+                    runtime.allocator = failing.allocator();
+                defer runtime.allocator = std.testing.allocator;
+                defer runtime.state.enablement_store.allocator = std.testing.allocator;
+                runtime.reconcileEnablementNoFail(.{
+                    .context = undefined,
+                    .slot_count = if (failure_step == 0) 1 else 0,
+                    .get_fn = Fixture.workspace,
+                }, harness.budget());
+            }
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(health, runtime.enablementHealth());
+            try std.testing.expectEqual(@as(usize, 1), runtime.state.enablement_store.items().len);
+            try std.testing.expectEqual(@as(u64, 2), runtime.state.enablement_store.last_revision);
+            try std.testing.expect((try file_store.loadAlloc(std.testing.allocator)) == null);
+        }
+    }
 }
 
 test "management outcome unknown freezes subsequent Skill mutations" {
