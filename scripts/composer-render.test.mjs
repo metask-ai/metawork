@@ -857,6 +857,28 @@ test("Task list keeps duplicate titles free of workspace metadata", () => {
   );
 });
 
+test("Sidebar typography reserves bold weight for the product identity", async () => {
+  const stylesheet = await readFile(
+    new URL("../frontend/src/index.css", import.meta.url),
+    "utf8",
+  );
+  assert.match(stylesheet, /\.sidebar-capability\s*\{[^}]*font-weight: 500/s);
+  assert.match(stylesheet, /\.task-group h3\s*\{[^}]*font-weight: 500/s);
+  assert.match(stylesheet, /\.section-label\s*\{[^}]*font-weight: 500/s);
+  assert.match(
+    stylesheet,
+    /\.task-list-row > span:first-child\s*\{[^}]*font-weight: 400/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.task-list-item\[aria-current="page"\] \.task-list-row > span:first-child\s*\{[^}]*font-weight: 500/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.account-identity-copy strong\s*\{[^}]*font-weight: 500/s,
+  );
+});
+
 test("Task completion dot consumes only the canonical unread receipt", () => {
   const completed = {
     id: "1",
