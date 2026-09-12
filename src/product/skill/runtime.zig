@@ -354,7 +354,7 @@ pub const Runtime = struct {
 
     pub fn setSourceEnabled(
         self: *Runtime,
-        id: sources.Id,
+        brand: sources.Brand,
         enabled: bool,
         expected_revision: u64,
         budget: ProjectionBudget,
@@ -363,11 +363,12 @@ pub const Runtime = struct {
         if (self.state.reconciliation != null) return .{ .reason = .busy };
         if (self.state.source_file_store == null) return .{ .reason = .source_settings_unavailable };
         const current = self.state.source_settings orelse return .{ .reason = .source_settings_unavailable };
-        const candidate = current.replacing(id, enabled, expected_revision) catch |err|
+        const candidate = current.replacing(brand, enabled, expected_revision) catch |err|
             return .{ .reason = if (err == error.StaleRevision) .stale_revision else .revision_exhausted };
         if (candidate.revision == current.revision)
             return .{ .applied = true, .revision = current.revision };
-        if (!self.sourceGenerationsAvailable(sources.definition(id).scope == .user)) return .{ .reason = .revision_exhausted };
+        const personal_changed = !current.selection.relevant(.user).eql(candidate.selection.relevant(.user));
+        if (!self.sourceGenerationsAvailable(personal_changed)) return .{ .reason = .revision_exhausted };
         return self.commitSourceSettings(candidate, budget);
     }
 
@@ -2401,12 +2402,12 @@ test "source commit CAS no-op and A B A invalidate old work before queue admissi
     const old_job = runtime.personal_job.?;
     const old_generation = old_job.request_generation;
     const before = runtime.state.catalog.request_generation;
-    const noop = runtime.setSourceEnabled(.claude_user, false, 1, harness.budget());
+    const noop = runtime.setSourceEnabled(.claude, false, 1, harness.budget());
     try std.testing.expect(noop.applied and !noop.changed);
     try std.testing.expectEqual(before, runtime.state.catalog.request_generation);
-    try std.testing.expectEqual(state.SourceSettingsReason.stale_revision, runtime.setSourceEnabled(.claude_user, true, 9, harness.budget()).reason.?);
-    try std.testing.expect(runtime.setSourceEnabled(.claude_user, true, 1, harness.budget()).applied);
-    try std.testing.expect(runtime.setSourceEnabled(.claude_user, false, 2, harness.budget()).applied);
+    try std.testing.expectEqual(state.SourceSettingsReason.stale_revision, runtime.setSourceEnabled(.claude, true, 9, harness.budget()).reason.?);
+    try std.testing.expect(runtime.setSourceEnabled(.claude, true, 1, harness.budget()).applied);
+    try std.testing.expect(runtime.setSourceEnabled(.claude, false, 2, harness.budget()).applied);
     try std.testing.expect(runtime.personal_reschedule_pending);
     try std.testing.expect(runtime.state.catalog.request_generation > old_generation);
     try std.testing.expect(!old_job.selection.enabled(.claude_user));
@@ -2427,7 +2428,7 @@ test "source commit CAS no-op and A B A invalidate old work before queue admissi
     try std.testing.expectEqual(@as(u64, 3), (try store.load(std.testing.allocator)).ready.revision);
 }
 
-test "project-only source commit preserves personal query and unknown sources deny new authority" {
+test "normalizing a partial brand preserves unchanged personal query and unknown sources deny new authority" {
     var harness: TestHarness = .{};
     var runtime = try testRuntime(&harness);
     defer runtime.deinit();
@@ -2435,9 +2436,14 @@ test "project-only source commit preserves personal query and unknown sources de
     defer tmp.cleanup();
     var store: sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
     runtime.state.source_file_store = &store;
+    runtime.state.source_settings = .{ .selection = .{ .values = .{ false, false, true, false } } };
+    try store.commit(runtime.state.source_settings.?);
     try runtime.refreshPersonal();
     const generation = runtime.state.catalog.request_generation;
-    try std.testing.expect(runtime.setSourceEnabled(.codex_workspace, true, 1, harness.budget()).applied);
+    try std.testing.expect(runtime.setSourceEnabled(.codex, true, 1, harness.budget()).applied);
+    const saved = (try store.load(std.testing.allocator)).ready;
+    try std.testing.expectEqual(@as(u64, 2), saved.revision);
+    try std.testing.expectEqualDeep([_]bool{ false, false, true, true }, saved.selection.values);
     try std.testing.expectEqual(generation, runtime.state.catalog.request_generation);
     try std.testing.expect(!runtime.personal_reschedule_pending);
     harness.runQueued();
@@ -2490,9 +2496,10 @@ test "source write failure keeps trusted values and reset of missing settings ad
     var store: sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
     runtime.state.source_file_store = &store;
     try tmp.dir.createDir(std.testing.io, sources.file_name, .default_dir);
-    const failure = runtime.setSourceEnabled(.claude_user, true, 1, harness.budget());
+    const failure = runtime.setSourceEnabled(.claude, true, 1, harness.budget());
     try std.testing.expectEqual(state.SourceSettingsReason.write_failed, failure.reason.?);
     try std.testing.expect(!runtime.state.source_settings.?.selection.enabled(.claude_user));
+    try std.testing.expect(!runtime.state.source_settings.?.selection.enabled(.claude_workspace));
     try std.testing.expectEqual(@as(u64, 1), runtime.state.source_settings.?.revision);
     try tmp.dir.deleteDir(std.testing.io, sources.file_name);
     runtime.markSourcesUnavailable(.missing, harness.budget());
@@ -2542,7 +2549,7 @@ test "source durable outcome unknown freezes new work until valid reread is reco
     runtime.state.source_file_store = &store;
     try store.commit(.{});
     store.commit_fault = .after_rename;
-    const uncertain = runtime.setSourceEnabled(.codex_user, true, 1, harness.budget());
+    const uncertain = runtime.setSourceEnabled(.codex, true, 1, harness.budget());
     try std.testing.expectEqual(state.SourceSettingsReason.persistence_outcome_unknown, uncertain.reason.?);
     try std.testing.expect(uncertain.changed and !uncertain.applied);
     try std.testing.expect(runtime.sourceSettings().settings == null);

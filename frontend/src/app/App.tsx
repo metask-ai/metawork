@@ -2279,7 +2279,7 @@ export default function App() {
       import("../bridge/contracts.ts").SkillSourceSettingsResult
     >,
   ) {
-    // This window owns the latch, not the Drawer: closing it does not cancel a Host write.
+    // This window owns the latch: navigating away does not cancel a Host write.
     if (sourceMutationPending.current || bridgeUnavailable) return;
     sourceMutationPending.current = true;
     setSourceMutationBusy(true);

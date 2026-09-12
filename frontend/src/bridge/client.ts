@@ -21,7 +21,7 @@ import type {
   FilePreview,
   FileChangeDiffResult,
   ModelMetadata,
-  SkillSourceId,
+  SkillSourceBrand,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -367,7 +367,7 @@ export class BridgeClient {
   }
 
   async setSkillSourceEnabled(
-    sourceId: SkillSourceId,
+    sourceId: SkillSourceBrand,
     enabled: boolean,
     expectedRevision: string,
   ) {

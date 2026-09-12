@@ -325,7 +325,7 @@ test "Skill source authorization excludes restored Manual roots until explicit r
         const changed = if (recover_sources)
             restored.recoverSkillSourceSettings(.reread, restored.skill.sourceSettings().recovery_token.?)
         else
-            restored.setSkillSourceEnabled(.claude_workspace, true, 1);
+            restored.setSkillSourceEnabled(.claude, true, 1);
         try std.testing.expect(changed.applied);
         try expectWorkspaceSkillProjection(&restored, workspace_id, false);
         try settleWorkspaceSkillQueries(&restored, workspace_id);
@@ -385,7 +385,7 @@ test "Skill source authorization keeps new and restored Automatic snapshots cata
             const changed = if (recover_sources)
                 workbench.recoverSkillSourceSettings(.reread, workbench.skill.sourceSettings().recovery_token.?)
             else
-                workbench.setSkillSourceEnabled(.codex_user, true, 1);
+                workbench.setSkillSourceEnabled(.codex, true, 1);
             try std.testing.expect(changed.applied);
             try expectWorkspaceSkillProjection(&workbench, workspace_id, false);
             try settleWorkspaceSkillQueries(&workbench, workspace_id);

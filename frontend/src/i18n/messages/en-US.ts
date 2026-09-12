@@ -432,15 +432,9 @@ export const enUS = {
   "skills.catalog_refresh_started": "Refreshing the Skill catalog…",
   "skills.catalog_refresh_failed": "The Skill catalog could not be refreshed.",
   "skills.sources.title": "Compatible sources",
-  "skills.sources.eyebrow": "Global Skill settings",
-  "skills.sources.explanation":
-    "Project directory switches apply to all manual projects, not just the selected project.",
-  "skills.sources.tasks":
-    "Changes affect new tasks. Existing tasks adopt them only after an explicit Skill refresh.",
-  "skills.sources.compatibility":
-    "Only Skills supported by the current Metask AgentCore are discovered. Other tools’ permissions and execution settings are not inherited.",
-  "skills.sources.default":
-    "Always enabled, independent of compatibility switches",
+  "skills.sources.hint":
+    "Reads personal and all authorized project Skills. Existing tasks need a Skill refresh.",
+  "skills.sources.partial": "Partially enabled",
   "skills.sources.scope.user": "Personal directory",
   "skills.sources.scope.workspace": "Project directory",
   "skills.sources.unknown": "State unknown",
@@ -449,15 +443,7 @@ export const enUS = {
   "skills.sources.reread": "Reread settings",
   "skills.sources.reset": "Turn off all compatible sources",
   "skills.sources.reset_body":
-    "Turns off only these four sources. No Skills are deleted, and individual Skill enablement and project data are unchanged.",
-  "skills.sources.discovery": "Directory checks for this scope",
-  "skills.sources.check_note":
-    "A checked root does not guarantee usable Skills or a conflict-free catalog.",
-  "skills.sources.not_checked": "Directory checks are currently unavailable.",
-  "skills.sources.state.disabled": "Off",
-  "skills.sources.state.checking": "Waiting or checking",
-  "skills.sources.state.missing": "Directory missing",
-  "skills.sources.state.checked": "Root checked",
+    "Turns off Claude and Codex sources. No Skills are deleted, and individual Skill enablement and project data are unchanged.",
   "skills.sources.state.error": "Check failed",
   "skills.sources.reason.unreadable": "Unreadable",
   "skills.sources.reason.unsupported_entry": "Unsupported directory entry",

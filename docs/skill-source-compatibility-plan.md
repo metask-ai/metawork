@@ -4,7 +4,7 @@
 
 ## 1. 产品边界与默认选择
 
-用户通过勾选启用 MetaWork 预定义的 Skill 来源。Host 从 canonical user home 或已授权 Manual Workspace root 派生目录，Renderer 只提交固定 source ID 和开关，不传物理路径。
+用户通过勾选启用 MetaWork 预定义的 Skill 来源。Host 从 canonical user home 或已授权 Manual Workspace root 派生目录，Renderer 只提交固定品牌 ID 和开关，不传物理路径。
 
 第一版建议如下；新增兼容来源默认关闭，保留现有用户行为。
 
@@ -490,14 +490,14 @@ Product 阶段可建立并测试 typed view，但不单独修改已发布 snapsh
 
 1. **Agent 适配与合同一并修正。** 保留现有 QueryTarget；management 从“拒绝全部 additional”改为“只接受 USER additional”，SDK 编码使用上表规则；Workspace 行为不改。按现有输入校验、owned copy、lease/shutdown 路径补测试。同步修订 `docs/agentcore-integration.md` 中本项目先前新增的全量拒绝约束，不修改 machine guard 或绕过它。
 2. **Product 闭环，不再单独堆准备层。** 复用已提交 sources codec/FileStore，在现有 Skill State/Runtime 接入设置加载、提交、重读/reset、相关 scope 失效和 latest intent；Control 只路由，Application 只注入 store。按第 9.3—9.5 节，同一交付完成 view 的精确资产关联、独立 issues 和管理 verification job 绑定。修正 `matchManagedContribution` 的 query-purpose 上下文判断，不按静态 USER source 表直接否定管理结果。不改 enablement/inventory 持久化格式，不迁移 Task pinned owner。
-3. **Bridge/Renderer 交付可用功能。** 四项固定 Checkbox，缺失目录仍保留选择，未知配置不伪装关闭，显示保存/刷新/错误状态、独立冲突和来源标签。所有 source mutation/recovery 仅提交固定 ID、boolean、CAS/恢复凭据，不传路径。页面 scope 和来源真实 scope 分开，不根据 Core scope 显示项目管理权限。
+3. **Bridge/Renderer 交付可用功能。** Claude/Codex 两个品牌 Checkbox，缺失目录仍保留选择，未知配置不伪装关闭，显示保存/刷新/错误状态、独立冲突和来源标签。所有 source mutation/recovery 仅提交固定 ID、boolean、CAS/恢复凭据，不传路径。页面 scope 和来源真实 scope 分开，不根据 Core scope 显示项目管理权限。
 4. **执行与恢复验收。** 四项组合、默认全关、重启恢复、个人与项目覆盖、零 winner 冲突、来源关闭、A→B→A/QueueFull/陈旧验证、写失败与 outcome unknown、取消/shutdown、外部目录不可写、旧 Task pinned 与新 Task/idle refresh 分别验收。使用当前 bundle 做真实 Skill Run，不以管理探针替代执行。
 
 全链路可先用 Claude 个人和项目两个来源证明，再把同一来源表中的 Codex 两项一起完成；最终交付仍包括四项，不留等待上游的分支。既有准备层可复用，但准备层完成不作为再次暂停生产接线的理由。
 
 ### 10.4 明确不扩大的范围
 
-这次解决“固定常见目录中的现有 Skill 可勾选接入”，不是“实现 Claude/Codex 的完整语言、插件和权限语义”。保留原始四项开关、来源只读、冲突/覆盖、持久化/恢复和真实执行目标；删除此前自行追加的“必须先修复上游完整 CRLF/YAML 与逐候选链接诊断才能接目录”的依赖。限制需在来源入口说明，不能暗称相关行为已经正确；现有安全和事务 Gate 不因此取消。
+这次解决“固定常见目录中的现有 Skill 可勾选接入”，不是“实现 Claude/Codex 的完整语言、插件和权限语义”。保留四类目录的发现、来源只读、冲突/覆盖、持久化/恢复和真实执行目标；删除此前自行追加的“必须先修复上游完整 CRLF/YAML 与逐候选链接诊断才能接目录”的依赖。限制需在来源入口说明，不能暗称相关行为已经正确；现有安全和事务 Gate 不因此取消。
 
 本轮只修正方案并验证关键 SDK 可行性，没有修改正式 Agent/Product 实现，也没有把既有 `CatalogSourcesUnsupported` 检查从生产路径绕开。下一步有确定的本仓库代码落点，不需要新增上游修改授权。
 
@@ -537,7 +537,7 @@ Product 阶段可建立并测试 typed view，但不单独修改已发布 snapsh
 
 | Command | 精确 payload 方案 | 提交语义 |
 | --- | --- | --- |
-| `metawork.skills.setSourceEnabled` | `{ sourceId, enabled, expectedRevision }` | 仅接受四个兼容 ID 与 boolean；Host 按 source revision 做 CAS，完成持久提交后才报告 applied |
+| `metawork.skills.setSourceEnabled` | `{ sourceId, enabled, expectedRevision }` | 仅接受 claude/codex 品牌 ID 与 boolean；Host 按 source revision 对该品牌的两个范围原子 CAS，完成一次持久提交后才报告 applied |
 | `metawork.skills.recoverSourceSettings` | `{ action: reread / reset, expectedRecoveryToken }` | 只请求 Host 重读或第 3.2 节允许的显式重置；动作与恢复代次同时校验 |
 
 两者沿用现有 Skill mutation 风格，返回 `{ applied, revision, reason }`：成功为 applied=true、可信 revision、reason=null；拒绝或未能确认提交为 applied=false、revision=null、typed reason。相同值 no-op 也返回 applied=true 和原 revision，但不写盘、不发起扫描。失败后的真实旧值或未知状态从 snapshot 获取，不拿失败 reply 的 null revision 覆盖本地设置。
@@ -546,29 +546,11 @@ typed reason 必须区分 stale revision、busy、设置不可用、明确写失
 
 设置保存成功只代表配置已提交，不代表 catalog 已就绪；查询结果继续由 snapshot/现有通知发布。保存后 QueueFull 或查询失败不得把成功改成“设置未保存”。若失败动作改变了 health、恢复 token 或 authority，Host 仍须提交相应 Product revision 并通知 Renderer，不能因 command 返回失败而吞掉状态变化。
 
-不传 Workspace ID：这四项是全局规则，当前项目选择器不改变写入范围。也不增加发现目录、读取配置或解决冲突的新命令。继续使用 `skills.refreshCatalog`、`workspaces.refreshSkillCatalog` 和 `tasks.refreshSkillCatalog` 各自已有入口。
+不传 Workspace ID：品牌开关是全局规则，当前项目选择器不改变写入范围。也不增加发现目录、读取配置或解决冲突的新命令。继续使用 `skills.refreshCatalog`、`workspaces.refreshSkillCatalog` 和 `tasks.refreshSkillCatalog` 各自已有入口。
 
 ### 11.4 页面与交互
 
-**固定来源设置。** 在现有 Skills 页增加次级“兼容来源”入口，使用已有 Drawer 展示四个 Checkbox；不新增 route、全局设置框架、品牌 Logo 或统计卡。按 Claude/Codex 分组，每组明确标注个人目录与项目目录，窄屏纵向排布。`.agents/skills` 以“默认启用”的只读说明呈现。设置区域与当前范围的目录检测区域分开，未选择合法项目时不显示猜测的项目检测结果。
-
-入口说明必须包含三项事实：“项目目录开关适用于所有手动项目”“影响新任务；已有任务显式刷新技能后生效”“只发现现有 AgentCore 支持的 Skill，不继承其他工具的权限或执行配置”。实际路径不进入表单；`.claude/skills`、`.codex/skills` 只是固定约定的说明文本，不是可编辑路径。
-
-Checkbox 即点即提交，不引入一套未保存草稿或额外 Save 按钮。选中值只取 committed snapshot：请求中显示保存状态，不乐观翻转；同一窗口一次只提交一个来源设置/恢复请求，暂时禁用四项配置操作，其他导航不因此整体锁死。关闭 Drawer 不取消 Host 命令，也不丢失 App 持有的 pending 状态。收到 applied 后等待相应 snapshot；如果更新迟迟未到或命令超时，走已有 resync，不自动重放。跨窗口 stale CAS 显示“设置已变更”并重同步，不自动合并或覆盖。
-
-配置未知时 Checkbox 使用不可交互的未知/indeterminate 表示并附文字，不能显示成 false；恢复按钮严格消费 Host capability。超限文案为“配置超出读取上限”，不支持 schema 文案为“配置格式不支持”，都不能显示“配置损坏”或重置按钮；在 Host 允许时提供“重新读取配置”，不新增文件编辑/选择入口。重置仅出现在 Host 确认允许的恢复面，文案明确“关闭四项兼容来源，不删除 Skill，不修改单 Skill 启停或项目数据”；沿用第 3.2 节的显式动作，不追加重复确认流程。设置已保存但 catalog 失败时保留选中值，提示刷新重试，不提示用户再次保存。
-
-**刷新目标。** 修正当前 `App.refreshSkillsPageCatalog()` 始终调用个人 refresh 的行为。SkillsPage 将点击时的目标传给 App：personal，或 project 加 Workspace id/expected epoch；App 分别调用现有个人或 Workspace client 方法。busy 状态按请求目标记录并结合当前 catalog loading，不借用 Composer 的全局 active Workspace。切换项目、授权 epoch 变化或旧请求迟到后，不把旧目标的 pending、错误或检测结果显示到新项目上；无合法项目时禁用项目刷新，不回退到个人。这里不触发任何 Task refresh。
-
-普通手动刷新仍遵循既有保留最近 committed catalog 的合同；来源设置提交造成的受影响 authority 失效则以 Host 新 snapshot 为准，不能继续把旧 Skill 展示为当前可选或可修改的有效项。Renderer 不自行清理或重绑已有 Task 的 pinned catalog。
-
-**问题展示。** 当前页面的 attention 依赖 asset 行，无法覆盖“有 source_conflict，但零 winner/零资产”。改为从当前个人/项目 catalog 的现有 `issues` 独立渲染“目录问题”，不要求关联成功的 asset。以 code 与可空 invocation 显示事实；不编造冲突双方、优先顺序或可一键选胜者的动作。冲突可引导用户检查兼容来源，或在外部调整 Skill 后显式刷新；不会通过关闭单 Skill policy 来改变 Core 冲突。
-
-搜索只筛选资产列表，当前范围的目录问题不被搜索隐藏。`pending_verification` 继续作为资产的待处理状态，和目录问题分组计数；asset `issueCodes` 可在详情解释关联问题，但不重复计为另一条目录问题。零资产有问题时显示问题和无可用资产说明，不显示误导性的“没有发现任何问题”。scope/项目切换仍沿现有规则关闭失效资产详情。
-
-**来源与权限。** 来源优先以详情 Drawer 中的普通文本呈现，例如“Claude · 个人目录”，复用现有视觉层级，不挤占卡片为品牌打标签。外部来源的导出、重导入、卸载继续由 Host `canExport/canReimport/canUninstall` 决定；可否设置单 Skill policy 只看现有 `canSetEnabled`，不与来源 Checkbox 的 capability 混用。managed install 与外部同名项同时存在时保留各自稳定行身份、详情目标和动作参数。
-
-使用现有 Checkbox、Button、Drawer 与状态组件，遵循 metask-ui-system 和 UI 真源：44 px 操作目标、可读文字加状态语义、键盘可达、Drawer 焦点约束与关闭后恢复、浅深主题和约 390 px 宽度验证；不增加依赖。必要时只提取一个内聚的 `SkillSourcesPanel` 展示组件，不建立新状态 owner。
+来源操作已收敛为 Skills 页内的 Claude/Codex 品牌勾选，不保留来源 Drawer 与逐目录操作。交互、部分启用/未知状态、反馈与恢复、刷新目标及视觉要求以 [UI 设计规范](ui-design.md#53-skill-中心) 为准；本实施材料不再重复维护呈现合同。资产详情与导入继续沿用原有 Drawer。
 
 ### 11.5 文件落点与合同收口
 
@@ -587,15 +569,15 @@ Checkbox 即点即提交，不引入一套未保存草稿或额外 Save 按钮�
 
 1. 按第 10 节完成 Agent 适配与 Product Runtime 最小闭环，并用真实 bundle 验证个人/项目查询、权限边界和配置恢复。不能再以“准备层已完成”代替生产接线。
 2. 将 Product typed view 接入 Bridge serializer、两个 command、TS decoder/client 和严格 fixture，一次收口 allowlist/跨语言 shape。不可用 baseline 必须明确禁用操作，不使用 fake 成功或静默 fallback。
-3. 接入设置 Drawer、目标明确的刷新、独立目录问题和 origin 详情；保留现有管理、单 Skill policy、Task 与 Composer 行为。
-4. 完成下面的自动化和桌面验证，才把四项选择作为可用功能交付。可以按依赖逐步实现和测试，但不留下 Host 未闭合却已允许操作的 UI，也不为中间状态新增长期 feature flag。
+3. 接入页面内品牌开关、目标明确的刷新、独立目录问题和 origin 详情；保留现有管理、单 Skill policy、Task 与 Composer 行为。
+4. 完成下面的自动化和桌面验证，才把品牌选择作为可用功能交付。可以按依赖逐步实现和测试，但不留下 Host 未闭合却已允许操作的 UI，也不为中间状态新增长期 feature flag。
 
 ### 11.7 反例与验收
 
 | 反例 | 必须观察的结果 |
 | --- | --- |
 | 勾选存在于磁盘的四类目录，重启应用 | 四项设置持久保留；个人与项目各自取得正确 catalog；受支持 Skill 可沿现有 Task 路径真实执行 |
-| 选中项目 A 时修改“项目目录”，随后查看 B | 设置全局一致，A/B 的检测结果分别来自各自 identity/epoch，不出现隐含逐项目设置 |
+| 选中项目 A 时修改品牌开关，随后查看 B | 设置全局一致，A/B 的检测结果分别来自各自 identity/epoch，不出现隐含逐项目设置 |
 | 目录缺失、根不可读、根为链接、根检查后变化 | 勾选不被撤销；缺失与 typed error 分开；不静默跳过错误根取得较低来源的可用 authority |
 | 配置损坏、读取失败、未知 schema、明确写失败 | 前三者不伪装四项关闭；恢复 capability 区分可重读/可重置；明确写失败保留旧可信配置 |
 | 零字节、恰好 4096 bytes 的合法当前配置/未知 schema/无效 JSON | 零字节为损坏；其余按完整解码分别成为 ready/不支持/损坏，不能仅因达到上限而拒绝或开放 reset |
@@ -603,7 +585,7 @@ Checkbox 即点即提交，不引入一套未保存草稿或额外 Save 按钮�
 | 页面已有可重置状态后，文件变为超限或不支持格式；读取途中增大、短读或 OOM | reset 重新观察后不写盘，并发布新 health/恢复能力；读取竞态与资源不足不降格为损坏；过期 token 仍拒绝 |
 | 用户把超限文件处理成预算内合法配置后重新读取 | 恢复文件中的真实四项值，沿既有恢复提交和 catalog 刷新收口；不能把 reread 当作四项全关的 reset |
 | 设置已保存，但刷新 QueueFull 或随后查询失败 | 仍显示已勾选；等待或失败状态独立，受影响新绑定不可使用旧 current catalog；Text 和旧 Task 不被追溯撤权 |
-| 快速操作、跨窗口 stale CAS、关闭 Drawer、reply 与 snapshot 先后颠倒 | 单窗口不并发覆盖配置；pending 不因关面板丢失；只采纳 canonical snapshot；失败或超时不自动重放 |
+| 快速操作、跨窗口 stale CAS、切换页面、reply 与 snapshot 先后颠倒 | 单窗口不并发覆盖配置；pending 不因页面切换丢失；只采纳 canonical snapshot；失败或超时不自动重放 |
 | outcome unknown 后重读仍失败，或旧 recovery token 请求 reset | 不误报保存成功，不提供越权 reset；Host 状态变化即使命令失败也能通过 snapshot 到达页面 |
 | 刷新项目 A 途中切到 B，随后 A 完成或 epoch 改变 | 只更新 A 的 Host 事实，B 不显示 A 的检测、busy 或错误；刷新 payload 不错用当前 Task 的 Workspace |
 | 同级来源冲突导致零 winner/零资产，或正在搜索不匹配文本 | 独立目录问题仍可见；不伪造 winner/contenders，不要求关闭单 Skill policy 来解冲突 |
@@ -611,7 +593,7 @@ Checkbox 即点即提交，不引入一套未保存草稿或额外 Save 按钮�
 | 管理查询 SDK 编码为 WORKSPACE，或项目页继承个人 Skill | origin 仍为个人；policy context 与文件权限保持正确；外部项没有由品牌或 scope 推导出的管理按钮 |
 | 同名 managed install 与 external winner 并存 | 行身份、来源、详情和管理动作互不串用；pending verification 不被普通来源刷新顺便提交 |
 | 来源 A→B→A、旧任务运行中切换、idle Task 显式刷新 | Host 淘汰旧查询；旧 Task 保持 pinned；只有新建/显式刷新采用新的 current authority，Renderer 不加新协议 |
-| 浅色/深色、约 390 px、键盘与屏幕阅读器 | 四个 Checkbox 及其范围/未知状态可辨识；无横向溢出；焦点、关闭返回和状态反馈符合现有 UI gate |
+| 浅色/深色、约 390 px、键盘与屏幕阅读器 | 两个品牌 Checkbox 及部分启用/未知状态可辨识；无横向溢出；键盘焦点和状态反馈符合现有 UI gate |
 
 Renderer 最小验证包括 `npm --workspace @metawork/renderer run check`，以及受影响的 `skills-center`、`bridge-client`、`workbench-contract`、`workbench-store` suites。现有 Skills suite 的静态渲染不能证明点击流程：补充交互用例，复用仓库已有 jsdom、Testing Library 和 user-event，不新增测试框架。command/fixture 改动同时运行 Bridge tests 与 `scripts/architecture-boundaries.test.mjs`；涉及真实生命周期的前置改动按 [验证规范](validation.md) 运行正式 Native/Agent/Product lifecycle 和当前平台 desktop vertical，不能只用 TS mock 代替。
 

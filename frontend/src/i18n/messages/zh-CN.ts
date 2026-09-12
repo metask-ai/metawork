@@ -401,13 +401,9 @@ export const zhCN: Record<MessageId, string> = {
   "skills.catalog_refresh_started": "正在刷新 Skill 目录…",
   "skills.catalog_refresh_failed": "未能刷新 Skill 目录。",
   "skills.sources.title": "兼容来源",
-  "skills.sources.eyebrow": "全局 Skill 设置",
-  "skills.sources.explanation":
-    "项目目录开关适用于所有手动项目，不是当前项目的独立设置。",
-  "skills.sources.tasks": "影响新任务；已有任务显式刷新技能后生效。",
-  "skills.sources.compatibility":
-    "只发现现有 Metask AgentCore 支持的 Skill，不继承其他工具的权限或执行配置。",
-  "skills.sources.default": "默认启用，不受兼容开关影响",
+  "skills.sources.hint":
+    "同时读取个人与所有已授权项目的 Skill；已有任务需刷新技能。",
+  "skills.sources.partial": "部分启用",
   "skills.sources.scope.user": "个人目录",
   "skills.sources.scope.workspace": "项目目录",
   "skills.sources.unknown": "状态未知",
@@ -416,15 +412,7 @@ export const zhCN: Record<MessageId, string> = {
   "skills.sources.reread": "重新读取配置",
   "skills.sources.reset": "关闭全部兼容来源",
   "skills.sources.reset_body":
-    "仅关闭四项兼容来源；不删除 Skill，不修改单 Skill 启停或项目数据。",
-  "skills.sources.discovery": "当前范围的目录检测",
-  "skills.sources.check_note":
-    "检测通过仅表示目录根可读取，不代表存在可用 Skill 或没有冲突。",
-  "skills.sources.not_checked": "当前无法检查目录。",
-  "skills.sources.state.disabled": "未启用",
-  "skills.sources.state.checking": "等待或正在检查",
-  "skills.sources.state.missing": "目录不存在",
-  "skills.sources.state.checked": "根检查通过",
+    "关闭 Claude 和 Codex 来源；不删除 Skill，不修改单 Skill 启停或项目数据。",
   "skills.sources.state.error": "检查失败",
   "skills.sources.reason.unreadable": "无法读取",
   "skills.sources.reason.unsupported_entry": "目录类型不支持",

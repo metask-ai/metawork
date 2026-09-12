@@ -9,7 +9,6 @@ const models_contract = @import("metawork_product_models_contract");
 const product_control = @import("metawork_product_control");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const skill_management = @import("metawork_product_skill").management;
-const skill_sources = @import("metawork_product_skill").sources;
 const skill_runtime = @import("metawork_product_skill").runtime;
 const commands = @import("commands.zig");
 const handlers = @import("handlers.zig");
@@ -2803,10 +2802,10 @@ pub const Dispatcher = struct {
         try self.requireWindow(invocation.source.window_id);
         var parsed = try handlers.parsePayload(handlers.SkillSourceSetEnabled, invocation.request.payload);
         defer parsed.deinit();
-        const id = skill_sources.findId(parsed.value.sourceId) orelse return error.InvalidBridgePayload;
+        const brand = try handlers.parseSkillSourceBrand(parsed.value.sourceId);
         const revision = try handlers.parseWireId(parsed.value.expectedRevision);
         if (revision == 0) return error.InvalidBridgeId;
-        const result = (try self.requireProductControl()).setSkillSourceEnabled(id, parsed.value.enabled, revision);
+        const result = (try self.requireProductControl()).setSkillSourceEnabled(brand, parsed.value.enabled, revision);
         if (result.changed) self.notifyCommitted();
         return encodeSourceSettingsResult(output, result);
     }

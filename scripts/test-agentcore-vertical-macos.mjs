@@ -342,7 +342,7 @@ try {
     );
     try {
       const enabled = await invokeBridge("metawork.skills.setSourceEnabled", {
-        sourceId,
+        sourceId: isOuter ? "codex" : "claude",
         enabled: true,
         expectedRevision: sourceRevision,
       });
@@ -366,7 +366,7 @@ try {
         `linked fixed Skill root ${component}`,
       );
       const disabled = await invokeBridge("metawork.skills.setSourceEnabled", {
-        sourceId,
+        sourceId: isOuter ? "codex" : "claude",
         enabled: false,
         expectedRevision: sourceRevision,
       });
@@ -379,7 +379,7 @@ try {
     }
   }
   const sourceCommit = await invokeBridge("metawork.skills.setSourceEnabled", {
-    sourceId: "compat.claude.workspace",
+    sourceId: "claude",
     enabled: true,
     expectedRevision: sourceRevision,
   });
@@ -480,7 +480,7 @@ try {
   // Disabling the source invalidates the Workspace current authority, but the
   // already-created Task must still execute its pinned Skill below.
   const sourceOff = await invokeBridge("metawork.skills.setSourceEnabled", {
-    sourceId: "compat.claude.workspace",
+    sourceId: "claude",
     enabled: false,
     expectedRevision: sourceCommit.revision,
   });
@@ -830,7 +830,7 @@ try {
     "idle Task explicit refresh adopts disabled source",
   );
   const sourceOn = await invokeBridge("metawork.skills.setSourceEnabled", {
-    sourceId: "compat.claude.workspace",
+    sourceId: "claude",
     enabled: true,
     expectedRevision: sourceOff.revision,
   });
@@ -886,20 +886,13 @@ try {
     "---\nname: Codex proof\ndescription: Fixed-source discovery fixture\ndisable-model-invocation: true\n---\nA supported Skill from the Codex compatibility directory.\n",
     { mode: 0o600 },
   );
-  sourceRevision = sourceOn.revision;
-  for (const sourceId of [
-    "compat.claude.user",
-    "compat.codex.user",
-    "compat.codex.workspace",
-  ]) {
-    const result = await invokeBridge("metawork.skills.setSourceEnabled", {
-      sourceId,
-      enabled: true,
-      expectedRevision: sourceRevision,
-    });
-    assert.equal(result.applied, true);
-    sourceRevision = result.revision;
-  }
+  const codexOn = await invokeBridge("metawork.skills.setSourceEnabled", {
+    sourceId: "codex",
+    enabled: true,
+    expectedRevision: sourceOn.revision,
+  });
+  assert.equal(codexOn.applied, true);
+  sourceRevision = codexOn.revision;
   await poll(
     async () => {
       const current = await snapshot();

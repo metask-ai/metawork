@@ -256,6 +256,9 @@ Skill 中心只有一个工作：管理 MetaWork 已知的本地 Skill 资产及
 Skills                                           [ Import skill ] [ Refresh ]
 Manage skills available to MetaWork.
 
+Compatible sources    [ ] Claude    [ ] Codex
+Reads personal and all authorized project Skills. Existing tasks need a Skill refresh.
+
 [ Search skills…                              ]  [ User defaults ] [ Project settings ]
                                                    Project: [ MetaWork ▾ ]
 
@@ -277,7 +280,7 @@ Skills                                                              10
 页面与卡片：
 
 - 页面保留 Workbench 左栏和约 944 px 内容宽度；标题使用现有 24–28 px Display scale，一句产品说明后直接进入 controls，不增加 Hero、统计卡、渐变、来源 Logo 或装饰插画；
-- Header 的 `Import skill` 是唯一主动作，`Refresh` 与“兼容来源”使用现有次级按钮。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
+- Header 的 `Import skill` 是唯一主动作，`Refresh` 使用现有次级按钮。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
 - 页面一次只展示一个 policy context，不提供把 Personal 与全部 Project row 相加的 `All` 入口。默认 `User defaults` 只展示 `scope.kind = personal`；`Project settings` 只展示一个已选择 Manual Workspace 的 row，并严格同时匹配 Workspace id 与 epoch；
 - Project selector 只包含 `kind = manual` 且 authorization available 的 Workspace，保持 Host authoritative recent order。当前选择仍存在时保持；失效后切换到第一个合法候选；没有合法 Workspace 时显示 `No configurable projects`，不得回退到其他 scope；
 - 搜索只过滤当前 context 已提交 projection 的 display name、description、invocation 和 argument name；资产计数、待验证组与普通列表从 visible rows 派生。目录问题独立消费当前 catalog issues，不随资产搜索隐藏。切换 context 或 Workspace 时关闭已失效的资产详情；
@@ -289,13 +292,15 @@ Skills                                                              10
 - 卡片是带标题的 `article/listitem`，打开详情的按钮、启用 switch、“恢复跟随用户”与可能存在的 `···` menu button 为并列元素，禁止嵌套 interactive element。开关最小命中区 44 px，checked 使用 `--ui-action-primary`，off 使用中性边框色，并始终有文字、键盘焦点与 disabled 状态；Renderer 不 optimistic 更新，等待 committed Snapshot 后再反映新状态；
 - Skill invocation、display name、description、argument name、文件名和用户内容不翻译；页面标题、范围、状态、动作、错误和空状态进入完整 locale catalog。
 
+兼容来源：
+
+标题下、搜索与 policy context 筛选之外直接呈现“兼容来源”及 Claude、Codex 两个 Checkbox；每项同时控制个人与全部已授权手动项目目录。不保留来源 Drawer 或逐目录操作，不新增 route、Logo、排序、自由目录或设置草稿。一句辅助文案解释全局范围及已有 Task 需要刷新技能；默认目录与正常检测结果不占用常驻列表。
+
+Checkbox 即点即提交，值只来自 committed snapshot，不乐观翻转；同品牌两个根都开/关才显示对应状态，已有值不一致显示可操作的 indeterminate 与“部分启用”，不自动写回。同一窗口来源写入/恢复互斥，pending 由 App 持有，页面切换不取消请求或解除互斥；其他导航仍可用。失败或超时 resync，不自动重放；stale CAS 提示确认新值。未知值显示禁用的 indeterminate 和“状态未知”，不能伪装 false 或与部分启用混淆。保存反馈、错误和恢复操作直接在设置下方呈现；重读/reset 严格消费 Host capability，超限与不支持格式不显示 reset。reset 明确只关闭 Claude/Codex 兼容来源，不删除 Skill、不修改单 Skill policy 或项目数据。
+
+只在当前范围存在真实根检查错误时展示对应范围、来源与安全原因，不常驻展示 disabled/checking/missing/checked 清单；missing 不撤销勾选，checked 不承诺 Skill 可用或无冲突。个人刷新只使用 personal target；项目刷新提交点击时 Workspace id/epoch，不借用当前 Task，也不在无合法项目时回退个人。pending/error 与目标一起记录，旧项目或旧 epoch 的迟到结果不能显示到新目标。普通刷新失败保留 committed view；来源提交引发 authority 失效则服从新 snapshot。来源详情使用普通文本，origin 未知明确显示未知，不按品牌授予管理按钮。
+
 详情 drawer：
-
-固定兼容来源使用同一 Drawer 体系：按 Claude/Codex 分组呈现个人/项目共四个 Checkbox，`.agents/skills` 为只读默认启用说明。路径只作固定约定文本，不可编辑；不新增 route、Logo、排序、自由目录或设置草稿。“项目目录开关适用于所有手动项目”“影响新任务；已有任务显式刷新技能后生效”“只发现现有 AgentCore 支持的 Skill，不继承其他工具权限或配置”须明确可见。
-
-Checkbox 即点即提交，值只来自 committed snapshot，不乐观翻转。同一窗口来源写入/恢复互斥，pending 由 App 持有，关闭 Drawer 不取消请求或解除互斥；其他导航仍可用。失败或超时 resync，不自动重放；stale CAS 提示确认新值。未知值显示禁用的 indeterminate 和文字，不能伪装 false。重读/reset 严格消费 Host capability；超限与不支持格式不能标成损坏或显示 reset。reset 明确只关闭四项兼容来源，不删除 Skill、不修改单 Skill policy 或项目数据。
-
-设置与当前范围的根检测分开呈现，missing 不撤销勾选，checked 不承诺 Skill 可用或无冲突。个人刷新只使用 personal target；项目刷新提交点击时 Workspace id/epoch，不借用当前 Task，也不在无合法项目时回退个人。pending/error 与目标一起记录，旧项目或旧 epoch 的迟到结果不能显示到新目标。普通刷新失败保留 committed view；来源提交引发 authority 失效则服从新 snapshot。来源详情使用普通文本，origin 未知明确显示未知，不按品牌授予管理按钮。
 
 - 点击卡片主体打开右侧 drawer；窄窗切为整页详情。顶部显示名称、description、范围和 health；正文依次显示 invocation/参数、安全渲染的 `SKILL.md`、资源/脚本/模板列表、结构化 issue 和折叠的安装信息；
 - Markdown 禁止 raw HTML、script、远程 embed 和隐式网络加载；文件区只允许查看 package 内受支持的文本资源，不形成通用仓库或磁盘浏览器；物理路径、raw diagnostic、credential、内部 handle 和 hash 不进入普通详情；

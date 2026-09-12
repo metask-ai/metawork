@@ -35,6 +35,7 @@ pub const CatalogAvailability = runtime_impl.CatalogAvailability;
 pub const SkillProjection = runtime_impl.SkillProjection;
 pub const CatalogIssueProjection = runtime_impl.CatalogIssueProjection;
 pub const CatalogProjection = runtime_impl.CatalogProjection;
+pub const SkillSourceBrand = runtime_impl.SkillSourceBrand;
 pub const PermissionChoice = runtime_impl.PermissionChoice;
 pub const UiResponse = runtime_impl.UiResponse;
 pub const Configuration = runtime_impl.Configuration;

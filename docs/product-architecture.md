@@ -169,7 +169,7 @@ Task 创建时同步借用当前 Workspace authority 并取得独立 pinned snap
 
 固定兼容来源选择也由 Product Skill 拥有，与单 Skill enablement、inventory 和 Task pinned authority 分离。来源配置以独立 `skill-sources.json`、schema 1、单调 revision 做持久 CAS；首次缺失须先持久提交默认关闭值才建立可信配置。读取预算为 4096 bytes：恰好达到预算仍完整解码，超出预算单独标记 `too_large`，不得按损坏处理或解码前缀。损坏/后续缺失可显式 reset；读取失败、超限、不支持格式和结果不确定只允许按 capability 重读，不得自动覆盖。恢复 token 绑定当前恢复代次，reset 写入前重新读取；若文件已恢复合法，保留其真实值并以高于已观察 revision 的新提交重建 authority。
 
-来源 candidate 先持久提交，再 no-fail 安装选择并使受影响 current authority 失效；个人规则影响 personal 与所有已授权 Manual Workspace，项目规则只影响这些 Workspace。明确写失败保留旧可信选择与 authority；持久结果不确定冻结新的来源/管理 mutation 与 Skill authority，但不追溯撤销已有 Task pinned lease、普通 Text 或 durable management transaction 的恢复职责。根检查在有界 worker 中执行，仅授权固定相对目录；不存在的可选根可缺席，不可读、不支持类型或变化的根不得被静默跳过后发布部分 authority。AgentCore 仍独占 Skill 解析及 winner/conflict 判定，Product 不实现候选 fallback。
+来源 mutation 以 Claude/Codex 品牌为单位：同一 CAS candidate 同时设置该品牌的个人和项目值、保留另一品牌，一次持久提交且 revision 至多推进一次；不提供逐目录写入口。schema 1 保留四个真实根的值，加载已有部分启用配置时不自动归一化。candidate 先持久提交，再 no-fail 安装选择并使实际受影响 current authority 失效；个人值变化影响 personal 与所有已授权 Manual Workspace，只有项目值变化时不使 personal 失效。明确写失败保留旧可信选择与 authority；持久结果不确定冻结新的来源/管理 mutation 与 Skill authority，但不追溯撤销已有 Task pinned lease、普通 Text 或 durable management transaction 的恢复职责。根检查在有界 worker 中执行，仅授权固定相对目录；不存在的可选根可缺席，不可读、不支持类型或变化的根不得被静默跳过后发布部分 authority。AgentCore 仍独占 Skill 解析及 winner/conflict 判定，Product 不实现候选 fallback。
 
 每个查询 scope 至多保留一个 job 与一个 latest reschedule intent。来源提交时即推进 request generation；旧 generation、选择或 Workspace epoch 的结果只释放，不得因 A→B→A 恢复同值而发布。shared Executor 的 QueueFull 保留 intent，沿既有 completion/wake 与 Control sync 有界轮转重试；其他错误结束该 intent 并等待显式刷新，不增加 timer、watcher 或无限自动重试。来源查询不隐式刷新 Task。
 

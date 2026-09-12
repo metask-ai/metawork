@@ -9,6 +9,7 @@ const agent = @import("metawork_agent");
 pub const file_name = "skill-sources.json";
 pub const max_store_bytes = 4096;
 pub const Id = enum { claude_user, claude_workspace, codex_user, codex_workspace };
+pub const Brand = enum { claude, codex };
 pub const Ecosystem = enum {
     agents,
     claude,
@@ -74,14 +75,20 @@ pub const Settings = struct {
 
     /// Prepares a value only. Persistence and no-fail installation belong to
     /// Skill Runtime; constructing this candidate does not change authority.
-    pub fn replacing(self: Settings, id: Id, enabled: bool, expected_revision: u64) error{ InvalidSettings, StaleRevision, RevisionExhausted }!Settings {
+    pub fn replacing(self: Settings, brand: Brand, enabled: bool, expected_revision: u64) error{ InvalidSettings, StaleRevision, RevisionExhausted }!Settings {
         if (self.revision == 0) return error.InvalidSettings;
         if (self.revision != expected_revision) return error.StaleRevision;
-        if (self.selection.enabled(id) == enabled) return self;
-        if (self.revision == std.math.maxInt(u64)) return error.RevisionExhausted;
+        const ecosystem: Ecosystem = switch (brand) {
+            .claude => .claude,
+            .codex => .codex,
+        };
         var result = self;
+        for (definitions) |item| {
+            if (item.ecosystem == ecosystem) result.selection.values[@intFromEnum(item.id)] = enabled;
+        }
+        if (result.selection.eql(self.selection)) return self;
+        if (self.revision == std.math.maxInt(u64)) return error.RevisionExhausted;
         result.revision += 1;
-        result.selection.values[@intFromEnum(id)] = enabled;
         return result;
     }
 };
@@ -398,14 +405,36 @@ test "fixed source settings round trip every selection and scope dependency" {
 
 test "settings candidate checks CAS no-op and overflow without mutating input" {
     const original: Settings = .{};
-    const candidate = try original.replacing(.claude_user, true, 1);
+    const candidate = try original.replacing(.claude, true, 1);
     try std.testing.expectEqual(@as(u64, 2), candidate.revision);
     try std.testing.expect(!original.selection.enabled(.claude_user));
-    try std.testing.expectEqualDeep(candidate, try candidate.replacing(.claude_user, true, 2));
-    try std.testing.expectError(error.StaleRevision, candidate.replacing(.claude_user, true, 1));
+    try std.testing.expectEqualDeep(candidate, try candidate.replacing(.claude, true, 2));
+    try std.testing.expectError(error.StaleRevision, candidate.replacing(.claude, true, 1));
     const exhausted: Settings = .{ .revision = std.math.maxInt(u64) };
-    try std.testing.expectEqualDeep(exhausted, try exhausted.replacing(.claude_user, false, exhausted.revision));
-    try std.testing.expectError(error.RevisionExhausted, exhausted.replacing(.claude_user, true, exhausted.revision));
+    try std.testing.expectEqualDeep(exhausted, try exhausted.replacing(.claude, false, exhausted.revision));
+    try std.testing.expectError(error.RevisionExhausted, exhausted.replacing(.claude, true, exhausted.revision));
+}
+
+test "brand candidate changes both scopes once and preserves the other brand in all persisted combinations" {
+    for (0..16) |bits| {
+        var original: Settings = .{ .revision = 7 };
+        for (&original.selection.values, 0..) |*value, index| value.* = bits & (@as(usize, 1) << @intCast(index)) != 0;
+        inline for (.{ Brand.claude, Brand.codex }) |brand| {
+            inline for (.{ false, true }) |enabled| {
+                const candidate = try original.replacing(brand, enabled, 7);
+                for (definitions) |item| {
+                    const selected = item.ecosystem == (switch (brand) {
+                        .claude => Ecosystem.claude,
+                        .codex => Ecosystem.codex,
+                    });
+                    try std.testing.expectEqual(if (selected) enabled else original.selection.enabled(item.id), candidate.selection.enabled(item.id));
+                }
+                try std.testing.expectEqual(@as(u64, if (candidate.selection.eql(original.selection)) 7 else 8), candidate.revision);
+                var buffer: [max_store_bytes]u8 = undefined;
+                try std.testing.expectEqualDeep(candidate, try decode(std.testing.allocator, try encode(candidate, &buffer)));
+            }
+        }
+    }
 }
 
 test "settings decoder rejects malformed unknown duplicate and coercible fields" {
@@ -431,10 +460,10 @@ test "source FileStore distinguishes absence corruption unsupported format and I
     var store = try FileStore.init(std.testing.io, root);
     defer store.deinit();
     try std.testing.expectEqualDeep(Load.absent, try store.load(std.testing.allocator));
-    const settings = try (Settings{}).replacing(.claude_user, true, 1);
+    const settings = try (Settings{}).replacing(.claude, true, 1);
     try store.commit(settings);
     try std.testing.expectEqualDeep(Load{ .ready = settings }, try store.load(std.testing.allocator));
-    try store.commit(try settings.replacing(.codex_workspace, true, 2));
+    try store.commit(try settings.replacing(.codex, true, 2));
     try std.testing.expectEqual(@as(u64, 3), (try store.load(std.testing.allocator)).ready.revision);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = file_name, .data = "{}" });
     try std.testing.expectEqualDeep(Load.invalid, try store.load(std.testing.allocator));
@@ -675,7 +704,7 @@ test "store sync failure distinguishes failed publication from uncertain durabil
     Fault.fail_on = 0;
     const original: Settings = .{};
     try store.commit(original);
-    const candidate = try original.replacing(.claude_user, true, 1);
+    const candidate = try original.replacing(.claude, true, 1);
     Fault.calls = 0;
     Fault.fail_on = 1;
     try std.testing.expectError(error.WriteFailed, store.commit(candidate));

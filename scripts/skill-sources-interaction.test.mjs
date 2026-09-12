@@ -69,7 +69,7 @@ HTMLButtonElement.prototype.getBoundingClientRect = () => ({
     return this;
   },
 });
-const { render, screen, cleanup, fireEvent, act, waitFor, within } =
+const { render, screen, cleanup, fireEvent, act, waitFor } =
   await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const vite = await createServer({
@@ -88,7 +88,7 @@ test.after(async () => {
   dom.window.close();
 });
 
-async function fixture(ctx) {
+async function fixture(ctx, configure = () => {}) {
   const snapshot = JSON.parse(
     await readFile(
       "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
@@ -122,6 +122,7 @@ async function fixture(ctx) {
   const writes = [],
     recoveries = [],
     refreshes = [];
+  configure(snapshot);
   for (const [name, fn] of Object.entries({
     available: () => true,
     onShortcut: () => () => {},
@@ -161,28 +162,30 @@ async function fixture(ctx) {
   return { snapshot, writes, recoveries, refreshes };
 }
 
-test("App owns source mutation across Drawer closure and displays only committed selections", async (ctx) => {
+test("Inline brand controls retain the App mutation latch across navigation and show only committed selections", async (ctx) => {
   const { snapshot, writes } = await fixture(ctx);
   const user = userEvent.setup({ document });
-  const trigger = screen.getByRole("button", { name: "Compatible sources" });
-  await user.click(trigger);
+  assert.equal(
+    screen.queryByRole("button", { name: "Compatible sources" }),
+    null,
+  );
+  assert.equal(screen.queryByRole("dialog"), null);
   let checkboxes = screen.getAllByRole("checkbox");
-  assert.equal(checkboxes.length, 4);
+  assert.equal(checkboxes.length, 2);
   await user.click(checkboxes[0]);
-  assert.deepEqual(writes[0].args, ["compat.claude.user", true, "1"]);
+  assert.deepEqual(writes[0].args, ["claude", true, "1"]);
   assert.equal(checkboxes[0].getAttribute("aria-checked"), "false");
   assert.ok(
     checkboxes.every((entry) => entry.getAttribute("aria-disabled") === "true"),
   );
-  await user.keyboard("{Escape}");
-  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
-  await waitFor(() => assert.equal(document.activeElement, trigger));
-  await user.click(trigger);
+  await user.click(screen.getByRole("button", { name: "MCP", exact: true }));
+  await user.click(screen.getByRole("button", { name: "Skills", exact: true }));
   checkboxes = screen.getAllByRole("checkbox");
   await user.click(checkboxes[1]);
   assert.equal(writes.length, 1);
   snapshot.skillManagement.sourceSettings.revision = "2";
   snapshot.skillManagement.sourceSettings.entries[0].enabled = true;
+  snapshot.skillManagement.sourceSettings.entries[1].enabled = true;
   snapshot.revision = "50";
   await act(async () =>
     writes[0].resolve({ applied: true, revision: "2", reason: null }),
@@ -194,7 +197,7 @@ test("App owns source mutation across Drawer closure and displays only committed
     ),
   );
   await user.click(screen.getAllByRole("checkbox")[1]);
-  assert.deepEqual(writes[1].args, ["compat.claude.workspace", true, "2"]);
+  assert.deepEqual(writes[1].args, ["codex", true, "2"]);
   await act(async () =>
     writes[1].resolve({
       applied: false,
@@ -213,7 +216,6 @@ test("App owns source mutation across Drawer closure and displays only committed
 test("Unknown and oversized settings stay indeterminate and cannot be reset", async (ctx) => {
   const { snapshot, writes, recoveries } = await fixture(ctx);
   // First request returns an uncertain outcome and a new authoritative snapshot.
-  fireEvent.click(screen.getByRole("button", { name: "Compatible sources" }));
   fireEvent.click(screen.getAllByRole("checkbox")[0]);
   Object.assign(snapshot.skillManagement.sourceSettings, {
     revision: null,
@@ -251,6 +253,73 @@ test("Unknown and oversized settings stay indeterminate and cannot be reset", as
     }),
   );
   assert.equal(writes.length, 1);
+});
+
+test("Partial persisted selections remain visible until an explicit atomic brand update succeeds", async (ctx) => {
+  const { snapshot, writes } = await fixture(ctx, (value) => {
+    value.skillManagement.sourceSettings.entries[0].enabled = true;
+  });
+  const user = userEvent.setup({ document });
+  const claude = screen.getByRole("checkbox", { name: /^Claude/ });
+  assert.equal(claude.getAttribute("aria-checked"), "mixed");
+  assert.ok(screen.getByText("Partially enabled"));
+  assert.equal(writes.length, 0);
+  claude.focus();
+  await user.keyboard(" ");
+  assert.deepEqual(writes[0].args, ["claude", true, "1"]);
+  await act(async () =>
+    writes[0].resolve({
+      applied: false,
+      revision: null,
+      reason: "write_failed",
+    }),
+  );
+  await screen.findByText(/previous settings remain valid/);
+  assert.equal(claude.getAttribute("aria-checked"), "mixed");
+  await user.click(claude);
+  snapshot.skillManagement.sourceSettings.entries[1].enabled = true;
+  snapshot.skillManagement.sourceSettings.revision = "2";
+  snapshot.revision = "52";
+  await act(async () =>
+    writes[1].resolve({ applied: true, revision: "2", reason: null }),
+  );
+  await waitFor(() =>
+    assert.equal(claude.getAttribute("aria-checked"), "true"),
+  );
+  assert.equal(screen.queryByText("Partially enabled"), null);
+  await user.click(claude);
+  assert.deepEqual(writes[2].args, ["claude", false, "2"]);
+  snapshot.skillManagement.sourceSettings.entries[0].enabled = false;
+  snapshot.skillManagement.sourceSettings.entries[1].enabled = false;
+  snapshot.skillManagement.sourceSettings.revision = "3";
+  snapshot.revision = "53";
+  await act(async () =>
+    writes[2].resolve({ applied: true, revision: "3", reason: null }),
+  );
+  await waitFor(() =>
+    assert.equal(claude.getAttribute("aria-checked"), "false"),
+  );
+});
+
+test("Only real directory errors are shown; a missing root does not turn off the brand", async (ctx) => {
+  const { writes } = await fixture(ctx, (snapshot) => {
+    for (const entry of snapshot.skillManagement.sourceSettings.entries)
+      entry.enabled = true;
+    snapshot.skillManagement.personalSourceDiscovery = [
+      { sourceId: "agents.user.default", state: "checked", reason: null },
+      { sourceId: "compat.claude.user", state: "missing", reason: null },
+      { sourceId: "compat.codex.user", state: "error", reason: "unreadable" },
+    ];
+  });
+  assert.equal(
+    screen
+      .getByRole("checkbox", { name: "Claude" })
+      .getAttribute("aria-checked"),
+    "true",
+  );
+  assert.ok(screen.getByText(/Codex · Personal directory.*Unreadable/));
+  assert.equal(screen.queryByText(/Root checked|Directory missing/), null);
+  assert.equal(writes.length, 0);
 });
 
 test("Catalog issues survive zero assets and search; refreshes use the selected scope and epoch", async (ctx) => {

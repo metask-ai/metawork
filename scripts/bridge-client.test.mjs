@@ -25,8 +25,7 @@ test("Skill source commands carry only fixed ID intent and exact revision or rec
     }),
   });
   assert.equal(
-    (await client.setSkillSourceEnabled("compat.claude.user", true, "7"))
-      .revision,
+    (await client.setSkillSourceEnabled("claude", true, "7")).revision,
     "18446744073709551615",
   );
   await client.recoverSkillSourceSettings("reread", "9");
@@ -35,7 +34,7 @@ test("Skill source commands carry only fixed ID intent and exact revision or rec
     {
       command: "metawork.skills.setSourceEnabled",
       payload: {
-        sourceId: "compat.claude.user",
+        sourceId: "claude",
         enabled: true,
         expectedRevision: "7",
       },

@@ -882,6 +882,9 @@ export type SkillCatalogView = {
   }[];
 };
 
+export const skillSourceBrands = ["claude", "codex"] as const;
+export type SkillSourceBrand = (typeof skillSourceBrands)[number];
+
 export const skillSourceIds = [
   "compat.claude.user",
   "compat.claude.workspace",

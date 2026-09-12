@@ -8,7 +8,7 @@ import type {
   SkillCatalogView,
   SkillManagementView,
   SkillMutationResult,
-  SkillSourceId,
+  SkillSourceBrand,
   WorkspaceView,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -19,7 +19,7 @@ import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
-import { SkillSourcesPanel } from "./SkillSourcesPanel.tsx";
+import { SkillSourceControls } from "./SkillSourceControls.tsx";
 
 type Asset = SkillManagementView["assets"][number];
 export type SkillContext = "personal" | "project";
@@ -245,7 +245,7 @@ export function SkillsPage({
   sourceBusy: boolean;
   sourceError: string | null;
   onSetSourceEnabled: (
-    id: SkillSourceId,
+    id: SkillSourceBrand,
     enabled: boolean,
     revision: string,
   ) => void;
@@ -293,7 +293,6 @@ export function SkillsPage({
   const [selected, setSelected] = useState<Asset | null>(null);
   const [detail, setDetail] = useState<SkillDetailResult | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  const [sourcesOpen, setSourcesOpen] = useState(false);
   const [preview, setPreview] = useState<SkillImportPreview | null>(null);
   const [importScope, setImportScope] = useState("personal");
   const [reimportTarget, setReimportTarget] = useState<Asset | null>(null);
@@ -329,7 +328,7 @@ export function SkillsPage({
     (asset) => asset.managementState === "pending_verification",
   );
   const regular = visibleAssets.filter((asset) => !attention.includes(asset));
-  const drawerOpen = selected !== null || importOpen || sourcesOpen;
+  const drawerOpen = selected !== null || importOpen;
   const catalog =
     context === "personal" ? personalCatalog : selectedWorkspace?.skillCatalog;
   const discovery =
@@ -475,7 +474,6 @@ export function SkillsPage({
     setSelected(null);
     setDetail(null);
     setImportOpen(false);
-    setSourcesOpen(false);
     setPreview(null);
     setReimportTarget(null);
     setReplaceRequired(false);
@@ -659,17 +657,6 @@ export function SkillsPage({
             <Button
               variant="secondary"
               size="sm"
-              onClick={(event) => {
-                closeDrawer(false);
-                rememberTrigger(event.currentTarget);
-                setSourcesOpen(true);
-              }}
-            >
-              {t("skills.sources.title")}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
               disabled={
                 disabled ||
                 refreshing ||
@@ -694,6 +681,21 @@ export function SkillsPage({
             </Button>
           </div>
         </header>
+
+        <SkillSourceControls
+          settings={management.sourceSettings}
+          discovery={discovery}
+          contextLabel={
+            context === "personal"
+              ? t("skills.scope.personal")
+              : (selectedWorkspace?.displayName ?? t("skills.no_project_title"))
+          }
+          busy={sourceBusy}
+          error={sourceError}
+          disabled={disabled}
+          onSetEnabled={onSetSourceEnabled}
+          onRecover={onRecoverSources}
+        />
 
         <div className="skill-toolbar">
           <SearchField
@@ -867,20 +869,16 @@ export function SkillsPage({
             <header>
               <div>
                 <small>
-                  {sourcesOpen
-                    ? t("skills.sources.eyebrow")
-                    : importOpen
-                      ? t("skills.import.eyebrow")
-                      : t("skills.detail.eyebrow")}
+                  {importOpen
+                    ? t("skills.import.eyebrow")
+                    : t("skills.detail.eyebrow")}
                 </small>
                 <h2 id="skill-drawer-title" ref={drawerHeading} tabIndex={-1}>
-                  {sourcesOpen
-                    ? t("skills.sources.title")
-                    : importOpen
-                      ? reimportTarget
-                        ? t("skills.reimport")
-                        : t("skills.import")
-                      : selected?.displayName || selected?.invocationName}
+                  {importOpen
+                    ? reimportTarget
+                      ? t("skills.reimport")
+                      : t("skills.import")
+                    : selected?.displayName || selected?.invocationName}
                 </h2>
               </div>
               <button
@@ -894,23 +892,7 @@ export function SkillsPage({
             </header>
 
             <div className="skill-drawer-scroll">
-              {sourcesOpen ? (
-                <SkillSourcesPanel
-                  settings={management.sourceSettings}
-                  discovery={discovery}
-                  contextLabel={
-                    context === "personal"
-                      ? t("skills.scope.personal")
-                      : (selectedWorkspace?.displayName ??
-                        t("skills.no_project_title"))
-                  }
-                  busy={sourceBusy}
-                  error={sourceError}
-                  disabled={disabled}
-                  onSetEnabled={onSetSourceEnabled}
-                  onRecover={onRecoverSources}
-                />
-              ) : importOpen ? (
+              {importOpen ? (
                 <>
                   {!preview?.selected ? (
                     <div className="skill-import-choices">

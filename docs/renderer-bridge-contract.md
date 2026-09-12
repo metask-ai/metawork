@@ -51,7 +51,7 @@ Tool 的 `bash` 必填且 nullable，只由 Host 为精确 `Bash` identifier 投
 
 ## Skill source settings
 
-revision 1 的 Skill 来源设置新增两个 typed 写入口：`metawork.skills.setSourceEnabled` 的 payload 精确为 `{ sourceId, enabled, expectedRevision }`；`metawork.skills.recoverSourceSettings` 精确为 `{ action, expectedRecoveryToken }`，action 仅为 `reread | reset`。来源 ID 仅为 `compat.claude.user | compat.claude.workspace | compat.codex.user | compat.codex.workspace`，不接收目录路径或 Workspace target；revision/token 是非零 canonical decimal u64。结果精确为 `{ applied, revision, reason }`；成功（含相同值 no-op）给出可信 revision 与 null reason，失败给出 null revision 与闭合原因。no-op 不写盘、不调度、不通知；失败若改变 health、token 或 authority 仍发布 Product revision。保存成功不表示查询成功。超时只 resync，不自动重放。
+revision 1 的 Skill 来源设置提供两个 typed 写入口：`metawork.skills.setSourceEnabled` 的 payload 精确为 `{ sourceId, enabled, expectedRevision }`，sourceId 仅为品牌 `claude | codex`，Host 在一次 CAS/持久提交中将该品牌的个人和项目来源同时设为 enabled；拒绝逐根 ID、目录路径或 Workspace target，不提供旧逐目录写入兼容路径。`metawork.skills.recoverSourceSettings` 精确为 `{ action, expectedRecoveryToken }`，action 仅为 `reread | reset`。revision/token 是非零 canonical decimal u64。结果精确为 `{ applied, revision, reason }`；成功（含两个值均未变化的 no-op）给出可信 revision 与 null reason，失败给出 null revision 与闭合原因。no-op 不写盘、不调度、不通知；失败若改变 health、token 或 authority 仍发布 Product revision。保存成功不表示查询成功。超时只 resync，不自动重放。
 
 原因仅为 `stale_revision | busy | source_settings_unavailable | write_failed | persistence_outcome_unknown | stale_recovery_token | recovery_not_allowed | read_failed | revision_exhausted | shutting_down`。Renderer 不能将失败的 null revision 覆盖 committed 选择，不能用恢复按钮绕过 Host 对新鲜恢复 token 和实际文件状态的校验。
 

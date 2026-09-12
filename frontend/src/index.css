@@ -3759,33 +3759,28 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   scrollbar-gutter: stable;
 }
 
-.skill-sources-panel {
+.skill-source-controls {
   display: grid;
-  gap: 16px;
+  gap: 4px;
+  margin-block: 20px;
   color: var(--ui-content-muted);
   font-size: var(--text-body);
 }
-.skill-sources-panel p {
+.skill-source-controls p {
   margin: 0;
   line-height: 1.6;
 }
-.skill-sources-panel fieldset {
-  margin: 0;
-  padding: 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 7px;
-  min-width: 0;
-}
-.skill-sources-panel legend,
-.skill-source-discovery h3 {
-  color: var(--ui-content-primary);
-  font-weight: 600;
+.skill-source-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 24px;
 }
 .skill-source-option {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 56px;
+  gap: 8px;
+  min-height: 44px;
   cursor: pointer;
 }
 .skill-source-option:has([disabled]) {
@@ -3795,33 +3790,28 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   color: var(--ui-content-primary);
 }
 .skill-source-option small {
-  display: block;
   color: var(--ui-content-muted);
-  margin-top: 4px;
 }
-.skill-sources-panel button {
+.skill-source-recovery button {
   min-height: 44px;
 }
-.skill-source-discovery {
+.skill-source-recovery {
   display: grid;
   gap: 8px;
-  border-top: 1px solid var(--ui-border);
-  padding-top: 16px;
+  justify-items: start;
+  margin-top: 8px;
 }
-.skill-source-discovery ul,
+.skill-source-errors {
+  margin-top: 8px;
+}
+.skill-source-errors ul,
 .skill-catalog-issues ul {
   list-style: none;
   padding: 0;
   margin: 0;
 }
-.skill-source-discovery li {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 4px 16px;
-  padding: 8px 0;
-}
-.skill-source-discovery li > span {
+.skill-source-errors li {
+  padding-block: 4px;
   overflow-wrap: anywhere;
 }
 .skill-catalog-issues {
@@ -3856,11 +3846,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .skill-drawer > footer button {
   min-height: 34px;
-}
-
-.skill-drawer:has(.skill-sources-panel) > :is(header, footer) button {
-  min-height: 44px;
-  min-width: 44px;
 }
 
 .skill-import-choices {

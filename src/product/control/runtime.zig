@@ -265,6 +265,7 @@ pub const CatalogAvailability = catalog_snapshot.CatalogAvailability;
 pub const SkillProjection = catalog_snapshot.SkillProjection;
 pub const CatalogIssueProjection = catalog_snapshot.CatalogIssueProjection;
 pub const CatalogProjection = catalog_snapshot.CatalogProjection;
+pub const SkillSourceBrand = @import("metawork_product_skill").sources.Brand;
 pub const NewTaskAdmissionView = execution_state.NewTaskAdmissionView;
 
 pub const ExecutionIdentity = struct {
@@ -2784,9 +2785,9 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
-    pub fn setSkillSourceEnabled(self: *Runtime, id: @import("metawork_product_skill").sources.Id, enabled: bool, expected_revision: u64) skill_runtime.SourceSettingsResult {
+    pub fn setSkillSourceEnabled(self: *Runtime, brand: SkillSourceBrand, enabled: bool, expected_revision: u64) skill_runtime.SourceSettingsResult {
         self.syncLifecycle();
-        const result = self.skill.setSourceEnabled(id, enabled, expected_revision, self.skillProjectionBudget());
+        const result = self.skill.setSourceEnabled(brand, enabled, expected_revision, self.skillProjectionBudget());
         if (result.changed) {
             _ = self.syncSkillCatalogsNoFail();
             self.bumpRevision();
