@@ -5065,11 +5065,18 @@ pub const Runtime = struct {
         workspace_epoch: u64,
     ) product_workspace.ViewError!void {
         const self: *const Runtime = @ptrCast(@alignCast(context));
+        const workspace = self.workspace.facts(workspace_id) orelse unreachable;
+        std.debug.assert(workspace.epoch == workspace_epoch);
+        // Automatic Workspaces have no catalog; unavailable is a Manual
+        // Workspace authority state, not their presentation state.
+        const projection: CatalogProjection = if (workspace.kind == .automatic)
+            .{ .availability = .uninitialized }
+        else
+            self.skill.workspaceCatalogProjection(workspace_id, workspace_epoch) catch unreachable;
         skill_runtime.Runtime.writeCatalogProjection(
             writer,
             self.skillTextProjection(),
-            self.skill.workspaceCatalogProjection(workspace_id, workspace_epoch) catch
-                unreachable,
+            projection,
         ) catch return error.SnapshotTooLarge;
     }
 
@@ -9329,6 +9336,23 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     const removed = try control.copyWorkspaceProjections(&storage);
     try std.testing.expectEqual(@as(usize, 0), removed.len);
     try std.testing.expectError(error.TaskClosing, control.runTask(3, .{ .text = "continue" }));
+}
+
+test "Automatic Workspace snapshot matches the catalog-free Renderer fixture variant" {
+    var control = try testRuntime();
+    defer control.deinit();
+    product_workspace.testing.makeAutomatic(&control.workspace, 1, 3);
+    try control.skill.setWorkspaceCatalogAuthorized(1, 1, false, control.skillProjectionBudget());
+
+    var fixture = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, contract_fixture.snapshot, .{});
+    defer fixture.deinit();
+    const workspace = &fixture.value.object.getPtr("workspaces").?.array.items[0];
+    workspace.object.getPtr("kind").?.* = .{ .string = "automatic" };
+    workspace.object.getPtr("recentOrder").?.* = .{ .string = "0" };
+    const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value, .{});
+    defer std.testing.allocator.free(expected);
+    var storage: [8192]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, try control.writeSnapshot(&storage));
 }
 
 test "Product Control snapshot serializer matches the Renderer contract fixture" {
