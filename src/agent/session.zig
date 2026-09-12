@@ -411,7 +411,6 @@ pub const Error = error{
     InvalidWorkspace,
     WorkspaceNotTrusted,
     InvalidCatalogQuery,
-    CatalogSourcesUnsupported,
     InvalidCatalogDescriptor,
     DuplicateCatalogIdentity,
     SkillCatalogInvalid,

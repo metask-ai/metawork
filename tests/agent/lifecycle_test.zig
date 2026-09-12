@@ -937,7 +937,150 @@ test "Catalog additional sources are encoded exactly and borrowed only for the q
     try std.testing.expectEqual(@as(usize, 4), fake_core.catalog_queries);
 }
 
-test "Catalog invalid sources fail before Core and management rejects additional discovery" {
+test "Management catalog encodes personal additions at the shared default priority" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const sources: [4]lifecycle.CatalogSource = @splat(.{
+        .canonical_root = root,
+        .scope = .user,
+        .source_instance_id = "personal",
+    });
+    var acquisition = try runtime.querySkillCatalog(.{
+        .canonical_user_home = root,
+        .target = .management,
+        .additional_sources = &sources,
+    });
+    defer acquisition.projection.deinit();
+    defer runtime.releaseSkillCatalog(acquisition.lease) catch unreachable;
+    try std.testing.expectEqual(@as(usize, 4), fake_core.catalog_source_count);
+    for (fake_core.catalog_sources[0..4]) |seen|
+        try std.testing.expectEqual(wire.SKILL_SOURCE_WORKSPACE, seen.scope);
+    for (sources) |source| try std.testing.expectEqual(lifecycle.CatalogSourceScope.user, source.scope);
+}
+
+test "canonical AgentCore management and Workspace resolve all personal and project source selections" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dirs = [_][]const u8{
+        "home/.claude/skills", "workspace/.claude/skills", "home/.codex/skills", "workspace/.codex/skills",
+    };
+    for (dirs ++ .{"home/.agents/skills"}) |dir| {
+        const entry = try std.fs.path.join(std.testing.allocator, &.{ dir, "review" });
+        defer std.testing.allocator.free(entry);
+        try tmp.dir.createDirPath(std.testing.io, entry);
+        const file = try std.fs.path.join(std.testing.allocator, &.{ entry, "SKILL.md" });
+        defer std.testing.allocator.free(file);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = file, .data = "---\nname: Review\ndescription: Review this change\n---\nInspect the requested file.\n" });
+    }
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, "workspace", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var roots: [4][:0]u8 = undefined;
+    var root_count: usize = 0;
+    defer for (roots[0..root_count]) |path| std.testing.allocator.free(path);
+    for (dirs, 0..) |dir, index| {
+        roots[index] = try tmp.dir.realPathFileAlloc(std.testing.io, dir, std.testing.allocator);
+        root_count += 1;
+    }
+    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const ids = [_][]const u8{ "compat.claude.user", "compat.claude.workspace", "compat.codex.user", "compat.codex.workspace" };
+    for (0..32) |variation| {
+        const mask = variation % 16;
+        var personal: [2]lifecycle.CatalogSource = undefined;
+        var workspace: [4]lifecycle.CatalogSource = undefined;
+        var personal_count: usize = 0;
+        var workspace_count: usize = 0;
+        var project_count: usize = 0;
+        var project_id: []const u8 = "";
+        for (roots, ids, 0..) |path, id, index| {
+            if (mask & (@as(usize, 1) << @intCast(index)) == 0) continue;
+            const source: lifecycle.CatalogSource = .{
+                .canonical_root = path,
+                .scope = if (index % 2 == 0) .user else .workspace,
+                .source_instance_id = id,
+            };
+            workspace[workspace_count] = source;
+            workspace_count += 1;
+            if (source.scope == .user) {
+                personal[personal_count] = source;
+                personal_count += 1;
+            } else {
+                project_count += 1;
+                project_id = id;
+            }
+        }
+        if (variation >= 16) {
+            std.mem.reverse(lifecycle.CatalogSource, personal[0..personal_count]);
+            std.mem.reverse(lifecycle.CatalogSource, workspace[0..workspace_count]);
+        }
+        var management = try runtime.querySkillCatalog(.{
+            .canonical_user_home = home,
+            .target = .management,
+            .additional_sources = personal[0..personal_count],
+        });
+        defer management.projection.deinit();
+        defer runtime.releaseSkillCatalog(management.lease) catch unreachable;
+        var effective = try runtime.querySkillCatalog(.{
+            .canonical_user_home = home,
+            .target = .{ .workspace = .{ .canonical_root = root, .epoch = "selection" } },
+            .additional_sources = workspace[0..workspace_count],
+        });
+        defer effective.projection.deinit();
+        defer runtime.releaseSkillCatalog(effective.lease) catch unreachable;
+        try std.testing.expectEqual(@as(usize, if (personal_count == 0) 1 else 0), management.projection.skills.len);
+        try std.testing.expectEqual(@as(usize, if (personal_count == 0) 0 else 1), management.projection.issues.len);
+        if (personal_count != 0)
+            try std.testing.expectEqual(lifecycle.CatalogIssueCode.source_conflict, management.projection.issues[0].code);
+        const conflict = project_count > 1 or (project_count == 0 and personal_count != 0);
+        try std.testing.expectEqual(@as(usize, if (conflict) 0 else 1), effective.projection.skills.len);
+        try std.testing.expectEqual(@as(usize, if (conflict) 1 else 0), effective.projection.issues.len);
+        if (conflict)
+            try std.testing.expectEqual(lifecycle.CatalogIssueCode.source_conflict, effective.projection.issues[0].code)
+        else
+            try std.testing.expectEqualStrings(if (project_count == 1) project_id else "agents.user.default", effective.projection.skills[0].source_instance_id);
+    }
+    // A malformed higher-priority definition must not reveal a lower winner.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace/.claude/skills/review/SKILL.md", .data = "\xff" });
+    var broken = try runtime.querySkillCatalog(.{
+        .canonical_user_home = home,
+        .target = .{ .workspace = .{ .canonical_root = root, .epoch = "broken" } },
+        .additional_sources = &.{.{ .canonical_root = roots[1], .scope = .workspace, .source_instance_id = ids[1] }},
+    });
+    defer broken.projection.deinit();
+    defer runtime.releaseSkillCatalog(broken.lease) catch unreachable;
+    try std.testing.expectEqual(@as(usize, 0), broken.projection.skills.len);
+    try std.testing.expectEqual(@as(usize, 1), broken.projection.issues.len);
+    try std.testing.expectEqual(lifecycle.CatalogIssueCode.invalid_definition, broken.projection.issues[0].code);
+    // Product deduplicates compatible roots when home equals Workspace. The
+    // one retained rule's selected scope must still follow Core priority.
+    for ([_]lifecycle.CatalogSourceScope{ .user, .workspace }) |scope| {
+        var shared = try runtime.querySkillCatalog(.{
+            .canonical_user_home = home,
+            .target = .{ .workspace = .{ .canonical_root = home, .epoch = "shared" } },
+            .additional_sources = &.{.{ .canonical_root = roots[0], .scope = scope, .source_instance_id = if (scope == .user) ids[0] else ids[1] }},
+        });
+        defer shared.projection.deinit();
+        defer runtime.releaseSkillCatalog(shared.lease) catch unreachable;
+        try std.testing.expectEqual(@as(usize, if (scope == .user) 1 else 0), shared.projection.skills.len);
+        if (scope == .user)
+            try std.testing.expectEqualStrings("agents.workspace.default", shared.projection.skills[0].source_instance_id)
+        else
+            try std.testing.expectEqual(lifecycle.CatalogIssueCode.source_conflict, shared.projection.issues[0].code);
+    }
+}
+
+test "Catalog invalid sources fail before Core and management rejects project sources" {
     fake_core.reset();
     const runtime = try createTestRuntime(.{ .max_sessions = 1 });
     defer {
@@ -959,10 +1102,10 @@ test "Catalog invalid sources fail before Core and management rejects additional
             .additional_sources = &.{source},
         }));
     }
-    try std.testing.expectError(error.CatalogSourcesUnsupported, runtime.querySkillCatalog(.{
+    try std.testing.expectError(error.InvalidCatalogQuery, runtime.querySkillCatalog(.{
         .canonical_user_home = root,
         .target = .management,
-        .additional_sources = &.{.{ .canonical_root = root, .scope = .user, .source_instance_id = "source" }},
+        .additional_sources = &.{.{ .canonical_root = root, .scope = .workspace, .source_instance_id = "source" }},
     }));
     // This length alone exhausts the budget, before any bytes or files are read.
     const oversized = try std.testing.allocator.alloc(u8, wire.MAX_SESSION_METADATA_BYTES_V1 + 1);
@@ -1033,7 +1176,11 @@ test "Management catalog leases cannot bind create restore or idle refresh even 
     }
     const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
-    var management = try runtime.querySkillCatalog(.{ .canonical_user_home = root, .target = .management });
+    var management = try runtime.querySkillCatalog(.{
+        .canonical_user_home = root,
+        .target = .management,
+        .additional_sources = &.{.{ .canonical_root = root, .scope = .user, .source_instance_id = "personal" }},
+    });
     defer management.projection.deinit();
     defer runtime.releaseSkillCatalog(management.lease) catch unreachable;
     var options: lifecycle.SessionOpenOptions = .{
@@ -2819,7 +2966,10 @@ test "Runtime shutdown waits for restore and rejects its late candidate" {
 
     var shutdown_harness = ShutdownHarness{ .runtime = runtime };
     const shutdown_thread = try std.Thread.spawn(.{}, ShutdownHarness.run, .{&shutdown_harness});
-    for (0..100) |_| std.Thread.yield() catch {};
+    // Yielding a fixed number of times does not establish that the other
+    // thread entered shutdown. Observe its admission barrier before releasing
+    // the restore candidate, otherwise this test races a valid early restore.
+    while (!runtime.shutting_down.load(.acquire)) std.Thread.yield() catch {};
     fake_core.lock();
     const destroyed_while_restore_blocked = fake_core.runtime_destroyed;
     fake_core.unlock();

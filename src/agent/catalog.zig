@@ -96,8 +96,8 @@ pub const Source = struct {
 };
 
 pub const QueryTarget = union(enum) {
-    /// The existing default-only management view. The current SDK has no
-    /// personal-only discovery mode; additional sources are rejected here.
+    /// A home-only management query. Personal additions share the default
+    /// source's SDK priority; its lease can never bind a Session.
     management,
     workspace: struct {
         canonical_root: []const u8,
@@ -127,7 +127,6 @@ pub const Query = struct {
 
 pub const Error = error{
     InvalidCatalogQuery,
-    CatalogSourcesUnsupported,
     InvalidCatalogDescriptor,
     DuplicateCatalogIdentity,
     SkillCatalogInvalid,
@@ -167,7 +166,9 @@ pub fn query(
     for (input.additional_sources, sources) |source, *encoded| {
         encoded.* = std.mem.zeroes(wire.SkillSourceV1);
         encoded.struct_size = @sizeOf(wire.SkillSourceV1);
-        encoded.scope_code = switch (source.scope) {
+        // Core registers the shared root/home default as WORKSPACE. Management
+        // has only personal inputs, which must compete at that same priority.
+        encoded.scope_code = if (input.target == .management) wire.SKILL_SOURCE_WORKSPACE else switch (source.scope) {
             .user => wire.SKILL_SOURCE_USER,
             .workspace => wire.SKILL_SOURCE_WORKSPACE,
         };
@@ -419,9 +420,9 @@ pub fn validateQuery(input: Query) Error!void {
         try chargeText(&remaining, source.canonical_root, true);
         try chargeText(&remaining, source.source_instance_id, true);
         if (!std.fs.path.isAbsolute(source.canonical_root)) return error.InvalidCatalogQuery;
+        if (input.target == .management and source.scope != .user)
+            return error.InvalidCatalogQuery;
     }
-    if (input.target == .management and input.additional_sources.len != 0)
-        return error.CatalogSourcesUnsupported;
 }
 
 fn chargeText(remaining: *u64, value: []const u8, nonempty: bool) Error!void {

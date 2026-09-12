@@ -279,7 +279,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 
 Agent Runtime 的 catalog resolve 是同步 Core 调用；调用在哪条受界线程运行由 Product Control 决定。输入必须使用 Application 解析并注入的 canonical user home，以及 Product Control canonicalize 并按 Workspace identity、authority 和 epoch 校验的 Workspace root。查询必须显式区分 Workspace 与管理用途。Workspace 查询可以接收 typed additional sources，每项只包含 canonical root、USER/WORKSPACE scope 与 opaque source instance ID；Agent 使用官方 SDK 编码，不识别产品品牌、路径模板或勾选状态。Product 负责来源授权和固定根选择，Agent 在文件系统访问前校验 SDK 数量与总 metadata 预算、文本和绝对路径，再检查传入根的 canonical directory 约束；传入根失效时整个查询失败，不静默丢弃来源。候选解析、冲突与 winner 由 AgentCore 决定。
 
-当前产品调用者仍只请求默认的 user/workspace `.agents/skills` discovery，不因 Agent 接受 typed sources 而开放来源设置。顶层管理 catalog 保留既有默认源查询：root 与 home 都绑定 canonical user home，epoch 为空；当前 SDK 没有独立的 personal-only discovery，管理用途携带任何 additional source 都返回 `CatalogSourcesUnsupported`，不得用 Workspace 语义冒充个人多来源。管理 lease 只由 Product Control 持有和释放，禁止借给 Session。AgentCore descriptor 由官方 SDK 校验后立即释放，Agent 只向上层返回两份彼此独立的线性值：
+顶层管理 catalog 的 root 与 home 都绑定 canonical user home，epoch 为空，只接受 USER additional sources。Core 将 shared root/home 的默认源注册为 WORKSPACE，Agent 因而仅在管理用途内把个人附加源也编码为 SDK WORKSPACE，使个人来源具有一致的相对优先级；真实 Workspace 查询仍保留 USER/WORKSPACE 编码。此适配不创建 Workspace、不改变产品个人归属或文件 authority，不重写 Core provenance、候选解析或冲突决议。Product 结合明确查询用途、已知来源身份及已授权管理目标判断归属，不能用管理查询中的 Core scope 推导项目文件权限。管理 lease 只由 Product Control 持有和释放，禁止借给 Session。AgentCore descriptor 由官方 SDK 校验后立即释放，Agent 只向上层返回两份彼此独立的线性值：
 
 - MetaWork-owned catalog projection：只包含 revision、health、可调用 Skill 的产品字段与 bounded issue；不包含 raw JSON、catalog scope、物理路径、Skill body 或内部 policy；
 - opaque catalog lease：内部持有 AgentCore handle 及查询用途、root/home/epoch/Runtime owner 绑定；只有 Workspace 用途可同步借给 Session create 或 idle refresh，并由原 Runtime 精确 release 一次。
