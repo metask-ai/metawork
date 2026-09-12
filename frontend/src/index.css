@@ -742,9 +742,11 @@ summary::-webkit-details-marker {
 }
 
 .about-dialog-build {
+  display: grid;
   margin: 24px 0 0;
   padding: 14px 0 0;
   border-top: 1px solid var(--ui-border);
+  gap: 6px;
 }
 
 .about-dialog-build > div {
@@ -762,6 +764,8 @@ summary::-webkit-details-marker {
 
 .about-dialog-build dd {
   margin: 0;
+  font-size: var(--text-label);
+  font-weight: 500;
 }
 
 .about-dialog-build code {

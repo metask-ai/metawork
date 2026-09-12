@@ -36,6 +36,10 @@ export function AboutMetaWorkDialog({
 
           <dl className="about-dialog-build">
             <div>
+              <dt>{t("about.developer")}</dt>
+              <dd>{t("about.developer_name")}</dd>
+            </div>
+            <div>
               <dt>{t("about.version")}</dt>
               <dd>
                 <code>{productVersion}</code>

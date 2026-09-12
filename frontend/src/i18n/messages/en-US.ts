@@ -21,6 +21,8 @@ export const enUS = {
   "common.cancel": "Cancel",
   "common.close": "Close",
   "about.menu_item": "About",
+  "about.developer": "Developer",
+  "about.developer_name": "Metask",
   "about.version": "Version",
   "connection.connecting": "Connecting to the Workbench…",
   "connection.connected": "Workbench connected.",

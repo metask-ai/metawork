@@ -443,7 +443,7 @@ Metask 已连接
 退出登录
 ```
 
-- “关于”是本地产品级动作，位于设置之后、退出登录之前；菜单项不重复展示产品名或版本，也不新增常驻侧栏行、Workbench 一级导航或设置分区。点击后打开紧凑模态窗，只展示 canonical Logo、产品名和从 `app.zon` 构建注入的版本；只有已有真实、安全 consumer 的官网、隐私、许可或更新能力才显示对应入口，不渲染宣传文案、占位动作或死链接；
+- “关于”是本地产品级动作，位于设置之后、退出登录之前；菜单项不重复展示产品名或版本，也不新增常驻侧栏行、Workbench 一级导航或设置分区。点击后打开紧凑模态窗，只展示 canonical Logo、产品名、Metask 开发者归属和从 `app.zon` 构建注入的版本；只有已有真实、安全 consumer 的官网、隐私、许可或更新能力才显示对应入口，不渲染宣传文案、占位动作或死链接；
 - About 不依赖 Account、Models、Bridge snapshot 或登录状态。没有 durable Task 而停留在独立登录/连接恢复表面时，使用同一弱化入口打开同一弹窗；菜单与触发器的无障碍名称必须表达“账户与应用”，不能继续声称只包含账号动作；
 - 账号菜单中的退出登录在当前 Workbench 上直接打开危险操作确认框，不先导航到设置；确认文案说明本机 Account 凭据会被清除、本地 Task 与历史记录会保留。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
 - 账号菜单只负责身份和导航；Metask API/model目录与用户管理的服务都进入 Models设置，不成为 Account字段；

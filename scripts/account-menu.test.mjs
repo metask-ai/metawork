@@ -179,7 +179,7 @@ test("account-menu sign out confirms in place without opening settings", async (
   assert.equal(screen.queryByRole("alertdialog"), null);
 });
 
-test("about MetaWork keeps version metadata in the dialog and returns focus", async () => {
+test("about MetaWork shows developer and version metadata and returns focus", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const { container } = renderIdentity({});
   const trigger = screen.getByRole("button", {
@@ -187,14 +187,13 @@ test("about MetaWork keeps version metadata in the dialog and returns focus", as
   });
 
   await user.click(trigger);
-  await user.click(
-    await screen.findByRole("menuitem", { name: "About" }),
-  );
+  await user.click(await screen.findByRole("menuitem", { name: "About" }));
 
   const dialog = await screen.findByRole("dialog", {
     name: "MetaWork",
   });
   assert.doesNotMatch(dialog.textContent, /native desktop workbench/iu);
+  assert.match(dialog.textContent, /DeveloperMetask/u);
   assert.match(
     dialog.textContent,
     new RegExp(productVersion.replaceAll(".", "\\."), "u"),
@@ -269,4 +268,5 @@ test("standalone sign-in surface keeps About available without Workbench state",
     dialog.textContent,
     new RegExp(productVersion.replaceAll(".", "\\."), "u"),
   );
+  assert.match(dialog.textContent, /DeveloperMetask/u);
 });

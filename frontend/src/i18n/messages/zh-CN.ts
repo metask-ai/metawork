@@ -23,6 +23,8 @@ export const zhCN: Record<MessageId, string> = {
   "common.cancel": "取消",
   "common.close": "关闭",
   "about.menu_item": "关于",
+  "about.developer": "开发者",
+  "about.developer_name": "Metask",
   "about.version": "版本",
   "connection.connecting": "正在连接工作台…",
   "connection.connected": "工作台已连接。",
