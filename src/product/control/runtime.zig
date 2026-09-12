@@ -10571,6 +10571,84 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     );
 }
 
+test "Skill mutation rejects a reused Workspace id after history recovery" {
+    const skill_kernel = @import("metawork_product_skill").management;
+    test_agent_runtime.io = std.testing.io;
+    var directory_a = std.testing.tmpDir(.{});
+    defer directory_a.cleanup();
+    var directory_b = std.testing.tmpDir(.{});
+    defer directory_b.cleanup();
+    var directory_store = std.testing.tmpDir(.{});
+    defer directory_store.cleanup();
+    var a_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const a_path = a_buffer[0..try directory_a.dir.realPath(std.testing.io, &a_buffer)];
+    var b_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const b_path = b_buffer[0..try directory_b.dir.realPath(std.testing.io, &b_buffer)];
+    var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store_path = store_buffer[0..try directory_store.dir.realPath(std.testing.io, &store_buffer)];
+    var old_id: u64 = undefined;
+    var old_epoch: u64 = undefined;
+    {
+        var original = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{});
+        defer original.deinit();
+        old_id = try original.openWorkspace(.{ .workspace_root = a_path, .trust = .explicitly_trusted });
+        try original.removeWorkspace(old_id);
+        try std.testing.expectEqual(old_id, try original.openWorkspace(.{ .workspace_root = a_path, .trust = .explicitly_trusted }));
+        old_epoch = original.workspace.facts(old_id).?.epoch;
+    }
+    var inventory = skill_kernel.Inventory.init(std.testing.allocator, .{});
+    defer inventory.deinit();
+    const install_id: skill_runtime.InstallId = @splat(7);
+    _ = try inventory.add(.{
+        .install_id = install_id,
+        .source_kind = .local_directory,
+        .scope = .{ .project = .{ .workspace_id = old_id, .workspace_epoch = old_epoch } },
+        .target_entry = "review",
+        .content_hash = @splat('a'),
+        .installed_at_unix_seconds = 1,
+    });
+    var asset_buffer: [8192]u8 = undefined;
+    const old_asset_bytes = try skill_kernel.encode(&asset_buffer, &inventory);
+    var asset_file: skill_kernel.FileStore = .{ .io = std.testing.io, .dir = directory_store.dir };
+    try asset_file.commit(old_asset_bytes);
+    const history_buffer = try std.testing.allocator.alloc(u8, 128 * 1024);
+    defer std.testing.allocator.free(history_buffer);
+    var history: TestTaskPersistence = .{ .storage = history_buffer };
+    {
+        var failed_history = history.capability(null);
+        failed_history.restore_failed = true;
+        var replacement = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+            .task_persistence = failed_history,
+            .skill_management = .{ .file_store = &asset_file, .staging_root = store_path, .restore_failed = true },
+        });
+        defer replacement.deinit();
+        try std.testing.expectEqual(SkillManagementHealth.read_failed, replacement.skill.managementHealth());
+        const new_id = try replacement.openWorkspace(.{ .workspace_root = b_path, .trust = .explicitly_trusted });
+        try std.testing.expectEqual(old_id, new_id);
+        try std.testing.expect(!std.mem.eql(u8, a_path, b_path));
+        try std.testing.expectEqual(PersistenceRecoveryOutcome.recovered, replacement.recoverTaskHistory(replacement.currentRevision()));
+    }
+    const canonical_assets = (try asset_file.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(canonical_assets);
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+        .task_persistence = history.capability(history.storage[0..history.len]),
+        .skill_management = .{ .file_store = &asset_file, .staging_root = store_path, .restored_bytes = canonical_assets },
+    });
+    defer restored.deinit();
+    const restored_id = try restored.openWorkspace(.{ .workspace_root = b_path, .trust = .explicitly_trusted });
+    const old_owner = try restored.skill.assetScope(install_id);
+    const current = restored.workspace.facts(restored_id).?;
+    try std.testing.expectEqual(TaskPersistenceHealth.ready, restored.task_persistence_health);
+    try std.testing.expectEqual(SkillManagementHealth.ready, restored.skill.managementHealth());
+    // Both canonical stores are readable again, but that does not prove their
+    // Workspace identities are continuous: B reused A's id while both reads
+    // were unavailable. Any ownership change must preserve this rejection.
+    try std.testing.expectEqualStrings(b_path, current.canonical_root);
+    try std.testing.expectEqual(old_owner.project.workspace_id, current.id);
+    try std.testing.expect(current.epoch != old_owner.project.workspace_epoch);
+    try std.testing.expectError(error.WorkspaceEpochMismatch, restored.uninstallSkill(install_id));
+}
+
 test "Skill management health failure advances Product revision exactly once" {
     var control = try testRuntime();
     defer control.deinit();
