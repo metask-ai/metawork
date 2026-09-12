@@ -9,6 +9,8 @@ const models_contract = @import("metawork_product_models_contract");
 const product_control = @import("metawork_product_control");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const skill_management = @import("metawork_product_skill").management;
+const skill_sources = @import("metawork_product_skill").sources;
+const skill_runtime = @import("metawork_product_skill").runtime;
 const commands = @import("commands.zig");
 const handlers = @import("handlers.zig");
 const callback_gate = @import("callback_gate.zig");
@@ -307,6 +309,8 @@ pub const Dispatcher = struct {
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
             .{ .name = commands.refresh_skill_catalog, .function = refreshSkillCatalog },
             .{ .name = commands.set_skill_enabled, .function = setSkillEnabled },
+            .{ .name = commands.set_skill_source_enabled, .function = setSkillSourceEnabled },
+            .{ .name = commands.recover_skill_source_settings, .function = recoverSkillSourceSettings },
             .{ .name = commands.choose_skill_import, .function = chooseSkillImport },
             .{ .name = commands.install_skill, .function = installSkill },
             .{ .name = commands.reimport_skill, .function = reimportSkill },
@@ -2790,6 +2794,41 @@ pub const Dispatcher = struct {
             "{{\"applied\":true,\"selectionRevision\":\"{d}\",\"reason\":null}}",
             .{next_revision},
         );
+    }
+
+    fn setSkillSourceEnabled(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.SkillSourceSetEnabled, invocation.request.payload);
+        defer parsed.deinit();
+        const id = skill_sources.findId(parsed.value.sourceId) orelse return error.InvalidBridgePayload;
+        const revision = try handlers.parseWireId(parsed.value.expectedRevision);
+        if (revision == 0) return error.InvalidBridgeId;
+        const result = (try self.requireProductControl()).setSkillSourceEnabled(id, parsed.value.enabled, revision);
+        if (result.changed) self.notifyCommitted();
+        return encodeSourceSettingsResult(output, result);
+    }
+
+    fn recoverSkillSourceSettings(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.SkillSourceRecover, invocation.request.payload);
+        defer parsed.deinit();
+        const action = std.meta.stringToEnum(skill_runtime.SourceRecoveryAction, parsed.value.action) orelse return error.InvalidBridgePayload;
+        const token = try handlers.parseWireId(parsed.value.expectedRecoveryToken);
+        if (token == 0) return error.InvalidBridgeId;
+        const result = (try self.requireProductControl()).recoverSkillSourceSettings(action, token);
+        if (result.changed) self.notifyCommitted();
+        return encodeSourceSettingsResult(output, result);
+    }
+
+    fn encodeSourceSettingsResult(output: []u8, result: skill_runtime.SourceSettingsResult) ![]const u8 {
+        if (result.applied) return std.fmt.bufPrint(output, "{{\"applied\":true,\"revision\":\"{d}\",\"reason\":null}}", .{result.revision.?});
+        return std.fmt.bufPrint(output, "{{\"applied\":false,\"revision\":null,\"reason\":\"{s}\"}}", .{@tagName(result.reason.?)});
     }
 
     fn chooseSkillImport(

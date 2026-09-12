@@ -1261,6 +1261,7 @@ fn wireAgentCore(
     product_skill_state.addImport("product_skill_catalog", catalog_snapshot);
     product_skill_state.addImport("product_skill_enablement", skill_enablement);
     product_skill_state.addImport("product_skill_management", skill_management);
+    product_skill_state.addImport("product_skill_sources", product_skill_sources);
     const product_skill_policy = b.createModule(.{
         .root_source_file = b.path("src/product/skill/policy.zig"),
         .target = target,
@@ -1288,6 +1289,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     product_skill_ports.addImport("metawork_agent", agent);
+    product_skill_ports.addImport("product_skill_sources", product_skill_sources);
     const product_skill_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/skill/runtime.zig"),
         .target = target,
@@ -1305,6 +1307,7 @@ fn wireAgentCore(
     product_skill_runtime.addImport("product_skill_policy", product_skill_policy);
     product_skill_runtime.addImport("product_skill_ports", product_skill_ports);
     product_skill_runtime.addImport("product_skill_state", product_skill_state);
+    product_skill_runtime.addImport("product_skill_sources", product_skill_sources);
     const product_skill_view = b.createModule(.{
         .root_source_file = b.path("src/product/skill/view.zig"),
         .target = target,
@@ -1314,6 +1317,7 @@ fn wireAgentCore(
     product_skill_view.addImport("product_skill_management", skill_management);
     product_skill_view.addImport("product_skill_policy", product_skill_policy);
     product_skill_view.addImport("product_skill_state", product_skill_state);
+    product_skill_view.addImport("product_skill_sources", product_skill_sources);
     product_skill_runtime.addImport("product_skill_view", product_skill_view);
     const product_skill = b.createModule(.{
         .root_source_file = b.path("src/product/skill.zig"),
@@ -1325,6 +1329,7 @@ fn wireAgentCore(
     product_skill.addImport("product_skill_management", skill_management);
     product_skill.addImport("product_skill_ports", product_skill_ports);
     product_skill.addImport("product_skill_runtime", product_skill_runtime);
+    product_skill.addImport("product_skill_sources", product_skill_sources);
     const owned_task_execution = b.createModule(.{
         .root_source_file = b.path("src/product/task/execution_binding.zig"),
         .target = target,

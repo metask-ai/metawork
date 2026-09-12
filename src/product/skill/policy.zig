@@ -11,10 +11,32 @@ const state = @import("product_skill_state");
 const sources = @import("product_skill_sources");
 
 pub const ContributionMatch = enum { matched, different, unproven };
+pub const QueryPurpose = enum { management, workspace };
+pub const Origin = struct { ecosystem: sources.Ecosystem, scope: enum { personal, project } };
+
+/// Product origin is interpreted in the query's purpose. Raw Core provenance
+/// is retained and never promoted into a filesystem management capability.
+pub fn origin(purpose: QueryPurpose, skill: catalog.SkillProjection) ?Origin {
+    if (!std.mem.eql(u8, skill.provider_id, "agents.directory") or skill.contribution_id.len == 0) return null;
+    return sourceOrigin(purpose, skill.source_instance_id, skill.source_scope);
+}
+
+fn sourceOrigin(purpose: QueryPurpose, id: []const u8, scope: agent.CatalogSourceScope) ?Origin {
+    for ([_]ManagedSource{ .user_default, .workspace_default }) |known| {
+        if (!std.mem.eql(u8, id, known.id())) continue;
+        if (scope != known.scope() or (purpose == .management and known == .user_default)) return null;
+        return .{ .ecosystem = .agents, .scope = if (purpose == .management or scope == .user) .personal else .project };
+    }
+    const compatibility = sources.definition(sources.findId(id) orelse return null);
+    if (purpose == .management) {
+        if (compatibility.scope != .user or scope != .workspace) return null;
+    } else if (scope != compatibility.scope) return null;
+    return .{ .ecosystem = compatibility.ecosystem, .scope = if (compatibility.scope == .user) .personal else .project };
+}
 
 /// The query owner supplies the known default source for its exact managed
 /// root, after establishing filesystem authority. This is not a file grant.
-/// In particular, current default-only management uses workspace_default;
+/// In particular, management uses workspace_default;
 /// do not infer this choice from the page's Personal/Project label.
 pub const ManagedSource = enum {
     user_default,
@@ -31,9 +53,8 @@ pub const ManagedSource = enum {
 
 /// Correlates one validated Core winner with an already-authorized managed
 /// entry. Never uses display name, package hash, or a locally computed Core ID.
-/// Preparation only: existing view/transaction callers are migrated together
-/// when the complete multi-source Product path is enabled.
 pub fn matchManagedContribution(
+    purpose: QueryPurpose,
     expected_source: ManagedSource,
     target_entry: []const u8,
     skill: catalog.SkillProjection,
@@ -42,15 +63,17 @@ pub fn matchManagedContribution(
     if (!std.mem.eql(u8, skill.invocation_name, target_entry)) return .different;
     if (!std.mem.eql(u8, skill.provider_id, "agents.directory") or skill.contribution_id.len == 0)
         return .unproven;
+    if (origin(purpose, skill) == null) return .unproven;
     if (std.mem.eql(u8, skill.source_instance_id, expected_source.id()))
         return if (skill.source_scope == expected_source.scope()) .matched else .unproven;
-    for ([_]ManagedSource{ .user_default, .workspace_default }) |known| {
-        if (std.mem.eql(u8, skill.source_instance_id, known.id()))
-            return if (skill.source_scope == known.scope()) .different else .unproven;
-    }
-    if (sources.findId(skill.source_instance_id)) |id|
-        return if (sources.definition(id).scope == skill.source_scope) .different else .unproven;
-    return .unproven;
+    return if (origin(purpose, skill) != null) .different else .unproven;
+}
+
+pub fn issueMatchesManaged(purpose: QueryPurpose, expected_source: ManagedSource, entry: []const u8, issue: catalog.CatalogIssueProjection) bool {
+    const name = issue.skill_policy_key orelse return false;
+    return std.mem.eql(u8, name, entry) and std.mem.eql(u8, issue.provider_id, "agents.directory") and
+        std.mem.eql(u8, issue.source_instance_id, expected_source.id()) and issue.source_scope == expected_source.scope() and
+        sourceOrigin(purpose, issue.source_instance_id, issue.source_scope) != null;
 }
 
 pub const EnablementPersistenceFailure = struct {
@@ -76,14 +99,16 @@ pub fn enablementPersistenceFailure(
         .{ .health = .write_failed, .invalidate_authorities = false };
 }
 
-pub fn inventoryHasInvocationInScope(
+pub fn inventoryHasContributionInScope(
     inventory: *const management.Inventory,
     scope: management.Scope,
-    invocation_name: []const u8,
+    purpose: QueryPurpose,
+    expected_source: ManagedSource,
+    skill: catalog.SkillProjection,
 ) bool {
     for (inventory.items()) |asset|
         if (asset.scope.eql(scope) and
-            std.mem.eql(u8, asset.target_entry, invocation_name)) return true;
+            matchManagedContribution(purpose, expected_source, asset.target_entry, skill) == .matched) return true;
     return false;
 }
 
@@ -213,30 +238,37 @@ test "managed contribution correlation requires known provenance rather than inv
         .argument_names = &.{},
         .max_values = 0,
     };
-    try std.testing.expectEqual(ContributionMatch.matched, matchManagedContribution(.workspace_default, "review", skill));
-    try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.user_default, "review", skill));
-    try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace_default, "other", skill));
+    try std.testing.expectEqual(ContributionMatch.matched, matchManagedContribution(.workspace, .workspace_default, "review", skill));
+    try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace, .user_default, "review", skill));
+    try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace, .workspace_default, "other", skill));
+    try std.testing.expectEqual(Origin{ .ecosystem = .agents, .scope = .personal }, origin(.management, skill).?);
+    try std.testing.expectEqual(Origin{ .ecosystem = .agents, .scope = .project }, origin(.workspace, skill).?);
     skill.source_instance_id = "agents.user.default";
     skill.source_scope = .user;
-    try std.testing.expectEqual(ContributionMatch.matched, matchManagedContribution(.user_default, "review", skill));
-    try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace_default, "review", skill));
+    try std.testing.expectEqual(ContributionMatch.matched, matchManagedContribution(.workspace, .user_default, "review", skill));
+    try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace, .workspace_default, "review", skill));
     for (sources.definitions) |source| {
         skill.source_instance_id = source.source_instance_id;
         skill.source_scope = source.scope;
-        try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.user_default, "review", skill));
-        try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace_default, "review", skill));
+        try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace, .user_default, "review", skill));
+        try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.workspace, .workspace_default, "review", skill));
+        skill.source_scope = .workspace;
+        if (source.scope == .user) {
+            try std.testing.expectEqual(Origin{ .ecosystem = source.ecosystem, .scope = .personal }, origin(.management, skill).?);
+            try std.testing.expectEqual(ContributionMatch.different, matchManagedContribution(.management, .workspace_default, "review", skill));
+        } else try std.testing.expect(origin(.management, skill) == null);
     }
     skill.source_instance_id = "unrecognized.source";
-    try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace_default, "review", skill));
+    try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace, .workspace_default, "review", skill));
     skill.source_instance_id = "agents.workspace.default";
     skill.source_scope = .user;
-    try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace_default, "review", skill));
+    try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace, .workspace_default, "review", skill));
     skill.source_scope = .workspace;
     skill.provider_id = "unrecognized.provider";
-    try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace_default, "review", skill));
+    try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace, .workspace_default, "review", skill));
     skill.provider_id = "agents.directory";
     skill.contribution_id = "";
-    try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace_default, "review", skill));
+    try std.testing.expectEqual(ContributionMatch.unproven, matchManagedContribution(.workspace, .workspace_default, "review", skill));
 }
 
 test "catalog compilation applies user and Workspace enablement policy" {

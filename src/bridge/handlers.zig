@@ -160,6 +160,8 @@ pub const WorkspaceIdentity = struct {
     expectedWorkspaceEpoch: []const u8,
 };
 pub const SkillImportChoice = struct { kind: []const u8 };
+pub const SkillSourceSetEnabled = struct { sourceId: []const u8, enabled: bool, expectedRevision: []const u8 };
+pub const SkillSourceRecover = struct { action: []const u8, expectedRecoveryToken: []const u8 };
 pub const SkillSetEnabled = struct {
     scope: []const u8,
     workspaceId: ?[]const u8,
@@ -602,6 +604,26 @@ pub fn permissionChoice(value: []const u8) ?PermissionChoice {
     if (std.mem.eql(u8, value, "deny_once")) return .deny_once;
     if (std.mem.eql(u8, value, "deny_session")) return .deny_session;
     return null;
+}
+
+test "Skill source payloads reject free paths coercion and mixed recovery intent" {
+    var settings = try parsePayload(SkillSourceSetEnabled, "{\"sourceId\":\"compat.claude.user\",\"enabled\":true,\"expectedRevision\":\"1\"}");
+    defer settings.deinit();
+    try std.testing.expect(settings.value.enabled);
+    var recovery = try parsePayload(SkillSourceRecover, "{\"action\":\"reread\",\"expectedRecoveryToken\":\"2\"}");
+    defer recovery.deinit();
+    try std.testing.expectEqualStrings("reread", recovery.value.action);
+    inline for (.{
+        "{\"sourceId\":\"compat.claude.user\",\"enabled\":true,\"expectedRevision\":\"1\",\"path\":\"/tmp\"}",
+        "{\"sourceId\":\"compat.claude.user\",\"enabled\":1,\"expectedRevision\":\"1\"}",
+        "{\"sourceId\":\"compat.claude.user\",\"enabled\":true,\"expectedRevision\":1}",
+        "{\"sourceId\":\"compat.claude.user\",\"enabled\":true}",
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(SkillSourceSetEnabled, payload));
+    inline for (.{
+        "{\"action\":\"reset\",\"expectedRecoveryToken\":\"2\",\"sources\":{}}",
+        "{\"action\":\"reset\",\"expectedRecoveryToken\":2}",
+        "{\"action\":\"reset\",\"expectedRecoveryToken\":\"2\",\"workspaceId\":\"1\"}",
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(SkillSourceRecover, payload));
 }
 
 test "Task Run input is an exact text skill or multimodal tagged object" {

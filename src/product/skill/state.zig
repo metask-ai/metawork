@@ -8,6 +8,62 @@ const agent = @import("metawork_agent");
 const catalog = @import("product_skill_catalog");
 const enablement = @import("product_skill_enablement");
 const management = @import("product_skill_management");
+const sources = @import("product_skill_sources");
+
+pub const SourceHealth = enum {
+    unavailable,
+    ready,
+    read_failed,
+    corrupt,
+    missing,
+    unsupported_schema,
+    too_large,
+    write_failed,
+    outcome_unknown,
+};
+
+pub const SourceRestore = union(enum) { unavailable, read_failed, loaded: sources.Load };
+
+pub const SourceConfiguration = struct {
+    file_store: ?*sources.FileStore = null,
+    restored: SourceRestore = .unavailable,
+};
+
+pub const SourceSettingsReason = enum {
+    stale_revision,
+    busy,
+    source_settings_unavailable,
+    write_failed,
+    persistence_outcome_unknown,
+    stale_recovery_token,
+    recovery_not_allowed,
+    read_failed,
+    revision_exhausted,
+    shutting_down,
+};
+
+pub const SourceSettingsResult = struct {
+    applied: bool = false,
+    revision: ?u64 = null,
+    reason: ?SourceSettingsReason = null,
+    /// Product Control must publish changed health even when applied is false.
+    changed: bool = false,
+};
+
+pub const SourceSettingsView = struct {
+    settings: ?sources.Settings,
+    health: SourceHealth,
+    can_set_enabled: bool,
+    can_reread: bool,
+    can_reset: bool,
+    recovery_token: ?u64,
+};
+
+pub const SourceDiscoveryView = struct {
+    selection: sources.Selection,
+    checks: ?sources.RootChecks,
+    checking: bool,
+};
 
 pub const ManagementHealth = enum {
     unavailable,
@@ -43,6 +99,7 @@ pub const EnablementConfiguration = struct {
 pub const Configuration = struct {
     management: ManagementConfiguration = .{},
     enablement: EnablementConfiguration = .{},
+    sources: SourceConfiguration = .{},
 };
 
 pub const Limits = struct {
@@ -98,6 +155,8 @@ pub const Reconciliation = struct {
     invocation_name: [management.max_target_entry_bytes]u8,
     invocation_name_len: usize,
     operation: management.Operation,
+    /// The exact query admitted to verify this transaction, never a plain refresh.
+    request_generation: ?u64 = null,
 
     pub fn invocationName(self: *const Reconciliation) []const u8 {
         return self.invocation_name[0..self.invocation_name_len];
@@ -195,6 +254,7 @@ pub const CatalogSlot = union(enum) {
 pub const CatalogControl = struct {
     slot: CatalogSlot = .uninitialized,
     request_generation: u64 = 0,
+    source_checks: ?sources.RootChecks = null,
 };
 
 pub const InitError = management.Error || enablement.Error;
@@ -206,6 +266,11 @@ pub const State = struct {
     enablement_store: enablement.Store,
     enablement_file_store: ?*enablement.FileStore,
     enablement_health: EnablementHealth,
+    source_file_store: ?*sources.FileStore,
+    source_settings: ?sources.Settings = null,
+    source_health: SourceHealth = .unavailable,
+    source_revision_high_water: u64 = 0,
+    source_recovery_generation: u64 = 1,
     staging_root: ?[]u8,
     reconciliation: ?Reconciliation = null,
     catalog: CatalogControl = .{},
@@ -321,6 +386,7 @@ pub const State = struct {
             .enablement_store = enablement_store,
             .enablement_file_store = configuration.enablement.file_store,
             .enablement_health = enablement_health,
+            .source_file_store = configuration.sources.file_store,
             .staging_root = staging_root,
         };
     }

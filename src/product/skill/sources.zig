@@ -86,10 +86,11 @@ pub const Settings = struct {
     }
 };
 
-pub const DecodeError = std.mem.Allocator.Error || error{ InvalidSettings, UnsupportedSchema };
+pub const DecodeError = std.mem.Allocator.Error || error{ InvalidSettings, UnsupportedSchema, SettingsTooLarge };
 
 pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) DecodeError!Settings {
-    if (bytes.len == 0 or bytes.len > max_store_bytes) return error.InvalidSettings;
+    if (bytes.len > max_store_bytes) return error.SettingsTooLarge;
+    if (bytes.len == 0) return error.InvalidSettings;
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{
         .duplicate_field_behavior = .@"error",
         .parse_numbers = false,
@@ -132,7 +133,7 @@ pub fn encode(settings: Settings, buffer: []u8) error{ InvalidSettings, BufferTo
     return writer.buffered();
 }
 
-pub const Load = union(enum) { absent, ready: Settings, invalid, unsupported_schema };
+pub const Load = union(enum) { absent, ready: Settings, invalid, unsupported_schema, too_large };
 pub const FileStoreError = std.mem.Allocator.Error || error{
     DirectoryUnavailable,
     ReadFailed,
@@ -145,11 +146,14 @@ pub const FileStoreError = std.mem.Allocator.Error || error{
 pub const FileStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    commit_fault: if (builtin.is_test) enum { none, after_rename } else void = if (builtin.is_test) .none else {},
 
     /// Opens an existing Application-owned settings directory; never creates
     /// source directories or initializes/resets the settings implicitly.
     pub fn init(io: std.Io, absolute_directory: []const u8) FileStoreError!FileStore {
-        const dir = openCanonicalBase(io, absolute_directory) catch return error.DirectoryUnavailable;
+        // POSIX durability requires a syncable directory descriptor, not an
+        // O_PATH handle. This permits opening it for sync; no scan is performed.
+        const dir = openCanonicalBase(io, absolute_directory, true) catch return error.DirectoryUnavailable;
         return .{ .io = io, .dir = dir };
     }
 
@@ -172,7 +176,7 @@ pub const FileStore = struct {
         defer file.close(self.io);
         const opened = file.stat(self.io) catch return error.ReadFailed;
         if (opened.kind != .file) return error.UnsupportedEntry;
-        if (opened.size == 0 or opened.size > max_store_bytes) return .invalid;
+        if (opened.size > max_store_bytes) return .too_large;
         var bytes: [max_store_bytes]u8 = undefined;
         const length: usize = @intCast(opened.size);
         const read = file.readPositionalAll(self.io, bytes[0..length], 0) catch return error.ReadFailed;
@@ -183,6 +187,7 @@ pub const FileStore = struct {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidSettings => .invalid,
             error.UnsupportedSchema => .unsupported_schema,
+            error.SettingsTooLarge => .too_large,
         };
         return .{ .ready = settings };
     }
@@ -213,6 +218,7 @@ pub const FileStore = struct {
         file_open = false;
         self.dir.rename(name, self.dir, file_name, self.io) catch return error.WriteFailed;
         temp_exists = false;
+        if (builtin.is_test) if (self.commit_fault == .after_rename) return error.PersistenceOutcomeUnknown;
         // The canonical rename has happened. Any durability failure after this
         // point is uncertain, never reported as a known non-commit.
         if (builtin.os.tag == .windows) {
@@ -274,10 +280,10 @@ fn openComponent(io: std.Io, base: std.Io.Dir, name: []const u8) OpenComponent {
     return .{ .opened = dir };
 }
 
-fn openCanonicalBase(io: std.Io, path: []const u8) error{InvalidBase}!std.Io.Dir {
+fn openCanonicalBase(io: std.Io, path: []const u8, iterate: bool) error{InvalidBase}!std.Io.Dir {
     if (!std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path) or
         std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidBase;
-    const dir = std.Io.Dir.openDirAbsolute(io, path, .{ .follow_symlinks = false }) catch return error.InvalidBase;
+    const dir = std.Io.Dir.openDirAbsolute(io, path, .{ .follow_symlinks = false, .iterate = iterate }) catch return error.InvalidBase;
     errdefer dir.close(io);
     const stat = dir.stat(io) catch return error.InvalidBase;
     if (stat.kind != .directory) return error.InvalidBase;
@@ -287,6 +293,12 @@ fn openCanonicalBase(io: std.Io, path: []const u8) error{InvalidBase}!std.Io.Dir
     return dir;
 }
 
+pub const RootChecks = struct {
+    default_user: RootCheck,
+    default_workspace: RootCheck,
+    checks: [definitions.len]RootCheck,
+};
+
 pub const Discovery = struct {
     allocator: std.mem.Allocator,
     default_user: RootCheck,
@@ -294,6 +306,10 @@ pub const Discovery = struct {
     checks: [definitions.len]RootCheck = @splat(.disabled),
     owned_sources: [definitions.len]agent.CatalogSource = undefined,
     count: usize = 0,
+
+    pub fn rootChecks(self: *const Discovery) RootChecks {
+        return .{ .default_user = self.default_user, .default_workspace = self.default_workspace, .checks = self.checks };
+    }
 
     pub fn deinit(self: *Discovery) void {
         for (self.owned_sources[0..self.count]) |source| self.allocator.free(source.canonical_root);
@@ -309,8 +325,7 @@ pub const Discovery = struct {
 };
 
 /// Pure input preparation plus bounded root I/O, not a catalog acquisition.
-/// A null workspace prepares only user roots; it does not promise that the
-/// currently locked AgentCore SDK can execute a personal-only query.
+/// A null workspace prepares only user roots for the Agent management query.
 pub fn discover(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -318,9 +333,9 @@ pub fn discover(
     canonical_workspace: ?[]const u8,
     selection: Selection,
 ) (std.mem.Allocator.Error || error{InvalidBase})!Discovery {
-    const home = try openCanonicalBase(io, canonical_home);
+    const home = try openCanonicalBase(io, canonical_home, false);
     defer home.close(io);
-    const workspace = if (canonical_workspace) |path| try openCanonicalBase(io, path) else null;
+    const workspace = if (canonical_workspace) |path| try openCanonicalBase(io, path, false) else null;
     defer if (workspace) |dir| dir.close(io);
     var result: Discovery = .{
         .allocator = allocator,
@@ -403,7 +418,7 @@ test "settings decoder rejects malformed unknown duplicate and coercible fields"
     }) |bytes| try std.testing.expectError(error.InvalidSettings, decode(std.testing.allocator, bytes));
     try std.testing.expectError(error.UnsupportedSchema, decode(std.testing.allocator, "{\"schema\":2,\"newShape\":true}"));
     var oversized: [max_store_bytes + 1]u8 = undefined;
-    try std.testing.expectError(error.InvalidSettings, decode(std.testing.allocator, &oversized));
+    try std.testing.expectError(error.SettingsTooLarge, decode(std.testing.allocator, &oversized));
     var tiny: [1]u8 = undefined;
     try std.testing.expectError(error.BufferTooSmall, encode(.{}, &tiny));
 }
@@ -430,6 +445,65 @@ test "source FileStore distinguishes absence corruption unsupported format and I
     try std.testing.expectError(error.UnsupportedEntry, store.load(std.testing.allocator));
     try std.testing.expectError(error.WriteFailed, store.commit(settings));
     try std.testing.expectEqual(std.Io.File.Kind.directory, (try tmp.dir.statFile(std.testing.io, file_name, .{})).kind);
+}
+
+test "source size boundaries preserve unsupported and unexamined formats" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var store = try FileStore.init(std.testing.io, root);
+    defer store.deinit();
+    var encoded: [max_store_bytes]u8 = undefined;
+    const current = try encode(.{}, &encoded);
+    for ([_][]const u8{ current, "{\"schema\":2}", "{invalid}" }, 0..) |prefix, index| {
+        var bytes: [max_store_bytes + 1]u8 = @splat(' ');
+        @memcpy(bytes[0..prefix.len], prefix);
+        const bounded = bytes[0..max_store_bytes];
+        switch (index) {
+            0 => try std.testing.expectEqualDeep(Settings{}, try decode(std.testing.allocator, bounded)),
+            1 => try std.testing.expectError(error.UnsupportedSchema, decode(std.testing.allocator, bounded)),
+            else => try std.testing.expectError(error.InvalidSettings, decode(std.testing.allocator, bounded)),
+        }
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = file_name, .data = bounded });
+        try std.testing.expectEqualDeep(switch (index) {
+            0 => Load{ .ready = .{} },
+            1 => Load.unsupported_schema,
+            else => Load.invalid,
+        }, try store.load(std.testing.allocator));
+        try std.testing.expectError(error.SettingsTooLarge, decode(std.testing.allocator, &bytes));
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = file_name, .data = &bytes });
+        try std.testing.expectEqualDeep(Load.too_large, try store.load(std.testing.allocator));
+    }
+}
+
+test "source reads reject a changed empty or nonempty file before classifying its format" {
+    const Fault = struct {
+        var calls: usize = 0;
+        fn stat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
+            var observed = try std.testing.io.vtable.fileStat(userdata, file);
+            calls += 1;
+            if (calls == 2) observed.size += 1;
+            return observed;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var vtable = std.testing.io.vtable.*;
+    vtable.fileStat = Fault.stat;
+    var io = std.testing.io;
+    io.vtable = &vtable;
+    var store: FileStore = .{ .io = io, .dir = tmp.dir };
+    for ([_][]const u8{ "", "{}" }) |bytes| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = file_name, .data = bytes });
+        Fault.calls = 0;
+        try std.testing.expectError(error.ReadFailed, store.load(std.testing.allocator));
+        // A stable empty/invalid file may be reset, but the racing read above
+        // is not evidence of corruption and must not grant that capability.
+        store.io = std.testing.io;
+        try std.testing.expectEqualDeep(Load.invalid, try store.load(std.testing.allocator));
+        store.io = io;
+    }
 }
 
 test "fixed root discovery handles all switches and shared base without creating directories" {

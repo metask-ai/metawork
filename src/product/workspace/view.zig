@@ -29,6 +29,7 @@ pub const Provider = struct {
     contains_sensitive_fn: *const fn (*const anyopaque, []const u8) bool,
     write_json_fn: *const fn (*const anyopaque, *std.Io.Writer, []const u8) Error!void,
     write_catalog_fn: *const fn (*const anyopaque, *std.Io.Writer, u64, u64) Error!void,
+    write_skill_source_discovery_fn: *const fn (*const anyopaque, *std.Io.Writer, u64, u64) Error!void,
 
     fn signals(self: Provider, workspace_id: u64) workspace.Signals {
         return self.signals_fn(self.context, workspace_id);
@@ -137,6 +138,8 @@ fn writeObject(
             return error.SnapshotTooLarge;
     writer.writeAll(",\"skillCatalog\":") catch return error.SnapshotTooLarge;
     try provider.writeCatalog(writer, fact.id, fact.epoch);
+    writer.writeAll(",\"skillSourceDiscovery\":") catch return error.SnapshotTooLarge;
+    try provider.write_skill_source_discovery_fn(provider.context, writer, fact.id, fact.epoch);
     writer.print(",\"recentOrder\":\"{d}\",\"signals\":{{\"running\":{},\"attention\":{},\"failedOrInterrupted\":{}}}}}", .{
         fact.recent_order,
         signals.running,

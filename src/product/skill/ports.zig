@@ -2,6 +2,18 @@
 //! These callbacks grant no Workbench, Executor, or Agent Runtime identity.
 
 const agent = @import("metawork_agent");
+const std = @import("std");
+const sources = @import("product_skill_sources");
+
+/// Bounded filesystem observation, independently injectable from Core queries.
+pub const SourceRoots = struct {
+    context: ?*anyopaque = null,
+    discover_fn: *const fn (?*anyopaque, std.Io, std.mem.Allocator, []const u8, ?[]const u8, sources.Selection) anyerror!sources.Discovery = discover,
+
+    fn discover(_: ?*anyopaque, io: std.Io, allocator: std.mem.Allocator, home: []const u8, workspace: ?[]const u8, selection: sources.Selection) anyerror!sources.Discovery {
+        return sources.discover(io, allocator, home, workspace, selection);
+    }
+};
 
 pub const Job = struct {
     identity: *anyopaque,
@@ -51,4 +63,5 @@ pub const Ports = struct {
     executor: Executor,
     catalog: Catalog,
     notifier: Notifier,
+    source_roots: SourceRoots = .{},
 };

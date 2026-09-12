@@ -2659,7 +2659,7 @@ pub fn createTestRuntime(limits: lifecycle.Limits) !*lifecycle.Runtime {
 }
 
 pub fn productControlConfiguration() product_control.Configuration {
-    return .{};
+    return .{ .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } } };
 }
 
 pub fn installProductControlExecution(

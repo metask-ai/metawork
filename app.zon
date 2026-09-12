@@ -29,6 +29,8 @@
             .{ .name = "metawork.workspaces.refreshSkillCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.refreshCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.setEnabled", .origins = .{"zero://app"} },
+            .{ .name = "metawork.skills.setSourceEnabled", .origins = .{"zero://app"} },
+            .{ .name = "metawork.skills.recoverSourceSettings", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.chooseImport", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.install", .origins = .{"zero://app"} },
             .{ .name = "metawork.skills.reimport", .origins = .{"zero://app"} },

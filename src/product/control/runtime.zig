@@ -313,6 +313,7 @@ pub const Configuration = struct {
     schedule_notifier: ScheduleNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
     skill_enablement: SkillEnablementConfiguration = .{},
+    skill_sources: skill_runtime.SourceConfiguration = .{},
     custom_providers: CustomProviderCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
     completion_factory: CompletionFactory = .{},
@@ -419,13 +420,16 @@ const custom_provider_snapshot_overhead: usize = 1024 +
 const workspace_snapshot_overhead: usize = 512;
 const task_snapshot_overhead: usize = 1024;
 const scheduled_task_snapshot_overhead: usize = 1024;
-const skill_asset_snapshot_overhead: usize = 1024;
+const skill_snapshot_structure = skill_runtime.Runtime.snapshotStructureBounds();
+const skill_asset_snapshot_overhead = skill_snapshot_structure.asset;
+const skill_source_settings_snapshot_bytes: usize = 1024;
+const skill_source_discovery_snapshot_bytes: usize = 1024;
 const run_snapshot_overhead: usize = 1024;
 const commentary_segment_snapshot_overhead: usize = 3;
 const compact_snapshot_overhead: usize = 512;
 const catalog_snapshot_overhead: usize = 256;
-const catalog_skill_snapshot_overhead: usize = 256;
-const catalog_argument_snapshot_overhead: usize = 16;
+const catalog_skill_snapshot_overhead = skill_snapshot_structure.catalog_skill;
+const catalog_argument_snapshot_overhead = skill_snapshot_structure.argument;
 const catalog_issue_snapshot_overhead: usize = 128;
 const tool_snapshot_overhead: usize = 512;
 const tool_min_projection_bytes: usize = "tool-1".len + 1;
@@ -1260,6 +1264,7 @@ pub const Runtime = struct {
                 .state = .{
                     .management = configuration.skill_management,
                     .enablement = configuration.skill_enablement,
+                    .sources = configuration.skill_sources,
                 },
                 .max_workspaces = workspace_capacity,
                 .canonical_user_home = canonical_user_home,
@@ -2700,6 +2705,7 @@ pub const Runtime = struct {
         self.skill.registerWorkspaceOwned(.{
             .id = workspace.id,
             .epoch = workspace.epoch,
+            .catalog_authorized = workspaceSkillCatalogAuthorized(workspace),
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
         skill_root_owned = false;
@@ -2719,6 +2725,10 @@ pub const Runtime = struct {
         ) catch unreachable;
         self.bumpRevision();
         return workspace.id;
+    }
+
+    fn workspaceSkillCatalogAuthorized(workspace: product_workspace.Facts) bool {
+        return workspace.kind == .manual and workspace.visible and workspace.authorization == .available;
     }
 
     fn skillBudgetAvailable(context: *anyopaque, reclaimable: usize) usize {
@@ -2772,6 +2782,26 @@ pub const Runtime = struct {
         self.syncLifecycle();
         try self.skill.refreshPersonal();
         self.bumpRevision();
+    }
+
+    pub fn setSkillSourceEnabled(self: *Runtime, id: @import("metawork_product_skill").sources.Id, enabled: bool, expected_revision: u64) skill_runtime.SourceSettingsResult {
+        self.syncLifecycle();
+        const result = self.skill.setSourceEnabled(id, enabled, expected_revision, self.skillProjectionBudget());
+        if (result.changed) {
+            _ = self.syncSkillCatalogsNoFail();
+            self.bumpRevision();
+        }
+        return result;
+    }
+
+    pub fn recoverSkillSourceSettings(self: *Runtime, action: skill_runtime.SourceRecoveryAction, expected_token: u64) skill_runtime.SourceSettingsResult {
+        self.syncLifecycle();
+        const result = self.skill.recoverSourceSettings(action, expected_token, self.skillProjectionBudget());
+        if (result.changed) {
+            _ = self.syncSkillCatalogsNoFail();
+            self.bumpRevision();
+        }
+        return result;
     }
 
     pub fn setSkillEnabled(
@@ -2987,17 +3017,19 @@ pub const Runtime = struct {
         self.skill.registerWorkspaceOwned(.{
             .id = workspace.id,
             .epoch = workspace.epoch,
+            .catalog_authorized = workspaceSkillCatalogAuthorized(workspace),
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
         skill_root_owned = false;
         self.reconcileSkillEnablementNoFail();
-        self.skill.invalidateWorkspace(workspace.id, self.skillProjectionBudget());
         self.bumpRevision();
         if (!self.task_runtime.releaseWorkspaceSessions(workspace_id, .{
             .context = self,
             .release_fn = releaseTaskRuntimeSession,
         })) {
             self.workspace.failRemovalStart(workspace_id);
+            const restored = self.workspace.facts(workspace_id) orelse unreachable;
+            self.skill.setWorkspaceCatalogAuthorized(restored.id, restored.epoch, workspaceSkillCatalogAuthorized(restored), self.skillProjectionBudget()) catch unreachable;
             self.commitTaskStateNoFail();
             self.bumpRevision();
             return error.TaskClosing;
@@ -5048,7 +5080,13 @@ pub const Runtime = struct {
             .contains_sensitive_fn = workspaceViewContainsSensitive,
             .write_json_fn = workspaceViewWriteJson,
             .write_catalog_fn = workspaceViewWriteCatalog,
+            .write_skill_source_discovery_fn = workspaceViewWriteSourceDiscovery,
         };
+    }
+
+    fn workspaceViewWriteSourceDiscovery(context: *const anyopaque, writer: *std.Io.Writer, id: u64, epoch: u64) product_workspace.ViewError!void {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.skill.writeWorkspaceSourceDiscovery(writer, id, epoch);
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -5905,6 +5943,7 @@ pub const Runtime = struct {
             self.skill.registerWorkspaceOwned(.{
                 .id = restored.id,
                 .epoch = restored.epoch,
+                .catalog_authorized = workspaceSkillCatalogAuthorized(restored),
                 .canonical_root = skill_root,
             }, self.skillProjectionBudget());
             skill_root_owned = false;
@@ -6482,6 +6521,7 @@ pub const Runtime = struct {
         self.skill.registerWorkspaceOwned(.{
             .id = workspace.id,
             .epoch = workspace.epoch,
+            .catalog_authorized = workspaceSkillCatalogAuthorized(workspace),
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
         return .{ .workspace = preparation };
@@ -6613,7 +6653,11 @@ pub const Runtime = struct {
                 .pending => .pending,
                 .ready => .ready,
             };
-            changed = self.workspace.applyRemovalState(workspace.id, state) or changed;
+            if (self.workspace.applyRemovalState(workspace.id, state)) {
+                const updated = self.workspace.facts(workspace.id) orelse unreachable;
+                self.skill.setWorkspaceCatalogAuthorized(updated.id, updated.epoch, workspaceSkillCatalogAuthorized(updated), self.skillProjectionBudget()) catch unreachable;
+                changed = true;
+            }
         }
         return changed;
     }
@@ -8236,6 +8280,33 @@ fn fileChangeSnapshotAdditionalBytes(limits: Limits) ?usize {
     return total;
 }
 
+// Management can show every managed install AND every unassociated runtime
+// winner. Catalog fields are serialized again in these rows; source settings
+// and root checks are additional bounded structure, never Task catalog data.
+fn skillManagementAdditionalSnapshotBytes(limits: Limits) ?usize {
+    const scopes = std.math.add(usize, limits.max_workspaces, 1) catch return null;
+    const catalog_text = std.math.mul(usize, scopes, limits.max_catalog_projection_bytes) catch return null;
+    const text = std.math.mul(usize, @min(catalog_text, limits.max_projection_bytes), json_string_expansion) catch return null;
+    const arguments = std.math.mul(usize, limits.max_skill_arguments, catalog_argument_snapshot_overhead) catch return null;
+    const asset_structure = std.math.add(usize, skill_asset_snapshot_overhead, arguments) catch return null;
+    const rows = std.math.mul(usize, scopes, limits.max_catalog_skills) catch return null;
+    const structure = std.math.mul(usize, rows, asset_structure) catch return null;
+    // Each exact source/invocation issue associates with at most one asset in
+    // its context; the catalog's issue array itself is budgeted separately.
+    const issues = std.math.mul(usize, scopes, limits.max_catalog_issues) catch return null;
+    const issue_codes = std.math.mul(usize, issues, 32) catch return null;
+    const discovery = std.math.mul(usize, scopes, skill_source_discovery_snapshot_bytes) catch return null;
+    // An unmatched managed install uses its untracked inventory target entry
+    // for both invocationName and displayName, independently of catalog text.
+    const target_text_per_asset = skill_snapshot_structure.managed_target_text;
+    const target_text = std.math.mul(usize, limits.max_skill_assets, target_text_per_asset) catch return null;
+    var total = std.math.add(usize, text, structure) catch return null;
+    total = std.math.add(usize, total, target_text) catch return null;
+    total = std.math.add(usize, total, issue_codes) catch return null;
+    total = std.math.add(usize, total, discovery) catch return null;
+    return std.math.add(usize, total, skill_source_settings_snapshot_bytes) catch return null;
+}
+
 fn worstCaseSnapshotBytes(limits: Limits) ?usize {
     // The 6x bound also covers raw + readable Bash text: readable fields are
     // emitted only from valid JSON. Its raw re-encoding and selected decoded
@@ -8270,6 +8341,7 @@ fn worstCaseSnapshotBytes(limits: Limits) ?usize {
             skill_asset_snapshot_overhead,
         ) catch return null,
     ) catch return null;
+    total = std.math.add(usize, total, skillManagementAdditionalSnapshotBytes(limits) orelse return null) catch return null;
     total = std.math.add(usize, total, root_snapshot_overhead) catch return null;
     total = std.math.add(
         usize,
@@ -8494,6 +8566,83 @@ fn testRuntime() !Runtime {
     return testRuntimeWith(.{});
 }
 
+test "non-Skill executor completion wakes queued source recovery without a Skill completion" {
+    const Harness = struct {
+        wakes: std.atomic.Value(usize) = .init(0),
+        queries: std.atomic.Value(usize) = .init(0),
+        fn wake(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            _ = self.wakes.fetchAdd(1, .release);
+            return true;
+        }
+        fn query(context: *anyopaque, _: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            _ = self.queries.fetchAdd(1, .release);
+            return error.CatalogUnavailable;
+        }
+    };
+    const Blocker = struct {
+        harness: *Harness,
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+        fn execute(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.entered.store(true, .release);
+            while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+            _ = Harness.wake(self.harness);
+        }
+        fn cancel(_: *anyopaque) void {}
+        fn job(self: *@This()) executor_impl.Job {
+            return .{ .identity = self, .context = self, .execute_fn = execute, .cancel_fn = cancel };
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var store: @import("metawork_product_skill").sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    try store.commit(.{});
+    var harness: Harness = .{};
+    var first: Blocker = .{ .harness = &harness };
+    var second: Blocker = .{ .harness = &harness };
+    var limits = testLimits();
+    limits.worker_count = 1;
+    limits.queue_capacity = 1;
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, limits, .{
+        .directories = .{ .canonical_user_home = home },
+        .change_notifier = .{ .context = &harness, .wake = Harness.wake },
+        .skill_sources = .{ .file_store = &store, .restored = .read_failed },
+    });
+    defer {
+        first.released.store(true, .release);
+        second.released.store(true, .release);
+        control.deinit();
+    }
+    control.skill.ports.catalog.context = &harness;
+    control.skill.ports.catalog.query_fn = Harness.query;
+    try control.executor.enqueue(first.job());
+    while (!first.entered.load(.acquire)) std.Thread.yield() catch {};
+    try control.executor.enqueue(second.job());
+    const recovered = control.recoverSkillSourceSettings(.reread, control.skill.sourceSettings().recovery_token.?);
+    try std.testing.expect(recovered.applied);
+    try std.testing.expect(control.skill.personalSourceDiscovery().?.checking);
+    try std.testing.expectEqual(@as(usize, 0), harness.queries.load(.acquire));
+    const wakes = harness.wakes.load(.acquire);
+    first.released.store(true, .release);
+    while (!second.entered.load(.acquire)) std.Thread.yield() catch {};
+    try std.testing.expect(harness.wakes.load(.acquire) > wakes);
+    control.syncLifecycle();
+    second.released.store(true, .release);
+    while (harness.wakes.load(.acquire) < wakes + 3) std.Thread.yield() catch {};
+    control.syncLifecycle();
+    try std.testing.expectEqual(@as(usize, 1), harness.queries.load(.acquire));
+    try std.testing.expect(!control.skill.personalSourceDiscovery().?.checking);
+    // A non-QueueFull query failure is not retried on unrelated future wakes.
+    control.syncLifecycle();
+    try std.testing.expectEqual(@as(usize, 1), harness.queries.load(.acquire));
+}
+
 fn testTaskModelSelectionInput(
     control: *Runtime,
     expected_model: []const u8,
@@ -8519,12 +8668,16 @@ fn testRuntimeWith(configuration: Configuration) !Runtime {
 
 fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime {
     test_agent_runtime.io = std.testing.io;
+    // This fixture models a known default source configuration. Source-store
+    // recovery tests supply their own Runtime and explicit restore evidence.
+    var fixture_configuration = configuration;
+    fixture_configuration.skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } };
     var control = try Runtime.init(
         std.testing.allocator,
         std.testing.io,
         &test_agent_runtime,
         limits,
-        configuration,
+        fixture_configuration,
     );
     try installTestExecution(&control);
     var task_execution = try control.cloneCurrentTaskExecution(control.allocator);
@@ -8552,6 +8705,7 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
     control.skill.registerWorkspaceOwned(.{
         .id = 1,
         .epoch = 1,
+        .catalog_authorized = true,
         .canonical_root = try control.allocator.dupe(u8, "/tmp/metawork-test"),
     }, control.skillProjectionBudget());
     product_workspace.testing.setIdentity(&control.workspace, 2, 2);
@@ -12294,6 +12448,7 @@ test "clearing the last default execution scrubs its credential before secure ze
     control.skill.registerWorkspaceOwned(.{
         .id = 1,
         .epoch = 1,
+        .catalog_authorized = true,
         .canonical_root = try control.allocator.dupe(u8, "/tmp"),
     }, control.skillProjectionBudget());
     try control.beginDefaultExecutionReplacement();
@@ -13388,6 +13543,12 @@ test "Runtime snapshot budget includes JSON escaping and structural overhead" {
     const worst_case = worstCaseSnapshotBytes(limits).?;
     try std.testing.expect(worst_case <= limits.max_snapshot_bytes);
     try std.testing.expect(worst_case > 1024 * 1024);
+    const additional_skill_bytes = skillManagementAdditionalSnapshotBytes(limits).?;
+    try std.testing.expect(additional_skill_bytes >= (limits.max_workspaces + 1) * limits.max_catalog_skills * skill_asset_snapshot_overhead);
+    try std.testing.expect(additional_skill_bytes >= @min((limits.max_workspaces + 1) * limits.max_catalog_projection_bytes, limits.max_projection_bytes) * json_string_expansion);
+    var exhausted_skill_limits = limits;
+    exhausted_skill_limits.max_workspaces = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(?usize, null), skillManagementAdditionalSnapshotBytes(exhausted_skill_limits));
     try std.testing.expectEqual(@as(usize, 1536 * 1024), limits.max_projection_bytes);
     try std.testing.expectEqual(@as(usize, 16), limits.max_runs_per_task);
     const file_change_budget = fileChangeSnapshotAdditionalBytes(limits).?;
@@ -13477,6 +13638,7 @@ test "default snapshot budget contains the maximum structural projection" {
         control.skill.registerWorkspaceOwned(.{
             .id = @intCast(task_index + 1),
             .epoch = 1,
+            .catalog_authorized = true,
             .canonical_root = try control.allocator.dupe(u8, root),
         }, control.skillProjectionBudget());
         const execution_model = try control.copyBounded(

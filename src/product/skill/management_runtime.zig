@@ -433,28 +433,48 @@ pub fn reconcileNoFail(
     if (!reconciliation.scope.eql(scope)) return;
     context.state.reconciliation = null;
     const current = snapshot orelse return;
+    const purpose: policy.QueryPurpose = if (scope == .personal) .management else .workspace;
     var found = false;
     for (current.skills) |skill| {
-        if (std.mem.eql(u8, skill.invocation_name, reconciliation.invocationName())) {
+        if (policy.matchManagedContribution(purpose, .workspace_default, reconciliation.invocationName(), skill) == .matched) {
             found = true;
             break;
         }
     }
     var has_matching_issue = false;
     for (current.issues) |issue| {
-        const issue_name = issue.skill_policy_key orelse continue;
-        if (std.mem.eql(u8, issue_name, reconciliation.invocationName())) {
+        if (policy.issueMatchesManaged(purpose, .workspace_default, reconciliation.invocationName(), issue)) {
             has_matching_issue = true;
             break;
         }
     }
-    const accepted = !has_matching_issue and switch (reconciliation.operation) {
-        .install, .replace => found,
-        .uninstall => !found,
-    };
     var root = openManagedRoot(context, scope, canonical_base) catch return;
     defer root.deinit();
     const transactions = if (context.state.transactions) |*value| value else return;
+    const asset = transactions.inventory.findConst(reconciliation.install_id) orelse return;
+    const recovery = asset.recovery orelse return;
+    if (!asset.scope.eql(scope) or recovery.operation != reconciliation.operation or
+        !std.mem.eql(u8, asset.target_entry, reconciliation.invocationName())) return;
+    const accepted = if (reconciliation.operation == .uninstall) absent: {
+        if (found) return;
+        _ = root.dir.statFile(context.io, asset.target_entry, .{ .follow_symlinks = false }) catch |err| {
+            if (err == error.FileNotFound) break :absent true;
+            return;
+        };
+        return;
+    } else published: {
+        // Core content revision is not a package hash. Reobserve the exact
+        // managed candidate with the existing package owner before accepting
+        // or rolling back any files.
+        const expected_hash = recovery.candidate_hash orelse return;
+        const target = root.dir.openDir(context.io, asset.target_entry, .{ .follow_symlinks = false, .iterate = true }) catch return;
+        defer target.close(context.io);
+        var manifest = package.inspectDirectory(context.io, context.allocator, target, .{}) catch return;
+        defer manifest.deinit();
+        if (!std.mem.eql(u8, &expected_hash, &manifest.content_hash)) return;
+        if (!found and !has_matching_issue) return;
+        break :published found and !has_matching_issue;
+    };
     if (accepted) {
         const now = validTimestamp(now_unix_seconds) orelse return;
         transactions.commitReconciliation(

@@ -7,8 +7,20 @@ const catalog = @import("product_skill_catalog");
 const management = @import("product_skill_management");
 const policy = @import("product_skill_policy");
 const state = @import("product_skill_state");
+const sources = @import("product_skill_sources");
 
 pub const Error = error{SnapshotTooLarge};
+
+/// Serializer-owned byte bounds for Product's global snapshot admission.
+/// Text, variable arrays and fixed structure are charged independently.
+pub const SnapshotStructureBounds = struct {
+    asset: usize = 640,
+    catalog_skill: usize = 192,
+    argument: usize = 3, // Two JSON quotes and at most one comma.
+    // Unmatched inventory entries are emitted twice and have no catalog text
+    // allocation. Control must reserve these bytes even without any winner.
+    managed_target_text: usize = 2 * management.max_target_entry_bytes * 6,
+};
 
 pub const TextProjection = struct {
     context: *const anyopaque,
@@ -50,6 +62,8 @@ pub const ManagementInput = struct {
     state: *const state.State,
     workspaces: WorkspaceCatalogs,
     text: TextProjection,
+    source_settings: state.SourceSettingsView,
+    personal_source_discovery: ?state.SourceDiscoveryView,
 };
 
 pub fn catalogProjection(
@@ -137,10 +151,14 @@ pub fn writeManagementProjection(
     writer: *std.Io.Writer,
     input: ManagementInput,
 ) Error!void {
-    writer.print("{{\"availability\":\"{s}\",\"enablementAvailability\":\"{s}\",\"assets\":[", .{
+    writer.print("{{\"availability\":\"{s}\",\"enablementAvailability\":\"{s}\",\"sourceSettings\":", .{
         @tagName(input.state.management_health),
         @tagName(input.state.enablement_health),
     }) catch return error.SnapshotTooLarge;
+    try writeSourceSettings(writer, input.source_settings);
+    writer.writeAll(",\"personalSourceDiscovery\":") catch return error.SnapshotTooLarge;
+    try writeSourceDiscovery(writer, .management, input.personal_source_discovery);
+    writer.writeAll(",\"assets\":[") catch return error.SnapshotTooLarge;
     const inventory = input.state.inventoryConst();
     var count: usize = 0;
     for (inventory.items()) |asset| {
@@ -150,10 +168,12 @@ pub fn writeManagementProjection(
     }
     if (input.state.catalog.slot.snapshotConst()) |snapshot| {
         for (snapshot.skills) |skill| {
-            if (policy.inventoryHasInvocationInScope(
+            if (policy.inventoryHasContributionInScope(
                 inventory,
                 .personal,
-                skill.invocation_name,
+                .management,
+                .workspace_default,
+                skill,
             )) continue;
             if (count != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
@@ -164,10 +184,12 @@ pub fn writeManagementProjection(
     for (0..input.workspaces.slot_count) |index| {
         const scoped = input.workspaces.get(index) orelse continue;
         for (scoped.snapshot.skills) |skill| {
-            if (policy.inventoryHasInvocationInScope(
+            if (policy.inventoryHasContributionInScope(
                 inventory,
                 scoped.scope,
-                skill.invocation_name,
+                .workspace,
+                .workspace_default,
+                skill,
             )) continue;
             if (count != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
@@ -176,6 +198,63 @@ pub fn writeManagementProjection(
         }
     }
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
+}
+
+fn writeSourceSettings(writer: *std.Io.Writer, settings: state.SourceSettingsView) Error!void {
+    writer.writeAll("{\"revision\":") catch return error.SnapshotTooLarge;
+    if (settings.settings) |value| writer.print("\"{d}\"", .{value.revision}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.print(",\"health\":\"{s}\",\"entries\":[", .{@tagName(settings.health)}) catch return error.SnapshotTooLarge;
+    for (sources.definitions, 0..) |source, index| {
+        if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+        writer.print("{{\"sourceId\":\"{s}\",\"enabled\":", .{source.source_instance_id}) catch return error.SnapshotTooLarge;
+        if (settings.settings) |value| writer.print("{}", .{value.selection.enabled(source.id)}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"canSetEnabled\":{}}}", .{settings.can_set_enabled}) catch return error.SnapshotTooLarge;
+    }
+    writer.print("],\"recovery\":{{\"canReread\":{},\"canReset\":{},\"token\":", .{ settings.can_reread, settings.can_reset }) catch return error.SnapshotTooLarge;
+    if (settings.recovery_token) |token| writer.print("\"{d}\"", .{token}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll("}}") catch return error.SnapshotTooLarge;
+}
+
+pub fn writeSourceDiscovery(writer: *std.Io.Writer, purpose: policy.QueryPurpose, discovery: ?state.SourceDiscoveryView) Error!void {
+    const value = discovery orelse {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    };
+    if (value.checks == null and !value.checking) {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    }
+    writer.writeByte('[') catch return error.SnapshotTooLarge;
+    try writeRootCheck(writer, "agents.user.default", if (value.checks) |checks| checks.default_user else null);
+    if (purpose == .workspace) {
+        writer.writeByte(',') catch return error.SnapshotTooLarge;
+        try writeRootCheck(writer, "agents.workspace.default", if (value.checks) |checks| checks.default_workspace else null);
+    }
+    for (sources.definitions) |source| {
+        if (purpose == .management and source.scope == .workspace) continue;
+        writer.writeByte(',') catch return error.SnapshotTooLarge;
+        const check: ?sources.RootCheck = if (!value.selection.enabled(source.id)) .disabled else if (value.checks) |checks| checks.checks[@intFromEnum(source.id)] else null;
+        try writeRootCheck(writer, source.source_instance_id, check);
+    }
+    writer.writeByte(']') catch return error.SnapshotTooLarge;
+}
+
+fn writeRootCheck(writer: *std.Io.Writer, id: []const u8, check: ?sources.RootCheck) Error!void {
+    const label: []const u8 = if (check) |value| switch (value) {
+        .disabled => "disabled",
+        .missing => "missing",
+        .checked => "checked",
+        .blocked => "error",
+    } else "checking";
+    writer.print("{{\"sourceId\":\"{s}\",\"state\":\"{s}\",\"reason\":", .{ id, label }) catch return error.SnapshotTooLarge;
+    if (check != null and check.? == .blocked) writer.print("\"{s}\"", .{@tagName(check.?.blocked)}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+fn writeOrigin(writer: *std.Io.Writer, scope: management.Scope, skill: ?catalog.SkillProjection) Error!void {
+    writer.writeAll(",\"origin\":") catch return error.SnapshotTooLarge;
+    const proven = if (skill) |value| policy.origin(if (scope == .personal) .management else .workspace, value) else null;
+    if (proven) |value| writer.print("{{\"ecosystem\":\"{s}\",\"scope\":\"{s}\"}}", .{ @tagName(value.ecosystem), @tagName(value.scope) }) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
 }
 
 fn writeManagedAsset(
@@ -191,6 +270,7 @@ fn writeManagedAsset(
         @tagName(asset.source_kind),
     }) catch return error.SnapshotTooLarge;
     try writeScope(writer, asset.scope);
+    try writeOrigin(writer, asset.scope, skill);
     writer.print(",\"managementState\":\"{s}\",\"skillId\":", .{
         @tagName(asset.state),
     }) catch return error.SnapshotTooLarge;
@@ -223,6 +303,7 @@ fn writeManagedAsset(
         asset.state == .pending_verification,
         asset.scope,
         asset.target_entry,
+        skill,
     );
 }
 
@@ -235,6 +316,7 @@ fn writeExternalAsset(
     writer.writeAll("{\"installId\":null,\"sourceKind\":\"external\",\"scope\":") catch
         return error.SnapshotTooLarge;
     try writeScope(writer, scope);
+    try writeOrigin(writer, scope, skill);
     writer.writeAll(",\"managementState\":\"externally_managed\",\"skillId\":") catch
         return error.SnapshotTooLarge;
     try input.text.writeJson(writer, skill.skill_id);
@@ -253,6 +335,7 @@ fn writeExternalAsset(
         false,
         scope,
         skill.invocation_name,
+        skill,
     );
 }
 
@@ -265,12 +348,9 @@ fn writeAssetTail(
     pending: bool,
     scope: management.Scope,
     invocation_name: []const u8,
+    runtime_skill: ?catalog.SkillProjection,
 ) Error!void {
     const snapshot = catalogForScope(input, scope);
-    const runtime_skill = if (snapshot) |value|
-        findSkill(value, invocation_name)
-    else
-        null;
     writer.writeAll(",\"skillPolicyKey\":") catch return error.SnapshotTooLarge;
     if (runtime_skill) |skill|
         try input.text.writeJson(writer, skill.skill_policy_key)
@@ -282,8 +362,8 @@ fn writeAssetTail(
         try input.text.writeJson(writer, name);
     }
     const enablement_available = input.state.enablement_health == .ready and
-        snapshot != null;
-    const selection_revision = if (enablement_available)
+        input.state.source_settings != null and snapshot != null;
+    const selection_revision = if (enablement_available and runtime_skill != null)
         snapshot.?.selection_revision
     else
         null;
@@ -292,9 +372,9 @@ fn writeAssetTail(
     writer.print("],\"maxValues\":{d},\"canExport\":{},\"canReimport\":{},\"canUninstall\":{},\"canRetry\":{},\"enabled\":", .{
         max_values,
         manageable,
-        manageable,
-        manageable or pending,
-        pending,
+        manageable and input.state.source_settings != null,
+        (manageable or pending) and input.state.source_settings != null,
+        pending and input.state.source_settings != null,
     }) catch return error.SnapshotTooLarge;
     if (runtime_skill) |skill| {
         if (enablement_available)
@@ -328,8 +408,13 @@ fn writeAssetTail(
     if (snapshot) |value| {
         var issue_count: usize = 0;
         for (value.issues) |issue| {
-            const issue_name = issue.skill_policy_key orelse continue;
-            if (!std.mem.eql(u8, issue_name, invocation_name)) continue;
+            if (runtime_skill) |skill| {
+                const issue_name = issue.skill_policy_key orelse continue;
+                if (!std.mem.eql(u8, issue_name, invocation_name) or
+                    !std.mem.eql(u8, issue.provider_id, skill.provider_id) or
+                    !std.mem.eql(u8, issue.source_instance_id, skill.source_instance_id) or
+                    issue.source_scope != skill.source_scope) continue;
+            } else if (!policy.issueMatchesManaged(if (scope == .personal) .management else .workspace, .workspace_default, invocation_name, issue)) continue;
             if (issue_count != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
             issue_count += 1;
@@ -362,15 +447,8 @@ fn findCatalogSkill(
     invocation_name: []const u8,
 ) ?catalog.SkillProjection {
     const snapshot = catalogForScope(input, scope) orelse return null;
-    return findSkill(snapshot, invocation_name);
-}
-
-fn findSkill(
-    snapshot: *const catalog.Snapshot,
-    invocation_name: []const u8,
-) ?catalog.SkillProjection {
     for (snapshot.skills) |skill|
-        if (std.mem.eql(u8, skill.invocation_name, invocation_name)) return skill;
+        if (policy.matchManagedContribution(if (scope == .personal) .management else .workspace, .workspace_default, invocation_name, skill) == .matched) return skill;
     return null;
 }
 
@@ -459,4 +537,201 @@ test "catalog projection redacts sensitive text through the injected projector" 
         "\"redacted\":true",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "SECRET") == null);
+}
+
+test "snapshot structure bounds cover maximum identities arguments issues and unmatched targets" {
+    const Fixture = struct {
+        const maximum = std.math.maxInt(u64);
+        const scope: management.Scope = .{ .project = .{ .workspace_id = maximum, .workspace_epoch = maximum } };
+        fn contains(_: *const anyopaque, _: []const u8) bool {
+            return false;
+        }
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) Error!void {
+            jsonValue(writer, value) catch return error.SnapshotTooLarge;
+        }
+        fn get(context: *const anyopaque, _: usize) ?ScopedCatalog {
+            const snapshot: *const catalog.Snapshot = @ptrCast(@alignCast(context));
+            return .{ .scope = scope, .snapshot = snapshot };
+        }
+        fn stripText(value: *std.json.Value, fields: []const []const u8) void {
+            for (fields) |field| {
+                const text = value.object.getPtr(field).?;
+                if (text.* == .string) text.* = .{ .string = "" };
+            }
+            for (value.object.getPtr("argumentNames").?.array.items) |*argument|
+                argument.* = .{ .string = "" };
+        }
+    };
+    const bounds: SnapshotStructureBounds = .{};
+    var product_state = try state.State.init(std.testing.io, std.testing.allocator, .{}, .{
+        .max_assets = 2,
+        .max_workspaces = 1,
+        .max_policy_keys = 2,
+        .max_policy_key_bytes = 128,
+    });
+    defer product_state.inventory.?.deinit();
+    defer product_state.enablement_store.deinit();
+    product_state.enablement_health = .ready;
+    product_state.source_settings = .{};
+    const inventory = &product_state.inventory.?;
+    const id: management.InstallId = @splat(1);
+    _ = try inventory.add(.{ .install_id = id, .source_kind = .local_directory, .scope = Fixture.scope, .target_entry = "review", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+    try inventory.beginTransaction(id, .{ .operation = .install, .phase = .candidate_published, .candidate_hash = @splat('a'), .candidate_entry = ".candidate" });
+    try inventory.markPendingVerification(id);
+    const target: [management.max_target_entry_bytes]u8 = @splat(1);
+    _ = try inventory.add(.{ .install_id = @splat(2), .source_kind = .local_directory, .scope = Fixture.scope, .target_entry = &target, .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+    const arguments: [64][]const u8 = @splat("\x01");
+    var skills = [_]catalog.SkillProjection{.{
+        .skill_id = "review-id",
+        .skill_policy_key = "review",
+        .invocation_name = "review",
+        .provider_id = "agents.directory",
+        .source_scope = .workspace,
+        .source_instance_id = "agents.workspace.default",
+        .contribution_id = "review",
+        .content_revision = "revision",
+        .display_name = "\x01",
+        .description = "\x01",
+        .argument_names = &arguments,
+        .max_values = std.math.maxInt(u32),
+        .enabled = false,
+    }};
+    var issues: [128]catalog.CatalogIssueProjection = @splat(.{
+        .kind = .invalid,
+        .code = .invalid_invocation_name,
+        .reason = null,
+        .skill_policy_key = "review",
+        .provider_id = "agents.directory",
+        .source_scope = .workspace,
+        .source_instance_id = "agents.workspace.default",
+    });
+    var snapshot: catalog.Snapshot = .{ .arena = .init(std.testing.allocator), .revision = "catalog", .health = .degraded, .skills = &skills, .issues = &issues, .projected_bytes = 0, .selection_revision = Fixture.maximum };
+    defer snapshot.deinit();
+    const text: TextProjection = .{ .context = undefined, .contains_sensitive_fn = Fixture.contains, .write_json_fn = Fixture.write };
+    const input: ManagementInput = .{
+        .state = &product_state,
+        .text = text,
+        .source_settings = .{ .settings = .{}, .health = .ready, .can_set_enabled = false, .can_reread = false, .can_reset = false, .recovery_token = null },
+        .personal_source_discovery = null,
+        .workspaces = .{ .context = &snapshot, .slot_count = 1, .get_fn = Fixture.get },
+    };
+    // Include both a matched pending install and an unassociated same-name
+    // winner. The latter adds a row; it must not replace or relabel the install.
+    for ([_][]const u8{ "agents.workspace.default", "compat.claude.workspace" }, 0..) |source_id, index| {
+        skills[0].source_instance_id = source_id;
+        for (&issues) |*issue| issue.source_instance_id = source_id;
+        var buffer: [16 * 1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try writeManagementProjection(&writer, input);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\\u0001") != null);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+        defer parsed.deinit();
+        const assets = parsed.value.object.getPtr("assets").?.array.items;
+        try std.testing.expectEqual(index + 2, assets.len);
+        for (assets) |*asset| {
+            const argument_count = asset.object.get("argumentNames").?.array.items.len;
+            const issue_count = asset.object.get("issueCodes").?.array.items.len;
+            if (asset.object.get("skillId").? == .null) {
+                writer = std.Io.Writer.fixed(&buffer);
+                try jsonValue(&writer, asset.*);
+                try std.testing.expect(writer.buffered().len + 1 <= bounds.asset + bounds.managed_target_text + issue_count * 32);
+            }
+            Fixture.stripText(asset, &.{ "skillId", "skillPolicyKey", "invocationName", "displayName", "description" });
+            writer = std.Io.Writer.fixed(&buffer);
+            try jsonValue(&writer, asset.*);
+            try std.testing.expect(writer.buffered().len + 1 <= bounds.asset + argument_count * bounds.argument + issue_count * 32);
+        }
+        writer = std.Io.Writer.fixed(&buffer);
+        try writeCatalogProjection(&writer, text, snapshot.view());
+        var catalog_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+        defer catalog_json.deinit();
+        const skill = &catalog_json.value.object.getPtr("skills").?.array.items[0];
+        Fixture.stripText(skill, &.{ "skillId", "invocationName", "displayName", "description" });
+        writer = std.Io.Writer.fixed(&buffer);
+        try jsonValue(&writer, skill.*);
+        try std.testing.expect(writer.buffered().len + 1 <= bounds.catalog_skill + arguments.len * bounds.argument);
+    }
+}
+
+test "same-name external winner is not suppressed or attached to a managed asset" {
+    const Fixture = struct {
+        fn contains(_: *const anyopaque, _: []const u8) bool {
+            return false;
+        }
+        fn write(_: *const anyopaque, writer: *std.Io.Writer, value: []const u8) Error!void {
+            jsonValue(writer, value) catch return error.SnapshotTooLarge;
+        }
+        fn workspace(_: *const anyopaque, _: usize) ?ScopedCatalog {
+            return null;
+        }
+    };
+    var product_state = try state.State.init(std.testing.io, std.testing.allocator, .{}, .{
+        .max_assets = 2,
+        .max_workspaces = 1,
+        .max_policy_keys = 2,
+        .max_policy_key_bytes = 64,
+    });
+    // No acquired lease is installed by this pure view fixture.
+    defer product_state.inventory.?.deinit();
+    defer product_state.enablement_store.deinit();
+    product_state.enablement_health = .ready;
+    product_state.source_settings = .{};
+    _ = try product_state.inventory.?.add(.{
+        .install_id = @splat(7),
+        .source_kind = .local_directory,
+        .scope = .personal,
+        .target_entry = "review",
+        .content_hash = @splat('a'),
+        .installed_at_unix_seconds = 1,
+    });
+    var skills = [_]catalog.SkillProjection{.{
+        .skill_id = "external-review",
+        .skill_policy_key = "review",
+        .invocation_name = "review",
+        .provider_id = "agents.directory",
+        .source_scope = .workspace,
+        .source_instance_id = "compat.claude.user",
+        .contribution_id = "external-contribution",
+        .content_revision = "opaque",
+        .display_name = "External review",
+        .description = "External description",
+        .argument_names = &.{"external-argument"},
+        .max_values = 1,
+    }};
+    product_state.catalog.slot = .{ .committed = .{
+        .lease = .fixture(),
+        .snapshot = .{ .arena = .init(std.testing.allocator), .revision = "catalog", .health = .healthy, .skills = &skills, .issues = &.{}, .projected_bytes = 0, .selection_revision = 1 },
+    } };
+    defer product_state.catalog.slot.committed.snapshot.deinit();
+    const input: ManagementInput = .{
+        .state = &product_state,
+        .source_settings = .{ .settings = .{}, .health = .ready, .can_set_enabled = false, .can_reread = false, .can_reset = false, .recovery_token = null },
+        .personal_source_discovery = null,
+        .text = .{ .context = undefined, .contains_sensitive_fn = Fixture.contains, .write_json_fn = Fixture.write },
+        .workspaces = .{ .context = undefined, .slot_count = 0, .get_fn = Fixture.workspace },
+    };
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeManagementProjection(&writer, input);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    const assets = parsed.value.object.get("assets").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), assets.len);
+    const managed = assets[0].object;
+    try std.testing.expect(managed.get("skillId").? == .null);
+    try std.testing.expect(managed.get("skillPolicyKey").? == .null);
+    try std.testing.expect(!managed.get("canSetEnabled").?.bool);
+    try std.testing.expectEqualStrings("", managed.get("description").?.string);
+    try std.testing.expectEqual(@as(usize, 0), managed.get("argumentNames").?.array.items.len);
+    const external = assets[1].object;
+    try std.testing.expect(external.get("installId").? == .null);
+    try std.testing.expectEqualStrings("external-review", external.get("skillId").?.string);
+    try std.testing.expect(external.get("canSetEnabled").?.bool);
+    try std.testing.expect(!external.get("canExport").?.bool and !external.get("canReimport").?.bool and !external.get("canUninstall").?.bool);
+    skills[0].source_instance_id = "agents.workspace.default";
+    writer = std.Io.Writer.fixed(&buffer);
+    try writeManagementProjection(&writer, input);
+    var linked = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer linked.deinit();
+    try std.testing.expectEqual(@as(usize, 1), linked.value.object.get("assets").?.array.items.len);
 }

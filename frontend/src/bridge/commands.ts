@@ -15,6 +15,8 @@ export const commands = {
   refreshWorkspaceSkillCatalog: "metawork.workspaces.refreshSkillCatalog",
   refreshSkillCatalog: "metawork.skills.refreshCatalog",
   setSkillEnabled: "metawork.skills.setEnabled",
+  setSkillSourceEnabled: "metawork.skills.setSourceEnabled",
+  recoverSkillSourceSettings: "metawork.skills.recoverSourceSettings",
   chooseSkillImport: "metawork.skills.chooseImport",
   installSkill: "metawork.skills.install",
   reimportSkill: "metawork.skills.reimport",

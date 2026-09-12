@@ -167,6 +167,14 @@ Task 创建时同步借用当前 Workspace authority 并取得独立 pinned snap
 
 恢复 durable `prepared` transaction 时，只有 transaction 记录了 backup 才检查 target/backup 物理状态：target 存在且 backup 不存在表示 rename 尚未发生或回滚已恢复；target 不存在且 backup 存在时必须先原子恢复 backup，再幂等删除未发布 candidate；两者同时存在或同时缺失必须保留全部 artifact 与 transaction 并 fail closed。fresh install 没有 backup，target 与 backup 同时缺失是正常的未发布状态。恢复磁盘事实后才能清除 transaction 或临时 inventory owner；任一步持久化结果不确定必须将 management health 置为 `outcome_unknown`，明确写失败置为 `write_failed`，两者都阻止后续 management mutation，并通过 Product revision 发布该变化。
 
+固定兼容来源选择也由 Product Skill 拥有，与单 Skill enablement、inventory 和 Task pinned authority 分离。来源配置以独立 `skill-sources.json`、schema 1、单调 revision 做持久 CAS；首次缺失须先持久提交默认关闭值才建立可信配置。读取预算为 4096 bytes：恰好达到预算仍完整解码，超出预算单独标记 `too_large`，不得按损坏处理或解码前缀。损坏/后续缺失可显式 reset；读取失败、超限、不支持格式和结果不确定只允许按 capability 重读，不得自动覆盖。恢复 token 绑定当前恢复代次，reset 写入前重新读取；若文件已恢复合法，保留其真实值并以高于已观察 revision 的新提交重建 authority。
+
+来源 candidate 先持久提交，再 no-fail 安装选择并使受影响 current authority 失效；个人规则影响 personal 与所有已授权 Manual Workspace，项目规则只影响这些 Workspace。明确写失败保留旧可信选择与 authority；持久结果不确定冻结新的来源/管理 mutation 与 Skill authority，但不追溯撤销已有 Task pinned lease、普通 Text 或 durable management transaction 的恢复职责。根检查在有界 worker 中执行，仅授权固定相对目录；不存在的可选根可缺席，不可读、不支持类型或变化的根不得被静默跳过后发布部分 authority。AgentCore 仍独占 Skill 解析及 winner/conflict 判定，Product 不实现候选 fallback。
+
+每个查询 scope 至多保留一个 job 与一个 latest reschedule intent。来源提交时即推进 request generation；旧 generation、选择或 Workspace epoch 的结果只释放，不得因 A→B→A 恢复同值而发布。shared Executor 的 QueueFull 保留 intent，沿既有 completion/wake 与 Control sync 有界轮转重试；其他错误结束该 intent 并等待显式刷新，不增加 timer、watcher 或无限自动重试。来源查询不隐式刷新 Task。
+
+管理资产关联必须同时证明 query purpose、provider、固定 source identity/scope 与 invocation，不能仅凭同名 winner 借用外部来源的健康、policy 或文件权限。管理记录与同名 external winner 可同时存在。验证 job 绑定 install identity、operation、scope/epoch 和 request generation；普通刷新不得完成 pending transaction，取消只清理匹配的 active verification，不丢弃 durable pending。发布验证还必须核对授权目标的实际 package 与 candidate 摘要；卸载验证证明该精确管理目标不存在，不要求其他来源的同名 Skill 一并消失。
+
 ### 2.5 MCP authority
 
 Product Control 拥有 MCP Desired Registry、connection approval、OAuth consent、credential locator、Runtime Manifest、Admission Authority、mutation/recovery 与 Task admission。Agent 拥有 connector/backend 生命周期、AgentCore descriptor、declarative Runtime apply、Activation、catalog 与 Selection。Application 只执行 child、network、系统 credential、OAuth、HTTP auth snapshot 与跨 owner coordination，不拥有 MCP JSON-RPC、产品状态或 admission policy。Account 与 MCP 不共享 ownership、credential service 或 persistence。

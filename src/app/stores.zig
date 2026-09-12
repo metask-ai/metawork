@@ -4,6 +4,8 @@ const schedule_persistence = @import("product_schedule_persistence");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const skill_enablement = @import("metawork_product_skill").enablement;
 const skill_management = @import("metawork_product_skill").management;
+const skill_sources = @import("metawork_product_skill").sources;
+const SourceRestore = @import("metawork_product_skill").runtime.SourceRestore;
 const product_task = @import("metawork_product_task");
 const app_paths = @import("paths.zig");
 
@@ -26,6 +28,8 @@ pub const Stores = struct {
     skill_enablement: ?skill_enablement.FileStore = null,
     skill_enablement_restore_failed: bool = true,
     skill_enablement_restored_bytes: ?[]u8 = null,
+    skill_sources: ?skill_sources.FileStore = null,
+    skill_sources_restored: SourceRestore = .unavailable,
 
     pub fn init(
         self: *Stores,
@@ -107,10 +111,17 @@ pub const Stores = struct {
             }
         else
             null;
+
+        self.skill_sources = skill_sources.FileStore.init(io, paths.workbenchDir()) catch null;
+        self.skill_sources_restored = if (self.skill_sources) |*store|
+            if (store.load(allocator)) |loaded| .{ .loaded = loaded } else |_| .read_failed
+        else
+            .unavailable;
     }
 
     pub fn deinit(self: *Stores) void {
         const allocator = self.allocator;
+        if (self.skill_sources) |*store| store.deinit();
         if (self.skill_enablement_restored_bytes) |bytes| self.allocator.free(bytes);
         if (self.skill_enablement) |*store| store.deinit();
         if (self.skill_management_restored_bytes) |bytes| self.allocator.free(bytes);
