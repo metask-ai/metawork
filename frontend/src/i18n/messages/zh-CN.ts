@@ -400,6 +400,83 @@ export const zhCN: Record<MessageId, string> = {
   "skills.no_results_body": "没有与“{query}”匹配的内容。",
   "skills.catalog_refresh_started": "正在刷新 Skill 目录…",
   "skills.catalog_refresh_failed": "未能刷新 Skill 目录。",
+  "skills.sources.title": "兼容来源",
+  "skills.sources.eyebrow": "全局 Skill 设置",
+  "skills.sources.explanation":
+    "项目目录开关适用于所有手动项目，不是当前项目的独立设置。",
+  "skills.sources.tasks": "影响新任务；已有任务显式刷新技能后生效。",
+  "skills.sources.compatibility":
+    "只发现现有 Metask AgentCore 支持的 Skill，不继承其他工具的权限或执行配置。",
+  "skills.sources.default": "默认启用，不受兼容开关影响",
+  "skills.sources.scope.user": "个人目录",
+  "skills.sources.scope.workspace": "项目目录",
+  "skills.sources.unknown": "状态未知",
+  "skills.sources.unknown_origin": "未知来源",
+  "skills.sources.saving": "正在确认配置…",
+  "skills.sources.reread": "重新读取配置",
+  "skills.sources.reset": "关闭全部兼容来源",
+  "skills.sources.reset_body":
+    "仅关闭四项兼容来源；不删除 Skill，不修改单 Skill 启停或项目数据。",
+  "skills.sources.discovery": "当前范围的目录检测",
+  "skills.sources.check_note":
+    "检测通过仅表示目录根可读取，不代表存在可用 Skill 或没有冲突。",
+  "skills.sources.not_checked": "当前无法检查目录。",
+  "skills.sources.state.disabled": "未启用",
+  "skills.sources.state.checking": "等待或正在检查",
+  "skills.sources.state.missing": "目录不存在",
+  "skills.sources.state.checked": "根检查通过",
+  "skills.sources.state.error": "检查失败",
+  "skills.sources.reason.unreadable": "无法读取",
+  "skills.sources.reason.unsupported_entry": "目录类型不支持",
+  "skills.sources.reason.changed": "目录已变化",
+  "skills.sources.health.unavailable": "配置存储不可用。",
+  "skills.sources.health.read_failed": "未能读取配置，当前选项未知。",
+  "skills.sources.health.corrupt":
+    "配置损坏，当前选项未知。可重新读取，或关闭全部兼容来源。",
+  "skills.sources.health.missing": "配置文件缺失，当前选项未知。",
+  "skills.sources.health.unsupported_schema":
+    "配置格式不支持。不会重置此文件。",
+  "skills.sources.health.too_large": "配置超出读取上限。不会重置此文件。",
+  "skills.sources.health.write_failed": "保存失败，仍使用上次确认的配置。",
+  "skills.sources.health.outcome_unknown":
+    "无法确认持久化结果，请重新读取配置。",
+  "skills.sources.failure.stale_revision":
+    "设置已被其他操作更改，已请求同步。请确认后再操作。",
+  "skills.sources.failure.busy": "Skill 管理操作尚未完成，请稍后重试。",
+  "skills.sources.failure.source_settings_unavailable":
+    "来源配置不可用，请查看恢复状态。",
+  "skills.sources.failure.write_failed": "未能保存，原配置仍然有效。",
+  "skills.sources.failure.persistence_outcome_unknown":
+    "无法确认保存结果，请重新读取配置。",
+  "skills.sources.failure.stale_recovery_token":
+    "恢复状态已变化，已请求同步。请确认后再操作。",
+  "skills.sources.failure.recovery_not_allowed": "当前配置不允许此恢复操作。",
+  "skills.sources.failure.read_failed": "未能重新读取配置。未重置文件。",
+  "skills.sources.failure.revision_exhausted":
+    "配置版本已达上限，无法继续修改。",
+  "skills.sources.failure.shutting_down": "应用正在关闭，未接纳此次修改。",
+  "skills.sources.saved_resync":
+    "配置已保存，但尚未同步显示。请等待连接恢复，不必再次保存。",
+  "skills.sources.uncertain":
+    "未能确认操作结果，已请求同步；不会自动重试修改。",
+  "skills.detail.origin": "目录来源",
+  "skills.catalog_issues": "目录问题",
+  "skills.catalog_issues_help":
+    "可检查兼容来源，或在外部调整 Skill 后刷新目录。单 Skill 启停不会消除来源冲突。",
+  "skills.catalog_unavailable":
+    "目录尚未就绪或查询失败。已保存的来源设置保持不变，可刷新重试。",
+  "skills.no_available_title": "当前没有可用 Skill",
+  "skills.section.pending": "等待验证",
+  "skills.issue.source_conflict": "同级来源冲突，没有可用候选",
+  "skills.issue.invalid_definition": "Skill 定义无效",
+  "skills.issue.invalid_resource": "Skill 资源无效",
+  "skills.issue.invalid_invocation_name": "Skill 调用名无效",
+  "skills.sources.root.agents.user.default": ".agents · 个人目录（默认）",
+  "skills.sources.root.agents.workspace.default": ".agents · 项目目录（默认）",
+  "skills.sources.root.compat.claude.user": "Claude · 个人目录",
+  "skills.sources.root.compat.claude.workspace": "Claude · 项目目录",
+  "skills.sources.root.compat.codex.user": "Codex · 个人目录",
+  "skills.sources.root.compat.codex.workspace": "Codex · 项目目录",
   "task.empty_title": "先说说你想完成什么。",
   "task.empty_body_with_workspace":
     "描述一个明确结果。新任务会使用当前工作区，MetaWork 会把过程、决定和结果整理在一起。",

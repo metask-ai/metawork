@@ -277,12 +277,12 @@ Skills                                                              10
 页面与卡片：
 
 - 页面保留 Workbench 左栏和约 944 px 内容宽度；标题使用现有 24–28 px Display scale，一句产品说明后直接进入 controls，不增加 Hero、统计卡、渐变、来源 Logo 或装饰插画；
-- Header 的 `Import skill` 是唯一主动作，`Refresh` 使用现有次级按钮。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
+- Header 的 `Import skill` 是唯一主动作，`Refresh` 与“兼容来源”使用现有次级按钮。导入、重新导入或卸载成功后仍自动请求 catalog reconciliation；显式 Refresh 是恢复与外部文件变化入口；
 - 页面一次只展示一个 policy context，不提供把 Personal 与全部 Project row 相加的 `All` 入口。默认 `User defaults` 只展示 `scope.kind = personal`；`Project settings` 只展示一个已选择 Manual Workspace 的 row，并严格同时匹配 Workspace id 与 epoch；
 - Project selector 只包含 `kind = manual` 且 authorization available 的 Workspace，保持 Host authoritative recent order。当前选择仍存在时保持；失效后切换到第一个合法候选；没有合法 Workspace 时显示 `No configurable projects`，不得回退到其他 scope；
-- 搜索只过滤当前 context 已提交 projection 的 display name、description、invocation 和 argument name；计数、空状态、Needs attention、普通列表、键盘导航和详情入口全部从当前 context 的 visible rows 派生。切换 context 或 Workspace 时关闭已经不属于 visible rows 的详情；
+- 搜索只过滤当前 context 已提交 projection 的 display name、description、invocation 和 argument name；资产计数、待验证组与普通列表从 visible rows 派生。目录问题独立消费当前 catalog issues，不随资产搜索隐藏。切换 context 或 Workspace 时关闭已失效的资产详情；
 - Personal row 标签为 `User defaults`；Project row 标签为 `Project settings · <Workspace display name>`。标签表达 policy context，不表达 Skill 文件来源；`sourceKind` 只用于已有 provenance 与管理动作；
-- 异常、冲突和 `pending_verification` 进入 `Needs attention`，正常资产进入 `Skills`；空分组不渲染，同一 Skill 不在两个分组重复；
+- `pending_verification` 独立进入“等待验证”，其他资产进入 `Skills`；空分组不渲染，同一资产不重复。目录问题在资产之前按 code 和可空 invocation 独立展示与计数，即使没有 winner/资产也保持可见；asset issueCodes 仅解释关联问题，不再重复计为目录问题。不猜测冲突双方，不提供选择 winner 或通过单 Skill 启停消除冲突的动作；
 - 常规桌面使用两列卡片，中等与窄窗降为一列。卡片使用 `canvas/paper`、`rule`、约 12 px 圆角和无常驻阴影；hover/focus 只增加极浅 brand 背景、边框和最多 1 px 位移；
 - 卡片显示统一的线性 Skill 文档图标、display name、单行 description、范围、可选 monospace invocation 和带文字的状态。删除原 `/` 装饰；不显示安装量、`Installed` 或来源品牌徽章。能够精确映射对应 current catalog member 的 Personal 与 Project asset 都在卡片尾部显示独立 switch：Personal 使用 `已启用/已禁用`，Project 的 inherit 状态显示 `跟随用户设置`，显式覆盖额外显示 `恢复跟随用户`。external source kind 不自动剥夺启停 authority，但 catalog/selection 不可用或 identity 不可证明时不显示可操作开关；
 - 状态颜色只复用 `live / amber / danger`，且必须同时显示文字或图标。来源、revision、资源数量和物理管理细节留在 drawer；
@@ -290,6 +290,12 @@ Skills                                                              10
 - Skill invocation、display name、description、argument name、文件名和用户内容不翻译；页面标题、范围、状态、动作、错误和空状态进入完整 locale catalog。
 
 详情 drawer：
+
+固定兼容来源使用同一 Drawer 体系：按 Claude/Codex 分组呈现个人/项目共四个 Checkbox，`.agents/skills` 为只读默认启用说明。路径只作固定约定文本，不可编辑；不新增 route、Logo、排序、自由目录或设置草稿。“项目目录开关适用于所有手动项目”“影响新任务；已有任务显式刷新技能后生效”“只发现现有 AgentCore 支持的 Skill，不继承其他工具权限或配置”须明确可见。
+
+Checkbox 即点即提交，值只来自 committed snapshot，不乐观翻转。同一窗口来源写入/恢复互斥，pending 由 App 持有，关闭 Drawer 不取消请求或解除互斥；其他导航仍可用。失败或超时 resync，不自动重放；stale CAS 提示确认新值。未知值显示禁用的 indeterminate 和文字，不能伪装 false。重读/reset 严格消费 Host capability；超限与不支持格式不能标成损坏或显示 reset。reset 明确只关闭四项兼容来源，不删除 Skill、不修改单 Skill policy 或项目数据。
+
+设置与当前范围的根检测分开呈现，missing 不撤销勾选，checked 不承诺 Skill 可用或无冲突。个人刷新只使用 personal target；项目刷新提交点击时 Workspace id/epoch，不借用当前 Task，也不在无合法项目时回退个人。pending/error 与目标一起记录，旧项目或旧 epoch 的迟到结果不能显示到新目标。普通刷新失败保留 committed view；来源提交引发 authority 失效则服从新 snapshot。来源详情使用普通文本，origin 未知明确显示未知，不按品牌授予管理按钮。
 
 - 点击卡片主体打开右侧 drawer；窄窗切为整页详情。顶部显示名称、description、范围和 health；正文依次显示 invocation/参数、安全渲染的 `SKILL.md`、资源/脚本/模板列表、结构化 issue 和折叠的安装信息；
 - Markdown 禁止 raw HTML、script、远程 embed 和隐式网络加载；文件区只允许查看 package 内受支持的文本资源，不形成通用仓库或磁盘浏览器；物理路径、raw diagnostic、credential、内部 handle 和 hash 不进入普通详情；
@@ -306,7 +312,7 @@ Skills                                                              10
 
 状态、空状态与恢复：
 
-- `ready` 展示已提交 inventory 与 health；`degraded` 保留可用资产并把对应 issue 卡片置于 `Needs attention`。issue 只使用 bounded code、scope 和可选 invocation，不显示 raw diagnostic；
+- `ready` 展示已提交 inventory 与 health；`degraded` 保留可用资产并独立展示目录问题。issue 只使用 bounded code、scope 和可选 invocation，不显示 raw diagnostic；
 - refresh pending 只禁用 Refresh 并显示 `Refreshing…`；失败保留最后 committed view 并提供 Retry，不清空成“没有 Skill”；
 - 首次 `uninitialized/loading` 显示两列 card skeleton；`unavailable` 显示恢复说明与 Refresh；真正 ready/degraded 且当前筛选无资产才显示空状态；
 - 全局空状态提供 `Import skill` 与 `Create in new task`。后者只打开预填 Text draft；返回 Skill 中心保留搜索、范围和选中的 Project，不持久化瞬时 drawer/progress；
