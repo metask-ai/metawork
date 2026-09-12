@@ -145,6 +145,7 @@ function SkillCard({
 }) {
   const { t } = useI18n();
   const attention =
+    asset.managementState === "recovery_required" ||
     asset.managementState === "pending_verification" ||
     asset.issueCodes.length > 0;
   return (
@@ -169,9 +170,11 @@ function SkillCard({
             <span>{sourceLabel(asset, t)}</span>
             {attention && (
               <span className="skill-card-attention">
-                {asset.managementState === "pending_verification"
-                  ? t("skills.status.pending")
-                  : t("skills.status.issue")}
+                {asset.managementState === "recovery_required"
+                  ? t("skills.status.recovery_required")
+                  : asset.managementState === "pending_verification"
+                    ? t("skills.status.pending")
+                    : t("skills.status.issue")}
               </span>
             )}
           </span>
@@ -325,7 +328,9 @@ export function SkillsPage({
     [contextAssets, query],
   );
   const attention = visibleAssets.filter(
-    (asset) => asset.managementState === "pending_verification",
+    (asset) =>
+      asset.managementState === "pending_verification" ||
+      asset.managementState === "recovery_required",
   );
   const regular = visibleAssets.filter((asset) => !attention.includes(asset));
   const drawerOpen = selected !== null || importOpen;
@@ -493,7 +498,8 @@ export function SkillsPage({
     setSelected(asset);
     setDetail(null);
     setError(null);
-    if (!asset.installId) return;
+    if (!asset.installId || asset.managementState === "recovery_required")
+      return;
     setDetailLoading(true);
     try {
       setDetail(await onDetail(asset.installId));
@@ -791,7 +797,14 @@ export function SkillsPage({
               <Icon name="warning" />
             </span>
             <h2>{t("skills.unavailable_title")}</h2>
-            <p>{t("skills.unavailable_body")}</p>
+            <p role="status">
+              {t(
+                management.availability === "write_failed" ||
+                  management.availability === "outcome_unknown"
+                  ? "skills.restart_recovery_body"
+                  : "skills.unavailable_body",
+              )}
+            </p>
           </div>
         ) : missingProjectWorkspace ? (
           <div className="skill-empty-state">
@@ -847,7 +860,7 @@ export function SkillsPage({
           </div>
         ) : (
           <div className="skill-groups">
-            {renderGroup(t("skills.section.pending"), attention)}
+            {renderGroup(t("skills.section.attention"), attention)}
             {renderGroup(t("skills.section.skills"), regular)}
           </div>
         )}
@@ -1001,11 +1014,13 @@ export function SkillsPage({
                     <div>
                       <span>{t("skills.detail.status")}</span>
                       <strong>
-                        {selected.managementState === "pending_verification"
-                          ? t("skills.status.pending")
-                          : selected.issueCodes.length > 0
-                            ? t("skills.status.issue")
-                            : t("skills.status.ready")}
+                        {selected.managementState === "recovery_required"
+                          ? t("skills.status.recovery_required")
+                          : selected.managementState === "pending_verification"
+                            ? t("skills.status.pending")
+                            : selected.issueCodes.length > 0
+                              ? t("skills.status.issue")
+                              : t("skills.status.ready")}
                       </strong>
                     </div>
                   </div>

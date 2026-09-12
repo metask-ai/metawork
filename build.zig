@@ -1648,6 +1648,11 @@ fn wireAgentCore(
         "product_control_contract_fixture",
         product_control_contract_fixture,
     );
+    product_control_contract_fixture.addOption(
+        []const u8,
+        "skill_recovery_required",
+        @embedFile("frontend/src/bridge/__fixtures__/skill-recovery-required.fixture"),
+    );
     const product_control = b.createModule(.{
         .root_source_file = b.path("src/product/control.zig"),
         .target = target,

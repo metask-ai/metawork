@@ -4517,6 +4517,7 @@ fn skillMutationRejection(err: anyerror) ?[]const u8 {
         error.CandidateUnavailable,
         error.TargetUnavailable,
         error.RootUnavailable,
+        error.RecoveryUnavailable,
         => "local_storage_failed",
         else => null,
     };

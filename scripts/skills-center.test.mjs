@@ -229,6 +229,39 @@ test("Skills center renders a compact local management surface", () => {
   assert.doesNotMatch(markup, />\/<|installed/i);
 });
 
+test("Skills center distinguishes physical recovery from catalog verification", () => {
+  const markup = render({
+    management: {
+      ...readyManagement,
+      assets: [
+        {
+          ...assets[0],
+          managementState: "recovery_required",
+          canRetry: true,
+          canExport: false,
+          canReimport: false,
+          canUninstall: false,
+        },
+      ],
+    },
+  });
+  assert.match(markup, /Needs attention/);
+  assert.match(markup, /Recovery required/);
+  assert.doesNotMatch(markup, /Pending verification/);
+});
+
+test("management persistence failures explain restart even when no asset remains", () => {
+  for (const availability of ["write_failed", "outcome_unknown"]) {
+    const markup = render({
+      management: { ...readyManagement, availability, assets: [] },
+    });
+    assert.match(markup, /role="status"/);
+    assert.match(markup, /Restart MetaWork/);
+    assert.match(markup, /folder access and file locks/);
+    assert.doesNotMatch(markup, /Your first Skill/);
+  }
+});
+
 test("Skills center derives one exact policy context without cross-Workspace aggregation", () => {
   const secondWorkspace = {
     ...workspaces[0],

@@ -813,7 +813,12 @@ function decodeSkillManagement(
         managementState: enumValue(
           asset.managementState,
           `${itemPath}.managementState`,
-          ["ready", "pending_verification", "externally_managed"] as const,
+          [
+            "ready",
+            "pending_verification",
+            "recovery_required",
+            "externally_managed",
+          ] as const,
         ),
         skillId:
           asset.skillId === null
@@ -881,6 +886,26 @@ function decodeSkillManagement(
     },
   );
   for (const asset of assets) {
+    if (
+      asset.managementState === "recovery_required" &&
+      (asset.installId === null ||
+        asset.canExport ||
+        asset.canReimport ||
+        asset.canUninstall)
+    )
+      fail(
+        path,
+        "recovery requires a managed asset without ordinary file actions",
+      );
+    if (
+      asset.canRetry &&
+      (availability !== "ready" ||
+        asset.installId === null ||
+        !["recovery_required", "pending_verification"].includes(
+          asset.managementState,
+        ))
+    )
+      fail(path, "retry requires trusted management and a recoverable asset");
     const enablementFields = [
       asset.enabled,
       asset.enablementState,

@@ -118,6 +118,11 @@ pub const Asset = struct {
     state: ManagementState,
     recovery: ?Recovery,
 
+    pub fn requiresRecovery(self: Asset) bool {
+        const recovery = self.recovery orelse return false;
+        return self.state != .pending_verification or recovery.phase != .reconciliation_pending;
+    }
+
     fn deinit(self: *Asset, allocator: std.mem.Allocator) void {
         allocator.free(self.target_entry);
         if (self.recovery) |*recovery| recovery.deinit(allocator);
@@ -149,6 +154,7 @@ pub const Inventory = struct {
     allocator: std.mem.Allocator,
     limits: Limits,
     assets: std.ArrayList(Asset) = .empty,
+    changed: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, limits: Limits) Inventory {
         return .{ .allocator = allocator, .limits = limits };
@@ -162,6 +168,13 @@ pub const Inventory = struct {
 
     pub fn items(self: *const Inventory) []const Asset {
         return self.assets.items;
+    }
+
+    /// Runtime-only publication fact, never part of the durable inventory.
+    pub fn takeChanged(self: *Inventory) bool {
+        const changed = self.changed;
+        self.changed = false;
+        return changed;
     }
 
     pub fn find(self: *Inventory, install_id: InstallId) ?*Asset {
@@ -198,6 +211,7 @@ pub const Inventory = struct {
             .state = input.state,
             .recovery = null,
         });
+        self.changed = true;
         return &self.assets.items[self.assets.items.len - 1];
     }
 
@@ -206,6 +220,7 @@ pub const Inventory = struct {
             if (!std.mem.eql(u8, &asset.install_id, &install_id)) continue;
             asset.deinit(self.allocator);
             _ = self.assets.orderedRemove(index);
+            self.changed = true;
             return;
         }
         return error.AssetNotFound;
@@ -236,6 +251,7 @@ pub const Inventory = struct {
             .candidate_entry = candidate_entry,
             .backup_entry = backup_entry,
         };
+        self.changed = true;
     }
 
     pub fn advanceTransaction(
@@ -263,6 +279,7 @@ pub const Inventory = struct {
         if (!valid)
             return error.InvalidTransaction;
         recovery.phase = next;
+        self.changed = true;
     }
 
     pub fn markPendingVerification(
@@ -276,6 +293,8 @@ pub const Inventory = struct {
             recovery.phase == .reconciliation_pending;
         if (!published)
             return error.InvalidTransaction;
+        if (recovery.phase != .reconciliation_pending or asset.state != .pending_verification)
+            self.changed = true;
         recovery.phase = .reconciliation_pending;
         asset.state = .pending_verification;
     }
@@ -285,6 +304,8 @@ pub const Inventory = struct {
         const recovery = if (asset.recovery) |*value| value else return error.TransactionMissing;
         if (recovery.phase == .prepared or recovery.phase == .reconciled)
             return error.InvalidTransaction;
+        if (recovery.phase != .rollback_pending or asset.state == .pending_verification)
+            self.changed = true;
         recovery.phase = .rollback_pending;
         if (asset.state == .pending_verification) asset.state = .ready;
     }
@@ -308,6 +329,7 @@ pub const Inventory = struct {
         recovery.deinit(self.allocator);
         asset.recovery = null;
         asset.state = .ready;
+        self.changed = true;
     }
 
     pub fn finishUninstall(self: *Inventory, install_id: InstallId) Error!void {
@@ -325,6 +347,7 @@ pub const Inventory = struct {
         recovery.deinit(self.allocator);
         asset.recovery = null;
         if (asset.state == .pending_verification) asset.state = .ready;
+        self.changed = true;
     }
 };
 
@@ -433,8 +456,12 @@ pub const PublishResult = struct {
 
 const RecoveryFault = enum {
     none,
+    before_recovery,
     backup_restore_rename,
+    backup_cleanup,
 };
+
+const RenameFault = enum { none, target_to_backup, candidate_to_target };
 
 /// Owns the filesystem half of Skill management. Catalog reconciliation is an
 /// intentionally separate completion step because acquisition and scheduling
@@ -447,6 +474,8 @@ pub const Transactions = struct {
     persistence: *FileStore,
     recovery_fault: if (builtin.is_test) RecoveryFault else void =
         if (builtin.is_test) .none else {},
+    rename_fault: if (builtin.is_test) RenameFault else void =
+        if (builtin.is_test) .none else {},
 
     pub fn init(
         io: std.Io,
@@ -454,10 +483,12 @@ pub const Transactions = struct {
         inventory: Inventory,
         persistence: *FileStore,
     ) Transactions {
+        var committed_inventory = inventory;
+        _ = committed_inventory.takeChanged();
         return .{
             .io = io,
             .allocator = allocator,
-            .inventory = inventory,
+            .inventory = committed_inventory,
             .persistence = persistence,
         };
     }
@@ -520,6 +551,8 @@ pub const Transactions = struct {
         asset_registered = false;
         cleanup_candidate = false;
         if (target_exists) {
+            if (builtin.is_test and self.rename_fault == .target_to_backup)
+                return error.FileTransactionFailed;
             root.dir.rename(
                 input.asset.target_entry,
                 root.dir,
@@ -529,6 +562,8 @@ pub const Transactions = struct {
             try self.inventory.advanceTransaction(asset.install_id, .backup_renamed);
             self.persist() catch return error.PersistenceOutcomeUnknown;
         }
+        if (builtin.is_test and self.rename_fault == .candidate_to_target)
+            return error.FileTransactionFailed;
         root.dir.rename(
             names.candidateSlice(),
             root.dir,
@@ -591,10 +626,14 @@ pub const Transactions = struct {
         )) return error.CandidateUnavailable;
         try self.persist();
         cleanup_candidate = false;
+        if (builtin.is_test and self.rename_fault == .target_to_backup)
+            return error.FileTransactionFailed;
         root.dir.rename(asset.target_entry, root.dir, names.backupSlice(), root.io) catch
             return error.FileTransactionFailed;
         try self.inventory.advanceTransaction(install_id, .backup_renamed);
         self.persist() catch return error.PersistenceOutcomeUnknown;
+        if (builtin.is_test and self.rename_fault == .candidate_to_target)
+            return error.FileTransactionFailed;
         root.dir.rename(names.candidateSlice(), root.dir, asset.target_entry, root.io) catch
             return error.FileTransactionFailed;
         try self.inventory.advanceTransaction(install_id, .candidate_published);
@@ -619,6 +658,8 @@ pub const Transactions = struct {
             .backup_entry = names.backupSlice(),
         });
         try self.persist();
+        if (builtin.is_test and self.rename_fault == .target_to_backup)
+            return error.FileTransactionFailed;
         root.dir.rename(asset.target_entry, root.dir, names.backupSlice(), root.io) catch
             return error.FileTransactionFailed;
         try self.inventory.advanceTransaction(install_id, .backup_renamed);
@@ -647,6 +688,8 @@ pub const Transactions = struct {
             try self.inventory.advanceTransaction(install_id, .reconciled);
             try self.persist();
         }
+        if (builtin.is_test and self.recovery_fault == .backup_cleanup)
+            return error.FileTransactionFailed;
         if (recovery.operation == .uninstall) {
             const backup = recovery.backup_entry orelse return error.InvalidTransaction;
             root.dir.deleteTree(root.io, backup) catch return error.FileTransactionFailed;
@@ -730,6 +773,8 @@ pub const Transactions = struct {
         const asset = self.inventory.find(install_id) orelse return error.AssetNotFound;
         if (!scopeMatchesRoot(asset.scope, root)) return error.RootUnavailable;
         const recovery = asset.recovery orelse return;
+        if (builtin.is_test and self.recovery_fault == .before_recovery)
+            return error.FileTransactionFailed;
         switch (recovery.phase) {
             .prepared => {
                 if (recovery.backup_entry) |backup| {
@@ -780,9 +825,11 @@ pub const Transactions = struct {
     }
 
     fn persist(self: *Transactions) Error!void {
-        const output = try self.allocator.alloc(u8, max_store_bytes);
+        // The in-memory phase may already have advanced. Failure to prepare
+        // its commit must freeze this store just like a definite write failure.
+        const output = self.allocator.alloc(u8, max_store_bytes) catch return error.PersistenceFailed;
         defer self.allocator.free(output);
-        const bytes = try encode(output, &self.inventory);
+        const bytes = encode(output, &self.inventory) catch return error.PersistenceFailed;
         self.persistence.commit(bytes) catch |err| return switch (err) {
             error.PersistenceOutcomeUnknown => error.PersistenceOutcomeUnknown,
             else => error.PersistenceFailed,
@@ -912,6 +959,14 @@ pub const FileStore = struct {
 pub const TestSupport = if (builtin.is_test) struct {
     pub const FileStoreCommitFault = CommitFault;
 
+    pub fn setRenameFault(transactions: *Transactions, fault: RenameFault) void {
+        transactions.rename_fault = fault;
+    }
+
+    pub fn setRecoveryFault(transactions: *Transactions, fault: RecoveryFault) void {
+        transactions.recovery_fault = fault;
+    }
+
     pub fn setFileStoreCommitFault(
         store: *FileStore,
         fault: FileStoreCommitFault,
@@ -1025,7 +1080,11 @@ pub fn decode(
                 .backup_entry = recovery.backup_entry,
             }) catch return error.StoreCorrupt;
             if (state == .pending_verification) {
-                if (phase != .reconciliation_pending) return error.StoreCorrupt;
+                // commitReconciliation durably advances the phase before
+                // cleanup and finishTransaction change the legacy state.
+                // Both combinations are emitted by this same schema writer.
+                if (phase != .reconciliation_pending and phase != .reconciled)
+                    return error.StoreCorrupt;
                 asset.state = .pending_verification;
             }
         } else if (state == .pending_verification) {

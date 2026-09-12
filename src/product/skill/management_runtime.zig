@@ -18,6 +18,7 @@ pub const Error = package.Error || management.Error || error{
     DestinationUnavailable,
     TargetAlreadyExists,
     WriteFailed,
+    RecoveryUnavailable,
 };
 
 pub const Context = struct {
@@ -338,7 +339,7 @@ pub fn uninstall(
     if (pending_operation) |operation| switch (operation) {
         .install => {
             transactions.rollbackReconciliation(&root, install_id) catch |err| {
-                notePersistenceFailure(context, err);
+                recoverAfterFileFailure(context, &root, install_id, now_unix_seconds, err);
                 return err;
             };
             return .{ .install_id = install_id, .verification_pending = false };
@@ -347,18 +348,18 @@ pub fn uninstall(
             const now = validTimestamp(now_unix_seconds) orelse
                 return error.PersistenceFailed;
             transactions.commitReconciliation(&root, install_id, null, now) catch |err| {
-                notePersistenceFailure(context, err);
+                recoverAfterFileFailure(context, &root, install_id, now_unix_seconds, err);
                 return err;
             };
             return .{ .install_id = install_id, .verification_pending = false };
         },
         .replace => transactions.rollbackReconciliation(&root, install_id) catch |err| {
-            notePersistenceFailure(context, err);
+            recoverAfterFileFailure(context, &root, install_id, now_unix_seconds, err);
             return err;
         },
     };
     transactions.uninstall(&root, install_id) catch |err| {
-        notePersistenceFailure(context, err);
+        recoverAfterFileFailure(context, &root, install_id, now_unix_seconds, err);
         return err;
     };
     transactions.markReconciliationUnavailable(install_id) catch |err| {
@@ -372,11 +373,25 @@ pub fn uninstall(
 pub fn retryVerification(
     context: Context,
     install_id: management.InstallId,
+    canonical_base: []const u8,
+    now_unix_seconds: ?u64,
 ) Error!state.MutationResult {
-    const current = context.state.inventoryConst().findConst(install_id) orelse
+    const before = context.state.inventoryConst().findConst(install_id) orelse
         return error.AssetNotFound;
-    if (current.state != .pending_verification or current.recovery == null)
-        return error.InvalidAsset;
+    if (before.recovery == null) return error.InvalidAsset;
+    if (before.requiresRecovery()) {
+        var root = try openManagedRoot(context, before.scope, canonical_base);
+        defer root.deinit();
+        try recoverOne(context, &root, install_id, now_unix_seconds);
+    }
+    // Recovery may remove the asset or replace/free its recovery payload.
+    const current = context.state.inventoryConst().findConst(install_id) orelse
+        return .{ .install_id = install_id, .verification_pending = false };
+    if (current.recovery == null)
+        return .{ .install_id = install_id, .verification_pending = false };
+    if (current.state != .pending_verification) return error.RecoveryUnavailable;
+    if (context.state.source_settings == null)
+        return .{ .install_id = install_id, .verification_pending = true };
     setReconciliation(
         context,
         install_id,
@@ -400,26 +415,50 @@ pub fn recoverNoFail(
     for (context.state.inventoryConst().items()) |asset| {
         if (asset.scope.eql(scope) and asset.recovery != null)
             pending.append(context.allocator, asset.install_id) catch {
-                context.state.management_health = .write_failed;
                 return;
             };
     }
     if (pending.items.len == 0) return;
-    var root = openManagedRoot(context, scope, canonical_base) catch {
-        context.state.management_health = .read_failed;
-        return;
-    };
+    var root = openManagedRoot(context, scope, canonical_base) catch return;
     defer root.deinit();
-    const now = validTimestamp(now_unix_seconds) orelse {
-        context.state.management_health = .read_failed;
-        return;
-    };
-    const transactions = &context.state.transactions.?;
     for (pending.items) |install_id|
-        transactions.recover(&root, install_id, now) catch |err| {
-            notePersistenceFailure(context, err);
-            return;
-        };
+        recoverOne(context, &root, install_id, now_unix_seconds) catch return;
+}
+
+/// One bounded attempt using the existing durable phase machine. A root or
+/// clock failure says nothing about the trustworthiness of the inventory.
+fn recoverOne(
+    context: Context,
+    root: *management.CanonicalRoot,
+    install_id: management.InstallId,
+    now_unix_seconds: ?u64,
+) Error!void {
+    if (context.state.management_health != .ready) return error.PersistenceFailed;
+    const transactions = if (context.state.transactions) |*value| value else return error.PersistenceFailed;
+    const asset = transactions.inventory.findConst(install_id) orelse return;
+    const recovery = asset.recovery orelse return;
+    const now = validTimestamp(now_unix_seconds) orelse blk: {
+        if (recovery.phase == .reconciled and recovery.operation != .uninstall)
+            return error.RecoveryUnavailable;
+        // These phases do not consume a timestamp.
+        break :blk 0;
+    };
+    transactions.recover(root, install_id, now) catch |err| {
+        notePersistenceFailure(context, err);
+        return err;
+    };
+}
+
+fn recoverAfterFileFailure(
+    context: Context,
+    root: *management.CanonicalRoot,
+    install_id: management.InstallId,
+    now_unix_seconds: ?u64,
+    err: anyerror,
+) void {
+    notePersistenceFailure(context, err);
+    if (err == error.FileTransactionFailed)
+        recoverOne(context, root, install_id, now_unix_seconds) catch {};
 }
 
 pub fn reconcileNoFail(
@@ -453,7 +492,8 @@ pub fn reconcileNoFail(
     const transactions = if (context.state.transactions) |*value| value else return;
     const asset = transactions.inventory.findConst(reconciliation.install_id) orelse return;
     const recovery = asset.recovery orelse return;
-    if (!asset.scope.eql(scope) or recovery.operation != reconciliation.operation or
+    if (context.state.management_health != .ready or recovery.phase != .reconciliation_pending or
+        !asset.scope.eql(scope) or recovery.operation != reconciliation.operation or
         !std.mem.eql(u8, asset.target_entry, reconciliation.invocationName())) return;
     const accepted = if (reconciliation.operation == .uninstall) absent: {
         if (found) return;
@@ -526,7 +566,7 @@ fn installSource(
         },
         .allow_replace = input.allow_replace,
     }) catch |err| {
-        notePersistenceFailure(context, err);
+        recoverAfterFileFailure(context, &root, install_id, now_unix_seconds, err);
         return err;
     };
     transactions.markReconciliationUnavailable(install_id) catch |err| {
@@ -570,7 +610,7 @@ fn reimportSource(
     defer root.deinit();
     const transactions = if (context.state.transactions) |*value| value else return error.PersistenceFailed;
     transactions.reimport(&root, install_id, source, &manifest) catch |err| {
-        notePersistenceFailure(context, err);
+        recoverAfterFileFailure(context, &root, install_id, null, err);
         return err;
     };
     transactions.markReconciliationUnavailable(install_id) catch |err| {

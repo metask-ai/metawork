@@ -1819,9 +1819,10 @@ pub const Runtime = struct {
             input,
             self.schedule.now(),
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1838,9 +1839,10 @@ pub const Runtime = struct {
             input,
             self.schedule.now(),
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1861,9 +1863,10 @@ pub const Runtime = struct {
             expected_invocation_name,
             expected_content_hash,
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1884,9 +1887,10 @@ pub const Runtime = struct {
             expected_invocation_name,
             expected_content_hash,
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1902,9 +1906,10 @@ pub const Runtime = struct {
             install_id,
             self.schedule.now(),
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1916,19 +1921,21 @@ pub const Runtime = struct {
         const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
         const previous_health = self.skill.managementHealth();
-        const result = self.skill.retryVerification(install_id) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+        const result = self.skill.retryVerification(install_id, self.schedule.now()) catch |err| {
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
 
-    fn bumpRevisionIfSkillManagementHealthChanged(
+    fn publishSkillManagementChanges(
         self: *Runtime,
         previous_health: skill_runtime.ManagementHealth,
     ) void {
-        if (self.skill.managementHealth() != previous_health)
+        const changed = self.skill.takeManagementChanged();
+        if (changed or self.skill.managementHealth() != previous_health)
             self.bumpRevision();
     }
     pub fn readSkillDefinition(
@@ -5520,6 +5527,7 @@ pub const Runtime = struct {
                 .slot_count = self.workspace.slotCount(),
                 .get_fn = skillWorkspaceCatalog,
             },
+            .{ .context = self, .available_fn = skillRetryAvailable },
         ) catch return error.SnapshotTooLarge;
     }
 
@@ -6585,8 +6593,19 @@ pub const Runtime = struct {
         self: *Runtime,
         scope: skill_runtime.ManagementScope,
     ) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        return self.checkSkillMutationAuthority(scope);
+    }
+
+    fn skillRetryAvailable(context: *const anyopaque, install_id: skill_runtime.InstallId) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        if (!self.skill.retryAvailable(install_id)) return false;
+        self.checkSkillMutationAuthority(self.skill.assetScope(install_id) catch return false) catch return false;
+        return true;
+    }
+
+    fn checkSkillMutationAuthority(self: *const Runtime, scope: skill_runtime.ManagementScope) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
         switch (scope) {
             .personal => {
                 if (self.task_runtime.hasActiveOperation(null)) return error.TaskBusy;
@@ -6651,10 +6670,13 @@ pub const Runtime = struct {
         self: *Runtime,
         scope: skill_runtime.ManagementScope,
     ) void {
+        self.checkSkillMutationAuthority(scope) catch return;
+        const previous_health = self.skill.managementHealth();
         self.skill.recoverTransactionsForScopeNoFail(
             scope,
             self.schedule.now(),
         );
+        self.publishSkillManagementChanges(previous_health);
     }
 
     fn commitMcpRefreshJobNoFail(self: *Runtime) bool {
@@ -10555,7 +10577,7 @@ test "Skill management health failure advances Product revision exactly once" {
     const previous_health = control.skill.managementHealth();
     const before_failure = control.revision;
     control.skill.testSetManagementHealth(.outcome_unknown);
-    control.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+    control.publishSkillManagementChanges(previous_health);
     try std.testing.expectEqual(before_failure + 1, control.revision);
     try std.testing.expectEqual(
         SkillManagementHealth.outcome_unknown,
@@ -10563,8 +10585,28 @@ test "Skill management health failure advances Product revision exactly once" {
     );
 
     const before_rejection = control.revision;
-    control.bumpRevisionIfSkillManagementHealthChanged(.outcome_unknown);
+    control.publishSkillManagementChanges(.outcome_unknown);
     try std.testing.expectEqual(before_rejection, control.revision);
+}
+
+test "Skill recovery phase changes publish without a health change and match the wire fixture" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.skill.testSetManagementHealth(.ready);
+    const before = control.revision;
+    try control.skill.testAddRecoveryAsset();
+    control.publishSkillManagementChanges(.ready);
+    try std.testing.expectEqual(before + 1, control.revision);
+    control.publishSkillManagementChanges(.ready);
+    try std.testing.expectEqual(before + 1, control.revision);
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try control.writeSkillManagement(&writer);
+    var projection = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer projection.deinit();
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, projection.value.object.get("assets").?.array.items[0], .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.skill_recovery_required, "\r\n"), encoded);
 }
 
 fn installTestCommittedSkillAuthorities(control: *Runtime) !void {

@@ -11,6 +11,10 @@ const sources = @import("product_skill_sources");
 
 pub const Error = error{SnapshotTooLarge};
 
+fn testRetryAvailable(_: *const anyopaque, _: management.InstallId) bool {
+    return true;
+}
+
 /// Serializer-owned byte bounds for Product's global snapshot admission.
 /// Text, variable arrays and fixed structure are charged independently.
 pub const SnapshotStructureBounds = struct {
@@ -58,12 +62,18 @@ pub const WorkspaceCatalogs = struct {
     }
 };
 
+pub const RetryAvailability = struct {
+    context: *const anyopaque,
+    available_fn: *const fn (*const anyopaque, management.InstallId) bool,
+};
+
 pub const ManagementInput = struct {
     state: *const state.State,
     workspaces: WorkspaceCatalogs,
     text: TextProjection,
     source_settings: state.SourceSettingsView,
     personal_source_discovery: ?state.SourceDiscoveryView,
+    retry: RetryAvailability,
 };
 
 pub fn catalogProjection(
@@ -272,7 +282,7 @@ fn writeManagedAsset(
     try writeScope(writer, asset.scope);
     try writeOrigin(writer, asset.scope, skill);
     writer.print(",\"managementState\":\"{s}\",\"skillId\":", .{
-        @tagName(asset.state),
+        if (asset.requiresRecovery()) "recovery_required" else @tagName(asset.state),
     }) catch return error.SnapshotTooLarge;
     if (skill) |value|
         try input.text.writeJson(writer, value.skill_id)
@@ -300,7 +310,9 @@ fn writeManagedAsset(
         if (skill) |value| value.max_values else 0,
         asset.state != .externally_managed and asset.state == .ready and
             asset.recovery == null,
-        asset.state == .pending_verification,
+        asset.state == .pending_verification and !asset.requiresRecovery(),
+        asset.recovery != null and input.state.management_health == .ready and
+            input.retry.available_fn(input.retry.context, asset.install_id),
         asset.scope,
         asset.target_entry,
         skill,
@@ -333,6 +345,7 @@ fn writeExternalAsset(
         skill.max_values,
         false,
         false,
+        false,
         scope,
         skill.invocation_name,
         skill,
@@ -346,6 +359,7 @@ fn writeAssetTail(
     max_values: u32,
     manageable: bool,
     pending: bool,
+    can_retry: bool,
     scope: management.Scope,
     invocation_name: []const u8,
     runtime_skill: ?catalog.SkillProjection,
@@ -371,10 +385,10 @@ fn writeAssetTail(
         runtime_skill != null and selection_revision != null;
     writer.print("],\"maxValues\":{d},\"canExport\":{},\"canReimport\":{},\"canUninstall\":{},\"canRetry\":{},\"enabled\":", .{
         max_values,
-        manageable,
-        manageable and input.state.source_settings != null,
-        (manageable or pending) and input.state.source_settings != null,
-        pending and input.state.source_settings != null,
+        manageable and input.state.management_health == .ready,
+        manageable and input.state.management_health == .ready and input.state.source_settings != null,
+        (manageable or pending) and input.state.management_health == .ready and input.state.source_settings != null,
+        can_retry,
     }) catch return error.SnapshotTooLarge;
     if (runtime_skill) |skill| {
         if (enablement_available)
@@ -610,6 +624,7 @@ test "snapshot structure bounds cover maximum identities arguments issues and un
     const text: TextProjection = .{ .context = undefined, .contains_sensitive_fn = Fixture.contains, .write_json_fn = Fixture.write };
     const input: ManagementInput = .{
         .state = &product_state,
+        .retry = .{ .context = undefined, .available_fn = testRetryAvailable },
         .text = text,
         .source_settings = .{ .settings = .{}, .health = .ready, .can_set_enabled = false, .can_reread = false, .can_reset = false, .recovery_token = null },
         .personal_source_discovery = null,
@@ -705,6 +720,7 @@ test "same-name external winner is not suppressed or attached to a managed asset
     defer product_state.catalog.slot.committed.snapshot.deinit();
     const input: ManagementInput = .{
         .state = &product_state,
+        .retry = .{ .context = undefined, .available_fn = testRetryAvailable },
         .source_settings = .{ .settings = .{}, .health = .ready, .can_set_enabled = false, .can_reread = false, .can_reset = false, .recovery_token = null },
         .personal_source_discovery = null,
         .text = .{ .context = undefined, .contains_sensitive_fn = Fixture.contains, .write_json_fn = Fixture.write },
@@ -754,4 +770,18 @@ test "same-name external winner is not suppressed or attached to a managed asset
     var linked = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
     defer linked.deinit();
     try std.testing.expectEqual(@as(usize, 1), linked.value.object.get("assets").?.array.items.len);
+    try product_state.inventory.?.beginTransaction(@splat(7), .{ .operation = .install, .phase = .candidate_published, .candidate_hash = @splat('a'), .candidate_entry = ".candidate" });
+    try product_state.inventory.?.markPendingVerification(@splat(7));
+    try product_state.inventory.?.advanceTransaction(@splat(7), .reconciled);
+    for ([_]state.ManagementHealth{ .ready, .write_failed, .outcome_unknown }) |health| {
+        product_state.management_health = health;
+        writer = std.Io.Writer.fixed(&buffer);
+        try writeManagementProjection(&writer, input);
+        var recovery_projection = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+        defer recovery_projection.deinit();
+        const recovering = recovery_projection.value.object.get("assets").?.array.items[0].object;
+        try std.testing.expectEqualStrings("recovery_required", recovering.get("managementState").?.string);
+        try std.testing.expectEqual(health == .ready, recovering.get("canRetry").?.bool);
+        try std.testing.expect(!recovering.get("canExport").?.bool and !recovering.get("canReimport").?.bool and !recovering.get("canUninstall").?.bool);
+    }
 }

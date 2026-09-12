@@ -85,7 +85,7 @@ Transactions.recover 继续是唯一的物理恢复实现；不复制其 prepare
 | 资产事实 | managementState / 行为 |
 | --- | --- |
 | 无 recovery，且原 state 为 ready | 继续走普通管理能力 |
-| recovery 存在且 state 不是 pending_verification | recovery_required；不能显示 ready 或开放普通替换 |
+| recovery 存在，且 state/phase 不同时为 pending_verification/reconciliation_pending | recovery_required；包括 reconciled 后清理未完成，不能显示 ready 或开放普通替换 |
 | 正处于 reconciliation_pending，state 为 pending_verification | pending_verification；Retry 登记新 verification |
 | management store 不可信 | 保留可见诊断，canRetry=false，提示重启后重新加载与恢复 |
 
