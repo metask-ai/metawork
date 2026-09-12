@@ -8,10 +8,7 @@ import type {
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
-import {
-  parseUnifiedDiff,
-  type UnifiedDiffRow,
-} from "../tasks/unified-diff.ts";
+import { parseUnifiedDiff, type UnifiedDiffRow } from "./unified-diff.ts";
 
 export type FileChangeDiffViewState =
   | { phase: "idle"; diff: null }

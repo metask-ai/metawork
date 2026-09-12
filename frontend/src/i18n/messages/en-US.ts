@@ -433,6 +433,83 @@ export const enUS = {
   "skills.no_results_body": "Nothing matches “{query}”.",
   "skills.catalog_refresh_started": "Refreshing the Skill catalog…",
   "skills.catalog_refresh_failed": "The Skill catalog could not be refreshed.",
+  "skills.sources.title": "Compatible sources",
+  "skills.sources.hint":
+    "Reads personal and all authorized project Skills. Existing tasks need a Skill refresh.",
+  "skills.sources.partial": "Partially enabled",
+  "skills.sources.scope.user": "Personal directory",
+  "skills.sources.scope.workspace": "Project directory",
+  "skills.sources.unknown": "State unknown",
+  "skills.sources.unknown_origin": "Unknown origin",
+  "skills.sources.saving": "Confirming settings…",
+  "skills.sources.reread": "Reread settings",
+  "skills.sources.reset": "Turn off all compatible sources",
+  "skills.sources.reset_body":
+    "Turns off Claude and Codex sources. No Skills are deleted, and individual Skill enablement and project data are unchanged.",
+  "skills.sources.state.error": "Check failed",
+  "skills.sources.reason.unreadable": "Unreadable",
+  "skills.sources.reason.unsupported_entry": "Unsupported directory entry",
+  "skills.sources.reason.changed": "Directory changed",
+  "skills.sources.health.unavailable": "Settings storage is unavailable.",
+  "skills.sources.health.read_failed":
+    "Settings could not be read; current selections are unknown.",
+  "skills.sources.health.corrupt":
+    "Settings are corrupt; selections are unknown. Reread them or turn off all compatible sources.",
+  "skills.sources.health.missing":
+    "The settings file is missing; current selections are unknown.",
+  "skills.sources.health.unsupported_schema":
+    "The settings format is unsupported. This file will not be reset.",
+  "skills.sources.health.too_large":
+    "Settings exceed the read limit. This file will not be reset.",
+  "skills.sources.health.write_failed":
+    "Saving failed. The last confirmed settings remain in use.",
+  "skills.sources.health.outcome_unknown":
+    "The persisted outcome is unknown. Reread settings to recover.",
+  "skills.sources.failure.stale_revision":
+    "Settings changed elsewhere. A sync was requested; review the values before trying again.",
+  "skills.sources.failure.busy":
+    "A Skill management operation is still pending. Try again after it finishes.",
+  "skills.sources.failure.source_settings_unavailable":
+    "Source settings are unavailable. Check their recovery status.",
+  "skills.sources.failure.write_failed":
+    "Could not save. The previous settings remain valid.",
+  "skills.sources.failure.persistence_outcome_unknown":
+    "The save outcome is unknown. Reread settings.",
+  "skills.sources.failure.stale_recovery_token":
+    "Recovery state changed. A sync was requested; review it before trying again.",
+  "skills.sources.failure.recovery_not_allowed":
+    "This recovery action is not allowed for the current settings.",
+  "skills.sources.failure.read_failed":
+    "Settings could not be reread. The file was not reset.",
+  "skills.sources.failure.revision_exhausted":
+    "The settings revision limit has been reached.",
+  "skills.sources.failure.shutting_down":
+    "The app is shutting down and did not accept this change.",
+  "skills.sources.saved_resync":
+    "Settings were saved, but the display has not synced. Wait for the connection to recover; do not save again.",
+  "skills.sources.uncertain":
+    "The outcome could not be confirmed. A sync was requested; the change will not be retried automatically.",
+  "skills.detail.origin": "Directory origin",
+  "skills.catalog_issues": "Catalog issues",
+  "skills.catalog_issues_help":
+    "Check compatible sources, or adjust Skills externally and refresh. Individual Skill enablement does not resolve source conflicts.",
+  "skills.catalog_unavailable":
+    "The catalog is not ready or its query failed. Saved source settings are unchanged; refresh to retry.",
+  "skills.no_available_title": "No Skills are currently available",
+  "skills.section.pending": "Awaiting verification",
+  "skills.issue.source_conflict":
+    "Same-priority source conflict; no candidate is available",
+  "skills.issue.invalid_definition": "Invalid Skill definition",
+  "skills.issue.invalid_resource": "Invalid Skill resource",
+  "skills.issue.invalid_invocation_name": "Invalid Skill invocation name",
+  "skills.sources.root.agents.user.default":
+    ".agents · Personal directory (default)",
+  "skills.sources.root.agents.workspace.default":
+    ".agents · Project directory (default)",
+  "skills.sources.root.compat.claude.user": "Claude · Personal directory",
+  "skills.sources.root.compat.claude.workspace": "Claude · Project directory",
+  "skills.sources.root.compat.codex.user": "Codex · Personal directory",
+  "skills.sources.root.compat.codex.workspace": "Codex · Project directory",
   "task.empty_title": "Start with the outcome you want.",
   "task.empty_body_with_workspace":
     "Describe a clear outcome. The new task will use the current workspace, and MetaWork will keep the work, decisions, and result together.",

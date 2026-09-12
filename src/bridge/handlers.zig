@@ -160,6 +160,8 @@ pub const WorkspaceIdentity = struct {
     expectedWorkspaceEpoch: []const u8,
 };
 pub const SkillImportChoice = struct { kind: []const u8 };
+pub const SkillSourceSetEnabled = struct { sourceId: std.json.Value, enabled: bool, expectedRevision: []const u8 };
+pub const SkillSourceRecover = struct { action: []const u8, expectedRecoveryToken: []const u8 };
 pub const SkillSetEnabled = struct {
     scope: []const u8,
     workspaceId: ?[]const u8,
@@ -426,6 +428,14 @@ pub fn parseWireId(value: []const u8) !u64 {
     return std.fmt.parseInt(u64, value, 10) catch error.InvalidBridgeId;
 }
 
+pub fn parseSkillSourceBrand(value: std.json.Value) !product_control.SkillSourceBrand {
+    const name = switch (value) {
+        .string => |name| name,
+        else => return error.InvalidBridgePayload,
+    };
+    return std.meta.stringToEnum(product_control.SkillSourceBrand, name) orelse error.InvalidBridgePayload;
+}
+
 pub fn permissionProfile(value: []const u8) ?product_control.PermissionProfile {
     if (std.mem.eql(u8, value, "approval_required")) return .approval_required;
     if (std.mem.eql(u8, value, "full_access")) return .full_access;
@@ -602,6 +612,39 @@ pub fn permissionChoice(value: []const u8) ?PermissionChoice {
     if (std.mem.eql(u8, value, "deny_once")) return .deny_once;
     if (std.mem.eql(u8, value, "deny_session")) return .deny_session;
     return null;
+}
+
+test "Skill source payloads reject free paths coercion and mixed recovery intent" {
+    inline for (.{ product_control.SkillSourceBrand.claude, product_control.SkillSourceBrand.codex }) |brand| {
+        var settings = try parsePayload(SkillSourceSetEnabled, "{\"sourceId\":\"" ++ @tagName(brand) ++ "\",\"enabled\":true,\"expectedRevision\":\"1\"}");
+        defer settings.deinit();
+        try std.testing.expect(settings.value.enabled);
+        try std.testing.expectEqual(brand, try parseSkillSourceBrand(settings.value.sourceId));
+    }
+    inline for (.{ "0", "1", "compat.claude.user", "compat.claude.workspace", "compat.codex.user", "compat.codex.workspace", "agents", "unknown", "Claude", "codex ", "", "/tmp" }) |id| {
+        var settings = try parsePayload(SkillSourceSetEnabled, "{\"sourceId\":\"" ++ id ++ "\",\"enabled\":true,\"expectedRevision\":\"1\"}");
+        defer settings.deinit();
+        try std.testing.expectError(error.InvalidBridgePayload, parseSkillSourceBrand(settings.value.sourceId));
+    }
+    inline for (.{ "0", "1", "true", "false", "null", "[]", "[99,108,97,117,100,101]", "{}" }) |value| {
+        var settings = try parsePayload(SkillSourceSetEnabled, "{\"sourceId\":" ++ value ++ ",\"enabled\":true,\"expectedRevision\":\"1\"}");
+        defer settings.deinit();
+        try std.testing.expectError(error.InvalidBridgePayload, parseSkillSourceBrand(settings.value.sourceId));
+    }
+    var recovery = try parsePayload(SkillSourceRecover, "{\"action\":\"reread\",\"expectedRecoveryToken\":\"2\"}");
+    defer recovery.deinit();
+    try std.testing.expectEqualStrings("reread", recovery.value.action);
+    inline for (.{
+        "{\"sourceId\":\"claude\",\"enabled\":true,\"expectedRevision\":\"1\",\"path\":\"/tmp\"}",
+        "{\"sourceId\":\"claude\",\"enabled\":1,\"expectedRevision\":\"1\"}",
+        "{\"sourceId\":\"claude\",\"enabled\":true,\"expectedRevision\":1}",
+        "{\"sourceId\":\"claude\",\"enabled\":true}",
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(SkillSourceSetEnabled, payload));
+    inline for (.{
+        "{\"action\":\"reset\",\"expectedRecoveryToken\":\"2\",\"sources\":{}}",
+        "{\"action\":\"reset\",\"expectedRecoveryToken\":2}",
+        "{\"action\":\"reset\",\"expectedRecoveryToken\":\"2\",\"workspaceId\":\"1\"}",
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(SkillSourceRecover, payload));
 }
 
 test "Task Run input is an exact text skill or multimodal tagged object" {

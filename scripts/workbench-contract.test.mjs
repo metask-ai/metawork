@@ -20,6 +20,7 @@ import {
   decodeSkillExportResult,
   decodeSkillImportPreview,
   decodeSkillMutationResult,
+  decodeSkillSourceSettingsResult,
   decodeMcpMutationResult,
   decodeMcpRefreshResult,
   decodeFilePreview,
@@ -51,6 +52,169 @@ const modelsUnavailableFixture = JSON.parse(
 function clone(value) {
   return structuredClone(value);
 }
+
+test("Skill source settings preserve unknown oversized formats without reset authority", () => {
+  for (const health of [
+    "too_large",
+    "unsupported_schema",
+    "read_failed",
+    "outcome_unknown",
+    "corrupt",
+    "missing",
+  ]) {
+    const candidate = clone(fixture);
+    const settings = candidate.skillManagement.sourceSettings;
+    settings.health = health;
+    settings.revision = null;
+    settings.entries.forEach((entry) => {
+      entry.enabled = null;
+      entry.canSetEnabled = false;
+    });
+    settings.recovery = {
+      canReread: true,
+      canReset: health === "corrupt" || health === "missing",
+      token: "18446744073709551615",
+    };
+    assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+    if (health !== "corrupt" && health !== "missing") {
+      settings.recovery.canReset = true;
+      assert.throws(
+        () => decodeWorkbenchSnapshot(candidate),
+        /source recovery authority/,
+      );
+    }
+  }
+  for (const mutate of [
+    (settings) => {
+      settings.entries.pop();
+    },
+    (settings) => {
+      settings.entries[1] = clone(settings.entries[0]);
+    },
+    (settings) => {
+      settings.entries[0].sourceId = "agents.user.default";
+    },
+    (settings) => {
+      settings.entries[0].path = "/tmp/skills";
+    },
+    (settings) => {
+      settings.entries[0].enabled = null;
+    },
+    (settings) => {
+      settings.revision = 1;
+    },
+    (settings) => {
+      settings.recovery = { canReread: true, canReset: false, token: null };
+    },
+  ]) {
+    const candidate = clone(fixture);
+    mutate(candidate.skillManagement.sourceSettings);
+    assert.throws(() => decodeWorkbenchSnapshot(candidate));
+  }
+});
+
+test("Skill discovery is scoped root evidence, separate from shared Task catalog", () => {
+  const candidate = clone(fixture);
+  const ids = candidate.skillManagement.sourceSettings.entries.map(
+    (entry) => entry.sourceId,
+  );
+  candidate.skillManagement.personalSourceDiscovery = [
+    { sourceId: "agents.user.default", state: "missing", reason: null },
+    ...ids
+      .filter((id) => id.endsWith(".user"))
+      .map((sourceId) => ({ sourceId, state: "disabled", reason: null })),
+  ];
+  candidate.workspaces[0].skillSourceDiscovery = [
+    { sourceId: "agents.user.default", state: "checked", reason: null },
+    {
+      sourceId: "agents.workspace.default",
+      state: "error",
+      reason: "unsupported_entry",
+    },
+    ...ids.map((sourceId) => ({ sourceId, state: "disabled", reason: null })),
+  ];
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  assert.equal(candidate.tasks[0].skillCatalog.sourceDiscovery, undefined);
+  for (const workspaceState of [
+    {
+      kind: "manual",
+      authorization: "reauthorization_required",
+      recentOrder: "1",
+    },
+    { kind: "manual", authorization: "removing", recentOrder: "1" },
+    { kind: "automatic", authorization: "available", recentOrder: "0" },
+  ]) {
+    const next = clone(candidate);
+    Object.assign(next.workspaces[0], workspaceState, {
+      skillSourceDiscovery: null,
+    });
+    // These Workspace facts are valid; only publishing discovery is forbidden.
+    assert.deepEqual(decodeWorkbenchSnapshot(next), next);
+    next.workspaces[0].skillSourceDiscovery =
+      candidate.workspaces[0].skillSourceDiscovery;
+    assert.throws(
+      () => decodeWorkbenchSnapshot(next),
+      /source discovery requires an authorized Manual Workspace/,
+    );
+  }
+  for (const mutate of [
+    (next) => {
+      next.skillManagement.personalSourceDiscovery.push(
+        next.workspaces[0].skillSourceDiscovery[1],
+      );
+    },
+    (next) => {
+      next.workspaces[0].skillSourceDiscovery[0].state = "disabled";
+    },
+    (next) => {
+      next.workspaces[0].skillSourceDiscovery[1].reason = null;
+    },
+    (next) => {
+      next.workspaces[0].authorization = "removing";
+    },
+    (next) => {
+      next.tasks[0].skillCatalog.sourceDiscovery = [];
+    },
+  ]) {
+    const next = clone(candidate);
+    mutate(next);
+    assert.throws(() => decodeWorkbenchSnapshot(next));
+  }
+});
+
+test("Skill source results use bounded typed rejections and lossless u64 revisions", () => {
+  for (const reason of [
+    "stale_revision",
+    "busy",
+    "source_settings_unavailable",
+    "write_failed",
+    "persistence_outcome_unknown",
+    "stale_recovery_token",
+    "recovery_not_allowed",
+    "read_failed",
+    "revision_exhausted",
+    "shutting_down",
+  ]) {
+    const result = { applied: false, revision: null, reason };
+    assert.deepEqual(decodeSkillSourceSettingsResult(result), result);
+  }
+  assert.deepEqual(
+    decodeSkillSourceSettingsResult({
+      applied: true,
+      revision: "18446744073709551615",
+      reason: null,
+    }),
+    { applied: true, revision: "18446744073709551615", reason: null },
+  );
+  for (const result of [
+    { applied: true, revision: null, reason: null },
+    { applied: true, revision: "1", reason: "busy" },
+    { applied: false, revision: "1", reason: "busy" },
+    { applied: false, revision: null, reason: "arbitrary error" },
+    { applied: true, revision: "01", reason: null },
+  ])
+    assert.throws(() => decodeSkillSourceSettingsResult(result));
+});
 
 test("Run elapsed time is nullable, bounded, and unavailable for terminal history", () => {
   for (const value of [null, "0", "134000"]) {
@@ -612,6 +776,19 @@ test("Task model selection availability is a strict Host-owned projection", () =
   assert.throws(
     () => decodeWorkbenchSnapshot(unknown),
     /modelSelectionAvailability/,
+  );
+});
+
+test("Automatic Workspace catalog-free fixture variant matches the Host serializer", () => {
+  const automatic = clone(fixture);
+  automatic.workspaces[0].kind = "automatic";
+  automatic.workspaces[0].recentOrder = "0";
+  assert.deepEqual(decodeWorkbenchSnapshot(automatic), automatic);
+
+  automatic.workspaces[0].skillCatalog.availability = "unavailable";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(automatic),
+    /automatic Workspace must remain Task-owned and catalog-free/,
   );
 });
 

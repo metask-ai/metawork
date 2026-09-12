@@ -32,6 +32,16 @@ import {
   type SkillCatalogView,
   type SkillManagementView,
   type SkillEnablementResult,
+  skillSourceIds,
+  skillSourceHealthStates,
+  skillSourceCheckStates,
+  skillSourceCheckReasons,
+  skillSourceSettingsReasons,
+  skillOriginEcosystems,
+  skillOriginScopes,
+  type SkillSourceSettings,
+  type SkillSourceDiscovery,
+  type SkillSourceSettingsResult,
   type McpManagementView,
   type McpMutationResult,
   type McpAuthorizationResult,
@@ -704,6 +714,8 @@ function decodeSkillManagement(
   const item = object(value, path, [
     "availability",
     "enablementAvailability",
+    "sourceSettings",
+    "personalSourceDiscovery",
     "assets",
   ]);
   const availability = enumValue(item.availability, `${path}.availability`, [
@@ -733,6 +745,7 @@ function decodeSkillManagement(
       const asset = object(value, itemPath, [
         "installId",
         "sourceKind",
+        "origin",
         "scope",
         "managementState",
         "skillId",
@@ -795,6 +808,7 @@ function decodeSkillManagement(
           "local_directory",
           "external",
         ] as const),
+        origin: decodeSkillOrigin(asset.origin, `${itemPath}.origin`),
         scope,
         managementState: enumValue(
           asset.managementState,
@@ -884,8 +898,192 @@ function decodeSkillManagement(
   return {
     availability,
     enablementAvailability,
+    sourceSettings: decodeSkillSourceSettings(
+      item.sourceSettings,
+      `${path}.sourceSettings`,
+    ),
+    personalSourceDiscovery: decodeSkillSourceDiscovery(
+      item.personalSourceDiscovery,
+      `${path}.personalSourceDiscovery`,
+      "personal",
+    ),
     assets,
   } as SkillManagementView;
+}
+
+function decodeSkillOrigin(
+  value: unknown,
+  path: string,
+): SkillManagementView["assets"][number]["origin"] {
+  if (value === null) return null;
+  const item = object(value, path, ["ecosystem", "scope"]);
+  return {
+    ecosystem: enumValue(
+      item.ecosystem,
+      `${path}.ecosystem`,
+      skillOriginEcosystems,
+    ),
+    scope: enumValue(item.scope, `${path}.scope`, skillOriginScopes),
+  };
+}
+
+function decodeSkillSourceSettings(
+  value: unknown,
+  path: string,
+): SkillSourceSettings {
+  const item = object(value, path, [
+    "revision",
+    "health",
+    "entries",
+    "recovery",
+  ]);
+  const revision =
+    item.revision === null
+      ? null
+      : positiveWireId(item.revision, `${path}.revision`);
+  const health = enumValue(
+    item.health,
+    `${path}.health`,
+    skillSourceHealthStates,
+  );
+  const entries = arrayValue(
+    item.entries,
+    `${path}.entries`,
+    (value, entryPath) => {
+      const entry = object(value, entryPath, [
+        "sourceId",
+        "enabled",
+        "canSetEnabled",
+      ]);
+      const sourceId = enumValue(
+        entry.sourceId,
+        `${entryPath}.sourceId`,
+        skillSourceIds,
+      );
+      const enabled = nullableBoolean(entry.enabled, `${entryPath}.enabled`);
+      const canSetEnabled = booleanValue(
+        entry.canSetEnabled,
+        `${entryPath}.canSetEnabled`,
+      );
+      if (
+        (enabled !== null) !== (revision !== null) ||
+        (canSetEnabled && enabled === null)
+      )
+        fail(
+          entryPath,
+          "source values and revision must describe the same known settings",
+        );
+      return { sourceId, enabled, canSetEnabled };
+    },
+  );
+  if (
+    entries.length !== skillSourceIds.length ||
+    new Set(entries.map((entry) => entry.sourceId)).size !==
+      skillSourceIds.length
+  )
+    fail(
+      `${path}.entries`,
+      "expected each fixed compatibility source exactly once",
+    );
+  if (
+    (health === "ready" && revision === null) ||
+    (health !== "ready" && health !== "write_failed" && revision !== null)
+  )
+    fail(path, "source health must agree with known configuration");
+  const rawRecovery = object(item.recovery, `${path}.recovery`, [
+    "canReread",
+    "canReset",
+    "token",
+  ]);
+  const recovery = {
+    canReread: booleanValue(
+      rawRecovery.canReread,
+      `${path}.recovery.canReread`,
+    ),
+    canReset: booleanValue(rawRecovery.canReset, `${path}.recovery.canReset`),
+    token:
+      rawRecovery.token === null
+        ? null
+        : positiveWireId(rawRecovery.token, `${path}.recovery.token`),
+  };
+  if (
+    recovery.canReread !== (recovery.token !== null) ||
+    (revision !== null && recovery.canReread) ||
+    (recovery.canReset &&
+      (!recovery.canReread || (health !== "corrupt" && health !== "missing")))
+  )
+    fail(`${path}.recovery`, "invalid source recovery authority");
+  return { revision, health, entries, recovery };
+}
+
+function decodeSkillSourceDiscovery(
+  value: unknown,
+  path: string,
+  context: "personal" | "project",
+): SkillSourceDiscovery {
+  if (value === null) return null;
+  const expected =
+    context === "personal"
+      ? ([
+          "agents.user.default",
+          "compat.claude.user",
+          "compat.codex.user",
+        ] as const)
+      : ([
+          "agents.user.default",
+          "agents.workspace.default",
+          ...skillSourceIds,
+        ] as const);
+  const checks = arrayValue(value, path, (value, checkPath) => {
+    const check = object(value, checkPath, ["sourceId", "state", "reason"]);
+    const sourceId = enumValue(
+      check.sourceId,
+      `${checkPath}.sourceId`,
+      expected,
+    );
+    const state = enumValue(
+      check.state,
+      `${checkPath}.state`,
+      skillSourceCheckStates,
+    );
+    const reason =
+      check.reason === null
+        ? null
+        : enumValue(
+            check.reason,
+            `${checkPath}.reason`,
+            skillSourceCheckReasons,
+          );
+    if (
+      (state === "error") !== (reason !== null) ||
+      (sourceId.startsWith("agents.") && state === "disabled")
+    )
+      fail(checkPath, "root check state and reason disagree");
+    return { sourceId, state, reason };
+  });
+  if (
+    checks.length !== expected.length ||
+    new Set(checks.map((check) => check.sourceId)).size !== expected.length
+  )
+    fail(path, "expected the complete scoped root checks");
+  return checks;
+}
+
+function assertSourceDiscoverySettings(
+  discovery: SkillSourceDiscovery,
+  settings: SkillSourceSettings,
+  path: string,
+): void {
+  if (discovery === null) return;
+  if (settings.revision === null)
+    fail(path, "unknown source settings cannot publish root checks");
+  for (const check of discovery) {
+    const entry = settings.entries.find(
+      (entry) => entry.sourceId === check.sourceId,
+    );
+    if (entry && (check.state === "disabled") !== (entry.enabled === false))
+      fail(path, "root checks must use the committed source selection");
+  }
 }
 
 function nullableBoolean(value: unknown, path: string): boolean | null {
@@ -2667,6 +2865,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     "authorization",
     "lastRemovalFailure",
     "skillCatalog",
+    "skillSourceDiscovery",
     "recentOrder",
     "signals",
   ]);
@@ -2687,6 +2886,19 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     ["task_close_failed"] as const,
   );
   const recentOrder = wireId(item.recentOrder, `${path}.recentOrder`);
+  const skillSourceDiscovery = decodeSkillSourceDiscovery(
+    item.skillSourceDiscovery,
+    `${path}.skillSourceDiscovery`,
+    "project",
+  );
+  if (
+    (kind !== "manual" || authorization !== "available") &&
+    skillSourceDiscovery !== null
+  )
+    fail(
+      `${path}.skillSourceDiscovery`,
+      "source discovery requires an authorized Manual Workspace",
+    );
   const skillCatalog = decodeSkillCatalog(
     item.skillCatalog,
     `${path}.skillCatalog`,
@@ -2711,6 +2923,7 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     authorization,
     lastRemovalFailure,
     skillCatalog,
+    skillSourceDiscovery,
     recentOrder,
     signals: {
       running: nonNegativeNumber(signals.running, `${path}.signals.running`),
@@ -3688,6 +3901,21 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     decodeWorkspace,
   );
   const tasks = arrayValue(root.tasks, "$.tasks", decodeTask);
+  const skillManagement = decodeSkillManagement(
+    root.skillManagement,
+    "$.skillManagement",
+  );
+  assertSourceDiscoverySettings(
+    skillManagement.personalSourceDiscovery,
+    skillManagement.sourceSettings,
+    "$.skillManagement.personalSourceDiscovery",
+  );
+  for (const workspace of workspaces)
+    assertSourceDiscoverySettings(
+      workspace.skillSourceDiscovery,
+      skillManagement.sourceSettings,
+      "$.workspaces.skillSourceDiscovery",
+    );
   const scheduledTasks = arrayValue(
     root.scheduledTasks,
     "$.scheduledTasks",
@@ -3770,10 +3998,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       "$.newTaskAdmission",
     ),
     skillCatalog: decodeSkillCatalog(root.skillCatalog, "$.skillCatalog"),
-    skillManagement: decodeSkillManagement(
-      root.skillManagement,
-      "$.skillManagement",
-    ),
+    skillManagement,
     mcp,
     workspaces,
     scheduledTasks,
@@ -4242,6 +4467,27 @@ export function decodeSkillEnablementResult(
       "shutting_down",
       "local_storage_failed",
     ] as const),
+  };
+}
+
+export function decodeSkillSourceSettingsResult(
+  value: unknown,
+): SkillSourceSettingsResult {
+  const item = object(value, "$", ["applied", "revision", "reason"]);
+  const applied = booleanValue(item.applied, "$.applied");
+  if (applied) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      applied: true,
+      revision: positiveWireId(item.revision, "$.revision"),
+      reason: null,
+    };
+  }
+  if (item.revision !== null) fail("$.revision", "expected null");
+  return {
+    applied: false,
+    revision: null,
+    reason: enumValue(item.reason, "$.reason", skillSourceSettingsReasons),
   };
 }
 

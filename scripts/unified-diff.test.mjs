@@ -12,7 +12,7 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 const { parseUnifiedDiff } = await vite.ssrLoadModule(
-  "/src/features/tasks/unified-diff.ts",
+  "/src/features/task-panel/unified-diff.ts",
 );
 
 test.after(async () => vite.close());

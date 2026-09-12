@@ -16,6 +16,40 @@ function bridgeWith(invoke) {
   };
 }
 
+test("Skill source commands carry only fixed ID intent and exact revision or recovery token", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { applied: true, revision: "18446744073709551615", reason: null };
+    }),
+  });
+  assert.equal(
+    (await client.setSkillSourceEnabled("claude", true, "7")).revision,
+    "18446744073709551615",
+  );
+  await client.recoverSkillSourceSettings("reread", "9");
+  await client.recoverSkillSourceSettings("reset", "10");
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.skills.setSourceEnabled",
+      payload: {
+        sourceId: "claude",
+        enabled: true,
+        expectedRevision: "7",
+      },
+    },
+    {
+      command: "metawork.skills.recoverSourceSettings",
+      payload: { action: "reread", expectedRecoveryToken: "9" },
+    },
+    {
+      command: "metawork.skills.recoverSourceSettings",
+      payload: { action: "reset", expectedRecoveryToken: "10" },
+    },
+  ]);
+});
+
 test("Renderer Bridge connect negotiates the exact contract before returning a generation", async () => {
   const calls = [];
   const client = new BridgeClient({

@@ -53,7 +53,12 @@ import {
 } from "../features/approvals/response-state.ts";
 import { useUiResponseStates } from "../features/approvals/useUiResponseStates.ts";
 import { GlobalSearch } from "../features/search/GlobalSearch.tsx";
-import { SkillsPage } from "../features/skills/SkillsPage.tsx";
+import {
+  SkillsPage,
+  skillRefreshKey,
+  type SkillRefreshTarget,
+  type SkillRefreshRequests,
+} from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
 import { ScheduledTasksPage } from "../features/scheduled-tasks/ScheduledTasksPage.tsx";
 import { ToolDetailView } from "../features/task-panel/ToolDetailView.tsx";
@@ -299,6 +304,14 @@ export default function App() {
   const [newTaskRequestedModel, setNewTaskRequestedModel] =
     useState<ModelRef | null>(null);
   const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
+  const skillRefreshPending = useRef(new Set<string>());
+  const [skillRefreshRequests, setSkillRefreshRequests] =
+    useState<SkillRefreshRequests>({});
+  const sourceMutationPending = useRef(false);
+  const [sourceMutationBusy, setSourceMutationBusy] = useState(false);
+  const [sourceMutationError, setSourceMutationError] = useState<string | null>(
+    null,
+  );
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const attachmentBusyRef = useRef(false);
@@ -2308,32 +2321,63 @@ export default function App() {
     }
   }
 
-  async function refreshSkillsPageCatalog() {
-    if (skillCatalogBusy || bridgeUnavailable) return;
-    const audience: StatusAudience = { scope: "skills" };
-    setSkillCatalogBusy(true);
+  async function refreshSkillsPageCatalog(target: SkillRefreshTarget) {
+    const key = skillRefreshKey(target);
+    if (skillRefreshPending.current.has(key) || bridgeUnavailable) return;
+    skillRefreshPending.current.add(key);
+    setSkillRefreshRequests((requests) => ({
+      ...requests,
+      [key]: { busy: true, error: null },
+    }));
+    let failure: string | null = null;
     try {
-      const result = await client.refreshSkillCatalog();
-      if (!result.accepted) {
-        setStatus(
-          attentionStatus(mutationReasonMessageId(result.reason!), audience),
-        );
-        return;
-      }
-      await refreshAfterCommit(
-        "skills.catalog_refresh_started",
-        "operation.skill_catalog_refresh",
-        audience,
-      );
-    } catch (error) {
+      const result =
+        target.scope === "personal"
+          ? await client.refreshSkillCatalog()
+          : await client.refreshWorkspaceSkillCatalog(
+              target.workspaceId,
+              target.expectedWorkspaceEpoch,
+            );
+      if (!result.accepted) failure = t("skills.catalog_refresh_failed");
+      await refreshSnapshot();
+    } catch {
       await refreshSnapshot().catch(() => undefined);
-      setStatus(
-        attentionStatus("skills.catalog_refresh_failed", audience, {
-          diagnostic: errorText(error),
-        }),
+      failure = t("skills.catalog_refresh_failed");
+    } finally {
+      skillRefreshPending.current.delete(key);
+      setSkillRefreshRequests((requests) => ({
+        ...requests,
+        [key]: { busy: false, error: failure },
+      }));
+    }
+  }
+
+  async function commitSkillSourceMutation(
+    mutation: () => Promise<
+      import("../bridge/contracts.ts").SkillSourceSettingsResult
+    >,
+  ) {
+    // This window owns the latch: navigating away does not cancel a Host write.
+    if (sourceMutationPending.current || bridgeUnavailable) return;
+    sourceMutationPending.current = true;
+    setSourceMutationBusy(true);
+    setSourceMutationError(null);
+    let applied = false;
+    try {
+      const result = await mutation();
+      applied = result.applied;
+      if (!result.applied)
+        setSourceMutationError(t(`skills.sources.failure.${result.reason}`));
+      // Failed commands can also change health and recovery capabilities.
+      await refreshSnapshot();
+    } catch {
+      await refreshSnapshot().catch(() => undefined);
+      setSourceMutationError(
+        t(applied ? "skills.sources.saved_resync" : "skills.sources.uncertain"),
       );
     } finally {
-      setSkillCatalogBusy(false);
+      sourceMutationPending.current = false;
+      setSourceMutationBusy(false);
     }
   }
 
@@ -3505,12 +3549,22 @@ export default function App() {
           personalCatalog={snapshot.skillCatalog}
           workspaces={snapshot.workspaces}
           query={skillsQuery}
-          refreshing={
-            skillCatalogBusy || snapshot.skillCatalog.availability === "loading"
+          refreshRequests={skillRefreshRequests}
+          sourceBusy={sourceMutationBusy}
+          sourceError={sourceMutationError}
+          onSetSourceEnabled={(id, enabled, revision) =>
+            void commitSkillSourceMutation(() =>
+              client.setSkillSourceEnabled(id, enabled, revision),
+            )
+          }
+          onRecoverSources={(action, token) =>
+            void commitSkillSourceMutation(() =>
+              client.recoverSkillSourceSettings(action, token),
+            )
           }
           disabled={bridgeUnavailable}
           onQuery={setSkillsQuery}
-          onRefresh={() => void refreshSkillsPageCatalog()}
+          onRefresh={(target) => void refreshSkillsPageCatalog(target)}
           onSetEnabled={setSkillEnabled}
           onChooseImport={(kind) => client.chooseSkillImport(kind)}
           onInstall={(previewId, scope, allowReplace) =>

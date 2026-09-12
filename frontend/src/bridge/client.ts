@@ -21,6 +21,7 @@ import type {
   FilePreview,
   FileChangeDiffResult,
   ModelMetadata,
+  SkillSourceBrand,
 } from "./contracts.ts";
 import {
   assertCancelAccepted,
@@ -53,6 +54,7 @@ import {
   decodeSkillImportPreview,
   decodeSkillMutationResult,
   decodeSkillEnablementResult,
+  decodeSkillSourceSettingsResult,
   decodeSkillExportResult,
   decodeSkillDetailResult,
   decodeMcpMutationResult,
@@ -361,6 +363,32 @@ export class BridgeClient {
         state,
         expectedCatalogRevision,
         expectedSelectionRevision,
+      }),
+    );
+  }
+
+  async setSkillSourceEnabled(
+    sourceId: SkillSourceBrand,
+    enabled: boolean,
+    expectedRevision: string,
+  ) {
+    return decodeSkillSourceSettingsResult(
+      await this.invoke(commands.setSkillSourceEnabled, {
+        sourceId,
+        enabled,
+        expectedRevision,
+      }),
+    );
+  }
+
+  async recoverSkillSourceSettings(
+    action: "reread" | "reset",
+    expectedRecoveryToken: string,
+  ) {
+    return decodeSkillSourceSettingsResult(
+      await this.invoke(commands.recoverSkillSourceSettings, {
+        action,
+        expectedRecoveryToken,
       }),
     );
   }

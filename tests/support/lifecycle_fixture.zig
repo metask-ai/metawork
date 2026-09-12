@@ -200,6 +200,13 @@ pub const FakeSession = struct {
     }
 };
 
+pub const CatalogSourceObservation = struct {
+    scope: u32 = 0,
+    root_hash: [32]u8 = @splat(0),
+    id: [128]u8 = @splat(0),
+    id_len: usize = 0,
+};
+
 pub const FakeCore = struct {
     mutex: std.Io.Mutex = .init,
     catalog_condition: std.Io.Condition = .init,
@@ -213,6 +220,8 @@ pub const FakeCore = struct {
     runtime_destroyed: usize = 0,
     runtime_destroy_busy_attempts: usize = 0,
     catalog_queries: usize = 0,
+    catalog_source_count: usize = 0,
+    catalog_sources: [wire.MAX_SKILL_SOURCES_V1]CatalogSourceObservation = @splat(.{}),
     catalog_releases: usize = 0,
     catalog_refreshes: usize = 0,
     mcp_refreshes: usize = 0,
@@ -923,7 +932,10 @@ pub fn runtimeQuerySkillCatalog(
         return wire.STATUS_INVALID_ARGUMENT;
     };
     if (runtime == null or out_catalog == null or out_descriptor == null or
-        input.struct_size != @sizeOf(wire.SkillCatalogQueryV1))
+        input.struct_size != @sizeOf(wire.SkillCatalogQueryV1) or
+        input.reserved0 != 0 or input.reserved[0] != 0 or
+        input.additional_source_count > wire.MAX_SKILL_SOURCES_V1 or
+        ((input.additional_source_count == 0) != (input.additional_sources == null)))
     {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
@@ -948,6 +960,23 @@ pub fn runtimeQuerySkillCatalog(
     fake_core.lock();
     defer fake_core.unlock();
     fake_core.catalog_queries += 1;
+    fake_core.catalog_source_count = @intCast(input.additional_source_count);
+    if (input.additional_sources) |sources| {
+        for (sources[0..fake_core.catalog_source_count], 0..) |source, index| {
+            if (source.struct_size != @sizeOf(wire.SkillSourceV1) or
+                !std.mem.allEqual(u64, &source.reserved, 0) or
+                (source.scope_code != wire.SKILL_SOURCE_USER and
+                    source.scope_code != wire.SKILL_SOURCE_WORKSPACE)) return wire.STATUS_INVALID_ARGUMENT;
+            const source_root = sdk.borrowedBytes(source.root) catch return wire.STATUS_INVALID_ARGUMENT;
+            const source_id = sdk.borrowedBytes(source.source_instance_id) catch return wire.STATUS_INVALID_ARGUMENT;
+            if (source_root.len == 0 or source_id.len == 0 or source_id.len > 128)
+                return wire.STATUS_INVALID_ARGUMENT;
+            const observation = &fake_core.catalog_sources[index];
+            observation.* = .{ .scope = source.scope_code, .id_len = source_id.len };
+            std.crypto.hash.sha2.Sha256.hash(source_root, &observation.root_hash, .{});
+            @memcpy(observation.id[0..source_id.len], source_id);
+        }
+    }
     fake_core.workspace_home_seen = true;
     fake_core.workspace_epoch_seen = epoch.len != 0;
     if (fake_core.catalog_plan == .controlled) {
@@ -2630,7 +2659,7 @@ pub fn createTestRuntime(limits: lifecycle.Limits) !*lifecycle.Runtime {
 }
 
 pub fn productControlConfiguration() product_control.Configuration {
-    return .{};
+    return .{ .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } } };
 }
 
 pub fn installProductControlExecution(

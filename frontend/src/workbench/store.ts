@@ -1,4 +1,5 @@
 import type { WorkbenchSnapshot } from "../bridge/contracts.ts";
+import { skillSourceIds } from "../bridge/contracts.ts";
 import { navigableTasks } from "./task-visibility.ts";
 
 export type WorkbenchState = {
@@ -108,6 +109,17 @@ export const initialWorkbenchState: WorkbenchState = {
     skillManagement: {
       availability: "unavailable",
       enablementAvailability: "unavailable",
+      sourceSettings: {
+        revision: null,
+        health: "unavailable",
+        entries: skillSourceIds.map((sourceId) => ({
+          sourceId,
+          enabled: null,
+          canSetEnabled: false,
+        })),
+        recovery: { canReread: false, canReset: false, token: null },
+      },
+      personalSourceDiscovery: null,
       assets: [],
     },
     mcp: {

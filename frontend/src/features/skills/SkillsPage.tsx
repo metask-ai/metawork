@@ -8,6 +8,7 @@ import type {
   SkillCatalogView,
   SkillManagementView,
   SkillMutationResult,
+  SkillSourceBrand,
   WorkspaceView,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -18,9 +19,22 @@ import { SearchField } from "../../components/ui/search-field.tsx";
 import { SelectField } from "../../components/ui/select.tsx";
 import { Switch } from "../../components/ui/switch.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import { SkillSourceControls } from "./SkillSourceControls.tsx";
 
 type Asset = SkillManagementView["assets"][number];
 export type SkillContext = "personal" | "project";
+export type SkillRefreshTarget =
+  | { scope: "personal" }
+  | { scope: "project"; workspaceId: string; expectedWorkspaceEpoch: string };
+export function skillRefreshKey(target: SkillRefreshTarget): string {
+  return target.scope === "personal"
+    ? "personal"
+    : `project:${target.workspaceId}:${target.expectedWorkspaceEpoch}`;
+}
+export type SkillRefreshRequests = Record<
+  string,
+  { busy: boolean; error: string | null }
+>;
 type ImportKind = "package" | "directory";
 type ImportScope =
   | { kind: "personal" }
@@ -206,7 +220,11 @@ export function SkillsPage({
   personalCatalog,
   workspaces,
   query,
-  refreshing,
+  refreshRequests,
+  sourceBusy,
+  sourceError,
+  onSetSourceEnabled,
+  onRecoverSources,
   disabled,
   onQuery,
   onRefresh,
@@ -223,10 +241,18 @@ export function SkillsPage({
   personalCatalog: SkillCatalogView;
   workspaces: WorkspaceView[];
   query: string;
-  refreshing: boolean;
+  refreshRequests: SkillRefreshRequests;
+  sourceBusy: boolean;
+  sourceError: string | null;
+  onSetSourceEnabled: (
+    id: SkillSourceBrand,
+    enabled: boolean,
+    revision: string,
+  ) => void;
+  onRecoverSources: (action: "reread" | "reset", token: string) => void;
   disabled: boolean;
   onQuery: (query: string) => void;
-  onRefresh: () => void;
+  onRefresh: (target: SkillRefreshTarget) => void;
   onSetEnabled: (
     target:
       | { scope: "personal" }
@@ -299,12 +325,36 @@ export function SkillsPage({
     [contextAssets, query],
   );
   const attention = visibleAssets.filter(
-    (asset) =>
-      asset.managementState === "pending_verification" ||
-      asset.issueCodes.length > 0,
+    (asset) => asset.managementState === "pending_verification",
   );
   const regular = visibleAssets.filter((asset) => !attention.includes(asset));
   const drawerOpen = selected !== null || importOpen;
+  const catalog =
+    context === "personal" ? personalCatalog : selectedWorkspace?.skillCatalog;
+  const discovery =
+    context === "personal"
+      ? management.personalSourceDiscovery
+      : (selectedWorkspace?.skillSourceDiscovery ?? null);
+  const refreshTarget: SkillRefreshTarget | null =
+    context === "personal"
+      ? { scope: "personal" }
+      : selectedWorkspace
+        ? {
+            scope: "project",
+            workspaceId: selectedWorkspace.id,
+            expectedWorkspaceEpoch: selectedWorkspace.epoch,
+          }
+        : null;
+  const refreshRequest = refreshTarget
+    ? refreshRequests[skillRefreshKey(refreshTarget)]
+    : undefined;
+  const refreshing =
+    refreshRequest?.busy === true || catalog?.availability === "loading";
+  const contextIdentity = refreshTarget
+    ? skillRefreshKey(refreshTarget)
+    : "project:none";
+  const currentContextIdentity = useRef(contextIdentity);
+  currentContextIdentity.current = contextIdentity;
 
   async function setEnablementState(
     asset: Asset,
@@ -339,6 +389,7 @@ export function SkillsPage({
     const identity = `${target.scope}:${target.scope === "project" ? target.workspaceId : "user"}:${asset.skillPolicyKey}`;
     setEnablementBusy(identity);
     setEnablementError(null);
+    const requestContext = contextIdentity;
     try {
       const result = await onSetEnabled(
         target,
@@ -347,15 +398,18 @@ export function SkillsPage({
         catalog.revision,
         asset.selectionRevision,
       );
-      if (!result.applied) setEnablementError(t("skills.error.enablement"));
+      if (!result.applied && currentContextIdentity.current === requestContext)
+        setEnablementError(t("skills.error.enablement"));
     } catch {
-      setEnablementError(t("skills.error.enablement"));
+      if (currentContextIdentity.current === requestContext)
+        setEnablementError(t("skills.error.enablement"));
     } finally {
       setEnablementBusy(null);
     }
   }
 
   useEffect(() => title.current?.focus(), []);
+  useEffect(() => setEnablementError(null), [contextIdentity]);
 
   useEffect(() => {
     if (selectedWorkspaceKey !== effectiveWorkspaceKey)
@@ -603,8 +657,15 @@ export function SkillsPage({
             <Button
               variant="secondary"
               size="sm"
-              disabled={disabled || refreshing}
-              onClick={onRefresh}
+              disabled={
+                disabled ||
+                refreshing ||
+                !refreshTarget ||
+                management.sourceSettings.revision === null
+              }
+              onClick={() => {
+                if (refreshTarget) onRefresh(refreshTarget);
+              }}
             >
               <Icon name="refresh" />
               {t(refreshing ? "skills.refreshing" : "skills.refresh")}
@@ -620,6 +681,21 @@ export function SkillsPage({
             </Button>
           </div>
         </header>
+
+        <SkillSourceControls
+          settings={management.sourceSettings}
+          discovery={discovery}
+          contextLabel={
+            context === "personal"
+              ? t("skills.scope.personal")
+              : (selectedWorkspace?.displayName ?? t("skills.no_project_title"))
+          }
+          busy={sourceBusy}
+          error={sourceError}
+          disabled={disabled}
+          onSetEnabled={onSetSourceEnabled}
+          onRecover={onRecoverSources}
+        />
 
         <div className="skill-toolbar">
           <SearchField
@@ -668,6 +744,41 @@ export function SkillsPage({
           </div>
         </div>
 
+        {refreshRequest?.error && (
+          <p className="skill-enablement-error" role="alert">
+            {refreshRequest.error}
+          </p>
+        )}
+        {catalog?.issues.length ? (
+          <section
+            className="skill-group skill-catalog-issues"
+            aria-label={t("skills.catalog_issues")}
+          >
+            <header>
+              <h2>{t("skills.catalog_issues")}</h2>
+              <span>{catalog.issues.length}</span>
+            </header>
+            <ul>
+              {catalog.issues.map((issue, index) => (
+                <li
+                  key={`${issue.code}:${issue.invocationName ?? ""}:${index}`}
+                >
+                  {issue.invocationName && (
+                    <code>{issue.invocationName} · </code>
+                  )}
+                  {t(`skills.issue.${issue.code}`)}
+                </li>
+              ))}
+            </ul>
+            <p>{t("skills.catalog_issues_help")}</p>
+          </section>
+        ) : null}
+        {catalog &&
+          !["ready", "degraded", "loading"].includes(catalog.availability) && (
+            <p className="skill-enablement-error" role="status">
+              {t("skills.catalog_unavailable")}
+            </p>
+          )}
         {enablementError && (
           <p className="skill-enablement-error" role="alert">
             {enablementError}
@@ -690,13 +801,32 @@ export function SkillsPage({
             <h2>{t("skills.no_project_title")}</h2>
             <p>{t("skills.no_project_body")}</p>
           </div>
+        ) : empty && catalog?.availability === "loading" ? (
+          <div
+            className="skill-empty-state skill-empty-state-compact"
+            role="status"
+          >
+            <p>{t("skills.refreshing")}</p>
+          </div>
         ) : empty ? (
           <div className="skill-empty-state">
             <span>
               <Icon name="skill-file" />
             </span>
-            <h2>{t("skills.empty_title")}</h2>
-            <p>{t("skills.empty_body")}</p>
+            <h2>
+              {t(
+                catalog?.issues.length
+                  ? "skills.no_available_title"
+                  : "skills.empty_title",
+              )}
+            </h2>
+            <p>
+              {t(
+                catalog?.issues.length
+                  ? "skills.catalog_issues_help"
+                  : "skills.empty_body",
+              )}
+            </p>
             <Button
               variant="primary"
               size="sm"
@@ -717,7 +847,7 @@ export function SkillsPage({
           </div>
         ) : (
           <div className="skill-groups">
-            {renderGroup(t("skills.section.attention"), attention)}
+            {renderGroup(t("skills.section.pending"), attention)}
             {renderGroup(t("skills.section.skills"), regular)}
           </div>
         )}
@@ -859,6 +989,14 @@ export function SkillsPage({
                     <div>
                       <span>{t("skills.detail.source")}</span>
                       <strong>{sourceLabel(selected, t)}</strong>
+                    </div>
+                    <div>
+                      <span>{t("skills.detail.origin")}</span>
+                      <strong>
+                        {selected.origin
+                          ? `${selected.origin.ecosystem === "agents" ? ".agents" : selected.origin.ecosystem === "claude" ? "Claude" : "Codex"} · ${t(selected.origin.scope === "personal" ? "skills.sources.scope.user" : "skills.sources.scope.workspace")}`
+                          : t("skills.sources.unknown_origin")}
+                      </strong>
                     </div>
                     <div>
                       <span>{t("skills.detail.status")}</span>

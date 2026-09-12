@@ -227,12 +227,15 @@ pub const Runtime = struct {
         self: *Runtime,
         input: CatalogQuery,
     ) (Error || std.mem.Allocator.Error)!CatalogAcquisition {
-        try validateCanonicalDirectory(self.io, self.allocator, input.workspace_root);
+        try catalog.validateQuery(input);
+        try validateCanonicalDirectory(self.io, self.allocator, input.workspaceRoot());
         try validateCanonicalDirectory(
             self.io,
             self.allocator,
             input.canonical_user_home,
         );
+        for (input.additional_sources) |source|
+            try validateCanonicalDirectory(self.io, self.allocator, source.canonical_root);
 
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire)) {
@@ -732,7 +735,7 @@ pub const Runtime = struct {
             );
         if (options.skill_catalog) |lease| {
             if (!catalog.belongsTo(lease, self) or
-                !catalog.matches(
+                !catalog.matchesSession(
                     lease,
                     options.workspace.canonical_root,
                     options.canonical_user_home,
@@ -924,7 +927,7 @@ pub const Runtime = struct {
             );
         if (session_options.skill_catalog) |lease| {
             if (!catalog.belongsTo(lease, self) or
-                !catalog.matches(
+                !catalog.matchesSession(
                     lease,
                     session_options.workspace.canonical_root,
                     session_options.canonical_user_home,

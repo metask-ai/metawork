@@ -203,6 +203,265 @@ const TaskPersistenceProbe = struct {
     }
 };
 
+// Observe both effect boundaries: a null projection alone cannot prove that
+// an unauthorized root was never inspected or handed to AgentCore.
+const WorkspaceSkillQueryProbe = struct {
+    catalog: product_skill.ports.Catalog = undefined,
+    root_checks: std.atomic.Value(usize) = .init(0),
+    queries: std.atomic.Value(usize) = .init(0),
+
+    fn attach(self: *@This(), workbench: *product_control.Runtime) void {
+        self.catalog = workbench.skill.ports.catalog;
+        workbench.skill.ports.catalog = .{ .context = self, .query_fn = query, .release_fn = release };
+        workbench.skill.ports.source_roots = .{ .context = self, .discover_fn = discover };
+    }
+
+    fn discover(context: ?*anyopaque, io: std.Io, allocator: std.mem.Allocator, home: []const u8, workspace: ?[]const u8, selection: product_skill.sources.Selection) anyerror!product_skill.sources.Discovery {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (workspace != null) _ = self.root_checks.fetchAdd(1, .release);
+        return product_skill.sources.discover(io, allocator, home, workspace, selection);
+    }
+
+    fn query(context: *anyopaque, input: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (input.target == .workspace) _ = self.queries.fetchAdd(1, .release);
+        return self.catalog.query(input);
+    }
+
+    fn release(context: *anyopaque, lease: *lifecycle.CatalogLease) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.catalog.release(lease);
+    }
+
+    fn expectQueries(self: *const @This(), count: usize) !void {
+        try std.testing.expectEqual(count, self.root_checks.load(.acquire));
+        try std.testing.expectEqual(count, self.queries.load(.acquire));
+    }
+};
+
+fn settleWorkspaceSkillQueries(workbench: *product_control.Runtime, id: u64) !void {
+    for (0..5_000) |_| {
+        workbench.syncLifecycle();
+        const discovery = workbench.skill.workspaceSourceDiscovery(id, try workbench.workspaceEpoch(id));
+        if (!workbench.skill.hasWorkspaceJob(id) and workbench.skill.personal_job == null and
+            (discovery == null or !discovery.?.checking)) return;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn expectWorkspaceSkillProjection(workbench: *product_control.Runtime, id: u64, present: bool) !void {
+    var storage: [256 * 1024]u8 = undefined;
+    const bytes = try workbench.writeSnapshot(&storage);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    for (parsed.value.object.get("workspaces").?.array.items) |workspace| {
+        if (try std.fmt.parseInt(u64, workspace.object.get("id").?.string, 10) != id) continue;
+        try std.testing.expectEqual(present, workspace.object.get("skillSourceDiscovery").? != .null);
+        const automatic = std.mem.eql(u8, "automatic", workspace.object.get("kind").?.string);
+        if (automatic or !present) {
+            const catalog = workspace.object.get("skillCatalog").?;
+            try std.testing.expectEqualStrings(if (automatic) "uninitialized" else "unavailable", catalog.object.get("availability").?.string);
+            try std.testing.expect(!catalog.object.get("redacted").?.bool);
+            try std.testing.expect(catalog.object.get("revision").? == .null);
+            try std.testing.expect(catalog.object.get("selectionRevision").? == .null);
+            try std.testing.expectEqual(@as(usize, 0), catalog.object.get("skills").?.array.items.len);
+            try std.testing.expectEqual(@as(usize, 0), catalog.object.get("issues").?.array.items.len);
+        }
+        if (automatic) {
+            try std.testing.expect(!present);
+            try std.testing.expectEqualStrings("0", workspace.object.get("recentOrder").?.string);
+            try std.testing.expectEqualStrings("available", workspace.object.get("authorization").?.string);
+            try std.testing.expect(workspace.object.get("lastRemovalFailure").? == .null);
+        }
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "Skill source authorization excludes restored Manual roots until explicit reauthorization" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var store: product_skill.sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    try store.commit(.{});
+    const history = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(history);
+    var persistence: TaskPersistenceProbe = .{ .storage = history };
+    const input: product_control.TaskCreateInput = .{ .workspace_root = home, .trust = .explicitly_trusted };
+    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 };
+    var workspace_id: u64 = undefined;
+    {
+        var original = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, .{
+            .directories = .{ .canonical_user_home = home },
+            .task_persistence = persistence.capability(),
+            .skill_sources = .{ .file_store = &store, .restored = .{ .loaded = .{ .ready = .{} } } },
+        });
+        defer original.deinit();
+        try installControlExecution(&original);
+        workspace_id = try original.openWorkspace(input);
+    }
+    const restored_bytes = try std.testing.allocator.dupe(u8, history[0..persistence.len]);
+    defer std.testing.allocator.free(restored_bytes);
+    for ([_]bool{ false, true }) |recover_sources| {
+        try store.commit(.{});
+        var probe: WorkspaceSkillQueryProbe = .{};
+        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, .{
+            .directories = .{ .canonical_user_home = home },
+            .task_persistence = persistence.capabilityRestored(restored_bytes),
+            .skill_sources = .{ .file_store = &store, .restored = if (recover_sources) .read_failed else .{ .loaded = .{ .ready = .{} } } },
+        });
+        defer restored.deinit();
+        probe.attach(&restored);
+        try installControlExecution(&restored);
+        try std.testing.expectError(error.WorkspaceUnavailable, restored.refreshWorkspaceCatalog(workspace_id, try restored.workspaceEpoch(workspace_id)));
+        const changed = if (recover_sources)
+            restored.recoverSkillSourceSettings(.reread, restored.skill.sourceSettings().recovery_token.?)
+        else
+            restored.setSkillSourceEnabled(.claude, true, 1);
+        try std.testing.expect(changed.applied);
+        try expectWorkspaceSkillProjection(&restored, workspace_id, false);
+        try settleWorkspaceSkillQueries(&restored, workspace_id);
+        try probe.expectQueries(0);
+        try std.testing.expectEqual(workspace_id, try restored.openWorkspace(input));
+        try settleWorkspaceSkillQueries(&restored, workspace_id);
+        try probe.expectQueries(1);
+        try expectWorkspaceSkillProjection(&restored, workspace_id, true);
+    }
+}
+
+test "Skill source authorization keeps new and restored Automatic snapshots catalog-free" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var store: product_skill.sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    const history = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(history);
+    var persistence: TaskPersistenceProbe = .{ .storage = history };
+    for ([_]bool{ false, true }) |recover_sources| {
+        var restored_bytes: ?[]u8 = null;
+        defer if (restored_bytes) |bytes| std.testing.allocator.free(bytes);
+        var task_id: u64 = undefined;
+        for ([_]bool{ false, true }) |restore_workspace| {
+            var automatic_root = try product_control.AutomaticWorkspaceRoot.open(std.testing.io, std.testing.allocator, home);
+            defer automatic_root.deinit();
+            try store.commit(.{});
+            var probe: WorkspaceSkillQueryProbe = .{};
+            var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+                .worker_count = 1,
+                .queue_capacity = 2,
+                .max_workspaces = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 1,
+                .max_tools_per_run = 1,
+            }, .{
+                .directories = .{ .canonical_user_home = home, .automatic_workspace_root = if (restore_workspace) null else &automatic_root },
+                .task_persistence = if (restore_workspace) persistence.capabilityRestored(restored_bytes.?) else persistence.capability(),
+                .skill_sources = .{ .file_store = &store, .restored = if (recover_sources) .read_failed else .{ .loaded = .{ .ready = .{} } } },
+            });
+            defer workbench.deinit();
+            probe.attach(&workbench);
+            try installControlExecution(&workbench);
+            if (!restore_workspace) {
+                task_id = try workbench.createTaskForWorkspace(.automatic, 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+                restored_bytes = try std.testing.allocator.dupe(u8, history[0..persistence.len]);
+            }
+            const workspace_id = try workbench.taskWorkspaceId(task_id);
+            try expectWorkspaceSkillProjection(&workbench, workspace_id, false);
+            const changed = if (recover_sources)
+                workbench.recoverSkillSourceSettings(.reread, workbench.skill.sourceSettings().recovery_token.?)
+            else
+                workbench.setSkillSourceEnabled(.codex, true, 1);
+            try std.testing.expect(changed.applied);
+            try expectWorkspaceSkillProjection(&workbench, workspace_id, false);
+            try settleWorkspaceSkillQueries(&workbench, workspace_id);
+            try expectWorkspaceSkillProjection(&workbench, workspace_id, false);
+            try probe.expectQueries(0);
+            try std.testing.expectError(error.WorkspaceUnavailable, workbench.refreshWorkspaceCatalog(workspace_id, try workbench.workspaceEpoch(workspace_id)));
+        }
+    }
+}
+
+test "Skill source authorization returns after immediate and asynchronous Workspace removal failures" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var store: product_skill.sources.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    for ([_]bool{ true, false }) |immediate_failure| {
+        try store.commit(.{});
+        var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoint_store.deinit();
+        var persistence: TaskPersistenceProbe = .{};
+        var probe: WorkspaceSkillQueryProbe = .{};
+        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        }, .{
+            .directories = .{ .canonical_user_home = home },
+            .task_persistence = persistence.capability(),
+            .checkpoint_store = .{ .file_store = &checkpoint_store },
+            .skill_sources = .{ .file_store = &store, .restored = .{ .loaded = .{ .ready = .{} } } },
+        });
+        defer {
+            fake_core.releaseCheckpointExport();
+            workbench.deinit();
+        }
+        probe.attach(&workbench);
+        try installControlExecution(&workbench);
+        const workspace_id = try workbench.openWorkspace(.{ .workspace_root = home, .trust = .explicitly_trusted });
+        try settleWorkspaceSkillQueries(&workbench, workspace_id);
+        try probe.expectQueries(1);
+        const epoch = try workbench.workspaceEpoch(workspace_id);
+        const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+        if (immediate_failure) {
+            // A terminal Run whose checkpoint still owns a worker lease cannot
+            // start Session detach; exercise the real synchronous failure path.
+            fake_core.controlNextCheckpointExport();
+            _ = try workbench.runTask(task_id, .{ .text = "hold checkpoint during removal" });
+            fake_core.waitCheckpointExportEntered();
+            try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+            try std.testing.expectError(error.TaskClosing, workbench.removeWorkspaceAtEpoch(workspace_id, epoch));
+            fake_core.releaseCheckpointExport();
+        } else {
+            fake_core.failNextSessionDestroy();
+            try workbench.removeWorkspaceAtEpoch(workspace_id, epoch);
+        }
+        try waitControlSnapshot(&workbench, "\"lastRemovalFailure\":\"task_close_failed\"");
+        try settleWorkspaceSkillQueries(&workbench, workspace_id);
+        try probe.expectQueries(2);
+        try expectWorkspaceSkillProjection(&workbench, workspace_id, true);
+        // The restored grant remains usable, rather than only displaying ready.
+        try workbench.refreshWorkspaceCatalog(workspace_id, try workbench.workspaceEpoch(workspace_id));
+        try settleWorkspaceSkillQueries(&workbench, workspace_id);
+        try probe.expectQueries(3);
+    }
+}
+
 fn expectFakeSessionModel(index: usize, expected: []const u8) !void {
     const session = &fake_core.sessions[index];
     session.lock();
@@ -3053,6 +3312,7 @@ test "Product Control pins an async catalog and admits typed Skill through the e
         .{
             .directories = .{ .canonical_user_home = home },
             .skill_enablement = .{ .file_store = &skill_enablement_store },
+            .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
         },
     );
     defer workbench.deinit();
@@ -3151,6 +3411,7 @@ test "Workspace incomplete catalog refresh preserves the committed last-good aut
         .{
             .directories = .{ .canonical_user_home = home },
             .skill_enablement = .{ .file_store = &skill_enablement_store },
+            .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
         },
     );
     defer workbench.deinit();
@@ -3906,6 +4167,7 @@ test "Workspace reauthorization reschedules the latest catalog query" {
         .{
             .directories = .{ .canonical_user_home = home },
             .skill_enablement = .{ .file_store = &skill_enablement_store },
+            .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
         },
     );
     defer workbench.deinit();
@@ -3978,6 +4240,7 @@ test "Product Control rejects stale Skill identity before Session or Run mutatio
         .{
             .directories = .{ .canonical_user_home = home },
             .skill_enablement = .{ .file_store = &skill_enablement_store },
+            .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
         },
     );
     defer workbench.deinit();
@@ -4085,6 +4348,7 @@ test "Product Control refreshes a Task only from the committed Workspace catalog
         .{
             .directories = .{ .canonical_user_home = home },
             .skill_enablement = .{ .file_store = &skill_enablement_store },
+            .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
         },
     );
     defer workbench.deinit();

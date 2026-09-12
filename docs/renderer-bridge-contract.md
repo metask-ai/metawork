@@ -49,6 +49,18 @@ Tool 的 `bash` 必填且 nullable，只由 Host 为精确 `Bash` identifier 投
 
 `output`、`activity`、`tools` 与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位、active→terminal process surface 迁移和 full Snapshot 渲染机制由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
 
+## Skill source settings
+
+revision 1 的 Skill 来源设置提供两个 typed 写入口：`metawork.skills.setSourceEnabled` 的 payload 精确为 `{ sourceId, enabled, expectedRevision }`，sourceId 仅为品牌 `claude | codex`，Host 在一次 CAS/持久提交中将该品牌的个人和项目来源同时设为 enabled；拒绝逐根 ID、目录路径或 Workspace target，不提供旧逐目录写入兼容路径。`metawork.skills.recoverSourceSettings` 精确为 `{ action, expectedRecoveryToken }`，action 仅为 `reread | reset`。revision/token 是非零 canonical decimal u64。结果精确为 `{ applied, revision, reason }`；成功（含两个值均未变化的 no-op）给出可信 revision 与 null reason，失败给出 null revision 与闭合原因。no-op 不写盘、不调度、不通知；失败若改变 health、token 或 authority 仍发布 Product revision。保存成功不表示查询成功。超时只 resync，不自动重放。
+
+原因仅为 `stale_revision | busy | source_settings_unavailable | write_failed | persistence_outcome_unknown | stale_recovery_token | recovery_not_allowed | read_failed | revision_exhausted | shutting_down`。Renderer 不能将失败的 null revision 覆盖 committed 选择，不能用恢复按钮绕过 Host 对新鲜恢复 token 和实际文件状态的校验。
+
+`skillManagement.sourceSettings` 精确发布 `{ revision, health, entries, recovery }`。entries 恰好包含四个唯一固定 ID，每项为 `{ sourceId, enabled, canSetEnabled }`；可信值的 revision 非空且 enabled 为 boolean，未知值均为 null 且不可操作。health 为 `unavailable | ready | read_failed | corrupt | missing | unsupported_schema | too_large | write_failed | outcome_unknown`；仅 ready 或明确 write_failed 可以持有可信旧值。recovery 为 `{ canReread, canReset, token }`，token 仅可重读时非空；reset 仅可在未知且 corrupt/missing 的可重读状态开放，不以读取失败、超限或不支持格式冒充损坏。
+
+`skillManagement.personalSourceDiscovery` 与 `workspaces[].skillSourceDiscovery` 是 nullable 根检查数组。非 null 时分别含完整的三个/六个逻辑根：个人/项目默认 `agents.user.default`、`agents.workspace.default` 与适用兼容 ID；每项 `{ sourceId, state, reason }`，state 为 `disabled | checking | missing | checked | error`，reason 仅 error 时为 `unreadable | unsupported_entry | changed`。关闭的兼容根为 disabled，默认根不能 disabled。未知配置、无可用 base、非已授权 Manual Workspace 不得伪造检测结果。checked 只表示根检查通过；Skill winner、冲突和查询健康仍消费既有 catalog。共享 `SkillCatalogView` 与 Task pinned catalog shape 不扩展。
+
+`skillManagement.assets[].origin` 为 null 或 `{ ecosystem: agents | claude | codex, scope: personal | project }`；由 Product 通过精确来源关联提供，不代替 asset 的 policy context 或 sourceKind 导入方式。未知 origin 不允许猜测，外部来源不能因 origin 获得文件管理 authority。
+
 ## File preview command
 
 `metawork.files.preview` 是 revision 1 command catalog 中的异步 command，原地 hard cut 使用 Native SDK async registry；它不出现在同步 handler registry。request 精确为：

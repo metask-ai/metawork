@@ -99,6 +99,18 @@ const assets = [
 const readyManagement = {
   availability: "ready",
   enablementAvailability: "ready",
+  sourceSettings: {
+    revision: "1",
+    health: "ready",
+    entries: [
+      "compat.claude.user",
+      "compat.claude.workspace",
+      "compat.codex.user",
+      "compat.codex.workspace",
+    ].map((sourceId) => ({ sourceId, enabled: false, canSetEnabled: true })),
+    recovery: { canReread: false, canReset: false, token: null },
+  },
+  personalSourceDiscovery: null,
   assets,
 };
 const workspaces = [
@@ -108,7 +120,8 @@ const workspaces = [
     kind: "manual",
     displayName: "MetaWork",
     authorization: "available",
-    skillCatalog: { revision: "catalog-1" },
+    skillCatalog: { revision: "catalog-1", availability: "ready", issues: [] },
+    skillSourceDiscovery: null,
   },
 ];
 
@@ -125,10 +138,18 @@ function render(props = {}) {
       },
       createElement(SkillsPage, {
         management: readyManagement,
-        personalCatalog: { revision: "personal-catalog-1" },
+        personalCatalog: {
+          revision: "personal-catalog-1",
+          availability: "ready",
+          issues: [],
+        },
         workspaces,
         query: "",
-        refreshing: false,
+        refreshRequests: {},
+        sourceBusy: false,
+        sourceError: null,
+        onSetSourceEnabled() {},
+        onRecoverSources() {},
         disabled: false,
         onQuery() {},
         onRefresh() {},
@@ -289,6 +310,7 @@ test("Skills center distinguishes unavailable, empty, and filtered states", () =
   assert.match(
     render({
       management: {
+        ...readyManagement,
         availability: "unavailable",
         enablementAvailability: "unavailable",
         assets: [],
@@ -299,6 +321,7 @@ test("Skills center distinguishes unavailable, empty, and filtered states", () =
   assert.match(
     render({
       management: {
+        ...readyManagement,
         availability: "ready",
         enablementAvailability: "ready",
         assets: [],
