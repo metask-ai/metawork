@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-09-13
+
+### Added
+
+- Skill 中心新增 Claude 与 Codex 兼容来源开关，可分别启用对应的个人目录和全部已授权 Manual Workspace 固定目录，并支持持久化选择与异常恢复。
+- 新增 Run 已用时和有界的可读 Tool 证据，在不推断进度或模型意图的前提下展示当前执行事实。
+- 新增 Task 完成回执，仅在最新一次成功完成尚未被用户实际看到时显示未读提醒；确认状态随既有 Task 持久化边界保存。
+- 新增“关于 MetaWork”对话框，展示产品身份、Metask 开发者归属和构建版本。
+
+### Changed
+
+- File Changes Review 改为按文件聚合的连续差异文档，支持文件级折叠与渐进式按需读取，同时保留底层记录顺序。
+- 统一 PermissionProfile 的界面表达，明确“请求批准”和“完全访问”的边界、默认值、单 Task 覆盖与既有 Task 只读语义，并移除重复确认。
+- 简化 Task 列表状态和文件预览界面，移除重复的元数据标签与冗余框架。
+
+### Fixed
+
+- 修复 macOS 安装包未完整部署 AgentCore runtime assets 的问题。
+- 修复同步失败与停止请求反馈不准确的问题。
+- 修复 recorded diff 行号和语义样式丢失的问题。
+- 修复 Automatic Workspace 错误携带 Skill catalog，以及个人兼容 Skill 来源查询缺失的问题。
+
 ## [0.1.8] - 2026-09-10
 
 ### Added
@@ -204,7 +226,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.8...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/metask-ai/metawork/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/metask-ai/metawork/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/metask-ai/metawork/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/metask-ai/metawork/compare/v0.1.5...v0.1.6
