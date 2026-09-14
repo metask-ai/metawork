@@ -78,6 +78,7 @@ const { FilePreviewRefreshAction, FilePreviewView } = await vite.ssrLoadModule(
 );
 const {
   HighlightedSource,
+  countSourceLines,
   isWithinHighlightBudget,
   resolvePreviewLanguage,
   validateHighlightTree,
@@ -1876,6 +1877,42 @@ test("source preview language resolution is explicit and bounded", () => {
   assert.equal(isWithinHighlightBudget("x\r".repeat(1_500)), false);
 });
 
+test("source preview line numbers preserve every displayed line boundary", () => {
+  for (const [content, expected] of [
+    ["", 1],
+    ["plain", 1],
+    ["plain\n", 2],
+    ["one\ntwo\nthree", 3],
+    ["one\r\ntwo", 2],
+    ["one\rtwo", 2],
+    ["\n\n", 3],
+  ]) {
+    assert.equal(countSourceLines(content), expected);
+  }
+
+  const content = "first\r\n\r\nthird\n";
+  render(
+    createElement(HighlightedSource, {
+      displayPath: "notes.txt",
+      content,
+    }),
+  );
+  assert.equal(
+    document.querySelector(".task-panel-code-gutter").textContent,
+    "1\n2\n3\n4",
+  );
+  assert.equal(
+    document
+      .querySelector(".task-panel-code-gutter")
+      .getAttribute("aria-hidden"),
+    "true",
+  );
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    content,
+  );
+});
+
 test("source preview does not load grammars for unknown or oversized content", async () => {
   let loadCount = 0;
   const loadHighlighter = async () => {
@@ -1923,7 +1960,10 @@ test("source preview keeps plain text after one failed highlight attempt", async
   view.rerender(createElement(HighlightedSource, props));
   await act(async () => Promise.resolve());
   assert.equal(loadCount, 1);
-  assert.equal(document.querySelector("pre").textContent, content);
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    content,
+  );
   assert.equal(document.querySelector(".token"), null);
 });
 
@@ -2019,9 +2059,15 @@ test("source preview progressively applies the registered grammar", async () => 
       content,
     }),
   );
-  assert.equal(document.querySelector("pre").textContent, content);
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    content,
+  );
   await waitFor(() => assert.ok(document.querySelector(".token.keyword")));
-  assert.equal(document.querySelector("pre").textContent, content);
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    content,
+  );
 });
 
 test("source preview rejects a late highlight result after the file changes", async () => {
@@ -2069,7 +2115,10 @@ test("source preview rejects a late highlight result after the file changes", as
     await Promise.resolve();
   });
 
-  assert.equal(document.querySelector("pre").textContent, "current plain text");
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    "current plain text",
+  );
   assert.equal(document.querySelector("span.token"), null);
 });
 
@@ -2094,7 +2143,7 @@ test("Task Panel renders file content without explanatory chrome", async () => {
   assert.equal(screen.queryByText("Recorded diff"), null);
   assert.ok(screen.getByText("const ready = true;"));
   await waitFor(() => assert.ok(document.querySelector(".token.keyword")));
-  assert.equal(document.querySelector("pre.task-panel-code").tabIndex, 0);
+  assert.equal(document.querySelector(".task-panel-code").tabIndex, 0);
   assert.equal(screen.queryByRole("combobox"), null);
 });
 
@@ -2149,7 +2198,7 @@ test("Markdown preview renders documents, switches to source, and preserves mode
   assert.ok(screen.getByText("Known sensitive content was hidden"));
   fireEvent.click(screen.getByRole("tab", { name: "Source" }));
   assert.equal(
-    document.querySelector("pre.task-panel-code").textContent,
+    document.querySelector(".task-panel-code-source code").textContent,
     content,
   );
   await waitFor(() => assert.ok(document.querySelector(".token")));
@@ -2167,7 +2216,7 @@ test("Markdown preview renders documents, switches to source, and preserves mode
     "true",
   );
   assert.equal(
-    document.querySelector("pre.task-panel-code").textContent,
+    document.querySelector(".task-panel-code-source code").textContent,
     "# Updated",
   );
   fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
@@ -2195,7 +2244,10 @@ test("text and HTML stay inert source without extra preview chrome", async () =>
     } else {
       await waitFor(() => assert.ok(document.querySelector(".token")));
     }
-    assert.equal(document.querySelector("pre").textContent, content);
+    assert.equal(
+      document.querySelector(".task-panel-code-source code").textContent,
+      content,
+    );
     assert.equal(document.querySelector("h1, script, img, iframe"), null);
     assert.equal(screen.queryByRole("tablist"), null);
     assert.equal(

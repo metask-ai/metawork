@@ -8274,6 +8274,42 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   outline-offset: -2px;
 }
 
+.task-panel-code-layout {
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  min-height: 100%;
+  grid-template-columns: max-content minmax(max-content, 1fr);
+}
+
+.task-panel-code-gutter,
+.task-panel-code-source {
+  margin: 0;
+  font: inherit;
+  line-height: inherit;
+  white-space: pre;
+}
+
+.task-panel-code-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 42px;
+  padding: 16px 8px;
+  border-right: 1px solid var(--ui-border);
+  color: var(--ui-content-muted);
+  background: var(--ui-surface-canvas);
+  text-align: right;
+  user-select: none;
+}
+
+.task-panel-code-source {
+  min-width: max-content;
+  padding: 16px;
+  color: inherit;
+  background: inherit;
+}
+
 .task-panel-code code {
   color: inherit;
   font: inherit;
@@ -8365,7 +8401,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-width: 0;
   min-height: 0;
   margin: 0;
-  padding: 16px;
   flex: 1;
   overflow: auto;
   color: var(--ui-content-primary);

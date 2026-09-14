@@ -150,17 +150,26 @@ export function resolvePreviewLanguage(
   return resolveShebang(content);
 }
 
-export function isWithinHighlightBudget(content: string): boolean {
-  if (content.length === 0 || content.length > MAX_CODE_UNITS) return false;
+export function countSourceLines(content: string): number {
   let lines = 1;
   for (let index = 0; index < content.length; index += 1) {
     const codeUnit = content.charCodeAt(index);
-    const lineBreak =
+    if (
       codeUnit === 10 ||
-      (codeUnit === 13 && content.charCodeAt(index + 1) !== 10);
-    if (lineBreak && ++lines > MAX_LINES) return false;
+      (codeUnit === 13 && content.charCodeAt(index + 1) !== 10)
+    ) {
+      lines += 1;
+    }
   }
-  return true;
+  return lines;
+}
+
+export function isWithinHighlightBudget(content: string): boolean {
+  return (
+    content.length > 0 &&
+    content.length <= MAX_CODE_UNITS &&
+    countSourceLines(content) <= MAX_LINES
+  );
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -291,14 +300,31 @@ export function HighlightedSource({
 
   const nodes =
     highlighted?.identity === highlightIdentity ? highlighted.nodes : null;
+  const lineNumbers = useMemo(
+    () =>
+      Array.from(
+        { length: countSourceLines(content) },
+        (_, index) => index + 1,
+      ).join("\n"),
+    [content],
+  );
 
   return (
-    <pre className="task-panel-code focus-ring" tabIndex={0}>
-      <code className={language ? `language-${language}` : undefined}>
-        {nodes
-          ? nodes.map((node, index) => renderHighlightNode(node, String(index)))
-          : content}
-      </code>
-    </pre>
+    <div className="task-panel-code focus-ring" tabIndex={0}>
+      <div className="task-panel-code-layout">
+        <pre className="task-panel-code-gutter" aria-hidden="true">
+          {lineNumbers}
+        </pre>
+        <pre className="task-panel-code-source">
+          <code className={language ? `language-${language}` : undefined}>
+            {nodes
+              ? nodes.map((node, index) =>
+                  renderHighlightNode(node, String(index)),
+                )
+              : content}
+          </code>
+        </pre>
+      </div>
+    </div>
   );
 }
