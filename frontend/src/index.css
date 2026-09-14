@@ -1082,6 +1082,177 @@ summary::-webkit-details-marker {
   content: "";
 }
 
+.settings-account-usage-scope {
+  max-width: 560px;
+  margin: 5px 0 0;
+  color: var(--settings-muted);
+  font-size: var(--text-control);
+  line-height: 1.5;
+}
+
+.settings-account-usage {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--settings-line);
+  border-radius: 14px;
+  background: var(--settings-paper);
+}
+
+.settings-account-usage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 76px;
+  padding: 15px 18px;
+  align-items: center;
+  gap: 24px;
+  border-top: 1px solid var(--settings-line);
+}
+
+.settings-account-usage-row:first-child {
+  border-top: 0;
+}
+
+.settings-account-usage-wallet {
+  min-height: 88px;
+  background: color-mix(
+    in srgb,
+    var(--settings-brand-mist) 36%,
+    var(--settings-paper)
+  );
+}
+
+.settings-account-usage-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.settings-account-usage-copy > span:first-child {
+  color: var(--settings-ink);
+  font-size: var(--text-body);
+  font-weight: 690;
+}
+
+.settings-account-usage-copy > span:not(:first-child) {
+  color: var(--settings-muted);
+  font-size: var(--text-label);
+  line-height: 1.5;
+}
+
+.settings-account-usage-stale {
+  color: var(--metask-state-warning) !important;
+  font-weight: 680;
+}
+
+.settings-account-usage-balance,
+.settings-account-usage-values {
+  display: grid;
+  justify-items: end;
+  text-align: right;
+  font-family: var(--metask-font-mono);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.settings-account-usage-balance strong {
+  color: var(--settings-brand-strong);
+  font-size: var(--text-display);
+  font-weight: 720;
+  letter-spacing: -0.035em;
+}
+
+.settings-account-usage-values {
+  gap: 3px;
+}
+
+.settings-account-usage-values strong {
+  color: var(--settings-ink);
+  font-size: var(--text-body);
+  font-weight: 690;
+}
+
+.settings-account-usage-values span {
+  color: var(--settings-muted);
+  font-size: var(--text-label);
+}
+
+.settings-account-usage-row[data-availability="loading"]
+  .settings-account-usage-balance,
+.settings-account-usage-row[data-availability="loading"]
+  .settings-account-usage-values,
+.settings-account-usage-row[data-availability="unavailable"]
+  .settings-account-usage-balance,
+.settings-account-usage-row[data-availability="unavailable"]
+  .settings-account-usage-values {
+  color: var(--settings-muted);
+}
+
+.settings-account-usage-row[data-availability="loading"]
+  .settings-account-usage-balance
+  strong,
+.settings-account-usage-row[data-availability="loading"]
+  .settings-account-usage-values
+  strong,
+.settings-account-usage-row[data-availability="unavailable"]
+  .settings-account-usage-balance
+  strong,
+.settings-account-usage-row[data-availability="unavailable"]
+  .settings-account-usage-values
+  strong {
+  color: var(--settings-muted);
+}
+
+.settings-account-usage-unknown {
+  display: flex;
+  min-height: 76px;
+  padding: 16px 18px;
+  align-items: flex-start;
+  gap: 9px;
+  color: var(--settings-muted);
+  font-size: var(--text-control);
+  line-height: 1.5;
+}
+
+.settings-account-usage-unknown svg {
+  margin-top: 2px;
+  flex: 0 0 auto;
+  color: var(--settings-brand);
+  font-size: var(--text-body);
+}
+
+.settings-account-usage-footer {
+  display: flex;
+  min-height: 58px;
+  padding: 10px 12px 10px 18px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--settings-line);
+  color: var(--settings-muted);
+  background: var(--settings-frost);
+  font-size: var(--text-label);
+  line-height: 1.4;
+}
+
+.settings-account-usage-footer button {
+  flex: 0 0 auto;
+}
+
+.settings-account-usage-refresh-icon {
+  display: inline-grid;
+  place-items: center;
+}
+
+.settings-account-usage-refresh-icon[data-refreshing="true"] {
+  animation: settings-account-refresh-spin 900ms linear infinite;
+}
+
+@keyframes settings-account-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .settings-execution-group {
   position: relative;
   margin-top: 12px;
@@ -2794,6 +2965,29 @@ button.run-process-tool:hover {
 
   .settings-danger-zone {
     grid-template-columns: 1fr;
+  }
+
+  .settings-account-usage-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 15px 14px;
+  }
+
+  .settings-account-usage-balance,
+  .settings-account-usage-values {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .settings-account-usage-footer {
+    padding: 12px 14px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-account-usage-footer button {
+    width: 100%;
+    min-height: 44px;
   }
 
   .settings-custom-provider-create {

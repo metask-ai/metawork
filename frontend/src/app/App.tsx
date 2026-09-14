@@ -3504,6 +3504,9 @@ export default function App() {
             onRetryRefresh={() =>
               void runAccountCommand(() => client.retryAccountRefresh())
             }
+            onRefreshAccountSummary={() =>
+              void runAccountCommand(() => client.refreshAccountSummary())
+            }
             onLogout={() => void runAccountCommand(() => client.logout())}
           />
         ) : null

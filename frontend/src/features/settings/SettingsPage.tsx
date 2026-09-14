@@ -15,6 +15,7 @@ import {
 } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
+import { AccountUsageSummary } from "./AccountUsageSummary.tsx";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection = "general" | "account" | "models" | "providers";
@@ -198,6 +199,7 @@ export function SettingsPage({
   onSelectCustomModel,
   onBeginLogin,
   onRetryRefresh,
+  onRefreshAccountSummary,
   onLogout,
 }: {
   account: AccountView;
@@ -268,6 +270,7 @@ export function SettingsPage({
   ) => void;
   onBeginLogin: () => void;
   onRetryRefresh: () => void;
+  onRefreshAccountSummary: () => void;
   onLogout: () => void;
 }) {
   const { locale, setLocale, t } = useI18n();
@@ -1175,6 +1178,14 @@ export function SettingsPage({
                     )}
                   </div>
                 )}
+
+              {authenticated && (
+                <AccountUsageSummary
+                  summary={account.summary}
+                  disabled={disabled || accountDisabled}
+                  onRefresh={onRefreshAccountSummary}
+                />
+              )}
 
               {authenticated && (
                 <div className="settings-group">

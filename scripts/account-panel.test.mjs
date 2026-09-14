@@ -19,6 +19,8 @@ const { AccountGate } = await vite.ssrLoadModule(
 const { SettingsPage } = await vite.ssrLoadModule(
   "/src/features/settings/SettingsPage.tsx",
 );
+const { formatAccountDecimal, formatAccountSyncedAt } =
+  await vite.ssrLoadModule("/src/features/settings/account-summary-format.ts");
 const { requiresAccountGate, requiresAccountSetup } = await vite.ssrLoadModule(
   "/src/features/account/gating.ts",
 );
@@ -38,6 +40,26 @@ const appSource = readFileSync(
 
 test.after(async () => vite.close());
 
+const emptyAccountSummary = {
+  operation: "idle",
+  usageEligibility: "unknown",
+  wallet: {
+    availability: "unavailable",
+    balanceU: null,
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+  usage: {
+    availability: "unavailable",
+    today: null,
+    total: null,
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+};
+
 const signedOut = {
   state: "signed_out",
   canCancel: false,
@@ -45,6 +67,7 @@ const signedOut = {
   displayName: "",
   errorCode: "none",
   safeDiagnostic: "",
+  summary: emptyAccountSummary,
 };
 
 const unavailableModels = {
@@ -117,6 +140,7 @@ const callbacks = {
   onReconnect() {},
   onBeginLogin() {},
   onRetryRefresh() {},
+  onRefreshAccountSummary() {},
   onCancel() {},
   onRefresh() {},
   onSelectApiKey() {},
@@ -379,6 +403,127 @@ test("refresh scheduling failure exposes the explicit Account retry", () => {
   );
   assert.match(markup, /Automatic sign-in refresh could not be scheduled/);
   assert.match(markup, />Retry sign-in refresh</);
+});
+
+test("Account settings render the whole-account balance and exact usage ledger", () => {
+  const markup = renderSettings(
+    {
+      ...readyAccount,
+      summary: {
+        operation: "idle",
+        usageEligibility: "enabled",
+        wallet: {
+          availability: "ready",
+          balanceU: "100.25",
+          syncedAt: "1789344000000",
+          errorCode: "none",
+          safeDiagnostic: "",
+        },
+        usage: {
+          availability: "ready",
+          today: {
+            inputTokens: "344800",
+            outputTokens: "496100",
+            cacheCreationTokens: "0",
+            cacheReadTokens: "1490000",
+            totalTokens: "2330900",
+            actualCostU: "149.739",
+          },
+          total: { totalTokens: "1204200000", actualCostU: "23420.1178" },
+          syncedAt: "1789344000000",
+          errorCode: "none",
+          safeDiagnostic: "",
+        },
+      },
+    },
+    readyModels,
+    { initialSection: "account" },
+  );
+  assert.match(markup, /Metask account usage/);
+  assert.match(markup, /whole Metask account, not only activity in MetaWork/);
+  assert.match(markup, /100\.25 U/);
+  assert.match(markup, /2,330,900 Token/);
+  assert.match(markup, /1,204,200,000 Token/);
+  assert.match(markup, /Input 344,800 · Output 496,100/);
+  assert.match(markup, />Refresh account usage</);
+  assert.doesNotMatch(markup, /RPM|TPM|response time|API keys|standard cost/i);
+});
+
+test("Account summary failure stays local, stale values remain, and simple mode hides usage", () => {
+  const partial = {
+    ...readyAccount,
+    summary: {
+      operation: "idle",
+      usageEligibility: "enabled",
+      wallet: {
+        availability: "ready",
+        balanceU: "12",
+        syncedAt: "1789344000000",
+        errorCode: "none",
+        safeDiagnostic: "",
+      },
+      usage: {
+        availability: "unavailable",
+        today: null,
+        total: null,
+        syncedAt: null,
+        errorCode: "metask_service_unavailable",
+        safeDiagnostic: "",
+      },
+    },
+  };
+  const partialMarkup = renderSettings(partial, readyModels, {
+    initialSection: "account",
+  });
+  assert.match(partialMarkup, /12 U/);
+  assert.match(partialMarkup, /Metask is temporarily unavailable/);
+  assert.match(partialMarkup, /Metask User/);
+
+  const stale = structuredClone(partial);
+  stale.summary.usage = {
+    availability: "stale",
+    today: {
+      inputTokens: "1",
+      outputTokens: "2",
+      cacheCreationTokens: "3",
+      cacheReadTokens: "4",
+      totalTokens: "10",
+      actualCostU: "0.5",
+    },
+    total: { totalTokens: "20", actualCostU: "1" },
+    syncedAt: "1789343000000",
+    errorCode: "metask_service_unavailable",
+    safeDiagnostic: "",
+  };
+  assert.match(
+    renderSettings(stale, readyModels, { initialSection: "account" }),
+    /May be out of date/,
+  );
+
+  const simple = structuredClone(readyAccount);
+  simple.summary.usageEligibility = "disabled";
+  assert.doesNotMatch(
+    renderSettings(simple, readyModels, { initialSection: "account" }),
+    /Metask account usage|Refresh account usage/,
+  );
+});
+
+test("unknown Account usage remains actionable without guessing a mode", () => {
+  const markup = renderSettings(readyAccount, readyModels, {
+    initialSection: "account",
+  });
+  assert.match(markup, /cannot confirm this account&#x27;s usage mode yet/);
+  assert.match(markup, />Refresh account usage</);
+  assert.doesNotMatch(markup, />Balance</);
+});
+
+test("Account usage formatting preserves decimal precision without number coercion", () => {
+  assert.equal(
+    formatAccountDecimal("12042000000000001.125"),
+    "12,042,000,000,000,001.125",
+  );
+  assert.equal(formatAccountDecimal("-1.25"), "−1.25");
+  assert.equal(formatAccountSyncedAt("18446744073709551615", "en-US"), null);
 });
 
 test("Models canonical recovery preserves Account identity and freezes selectors", () => {
