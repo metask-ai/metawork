@@ -68,6 +68,12 @@
     var(--metask-state-complete) 78%
   );
   --ui-content-on-primary: var(--metask-light-panel);
+  --ui-syntax-comment: #626775;
+  --ui-syntax-keyword: #6639ba;
+  --ui-syntax-string: #26734d;
+  --ui-syntax-constant: #8a5515;
+  --ui-syntax-function: #2457a6;
+  --ui-syntax-punctuation: #4e5360;
   --ui-action-hover-surface: var(--ui-surface-panel-2);
   --ui-action-hover-content: var(--ui-content-primary);
   --ui-action-selected-surface: color-mix(
@@ -128,6 +134,12 @@
     var(--metask-dark-text) 22%,
     var(--metask-state-complete) 78%
   );
+  --ui-syntax-comment: #a7abb7;
+  --ui-syntax-keyword: #c6a0f6;
+  --ui-syntax-string: #8bd5a5;
+  --ui-syntax-constant: #f5b97a;
+  --ui-syntax-function: #8aadf4;
+  --ui-syntax-punctuation: #cbd0da;
   --ui-action-danger-surface: color-mix(
     in srgb,
     var(--ui-surface-panel) 85%,

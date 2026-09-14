@@ -8270,6 +8270,62 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   white-space: pre;
 }
 
+.task-panel-code:focus-visible {
+  outline-offset: -2px;
+}
+
+.task-panel-code code {
+  color: inherit;
+  font: inherit;
+}
+
+.task-panel-code .token.comment,
+.task-panel-code .token.prolog,
+.task-panel-code .token.doctype,
+.task-panel-code .token.cdata {
+  color: var(--ui-syntax-comment);
+}
+
+.task-panel-code .token.keyword,
+.task-panel-code .token.atrule,
+.task-panel-code .token.important,
+.task-panel-code .token.rule {
+  color: var(--ui-syntax-keyword);
+}
+
+.task-panel-code .token.string,
+.task-panel-code .token.char,
+.task-panel-code .token.attr-value,
+.task-panel-code .token.regex,
+.task-panel-code .token.inserted {
+  color: var(--ui-syntax-string);
+}
+
+.task-panel-code .token.boolean,
+.task-panel-code .token.number,
+.task-panel-code .token.constant,
+.task-panel-code .token.symbol,
+.task-panel-code .token.deleted {
+  color: var(--ui-syntax-constant);
+}
+
+.task-panel-code .token.function,
+.task-panel-code .token.class-name,
+.task-panel-code .token.tag,
+.task-panel-code .token.selector,
+.task-panel-code .token.attr-name,
+.task-panel-code .token.builtin {
+  color: var(--ui-syntax-function);
+}
+
+.task-panel-code .token.punctuation,
+.task-panel-code .token.operator,
+.task-panel-code .token.entity,
+.task-panel-code .token.url,
+.task-panel-code .token.variable {
+  color: var(--ui-syntax-punctuation);
+}
+
 .task-panel-preview-source {
   padding: 0;
 }

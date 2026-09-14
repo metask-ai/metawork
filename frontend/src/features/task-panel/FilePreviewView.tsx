@@ -5,6 +5,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Tabs } from "../../components/ui/tabs.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import { HighlightedSource } from "./HighlightedSource.tsx";
 
 export type FilePreviewViewState = {
   selected: FileReferenceView;
@@ -80,11 +81,17 @@ export function FilePreviewView({
                   value="source"
                   className="task-panel-preview-source"
                 >
-                  <pre className="task-panel-code">{state.preview.content}</pre>
+                  <HighlightedSource
+                    displayPath={state.selected.displayPath}
+                    content={state.preview.content}
+                  />
                 </Tabs.Panel>
               </>
             ) : (
-              <pre className="task-panel-code">{state.preview.content}</pre>
+              <HighlightedSource
+                displayPath={state.selected.displayPath}
+                content={state.preview.content}
+              />
             )}
           </>
         ) : (
