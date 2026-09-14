@@ -300,12 +300,35 @@ pub const State = struct {
                 allocator,
                 configuration.management.restored_bytes.?,
                 .{ .max_assets = limits.max_assets },
-            ) catch restore: {
-                management_health = .corrupt;
-                break :restore management.Inventory.init(
-                    allocator,
-                    .{ .max_assets = limits.max_assets },
-                );
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => abandoned: {
+                    std.log.warn("abandoning undecodable Skill store file={s} error={s}", .{
+                        management.file_name,
+                        @errorName(err),
+                    });
+                    var empty = management.Inventory.init(
+                        allocator,
+                        .{ .max_assets = limits.max_assets },
+                    );
+                    const output = allocator.alloc(u8, management.max_store_bytes) catch {
+                        empty.deinit();
+                        return error.OutOfMemory;
+                    };
+                    defer allocator.free(output);
+                    const bytes = management.encode(output, &empty) catch |encode_err| {
+                        empty.deinit();
+                        return encode_err;
+                    };
+                    configuration.management.file_store.?.commit(bytes) catch |commit_err| {
+                        management_health = .corrupt;
+                        std.log.warn("failed to replace abandoned Skill store file={s} error={s}", .{
+                            management.file_name,
+                            @errorName(commit_err),
+                        });
+                    };
+                    break :abandoned empty;
+                },
             }
         else
             management.Inventory.init(
@@ -369,12 +392,35 @@ pub const State = struct {
                 allocator,
                 configuration.enablement.restored_bytes.?,
                 enablement_limits,
-            ) catch restore: {
-                enablement_health = .corrupt;
-                break :restore try enablement.Store.init(
-                    allocator,
-                    enablement_limits,
-                );
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => abandoned: {
+                    std.log.warn("abandoning undecodable Skill store file={s} error={s}", .{
+                        enablement.file_name,
+                        @errorName(err),
+                    });
+                    var empty = try enablement.Store.init(
+                        allocator,
+                        enablement_limits,
+                    );
+                    const output = allocator.alloc(u8, enablement.max_store_bytes) catch {
+                        empty.deinit();
+                        return error.OutOfMemory;
+                    };
+                    defer allocator.free(output);
+                    const bytes = enablement.encode(output, &empty) catch |encode_err| {
+                        empty.deinit();
+                        return encode_err;
+                    };
+                    configuration.enablement.file_store.?.commit(bytes) catch |commit_err| {
+                        enablement_health = .corrupt;
+                        std.log.warn("failed to replace abandoned Skill store file={s} error={s}", .{
+                            enablement.file_name,
+                            @errorName(commit_err),
+                        });
+                    };
+                    break :abandoned empty;
+                },
             }
         else
             try enablement.Store.init(allocator, enablement_limits);
@@ -404,6 +450,93 @@ pub const State = struct {
         self.* = undefined;
     }
 };
+
+test "undecodable persisted Skill records are abandoned without recovery" {
+    const Fixture = struct {
+        fn release(_: ?*anyopaque, _: *agent.CatalogLease) void {}
+    };
+    var storage = std.testing.tmpDir(.{});
+    defer storage.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_storage[0..try storage.dir.realPath(std.testing.io, &root_storage)];
+    var management_store: management.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
+    var enablement_store: enablement.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
+    const invalid_management = "{\"schema_version\":1,\"assets\":[],\"retired\":true}";
+    const invalid_enablement = "{\"schema\":1,\"retired\":true}";
+    try management_store.commit(invalid_management);
+    try enablement_store.commit(invalid_enablement);
+    var value = try State.init(std.testing.io, std.testing.allocator, .{
+        .management = .{
+            .file_store = &management_store,
+            .staging_root = root,
+            .restored_bytes = invalid_management,
+        },
+        .enablement = .{
+            .file_store = &enablement_store,
+            .restored_bytes = invalid_enablement,
+        },
+    }, .{
+        .max_assets = 4,
+        .max_workspaces = 4,
+        .max_policy_keys = 4,
+        .max_policy_key_bytes = 64,
+    });
+    defer value.deinit(std.testing.allocator, .{ .context = null, .release_fn = Fixture.release });
+    try std.testing.expectEqual(ManagementHealth.ready, value.management_health);
+    try std.testing.expectEqual(EnablementHealth.ready, value.enablement_health);
+    try std.testing.expectEqual(@as(usize, 0), value.inventoryConst().items().len);
+    try std.testing.expectEqual(@as(usize, 0), value.enablement_store.items().len);
+    const management_bytes = (try management_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(management_bytes);
+    var restored_management = try management.decode(
+        std.testing.allocator,
+        management_bytes,
+        .{ .max_assets = 4 },
+    );
+    defer restored_management.deinit();
+    try std.testing.expectEqual(@as(usize, 0), restored_management.items().len);
+    const enablement_bytes = (try enablement_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(enablement_bytes);
+    var restored_enablement = try enablement.decode(
+        std.testing.allocator,
+        enablement_bytes,
+        .{
+            .max_workspaces = 4,
+            .max_policy_keys = 4,
+            .max_policy_key_bytes = 64,
+        },
+    );
+    defer restored_enablement.deinit();
+    try std.testing.expectEqual(@as(usize, 0), restored_enablement.items().len);
+}
+
+test "failed abandoned management replacement remains corrupt" {
+    const Fixture = struct {
+        fn release(_: ?*anyopaque, _: *agent.CatalogLease) void {}
+    };
+    var storage = std.testing.tmpDir(.{});
+    defer storage.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_storage[0..try storage.dir.realPath(std.testing.io, &root_storage)];
+    var file_store: management.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
+    const invalid = "{\"schema_version\":1,\"assets\":[],\"retired\":true}";
+    try file_store.commit(invalid);
+    management.TestSupport.setFileStoreCommitFault(&file_store, .outcome_unknown);
+    var value = try State.init(std.testing.io, std.testing.allocator, .{
+        .management = .{
+            .file_store = &file_store,
+            .staging_root = root,
+            .restored_bytes = invalid,
+        },
+    }, .{
+        .max_assets = 4,
+        .max_workspaces = 4,
+        .max_policy_keys = 4,
+        .max_policy_key_bytes = 64,
+    });
+    defer value.deinit(std.testing.allocator, .{ .context = null, .release_fn = Fixture.release });
+    try std.testing.expectEqual(ManagementHealth.corrupt, value.management_health);
+}
 
 test "catalog slot keeps product availability separate from release effect" {
     const slot: CatalogSlot = .unavailable;
