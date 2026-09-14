@@ -89,19 +89,20 @@ export function rowsForSkillContext(
 ): Asset[] {
   if (context === "personal")
     return assets.filter((asset) => asset.scope.kind === "personal");
+  // Ownership is keyed by Workspace id; the current epoch comes from the
+  // Workspace itself when a command needs it.
   if (!workspace) return [];
   return assets.filter(
     (asset) =>
       asset.scope.kind === "project" &&
-      asset.scope.workspaceId === workspace.id &&
-      asset.scope.workspaceEpoch === workspace.epoch,
+      asset.scope.workspaceId === workspace.id,
   );
 }
 
 function skillRowIdentity(asset: Asset): string {
   const scopeIdentity =
     asset.scope.kind === "project"
-      ? `${asset.scope.kind}:${asset.scope.workspaceId}:${asset.scope.workspaceEpoch}`
+      ? `${asset.scope.kind}:${asset.scope.workspaceId}`
       : asset.scope.kind;
   return `${scopeIdentity}:${asset.installId ?? ""}:${asset.skillId ?? ""}:${asset.invocationName}`;
 }
@@ -121,9 +122,7 @@ function scopeLabel(
   if (asset.scope.kind === "personal") return t("skills.scope.personal");
   if (asset.scope.kind === "external") return t("skills.scope.external");
   const workspace = workspaces.find(
-    (candidate) =>
-      candidate.id === asset.scope.workspaceId &&
-      candidate.epoch === asset.scope.workspaceEpoch,
+    (candidate) => candidate.id === asset.scope.workspaceId,
   );
   return workspace
     ? t("skills.scope.project_context", { workspace: workspace.displayName })
@@ -371,13 +370,23 @@ export function SkillsPage({
       !asset.selectionRevision
     )
       return;
+    // Commands carry the Workspace's current epoch from the same snapshot,
+    // never the asset's creation epoch.
+    const currentWorkspace =
+      asset.scope.kind === "project"
+        ? workspaces.find(
+            (candidate) => candidate.id === asset.scope.workspaceId,
+          )
+        : undefined;
     const target =
       asset.scope.kind === "project"
-        ? {
-            scope: "project" as const,
-            workspaceId: asset.scope.workspaceId,
-            expectedWorkspaceEpoch: asset.scope.workspaceEpoch,
-          }
+        ? currentWorkspace
+          ? {
+              scope: "project" as const,
+              workspaceId: currentWorkspace.id,
+              expectedWorkspaceEpoch: currentWorkspace.epoch,
+            }
+          : null
         : asset.scope.kind === "personal"
           ? { scope: "personal" as const }
           : null;
@@ -385,11 +394,7 @@ export function SkillsPage({
     const catalog =
       target.scope === "personal"
         ? personalCatalog
-        : workspaces.find(
-            (candidate) =>
-              candidate.id === target.workspaceId &&
-              candidate.epoch === target.expectedWorkspaceEpoch,
-          )?.skillCatalog;
+        : currentWorkspace?.skillCatalog;
     if (!catalog?.revision) return;
     const identity = `${target.scope}:${target.scope === "project" ? target.workspaceId : "user"}:${asset.skillPolicyKey}`;
     setEnablementBusy(identity);

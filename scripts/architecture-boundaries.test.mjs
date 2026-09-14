@@ -1045,6 +1045,7 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(workspaceRuntime, /pub fn taskRunAuthority/);
   assert.match(workspaceRuntime, /pub fn recoveryAuthority/);
   assert.match(workspaceRuntime, /pub fn filePreviewAuthorized/);
+  assert.match(workspaceRuntime, /pub fn visibleManualBindingAt/);
   assert.match(
     workspaceRuntime,
     /automatic_allocator: \?automatic_root\.Allocator/,
@@ -1099,7 +1100,6 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(control, /workspace\.recoveryAuthority/);
   assert.match(control, /workspace\.filePreviewAuthorized/);
   assert.match(control, /workspace\.availableManualBindingAt/);
-  assert.match(control, /workspace\.visibleManualBindingAt/);
   assert.match(control, /product_workspace\.copyProjections/);
   assert.match(control, /product_workspace\.writeProjectionList/);
   assert.doesNotMatch(
@@ -1350,7 +1350,10 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.match(runtime, /pub fn ensureWorkspaceCatalog/);
   assert.match(runtime, /pub fn redactCatalogsNoFail/);
   assert.match(runtime, /fn commitEnablementCandidate/);
-  assert.match(runtime, /pub fn reconcileEnablementNoFail/);
+  assert.match(runtime, /pub fn identitySourceTrusted/);
+  assert.match(runtime, /pub fn workspaceRetirementAllowed/);
+  assert.match(runtime, /pub fn retireWorkspace/);
+  assert.match(runtime, /pub fn resolveOwnerScope/);
   assert.match(runtime, /@import\("product_skill_management_runtime"\)/);
   assert.match(runtime, /@import\("product_skill_package"\)/);
   assert.match(runtime, /pub fn previewDirectory/);

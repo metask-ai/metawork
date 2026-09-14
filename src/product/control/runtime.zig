@@ -1334,7 +1334,9 @@ pub const Runtime = struct {
         }
         control.reconcileCheckpointStoreNoFail();
         control.cleanupFileChangeStoreNoFail();
-        control.reconcileSkillEnablementNoFail();
+        // Skill records name Workspace ids; the allocator must never hand out
+        // an id they still claim, whatever history survived.
+        control.workspace.reserveIdentity(control.skill.maxWorkspaceId());
         _ = control.schedule.recoverInterruptedNoFail(
             control.scheduleRedaction(),
         );
@@ -2722,7 +2724,6 @@ pub const Runtime = struct {
             self.execution_state.credential(),
             self.workspaceStorage(),
         );
-        self.reconcileSkillEnablementNoFail();
         self.recoverSkillTransactionsForScopeNoFail(.{ .project = .{
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
@@ -3035,7 +3036,6 @@ pub const Runtime = struct {
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
         skill_root_owned = false;
-        self.reconcileSkillEnablementNoFail();
         self.bumpRevision();
         if (!self.task_runtime.releaseWorkspaceSessions(workspace_id, .{
             .context = self,
@@ -6643,27 +6643,6 @@ pub const Runtime = struct {
                     return error.WorkspaceUnavailable;
             },
         }
-    }
-
-    fn skillEnablementWorkspace(
-        context: *const anyopaque,
-        index: usize,
-    ) ?skill_runtime.EnablementWorkspaceIdentity {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        const workspace = self.workspace.visibleManualBindingAt(index) orelse
-            return null;
-        return .{
-            .workspace_id = workspace.id,
-            .workspace_epoch = workspace.epoch,
-        };
-    }
-
-    fn reconcileSkillEnablementNoFail(self: *Runtime) void {
-        self.skill.reconcileEnablementNoFail(.{
-            .context = self,
-            .slot_count = self.workspace.slotCount(),
-            .get_fn = skillEnablementWorkspace,
-        }, self.skillProjectionBudget());
     }
 
     fn recoverSkillTransactionsForScopeNoFail(

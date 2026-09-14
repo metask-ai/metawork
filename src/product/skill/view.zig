@@ -15,6 +15,13 @@ fn testRetryAvailable(_: *const anyopaque, _: management.InstallId) bool {
     return true;
 }
 
+fn testOwnerResolve(_: *const anyopaque, owner: management.Owner) ?management.Scope {
+    return switch (owner) {
+        .personal => .personal,
+        .project => |id| .{ .project = .{ .workspace_id = id, .workspace_epoch = std.math.maxInt(u64) } },
+    };
+}
+
 /// Serializer-owned byte bounds for Product's global snapshot admission.
 /// Text, variable arrays and fixed structure are charged independently.
 pub const SnapshotStructureBounds = struct {
@@ -67,6 +74,17 @@ pub const RetryAvailability = struct {
     available_fn: *const fn (*const anyopaque, management.InstallId) bool,
 };
 
+/// Maps an asset's stored ownership scope to the current authority scope of
+/// the registered Workspace that owns it; null means no live owner.
+pub const OwnerResolver = struct {
+    context: *const anyopaque,
+    resolve_fn: *const fn (*const anyopaque, management.Owner) ?management.Scope,
+
+    fn resolve(self: OwnerResolver, owner: management.Owner) ?management.Scope {
+        return self.resolve_fn(self.context, owner);
+    }
+};
+
 pub const ManagementInput = struct {
     state: *const state.State,
     workspaces: WorkspaceCatalogs,
@@ -74,6 +92,7 @@ pub const ManagementInput = struct {
     source_settings: state.SourceSettingsView,
     personal_source_discovery: ?state.SourceDiscoveryView,
     retry: RetryAvailability,
+    owner: OwnerResolver,
 };
 
 pub fn catalogProjection(
@@ -261,10 +280,16 @@ fn writeRootCheck(writer: *std.Io.Writer, id: []const u8, check: ?sources.RootCh
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
-fn writeOrigin(writer: *std.Io.Writer, scope: management.Scope, skill: ?catalog.SkillProjection) Error!void {
+fn writeOrigin(writer: *std.Io.Writer, owner: management.Owner, skill: ?catalog.SkillProjection) Error!void {
     writer.writeAll(",\"origin\":") catch return error.SnapshotTooLarge;
-    const proven = if (skill) |value| policy.origin(if (scope == .personal) .management else .workspace, value) else null;
+    const proven = if (skill) |value| policy.origin(if (owner == .personal) .management else .workspace, value) else null;
     if (proven) |value| writer.print("{{\"ecosystem\":\"{s}\",\"scope\":\"{s}\"}}", .{ @tagName(value.ecosystem), @tagName(value.scope) }) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+}
+
+/// File management needs a registered owner; a record whose Workspace id is
+/// not currently registered only reads as provenance.
+fn manageableOwner(input: ManagementInput, asset: *const management.Asset) bool {
+    return input.owner.resolve(asset.owner) != null;
 }
 
 fn writeManagedAsset(
@@ -273,14 +298,14 @@ fn writeManagedAsset(
     asset: management.Asset,
 ) Error!void {
     const id_hex = std.fmt.bytesToHex(asset.install_id, .lower);
-    const skill = findCatalogSkill(input, asset.scope, asset.target_entry);
+    const skill = findCatalogSkill(input, asset.owner, asset.target_entry);
     writer.writeAll("{\"installId\":") catch return error.SnapshotTooLarge;
     jsonValue(writer, &id_hex) catch return error.SnapshotTooLarge;
     writer.print(",\"sourceKind\":\"{s}\",\"scope\":", .{
         @tagName(asset.source_kind),
     }) catch return error.SnapshotTooLarge;
-    try writeScope(writer, asset.scope);
-    try writeOrigin(writer, asset.scope, skill);
+    try writeScope(writer, asset.owner);
+    try writeOrigin(writer, asset.owner, skill);
     writer.print(",\"managementState\":\"{s}\",\"skillId\":", .{
         if (asset.requiresRecovery()) "recovery_required" else @tagName(asset.state),
     }) catch return error.SnapshotTooLarge;
@@ -309,11 +334,11 @@ fn writeManagedAsset(
         if (skill) |value| value.argument_names else &.{},
         if (skill) |value| value.max_values else 0,
         asset.state != .externally_managed and asset.state == .ready and
-            asset.recovery == null,
+            asset.recovery == null and manageableOwner(input, &asset),
         asset.state == .pending_verification and !asset.requiresRecovery(),
         asset.recovery != null and input.state.management_health == .ready and
             input.retry.available_fn(input.retry.context, asset.install_id),
-        asset.scope,
+        asset.owner,
         asset.target_entry,
         skill,
     );
@@ -325,10 +350,11 @@ fn writeExternalAsset(
     skill: catalog.SkillProjection,
     scope: management.Scope,
 ) Error!void {
+    const owner = management.Owner.fromScope(scope);
     writer.writeAll("{\"installId\":null,\"sourceKind\":\"external\",\"scope\":") catch
         return error.SnapshotTooLarge;
-    try writeScope(writer, scope);
-    try writeOrigin(writer, scope, skill);
+    try writeScope(writer, owner);
+    try writeOrigin(writer, owner, skill);
     writer.writeAll(",\"managementState\":\"externally_managed\",\"skillId\":") catch
         return error.SnapshotTooLarge;
     try input.text.writeJson(writer, skill.skill_id);
@@ -346,7 +372,7 @@ fn writeExternalAsset(
         false,
         false,
         false,
-        scope,
+        owner,
         skill.invocation_name,
         skill,
     );
@@ -360,11 +386,12 @@ fn writeAssetTail(
     manageable: bool,
     pending: bool,
     can_retry: bool,
-    scope: management.Scope,
+    owner: management.Owner,
     invocation_name: []const u8,
     runtime_skill: ?catalog.SkillProjection,
 ) Error!void {
-    const snapshot = catalogForScope(input, scope);
+    const resolved = resolveScope(input, owner);
+    const snapshot = resolved.snapshot;
     writer.writeAll(",\"skillPolicyKey\":") catch return error.SnapshotTooLarge;
     if (runtime_skill) |skill|
         try input.text.writeJson(writer, skill.skill_policy_key)
@@ -398,7 +425,7 @@ fn writeAssetTail(
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"enablementState\":") catch return error.SnapshotTooLarge;
     if (runtime_skill) |skill| {
-        if (enablement_available) switch (scope) {
+        if (enablement_available) switch (resolved.current.?) {
             .personal => jsonValue(
                 writer,
                 if (skill.enabled) "enabled" else "disabled",
@@ -428,7 +455,7 @@ fn writeAssetTail(
                     !std.mem.eql(u8, issue.provider_id, skill.provider_id) or
                     !std.mem.eql(u8, issue.source_instance_id, skill.source_instance_id) or
                     issue.source_scope != skill.source_scope) continue;
-            } else if (!policy.issueMatchesManaged(if (scope == .personal) .management else .workspace, .workspace_default, invocation_name, issue)) continue;
+            } else if (!policy.issueMatchesManaged(if (owner == .personal) .management else .workspace, .workspace_default, invocation_name, issue)) continue;
             if (issue_count != 0) writer.writeByte(',') catch
                 return error.SnapshotTooLarge;
             issue_count += 1;
@@ -439,30 +466,36 @@ fn writeAssetTail(
     writer.writeAll("]}") catch return error.SnapshotTooLarge;
 }
 
-fn catalogForScope(
-    input: ManagementInput,
-    scope: management.Scope,
-) ?*const catalog.Snapshot {
-    return switch (scope) {
-        .personal => input.state.catalog.slot.snapshotConst(),
+const ResolvedScope = struct {
+    /// The owning Workspace's current authority scope when it has a current
+    /// catalog; null otherwise.
+    current: ?management.Scope,
+    snapshot: ?*const catalog.Snapshot,
+};
+
+/// Ownership follows the Workspace id; the current catalog belongs to the
+/// Workspace's current epoch.
+fn resolveScope(input: ManagementInput, owner: management.Owner) ResolvedScope {
+    return switch (owner) {
+        .personal => .{ .current = .personal, .snapshot = input.state.catalog.slot.snapshotConst() },
         .project => {
             for (0..input.workspaces.slot_count) |index| {
                 const scoped = input.workspaces.get(index) orelse continue;
-                if (scoped.scope.eql(scope)) return scoped.snapshot;
+                if (owner.owns(scoped.scope)) return .{ .current = scoped.scope, .snapshot = scoped.snapshot };
             }
-            return null;
+            return .{ .current = null, .snapshot = null };
         },
     };
 }
 
 fn findCatalogSkill(
     input: ManagementInput,
-    scope: management.Scope,
+    owner: management.Owner,
     invocation_name: []const u8,
 ) ?catalog.SkillProjection {
-    const snapshot = catalogForScope(input, scope) orelse return null;
+    const snapshot = resolveScope(input, owner).snapshot orelse return null;
     for (snapshot.skills) |skill|
-        if (policy.matchManagedContribution(if (scope == .personal) .management else .workspace, .workspace_default, invocation_name, skill) == .matched) return skill;
+        if (policy.matchManagedContribution(if (owner == .personal) .management else .workspace, .workspace_default, invocation_name, skill) == .matched) return skill;
     return null;
 }
 
@@ -487,14 +520,14 @@ fn catalogContainsSensitive(
     return false;
 }
 
-fn writeScope(writer: *std.Io.Writer, scope: management.Scope) Error!void {
-    switch (scope) {
+fn writeScope(writer: *std.Io.Writer, owner: management.Owner) Error!void {
+    switch (owner) {
         .personal => writer.writeAll(
-            "{\"kind\":\"personal\",\"workspaceId\":null,\"workspaceEpoch\":null}",
+            "{\"kind\":\"personal\",\"workspaceId\":null}",
         ) catch return error.SnapshotTooLarge,
-        .project => |project| writer.print(
-            "{{\"kind\":\"project\",\"workspaceId\":\"{d}\",\"workspaceEpoch\":\"{d}\"}}",
-            .{ project.workspace_id, project.workspace_epoch },
+        .project => |id| writer.print(
+            "{{\"kind\":\"project\",\"workspaceId\":\"{d}\"}}",
+            .{id},
         ) catch return error.SnapshotTooLarge,
     }
 }
@@ -625,6 +658,7 @@ test "snapshot structure bounds cover maximum identities arguments issues and un
     const input: ManagementInput = .{
         .state = &product_state,
         .retry = .{ .context = undefined, .available_fn = testRetryAvailable },
+        .owner = .{ .context = undefined, .resolve_fn = testOwnerResolve },
         .text = text,
         .source_settings = .{ .settings = .{}, .health = .ready, .can_set_enabled = false, .can_reread = false, .can_reset = false, .recovery_token = null },
         .personal_source_discovery = null,
@@ -721,6 +755,7 @@ test "same-name external winner is not suppressed or attached to a managed asset
     const input: ManagementInput = .{
         .state = &product_state,
         .retry = .{ .context = undefined, .available_fn = testRetryAvailable },
+        .owner = .{ .context = undefined, .resolve_fn = testOwnerResolve },
         .source_settings = .{ .settings = .{}, .health = .ready, .can_set_enabled = false, .can_reread = false, .can_reset = false, .recovery_token = null },
         .personal_source_discovery = null,
         .text = .{ .context = undefined, .contains_sensitive_fn = Fixture.contains, .write_json_fn = Fixture.write },

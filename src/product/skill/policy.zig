@@ -116,7 +116,7 @@ pub fn inventoryHasContributionInScope(
     skill: catalog.SkillProjection,
 ) bool {
     for (inventory.items()) |asset|
-        if (asset.scope.eql(scope) and
+        if (asset.owner.owns(scope) and
             matchManagedContribution(purpose, expected_source, asset.target_entry, skill) == .matched) return true;
     return false;
 }

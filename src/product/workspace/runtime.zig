@@ -994,6 +994,18 @@ pub const Runtime = struct {
         self.next_recent_order = next_recent_order;
     }
 
+    /// Raises the identity allocator above ids still referenced by other
+    /// owners' durable records, so a lost or older history cannot hand a new
+    /// Workspace an id that older Skill records already claim.
+    pub fn reserveIdentity(self: *Runtime, highest_referenced_id: u64) void {
+        // An exhausted reference makes every later allocation fail closed
+        // through the existing identity check instead of wrapping around.
+        self.next_id = if (highest_referenced_id == std.math.maxInt(u64))
+            std.math.maxInt(u64)
+        else
+            @max(self.next_id, highest_referenced_id + 1);
+    }
+
     pub fn identity(self: *const Runtime) struct {
         next_id: u64,
         next_recent_order: u64,

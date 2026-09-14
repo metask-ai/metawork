@@ -768,7 +768,6 @@ function decodeSkillManagement(
       const scopeValue = object(asset.scope, `${itemPath}.scope`, [
         "kind",
         "workspaceId",
-        "workspaceEpoch",
       ]);
       const scopeKind = enumValue(scopeValue.kind, `${itemPath}.scope.kind`, [
         "personal",
@@ -783,20 +782,9 @@ function decodeSkillManagement(
                 scopeValue.workspaceId,
                 `${itemPath}.scope.workspaceId`,
               ),
-              workspaceEpoch: positiveWireId(
-                scopeValue.workspaceEpoch,
-                `${itemPath}.scope.workspaceEpoch`,
-              ),
             }
-          : {
-              kind: scopeKind,
-              workspaceId: null,
-              workspaceEpoch: null,
-            };
-      if (
-        scopeKind !== "project" &&
-        (scopeValue.workspaceId !== null || scopeValue.workspaceEpoch !== null)
-      )
+          : { kind: scopeKind, workspaceId: null };
+      if (scopeKind !== "project" && scopeValue.workspaceId !== null)
         fail(`${itemPath}.scope`, "non-project scope cannot name a workspace");
       return {
         installId:

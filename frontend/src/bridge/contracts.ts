@@ -968,13 +968,9 @@ export type SkillManagementView = {
       scope: (typeof skillOriginScopes)[number];
     } | null;
     scope:
-      | { kind: "personal"; workspaceId: null; workspaceEpoch: null }
-      | {
-          kind: "project";
-          workspaceId: string;
-          workspaceEpoch: string;
-        }
-      | { kind: "external"; workspaceId: null; workspaceEpoch: null };
+      | { kind: "personal"; workspaceId: null }
+      | { kind: "project"; workspaceId: string }
+      | { kind: "external"; workspaceId: null };
     managementState:
       | "ready"
       | "pending_verification"

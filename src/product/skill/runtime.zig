@@ -44,6 +44,12 @@ pub const SourceSettingsResult = state.SourceSettingsResult;
 pub const SourceSettingsView = state.SourceSettingsView;
 pub const SourceRecoveryAction = enum { reread, reset };
 
+pub const testing = if (builtin.is_test) struct {
+    pub const ManagementInventory = management.Inventory;
+    pub const ManagementFileStore = management.FileStore;
+    pub const encodeManagement = management.encode;
+} else struct {};
+
 pub const BorrowedCatalogAuthority = struct {
     snapshot: *const catalog.Snapshot,
     lease: *agent.CatalogLease,
@@ -120,17 +126,6 @@ pub const ProjectionBudget = struct {
 
     fn replace(self: ProjectionBudget, old: usize, new: usize) void {
         self.replace_fn(self.context, old, new);
-    }
-};
-
-pub const EnablementWorkspaces = struct {
-    context: *const anyopaque,
-    slot_count: usize,
-    get_fn: *const fn (*const anyopaque, usize) ?enablement.WorkspaceIdentity,
-
-    fn get(self: EnablementWorkspaces, index: usize) ?enablement.WorkspaceIdentity {
-        std.debug.assert(index < self.slot_count);
-        return self.get_fn(self.context, index);
     }
 };
 
@@ -867,6 +862,7 @@ pub const Runtime = struct {
             .state = &self.state,
             .workspaces = workspaces,
             .retry = retry,
+            .owner = .{ .context = self, .resolve_fn = viewOwnerResolve },
             .text = text,
             .source_settings = self.sourceSettings(),
             .personal_source_discovery = self.personalSourceDiscovery(),
@@ -877,13 +873,104 @@ pub const Runtime = struct {
         return view.writeSourceDiscovery(writer, .workspace, self.workspaceSourceDiscovery(id, epoch));
     }
 
+    /// Resolves an asset's persistent owner to the owning Workspace's current
+    /// authority scope. Ownership follows the Workspace id alone; the
+    /// registry, not any stored epoch, decides which record that id is.
     pub fn assetScope(
         self: *const Runtime,
         install_id: management.InstallId,
     ) AssetError!management.Scope {
         const current = self.state.inventoryConst().findConst(install_id) orelse
             return error.AssetNotFound;
-        return current.scope;
+        return self.resolveOwnerScope(current.owner) orelse error.UnknownWorkspace;
+    }
+
+    /// True when both Skill stores were strictly loaded, so every Workspace id
+    /// they reference is known. An unreadable or corrupt store hides ids that
+    /// a fresh allocation could collide with.
+    pub fn identitySourceTrusted(self: *const Runtime) bool {
+        const management_trusted = switch (self.state.management_health) {
+            .ready, .unavailable, .write_failed => true,
+            .read_failed, .corrupt, .outcome_unknown => false,
+        };
+        const enablement_trusted = switch (self.state.enablement_health) {
+            .ready, .unavailable, .write_failed => true,
+            .read_failed, .corrupt, .outcome_unknown => false,
+        };
+        return management_trusted and enablement_trusted;
+    }
+
+    /// True when no durable transaction still references the Workspace id and
+    /// the inventory is trustworthy enough to prove it.
+    pub fn workspaceRetirementAllowed(self: *const Runtime, workspace_id: u64) bool {
+        switch (self.state.management_health) {
+            .ready, .unavailable => {},
+            .read_failed, .corrupt, .write_failed, .outcome_unknown => return false,
+        }
+        switch (self.state.enablement_health) {
+            .ready, .unavailable => {},
+            .read_failed, .corrupt, .write_failed, .outcome_unknown => return false,
+        }
+        return !self.state.inventoryConst().hasRecoveryFor(workspace_id);
+    }
+
+    /// Drops policy and provenance of a Workspace id that left the registry.
+    /// Files are never touched. Each store commits independently; a failed
+    /// commit keeps that store's records for a later attempt.
+    pub fn retireWorkspace(self: *Runtime, workspace_id: u64, budget: ProjectionBudget) bool {
+        std.debug.assert(self.workspaceRetirementAllowed(workspace_id));
+        var changed = false;
+        if (self.enablementTrusted() and self.state.enablement_file_store != null) enablement_store: {
+            var candidate = self.state.enablement_store.clone() catch break :enablement_store;
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            if (!candidate.retire(workspace_id)) break :enablement_store;
+            self.commitEnablementCandidate(&candidate) catch |err| {
+                self.noteEnablementPersistenceFailure(err, budget);
+                break :enablement_store;
+            };
+            candidate_owned = false;
+            changed = true;
+        }
+        if (self.state.management_health == .ready) {
+            if (self.state.transactions) |*transactions| {
+                const retired = transactions.retire(workspace_id) catch |err| blk: {
+                    if (err == error.PersistenceFailed or err == error.PersistenceOutcomeUnknown)
+                        self.state.management_health = policy.managementHealthAfterPersistenceFailure(err);
+                    break :blk true;
+                };
+                changed = retired or changed;
+            }
+        }
+        return changed;
+    }
+
+    /// Maps a persistent owner to the owning Workspace's current authority
+    /// scope, or null when no registered record carries that id.
+    pub fn resolveOwnerScope(self: *const Runtime, owner: management.Owner) ?management.Scope {
+        return switch (owner) {
+            .personal => .personal,
+            .project => |id| blk: {
+                const workspace = self.findWorkspaceConst(id) orelse return null;
+                break :blk .{ .project = .{
+                    .workspace_id = workspace.id,
+                    .workspace_epoch = workspace.epoch,
+                } };
+            },
+        };
+    }
+
+    fn viewOwnerResolve(context: *const anyopaque, owner: management.Owner) ?management.Scope {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.resolveOwnerScope(owner);
+    }
+
+    /// Highest Workspace id referenced by any persistent Skill record.
+    pub fn maxWorkspaceId(self: *const Runtime) u64 {
+        var result = self.state.inventoryConst().maxWorkspaceId();
+        for (self.state.enablement_store.items()) |workspace_policy|
+            result = @max(result, workspace_policy.workspace_id);
+        return result;
     }
 
     pub fn previewDirectory(
@@ -910,6 +997,7 @@ pub const Runtime = struct {
         const scope = try self.assetScope(install_id);
         return management_runtime.readDefinition(
             self.managementContext(),
+            scope,
             install_id,
             try self.canonicalBase(scope),
         );
@@ -924,6 +1012,7 @@ pub const Runtime = struct {
         const scope = try self.assetScope(install_id);
         return management_runtime.exportPackage(
             self.managementContext(),
+            scope,
             install_id,
             try self.canonicalBase(scope),
             absolute_destination,
@@ -981,6 +1070,7 @@ pub const Runtime = struct {
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.reimportDirectory(
             self.managementContext(),
+            scope,
             try self.canonicalBase(scope),
             install_id,
             absolute_path,
@@ -1004,6 +1094,7 @@ pub const Runtime = struct {
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.reimportArchive(
             self.managementContext(),
+            scope,
             try self.canonicalBase(scope),
             install_id,
             absolute_path,
@@ -1025,6 +1116,7 @@ pub const Runtime = struct {
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.uninstall(
             self.managementContext(),
+            scope,
             try self.canonicalBase(scope),
             install_id,
             now_unix_seconds,
@@ -1048,6 +1140,7 @@ pub const Runtime = struct {
             return error.CatalogUnavailable;
         const result = try management_runtime.retryVerification(
             self.managementContext(),
+            scope,
             install_id,
             try self.canonicalBase(scope),
             now_unix_seconds,
@@ -1062,8 +1155,9 @@ pub const Runtime = struct {
     pub fn retryAvailable(self: *const Runtime, install_id: management.InstallId) bool {
         const current = self.state.inventoryConst().findConst(install_id) orelse return false;
         if (current.recovery == null) return false;
-        self.requireRecoveryAvailable(current.scope) catch return false;
-        _ = self.canonicalBase(current.scope) catch return false;
+        const scope = self.assetScope(install_id) catch return false;
+        self.requireRecoveryAvailable(scope) catch return false;
+        _ = self.canonicalBase(scope) catch return false;
         return current.requiresRecovery() or self.state.source_settings != null;
     }
 
@@ -1215,30 +1309,6 @@ pub const Runtime = struct {
         }
         authority_candidates_owned = false;
         return next_revision;
-    }
-
-    pub fn reconcileEnablementNoFail(
-        self: *Runtime,
-        workspaces: EnablementWorkspaces,
-        budget: ProjectionBudget,
-    ) void {
-        if (!self.enablementTrusted() or
-            self.state.enablement_file_store == null)
-            return;
-        var active_workspaces: std.ArrayList(enablement.WorkspaceIdentity) = .empty;
-        defer active_workspaces.deinit(self.allocator);
-        for (0..workspaces.slot_count) |index|
-            if (workspaces.get(index)) |identity|
-                active_workspaces.append(self.allocator, identity) catch return;
-        var candidate = self.state.enablement_store.clone() catch return;
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        if (!candidate.reconcile(active_workspaces.items)) return;
-        self.commitEnablementCandidate(&candidate) catch |err| {
-            self.noteEnablementPersistenceFailure(err, budget);
-            return;
-        };
-        candidate_owned = false;
     }
 
     pub fn testSetEnablementPersistence(
@@ -1957,51 +2027,127 @@ fn exerciseManagementCommitFailure(
     );
 }
 
-test "enablement reconciliation preparation failures preserve committed policy and persistence health" {
-    const Fixture = struct {
-        fn workspace(_: *const anyopaque, _: usize) ?enablement.WorkspaceIdentity {
-            return .{ .workspace_id = 7, .workspace_epoch = 3 };
-        }
-    };
-    for ([_]state.EnablementHealth{ .ready, .write_failed }) |health| {
-        for (0..3) |failure_step| {
-            var harness: TestHarness = .{};
-            var runtime = try testRuntime(&harness);
-            defer runtime.deinit();
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var file_store: enablement.FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
-            runtime.testSetEnablementPersistence(&file_store);
-            runtime.state.enablement_health = health;
-            _ = try runtime.state.enablement_store.applyWorkspace(.{
-                .identity = .{ .workspace_id = 7, .workspace_epoch = 3 },
-                .skill_policy_key = "review",
-                .state = .disabled,
-                .expected_revision = 1,
-            });
-            var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-            {
-                // Exercise active-set allocation, Store.clone, and the final
-                // encode-buffer allocation independently.
-                if (failure_step == 1)
-                    runtime.state.enablement_store.allocator = failing.allocator()
-                else
-                    runtime.allocator = failing.allocator();
-                defer runtime.allocator = std.testing.allocator;
-                defer runtime.state.enablement_store.allocator = std.testing.allocator;
-                runtime.reconcileEnablementNoFail(.{
-                    .context = undefined,
-                    .slot_count = if (failure_step == 0) 1 else 0,
-                    .get_fn = Fixture.workspace,
-                }, harness.budget());
-            }
-            try std.testing.expect(failing.has_induced_failure);
-            try std.testing.expectEqual(health, runtime.enablementHealth());
-            try std.testing.expectEqual(@as(usize, 1), runtime.state.enablement_store.items().len);
-            try std.testing.expectEqual(@as(u64, 2), runtime.state.enablement_store.last_revision);
-            try std.testing.expect((try file_store.loadAlloc(std.testing.allocator)) == null);
-        }
+test "asset ownership follows the registered Workspace id across fencing epochs" {
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    runtime.registerWorkspaceOwned(.{
+        .id = 9,
+        .epoch = 1,
+        .catalog_authorized = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace/a"),
+    }, harness.budget());
+    const inventory = &runtime.state.inventory.?;
+    const created: management.InstallId = @splat(1);
+    _ = try inventory.add(.{ .install_id = created, .source_kind = .local_directory, .scope = .{ .project = .{ .workspace_id = 9, .workspace_epoch = 1 } }, .target_entry = "review", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+    _ = try runtime.state.enablement_store.applyWorkspace(.{
+        .identity = .{ .workspace_id = 9, .workspace_epoch = 1 },
+        .skill_policy_key = "review",
+        .state = .disabled,
+        .expected_revision = 1,
+    });
+    try std.testing.expect((try runtime.assetScope(created)).eql(.{ .project = .{ .workspace_id = 9, .workspace_epoch = 1 } }));
+    // A failed removal leaves the same registry record at a higher epoch.
+    runtime.registerWorkspaceOwned(.{
+        .id = 9,
+        .epoch = 2,
+        .catalog_authorized = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace/a"),
+    }, harness.budget());
+    const current: management.Scope = .{ .project = .{ .workspace_id = 9, .workspace_epoch = 2 } };
+    try std.testing.expect((try runtime.assetScope(created)).eql(current));
+    try std.testing.expect(runtime.resolveOwnerScope(.{ .project = 9 }).?.eql(current));
+    try std.testing.expect(!runtime.isSkillEnabled(current, "review"));
+    try std.testing.expectEqual(@as(u64, 2), runtime.enablementRevision(current));
+    try std.testing.expect(runtime.workspaceRetirementAllowed(9));
+    // A record naming an unregistered id has no owner and cannot be managed.
+    const unknown: management.InstallId = @splat(3);
+    _ = try inventory.add(.{ .install_id = unknown, .source_kind = .local_directory, .scope = .{ .project = .{ .workspace_id = 11, .workspace_epoch = 1 } }, .target_entry = "gone", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+    try std.testing.expectError(error.UnknownWorkspace, runtime.assetScope(unknown));
+    try std.testing.expect(runtime.resolveOwnerScope(.{ .project = 11 }) == null);
+    try std.testing.expectEqual(@as(u64, 11), runtime.maxWorkspaceId());
+    try inventory.beginTransaction(unknown, .{ .operation = .install, .candidate_entry = ".gone.candidate" });
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(11));
+    try std.testing.expect(inventory.find(unknown) != null);
+    // Identity is trusted only while both stores were strictly loaded.
+    try std.testing.expect(runtime.identitySourceTrusted());
+    runtime.state.management_health = .read_failed;
+    try std.testing.expect(!runtime.identitySourceTrusted());
+    runtime.state.management_health = .unavailable;
+    runtime.state.enablement_health = .corrupt;
+    try std.testing.expect(!runtime.identitySourceTrusted());
+    runtime.state.enablement_health = .write_failed;
+    try std.testing.expect(runtime.identitySourceTrusted());
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(9));
+    runtime.state.enablement_health = .ready;
+    try std.testing.expect(runtime.identitySourceTrusted());
+    try std.testing.expect(runtime.workspaceRetirementAllowed(9));
+    runtime.state.management_health = .write_failed;
+    try std.testing.expect(runtime.identitySourceTrusted());
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(9));
+}
+
+test "retiring a Workspace id drops policy and provenance in both stores and keeps durable transactions" {
+    var harness: TestHarness = .{};
+    var storage = std.testing.tmpDir(.{});
+    defer storage.cleanup();
+    var enablement_dir = std.testing.tmpDir(.{});
+    defer enablement_dir.cleanup();
+    var persistence: management.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
+    var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
+        .state = .{
+            .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+            .management = .{ .file_store = &persistence, .staging_root = "/tmp" },
+        },
+        .max_workspaces = 2,
+        .canonical_user_home = "/home/tester",
+    }, .{ .max_assets = 8, .max_workspaces = 2, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
+    defer runtime.deinit();
+    var enablement_file: enablement.FileStore = .{ .io = std.testing.io, .dir = enablement_dir.dir };
+    runtime.testSetEnablementPersistence(&enablement_file);
+    const transactions = &runtime.state.transactions.?;
+    for ([_]u64{ 9, 11 }) |workspace_id| {
+        _ = try transactions.inventory.add(.{ .install_id = @splat(@intCast(workspace_id)), .source_kind = .local_directory, .scope = .{ .project = .{ .workspace_id = workspace_id, .workspace_epoch = 1 } }, .target_entry = "review", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+        _ = try runtime.state.enablement_store.applyWorkspace(.{
+            .identity = .{ .workspace_id = workspace_id, .workspace_epoch = 1 },
+            .skill_policy_key = "review",
+            .state = .disabled,
+            .expected_revision = runtime.state.enablement_store.revision(.{ .workspace_id = workspace_id, .workspace_epoch = 1 }),
+        });
     }
+    const pending: management.InstallId = @splat(20);
+    _ = try transactions.inventory.add(.{ .install_id = pending, .source_kind = .local_directory, .scope = .{ .project = .{ .workspace_id = 9, .workspace_epoch = 1 } }, .target_entry = "pending", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+    try transactions.inventory.beginTransaction(pending, .{ .operation = .install, .candidate_entry = ".pending.candidate" });
+    _ = runtime.takeManagementChanged();
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(9));
+    try std.testing.expect(runtime.workspaceRetirementAllowed(11));
+    // Retirement happens when the registry slot of a hidden id is reused.
+    try std.testing.expect(runtime.retireWorkspace(11, harness.budget()));
+    try std.testing.expect(runtime.takeManagementChanged());
+    try std.testing.expectEqual(@as(usize, 2), transactions.inventory.items().len);
+    try std.testing.expect(transactions.inventory.findConst(@splat(11)) == null);
+    try std.testing.expect(transactions.inventory.findConst(pending) != null);
+    try std.testing.expectEqual(@as(usize, 1), runtime.state.enablement_store.items().len);
+    try std.testing.expectEqual(@as(u64, 9), runtime.state.enablement_store.items()[0].workspace_id);
+    try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
+    try std.testing.expectEqual(state.EnablementHealth.ready, runtime.enablementHealth());
+    const bytes = (try persistence.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(bytes);
+    var restored = try management.decode(std.testing.allocator, bytes, .{ .max_assets = 8 });
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 2), restored.items().len);
+    const policy_bytes = (try enablement_file.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(policy_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, policy_bytes, "\"workspace_id\":11") == null);
+    // Resolving the transaction makes the id retirable; a definite write
+    // failure keeps the store frozen rather than pretending success.
+    try transactions.inventory.clearTransaction(pending);
+    try std.testing.expect(runtime.workspaceRetirementAllowed(9));
+    management.TestSupport.setFileStoreCommitFault(&persistence, .write_failed);
+    try std.testing.expect(runtime.retireWorkspace(9, harness.budget()));
+    try std.testing.expectEqual(ManagementHealth.write_failed, runtime.managementHealth());
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(9));
+    try std.testing.expectEqual(@as(usize, 0), runtime.state.enablement_store.items().len);
 }
 
 test "management outcome unknown freezes subsequent Skill mutations" {

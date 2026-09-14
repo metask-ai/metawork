@@ -33,7 +33,7 @@ const assets = [
   {
     installId: "aabbccdd",
     sourceKind: "local_package",
-    scope: { kind: "personal", workspaceId: null, workspaceEpoch: null },
+    scope: { kind: "personal", workspaceId: null },
     managementState: "ready",
     skillId: "skill-review",
     invocationName: "code-review",
@@ -55,7 +55,7 @@ const assets = [
   {
     installId: "eeff0011",
     sourceKind: "local_directory",
-    scope: { kind: "project", workspaceId: "1", workspaceEpoch: "1" },
+    scope: { kind: "project", workspaceId: "1" },
     managementState: "pending_verification",
     skillId: "skill-release",
     invocationName: "release-check",
@@ -76,7 +76,7 @@ const assets = [
   {
     installId: null,
     sourceKind: "external",
-    scope: { kind: "external", workspaceId: null, workspaceEpoch: null },
+    scope: { kind: "external", workspaceId: null },
     managementState: "externally_managed",
     skillId: "skill-notes",
     invocationName: "release-notes",
@@ -279,13 +279,10 @@ test("Skills center derives one exact policy context without cross-Workspace agg
   const projectTwo = {
     ...assets[1],
     installId: null,
-    scope: { kind: "project", workspaceId: "2", workspaceEpoch: "4" },
+    skillId: "skill-two",
+    scope: { kind: "project", workspaceId: "2" },
   };
-  const staleProjectTwo = {
-    ...projectTwo,
-    scope: { kind: "project", workspaceId: "2", workspaceEpoch: "3" },
-  };
-  const rows = [assets[0], projectOne, projectTwo, staleProjectTwo, assets[2]];
+  const rows = [assets[0], projectOne, projectTwo, assets[2]];
 
   assert.deepEqual(
     rowsForSkillContext(rows, "personal", null).map((asset) => asset.skillId),
@@ -293,15 +290,17 @@ test("Skills center derives one exact policy context without cross-Workspace agg
   );
   assert.deepEqual(
     rowsForSkillContext(rows, "project", workspaces[0]).map(
-      (asset) => `${asset.scope.workspaceId}:${asset.scope.workspaceEpoch}`,
+      (asset) => asset.scope.workspaceId,
     ),
-    ["1:1"],
+    ["1"],
   );
+  // Ownership is keyed by Workspace id alone; the Workspace's own epoch is
+  // irrelevant to which rows it owns.
   assert.deepEqual(
     rowsForSkillContext(rows, "project", secondWorkspace).map(
-      (asset) => `${asset.scope.workspaceId}:${asset.scope.workspaceEpoch}`,
+      (asset) => asset.skillId,
     ),
-    ["2:4"],
+    ["skill-two"],
   );
   assert.equal(rowsForSkillContext(rows, "project", null).length, 0);
 
@@ -407,7 +406,12 @@ test("Skills route uses canonical management and Workspace enablement commands",
   assert.match(page, /expectedSelectionRevision/);
   assert.match(page, /skills\.enablement\.follow_user/);
   assert.doesNotMatch(page, /ScopeFilter|\["all", "personal", "project"\]/);
-  assert.match(page, /asset\.scope\.workspaceEpoch === workspace\.epoch/);
+  assert.match(page, /asset\.scope\.workspaceId === workspace\.id,\n\s*\);/);
+  assert.doesNotMatch(
+    page,
+    /asset\.scope\.workspaceEpoch === workspace\.epoch/,
+  );
+  assert.match(page, /expectedWorkspaceEpoch: currentWorkspace\.epoch/);
   assert.match(
     css,
     /\.skill-header-actions > button \{[\s\S]*?display: inline-flex;[\s\S]*?width: auto;[\s\S]*?margin-top: 0;[\s\S]*?gap: 6px;/,

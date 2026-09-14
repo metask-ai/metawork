@@ -92,13 +92,14 @@ pub fn previewArchive(
 
 pub fn readDefinition(
     context: Context,
+    scope: management.Scope,
     install_id: management.InstallId,
     canonical_base: []const u8,
 ) Error!package.Preview {
     const current = context.state.inventoryConst().findConst(install_id) orelse
         return error.AssetNotFound;
     if (current.recovery != null) return error.InvalidAsset;
-    var root = try openManagedRoot(context, current.scope, canonical_base);
+    var root = try openManagedRoot(context, scope, canonical_base);
     defer root.deinit();
     const source = root.dir.openDir(
         context.io,
@@ -111,6 +112,7 @@ pub fn readDefinition(
 
 pub fn exportPackage(
     context: Context,
+    scope: management.Scope,
     install_id: management.InstallId,
     canonical_base: []const u8,
     absolute_destination: []const u8,
@@ -122,7 +124,7 @@ pub fn exportPackage(
         return error.AssetNotFound;
     if (current.state != .ready or current.recovery != null)
         return error.InvalidAsset;
-    var root = try openManagedRoot(context, current.scope, canonical_base);
+    var root = try openManagedRoot(context, scope, canonical_base);
     defer root.deinit();
     const source = root.dir.openDir(
         context.io,
@@ -241,6 +243,7 @@ pub fn installArchive(
 
 pub fn reimportDirectory(
     context: Context,
+    scope: management.Scope,
     canonical_base: []const u8,
     install_id: management.InstallId,
     absolute_path: []const u8,
@@ -257,6 +260,7 @@ pub fn reimportDirectory(
     defer source.close(context.io);
     return reimportSource(
         context,
+        scope,
         canonical_base,
         install_id,
         source,
@@ -267,6 +271,7 @@ pub fn reimportDirectory(
 
 pub fn reimportArchive(
     context: Context,
+    scope: management.Scope,
     canonical_base: []const u8,
     install_id: management.InstallId,
     absolute_path: []const u8,
@@ -312,6 +317,7 @@ pub fn reimportArchive(
     defer if (inspection.wrapperName() != null) source.close(context.io);
     return reimportSource(
         context,
+        scope,
         canonical_base,
         install_id,
         source,
@@ -322,13 +328,13 @@ pub fn reimportArchive(
 
 pub fn uninstall(
     context: Context,
+    scope: management.Scope,
     canonical_base: []const u8,
     install_id: management.InstallId,
     now_unix_seconds: ?u64,
 ) Error!state.MutationResult {
     const current = context.state.inventoryConst().findConst(install_id) orelse
         return error.AssetNotFound;
-    const scope = current.scope;
     const target_entry = try context.allocator.dupe(u8, current.target_entry);
     defer context.allocator.free(target_entry);
     const pending_operation = if (current.state == .pending_verification and
@@ -372,6 +378,7 @@ pub fn uninstall(
 
 pub fn retryVerification(
     context: Context,
+    scope: management.Scope,
     install_id: management.InstallId,
     canonical_base: []const u8,
     now_unix_seconds: ?u64,
@@ -380,7 +387,7 @@ pub fn retryVerification(
         return error.AssetNotFound;
     if (before.recovery == null) return error.InvalidAsset;
     if (before.requiresRecovery()) {
-        var root = try openManagedRoot(context, before.scope, canonical_base);
+        var root = try openManagedRoot(context, scope, canonical_base);
         defer root.deinit();
         try recoverOne(context, &root, install_id, now_unix_seconds);
     }
@@ -395,7 +402,7 @@ pub fn retryVerification(
     setReconciliation(
         context,
         install_id,
-        current.scope,
+        scope,
         current.target_entry,
         current.recovery.?.operation,
     );
@@ -413,7 +420,7 @@ pub fn recoverNoFail(
     var pending: std.ArrayList(management.InstallId) = .empty;
     defer pending.deinit(context.allocator);
     for (context.state.inventoryConst().items()) |asset| {
-        if (asset.scope.eql(scope) and asset.recovery != null)
+        if (asset.owner.owns(scope) and asset.recovery != null)
             pending.append(context.allocator, asset.install_id) catch {
                 return;
             };
@@ -493,7 +500,7 @@ pub fn reconcileNoFail(
     const asset = transactions.inventory.findConst(reconciliation.install_id) orelse return;
     const recovery = asset.recovery orelse return;
     if (context.state.management_health != .ready or recovery.phase != .reconciliation_pending or
-        !asset.scope.eql(scope) or recovery.operation != reconciliation.operation or
+        !asset.owner.owns(scope) or recovery.operation != reconciliation.operation or
         !std.mem.eql(u8, asset.target_entry, reconciliation.invocationName())) return;
     const accepted = if (reconciliation.operation == .uninstall) absent: {
         if (found) return;
@@ -585,6 +592,7 @@ fn installSource(
 
 fn reimportSource(
     context: Context,
+    scope: management.Scope,
     canonical_base: []const u8,
     install_id: management.InstallId,
     source: std.Io.Dir,
@@ -593,7 +601,6 @@ fn reimportSource(
 ) Error!state.MutationResult {
     const current = context.state.inventoryConst().findConst(install_id) orelse
         return error.AssetNotFound;
-    const scope = current.scope;
     const target_entry = try context.allocator.dupe(u8, current.target_entry);
     defer context.allocator.free(target_entry);
     var preview = try package.previewDirectory(context.io, context.allocator, source, .{});
