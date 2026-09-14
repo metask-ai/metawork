@@ -19,7 +19,6 @@ import {
   type PendingUi,
   type PermissionHistory,
   type PermissionChoice,
-  type PermissionProfileMutationResult,
   type CatalogRefreshResult,
   type CompactView,
   type RunInputView,
@@ -4016,20 +4015,6 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     workspaces,
     scheduledTasks,
     tasks,
-  };
-}
-
-export function decodePermissionProfileMutationResult(
-  value: unknown,
-): PermissionProfileMutationResult {
-  const item = object(value, "$", ["changed", "defaultProfile"]);
-  return {
-    changed: booleanValue(item.changed, "$.changed"),
-    defaultProfile: enumValue(
-      item.defaultProfile,
-      "$.defaultProfile",
-      permissionProfiles,
-    ),
   };
 }
 

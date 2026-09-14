@@ -3160,6 +3160,11 @@ pub const Runtime = struct {
         permission: TaskPermissionRequest,
         allow_unowned_automatic: bool,
     ) Error!u64 {
+        const remembered_profile: ?PermissionProfile = switch (permission) {
+            .interactive => |profile| profile orelse self.default_permission_profile,
+            .noninteractive => null,
+        };
+        const previous_default_profile = self.default_permission_profile;
         var prepared = try self.prepareTaskInWorkspaceInternal(
             workspace_id,
             expected_workspace_epoch,
@@ -3171,7 +3176,9 @@ pub const Runtime = struct {
             permission,
             allow_unowned_automatic,
         );
+        if (remembered_profile) |profile| self.default_permission_profile = profile;
         self.commitTaskStateBestEffort() catch |err| {
+            self.default_permission_profile = previous_default_profile;
             prepared.rollback(self);
             return err;
         };
@@ -4075,24 +4082,6 @@ pub const Runtime = struct {
 
     pub fn defaultPermissionProfile(self: *const Runtime) PermissionProfile {
         return self.default_permission_profile;
-    }
-
-    /// Changes only the default captured by future Tasks. Existing Task and
-    /// Session authority is immutable in this product slice.
-    pub fn setDefaultPermissionProfile(
-        self: *Runtime,
-        profile: PermissionProfile,
-    ) Error!bool {
-        self.syncLifecycle();
-        if (profile == self.default_permission_profile) return false;
-        const previous = self.default_permission_profile;
-        self.default_permission_profile = profile;
-        self.commitTaskStateBestEffort() catch |err| {
-            self.default_permission_profile = previous;
-            return err;
-        };
-        self.bumpRevision();
-        return true;
     }
 
     pub fn checkpointStoreHealth(self: *const Runtime) checkpoint_store.Health {

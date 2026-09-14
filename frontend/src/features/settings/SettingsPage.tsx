@@ -5,7 +5,6 @@ import type {
   BuiltinProviderId,
   ModelsView,
   Protocol,
-  PermissionProfile,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
@@ -18,8 +17,7 @@ import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
-type SettingsSection =
-  "general" | "permissions" | "account" | "models" | "providers";
+type SettingsSection = "general" | "account" | "models" | "providers";
 type ProvidersPage = "list" | "builtin" | "custom";
 type RequestedSelection = {
   selectionId: string;
@@ -176,7 +174,6 @@ export function SettingsPage({
   account,
   models,
   customProviderCapabilities,
-  permissionProfiles,
   focusTarget,
   initialSection = "general",
   disabled,
@@ -202,7 +199,6 @@ export function SettingsPage({
   onBeginLogin,
   onRetryRefresh,
   onLogout,
-  onSetDefaultPermissionProfile,
 }: {
   account: AccountView;
   models: ModelsView;
@@ -210,12 +206,6 @@ export function SettingsPage({
     management: boolean;
     secretCapture: boolean;
     modelTest: boolean;
-  };
-  permissionProfiles: {
-    enabled: boolean;
-    available: PermissionProfile[];
-    defaultProfile: PermissionProfile;
-    busy: boolean;
   };
   focusTarget: SettingsFocusTarget;
   initialSection?: SettingsSection;
@@ -279,7 +269,6 @@ export function SettingsPage({
   onBeginLogin: () => void;
   onRetryRefresh: () => void;
   onLogout: () => void;
-  onSetDefaultPermissionProfile: (profile: PermissionProfile) => void;
 }) {
   const { locale, setLocale, t } = useI18n();
   const customProviderSettingsAvailable =
@@ -322,7 +311,6 @@ export function SettingsPage({
   const content = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
   const generalHeading = useRef<HTMLHeadingElement>(null);
-  const permissionsHeading = useRef<HTMLHeadingElement>(null);
   const accountHeading = useRef<HTMLHeadingElement>(null);
   const modelsHeading = useRef<HTMLHeadingElement>(null);
   const providersHeading = useRef<HTMLHeadingElement>(null);
@@ -429,22 +417,6 @@ export function SettingsPage({
         : []),
     ],
     [t],
-  );
-  const permissionOptions = useMemo<SelectionMenuOption[]>(
-    () =>
-      permissionProfiles.available.map((profile) => ({
-        value: profile,
-        label: t(`permission.profile.${profile}`),
-        description: t(`permission.profile.${profile}.help`),
-        descriptionKind: "text",
-        trailing:
-          profile === "full_access" ? (
-            <span className="permission-profile-risk" aria-hidden="true">
-              <Icon name="warning" />
-            </span>
-          ) : undefined,
-      })),
-    [permissionProfiles.available, t],
   );
   const providerOptions = useMemo<SelectionMenuOption[]>(
     () => [
@@ -664,18 +636,13 @@ export function SettingsPage({
   }, [focusTarget, customProviderSettingsAvailable]);
 
   useEffect(() => {
-    if (
-      (activeSection === "permissions" && !permissionProfiles.enabled) ||
-      (activeSection === "providers" && !customProviderSettingsAvailable)
-    ) {
+    if (activeSection === "providers" && !customProviderSettingsAvailable) {
       setActiveSection("general");
       return;
     }
     const frame = window.requestAnimationFrame(() => {
       if (activeSection === "general" && focusTarget === "title") {
         generalHeading.current?.focus();
-      } else if (activeSection === "permissions") {
-        permissionsHeading.current?.focus();
       } else if (activeSection === "account") {
         accountHeading.current?.focus();
       } else if (activeSection === "models") {
@@ -689,7 +656,6 @@ export function SettingsPage({
     activeSection,
     focusTarget,
     customProviderSettingsAvailable,
-    permissionProfiles.enabled,
     providersPage,
   ]);
 
@@ -1041,24 +1007,6 @@ export function SettingsPage({
             </span>
             <span>{t("settings.general")}</span>
           </a>
-          {permissionProfiles.enabled && (
-            <a
-              className="focus-ring"
-              href="#settings-permissions"
-              aria-current={
-                activeSection === "permissions" ? "location" : undefined
-              }
-              onClick={(event) => {
-                event.preventDefault();
-                setActiveSection("permissions");
-              }}
-            >
-              <span className="settings-nav-icon" aria-hidden="true">
-                <Icon name="shield" />
-              </span>
-              <span>{t("settings.permissions")}</span>
-            </a>
-          )}
           <a
             className="focus-ring"
             href="#settings-account"
@@ -1150,51 +1098,6 @@ export function SettingsPage({
                       onValueChange={(value) => setLocale(value as Locale)}
                     />
                   </div>
-                </div>
-              </div>
-            </section>
-          )}
-
-          {activeSection === "permissions" && permissionProfiles.enabled && (
-            <section id="settings-permissions" className="settings-section">
-              <div className="settings-section-heading">
-                <h2 ref={permissionsHeading} tabIndex={-1}>
-                  {t("settings.permissions")}
-                </h2>
-              </div>
-              <div className="settings-group">
-                <h3 className="settings-group-label">
-                  {t("settings.permission_defaults")}
-                </h3>
-                <div className="permission-policy-card">
-                  <div className="permission-policy-copy">
-                    <strong>
-                      {t(
-                        `permission.profile.${permissionProfiles.defaultProfile}`,
-                      )}
-                    </strong>
-                    <p>{t("permission.default.help")}</p>
-                  </div>
-                  <SelectionMenu
-                    triggerId="settings-permission-profile"
-                    value={permissionProfiles.defaultProfile}
-                    options={permissionOptions}
-                    placeholder={t("permission.default.label")}
-                    ariaLabel={t("permission.default.label")}
-                    helper={t("permission.menu_help")}
-                    disabled={disabled || permissionProfiles.busy}
-                    busy={permissionProfiles.busy}
-                    valueLayout="detailed"
-                    triggerClassName="permission-profile-trigger"
-                    contentClassName="permission-profile-menu"
-                    onValueChange={(value) =>
-                      onSetDefaultPermissionProfile(value as PermissionProfile)
-                    }
-                  />
-                  <p className="permission-policy-boundary">
-                    <Icon name="info" />
-                    {t("permission.full_access.boundary")}
-                  </p>
                 </div>
               </div>
             </section>

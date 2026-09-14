@@ -786,7 +786,6 @@ export const zhCN: Record<MessageId, string> = {
   "operation.task_restore": "恢复任务",
   "operation.task_delete": "删除任务记录",
   "operation.workspace_remove": "移除工作区",
-  "operation.permission_default": "更新权限默认策略",
   "operation.skill_catalog_refresh": "刷新 Skill 目录",
   "search.open": "搜索",
   "search.title": "搜索 MetaWork",
@@ -806,12 +805,10 @@ export const zhCN: Record<MessageId, string> = {
   "settings.intro": "管理 MetaWork 开始新任务时使用的默认配置。",
   "settings.sections": "设置分区",
   "settings.general": "通用",
-  "settings.permissions": "权限",
   "settings.account": "账户",
   "settings.models": "模型",
   "settings.providers": "Provider",
   "settings.general_basics": "常规",
-  "settings.permission_defaults": "新任务默认策略",
   "settings.account_profile": "账户信息",
   "settings.account_security": "安全操作",
   "settings.providers_saved": "模型服务",
@@ -858,19 +855,15 @@ export const zhCN: Record<MessageId, string> = {
   "permission.profile.full_access.help":
     "MetaWork 跳过常规工具操作的批准；AgentCore 核心保护及系统或服务权限仍可阻止操作。",
   "permission.new_task.label": "权限策略",
-  "permission.new_task.help": "此权限在 Task 创建时确定。",
+  "permission.new_task.help": "创建后固定，并作为下次新任务的默认选择。",
   "permission.task.label": "权限策略",
-  "permission.task.help": "创建此 Task 时已固定；修改默认策略不会影响它。",
+  "permission.task.help":
+    "创建此 Task 时已固定；之后新建 Task 的选择不会影响它。",
   "permission.task.full_access.help":
     "创建时已固定；跳过常规批准，但 AgentCore 与系统保护仍然有效。",
-  "permission.default.label": "新 Task 默认策略",
-  "permission.default.help":
-    "只影响之后创建的 Task；已有 Task 保留创建时的策略。",
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
     "完全访问会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",
-  "permission.default_updated": "已更新权限默认策略。",
-  "permission.default_update_failed": "MetaWork 无法更新权限默认策略。",
   "settings.default_model_for_new_tasks": "新任务默认模型",
   "settings.current_default": "当前默认",
   "settings.provider": "Provider",

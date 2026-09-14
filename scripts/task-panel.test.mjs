@@ -76,6 +76,13 @@ const { FileChangesView } = await vite.ssrLoadModule(
 const { FilePreviewRefreshAction, FilePreviewView } = await vite.ssrLoadModule(
   "/src/features/task-panel/FilePreviewView.tsx",
 );
+const {
+  HighlightedSource,
+  countSourceLines,
+  isWithinHighlightBudget,
+  resolvePreviewLanguage,
+  validateHighlightTree,
+} = await vite.ssrLoadModule("/src/features/task-panel/HighlightedSource.tsx");
 const { TaskPanel } = await vite.ssrLoadModule(
   "/src/features/task-panel/TaskPanel.tsx",
 );
@@ -1842,7 +1849,280 @@ function filePreviewElement(state, onRefresh = () => {}) {
   );
 }
 
-test("Task Panel renders file content without explanatory chrome", () => {
+test("source preview language resolution is explicit and bounded", () => {
+  for (const [path, content, expected] of [
+    ["src/main.MTS", "", "typescript"],
+    ["src/component.tsx", "", "tsx"],
+    ["C:\\workspace\\Makefile", "", "makefile"],
+    ["containers/Dockerfile", "", "docker"],
+    ["native/CMakeLists.txt", "", "cmake"],
+    ["crates/Cargo.lock", "", "toml"],
+    ["ruby/Gemfile", "", "ruby"],
+    ["native/build.zon", "", "zig"],
+    ["config/settings.JSON", "", "json"],
+    ["docs/readme.Markdown", "", "markdown"],
+    ["web/page.HTML", "", "markup"],
+    ["scripts/release", "#!/usr/bin/env -S node --no-warnings\n", "javascript"],
+    ["scripts/check.command", "#!/usr/bin/env bash\n", "bash"],
+    ["scripts/check", "#!/opt/tools/python3\n", "python"],
+    ["notes.txt", "const misleading = true;", null],
+  ]) {
+    assert.equal(resolvePreviewLanguage(path, content), expected);
+  }
+
+  assert.equal(isWithinHighlightBudget("x".repeat(65_536)), true);
+  assert.equal(isWithinHighlightBudget("x".repeat(65_537)), false);
+  assert.equal(isWithinHighlightBudget("x\n".repeat(1_499)), true);
+  assert.equal(isWithinHighlightBudget("x\n".repeat(1_500)), false);
+  assert.equal(isWithinHighlightBudget("x\r".repeat(1_500)), false);
+});
+
+test("source preview line numbers preserve every displayed line boundary", () => {
+  for (const [content, expected] of [
+    ["", 1],
+    ["plain", 1],
+    ["plain\n", 2],
+    ["one\ntwo\nthree", 3],
+    ["one\r\ntwo", 2],
+    ["one\rtwo", 2],
+    ["\n\n", 3],
+  ]) {
+    assert.equal(countSourceLines(content), expected);
+  }
+
+  const content = "first\r\n\r\nthird\n";
+  render(
+    createElement(HighlightedSource, {
+      displayPath: "notes.txt",
+      content,
+    }),
+  );
+  assert.equal(
+    document.querySelector(".task-panel-code-gutter").textContent,
+    "1\n2\n3\n4",
+  );
+  assert.equal(
+    document
+      .querySelector(".task-panel-code-gutter")
+      .getAttribute("aria-hidden"),
+    "true",
+  );
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    content,
+  );
+});
+
+test("source preview does not load grammars for unknown or oversized content", async () => {
+  let loadCount = 0;
+  const loadHighlighter = async () => {
+    loadCount += 1;
+    throw new Error("must not load");
+  };
+  const view = render(
+    createElement(HighlightedSource, {
+      displayPath: "notes.txt",
+      content: "plain text",
+      loadHighlighter,
+    }),
+  );
+  view.rerender(
+    createElement(HighlightedSource, {
+      displayPath: "large.js",
+      content: "x".repeat(65_537),
+      loadHighlighter,
+    }),
+  );
+  view.rerender(
+    createElement(HighlightedSource, {
+      displayPath: "many-lines.js",
+      content: "x\n".repeat(1_500),
+      loadHighlighter,
+    }),
+  );
+  await act(async () => Promise.resolve());
+  assert.equal(loadCount, 0);
+});
+
+test("source preview keeps plain text after one failed highlight attempt", async () => {
+  let loadCount = 0;
+  const content = "const ready = true;";
+  const props = {
+    displayPath: "main.js",
+    content,
+    loadHighlighter: async () => {
+      loadCount += 1;
+      throw new Error("fixture load failure");
+    },
+  };
+  const view = render(createElement(HighlightedSource, props));
+  await waitFor(() => assert.equal(loadCount, 1));
+  view.rerender(createElement(HighlightedSource, props));
+  await act(async () => Promise.resolve());
+  assert.equal(loadCount, 1);
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    content,
+  );
+  assert.equal(document.querySelector(".token"), null);
+});
+
+test("source preview accepts only text-preserving span ASTs", () => {
+  const valid = {
+    type: "root",
+    children: [
+      {
+        type: "element",
+        tagName: "span",
+        properties: { className: ["token", "keyword"] },
+        children: [{ type: "text", value: "const" }],
+      },
+      { type: "text", value: " ready = true;" },
+    ],
+  };
+  assert.notEqual(validateHighlightTree(valid, "const ready = true;"), null);
+  assert.equal(validateHighlightTree(valid, "changed"), null);
+  assert.equal(
+    validateHighlightTree(
+      {
+        type: "root",
+        children: [
+          {
+            type: "element",
+            tagName: "img",
+            properties: { src: "https://example.com/track.png" },
+            children: [],
+          },
+        ],
+      },
+      "",
+    ),
+    null,
+  );
+
+  for (const properties of [
+    { className: ["token", "keyword"], style: "display:none" },
+    { className: ["token", 'keyword" onclick="attack'] },
+  ]) {
+    assert.equal(
+      validateHighlightTree(
+        {
+          type: "root",
+          children: [
+            {
+              type: "element",
+              tagName: "span",
+              properties,
+              children: [{ type: "text", value: "const" }],
+            },
+          ],
+        },
+        "const",
+      ),
+      null,
+    );
+  }
+
+  let tooDeep = { type: "text", value: "" };
+  for (let depth = 0; depth < 9; depth += 1) {
+    tooDeep = {
+      type: "element",
+      tagName: "span",
+      properties: { className: ["token"] },
+      children: [tooDeep],
+    };
+  }
+  assert.equal(
+    validateHighlightTree({ type: "root", children: [tooDeep] }, ""),
+    null,
+  );
+  assert.equal(
+    validateHighlightTree(
+      {
+        type: "root",
+        children: Array.from({ length: 20_000 }, () => ({
+          type: "text",
+          value: "",
+        })),
+      },
+      "",
+    ),
+    null,
+  );
+});
+
+test("source preview progressively applies the registered grammar", async () => {
+  const content = 'const 名称 = "🙂";\r\n\t// 保持原文\r\n';
+  render(
+    createElement(HighlightedSource, {
+      displayPath: "src/main.zig",
+      content,
+    }),
+  );
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    content,
+  );
+  await waitFor(() => assert.ok(document.querySelector(".token.keyword")));
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    content,
+  );
+});
+
+test("source preview rejects a late highlight result after the file changes", async () => {
+  let resolveLoader;
+  let loadCount = 0;
+  const loadHighlighter = () => {
+    loadCount += 1;
+    return new Promise((resolve) => {
+      resolveLoader = resolve;
+    });
+  };
+  const view = render(
+    createElement(HighlightedSource, {
+      displayPath: "old.js",
+      content: "const oldValue = true;",
+      loadHighlighter,
+    }),
+  );
+  await waitFor(() => assert.equal(loadCount, 1));
+
+  view.rerender(
+    createElement(HighlightedSource, {
+      displayPath: "notes.txt",
+      content: "current plain text",
+      loadHighlighter,
+    }),
+  );
+  await act(async () => {
+    resolveLoader({
+      highlightSource() {
+        return {
+          type: "root",
+          children: [
+            {
+              type: "element",
+              tagName: "span",
+              properties: { className: ["token", "keyword"] },
+              children: [{ type: "text", value: "const" }],
+            },
+            { type: "text", value: " oldValue = true;" },
+          ],
+        };
+      },
+    });
+    await Promise.resolve();
+  });
+
+  assert.equal(
+    document.querySelector(".task-panel-code-source code").textContent,
+    "current plain text",
+  );
+  assert.equal(document.querySelector("span.token"), null);
+});
+
+test("Task Panel renders file content without explanatory chrome", async () => {
   const state = {
     selected: {
       id: "file-1",
@@ -1862,6 +2142,8 @@ test("Task Panel renders file content without explanatory chrome", () => {
   assert.equal(screen.queryByRole("button", { name: "Preview details" }), null);
   assert.equal(screen.queryByText("Recorded diff"), null);
   assert.ok(screen.getByText("const ready = true;"));
+  await waitFor(() => assert.ok(document.querySelector(".token.keyword")));
+  assert.equal(document.querySelector(".task-panel-code").tabIndex, 0);
   assert.equal(screen.queryByRole("combobox"), null);
 });
 
@@ -1890,7 +2172,7 @@ test("file preview actions and content remain independently composable", () => {
   );
 });
 
-test("Markdown preview renders documents, switches to source, and preserves mode while refreshing", () => {
+test("Markdown preview renders documents, switches to source, and preserves mode while refreshing", async () => {
   const content =
     "# API guide\n\n**Strong**\n\n| key | value |\n| --- | --- |\n| page | 1 |\n\n- [x] done\n\n> note\n\n```\nGET /users\n```\n\n![Remote image](https://example.com/track.png)\n\n[local](relative.md)\n\n<script>alert(1)</script>";
   const state = {
@@ -1916,9 +2198,10 @@ test("Markdown preview renders documents, switches to source, and preserves mode
   assert.ok(screen.getByText("Known sensitive content was hidden"));
   fireEvent.click(screen.getByRole("tab", { name: "Source" }));
   assert.equal(
-    document.querySelector("pre.task-panel-code").textContent,
+    document.querySelector(".task-panel-code-source code").textContent,
     content,
   );
+  await waitFor(() => assert.ok(document.querySelector(".token")));
   assert.equal(screen.queryByRole("heading", { name: "API guide" }), null);
   assert.equal(document.querySelector("table"), null);
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -1933,14 +2216,14 @@ test("Markdown preview renders documents, switches to source, and preserves mode
     "true",
   );
   assert.equal(
-    document.querySelector("pre.task-panel-code").textContent,
+    document.querySelector(".task-panel-code-source code").textContent,
     "# Updated",
   );
   fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
   assert.ok(screen.getByRole("heading", { name: "Updated" }));
 });
 
-test("text and HTML stay inert source without extra preview chrome", () => {
+test("text and HTML stay inert source without extra preview chrome", async () => {
   for (const path of ["notes.txt", "script.js", "page.html", "page.HTM"]) {
     const content =
       '<h1>Page</h1><script>window.zero.invoke("attack")</script><img src="https://example.com/track.png">';
@@ -1955,7 +2238,16 @@ test("text and HTML stay inert source without extra preview chrome", () => {
       },
     };
     render(filePreviewElement(state));
-    assert.equal(document.querySelector("pre").textContent, content);
+    if (path === "notes.txt") {
+      await act(async () => Promise.resolve());
+      assert.equal(document.querySelector(".token"), null);
+    } else {
+      await waitFor(() => assert.ok(document.querySelector(".token")));
+    }
+    assert.equal(
+      document.querySelector(".task-panel-code-source code").textContent,
+      content,
+    );
     assert.equal(document.querySelector("h1, script, img, iframe"), null);
     assert.equal(screen.queryByRole("tablist"), null);
     assert.equal(
@@ -2219,7 +2511,7 @@ test("task information uses a keyboard-accessible icon and retains creation MCP 
     assert.equal(screen.queryByRole("combobox"), null);
     assert.match(
       document.body.textContent,
-      /Fixed when this Task was created.*default does not affect it/,
+      /Fixed when this Task was created.*Choices for later Tasks do not affect it/,
     );
     assert.match(document.body.textContent, /not current connection status/);
     await user.keyboard("{Escape}");
