@@ -73,6 +73,30 @@ test("rich clipboard writes one ordered item and preserves exact Markdown", asyn
   assert.deepEqual(textWrites, []);
 });
 
+test("rich clipboard preserves product-limit Markdown and expanded HTML", async () => {
+  const writes = [];
+  installClipboard(
+    {
+      async write(items) {
+        writes.push(items);
+      },
+      async writeText() {
+        assert.fail("rich-capable clipboard must not use the fallback");
+      },
+    },
+    MockClipboardItem,
+  );
+  const markdown = `PLAIN_256K\n${"x".repeat(256 * 1024 - 11)}`;
+  const html = `<p>HTML_BEGIN</p><table>${"<tr><td>内容</td></tr>".repeat(50_000)}</table><p>HTML_END</p>`;
+
+  assert.equal(await writeRichClipboard(markdown, html), "rich");
+  const item = writes[0][0];
+  assert.equal(await (await item.getType("text/plain")).text(), markdown);
+  assert.equal(await (await item.getType("text/html")).text(), html);
+  assert.equal(new TextEncoder().encode(markdown).length, 256 * 1024);
+  assert.ok(new TextEncoder().encode(html).length > 1_000_000);
+});
+
 test("explicit missing rich capability falls back to complete Markdown text", async () => {
   const markdown = `PLAIN_256K\n${"x".repeat(256 * 1024 - 11)}`;
   const textWrites = [];

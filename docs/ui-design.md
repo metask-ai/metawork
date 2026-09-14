@@ -641,6 +641,7 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 - 支持 Markdown、表格、代码、引用和链接；
 - commentary 作为 Assistant 过程叙事按 Host 提供的有序 group array 渲染为同一 Assistant message 内的独立 Markdown block；Renderer 不自行按换行切组，也不按 chunk 或 Tool 穿插伪造顺序。Host 发布新的 closed commentary group 后，主阅读流随 Snapshot revision 追加一个稳定 block；
 - `final | partial` response 使用安全 Markdown；尚未收到 output-segment 定性的 provisional 紧随 commentary 以中性纯文本呈现，不称为草稿、不解释 Markdown，discard 后随下一 Snapshot 消失；流式生成只显示克制的单一活动指示；
+- 已 terminal 且非空的 `final | partial` response 在正文下方提供“复制回复”：最新一条始终可见，历史条目在 response hover 或 focus-within 时显示，coarse pointer 设备始终显示；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML，成功切换为勾选和“已复制”约 1.2 秒，失败显示 warning 和“复制失败”约 1.5 秒，重复操作重置反馈周期，真实写入完成前不得显示成功。代码块右上角提供独立“复制代码”，只复制当前显示的代码正文；按钮具备可见键盘焦点、明确 accessible name 和至少 32px 点击高度，不把语言名、围栏、行号或 UI 文案带入剪贴板；
 - 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
 - output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
