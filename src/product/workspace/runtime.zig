@@ -120,6 +120,7 @@ pub const Error = StorageError || error{
     WorkspaceNotTrusted,
     WorkspaceCapacity,
     WorkspaceIdentityExhausted,
+    WorkspaceIdentityUntrusted,
     WorkspaceOrderExhausted,
     WorkspaceEpochExhausted,
     WorkspaceRemovalInProgress,
@@ -197,6 +198,10 @@ pub const OpenAuthority = struct {
     context: *const anyopaque,
     automatic_contains_fn: *const fn (*const anyopaque, []const u8) bool,
     reusable_fn: *const fn (*const anyopaque, u64) bool,
+    /// False while another owner's durable records that name Workspace ids
+    /// could not be read: a fresh id might then collide with one of them.
+    /// Reauthorizing an existing record never allocates and stays allowed.
+    allocation_allowed: bool = true,
 
     fn automaticContains(self: OpenAuthority, path: []const u8) bool {
         return self.automatic_contains_fn(self.context, path);
@@ -607,6 +612,7 @@ pub const Runtime = struct {
             return error.WorkspaceCapacity;
         if (slot == null) slot = findEmpty(self.records);
         const target = slot orelse return error.WorkspaceCapacity;
+        if (!authority.allocation_allowed) return error.WorkspaceIdentityUntrusted;
         if (self.next_id == 0 or self.next_id == std.math.maxInt(u64))
             return error.WorkspaceIdentityExhausted;
 
@@ -809,7 +815,9 @@ pub const Runtime = struct {
         self: *Runtime,
         sensitive: []const u8,
         storage: Storage,
+        allocation_allowed: bool,
     ) Error!PreparedAutomaticWorkspace {
+        if (!allocation_allowed) return error.WorkspaceIdentityUntrusted;
         const allocator = if (self.automatic_allocator) |*value| value else return error.WorkspaceUnavailable;
         if (self.count(.automatic) >= self.max_automatic) return error.WorkspaceCapacity;
         const target = findEmpty(self.records) orelse return error.WorkspaceCapacity;
@@ -1284,7 +1292,7 @@ test "automatic Workspace preparation owns capacity and settles its private allo
     );
     defer runtime.deinit(storage);
 
-    var rolled_back = try runtime.prepareAutomatic("", storage);
+    var rolled_back = try runtime.prepareAutomatic("", storage, true);
     const rolled_back_facts = runtime.preparedAutomaticFacts(&rolled_back);
     const rolled_back_key = try std.testing.allocator.dupe(
         u8,
@@ -1294,7 +1302,7 @@ test "automatic Workspace preparation owns capacity and settles its private allo
     try std.testing.expect(!runtime.automaticCapacityAvailable());
     try std.testing.expectError(
         error.WorkspaceCapacity,
-        runtime.prepareAutomatic("", storage),
+        runtime.prepareAutomatic("", storage, true),
     );
     try std.testing.expect(runtime.rollbackPreparedAutomatic(&rolled_back, storage));
     try std.testing.expect(runtime.automaticCapacityAvailable());
@@ -1307,7 +1315,7 @@ test "automatic Workspace preparation owns capacity and settles its private allo
         ),
     );
 
-    var abandoned = try runtime.prepareAutomatic("", storage);
+    var abandoned = try runtime.prepareAutomatic("", storage, true);
     const abandoned_facts = runtime.preparedAutomaticFacts(&abandoned);
     const abandoned_key = try std.testing.allocator.dupe(
         u8,
@@ -1322,7 +1330,7 @@ test "automatic Workspace preparation owns capacity and settles its private allo
     );
     abandoned_dir.close(std.testing.io);
 
-    var completed = try runtime.prepareAutomatic("", storage);
+    var completed = try runtime.prepareAutomatic("", storage, true);
     const completed_id = completed.id();
     runtime.completeAutomatic(&completed);
     try std.testing.expect(!runtime.automaticCapacityAvailable());
