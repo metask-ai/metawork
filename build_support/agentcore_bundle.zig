@@ -72,9 +72,9 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
     const lock_path = if (std.mem.eql(u8, manifest.target.id, "aarch64-windows-gnu"))
         "build_support/agentcore-bundle.windows-aarch64.lock.json"
     else if (std.mem.eql(u8, manifest.target.id, "x86_64-windows-gnu"))
-        "build_support/agentcore-bundle.windows.lock.json"
+        "build_support/agentcore-bundle.windows-x86_64.lock.json"
     else if (std.mem.eql(u8, manifest.target.id, "aarch64-macos"))
-        "build_support/agentcore-bundle.macos.lock.json"
+        "build_support/agentcore-bundle.macos-aarch64.lock.json"
     else if (std.mem.eql(u8, manifest.target.id, "x86_64-macos"))
         "build_support/agentcore-bundle.macos-x86_64.lock.json"
     else

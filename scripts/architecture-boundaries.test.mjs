@@ -2346,8 +2346,8 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
   assert.doesNotMatch(build, /\.addObjectFile\(/);
   for (const [target, lock] of [
     ["aarch64-windows-gnu", "agentcore-bundle.windows-aarch64.lock.json"],
-    ["x86_64-windows-gnu", "agentcore-bundle.windows.lock.json"],
-    ["aarch64-macos", "agentcore-bundle.macos.lock.json"],
+    ["x86_64-windows-gnu", "agentcore-bundle.windows-x86_64.lock.json"],
+    ["aarch64-macos", "agentcore-bundle.macos-aarch64.lock.json"],
     ["x86_64-macos", "agentcore-bundle.macos-x86_64.lock.json"],
   ]) {
     assert.ok(bundleVerifier.includes(target));

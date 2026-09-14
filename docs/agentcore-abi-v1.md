@@ -8,9 +8,9 @@
 
 MetaWork 接受 binary ABI version 1。各 target 的 toolchain、build、link、source identity、manifest bytes 与 payload checksum 由 repository lock 唯一定义：
 
-- [Windows x86_64 GNU lock](../build_support/agentcore-bundle.windows.lock.json)
+- [Windows x86_64 GNU lock](../build_support/agentcore-bundle.windows-x86_64.lock.json)
 - [Windows arm64 GNU lock](../build_support/agentcore-bundle.windows-aarch64.lock.json)
-- [macOS arm64 lock](../build_support/agentcore-bundle.macos.lock.json)
+- [macOS arm64 lock](../build_support/agentcore-bundle.macos-aarch64.lock.json)
 - [macOS x86_64 lock](../build_support/agentcore-bundle.macos-x86_64.lock.json)
 
 lock 只有满足当前 revision 接受规则时才可消费；尚未取得新 artifact 的 target 保持 fail closed，不得用旧 lock、其他 target 或伪造 manifest 补齐。

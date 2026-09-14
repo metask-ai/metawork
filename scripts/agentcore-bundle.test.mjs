@@ -147,8 +147,8 @@ async function repository(t, manifest) {
   await mkdir(lockRoot, { recursive: true });
   for (const lockName of [
     "agentcore-bundle.windows-aarch64.lock.json",
-    "agentcore-bundle.windows.lock.json",
-    "agentcore-bundle.macos.lock.json",
+    "agentcore-bundle.windows-x86_64.lock.json",
+    "agentcore-bundle.macos-aarch64.lock.json",
     "agentcore-bundle.macos-x86_64.lock.json",
   ]) {
     await writeFile(path.join(lockRoot, lockName), JSON.stringify(manifest));
@@ -379,7 +379,7 @@ test("staged preflight refuses a retired revision lock", async (t) => {
   });
   candidate.manifest.contract.binary_abi_revision = 14;
   await writeFile(
-    path.join(root, "build_support", "agentcore-bundle.windows.lock.json"),
+    path.join(root, "build_support", "agentcore-bundle.windows-x86_64.lock.json"),
     JSON.stringify(candidate.manifest),
   );
   await assert.rejects(
