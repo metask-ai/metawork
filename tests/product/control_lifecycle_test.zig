@@ -5043,7 +5043,7 @@ test "Product Control shutdown rejects new Task admission without creating produ
     );
     try std.testing.expectEqual(@as(u64, 0), workbench.currentRevision());
 
-    var snapshot_storage: [4096]u8 = undefined;
+    var snapshot_storage: [8192]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"tasks\":[]") != null);
 }
