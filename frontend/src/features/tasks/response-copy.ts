@@ -22,8 +22,9 @@ export function latestCopyableResponseId(
 }
 
 export async function copyResponseMarkdown(markdown: string): Promise<void> {
-  const html = await renderMarkdownForClipboard(markdown);
-  await writeRichClipboard(markdown, html);
+  await writeRichClipboard(markdown, () =>
+    renderMarkdownForClipboard(markdown),
+  );
 }
 
 export async function copyCodeText(value: string): Promise<void> {

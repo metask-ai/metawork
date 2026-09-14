@@ -61,7 +61,7 @@ test("rich clipboard writes one ordered item and preserves exact Markdown", asyn
   const markdown = "  # 标题\n\n```ts\nconst x = 1;\n```\n\n";
   const html = "<h1>标题</h1><pre><code>const x = 1;\n</code></pre>";
 
-  assert.equal(await writeRichClipboard(markdown, html), "rich");
+  assert.equal(await writeRichClipboard(markdown, () => html), "rich");
   assert.equal(writes.length, 1);
   assert.equal(writes[0].length, 1);
   assert.deepEqual(writes[0][0].types, ["text/html", "text/plain"]);
@@ -89,7 +89,7 @@ test("rich clipboard preserves product-limit Markdown and expanded HTML", async 
   const markdown = `PLAIN_256K\n${"x".repeat(256 * 1024 - 11)}`;
   const html = `<p>HTML_BEGIN</p><table>${"<tr><td>内容</td></tr>".repeat(50_000)}</table><p>HTML_END</p>`;
 
-  assert.equal(await writeRichClipboard(markdown, html), "rich");
+  assert.equal(await writeRichClipboard(markdown, () => html), "rich");
   const item = writes[0][0];
   assert.equal(await (await item.getType("text/plain")).text(), markdown);
   assert.equal(await (await item.getType("text/html")).text(), html);
@@ -100,15 +100,23 @@ test("rich clipboard preserves product-limit Markdown and expanded HTML", async 
 test("explicit missing rich capability falls back to complete Markdown text", async () => {
   const markdown = `PLAIN_256K\n${"x".repeat(256 * 1024 - 11)}`;
   const textWrites = [];
+  let rendered = false;
   installClipboard({
     async writeText(value) {
       textWrites.push(value);
     },
   });
 
-  assert.equal(await writeRichClipboard(markdown, "<p>large</p>"), "plain");
+  assert.equal(
+    await writeRichClipboard(markdown, () => {
+      rendered = true;
+      return "<p>large</p>";
+    }),
+    "plain",
+  );
   assert.equal(new TextEncoder().encode(textWrites[0]).length, 256 * 1024);
   assert.equal(textWrites[0], markdown);
+  assert.equal(rendered, false);
 });
 
 test("an explicit MIME support rejection uses the text fallback", async () => {
@@ -130,7 +138,10 @@ test("an explicit MIME support rejection uses the text fallback", async () => {
     PlainOnlyClipboardItem,
   );
 
-  assert.equal(await writeRichClipboard("markdown", "<p>html</p>"), "plain");
+  assert.equal(
+    await writeRichClipboard("markdown", () => "<p>html</p>"),
+    "plain",
+  );
   assert.deepEqual(textWrites, ["markdown"]);
 });
 
@@ -148,8 +159,60 @@ test("a rich clipboard runtime failure does not retry through writeText", async 
     MockClipboardItem,
   );
 
-  await assert.rejects(writeRichClipboard("markdown", "<p>html</p>"), /denied/);
+  await assert.rejects(
+    writeRichClipboard("markdown", () => "<p>html</p>"),
+    /denied/,
+  );
   assert.equal(textWrites, 0);
+});
+
+test("rich write starts in the user gesture stack before lazy HTML resolves", async () => {
+  let resolveHtml;
+  const html = new Promise((resolve) => {
+    resolveHtml = resolve;
+  });
+  let writeStarted = false;
+  let htmlObserved = null;
+  installClipboard(
+    {
+      async write(items) {
+        writeStarted = true;
+        htmlObserved = await (await items[0].getType("text/html")).text();
+      },
+      async writeText() {
+        assert.fail("rich-capable clipboard must not use the fallback");
+      },
+    },
+    MockClipboardItem,
+  );
+
+  const writing = writeRichClipboard("markdown", () => html);
+  assert.equal(writeStarted, true);
+  assert.equal(htmlObserved, null);
+  resolveHtml("<p>lazy</p>");
+  assert.equal(await writing, "rich");
+  assert.equal(htmlObserved, "<p>lazy</p>");
+});
+
+test("lazy HTML conversion failure rejects the already-started rich write", async () => {
+  installClipboard(
+    {
+      async write(items) {
+        await items[0].getType("text/html");
+      },
+      async writeText() {
+        assert.fail("conversion failure must not trigger the text fallback");
+      },
+    },
+    MockClipboardItem,
+  );
+
+  await assert.rejects(
+    writeRichClipboard("markdown", async () => {
+      throw new Error("render failed");
+    }),
+    /render failed/,
+  );
 });
 
 test("plain code copy preserves only the supplied displayed value", async () => {

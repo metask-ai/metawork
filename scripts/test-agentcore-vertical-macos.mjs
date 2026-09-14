@@ -71,6 +71,11 @@ const windowsWebViewFocusProbeScript = path.join(
   "scripts",
   "probe-windows-webview-focus.ps1",
 );
+const windowsClipboardProbeScript = path.join(
+  root,
+  "scripts",
+  "probe-windows-clipboard.ps1",
+);
 
 // This harness owns the artifact it drives. run-agentcore-vertical-windows.mjs
 // builds the same artifact before importing this module and sets the flag so
@@ -137,6 +142,24 @@ const attachmentPngPath = join(canonicalWorkspace, "reference.png");
 const attachmentJpegPath = join(canonicalWorkspace, "brief.jpg");
 await writeFile(attachmentPngPath, attachmentPngBytes, { mode: 0o600 });
 await writeFile(attachmentJpegPath, attachmentJpegBytes, { mode: 0o600 });
+const windowsClipboard70 = clipboardMarkdownFixture(
+  70 * 1024,
+  "70K",
+  "multimodal",
+);
+const windowsClipboard256 = clipboardMarkdownFixture(
+  256 * 1024,
+  "256K",
+  "text",
+);
+const windowsClipboard70Path = join(canonicalWorkspace, "clipboard-70k.md");
+const windowsClipboard256Path = join(canonicalWorkspace, "clipboard-256k.md");
+if (process.platform === "win32") {
+  await writeFile(windowsClipboard70Path, windowsClipboard70, { mode: 0o600 });
+  await writeFile(windowsClipboard256Path, windowsClipboard256, {
+    mode: 0o600,
+  });
+}
 // The real desktop must discover and run this Skill through a persisted fixed
 // compatibility switch, not through a default source or a mock catalog.
 const skillSourceDirectory = ".claude";
@@ -242,12 +265,16 @@ const responses = [
     );
     return textSse(
       process.platform === "win32" ? "m11" : "m5",
-      "metawork multimodal checkpoint complete",
+      process.platform === "win32"
+        ? windowsClipboard70
+        : "metawork multimodal checkpoint complete",
     );
   },
   textSse(
     process.platform === "win32" ? "m12" : "m6",
-    "metawork text checkpoint complete",
+    process.platform === "win32"
+      ? windowsClipboard256
+      : "metawork text checkpoint complete",
   ),
   textSse(
     process.platform === "win32" ? "m14" : "m8",
@@ -1019,6 +1046,12 @@ try {
       sizeBytes: String(attachmentJpegBytes.length),
     },
   ]);
+  await probeWindowsClipboard({
+    expectedPath: windowsClipboard70Path,
+    expectedBytes: 70 * 1024,
+    marker: "CLIPBOARD_70K_END",
+    expectedCode: 'const clipboardProbe = "70K";',
+  });
   for (const token of attachmentTokens) {
     const released = await invokeBridge("metawork.attachments.release", {
       token,
@@ -1117,6 +1150,11 @@ try {
     throw new Error(
       `Text checkpoint Run did not complete: ${JSON.stringify(textTerminal.run)}`,
     );
+  await probeWindowsClipboard({
+    expectedPath: windowsClipboard256Path,
+    expectedBytes: 256 * 1024,
+    marker: "CLIPBOARD_256K_END",
+  });
   const textCheckpointObservedAt = Date.now();
   const textCheckpoint = await poll(
     async () =>
@@ -1321,7 +1359,7 @@ try {
 
   process.stdout.write(
     process.platform === "win32"
-      ? "AgentCore Windows desktop vertical passed: real Skill/multimodal/Text/compact checkpoints, ordered image provider input, metadata-only attachment history, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
+      ? "AgentCore Windows desktop vertical passed: real Skill/multimodal/Text/compact checkpoints, 70 KiB and 256 KiB dual-format response clipboard plus plain-only code copy, ordered image provider input, metadata-only attachment history, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, main-thread ProductDelivery, Runtime-owned tray routing, and clean shutdown; Windows Shell chrome/tray remain separate non-blocking gates.\n"
       : "AgentCore macOS desktop vertical passed: real Skill/multimodal/Text/compact checkpoints, ordered image provider input, metadata-only attachment history, typed File Changes/diff, hash/descriptor verification, missing-blob restart reconciliation, materialized arguments without raw slash, main-thread ProductDelivery, Read/Bash/Edit, permission UI, duplicate UI-response rejection, Task metadata lifecycle, Runtime-owned tray routing, and clean shutdown.\n",
   );
 } catch (error) {
@@ -1931,6 +1969,38 @@ async function automate(...args) {
   });
 }
 
+async function probeWindowsClipboard({
+  expectedPath,
+  expectedBytes,
+  marker,
+  expectedCode = null,
+}) {
+  if (process.platform !== "win32") return;
+  const args = [
+    "-NoProfile",
+    "-Sta",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    windowsClipboardProbeScript,
+    "-ProcessId",
+    String(app.pid),
+    "-ExpectedPlainPath",
+    expectedPath,
+    "-ExpectedBytes",
+    String(expectedBytes),
+    "-Marker",
+    marker,
+  ];
+  if (expectedCode !== null) args.push("-ExpectedCode", expectedCode);
+  const { stdout } = await execFileAsync(
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    args,
+    { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
+  );
+  process.stdout.write(`Windows clipboard evidence: ${stdout.trim()}\n`);
+}
+
 async function captureVisual(
   name,
   width,
@@ -2367,6 +2437,34 @@ function textSse(messageId, text) {
     },
     { type: "message_stop" },
   ]);
+}
+
+function clipboardMarkdownFixture(targetBytes, label, checkpointKind) {
+  const prefix = [
+    `# Clipboard ${label}`,
+    "",
+    `metawork ${checkpointKind} checkpoint complete`,
+    "",
+    "| target | result |",
+    "| --- | --- |",
+    "| editor | Markdown |",
+    "| rich text | semantic HTML |",
+    "",
+    "```ts",
+    `const clipboardProbe = \"${label}\";`,
+    "```",
+    "",
+    `CLIPBOARD_${label}_BEGIN`,
+    "",
+  ].join("\n");
+  const suffix = `\nCLIPBOARD_${label}_END`;
+  const remaining =
+    targetBytes - Buffer.byteLength(prefix) - Buffer.byteLength(suffix);
+  if (remaining < 0) throw new Error("clipboard fixture target is too small");
+  const markdown = `${prefix}${"x".repeat(remaining)}${suffix}`;
+  if (Buffer.byteLength(markdown) !== targetBytes)
+    throw new Error("clipboard fixture byte count is not exact");
+  return markdown;
 }
 
 function sse(events) {

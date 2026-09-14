@@ -18,7 +18,7 @@ function richClipboardUnavailable(clipboard: Clipboard): boolean {
 
 export async function writeRichClipboard(
   markdown: string,
-  html: string,
+  renderHtml: () => string | Promise<string>,
 ): Promise<ClipboardWriteMode> {
   const clipboard = browserClipboard();
   if (richClipboardUnavailable(clipboard)) {
@@ -29,7 +29,9 @@ export async function writeRichClipboard(
   }
 
   const item = new ClipboardItem({
-    "text/html": new Blob([html], { type: "text/html" }),
+    "text/html": Promise.resolve()
+      .then(renderHtml)
+      .then((html) => new Blob([html], { type: "text/html" })),
     "text/plain": new Blob([markdown], { type: "text/plain" }),
   });
   await clipboard.write([item]);
