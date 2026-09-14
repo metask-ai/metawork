@@ -44,6 +44,12 @@ pub const SourceSettingsResult = state.SourceSettingsResult;
 pub const SourceSettingsView = state.SourceSettingsView;
 pub const SourceRecoveryAction = enum { reread, reset };
 
+pub const testing = if (builtin.is_test) struct {
+    pub const ManagementInventory = management.Inventory;
+    pub const ManagementFileStore = management.FileStore;
+    pub const encodeManagement = management.encode;
+} else struct {};
+
 pub const BorrowedCatalogAuthority = struct {
     snapshot: *const catalog.Snapshot,
     lease: *agent.CatalogLease,
@@ -120,17 +126,6 @@ pub const ProjectionBudget = struct {
 
     fn replace(self: ProjectionBudget, old: usize, new: usize) void {
         self.replace_fn(self.context, old, new);
-    }
-};
-
-pub const EnablementWorkspaces = struct {
-    context: *const anyopaque,
-    slot_count: usize,
-    get_fn: *const fn (*const anyopaque, usize) ?enablement.WorkspaceIdentity,
-
-    fn get(self: EnablementWorkspaces, index: usize) ?enablement.WorkspaceIdentity {
-        std.debug.assert(index < self.slot_count);
-        return self.get_fn(self.context, index);
     }
 };
 
@@ -691,6 +686,7 @@ pub const Runtime = struct {
             changed = true;
         }
         changed = self.dispatchPending(budget) or changed;
+        changed = self.takeManagementChanged() or changed;
         return changed;
     }
 
@@ -789,6 +785,10 @@ pub const Runtime = struct {
         return self.state.enablement_health;
     }
 
+    pub fn enablementTrusted(self: *const Runtime) bool {
+        return policy.enablementTrusted(self.state.enablement_health);
+    }
+
     pub fn managementHealth(self: *const Runtime) state.ManagementHealth {
         return self.state.management_health;
     }
@@ -856,10 +856,13 @@ pub const Runtime = struct {
         writer: *std.Io.Writer,
         text: view.TextProjection,
         workspaces: view.WorkspaceCatalogs,
+        retry: view.RetryAvailability,
     ) view.Error!void {
         return view.writeManagementProjection(writer, .{
             .state = &self.state,
             .workspaces = workspaces,
+            .retry = retry,
+            .owner = .{ .context = self, .resolve_fn = viewOwnerResolve },
             .text = text,
             .source_settings = self.sourceSettings(),
             .personal_source_discovery = self.personalSourceDiscovery(),
@@ -870,13 +873,104 @@ pub const Runtime = struct {
         return view.writeSourceDiscovery(writer, .workspace, self.workspaceSourceDiscovery(id, epoch));
     }
 
+    /// Resolves an asset's persistent owner to the owning Workspace's current
+    /// authority scope. Ownership follows the Workspace id alone; the
+    /// registry, not any stored epoch, decides which record that id is.
     pub fn assetScope(
         self: *const Runtime,
         install_id: management.InstallId,
     ) AssetError!management.Scope {
         const current = self.state.inventoryConst().findConst(install_id) orelse
             return error.AssetNotFound;
-        return current.scope;
+        return self.resolveOwnerScope(current.owner) orelse error.UnknownWorkspace;
+    }
+
+    /// True when both Skill stores were strictly loaded, so every Workspace id
+    /// they reference is known. An unreadable or corrupt store hides ids that
+    /// a fresh allocation could collide with.
+    pub fn identitySourceTrusted(self: *const Runtime) bool {
+        const management_trusted = switch (self.state.management_health) {
+            .ready, .unavailable, .write_failed => true,
+            .read_failed, .corrupt, .outcome_unknown => false,
+        };
+        const enablement_trusted = switch (self.state.enablement_health) {
+            .ready, .unavailable, .write_failed => true,
+            .read_failed, .corrupt, .outcome_unknown => false,
+        };
+        return management_trusted and enablement_trusted;
+    }
+
+    /// True when no durable transaction still references the Workspace id and
+    /// the inventory is trustworthy enough to prove it.
+    pub fn workspaceRetirementAllowed(self: *const Runtime, workspace_id: u64) bool {
+        switch (self.state.management_health) {
+            .ready, .unavailable => {},
+            .read_failed, .corrupt, .write_failed, .outcome_unknown => return false,
+        }
+        switch (self.state.enablement_health) {
+            .ready, .unavailable => {},
+            .read_failed, .corrupt, .write_failed, .outcome_unknown => return false,
+        }
+        return !self.state.inventoryConst().hasRecoveryFor(workspace_id);
+    }
+
+    /// Drops policy and provenance of a Workspace id that left the registry.
+    /// Files are never touched. Each store commits independently; a failed
+    /// commit keeps that store's records for a later attempt.
+    pub fn retireWorkspace(self: *Runtime, workspace_id: u64, budget: ProjectionBudget) bool {
+        std.debug.assert(self.workspaceRetirementAllowed(workspace_id));
+        var changed = false;
+        if (self.enablementTrusted() and self.state.enablement_file_store != null) enablement_store: {
+            var candidate = self.state.enablement_store.clone() catch break :enablement_store;
+            var candidate_owned = true;
+            defer if (candidate_owned) candidate.deinit();
+            if (!candidate.retire(workspace_id)) break :enablement_store;
+            self.commitEnablementCandidate(&candidate) catch |err| {
+                self.noteEnablementPersistenceFailure(err, budget);
+                break :enablement_store;
+            };
+            candidate_owned = false;
+            changed = true;
+        }
+        if (self.state.management_health == .ready) {
+            if (self.state.transactions) |*transactions| {
+                const retired = transactions.retire(workspace_id) catch |err| blk: {
+                    if (err == error.PersistenceFailed or err == error.PersistenceOutcomeUnknown)
+                        self.state.management_health = policy.managementHealthAfterPersistenceFailure(err);
+                    break :blk true;
+                };
+                changed = retired or changed;
+            }
+        }
+        return changed;
+    }
+
+    /// Maps a persistent owner to the owning Workspace's current authority
+    /// scope, or null when no registered record carries that id.
+    pub fn resolveOwnerScope(self: *const Runtime, owner: management.Owner) ?management.Scope {
+        return switch (owner) {
+            .personal => .personal,
+            .project => |id| blk: {
+                const workspace = self.findWorkspaceConst(id) orelse return null;
+                break :blk .{ .project = .{
+                    .workspace_id = workspace.id,
+                    .workspace_epoch = workspace.epoch,
+                } };
+            },
+        };
+    }
+
+    fn viewOwnerResolve(context: *const anyopaque, owner: management.Owner) ?management.Scope {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        return self.resolveOwnerScope(owner);
+    }
+
+    /// Highest Workspace id referenced by any persistent Skill record.
+    pub fn maxWorkspaceId(self: *const Runtime) u64 {
+        var result = self.state.inventoryConst().maxWorkspaceId();
+        for (self.state.enablement_store.items()) |workspace_policy|
+            result = @max(result, workspace_policy.workspace_id);
+        return result;
     }
 
     pub fn previewDirectory(
@@ -903,6 +997,7 @@ pub const Runtime = struct {
         const scope = try self.assetScope(install_id);
         return management_runtime.readDefinition(
             self.managementContext(),
+            scope,
             install_id,
             try self.canonicalBase(scope),
         );
@@ -917,6 +1012,7 @@ pub const Runtime = struct {
         const scope = try self.assetScope(install_id);
         return management_runtime.exportPackage(
             self.managementContext(),
+            scope,
             install_id,
             try self.canonicalBase(scope),
             absolute_destination,
@@ -974,6 +1070,7 @@ pub const Runtime = struct {
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.reimportDirectory(
             self.managementContext(),
+            scope,
             try self.canonicalBase(scope),
             install_id,
             absolute_path,
@@ -997,6 +1094,7 @@ pub const Runtime = struct {
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.reimportArchive(
             self.managementContext(),
+            scope,
             try self.canonicalBase(scope),
             install_id,
             absolute_path,
@@ -1018,6 +1116,7 @@ pub const Runtime = struct {
         try self.requireMutationAvailable(scope);
         const result = try management_runtime.uninstall(
             self.managementContext(),
+            scope,
             try self.canonicalBase(scope),
             install_id,
             now_unix_seconds,
@@ -1031,18 +1130,41 @@ pub const Runtime = struct {
     pub fn retryVerification(
         self: *Runtime,
         install_id: management.InstallId,
+        now_unix_seconds: ?u64,
     ) MutationError!state.MutationResult {
         const scope = try self.assetScope(install_id);
-        try self.requireMutationAvailable(scope);
+        try self.requireRecoveryAvailable(scope);
+        const current = self.state.inventoryConst().findConst(install_id).?;
+        if (current.recovery == null) return error.InvalidAsset;
+        if (!current.requiresRecovery() and self.state.source_settings == null)
+            return error.CatalogUnavailable;
         const result = try management_runtime.retryVerification(
             self.managementContext(),
+            scope,
             install_id,
+            try self.canonicalBase(scope),
+            now_unix_seconds,
         );
-        self.scheduleReconciliation(scope) catch |err| {
+        if (self.state.reconciliation != null) self.scheduleReconciliation(scope) catch |err| {
             self.state.reconciliation = null;
             return err;
         };
         return result;
+    }
+
+    pub fn retryAvailable(self: *const Runtime, install_id: management.InstallId) bool {
+        const current = self.state.inventoryConst().findConst(install_id) orelse return false;
+        if (current.recovery == null) return false;
+        const scope = self.assetScope(install_id) catch return false;
+        self.requireRecoveryAvailable(scope) catch return false;
+        _ = self.canonicalBase(scope) catch return false;
+        return current.requiresRecovery() or self.state.source_settings != null;
+    }
+
+    pub fn takeManagementChanged(self: *Runtime) bool {
+        if (self.state.transactions) |*transactions| return transactions.inventory.takeChanged();
+        if (self.state.inventory) |*inventory| return inventory.takeChanged();
+        return false;
     }
     pub fn isSkillEnabled(
         self: *const Runtime,
@@ -1077,7 +1199,7 @@ pub const Runtime = struct {
         budget: ProjectionBudget,
         snapshot_limits: catalog.Limits,
     ) EnablementError!u64 {
-        if (self.state.enablement_health != .ready or
+        if (!self.enablementTrusted() or
             self.state.enablement_file_store == null)
             return error.PersistenceFailed;
         const control: *state.CatalogControl = switch (mutation.scope) {
@@ -1189,36 +1311,6 @@ pub const Runtime = struct {
         return next_revision;
     }
 
-    pub fn reconcileEnablementNoFail(
-        self: *Runtime,
-        workspaces: EnablementWorkspaces,
-        budget: ProjectionBudget,
-    ) void {
-        if (self.state.enablement_health != .ready or
-            self.state.enablement_file_store == null)
-            return;
-        var active_workspaces: std.ArrayList(enablement.WorkspaceIdentity) = .empty;
-        defer active_workspaces.deinit(self.allocator);
-        for (0..workspaces.slot_count) |index|
-            if (workspaces.get(index)) |identity|
-                active_workspaces.append(self.allocator, identity) catch {
-                    self.state.enablement_health = .write_failed;
-                    return;
-                };
-        var candidate = self.state.enablement_store.clone() catch {
-            self.state.enablement_health = .write_failed;
-            return;
-        };
-        var candidate_owned = true;
-        defer if (candidate_owned) candidate.deinit();
-        if (!candidate.reconcile(active_workspaces.items)) return;
-        self.commitEnablementCandidate(&candidate) catch |err| {
-            self.noteEnablementPersistenceFailure(err, budget);
-            return;
-        };
-        candidate_owned = false;
-    }
-
     pub fn testSetEnablementPersistence(
         self: *Runtime,
         file_store: *enablement.FileStore,
@@ -1234,6 +1326,14 @@ pub const Runtime = struct {
     ) void {
         comptime std.debug.assert(builtin.is_test);
         self.state.management_health = health;
+    }
+
+    pub fn testAddRecoveryAsset(self: *Runtime) !void {
+        comptime std.debug.assert(builtin.is_test);
+        const inventory = if (self.state.transactions) |*transactions| &transactions.inventory else &self.state.inventory.?;
+        const id: management.InstallId = @splat(7);
+        _ = try inventory.add(.{ .install_id = id, .source_kind = .local_directory, .scope = .personal, .target_entry = "review", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+        try inventory.beginTransaction(id, .{ .operation = .install, .candidate_hash = @splat('a'), .candidate_entry = ".candidate" });
     }
 
     pub fn testNoteEnablementPersistenceFailure(
@@ -1402,6 +1502,7 @@ pub const Runtime = struct {
         self.state.enablement_store.deinit();
         self.state.enablement_store = candidate.*;
         candidate.* = undefined;
+        self.state.enablement_health = .ready;
     }
 
     fn managementContext(self: *Runtime) management_runtime.Context {
@@ -1418,19 +1519,23 @@ pub const Runtime = struct {
     }
 
     fn requireMutationAvailable(
-        self: *Runtime,
+        self: *const Runtime,
         scope: management.Scope,
     ) MutationError!void {
+        try self.requireRecoveryAvailable(scope);
+        if (self.state.source_settings == null) return error.CatalogUnavailable;
+    }
+
+    fn requireRecoveryAvailable(self: *const Runtime, scope: management.Scope) MutationError!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.state.management_health != .ready or
             self.state.transactions == null)
             return error.PersistenceFailed;
         if (self.state.reconciliation != null) return error.TaskBusy;
-        if (self.state.source_settings == null) return error.CatalogUnavailable;
         switch (scope) {
             .personal => if (self.personal_job != null or self.personal_reschedule_pending) return error.CatalogLoading,
             .project => |project| {
-                const workspace = self.findWorkspace(project.workspace_id) orelse
+                const workspace = self.findWorkspaceConst(project.workspace_id) orelse
                     return error.UnknownWorkspace;
                 if (workspace.epoch != project.workspace_epoch)
                     return error.WorkspaceEpochMismatch;
@@ -1489,10 +1594,8 @@ pub const Runtime = struct {
         if (self.state.management_health != .ready or
             self.state.transactions == null)
             return;
-        const base = self.canonicalBase(scope) catch {
-            self.state.management_health = .read_failed;
-            return;
-        };
+        self.requireRecoveryAvailable(scope) catch return;
+        const base = self.canonicalBase(scope) catch return;
         management_runtime.recoverNoFail(
             self.managementContext(),
             scope,
@@ -1541,6 +1644,9 @@ pub const Runtime = struct {
         err: anyerror,
         budget: ProjectionBudget,
     ) void {
+        // Allocation/encoding can fail before FileStore.commit is attempted.
+        // Those errors say nothing about canonical persistence health.
+        if (err != error.WriteFailed and err != error.PersistenceOutcomeUnknown) return;
         const decision = policy.enablementPersistenceFailure(err);
         self.state.enablement_health = decision.health;
         if (!decision.invalidate_authorities) return;
@@ -1921,6 +2027,129 @@ fn exerciseManagementCommitFailure(
     );
 }
 
+test "asset ownership follows the registered Workspace id across fencing epochs" {
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    runtime.registerWorkspaceOwned(.{
+        .id = 9,
+        .epoch = 1,
+        .catalog_authorized = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace/a"),
+    }, harness.budget());
+    const inventory = &runtime.state.inventory.?;
+    const created: management.InstallId = @splat(1);
+    _ = try inventory.add(.{ .install_id = created, .source_kind = .local_directory, .scope = .{ .project = .{ .workspace_id = 9, .workspace_epoch = 1 } }, .target_entry = "review", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+    _ = try runtime.state.enablement_store.applyWorkspace(.{
+        .identity = .{ .workspace_id = 9, .workspace_epoch = 1 },
+        .skill_policy_key = "review",
+        .state = .disabled,
+        .expected_revision = 1,
+    });
+    try std.testing.expect((try runtime.assetScope(created)).eql(.{ .project = .{ .workspace_id = 9, .workspace_epoch = 1 } }));
+    // A failed removal leaves the same registry record at a higher epoch.
+    runtime.registerWorkspaceOwned(.{
+        .id = 9,
+        .epoch = 2,
+        .catalog_authorized = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/workspace/a"),
+    }, harness.budget());
+    const current: management.Scope = .{ .project = .{ .workspace_id = 9, .workspace_epoch = 2 } };
+    try std.testing.expect((try runtime.assetScope(created)).eql(current));
+    try std.testing.expect(runtime.resolveOwnerScope(.{ .project = 9 }).?.eql(current));
+    try std.testing.expect(!runtime.isSkillEnabled(current, "review"));
+    try std.testing.expectEqual(@as(u64, 2), runtime.enablementRevision(current));
+    try std.testing.expect(runtime.workspaceRetirementAllowed(9));
+    // A record naming an unregistered id has no owner and cannot be managed.
+    const unknown: management.InstallId = @splat(3);
+    _ = try inventory.add(.{ .install_id = unknown, .source_kind = .local_directory, .scope = .{ .project = .{ .workspace_id = 11, .workspace_epoch = 1 } }, .target_entry = "gone", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+    try std.testing.expectError(error.UnknownWorkspace, runtime.assetScope(unknown));
+    try std.testing.expect(runtime.resolveOwnerScope(.{ .project = 11 }) == null);
+    try std.testing.expectEqual(@as(u64, 11), runtime.maxWorkspaceId());
+    try inventory.beginTransaction(unknown, .{ .operation = .install, .candidate_entry = ".gone.candidate" });
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(11));
+    try std.testing.expect(inventory.find(unknown) != null);
+    // Identity is trusted only while both stores were strictly loaded.
+    try std.testing.expect(runtime.identitySourceTrusted());
+    runtime.state.management_health = .read_failed;
+    try std.testing.expect(!runtime.identitySourceTrusted());
+    runtime.state.management_health = .unavailable;
+    runtime.state.enablement_health = .corrupt;
+    try std.testing.expect(!runtime.identitySourceTrusted());
+    runtime.state.enablement_health = .write_failed;
+    try std.testing.expect(runtime.identitySourceTrusted());
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(9));
+    runtime.state.enablement_health = .ready;
+    try std.testing.expect(runtime.identitySourceTrusted());
+    try std.testing.expect(runtime.workspaceRetirementAllowed(9));
+    runtime.state.management_health = .write_failed;
+    try std.testing.expect(runtime.identitySourceTrusted());
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(9));
+}
+
+test "retiring a Workspace id drops policy and provenance in both stores and keeps durable transactions" {
+    var harness: TestHarness = .{};
+    var storage = std.testing.tmpDir(.{});
+    defer storage.cleanup();
+    var enablement_dir = std.testing.tmpDir(.{});
+    defer enablement_dir.cleanup();
+    var persistence: management.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
+    var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
+        .state = .{
+            .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+            .management = .{ .file_store = &persistence, .staging_root = "/tmp" },
+        },
+        .max_workspaces = 2,
+        .canonical_user_home = "/home/tester",
+    }, .{ .max_assets = 8, .max_workspaces = 2, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
+    defer runtime.deinit();
+    var enablement_file: enablement.FileStore = .{ .io = std.testing.io, .dir = enablement_dir.dir };
+    runtime.testSetEnablementPersistence(&enablement_file);
+    const transactions = &runtime.state.transactions.?;
+    for ([_]u64{ 9, 11 }) |workspace_id| {
+        _ = try transactions.inventory.add(.{ .install_id = @splat(@intCast(workspace_id)), .source_kind = .local_directory, .scope = .{ .project = .{ .workspace_id = workspace_id, .workspace_epoch = 1 } }, .target_entry = "review", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+        _ = try runtime.state.enablement_store.applyWorkspace(.{
+            .identity = .{ .workspace_id = workspace_id, .workspace_epoch = 1 },
+            .skill_policy_key = "review",
+            .state = .disabled,
+            .expected_revision = runtime.state.enablement_store.revision(.{ .workspace_id = workspace_id, .workspace_epoch = 1 }),
+        });
+    }
+    const pending: management.InstallId = @splat(20);
+    _ = try transactions.inventory.add(.{ .install_id = pending, .source_kind = .local_directory, .scope = .{ .project = .{ .workspace_id = 9, .workspace_epoch = 1 } }, .target_entry = "pending", .content_hash = @splat('a'), .installed_at_unix_seconds = 1 });
+    try transactions.inventory.beginTransaction(pending, .{ .operation = .install, .candidate_entry = ".pending.candidate" });
+    _ = runtime.takeManagementChanged();
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(9));
+    try std.testing.expect(runtime.workspaceRetirementAllowed(11));
+    // Retirement happens when the registry slot of a hidden id is reused.
+    try std.testing.expect(runtime.retireWorkspace(11, harness.budget()));
+    try std.testing.expect(runtime.takeManagementChanged());
+    try std.testing.expectEqual(@as(usize, 2), transactions.inventory.items().len);
+    try std.testing.expect(transactions.inventory.findConst(@splat(11)) == null);
+    try std.testing.expect(transactions.inventory.findConst(pending) != null);
+    try std.testing.expectEqual(@as(usize, 1), runtime.state.enablement_store.items().len);
+    try std.testing.expectEqual(@as(u64, 9), runtime.state.enablement_store.items()[0].workspace_id);
+    try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
+    try std.testing.expectEqual(state.EnablementHealth.ready, runtime.enablementHealth());
+    const bytes = (try persistence.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(bytes);
+    var restored = try management.decode(std.testing.allocator, bytes, .{ .max_assets = 8 });
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 2), restored.items().len);
+    const policy_bytes = (try enablement_file.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(policy_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, policy_bytes, "\"workspace_id\":11") == null);
+    // Resolving the transaction makes the id retirable; a definite write
+    // failure keeps the store frozen rather than pretending success.
+    try transactions.inventory.clearTransaction(pending);
+    try std.testing.expect(runtime.workspaceRetirementAllowed(9));
+    management.TestSupport.setFileStoreCommitFault(&persistence, .write_failed);
+    try std.testing.expect(runtime.retireWorkspace(9, harness.budget()));
+    try std.testing.expectEqual(ManagementHealth.write_failed, runtime.managementHealth());
+    try std.testing.expect(!runtime.workspaceRetirementAllowed(9));
+    try std.testing.expectEqual(@as(usize, 0), runtime.state.enablement_store.items().len);
+}
+
 test "management outcome unknown freezes subsequent Skill mutations" {
     try exerciseManagementCommitFailure(
         .outcome_unknown,
@@ -1929,12 +2158,276 @@ test "management outcome unknown freezes subsequent Skill mutations" {
     );
 }
 
+test "rename failures recover only their asset and explicit retry preserves admission" {
+    const Operation = enum { install, replace, reimport, uninstall };
+    const definition = "---\nname: demo\ndescription: Demo\n---\n";
+    for (std.enums.values(Operation)) |operation| {
+        for ([_]bool{ false, true }) |fail_recovery| {
+            var harness: TestHarness = .{};
+            var home = std.testing.tmpDir(.{ .iterate = true });
+            defer home.cleanup();
+            var source = std.testing.tmpDir(.{ .iterate = true });
+            defer source.cleanup();
+            var storage = std.testing.tmpDir(.{});
+            defer storage.cleanup();
+            try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = definition });
+            var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const home_path = home_buffer[0..try home.dir.realPath(std.testing.io, &home_buffer)];
+            var source_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const source_path = source_buffer[0..try source.dir.realPath(std.testing.io, &source_buffer)];
+            var persistence: management.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
+            var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
+                .state = .{
+                    .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+                    .management = .{ .file_store = &persistence, .staging_root = source_path },
+                },
+                .max_workspaces = 1,
+                .canonical_user_home = home_path,
+            }, .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 });
+            defer runtime.deinit();
+            var preview = try package.previewDirectory(std.testing.io, std.testing.allocator, source.dir, .{});
+            defer preview.deinit();
+            const owned = operation == .reimport or operation == .uninstall;
+            const id: management.InstallId = @splat(5);
+            if (operation != .install) {
+                try home.dir.createDirPath(std.testing.io, ".agents/skills/demo");
+                try home.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/demo/SKILL.md", .data = definition });
+            }
+            const transactions = &runtime.state.transactions.?;
+            if (owned) _ = try transactions.inventory.add(.{
+                .install_id = id,
+                .source_kind = .local_directory,
+                .scope = .personal,
+                .target_entry = "demo",
+                .content_hash = preview.content_hash,
+                .installed_at_unix_seconds = 99,
+            });
+            const unrelated_id: management.InstallId = @splat(9);
+            _ = try transactions.inventory.add(.{ .install_id = unrelated_id, .source_kind = .local_directory, .scope = .personal, .target_entry = "unrelated", .content_hash = preview.content_hash, .installed_at_unix_seconds = 99 });
+            try transactions.inventory.beginTransaction(unrelated_id, .{ .operation = .install, .remove_asset_on_rollback = true, .candidate_hash = preview.content_hash, .candidate_entry = ".unrelated-candidate" });
+            _ = runtime.takeManagementChanged();
+            management.TestSupport.setRenameFault(transactions, if (operation == .uninstall) .target_to_backup else .candidate_to_target);
+            if (fail_recovery) management.TestSupport.setRecoveryFault(transactions, .before_recovery);
+            const result = switch (operation) {
+                .install, .replace => runtime.installDirectory(source_path, .{
+                    .source_kind = .local_directory,
+                    .scope = .personal,
+                    .expected_invocation_name = preview.invocation_name,
+                    .expected_content_hash = preview.content_hash,
+                    .allow_replace = operation == .replace,
+                }, 100),
+                .reimport => runtime.reimportDirectory(id, source_path, preview.invocation_name, preview.content_hash),
+                .uninstall => runtime.uninstall(id, 100),
+            };
+            try std.testing.expectError(error.FileTransactionFailed, result);
+            try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
+            try std.testing.expect(runtime.takeManagementChanged());
+            try std.testing.expect(!runtime.takeManagementChanged());
+            try std.testing.expect(runtime.personal_job == null and runtime.state.reconciliation == null);
+            if (fail_recovery) {
+                const recovery_id = if (owned) id else transactions.inventory.items()[transactions.inventory.items().len - 1].install_id;
+                try std.testing.expect(transactions.inventory.findConst(recovery_id).?.recovery != null);
+                try std.testing.expect(runtime.retryAvailable(recovery_id));
+                runtime.personal_reschedule_pending = true;
+                try std.testing.expect(!runtime.retryAvailable(recovery_id));
+                try std.testing.expectError(error.CatalogLoading, runtime.retryVerification(recovery_id, 101));
+                runtime.personal_reschedule_pending = false;
+                try std.testing.expectError(error.FileTransactionFailed, runtime.retryVerification(recovery_id, 101));
+                try std.testing.expect(!runtime.takeManagementChanged());
+                var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+                {
+                    runtime.allocator = failing.allocator();
+                    defer runtime.allocator = std.testing.allocator;
+                    runtime.recoverTransactionsForScopeNoFail(.personal, 101);
+                }
+                try std.testing.expect(failing.has_induced_failure);
+                try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
+                try std.testing.expect(!runtime.takeManagementChanged());
+                management.TestSupport.setRecoveryFault(transactions, .none);
+                var inaccessible = std.testing.tmpDir(.{});
+                defer inaccessible.cleanup();
+                try inaccessible.dir.writeFile(std.testing.io, .{ .sub_path = ".agents", .data = "not a directory" });
+                var inaccessible_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const inaccessible_path = inaccessible_buffer[0..try inaccessible.dir.realPath(std.testing.io, &inaccessible_buffer)];
+                {
+                    const original_home = runtime.canonical_user_home;
+                    runtime.canonical_user_home = inaccessible_path;
+                    defer runtime.canonical_user_home = original_home;
+                    try std.testing.expectError(error.RootUnavailable, runtime.retryVerification(recovery_id, 101));
+                    try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
+                    try std.testing.expect(!runtime.takeManagementChanged());
+                }
+                // Physical recovery is independent of source/catalog trust.
+                runtime.state.source_settings = null;
+                try std.testing.expect(runtime.retryAvailable(recovery_id));
+                const recovered = try runtime.retryVerification(recovery_id, null);
+                try std.testing.expect(!recovered.verification_pending);
+                try std.testing.expect(runtime.takeManagementChanged());
+                try std.testing.expect(runtime.personal_job == null and runtime.state.reconciliation == null);
+            }
+            try std.testing.expect(transactions.inventory.findConst(unrelated_id).?.recovery.?.phase == .prepared);
+            try std.testing.expectEqual(@as(usize, if (owned) 2 else 1), transactions.inventory.items().len);
+            if (owned) try std.testing.expect(transactions.inventory.findConst(id).?.recovery == null);
+            if (operation == .install) {
+                try std.testing.expectError(error.FileNotFound, home.dir.statFile(std.testing.io, ".agents/skills/demo", .{}));
+            } else {
+                const bytes = try home.dir.readFileAlloc(std.testing.io, ".agents/skills/demo/SKILL.md", std.testing.allocator, .limited(4096));
+                defer std.testing.allocator.free(bytes);
+                try std.testing.expectEqualStrings(definition, bytes);
+            }
+            const bytes = (try persistence.loadAlloc(std.testing.allocator)).?;
+            defer std.testing.allocator.free(bytes);
+            var restored = try management.decode(std.testing.allocator, bytes, .{ .max_assets = 4 });
+            defer restored.deinit();
+            try std.testing.expectEqual(transactions.inventory.items().len, restored.items().len);
+            for (restored.items()) |asset| try std.testing.expect((asset.recovery != null) == std.mem.eql(u8, &asset.install_id, &unrelated_id));
+            if (owned) {
+                // Final cleanup can fail after the durable phase advanced,
+                // while the legacy asset state still says pending_verification.
+                management.TestSupport.setRenameFault(transactions, .none);
+                const root_path = try std.fs.path.join(std.testing.allocator, &.{ home_path, ".agents", "skills" });
+                defer std.testing.allocator.free(root_path);
+                var root = try management.CanonicalRoot.open(std.testing.io, std.testing.allocator, .personal, root_path);
+                defer root.deinit();
+                var manifest = try package.inspectDirectory(std.testing.io, std.testing.allocator, source.dir, .{});
+                defer manifest.deinit();
+                try transactions.reimport(&root, id, source.dir, &manifest);
+                try transactions.markReconciliationUnavailable(id);
+                management.TestSupport.setRecoveryFault(transactions, .backup_cleanup);
+                try std.testing.expectError(error.FileTransactionFailed, transactions.commitReconciliation(&root, id, null, 102));
+                try std.testing.expect(transactions.inventory.findConst(id).?.state == .pending_verification);
+                try std.testing.expect(transactions.inventory.findConst(id).?.requiresRecovery());
+                const committed_bytes = (try persistence.loadAlloc(std.testing.allocator)).?;
+                defer std.testing.allocator.free(committed_bytes);
+                var restart_inventory = try management.decode(std.testing.allocator, committed_bytes, .{ .max_assets = 4 });
+                defer restart_inventory.deinit();
+                try std.testing.expect(restart_inventory.findConst(id).?.requiresRecovery());
+                management.TestSupport.setRecoveryFault(transactions, .none);
+                runtime.state.source_settings = null;
+                try std.testing.expect(runtime.retryAvailable(id));
+                try std.testing.expectError(error.RecoveryUnavailable, runtime.retryVerification(id, null));
+                try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
+                try std.testing.expect(!(try runtime.retryVerification(id, 103)).verification_pending);
+                try std.testing.expect(transactions.inventory.findConst(id).?.recovery == null);
+                if (operation == .uninstall and fail_recovery) {
+                    try transactions.uninstall(&root, id);
+                    try std.testing.expect(runtime.retryAvailable(id));
+                    try std.testing.expect((try runtime.retryVerification(id, 104)).verification_pending);
+                    try std.testing.expect(runtime.personal_job == null and runtime.state.reconciliation == null);
+                    try std.testing.expect(!runtime.retryAvailable(id));
+                    try std.testing.expectError(error.CatalogUnavailable, runtime.retryVerification(id, 105));
+                    runtime.state.source_settings = .{};
+                    try std.testing.expect((try runtime.retryVerification(id, 106)).verification_pending);
+                    try std.testing.expect(runtime.state.reconciliation.?.request_generation != 0);
+                    try std.testing.expect(runtime.personal_job != null and !runtime.retryAvailable(id));
+                    try std.testing.expectError(error.TaskBusy, runtime.retryVerification(id, 107));
+                    harness.runQueued();
+                    _ = runtime.sync(harness.budget(), test_snapshot_limits, 108);
+                }
+                if (builtin.os.tag == .windows and operation == .uninstall and !fail_recovery) {
+                    const windows = std.os.windows;
+                    var name = windows.UNICODE_STRING.init(std.unicode.utf8ToUtf16LeStringLiteral("demo"));
+                    const attributes: windows.OBJECT.ATTRIBUTES = .{ .RootDirectory = root.dir.handle, .ObjectName = &name };
+                    var locked: windows.HANDLE = undefined;
+                    var status: windows.IO_STATUS_BLOCK = undefined;
+                    // Real OS sharing violation, not a transaction fault hook.
+                    try std.testing.expectEqual(windows.NTSTATUS.SUCCESS, windows.ntdll.NtCreateFile(
+                        &locked,
+                        .{ .GENERIC = .{ .READ = true }, .STANDARD = .{ .SYNCHRONIZE = true } },
+                        &attributes,
+                        &status,
+                        null,
+                        .{},
+                        .{ .READ = true, .WRITE = true, .DELETE = false },
+                        .OPEN,
+                        .{ .DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT },
+                        null,
+                        0,
+                    ));
+                    defer _ = windows.ntdll.NtClose(locked);
+                    runtime.state.source_settings = .{};
+                    try std.testing.expectError(error.FileTransactionFailed, runtime.uninstall(id, 104));
+                    try std.testing.expectEqual(ManagementHealth.ready, runtime.managementHealth());
+                    try std.testing.expect(transactions.inventory.findConst(id).?.recovery == null);
+                    _ = try root.dir.statFile(std.testing.io, "demo/SKILL.md", .{});
+                }
+            }
+        }
+    }
+}
+
 test "management definite write failure is observable and blocks retry" {
     try exerciseManagementCommitFailure(
         .write_failed,
         error.PersistenceFailed,
         .write_failed,
     );
+}
+
+test "recovery persistence failure freezes ahead memory and restarts from strict canonical inventory" {
+    for ([_]management.TestSupport.FileStoreCommitFault{ .write_failed, .outcome_unknown }) |fault| {
+        var home = std.testing.tmpDir(.{});
+        defer home.cleanup();
+        var source = std.testing.tmpDir(.{ .iterate = true });
+        defer source.cleanup();
+        var storage = std.testing.tmpDir(.{});
+        defer storage.cleanup();
+        try source.dir.writeFile(std.testing.io, .{ .sub_path = "SKILL.md", .data = "---\nname: demo\ndescription: Demo\n---\n" });
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home_path = home_buffer[0..try home.dir.realPath(std.testing.io, &home_buffer)];
+        var source_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const source_path = source_buffer[0..try source.dir.realPath(std.testing.io, &source_buffer)];
+        var persistence: management.FileStore = .{ .io = std.testing.io, .dir = storage.dir };
+        var configuration: Configuration = .{
+            .state = .{
+                .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+                .management = .{ .file_store = &persistence, .staging_root = source_path },
+            },
+            .max_workspaces = 1,
+            .canonical_user_home = home_path,
+        };
+        const limits: state.Limits = .{ .max_assets = 4, .max_workspaces = 1, .max_policy_keys = 4, .max_policy_key_bytes = 64 };
+        var id: management.InstallId = undefined;
+        {
+            var harness: TestHarness = .{};
+            var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), configuration, limits);
+            defer runtime.deinit();
+            var preview = try runtime.previewDirectory(source_path);
+            defer preview.deinit();
+            management.TestSupport.setRenameFault(&runtime.state.transactions.?, .candidate_to_target);
+            management.TestSupport.setRecoveryFault(&runtime.state.transactions.?, .before_recovery);
+            try std.testing.expectError(error.FileTransactionFailed, runtime.installDirectory(source_path, .{
+                .source_kind = .local_directory,
+                .scope = .personal,
+                .expected_invocation_name = preview.invocation_name,
+                .expected_content_hash = preview.content_hash,
+            }, 100));
+            id = runtime.state.inventoryConst().items()[0].install_id;
+            _ = runtime.takeManagementChanged();
+            management.TestSupport.setRecoveryFault(&runtime.state.transactions.?, .none);
+            management.TestSupport.setFileStoreCommitFault(&persistence, fault);
+            const expected_error = if (fault == .write_failed) error.PersistenceFailed else error.PersistenceOutcomeUnknown;
+            try std.testing.expectError(expected_error, runtime.retryVerification(id, 101));
+            try std.testing.expectEqual(if (fault == .write_failed) ManagementHealth.write_failed else ManagementHealth.outcome_unknown, runtime.managementHealth());
+            try std.testing.expect(runtime.takeManagementChanged());
+            try std.testing.expect(runtime.state.inventoryConst().findConst(id) == null);
+            try std.testing.expectError(error.PersistenceFailed, runtime.requireRecoveryAvailable(.personal));
+        }
+        // All process-local transaction state has been destroyed. Only the
+        // actual canonical file is supplied to the next Runtime constructor.
+        management.TestSupport.setFileStoreCommitFault(&persistence, .none);
+        const bytes = (try persistence.loadAlloc(std.testing.allocator)).?;
+        defer std.testing.allocator.free(bytes);
+        configuration.state.management.restored_bytes = bytes;
+        var restarted_harness: TestHarness = .{};
+        var restarted = try Runtime.init(std.testing.io, std.testing.allocator, restarted_harness.effectPorts(), configuration, limits);
+        defer restarted.deinit();
+        try std.testing.expectEqual(ManagementHealth.ready, restarted.managementHealth());
+        try std.testing.expect(restarted.state.inventoryConst().findConst(id).?.requiresRecovery());
+        try std.testing.expect(!(try restarted.retryVerification(id, 102)).verification_pending);
+        try std.testing.expect(restarted.state.inventoryConst().findConst(id) == null);
+        try std.testing.expectError(error.FileNotFound, home.dir.statFile(std.testing.io, ".agents/skills/demo", .{}));
+    }
 }
 
 test "management mutation and failed catalog reconciliation stay inside Runtime" {

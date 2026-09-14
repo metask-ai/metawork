@@ -61,6 +61,8 @@ revision 1 的 Skill 来源设置提供两个 typed 写入口：`metawork.skills
 
 `skillManagement.assets[].origin` 为 null 或 `{ ecosystem: agents | claude | codex, scope: personal | project }`；由 Product 通过精确来源关联提供，不代替 asset 的 policy context 或 sourceKind 导入方式。未知 origin 不允许猜测，外部来源不能因 origin 获得文件管理 authority。
 
+`skillManagement.assets[].scope` 精确为 `{ kind: personal | project | external, workspaceId }`，project 时 `workspaceId` 非空，其余为 null；asset 不携带 Workspace epoch。Renderer 只按 `workspaceId` 把 project asset 归入 `workspaces[]` 中的 Workspace；所有携带 `expectedWorkspaceEpoch` 的 command 必须取同一 snapshot 中该 Workspace 的当前 `epoch`。
+
 ## File preview command
 
 `metawork.files.preview` 是 revision 1 command catalog 中的异步 command，原地 hard cut 使用 Native SDK async registry；它不出现在同步 handler registry。request 精确为：
@@ -207,6 +209,8 @@ Permission occurrence 在 `uiHistory` 中额外携带 `agentRequestId` 与 nulla
 根 `capabilities.conversationRecovery` 当前为 true。每个 Task 延续唯一 continuation 模型：`continuationAvailable` 表示现在可启动下一 Run，`continuationUnavailableReason` 精确取 `session_poisoned | event_projection_failure | closing | task_archived | session_recovery_required | session_recovery_in_progress | session_recovery_failed | persistence_unavailable | checkpoint_unavailable | execution_rebind_required | workspace_unavailable | authority_unavailable | runtime_unavailable` 或 null，`continuationRecoveryAvailable` 表示当前 snapshot 下允许 Renderer 在普通发送的内部前置步骤提交 restore；它不产生独立的恢复按钮、卡片或专用 Composer 文案。`execution_rebind_required` 只表示当前 protocol/model authority 不能承载该 Task，不能用于表达历史 generation 与当前 generation 不等；Renderer 也不能把它解释为 Conversation 身份失败。Task lifecycle 精确取 `open | closing`，不存在 `closed`；删除用例另以 `deletionStatus = idle | deleting | failed` 表达，只有 archived Task 可以非 `idle`，`deleting` 必须对应 `closing` lifecycle。active operation 可取 `restore`。Decoder 必须联合校验这些字段：attached 可继续态不能同时声称可恢复；required/failed 只有在 checkpoint、Task/Workspace source identity、Execution target readiness 与 runtime-readiness 等核心 Host gate 成立时才可发布 recovery available，Skill/MCP/Permission/projection readiness 不属于这些 gate；in-progress 必须对应 restore operation；archived/closing、普通 Run/compact 或 capability=false 时不得发布恢复前置步骤。不得新增并行的 `task.recovery` 状态对象。
 
 Skill management 使用同一 revision 1 数据面发布 bounded preview/detail/projection 与 typed import/export/reimport/uninstall mutation；command catalog、Zig DTO、TypeScript runtime decoder、snapshot fixture 和 automation 必须完全一致，不建立第二 transport 或局部 revision。
+
+Skill asset 的 `managementState` 包含派生的 `recovery_required`，不改变持久化 Asset.state 或事务 phase。该状态必须有 installId，并关闭 canExport/canReimport/canUninstall；canRetry 仅可在 management ready 且 Host 的当前恢复/验证准入成立时为 true。现有 Retry command 不变，其物理恢复与验证分派由 Host 决定；ready/external 或 store 不可信时不得宣称可 Retry。恢复、原操作错误与全局 revision 发布的关系由 [Product 架构](product-architecture.md#24-skill-authority-与本地资产)定义。
 
 MCP 管理使用同一 revision 1 snapshot 与 command 数据面，原地 hard cut 为 transport-discriminated catalog：既有 typed server commands 之外增加空 payload 的 `metawork.mcp.applyConfiguration`；不得暴露 generic upsert、secret-bearing payload 或第二 OAuth callback data plane。所有 server command 携带 canonical decimal `expectedDesiredGeneration` 和目标 `serverId`（create 除外）；create/update 仍只接收结构化 command + ordered arguments 或严格 HTTP endpoint，不接受 shell string。`applyConfiguration` 返回 `started | busy | rejected | unavailable`，只重试把 Host canonical desired 应用到正式 Runtime，不接受 Renderer 提供配置。完整精确命令集由 `app.zon`、Zig 与 TypeScript catalog 同步定义。
 

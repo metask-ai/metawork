@@ -319,6 +319,7 @@ Checkbox 即点即提交，值只来自 committed snapshot，不乐观翻转；�
 
 状态、空状态与恢复：
 
+- 未完成的文件恢复与 catalog 等待验证都进入“需要处理”分组，分别显示“需要恢复”和“等待验证”。详情沿用现有 Retry，严格消费 Host canRetry；需要恢复时不尝试读取可能正在移动的 definition，也不显示普通导出/替换/卸载动作。management 写失败或结果不确定必须在中心级说明重启后重新加载并尝试恢复，即使已没有资产行；不得承诺重启必定修复目录访问或文件占用。
 - `ready` 展示已提交 inventory 与 health；`degraded` 保留可用资产并独立展示目录问题。issue 只使用 bounded code、scope 和可选 invocation，不显示 raw diagnostic；
 - refresh pending 只禁用 Refresh 并显示 `Refreshing…`；失败保留最后 committed view 并提供 Retry，不清空成“没有 Skill”；
 - 首次 `uninitialized/loading` 显示两列 card skeleton；`unavailable` 显示恢复说明与 Refresh；真正 ready/degraded 且当前筛选无资产才显示空状态；

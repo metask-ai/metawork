@@ -75,8 +75,11 @@ pub const UserPolicy = struct {
     }
 };
 
+/// Keyed by Workspace id only. Callers still present the full current
+/// identity so command fencing stays with the Workspace epoch, but no epoch
+/// is persisted or compared here.
 pub const WorkspacePolicy = struct {
-    identity: WorkspaceIdentity,
+    workspace_id: u64,
     policy_revision: u64,
     enabled_override_skill_policy_keys: std.ArrayList([]u8) = .empty,
     disabled_override_skill_policy_keys: std.ArrayList([]u8) = .empty,
@@ -119,7 +122,7 @@ pub const Store = struct {
         );
         for (self.policies.items) |policy| {
             try result.policies.append(self.allocator, .{
-                .identity = policy.identity,
+                .workspace_id = policy.workspace_id,
                 .policy_revision = policy.policy_revision,
             });
             const copy = &result.policies.items[result.policies.items.len - 1];
@@ -246,36 +249,20 @@ pub const Store = struct {
         if (self.policies.items.len == self.limits.max_workspaces)
             return error.WorkspaceCapacity;
         try self.policies.append(self.allocator, .{
-            .identity = identity,
+            .workspace_id = identity.workspace_id,
             .policy_revision = self.user.policy_revision,
         });
         return &self.policies.items[self.policies.items.len - 1];
     }
 
-    /// Removes policies that cannot belong to a currently registered Manual
-    /// Workspace. Empty policies remain so their revision cannot be replayed.
-    pub fn reconcile(
-        self: *Store,
-        active: []const WorkspaceIdentity,
-    ) bool {
-        var changed = false;
-        var index = self.policies.items.len;
-        while (index > 0) {
-            index -= 1;
-            const policy = &self.policies.items[index];
-            var found = false;
-            for (active) |identity| {
-                if (policy.identity.eql(identity)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (found) continue;
-            policy.deinit(self.allocator);
-            _ = self.policies.orderedRemove(index);
-            changed = true;
-        }
-        return changed;
+    /// Removes the policy of a Workspace id that has left the registry.
+    /// Callers decide when an id is gone; this never consults visibility
+    /// or epochs.
+    pub fn retire(self: *Store, workspace_id: u64) bool {
+        const index = self.findIndex(workspace_id) orelse return false;
+        self.policies.items[index].deinit(self.allocator);
+        _ = self.policies.orderedRemove(index);
+        return true;
     }
 
     pub fn items(self: *const Store) []const WorkspacePolicy {
@@ -289,14 +276,18 @@ pub const Store = struct {
     }
 
     fn find(self: *Store, identity: WorkspaceIdentity) ?*WorkspacePolicy {
-        for (self.policies.items) |*policy|
-            if (policy.identity.eql(identity)) return policy;
-        return null;
+        const index = self.findIndex(identity.workspace_id) orelse return null;
+        return &self.policies.items[index];
     }
 
     fn findConst(self: *const Store, identity: WorkspaceIdentity) ?*const WorkspacePolicy {
-        for (self.policies.items) |*policy|
-            if (policy.identity.eql(identity)) return policy;
+        const index = self.findIndex(identity.workspace_id) orelse return null;
+        return &self.policies.items[index];
+    }
+
+    fn findIndex(self: *const Store, workspace_id: u64) ?usize {
+        for (self.policies.items, 0..) |policy, index|
+            if (policy.workspace_id == workspace_id) return index;
         return null;
     }
 };
@@ -404,7 +395,6 @@ const UserWire = struct {
 
 const WorkspaceWire = struct {
     workspace_id: u64,
-    workspace_epoch: u64,
     policy_revision: u64,
     enabled_override_skill_policy_keys: []const []const u8,
     disabled_override_skill_policy_keys: []const []const u8,
@@ -426,10 +416,9 @@ pub fn encode(output: []u8, store: *const Store) Error![]const u8 {
     for (store.policies.items, 0..) |policy, index| {
         if (index != 0) writer.writeByte(',') catch return error.StoreEncodeFailed;
         writer.print(
-            "{{\"workspace_id\":{d},\"workspace_epoch\":{d},\"policy_revision\":{d},\"enabled_override_skill_policy_keys\":[",
+            "{{\"workspace_id\":{d},\"policy_revision\":{d},\"enabled_override_skill_policy_keys\":[",
             .{
-                policy.identity.workspace_id,
-                policy.identity.workspace_epoch,
+                policy.workspace_id,
                 policy.policy_revision,
             },
         ) catch return error.StoreEncodeFailed;
@@ -463,7 +452,10 @@ pub fn decode(
     if (input.len > max_store_bytes) return error.StoreTooLarge;
     var parsed = std.json.parseFromSlice(StoreWire, allocator, input, .{
         .ignore_unknown_fields = false,
-    }) catch return error.StoreCorrupt;
+    }) catch |err| return if (err == error.OutOfMemory)
+        error.OutOfMemory
+    else
+        error.StoreCorrupt;
     defer parsed.deinit();
     if (parsed.value.schema != schema_version or
         parsed.value.last_revision == 0 or
@@ -483,18 +475,15 @@ pub fn decode(
         limits,
     );
     for (parsed.value.workspaces) |wire| {
-        const identity: WorkspaceIdentity = .{
-            .workspace_id = wire.workspace_id,
-            .workspace_epoch = wire.workspace_epoch,
-        };
-        if (!validIdentity(identity) or wire.policy_revision == 0 or
+        // One policy per Workspace id; a repeated id is corrupt, never merged.
+        if (wire.workspace_id == 0 or wire.policy_revision == 0 or
             wire.policy_revision > parsed.value.last_revision or
             wire.enabled_override_skill_policy_keys.len > limits.max_policy_keys or
             wire.disabled_override_skill_policy_keys.len > limits.max_policy_keys or
-            result.findConst(identity) != null)
+            result.findIndex(wire.workspace_id) != null)
             return error.StoreCorrupt;
         try result.policies.append(allocator, .{
-            .identity = identity,
+            .workspace_id = wire.workspace_id,
             .policy_revision = wire.policy_revision,
         });
         const policy = &result.policies.items[result.policies.items.len - 1];
@@ -683,7 +672,50 @@ test "User defaults stamp every Workspace with one global revision" {
     try std.testing.expectEqual(@as(usize, 0), store.items()[0].disabled_override_skill_policy_keys.items.len);
 }
 
-test "Skill enablement codec is strict and reconciliation removes stale epochs" {
+test "Skill enablement ownership is keyed by Workspace id and a repeated id is corrupt" {
+    const limits: Limits = .{
+        .max_workspaces = 4,
+        .max_policy_keys = 8,
+        .max_policy_key_bytes = 64,
+    };
+    var store = try Store.init(std.testing.allocator, limits);
+    defer store.deinit();
+    const created: WorkspaceIdentity = .{ .workspace_id = 7, .workspace_epoch = 3 };
+    const later: WorkspaceIdentity = .{ .workspace_id = 7, .workspace_epoch = 5 };
+    _ = try store.applyWorkspace(.{
+        .identity = created,
+        .skill_policy_key = "review",
+        .state = .disabled,
+        .expected_revision = 1,
+    });
+    // The Workspace epoch fences commands only; the policy follows the id.
+    try std.testing.expect(!store.isEnabled(later, "review"));
+    try std.testing.expectEqual(@as(u64, 2), store.revision(later));
+    try std.testing.expectEqual(@as(u64, 3), try store.applyWorkspace(.{
+        .identity = later,
+        .skill_policy_key = "review",
+        .state = .enabled,
+        .expected_revision = 2,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), store.items().len);
+    try std.testing.expectEqual(@as(u64, 7), store.items()[0].workspace_id);
+    var output: [max_store_bytes]u8 = undefined;
+    const encoded = try encode(&output, &store);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "workspace_epoch") == null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"schema\":1") != null);
+    try std.testing.expect(store.retire(7));
+    try std.testing.expect(!store.retire(7));
+    try std.testing.expectEqual(@as(usize, 0), store.items().len);
+    // Strict decode: a repeated id, an epoch field, or an unknown schema is corrupt.
+    const prefix = "{\"schema\":1,\"last_revision\":2,\"user\":{\"policy_revision\":1,\"disabled_skill_policy_keys\":[]},\"workspaces\":[";
+    inline for (.{
+        prefix ++ "{\"workspace_id\":7,\"policy_revision\":2,\"enabled_override_skill_policy_keys\":[],\"disabled_override_skill_policy_keys\":[]},{\"workspace_id\":7,\"policy_revision\":2,\"enabled_override_skill_policy_keys\":[],\"disabled_override_skill_policy_keys\":[]}]}",
+        prefix ++ "{\"workspace_id\":7,\"workspace_epoch\":3,\"policy_revision\":2,\"enabled_override_skill_policy_keys\":[],\"disabled_override_skill_policy_keys\":[]}]}",
+        "{\"schema\":2,\"last_revision\":1,\"user\":{\"policy_revision\":1,\"disabled_skill_policy_keys\":[]},\"workspaces\":[]}",
+    }) |bytes| try std.testing.expectError(error.StoreCorrupt, decode(std.testing.allocator, bytes, limits));
+}
+
+test "Skill enablement codec is strict and retirement removes a Workspace id" {
     const limits: Limits = .{
         .max_workspaces = 4,
         .max_policy_keys = 8,
@@ -711,10 +743,11 @@ test "Skill enablement codec is strict and reconciliation removes stale epochs" 
         .{ .workspace_id = 7, .workspace_epoch = 3 },
         "review",
     ));
-    try std.testing.expect(restored.reconcile(&.{.{
-        .workspace_id = 7,
-        .workspace_epoch = 4,
-    }}));
+    try std.testing.expect(restored.isEnabled(
+        .{ .workspace_id = 7, .workspace_epoch = 4 },
+        "review",
+    ));
+    try std.testing.expect(restored.retire(7));
     try std.testing.expectEqual(@as(usize, 0), restored.items().len);
     try std.testing.expectError(error.StoreCorrupt, decode(
         std.testing.allocator,
@@ -765,7 +798,7 @@ test "Skill enablement file store atomically restores committed bytes" {
     var file_store = try FileStore.init(std.testing.io, absolute);
     defer file_store.deinit();
     const expected =
-        "{\"schema\":1,\"last_revision\":2,\"user\":{\"policy_revision\":2,\"disabled_skill_policy_keys\":[\"review\"]},\"workspaces\":[{\"workspace_id\":7,\"workspace_epoch\":3,\"policy_revision\":2,\"enabled_override_skill_policy_keys\":[],\"disabled_override_skill_policy_keys\":[]}]}";
+        "{\"schema\":1,\"last_revision\":2,\"user\":{\"policy_revision\":2,\"disabled_skill_policy_keys\":[\"review\"]},\"workspaces\":[{\"workspace_id\":7,\"policy_revision\":2,\"enabled_override_skill_policy_keys\":[],\"disabled_override_skill_policy_keys\":[]}]}";
     try file_store.commit(expected);
     const restored = (try file_store.loadAlloc(std.testing.allocator)) orelse
         return error.TestExpectedEqual;

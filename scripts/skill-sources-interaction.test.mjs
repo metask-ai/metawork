@@ -88,6 +88,68 @@ test.after(async () => {
   dom.window.close();
 });
 
+test("Recovery-required details skip moving files and keep exact Retry and keyboard focus", async (ctx) => {
+  const recovery = JSON.parse(
+    await readFile(
+      "frontend/src/bridge/__fixtures__/skill-recovery-required.fixture",
+      "utf8",
+    ),
+  );
+  recovery.canRetry = true;
+  const retries = [];
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "retrySkillVerification",
+    (installId) =>
+      new Promise((resolve) => retries.push({ installId, resolve })),
+  );
+  const detail = ctx.mock.method(
+    BridgeClient.prototype,
+    "skillDetail",
+    async () => {
+      throw new Error("Recovery must not read a moving target");
+    },
+  );
+  const { snapshot } = await fixture(
+    ctx,
+    (value) => (value.skillManagement.assets = [recovery]),
+  );
+  const user = userEvent.setup({ document });
+  const card = await screen.findByRole("button", {
+    name: /review.*Recovery required/,
+  });
+  await user.click(card);
+  await screen.findByRole("dialog");
+  assert.equal(detail.mock.callCount(), 0);
+  assert.equal(screen.queryByRole("button", { name: "Export .skill" }), null);
+  await user.click(screen.getByRole("button", { name: "Retry", exact: true }));
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0].installId, recovery.installId);
+  assert.equal(
+    screen.getByRole("button", { name: "Retry", exact: true }).disabled,
+    true,
+  );
+  snapshot.revision = "51";
+  await act(async () =>
+    retries[0].resolve({
+      accepted: false,
+      installId: recovery.installId,
+      verificationPending: false,
+      reason: "local_storage_failed",
+    }),
+  );
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Retry", exact: true }).disabled,
+      false,
+    ),
+  );
+  assert.equal(retries.length, 1);
+  await user.keyboard("{Escape}");
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  assert.equal(document.activeElement, card);
+});
+
 async function fixture(ctx, configure = () => {}) {
   const snapshot = JSON.parse(
     await readFile(

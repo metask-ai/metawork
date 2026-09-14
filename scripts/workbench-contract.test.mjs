@@ -53,6 +53,36 @@ function clone(value) {
   return structuredClone(value);
 }
 
+test("Skill recovery state matches the Host fixture and enforces Retry authority", () => {
+  const asset = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/skill-recovery-required.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const candidate = clone(fixture);
+  candidate.skillManagement.assets = [asset];
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  candidate.skillManagement.availability = "ready";
+  asset.canRetry = true;
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  for (const mutate of [
+    (value) => (value.skillManagement.availability = "write_failed"),
+    (value) => (value.skillManagement.assets[0].managementState = "ready"),
+    (value) =>
+      (value.skillManagement.assets[0].managementState = "invented_phase"),
+    (value) => (value.skillManagement.assets[0].installId = null),
+    (value) => (value.skillManagement.assets[0].canReimport = true),
+  ]) {
+    const invalid = clone(candidate);
+    mutate(invalid);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+});
+
 test("Skill source settings preserve unknown oversized formats without reset authority", () => {
   for (const health of [
     "too_large",

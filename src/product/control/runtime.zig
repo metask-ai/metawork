@@ -70,6 +70,7 @@ pub const Error = lifecycle.Error || product_attachment.Error || product_schedul
     TaskIdentityExhausted,
     WorkspaceCapacity,
     WorkspaceIdentityExhausted,
+    WorkspaceIdentityUntrusted,
     WorkspaceOrderExhausted,
     UnknownTask,
     UnknownWorkspace,
@@ -620,7 +621,8 @@ fn automaticWorkspaceContains(context: *const anyopaque, path: []const u8) bool 
 fn hiddenWorkspaceReusable(context: *const anyopaque, workspace_id: u64) bool {
     const self: *const Runtime = @ptrCast(@alignCast(context));
     return !self.task_runtime.workspaceHasTasks(workspace_id) and
-        !self.skill.hasWorkspaceJob(workspace_id);
+        !self.skill.hasWorkspaceJob(workspace_id) and
+        self.skill.workspaceRetirementAllowed(workspace_id);
 }
 
 fn enqueueSkillJob(
@@ -1334,7 +1336,9 @@ pub const Runtime = struct {
         }
         control.reconcileCheckpointStoreNoFail();
         control.cleanupFileChangeStoreNoFail();
-        control.reconcileSkillEnablementNoFail();
+        // Skill records name Workspace ids; the allocator must never hand out
+        // an id they still claim, whatever history survived.
+        control.workspace.reserveIdentity(control.skill.maxWorkspaceId());
         _ = control.schedule.recoverInterruptedNoFail(
             control.scheduleRedaction(),
         );
@@ -1819,9 +1823,10 @@ pub const Runtime = struct {
             input,
             self.schedule.now(),
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1838,9 +1843,10 @@ pub const Runtime = struct {
             input,
             self.schedule.now(),
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1861,9 +1867,10 @@ pub const Runtime = struct {
             expected_invocation_name,
             expected_content_hash,
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1884,9 +1891,10 @@ pub const Runtime = struct {
             expected_invocation_name,
             expected_content_hash,
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1902,9 +1910,10 @@ pub const Runtime = struct {
             install_id,
             self.schedule.now(),
         ) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
@@ -1916,19 +1925,21 @@ pub const Runtime = struct {
         const scope = try self.skill.assetScope(install_id);
         try self.requireSkillMutationAuthority(scope);
         const previous_health = self.skill.managementHealth();
-        const result = self.skill.retryVerification(install_id) catch |err| {
-            self.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+        const result = self.skill.retryVerification(install_id, self.schedule.now()) catch |err| {
+            self.publishSkillManagementChanges(previous_health);
             return err;
         };
+        _ = self.skill.takeManagementChanged();
         self.bumpRevision();
         return result;
     }
 
-    fn bumpRevisionIfSkillManagementHealthChanged(
+    fn publishSkillManagementChanges(
         self: *Runtime,
         previous_health: skill_runtime.ManagementHealth,
     ) void {
-        if (self.skill.managementHealth() != previous_health)
+        const changed = self.skill.takeManagementChanged();
+        if (changed or self.skill.managementHealth() != previous_health)
             self.bumpRevision();
     }
     pub fn readSkillDefinition(
@@ -1947,7 +1958,8 @@ pub const Runtime = struct {
         return self.skill.exportPackage(install_id, absolute_destination);
     }
     pub fn automaticWorkspacesAvailable(self: *const Runtime) bool {
-        return self.workspace.automaticRootAvailable();
+        return self.workspace.automaticRootAvailable() and
+            self.skill.identitySourceTrusted();
     }
 
     pub fn stageAttachments(
@@ -2687,6 +2699,7 @@ pub const Runtime = struct {
                 .context = self,
                 .automatic_contains_fn = automaticWorkspaceContains,
                 .reusable_fn = hiddenWorkspaceReusable,
+                .allocation_allowed = self.skill.identitySourceTrusted(),
             },
         );
         errdefer if (preparation.isActive())
@@ -2699,11 +2712,15 @@ pub const Runtime = struct {
             self.workspace.rollbackOpen(&preparation, self.workspaceStorage());
             return err;
         };
-        if (self.workspace.commitOpen(&preparation, self.workspaceStorage())) |displaced_id|
+        if (self.workspace.commitOpen(&preparation, self.workspaceStorage())) |displaced_id| {
             std.debug.assert(self.skill.unregisterWorkspace(
                 displaced_id,
                 self.skillProjectionBudget(),
             ));
+            // The id has left the registry for good; its Skill provenance and
+            // policy retire with it. Files under the old root are untouched.
+            _ = self.skill.retireWorkspace(displaced_id, self.skillProjectionBudget());
+        }
         self.skill.registerWorkspaceOwned(.{
             .id = workspace.id,
             .epoch = workspace.epoch,
@@ -2715,7 +2732,6 @@ pub const Runtime = struct {
             self.execution_state.credential(),
             self.workspaceStorage(),
         );
-        self.reconcileSkillEnablementNoFail();
         self.recoverSkillTransactionsForScopeNoFail(.{ .project = .{
             .workspace_id = workspace.id,
             .workspace_epoch = workspace.epoch,
@@ -2825,12 +2841,17 @@ pub const Runtime = struct {
                     return error.WorkspaceEpochMismatch;
             },
         }
-        const next_revision = try self.skill.setEnabled(
+        const previous_health = self.skill.enablementHealth();
+        const next_revision = self.skill.setEnabled(
             mutation,
             self.skillProjectionBudget(),
             catalogSnapshotLimits(self.limits),
-        );
-        if (next_revision != mutation.expected_selection_revision)
+        ) catch |err| {
+            if (self.skill.enablementHealth() != previous_health) self.bumpRevision();
+            return err;
+        };
+        if (next_revision != mutation.expected_selection_revision or
+            self.skill.enablementHealth() != previous_health)
             self.bumpRevision();
         return next_revision;
     }
@@ -2891,7 +2912,7 @@ pub const Runtime = struct {
         );
         const workspace = self.workspace.facts(facts.workspace_id) orelse
             return error.WorkspaceUnavailable;
-        if (self.skill.enablementHealth() != .ready)
+        if (!self.skill.enablementTrusted())
             return error.RecoveryUnavailable;
         if (workspace.kind != .manual) return error.CatalogUnavailable;
         if (workspace.epoch != facts.workspace_epoch)
@@ -3023,7 +3044,6 @@ pub const Runtime = struct {
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
         skill_root_owned = false;
-        self.reconcileSkillEnablementNoFail();
         self.bumpRevision();
         if (!self.task_runtime.releaseWorkspaceSessions(workspace_id, .{
             .context = self,
@@ -4743,7 +4763,7 @@ pub const Runtime = struct {
             @tagName(self.task_persistence_health),
             self.taskHistoryRecoveryAvailable(),
             permission_profiles_available,
-            self.workspace.automaticRootAvailable(),
+            self.automaticWorkspacesAvailable(),
             self.schedule.timerEnabled() and schedule_persistence_ready and
                 background_schedule_wake,
             schedule_persistence_ready,
@@ -5515,11 +5535,16 @@ pub const Runtime = struct {
                 .slot_count = self.workspace.slotCount(),
                 .get_fn = skillWorkspaceCatalog,
             },
+            .{ .context = self, .available_fn = skillRetryAvailable },
         ) catch return error.SnapshotTooLarge;
     }
 
     fn canCreateTask(self: *const Runtime) bool {
-        return !self.shutting_down and self.modelsDefaultCurrent();
+        // A new Task allocates an Automatic Workspace id; that is refused while
+        // the Skill stores that name ids could not be read, and the admission
+        // view says so before any command is sent.
+        return !self.shutting_down and self.modelsDefaultCurrent() and
+            self.skill.identitySourceTrusted();
     }
 
     fn cloneCurrentTaskExecution(
@@ -5611,7 +5636,7 @@ pub const Runtime = struct {
             .source_generation = self.execution_state.activeSourceGeneration(),
             .selection_revision = self.execution_state.activeSelectionRevision(),
             .protocol = self.execution_state.protocol(),
-            .automatic_workspace_available = self.workspace.automaticRootAvailable(),
+            .automatic_workspace_available = self.automaticWorkspacesAvailable(),
         };
     }
 
@@ -6529,6 +6554,7 @@ pub const Runtime = struct {
         var preparation = try self.workspace.prepareAutomatic(
             self.execution_state.credential(),
             self.workspaceStorage(),
+            self.skill.identitySourceTrusted(),
         );
         errdefer if (preparation.isActive()) {
             _ = self.workspace.rollbackPreparedAutomatic(
@@ -6580,8 +6606,19 @@ pub const Runtime = struct {
         self: *Runtime,
         scope: skill_runtime.ManagementScope,
     ) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        return self.checkSkillMutationAuthority(scope);
+    }
+
+    fn skillRetryAvailable(context: *const anyopaque, install_id: skill_runtime.InstallId) bool {
+        const self: *const Runtime = @ptrCast(@alignCast(context));
+        if (!self.skill.retryAvailable(install_id)) return false;
+        self.checkSkillMutationAuthority(self.skill.assetScope(install_id) catch return false) catch return false;
+        return true;
+    }
+
+    fn checkSkillMutationAuthority(self: *const Runtime, scope: skill_runtime.ManagementScope) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
         switch (scope) {
             .personal => {
                 if (self.task_runtime.hasActiveOperation(null)) return error.TaskBusy;
@@ -6621,35 +6658,17 @@ pub const Runtime = struct {
         }
     }
 
-    fn skillEnablementWorkspace(
-        context: *const anyopaque,
-        index: usize,
-    ) ?skill_runtime.EnablementWorkspaceIdentity {
-        const self: *const Runtime = @ptrCast(@alignCast(context));
-        const workspace = self.workspace.visibleManualBindingAt(index) orelse
-            return null;
-        return .{
-            .workspace_id = workspace.id,
-            .workspace_epoch = workspace.epoch,
-        };
-    }
-
-    fn reconcileSkillEnablementNoFail(self: *Runtime) void {
-        self.skill.reconcileEnablementNoFail(.{
-            .context = self,
-            .slot_count = self.workspace.slotCount(),
-            .get_fn = skillEnablementWorkspace,
-        }, self.skillProjectionBudget());
-    }
-
     fn recoverSkillTransactionsForScopeNoFail(
         self: *Runtime,
         scope: skill_runtime.ManagementScope,
     ) void {
+        self.checkSkillMutationAuthority(scope) catch return;
+        const previous_health = self.skill.managementHealth();
         self.skill.recoverTransactionsForScopeNoFail(
             scope,
             self.schedule.now(),
         );
+        self.publishSkillManagementChanges(previous_health);
     }
 
     fn commitMcpRefreshJobNoFail(self: *Runtime) bool {
@@ -10544,13 +10563,64 @@ test "Skill catalog snapshot reports redaction without exposing credential bytes
     );
 }
 
+test "unreadable Skill stores forbid every Workspace allocation until a strict reload proves the ids in use" {
+    test_agent_runtime.io = std.testing.io;
+    var directory_b = std.testing.tmpDir(.{});
+    defer directory_b.cleanup();
+    var directory_store = std.testing.tmpDir(.{});
+    defer directory_store.cleanup();
+    var b_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const b_path = b_buffer[0..try directory_b.dir.realPath(std.testing.io, &b_buffer)];
+    var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store_path = store_buffer[0..try directory_store.dir.realPath(std.testing.io, &store_buffer)];
+    // A Skill store already names Workspace id 1, whatever history survives.
+    var inventory = skill_runtime.testing.ManagementInventory.init(std.testing.allocator, .{});
+    defer inventory.deinit();
+    const install_id: skill_runtime.InstallId = @splat(7);
+    _ = try inventory.add(.{
+        .install_id = install_id,
+        .source_kind = .local_directory,
+        .scope = .{ .project = .{ .workspace_id = 1, .workspace_epoch = 1 } },
+        .target_entry = "review",
+        .content_hash = @splat('a'),
+        .installed_at_unix_seconds = 1,
+    });
+    var asset_buffer: [8192]u8 = undefined;
+    var asset_file: skill_runtime.testing.ManagementFileStore = .{ .io = std.testing.io, .dir = directory_store.dir };
+    try asset_file.commit(try skill_runtime.testing.encodeManagement(&asset_buffer, &inventory));
+    {
+        // Lost history plus an unreadable Skill store: no id can be proven free,
+        // so neither a Manual nor an Automatic Workspace may be allocated.
+        var replacement = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+            .skill_management = .{ .file_store = &asset_file, .staging_root = store_path, .restore_failed = true },
+        });
+        defer replacement.deinit();
+        try std.testing.expectEqual(SkillManagementHealth.read_failed, replacement.skill.managementHealth());
+        try std.testing.expect(!replacement.skill.identitySourceTrusted());
+        try std.testing.expectError(error.WorkspaceIdentityUntrusted, replacement.openWorkspace(.{ .workspace_root = b_path, .trust = .explicitly_trusted }));
+        try std.testing.expectError(error.WorkspaceIdentityUntrusted, replacement.prepareAutomaticWorkspace());
+        try std.testing.expectEqual(@as(usize, 0), replacement.workspace.count(.manual));
+    }
+    // A strict reload of the same store lifts the ban; the allocator now starts
+    // above every id the store names, and the orphaned record stays inert.
+    const canonical_assets = (try asset_file.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(canonical_assets);
+    var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+        .skill_management = .{ .file_store = &asset_file, .staging_root = store_path, .restored_bytes = canonical_assets },
+    });
+    defer restored.deinit();
+    try std.testing.expect(restored.skill.identitySourceTrusted());
+    try std.testing.expectEqual(@as(u64, 2), try restored.openWorkspace(.{ .workspace_root = b_path, .trust = .explicitly_trusted }));
+    try std.testing.expectError(error.UnknownWorkspace, restored.uninstallSkill(install_id));
+}
+
 test "Skill management health failure advances Product revision exactly once" {
     var control = try testRuntime();
     defer control.deinit();
     const previous_health = control.skill.managementHealth();
     const before_failure = control.revision;
     control.skill.testSetManagementHealth(.outcome_unknown);
-    control.bumpRevisionIfSkillManagementHealthChanged(previous_health);
+    control.publishSkillManagementChanges(previous_health);
     try std.testing.expectEqual(before_failure + 1, control.revision);
     try std.testing.expectEqual(
         SkillManagementHealth.outcome_unknown,
@@ -10558,8 +10628,28 @@ test "Skill management health failure advances Product revision exactly once" {
     );
 
     const before_rejection = control.revision;
-    control.bumpRevisionIfSkillManagementHealthChanged(.outcome_unknown);
+    control.publishSkillManagementChanges(.outcome_unknown);
     try std.testing.expectEqual(before_rejection, control.revision);
+}
+
+test "Skill recovery phase changes publish without a health change and match the wire fixture" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.skill.testSetManagementHealth(.ready);
+    const before = control.revision;
+    try control.skill.testAddRecoveryAsset();
+    control.publishSkillManagementChanges(.ready);
+    try std.testing.expectEqual(before + 1, control.revision);
+    control.publishSkillManagementChanges(.ready);
+    try std.testing.expectEqual(before + 1, control.revision);
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try control.writeSkillManagement(&writer);
+    var projection = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer projection.deinit();
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, projection.value.object.get("assets").?.array.items[0], .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.skill_recovery_required, "\r\n"), encoded);
 }
 
 fn installTestCommittedSkillAuthorities(control: *Runtime) !void {
@@ -10677,6 +10767,52 @@ test "unknown Skill enablement persistence outcome freezes authorities" {
             .expected_selection_revision = 1,
         }),
     );
+}
+
+test "Skill enablement retries a definite file write failure without discarding committed policy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory_len = try tmp.dir.realPath(std.testing.io, &directory_storage);
+    var file_store = try skill_runtime.EnablementFileStore.init(std.testing.io, directory_storage[0..directory_len]);
+    defer file_store.deinit();
+    var control = try testRuntime();
+    defer control.deinit();
+    control.skill.testSetEnablementPersistence(&file_store);
+    try installTestCommittedSkillAuthorities(&control);
+
+    // A directory at the canonical file name makes atomic rename fail before
+    // publication on every platform, without a production fault-injection port.
+    try tmp.dir.createDir(std.testing.io, "skill-enablement.json", .default_dir);
+    const disable: SkillEnablementMutation = .{
+        .scope = .personal,
+        .skill_policy_key = "review",
+        .state = .disabled,
+        .expected_catalog_revision = "catalog-1",
+        .expected_selection_revision = 1,
+    };
+    const before_failure = control.revision;
+    try std.testing.expectError(error.WriteFailed, control.setSkillEnabled(disable));
+    try std.testing.expectEqual(before_failure + 1, control.revision);
+    try std.testing.expectEqual(SkillEnablementHealth.write_failed, control.skill.enablementHealth());
+    try std.testing.expect(control.skill.personalCatalogProjection().skills[0].enabled);
+    try std.testing.expect(testWorkspaceSkillProjection(&control).skills[0].enabled);
+    var no_op = disable;
+    no_op.state = .enabled;
+    try std.testing.expectEqual(@as(u64, 1), try control.setSkillEnabled(no_op));
+    try std.testing.expectEqual(SkillEnablementHealth.write_failed, control.skill.enablementHealth());
+    try std.testing.expectEqual(before_failure + 1, control.revision);
+    try std.testing.expectError(error.WriteFailed, control.setSkillEnabled(disable));
+    try std.testing.expectEqual(before_failure + 1, control.revision);
+
+    try tmp.dir.deleteDir(std.testing.io, "skill-enablement.json");
+    try std.testing.expectEqual(@as(u64, 2), try control.setSkillEnabled(disable));
+    try std.testing.expectEqual(SkillEnablementHealth.ready, control.skill.enablementHealth());
+    try std.testing.expect(!control.skill.personalCatalogProjection().skills[0].enabled);
+    try std.testing.expect(!testWorkspaceSkillProjection(&control).skills[0].enabled);
+    const saved = (try file_store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "review") != null);
 }
 
 test "Workspace Skill enablement uses double revision CAS and leaves pinned catalogs unchanged" {

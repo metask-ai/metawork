@@ -768,7 +768,6 @@ function decodeSkillManagement(
       const scopeValue = object(asset.scope, `${itemPath}.scope`, [
         "kind",
         "workspaceId",
-        "workspaceEpoch",
       ]);
       const scopeKind = enumValue(scopeValue.kind, `${itemPath}.scope.kind`, [
         "personal",
@@ -783,20 +782,9 @@ function decodeSkillManagement(
                 scopeValue.workspaceId,
                 `${itemPath}.scope.workspaceId`,
               ),
-              workspaceEpoch: positiveWireId(
-                scopeValue.workspaceEpoch,
-                `${itemPath}.scope.workspaceEpoch`,
-              ),
             }
-          : {
-              kind: scopeKind,
-              workspaceId: null,
-              workspaceEpoch: null,
-            };
-      if (
-        scopeKind !== "project" &&
-        (scopeValue.workspaceId !== null || scopeValue.workspaceEpoch !== null)
-      )
+          : { kind: scopeKind, workspaceId: null };
+      if (scopeKind !== "project" && scopeValue.workspaceId !== null)
         fail(`${itemPath}.scope`, "non-project scope cannot name a workspace");
       return {
         installId:
@@ -813,7 +801,12 @@ function decodeSkillManagement(
         managementState: enumValue(
           asset.managementState,
           `${itemPath}.managementState`,
-          ["ready", "pending_verification", "externally_managed"] as const,
+          [
+            "ready",
+            "pending_verification",
+            "recovery_required",
+            "externally_managed",
+          ] as const,
         ),
         skillId:
           asset.skillId === null
@@ -881,6 +874,26 @@ function decodeSkillManagement(
     },
   );
   for (const asset of assets) {
+    if (
+      asset.managementState === "recovery_required" &&
+      (asset.installId === null ||
+        asset.canExport ||
+        asset.canReimport ||
+        asset.canUninstall)
+    )
+      fail(
+        path,
+        "recovery requires a managed asset without ordinary file actions",
+      );
+    if (
+      asset.canRetry &&
+      (availability !== "ready" ||
+        asset.installId === null ||
+        !["recovery_required", "pending_verification"].includes(
+          asset.managementState,
+        ))
+    )
+      fail(path, "retry requires trusted management and a recoverable asset");
     const enablementFields = [
       asset.enabled,
       asset.enablementState,

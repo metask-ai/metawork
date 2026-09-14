@@ -968,14 +968,14 @@ export type SkillManagementView = {
       scope: (typeof skillOriginScopes)[number];
     } | null;
     scope:
-      | { kind: "personal"; workspaceId: null; workspaceEpoch: null }
-      | {
-          kind: "project";
-          workspaceId: string;
-          workspaceEpoch: string;
-        }
-      | { kind: "external"; workspaceId: null; workspaceEpoch: null };
-    managementState: "ready" | "pending_verification" | "externally_managed";
+      | { kind: "personal"; workspaceId: null }
+      | { kind: "project"; workspaceId: string }
+      | { kind: "external"; workspaceId: null };
+    managementState:
+      | "ready"
+      | "pending_verification"
+      | "recovery_required"
+      | "externally_managed";
     skillId: string | null;
     skillPolicyKey: string | null;
     invocationName: string;

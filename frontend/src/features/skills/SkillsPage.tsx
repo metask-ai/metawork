@@ -89,19 +89,20 @@ export function rowsForSkillContext(
 ): Asset[] {
   if (context === "personal")
     return assets.filter((asset) => asset.scope.kind === "personal");
+  // Ownership is keyed by Workspace id; the current epoch comes from the
+  // Workspace itself when a command needs it.
   if (!workspace) return [];
   return assets.filter(
     (asset) =>
       asset.scope.kind === "project" &&
-      asset.scope.workspaceId === workspace.id &&
-      asset.scope.workspaceEpoch === workspace.epoch,
+      asset.scope.workspaceId === workspace.id,
   );
 }
 
 function skillRowIdentity(asset: Asset): string {
   const scopeIdentity =
     asset.scope.kind === "project"
-      ? `${asset.scope.kind}:${asset.scope.workspaceId}:${asset.scope.workspaceEpoch}`
+      ? `${asset.scope.kind}:${asset.scope.workspaceId}`
       : asset.scope.kind;
   return `${scopeIdentity}:${asset.installId ?? ""}:${asset.skillId ?? ""}:${asset.invocationName}`;
 }
@@ -121,9 +122,7 @@ function scopeLabel(
   if (asset.scope.kind === "personal") return t("skills.scope.personal");
   if (asset.scope.kind === "external") return t("skills.scope.external");
   const workspace = workspaces.find(
-    (candidate) =>
-      candidate.id === asset.scope.workspaceId &&
-      candidate.epoch === asset.scope.workspaceEpoch,
+    (candidate) => candidate.id === asset.scope.workspaceId,
   );
   return workspace
     ? t("skills.scope.project_context", { workspace: workspace.displayName })
@@ -145,6 +144,7 @@ function SkillCard({
 }) {
   const { t } = useI18n();
   const attention =
+    asset.managementState === "recovery_required" ||
     asset.managementState === "pending_verification" ||
     asset.issueCodes.length > 0;
   return (
@@ -169,9 +169,11 @@ function SkillCard({
             <span>{sourceLabel(asset, t)}</span>
             {attention && (
               <span className="skill-card-attention">
-                {asset.managementState === "pending_verification"
-                  ? t("skills.status.pending")
-                  : t("skills.status.issue")}
+                {asset.managementState === "recovery_required"
+                  ? t("skills.status.recovery_required")
+                  : asset.managementState === "pending_verification"
+                    ? t("skills.status.pending")
+                    : t("skills.status.issue")}
               </span>
             )}
           </span>
@@ -325,7 +327,9 @@ export function SkillsPage({
     [contextAssets, query],
   );
   const attention = visibleAssets.filter(
-    (asset) => asset.managementState === "pending_verification",
+    (asset) =>
+      asset.managementState === "pending_verification" ||
+      asset.managementState === "recovery_required",
   );
   const regular = visibleAssets.filter((asset) => !attention.includes(asset));
   const drawerOpen = selected !== null || importOpen;
@@ -366,13 +370,23 @@ export function SkillsPage({
       !asset.selectionRevision
     )
       return;
+    // Commands carry the Workspace's current epoch from the same snapshot,
+    // never the asset's creation epoch.
+    const currentWorkspace =
+      asset.scope.kind === "project"
+        ? workspaces.find(
+            (candidate) => candidate.id === asset.scope.workspaceId,
+          )
+        : undefined;
     const target =
       asset.scope.kind === "project"
-        ? {
-            scope: "project" as const,
-            workspaceId: asset.scope.workspaceId,
-            expectedWorkspaceEpoch: asset.scope.workspaceEpoch,
-          }
+        ? currentWorkspace
+          ? {
+              scope: "project" as const,
+              workspaceId: currentWorkspace.id,
+              expectedWorkspaceEpoch: currentWorkspace.epoch,
+            }
+          : null
         : asset.scope.kind === "personal"
           ? { scope: "personal" as const }
           : null;
@@ -380,11 +394,7 @@ export function SkillsPage({
     const catalog =
       target.scope === "personal"
         ? personalCatalog
-        : workspaces.find(
-            (candidate) =>
-              candidate.id === target.workspaceId &&
-              candidate.epoch === target.expectedWorkspaceEpoch,
-          )?.skillCatalog;
+        : currentWorkspace?.skillCatalog;
     if (!catalog?.revision) return;
     const identity = `${target.scope}:${target.scope === "project" ? target.workspaceId : "user"}:${asset.skillPolicyKey}`;
     setEnablementBusy(identity);
@@ -493,7 +503,8 @@ export function SkillsPage({
     setSelected(asset);
     setDetail(null);
     setError(null);
-    if (!asset.installId) return;
+    if (!asset.installId || asset.managementState === "recovery_required")
+      return;
     setDetailLoading(true);
     try {
       setDetail(await onDetail(asset.installId));
@@ -791,7 +802,14 @@ export function SkillsPage({
               <Icon name="warning" />
             </span>
             <h2>{t("skills.unavailable_title")}</h2>
-            <p>{t("skills.unavailable_body")}</p>
+            <p role="status">
+              {t(
+                management.availability === "write_failed" ||
+                  management.availability === "outcome_unknown"
+                  ? "skills.restart_recovery_body"
+                  : "skills.unavailable_body",
+              )}
+            </p>
           </div>
         ) : missingProjectWorkspace ? (
           <div className="skill-empty-state">
@@ -847,7 +865,7 @@ export function SkillsPage({
           </div>
         ) : (
           <div className="skill-groups">
-            {renderGroup(t("skills.section.pending"), attention)}
+            {renderGroup(t("skills.section.attention"), attention)}
             {renderGroup(t("skills.section.skills"), regular)}
           </div>
         )}
@@ -1001,11 +1019,13 @@ export function SkillsPage({
                     <div>
                       <span>{t("skills.detail.status")}</span>
                       <strong>
-                        {selected.managementState === "pending_verification"
-                          ? t("skills.status.pending")
-                          : selected.issueCodes.length > 0
-                            ? t("skills.status.issue")
-                            : t("skills.status.ready")}
+                        {selected.managementState === "recovery_required"
+                          ? t("skills.status.recovery_required")
+                          : selected.managementState === "pending_verification"
+                            ? t("skills.status.pending")
+                            : selected.issueCodes.length > 0
+                              ? t("skills.status.issue")
+                              : t("skills.status.ready")}
                       </strong>
                     </div>
                   </div>

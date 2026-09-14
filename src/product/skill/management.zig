@@ -71,6 +71,42 @@ pub const Scope = union(enum) {
     }
 };
 
+/// Persistent ownership of a managed asset. Only the Workspace id is durable;
+/// the fencing epoch belongs to the current authority `Scope` and is never
+/// stored, so no epoch can be used to guess which record owns what.
+pub const Owner = union(enum) {
+    personal,
+    project: u64,
+
+    pub fn fromScope(scope: Scope) Owner {
+        return switch (scope) {
+            .personal => .personal,
+            .project => |project| .{ .project = project.workspace_id },
+        };
+    }
+
+    pub fn owns(self: Owner, current: Scope) bool {
+        return switch (self) {
+            .personal => current == .personal,
+            .project => |id| current == .project and current.project.workspace_id == id,
+        };
+    }
+
+    pub fn eql(left: Owner, right: Owner) bool {
+        return switch (left) {
+            .personal => right == .personal,
+            .project => |id| right == .project and right.project == id,
+        };
+    }
+
+    pub fn workspaceId(self: Owner) ?u64 {
+        return switch (self) {
+            .personal => null,
+            .project => |id| id,
+        };
+    }
+};
+
 pub const ManagementState = enum {
     ready,
     pending_verification,
@@ -110,13 +146,18 @@ pub const Recovery = struct {
 pub const Asset = struct {
     install_id: InstallId,
     source_kind: SourceKind,
-    scope: Scope,
+    owner: Owner,
     target_entry: []u8,
     content_hash: ContentHash,
     installed_at_unix_seconds: u64,
     reimported_at_unix_seconds: ?u64,
     state: ManagementState,
     recovery: ?Recovery,
+
+    pub fn requiresRecovery(self: Asset) bool {
+        const recovery = self.recovery orelse return false;
+        return self.state != .pending_verification or recovery.phase != .reconciliation_pending;
+    }
 
     fn deinit(self: *Asset, allocator: std.mem.Allocator) void {
         allocator.free(self.target_entry);
@@ -149,6 +190,7 @@ pub const Inventory = struct {
     allocator: std.mem.Allocator,
     limits: Limits,
     assets: std.ArrayList(Asset) = .empty,
+    changed: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, limits: Limits) Inventory {
         return .{ .allocator = allocator, .limits = limits };
@@ -162,6 +204,13 @@ pub const Inventory = struct {
 
     pub fn items(self: *const Inventory) []const Asset {
         return self.assets.items;
+    }
+
+    /// Runtime-only publication fact, never part of the durable inventory.
+    pub fn takeChanged(self: *Inventory) bool {
+        const changed = self.changed;
+        self.changed = false;
+        return changed;
     }
 
     pub fn find(self: *Inventory, install_id: InstallId) ?*Asset {
@@ -179,18 +228,22 @@ pub const Inventory = struct {
     }
 
     pub fn add(self: *Inventory, input: AssetInput) Error!*Asset {
-        if (self.assets.items.len == self.limits.max_assets or !validAssetInput(input))
+        if (!validAssetInput(input)) return error.InvalidAsset;
+        return self.addOwned(Owner.fromScope(input.scope), input);
+    }
+
+    fn addOwned(self: *Inventory, owner: Owner, input: AssetInput) Error!*Asset {
+        if (self.assets.items.len == self.limits.max_assets or !validAssetFields(input))
             return error.InvalidAsset;
         if (self.find(input.install_id) != null) return error.DuplicateInstallId;
         for (self.assets.items) |asset| {
-            if (asset.scope.eql(input.scope) and
-                targetEntryEqual(asset.target_entry, input.target_entry))
+            if (asset.owner.eql(owner) and targetEntryEqual(asset.target_entry, input.target_entry))
                 return error.DuplicateTarget;
         }
         try self.assets.append(self.allocator, .{
             .install_id = input.install_id,
             .source_kind = input.source_kind,
-            .scope = input.scope,
+            .owner = owner,
             .target_entry = try self.allocator.dupe(u8, input.target_entry),
             .content_hash = input.content_hash,
             .installed_at_unix_seconds = input.installed_at_unix_seconds,
@@ -198,6 +251,7 @@ pub const Inventory = struct {
             .state = input.state,
             .recovery = null,
         });
+        self.changed = true;
         return &self.assets.items[self.assets.items.len - 1];
     }
 
@@ -206,6 +260,7 @@ pub const Inventory = struct {
             if (!std.mem.eql(u8, &asset.install_id, &install_id)) continue;
             asset.deinit(self.allocator);
             _ = self.assets.orderedRemove(index);
+            self.changed = true;
             return;
         }
         return error.AssetNotFound;
@@ -236,6 +291,7 @@ pub const Inventory = struct {
             .candidate_entry = candidate_entry,
             .backup_entry = backup_entry,
         };
+        self.changed = true;
     }
 
     pub fn advanceTransaction(
@@ -263,6 +319,7 @@ pub const Inventory = struct {
         if (!valid)
             return error.InvalidTransaction;
         recovery.phase = next;
+        self.changed = true;
     }
 
     pub fn markPendingVerification(
@@ -276,6 +333,8 @@ pub const Inventory = struct {
             recovery.phase == .reconciliation_pending;
         if (!published)
             return error.InvalidTransaction;
+        if (recovery.phase != .reconciliation_pending or asset.state != .pending_verification)
+            self.changed = true;
         recovery.phase = .reconciliation_pending;
         asset.state = .pending_verification;
     }
@@ -285,6 +344,8 @@ pub const Inventory = struct {
         const recovery = if (asset.recovery) |*value| value else return error.TransactionMissing;
         if (recovery.phase == .prepared or recovery.phase == .reconciled)
             return error.InvalidTransaction;
+        if (recovery.phase != .rollback_pending or asset.state == .pending_verification)
+            self.changed = true;
         recovery.phase = .rollback_pending;
         if (asset.state == .pending_verification) asset.state = .ready;
     }
@@ -308,6 +369,7 @@ pub const Inventory = struct {
         recovery.deinit(self.allocator);
         asset.recovery = null;
         asset.state = .ready;
+        self.changed = true;
     }
 
     pub fn finishUninstall(self: *Inventory, install_id: InstallId) Error!void {
@@ -325,6 +387,39 @@ pub const Inventory = struct {
         recovery.deinit(self.allocator);
         asset.recovery = null;
         if (asset.state == .pending_verification) asset.state = .ready;
+        self.changed = true;
+    }
+
+    pub fn hasRecoveryFor(self: *const Inventory, workspace_id: u64) bool {
+        for (self.assets.items) |asset|
+            if (asset.recovery != null and asset.owner.workspaceId() == workspace_id) return true;
+        return false;
+    }
+
+    /// Drops every provenance record of a Workspace id that has left the
+    /// registry. Assets with a durable transaction are never dropped here;
+    /// callers must refuse retirement while `hasRecoveryFor` holds.
+    pub fn retire(self: *Inventory, workspace_id: u64) bool {
+        var changed = false;
+        var index = self.assets.items.len;
+        while (index > 0) {
+            index -= 1;
+            const asset = &self.assets.items[index];
+            if (asset.owner.workspaceId() != workspace_id or asset.recovery != null) continue;
+            asset.deinit(self.allocator);
+            _ = self.assets.orderedRemove(index);
+            changed = true;
+        }
+        if (changed) self.changed = true;
+        return changed;
+    }
+
+    pub fn maxWorkspaceId(self: *const Inventory) u64 {
+        var result: u64 = 0;
+        for (self.assets.items) |asset| {
+            if (asset.owner.workspaceId()) |id| result = @max(result, id);
+        }
+        return result;
     }
 };
 
@@ -399,8 +494,8 @@ fn transactionNames(install_id: InstallId) TransactionNames {
     return result;
 }
 
-fn scopeMatchesRoot(scope: Scope, root: *const CanonicalRoot) bool {
-    return scope.eql(root.scope);
+fn scopeMatchesRoot(owner: Owner, root: *const CanonicalRoot) bool {
+    return owner.owns(root.scope);
 }
 
 fn directDirectoryExists(root: *const CanonicalRoot, entry: []const u8) !bool {
@@ -433,8 +528,12 @@ pub const PublishResult = struct {
 
 const RecoveryFault = enum {
     none,
+    before_recovery,
     backup_restore_rename,
+    backup_cleanup,
 };
+
+const RenameFault = enum { none, target_to_backup, candidate_to_target };
 
 /// Owns the filesystem half of Skill management. Catalog reconciliation is an
 /// intentionally separate completion step because acquisition and scheduling
@@ -447,6 +546,8 @@ pub const Transactions = struct {
     persistence: *FileStore,
     recovery_fault: if (builtin.is_test) RecoveryFault else void =
         if (builtin.is_test) .none else {},
+    rename_fault: if (builtin.is_test) RenameFault else void =
+        if (builtin.is_test) .none else {},
 
     pub fn init(
         io: std.Io,
@@ -454,10 +555,12 @@ pub const Transactions = struct {
         inventory: Inventory,
         persistence: *FileStore,
     ) Transactions {
+        var committed_inventory = inventory;
+        _ = committed_inventory.takeChanged();
         return .{
             .io = io,
             .allocator = allocator,
-            .inventory = inventory,
+            .inventory = committed_inventory,
             .persistence = persistence,
         };
     }
@@ -474,13 +577,19 @@ pub const Transactions = struct {
         manifest: *const skill_package.Manifest,
         input: PublishInput,
     ) Error!PublishResult {
-        if (!scopeMatchesRoot(input.asset.scope, root)) return error.RootUnavailable;
+        if (!Owner.fromScope(input.asset.scope).owns(root.scope)) return error.RootUnavailable;
         const target_exists = directDirectoryExists(root, input.asset.target_entry) catch
             return error.TargetUnavailable;
         if (target_exists and !input.allow_replace) return error.TargetAlreadyExists;
+        // Nothing observable exists until the first persist; a failure before
+        // it must not report a change that never reached durable state.
+        const changed_before_registration = self.inventory.changed;
         const asset = try self.inventory.add(input.asset);
         var asset_registered = true;
-        errdefer if (asset_registered) self.inventory.remove(input.asset.install_id) catch {};
+        errdefer if (asset_registered) {
+            self.inventory.remove(input.asset.install_id) catch {};
+            self.inventory.changed = changed_before_registration;
+        };
         const names = transactionNames(input.asset.install_id);
         const operation: Operation = if (target_exists) .replace else .install;
         try self.inventory.beginTransaction(asset.install_id, .{
@@ -520,6 +629,8 @@ pub const Transactions = struct {
         asset_registered = false;
         cleanup_candidate = false;
         if (target_exists) {
+            if (builtin.is_test and self.rename_fault == .target_to_backup)
+                return error.FileTransactionFailed;
             root.dir.rename(
                 input.asset.target_entry,
                 root.dir,
@@ -529,6 +640,8 @@ pub const Transactions = struct {
             try self.inventory.advanceTransaction(asset.install_id, .backup_renamed);
             self.persist() catch return error.PersistenceOutcomeUnknown;
         }
+        if (builtin.is_test and self.rename_fault == .candidate_to_target)
+            return error.FileTransactionFailed;
         root.dir.rename(
             names.candidateSlice(),
             root.dir,
@@ -552,7 +665,7 @@ pub const Transactions = struct {
     ) Error!void {
         const asset = self.inventory.find(install_id) orelse return error.AssetNotFound;
         if (asset.state != .ready or asset.recovery != null or
-            !scopeMatchesRoot(asset.scope, root))
+            !scopeMatchesRoot(asset.owner, root))
             return error.InvalidAsset;
         if (!(directDirectoryExists(root, asset.target_entry) catch false))
             return error.TargetUnavailable;
@@ -591,10 +704,14 @@ pub const Transactions = struct {
         )) return error.CandidateUnavailable;
         try self.persist();
         cleanup_candidate = false;
+        if (builtin.is_test and self.rename_fault == .target_to_backup)
+            return error.FileTransactionFailed;
         root.dir.rename(asset.target_entry, root.dir, names.backupSlice(), root.io) catch
             return error.FileTransactionFailed;
         try self.inventory.advanceTransaction(install_id, .backup_renamed);
         self.persist() catch return error.PersistenceOutcomeUnknown;
+        if (builtin.is_test and self.rename_fault == .candidate_to_target)
+            return error.FileTransactionFailed;
         root.dir.rename(names.candidateSlice(), root.dir, asset.target_entry, root.io) catch
             return error.FileTransactionFailed;
         try self.inventory.advanceTransaction(install_id, .candidate_published);
@@ -608,7 +725,7 @@ pub const Transactions = struct {
     ) Error!void {
         const asset = self.inventory.find(install_id) orelse return error.AssetNotFound;
         if (asset.state != .ready or asset.recovery != null or
-            !scopeMatchesRoot(asset.scope, root))
+            !scopeMatchesRoot(asset.owner, root))
             return error.InvalidAsset;
         if (!(directDirectoryExists(root, asset.target_entry) catch false))
             return error.TargetUnavailable;
@@ -619,6 +736,8 @@ pub const Transactions = struct {
             .backup_entry = names.backupSlice(),
         });
         try self.persist();
+        if (builtin.is_test and self.rename_fault == .target_to_backup)
+            return error.FileTransactionFailed;
         root.dir.rename(asset.target_entry, root.dir, names.backupSlice(), root.io) catch
             return error.FileTransactionFailed;
         try self.inventory.advanceTransaction(install_id, .backup_renamed);
@@ -641,12 +760,14 @@ pub const Transactions = struct {
         completed_at_unix_seconds: u64,
     ) Error!void {
         const asset = self.inventory.find(install_id) orelse return error.AssetNotFound;
-        if (!scopeMatchesRoot(asset.scope, root)) return error.RootUnavailable;
+        if (!scopeMatchesRoot(asset.owner, root)) return error.RootUnavailable;
         const recovery = asset.recovery orelse return error.TransactionMissing;
         if (recovery.phase != .reconciled) {
             try self.inventory.advanceTransaction(install_id, .reconciled);
             try self.persist();
         }
+        if (builtin.is_test and self.recovery_fault == .backup_cleanup)
+            return error.FileTransactionFailed;
         if (recovery.operation == .uninstall) {
             const backup = recovery.backup_entry orelse return error.InvalidTransaction;
             root.dir.deleteTree(root.io, backup) catch return error.FileTransactionFailed;
@@ -669,7 +790,7 @@ pub const Transactions = struct {
         install_id: InstallId,
     ) Error!void {
         const asset = self.inventory.find(install_id) orelse return error.AssetNotFound;
-        if (!scopeMatchesRoot(asset.scope, root)) return error.RootUnavailable;
+        if (!scopeMatchesRoot(asset.owner, root)) return error.RootUnavailable;
         const recovery = asset.recovery orelse return error.TransactionMissing;
         if (recovery.phase != .rollback_pending) {
             try self.inventory.markRollbackPending(install_id);
@@ -728,8 +849,10 @@ pub const Transactions = struct {
         now_unix_seconds: u64,
     ) Error!void {
         const asset = self.inventory.find(install_id) orelse return error.AssetNotFound;
-        if (!scopeMatchesRoot(asset.scope, root)) return error.RootUnavailable;
+        if (!scopeMatchesRoot(asset.owner, root)) return error.RootUnavailable;
         const recovery = asset.recovery orelse return;
+        if (builtin.is_test and self.recovery_fault == .before_recovery)
+            return error.FileTransactionFailed;
         switch (recovery.phase) {
             .prepared => {
                 if (recovery.backup_entry) |backup| {
@@ -779,10 +902,21 @@ pub const Transactions = struct {
         }
     }
 
+    /// Retires provenance of a Workspace id that left the registry. The
+    /// in-memory removal precedes persist like every other transition here:
+    /// a definite write failure freezes this store until strict reload.
+    pub fn retire(self: *Transactions, workspace_id: u64) Error!bool {
+        if (!self.inventory.retire(workspace_id)) return false;
+        try self.persist();
+        return true;
+    }
+
     fn persist(self: *Transactions) Error!void {
-        const output = try self.allocator.alloc(u8, max_store_bytes);
+        // The in-memory phase may already have advanced. Failure to prepare
+        // its commit must freeze this store just like a definite write failure.
+        const output = self.allocator.alloc(u8, max_store_bytes) catch return error.PersistenceFailed;
         defer self.allocator.free(output);
-        const bytes = try encode(output, &self.inventory);
+        const bytes = encode(output, &self.inventory) catch return error.PersistenceFailed;
         self.persistence.commit(bytes) catch |err| return switch (err) {
             error.PersistenceOutcomeUnknown => error.PersistenceOutcomeUnknown,
             else => error.PersistenceFailed,
@@ -912,6 +1046,14 @@ pub const FileStore = struct {
 pub const TestSupport = if (builtin.is_test) struct {
     pub const FileStoreCommitFault = CommitFault;
 
+    pub fn setRenameFault(transactions: *Transactions, fault: RenameFault) void {
+        transactions.rename_fault = fault;
+    }
+
+    pub fn setRecoveryFault(transactions: *Transactions, fault: RecoveryFault) void {
+        transactions.recovery_fault = fault;
+    }
+
     pub fn setFileStoreCommitFault(
         store: *FileStore,
         fault: FileStoreCommitFault,
@@ -940,7 +1082,6 @@ const AssetWire = struct {
 const ScopeWire = struct {
     kind: []const u8,
     workspace_id: ?u64,
-    workspace_epoch: ?u64,
 };
 
 const RecoveryWire = struct {
@@ -976,7 +1117,10 @@ pub fn decode(
     if (input.len > max_store_bytes) return error.StoreTooLarge;
     var parsed = std.json.parseFromSlice(StoreWire, allocator, input, .{
         .ignore_unknown_fields = false,
-    }) catch return error.StoreCorrupt;
+    }) catch |err| return if (err == error.OutOfMemory)
+        error.OutOfMemory
+    else
+        error.StoreCorrupt;
     defer parsed.deinit();
     if (parsed.value.schema_version != schema_version or
         parsed.value.assets.len > limits.max_assets)
@@ -992,21 +1136,26 @@ pub fn decode(
             return error.StoreCorrupt;
         const state = std.meta.stringToEnum(ManagementState, wire.state) orelse
             return error.StoreCorrupt;
-        const scope = parseScope(wire.scope) orelse return error.StoreCorrupt;
+        const owner = parseOwner(wire.scope) orelse return error.StoreCorrupt;
         const decoded_state: ManagementState = if (state == .pending_verification)
             .ready
         else
             state;
-        const asset = inventory.add(.{
+        // A repeated owner/target pair is corrupt; nothing here guesses which
+        // record is real.
+        const asset = inventory.addOwned(owner, .{
             .install_id = install_id,
             .source_kind = source_kind,
-            .scope = scope,
+            .scope = .personal,
             .target_entry = wire.target_entry,
             .content_hash = content_hash,
             .installed_at_unix_seconds = wire.installed_at_unix_seconds,
             .reimported_at_unix_seconds = wire.reimported_at_unix_seconds,
             .state = decoded_state,
-        }) catch return error.StoreCorrupt;
+        }) catch |err| return if (err == error.OutOfMemory)
+            error.OutOfMemory
+        else
+            error.StoreCorrupt;
         if (wire.recovery) |recovery| {
             const operation = std.meta.stringToEnum(Operation, recovery.operation) orelse
                 return error.StoreCorrupt;
@@ -1023,9 +1172,16 @@ pub fn decode(
                 .candidate_hash = candidate_hash,
                 .candidate_entry = recovery.candidate_entry,
                 .backup_entry = recovery.backup_entry,
-            }) catch return error.StoreCorrupt;
+            }) catch |err| return if (err == error.OutOfMemory)
+                error.OutOfMemory
+            else
+                error.StoreCorrupt;
             if (state == .pending_verification) {
-                if (phase != .reconciliation_pending) return error.StoreCorrupt;
+                // commitReconciliation durably advances the phase before
+                // cleanup and finishTransaction change the legacy state.
+                // Both combinations are emitted by this same schema writer.
+                if (phase != .reconciliation_pending and phase != .reconciled)
+                    return error.StoreCorrupt;
                 asset.state = .pending_verification;
             }
         } else if (state == .pending_verification) {
@@ -1043,12 +1199,9 @@ fn encodeAsset(writer: *std.Io.Writer, asset: Asset) !void {
     try writer.writeAll(",\"source_kind\":");
     try jsonString(writer, @tagName(asset.source_kind));
     try writer.writeAll(",\"scope\":");
-    switch (asset.scope) {
-        .personal => try writer.writeAll("{\"kind\":\"personal\",\"workspace_id\":null,\"workspace_epoch\":null}"),
-        .project => |project| try writer.print(
-            "{{\"kind\":\"project\",\"workspace_id\":{d},\"workspace_epoch\":{d}}}",
-            .{ project.workspace_id, project.workspace_epoch },
-        ),
+    switch (asset.owner) {
+        .personal => try writer.writeAll("{\"kind\":\"personal\",\"workspace_id\":null}"),
+        .project => |id| try writer.print("{{\"kind\":\"project\",\"workspace_id\":{d}}}", .{id}),
     }
     try writer.writeAll(",\"target_entry\":");
     try jsonString(writer, asset.target_entry);
@@ -1085,17 +1238,21 @@ fn encodeAsset(writer: *std.Io.Writer, asset: Asset) !void {
 }
 
 fn validAssetInput(input: AssetInput) bool {
+    if (!validAssetFields(input)) return false;
+    return switch (input.scope) {
+        .personal => true,
+        .project => |project| project.workspace_id != 0 and project.workspace_epoch != 0,
+    };
+}
+
+fn validAssetFields(input: AssetInput) bool {
     if (allZero(&input.install_id) or input.installed_at_unix_seconds == 0 or
         (input.reimported_at_unix_seconds != null and
             input.reimported_at_unix_seconds.? < input.installed_at_unix_seconds) or
         input.state == .pending_verification or
         (input.state == .externally_managed and input.source_kind != .external))
         return false;
-    if (!validTargetEntry(input.target_entry)) return false;
-    return switch (input.scope) {
-        .personal => true,
-        .project => |project| project.workspace_id != 0 and project.workspace_epoch != 0,
-    };
+    return validTargetEntry(input.target_entry);
 }
 
 fn validRecovery(asset: *const Asset, input: RecoveryInput) bool {
@@ -1134,19 +1291,15 @@ fn targetEntryEqual(left: []const u8, right: []const u8) bool {
         std.mem.eql(u8, left, right);
 }
 
-fn parseScope(wire: ScopeWire) ?Scope {
+fn parseOwner(wire: ScopeWire) ?Owner {
     if (std.mem.eql(u8, wire.kind, "personal")) {
-        if (wire.workspace_id != null or wire.workspace_epoch != null) return null;
+        if (wire.workspace_id != null) return null;
         return .personal;
     }
     if (std.mem.eql(u8, wire.kind, "project")) {
         const workspace_id = wire.workspace_id orelse return null;
-        const workspace_epoch = wire.workspace_epoch orelse return null;
-        if (workspace_id == 0 or workspace_epoch == 0) return null;
-        return .{ .project = .{
-            .workspace_id = workspace_id,
-            .workspace_epoch = workspace_epoch,
-        } };
+        if (workspace_id == 0) return null;
+        return .{ .project = workspace_id };
     }
     return null;
 }
@@ -1389,6 +1542,54 @@ test "inventory keeps install identity separate from target and runtime identity
     }));
 }
 
+test "inventory ownership is keyed by Workspace id and retirement keeps durable transactions" {
+    var inventory = Inventory.init(std.testing.allocator, .{});
+    defer inventory.deinit();
+    const created: Scope = .{ .project = .{ .workspace_id = 7, .workspace_epoch = 3 } };
+    const later: Scope = .{ .project = .{ .workspace_id = 7, .workspace_epoch = 5 } };
+    const owner = Owner.fromScope(created);
+    try std.testing.expect(owner.owns(later));
+    try std.testing.expect(!owner.owns(.personal));
+    try std.testing.expect(!owner.owns(.{ .project = .{ .workspace_id = 8, .workspace_epoch = 3 } }));
+    const personal: Owner = .personal;
+    try std.testing.expect(personal.owns(.personal));
+    try std.testing.expect(!personal.owns(created));
+    const ready_id = repeatedByte(install_id_bytes, 1);
+    const recovering_id = repeatedByte(install_id_bytes, 2);
+    _ = try inventory.add(.{ .install_id = ready_id, .source_kind = .local_directory, .scope = created, .target_entry = "review", .content_hash = repeatedByte(hash_bytes, 0x11), .installed_at_unix_seconds = 1 });
+    // The same target under a later fencing epoch is still this Workspace.
+    try std.testing.expectError(error.DuplicateTarget, inventory.add(.{ .install_id = repeatedByte(install_id_bytes, 3), .source_kind = .local_directory, .scope = later, .target_entry = "review", .content_hash = repeatedByte(hash_bytes, 0x11), .installed_at_unix_seconds = 1 }));
+    _ = try inventory.add(.{ .install_id = recovering_id, .source_kind = .local_directory, .scope = later, .target_entry = "demo", .content_hash = repeatedByte(hash_bytes, 0x11), .installed_at_unix_seconds = 1 });
+    try inventory.beginTransaction(recovering_id, .{ .operation = .install, .candidate_entry = ".demo.candidate" });
+    _ = try inventory.add(.{ .install_id = repeatedByte(install_id_bytes, 4), .source_kind = .local_directory, .scope = .{ .project = .{ .workspace_id = 9, .workspace_epoch = 1 } }, .target_entry = "review", .content_hash = repeatedByte(hash_bytes, 0x11), .installed_at_unix_seconds = 1 });
+    try std.testing.expectEqual(@as(u64, 9), inventory.maxWorkspaceId());
+    try std.testing.expect(inventory.hasRecoveryFor(7));
+    try std.testing.expect(!inventory.hasRecoveryFor(9));
+    var output: [max_store_bytes]u8 = undefined;
+    const encoded = try encode(&output, &inventory);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "workspace_epoch") == null);
+    var restored = try decode(std.testing.allocator, encoded, .{});
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 3), restored.items().len);
+    try std.testing.expect(restored.findConst(recovering_id).?.owner.eql(.{ .project = 7 }));
+    _ = inventory.takeChanged();
+    try std.testing.expect(inventory.retire(7));
+    try std.testing.expect(inventory.takeChanged());
+    try std.testing.expect(!inventory.retire(7));
+    try std.testing.expect(!inventory.takeChanged());
+    try std.testing.expectEqual(@as(usize, 2), inventory.items().len);
+    try std.testing.expect(inventory.find(ready_id) == null);
+    try std.testing.expect(inventory.find(recovering_id) != null);
+    try std.testing.expect(inventory.retire(9));
+    try std.testing.expectEqual(@as(usize, 1), inventory.items().len);
+    // The strict current schema rejects repeated owner/target pairs and epoch fields.
+    const single = "{\"install_id\":\"02020202020202020202020202020202\",\"source_kind\":\"local_directory\",\"scope\":{\"kind\":\"project\",\"workspace_id\":7},\"target_entry\":\"review\",\"content_hash\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"installed_at_unix_seconds\":1,\"reimported_at_unix_seconds\":null,\"state\":\"ready\",\"recovery\":null}";
+    const twin = "{\"install_id\":\"03030303030303030303030303030303\",\"source_kind\":\"local_directory\",\"scope\":{\"kind\":\"project\",\"workspace_id\":7},\"target_entry\":\"review\",\"content_hash\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"installed_at_unix_seconds\":1,\"reimported_at_unix_seconds\":null,\"state\":\"ready\",\"recovery\":null}";
+    try std.testing.expectError(error.StoreCorrupt, decode(std.testing.allocator, "{\"schema_version\":1,\"assets\":[" ++ single ++ "," ++ twin ++ "]}", .{}));
+    try std.testing.expectError(error.StoreCorrupt, decode(std.testing.allocator, "{\"schema_version\":1,\"assets\":[{\"install_id\":\"02020202020202020202020202020202\",\"source_kind\":\"local_directory\",\"scope\":{\"kind\":\"project\",\"workspace_id\":7,\"workspace_epoch\":3},\"target_entry\":\"review\",\"content_hash\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"installed_at_unix_seconds\":1,\"reimported_at_unix_seconds\":null,\"state\":\"ready\",\"recovery\":null}]}", .{}));
+    try std.testing.expectError(error.StoreCorrupt, decode(std.testing.allocator, "{\"schema_version\":2,\"assets\":[]}", .{}));
+}
+
 test "inventory persists pending reconciliation recovery without secrets" {
     var inventory = Inventory.init(std.testing.allocator, .{ .max_assets = 4 });
     defer inventory.deinit();
@@ -1435,7 +1636,7 @@ test "inventory decoder rejects unknown fields and invalid direct entries" {
         "{\"schema_version\":1,\"assets\":[{" ++
         "\"install_id\":\"11111111111111111111111111111111\"," ++
         "\"source_kind\":\"external\"," ++
-        "\"scope\":{\"kind\":\"personal\",\"workspace_id\":null,\"workspace_epoch\":null}," ++
+        "\"scope\":{\"kind\":\"personal\",\"workspace_id\":null}," ++
         "\"target_entry\":\"../escape\"," ++
         "\"content_hash\":\"2222222222222222222222222222222222222222222222222222222222222222\"," ++
         "\"installed_at_unix_seconds\":1,\"reimported_at_unix_seconds\":null," ++
@@ -1489,6 +1690,24 @@ test "publish and reconciliation commit install one bounded Skill directory" {
     );
     defer transactions.deinit();
     const id = repeatedByte(install_id_bytes, 0x31);
+    // A failure before the first persist leaves nothing observable behind,
+    // so it must not report a change either.
+    const names = transactionNames(id);
+    try target.dir.createDir(std.testing.io, names.candidateSlice(), .default_dir);
+    _ = transactions.inventory.takeChanged();
+    try std.testing.expectError(error.FileTransactionFailed, transactions.publish(&root, source.dir, &manifest, .{
+        .asset = .{
+            .install_id = id,
+            .source_kind = .local_directory,
+            .scope = .personal,
+            .target_entry = "demo",
+            .content_hash = manifest.content_hash,
+            .installed_at_unix_seconds = 100,
+        },
+    }));
+    try std.testing.expect(!transactions.inventory.takeChanged());
+    try std.testing.expectEqual(@as(usize, 0), transactions.inventory.items().len);
+    try target.dir.deleteDir(std.testing.io, names.candidateSlice());
     const published = try transactions.publish(&root, source.dir, &manifest, .{
         .asset = .{
             .install_id = id,
