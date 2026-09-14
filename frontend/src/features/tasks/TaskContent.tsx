@@ -19,6 +19,7 @@ import {
   Message,
 } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { CopyButton } from "../../components/ui/CopyButton.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
@@ -28,6 +29,12 @@ import {
   toggleRunProcessDisclosure,
   type RunProcessDisclosure,
 } from "./run-presentation.ts";
+import {
+  copyCodeText,
+  copyResponseMarkdown,
+  latestCopyableResponseId,
+  responseCopyEligible,
+} from "./response-copy.ts";
 
 type ReadingState = { scrollTop: number; followingLatest: boolean };
 
@@ -218,6 +225,7 @@ export function TaskContent({
       task.runs.at(-1) ??
       null)
     : null;
+  const latestCopyableId = latestCopyableResponseId(task?.runs ?? []);
 
   useLayoutEffect(() => {
     const node = viewport.current;
@@ -285,6 +293,7 @@ export function TaskContent({
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
+        const responseCopyable = responseCopyEligible(run);
         const references = new Map(
           [...runFileReferenceLinks(run)].map(([text, reference]) => [
             text,
@@ -382,14 +391,41 @@ export function TaskContent({
             )}
             {presentation.responseVisible && (
               <Message role="assistant">
-                <Markdown className="agent-response" references={references}>
-                  {run.output.response}
-                </Markdown>
-                {run.output.redacted && (
-                  <p className="projection-note">
-                    {t("privacy.sensitive_hidden")}
-                  </p>
-                )}
+                <div className="agent-response-surface">
+                  <Markdown
+                    className="agent-response"
+                    references={references}
+                    codeCopy={
+                      responseCopyable
+                        ? {
+                            label: t("copy.code"),
+                            copiedLabel: t("copy.copied"),
+                            failedLabel: t("copy.failed"),
+                            onCopy: copyCodeText,
+                          }
+                        : undefined
+                    }
+                  >
+                    {run.output.response}
+                  </Markdown>
+                  {responseCopyable && (
+                    <div className="response-copy-actions">
+                      <CopyButton
+                        className="response-copy-action"
+                        data-latest={run.id === latestCopyableId}
+                        copyLabel={t("copy.response")}
+                        copiedLabel={t("copy.copied")}
+                        failedLabel={t("copy.failed")}
+                        onCopy={() => copyResponseMarkdown(run.output.response)}
+                      />
+                    </div>
+                  )}
+                  {run.output.redacted && (
+                    <p className="projection-note">
+                      {t("privacy.sensitive_hidden")}
+                    </p>
+                  )}
+                </div>
               </Message>
             )}
             {!presentation.active && (

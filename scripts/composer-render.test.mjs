@@ -323,6 +323,16 @@ function renderNewTaskView(composer = null, overrides = {}) {
   );
 }
 
+test("terminal responses expose response and code copy without copying process UI", () => {
+  const markup = renderCompletedSurface(
+    "Answer\n\n```ts\nconst answer = 42;\n```",
+  );
+  assert.match(markup, /data-latest="true"/);
+  assert.match(markup, />Copy response<\/span>/);
+  assert.match(markup, />Copy code<\/span>/);
+  assert.equal((markup.match(/data-copy-state="idle"/g) ?? []).length, 2);
+});
+
 function renderTaskList(tasks, props = {}) {
   return renderToStaticMarkup(
     createElement(

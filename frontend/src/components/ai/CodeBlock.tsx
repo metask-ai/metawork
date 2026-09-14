@@ -1,5 +1,6 @@
 import type { ComponentPropsWithoutRef } from "react";
 
+import { CopyButton } from "../ui/CopyButton.tsx";
 import { cn } from "../ui/utils.ts";
 
 /**
@@ -11,11 +12,18 @@ import { cn } from "../ui/utils.ts";
 export function CodeBlock({
   className,
   value,
+  copy,
   ...props
 }: Omit<ComponentPropsWithoutRef<"pre">, "children"> & {
   value: string;
+  copy?: {
+    label: string;
+    copiedLabel: string;
+    failedLabel: string;
+    onCopy: (value: string) => void | Promise<unknown>;
+  };
 }) {
-  return (
+  const code = (
     <pre
       className={cn("code-block-preview", className)}
       tabIndex={0}
@@ -23,5 +31,18 @@ export function CodeBlock({
     >
       {value}
     </pre>
+  );
+  if (!copy) return code;
+  return (
+    <div className="code-block-copyable">
+      <CopyButton
+        className="code-block-copy-action"
+        copyLabel={copy.label}
+        copiedLabel={copy.copiedLabel}
+        failedLabel={copy.failedLabel}
+        onCopy={() => copy.onCopy(value)}
+      />
+      {code}
+    </div>
   );
 }

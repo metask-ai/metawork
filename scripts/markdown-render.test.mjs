@@ -12,7 +12,7 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 
-const { Markdown } = await vite.ssrLoadModule(
+const { Markdown, renderMarkdownForClipboard } = await vite.ssrLoadModule(
   "/src/components/ai/Markdown.tsx",
 );
 const { runFileReferenceLinks } = await vite.ssrLoadModule(
@@ -49,6 +49,54 @@ test("drops unsafe link protocols", () => {
 
   assert.match(markup, /href="\/docs"/);
   assert.doesNotMatch(markup, /javascript:/);
+});
+
+test("clipboard Markdown is semantic, inert HTML without product UI", async () => {
+  const markup = await renderMarkdownForClipboard(
+    [
+      "# 标题",
+      "",
+      "> 引用",
+      "",
+      "- [x] 完成",
+      "  - 嵌套",
+      "",
+      "| key | value |",
+      "| --- | --- |",
+      "| a | b |",
+      "",
+      "[external](https://example.com) [mail](mailto:test@example.com)",
+      "[relative](report.txt) [file](file:///tmp/report.txt)",
+      "![diagram](https://example.com/diagram.png)",
+      "",
+      "`inline`",
+      "",
+      "```ts",
+      "const answer = 42;",
+      "```",
+      "",
+      "```",
+      "second",
+      "```",
+      "",
+      '<button aria-label="bad">bad</button><script>alert(1)</script>',
+    ].join("\n"),
+  );
+
+  assert.match(markup, /<h1>标题<\/h1>/);
+  assert.match(markup, /<blockquote>/);
+  assert.match(markup, /<ul>\s*<li>\[x\] 完成/);
+  assert.match(markup, /<table>/);
+  assert.match(markup, /href="https:\/\/example.com"/);
+  assert.match(markup, /href="mailto:test@example.com"/);
+  assert.match(markup, /<span>relative<\/span>/);
+  assert.match(markup, /<span>file<\/span>/);
+  assert.match(markup, /<span>diagram<\/span>/);
+  assert.equal((markup.match(/<pre>/g) ?? []).length, 2);
+  assert.doesNotMatch(
+    markup,
+    /<(?:button|input|img|script)\b|class=|style=|javascript:|file:\/\//,
+  );
 });
 
 function referenceMarkup(source, names = ["random_1.txt", "report a.txt"]) {

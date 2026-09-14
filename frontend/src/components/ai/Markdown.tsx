@@ -19,6 +19,15 @@ const ReferenceContext = createContext<
   ReadonlyMap<string, MarkdownReference> | undefined
 >(undefined);
 
+export type MarkdownCodeCopy = {
+  label: string;
+  copiedLabel: string;
+  failedLabel: string;
+  onCopy: (value: string) => void | Promise<unknown>;
+};
+
+const CodeCopyContext = createContext<MarkdownCodeCopy | undefined>(undefined);
+
 function referencePlugin(references: ReadonlyMap<string, MarkdownReference>) {
   const aliases = [...references.keys()]
     .filter(Boolean)
@@ -114,6 +123,7 @@ function safeHref(href: string | undefined): string | null {
 // or a snapshot changes. The reference context updates callbacks without remounts.
 const components: Components = {
   pre: ({ node }) => {
+    const copy = useContext(CodeCopyContext);
     // The Markdown AST owns block/inline semantics, not line count or language.
     const code = node?.children[0];
     const value =
@@ -130,6 +140,7 @@ const components: Components = {
       <CodeBlock
         aria-label={language ? `${language} code` : "Code block"}
         value={value.replace(/\n$/, "")}
+        copy={copy}
       />
     );
   },
@@ -167,6 +178,40 @@ const components: Components = {
   },
 };
 
+function clipboardHref(href: string | undefined): string | null {
+  const value = safeHref(href);
+  return value && /^(?:https?:|mailto:)/i.test(value) ? value : null;
+}
+
+const clipboardComponents: Components = {
+  a: ({ href, children }) => {
+    const value = clipboardHref(href);
+    return value ? <a href={value}>{children}</a> : <span>{children}</span>;
+  },
+  img: ({ alt }) => <span>{alt}</span>,
+  input: ({ checked }) => <>{checked ? "[x]" : "[ ]"}</>,
+  ul: ({ children }) => <ul>{children}</ul>,
+  ol: ({ children }) => <ol>{children}</ol>,
+  li: ({ children }) => <li>{children}</li>,
+  code: ({ children }) => <code>{children}</code>,
+  pre: ({ children }) => <pre>{children}</pre>,
+};
+
+export async function renderMarkdownForClipboard(
+  markdown: string,
+): Promise<string> {
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  return renderToStaticMarkup(
+    <ReactMarkdown
+      skipHtml
+      remarkPlugins={[remarkGfm]}
+      components={clipboardComponents}
+    >
+      {markdown}
+    </ReactMarkdown>,
+  );
+}
+
 const textResourceComponents: Components = {
   ...components,
   img: ({ alt }) => <span>{alt}</span>,
@@ -188,26 +233,30 @@ export function Markdown({
   children,
   references,
   textResourcesOnly = false,
+  codeCopy,
 }: {
   className?: string;
   children: string;
   references?: ReadonlyMap<string, MarkdownReference>;
   textResourcesOnly?: boolean;
+  codeCopy?: MarkdownCodeCopy;
 }) {
   return (
     <div className={className ? `ai-markdown ${className}` : "ai-markdown"}>
       <ReferenceContext.Provider value={references}>
-        <ReactMarkdown
-          skipHtml
-          remarkPlugins={
-            references?.size
-              ? [remarkGfm, referencePlugin(references)]
-              : [remarkGfm]
-          }
-          components={textResourcesOnly ? textResourceComponents : components}
-        >
-          {children}
-        </ReactMarkdown>
+        <CodeCopyContext.Provider value={codeCopy}>
+          <ReactMarkdown
+            skipHtml
+            remarkPlugins={
+              references?.size
+                ? [remarkGfm, referencePlugin(references)]
+                : [remarkGfm]
+            }
+            components={textResourcesOnly ? textResourceComponents : components}
+          >
+            {children}
+          </ReactMarkdown>
+        </CodeCopyContext.Provider>
       </ReferenceContext.Provider>
     </div>
   );
