@@ -51,7 +51,7 @@ flowchart TB
 这是逻辑边界图，不等于源码目录图或进程图：
 
 1. Application 组装 Bridge、Product 与 Agent，执行平台生命周期和已定义的跨 owner 顺序；它不是业务 owner，也不形成统一 facade；
-2. Renderer 的产品操作只通过 Renderer Bridge 访问 Host，不能直接调用 Product、Agent 或任意 OS API；它可以消费 `app.zon` 已开放且 Native SDK 明确面向 System WebView 的 UI/input surface，这类消费不授予 Product authority 或通用系统执行权；
+2. Renderer 的产品操作只通过 Renderer Bridge 访问 Host，不能直接调用 Product、Agent 或任意 OS API；它可以消费 `app.zon` 已开放且 Native SDK 明确面向 System WebView 的 UI/input surface，以及本节明确登记的标准 WebView API，这类消费不授予 Product authority 或通用系统执行权；
 3. Product 包含 Account 与 Product Control 两个 named owner，不代表统一 module；Product Control 直接消费 Agent 公共执行能力；
 4. Agent 是独立于 Product 的 MetaWork-owned 执行边界，也是 AgentCore SDK/ABI 的唯一正式消费者；
 5. Native SDK compatibility 是 Application-owned 的受限消费路径，不是新的顶层 owner、平台层或 SDK 替代品；
@@ -68,6 +68,8 @@ Renderer 拥有 WebUI 页面、布局、交互、结构化 Agent 工作展示和
 Renderer 是随 MetaWork 桌面应用一同构建、签名和发布的可信 UI 实现，不作为与 Host 对立的恶意安全主体。它可以消费 `app.zon` 已开放且 Native SDK 明确面向 System WebView 的 UI/input surface，并在用户显式交互的有界生命周期内持有对应领域合同允许的 UI 输入或本地资源 locator；本地路径是否可以进入某个 typed command 由对应领域合同决定，不因数据先到达 Renderer 就要求 Native SDK 提供功能重复的 Host-only 接口。credential、raw file content 与原生 handle 仍只按各自明确合同处理，这一定位不授予通用访问权。
 
 可信 UI 身份不使 Renderer 成为 Product authority、credential store 或原生系统 effect owner。Renderer 不访问任意文件或进程，不持有原生 identity/handle，不执行未登记的窗口、托盘、快捷键等平台 effect，也不根据 DOM、Toast、URL、显示文本或本地缓存发明 Product policy。Bridge 对 payload 的严格解码和 Host 对 identity、revision、membership、资源范围与时效的重新校验用于维护 owner、处理陈旧 UI 状态、实现错误隔离并拒绝格式错误，不以 Renderer 是恶意代码为前提。用户在 Custom Provider 表单中显式填写的 API Key 只允许停留到一次 create/replace command 提交完成，之后必须从表单状态清除；该窄例外不赋予 Renderer credential authority。
+
+Renderer 唯一可直接执行的标准 WebView 系统写入是 secure packaged origin 内、由用户手势触发的 Clipboard API 写入。它只承载已经进入 canonical Product projection 的 terminal final/partial response Markdown、由同一 Markdown 安全渲染得到的语义 HTML，或该 response 内可见代码块的纯文本；不得读取系统剪贴板、写入 provisional/commentary/Tool/状态、从页面 DOM 反取内容、截断后报告成功，或把这条登记扩展为任意 Web API 系统 effect。双格式写入必须由一个 `ClipboardItem` 原子提交；只有运行环境明确缺少多 MIME 能力时才可完整降级为 `writeText(Markdown)`，权限、容量、转换或系统拒绝必须显式失败。
 
 ### 3.2 Bridge
 
@@ -97,6 +99,7 @@ Native SDK Bridge API 是独立的正式 transport surface，不属于系统 eff
 | --- | --- | --- |
 | Runtime API | Application | 正常系统 effect 与 SDK-owned runtime state |
 | WebView UI/input API | Renderer、browser-side Bridge | 只消费 `app.zon` 已开放的呈现与用户输入能力，不授予 Product authority 或通用系统 effect |
+| 标准 WebView Clipboard API | Renderer | 只允许上述 secure origin、用户手势限定的 canonical response/code 写入；禁止 clipboard read 与未登记内容 |
 | Bridge API / data-only DTO | Bridge、Application | transport、source/window authority 与无执行权数据 |
 | `PlatformServices` public primitive | 已登记一级 compatibility seam | 只补 Runtime API 的明确缺口 |
 | 公开 OS API / platform handle | 已登记二级 compatibility seam | 只补 SDK 也未提供原语的明确缺口 |
