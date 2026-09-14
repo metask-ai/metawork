@@ -132,7 +132,10 @@ const providers = [
     name: "anthropic",
     code: "wire.PROVIDER_ANTHROPIC",
     apiKey: "anthropic-provider-test-key",
-    model: "claude-sonnet-4-20250514",
+    // Keep the wire protocol and model family independent: AgentCore must
+    // admit known vision models even when they use an Anthropic-compatible
+    // endpoint rather than a Claude model name.
+    model: "gpt-5.6-sol",
     path: "/v1/messages",
     baseUrlSuffix: "/v1/messages",
     authorization: "Bearer anthropic-provider-test-key",
