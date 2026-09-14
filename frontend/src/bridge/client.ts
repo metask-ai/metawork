@@ -63,7 +63,6 @@ import {
   decodeMcpConnectionTestResult,
   decodeMcpAuthorizationResult,
   decodeMcpAuthorizationCancelResult,
-  decodePermissionProfileMutationResult,
   decodeFilePreview,
   decodeFileChangeDiff,
   decodeAttachmentChooseResult,
@@ -767,14 +766,6 @@ export class BridgeClient {
         modelSelection,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,
-        permissionProfile,
-      }),
-    );
-  }
-
-  async setDefaultPermissionProfile(permissionProfile: PermissionProfile) {
-    return decodePermissionProfileMutationResult(
-      await this.invoke(commands.setDefaultPermissionProfile, {
         permissionProfile,
       }),
     );

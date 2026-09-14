@@ -740,17 +740,20 @@ test "Product Control Task admission consumes the fixed MetaWork Agent tool surf
     try std.testing.expect(fake_core.builtin_allowlist_seen);
 }
 
-test "Task permission profile is immutable and has one AgentCore compiler" {
+test "Task permission profile is immutable and successful interactive create remembers it" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
         .queue_capacity = 1,
-        .max_sessions = 3,
+        .max_sessions = 5,
     });
     defer {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
+    var task_persistence: TaskPersistenceProbe = .{};
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = task_persistence.capability();
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -758,12 +761,12 @@ test "Task permission profile is immutable and has one AgentCore compiler" {
         .{
             .worker_count = 1,
             .queue_capacity = 1,
-            .max_tasks = 3,
+            .max_tasks = 5,
             .max_workspaces = 1,
             .max_runs_per_task = 1,
             .max_tools_per_run = 1,
         },
-        productControlConfiguration(),
+        configuration,
     );
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -784,10 +787,20 @@ test "Task permission profile is immutable and has one AgentCore compiler" {
     try std.testing.expectEqual(@as(?u32, wire.PERMISSION_ACCEPT_EDITS), default_mode);
     try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), default_shell);
 
-    try std.testing.expect(try workbench.setDefaultPermissionProfile(.full_access));
+    var full_access_input = productControlTaskInput();
+    full_access_input.permission_profile = .full_access;
+    const explicit_full_access = try workbench.createTask(full_access_input);
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        try workbench.taskPermissionProfile(explicit_full_access),
+    );
     try std.testing.expectEqual(
         product_control.PermissionProfile.approval_required,
         try workbench.taskPermissionProfile(default_task),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        workbench.defaultPermissionProfile(),
     );
     const inherited_full_access = try workbench.createTask(productControlTaskInput());
     try std.testing.expectEqual(
@@ -808,12 +821,40 @@ test "Task permission profile is immutable and has one AgentCore compiler" {
         product_control.PermissionProfile.approval_required,
         try workbench.taskPermissionProfile(explicit_task),
     );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.approval_required,
+        workbench.defaultPermissionProfile(),
+    );
     fake_core.lock();
     const explicit_mode = fake_core.last_permission_mode_code;
     const explicit_shell = fake_core.last_shell_policy_code;
     fake_core.unlock();
     try std.testing.expectEqual(@as(?u32, wire.PERMISSION_ACCEPT_EDITS), explicit_mode);
     try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), explicit_shell);
+
+    var rejected_input = productControlTaskInput();
+    rejected_input.permission_profile = .full_access;
+    task_persistence.result = .failed;
+    const degraded_task = try workbench.createTask(rejected_input);
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        try workbench.taskPermissionProfile(degraded_task),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        workbench.defaultPermissionProfile(),
+    );
+
+    var capacity_rejected_input = productControlTaskInput();
+    capacity_rejected_input.permission_profile = .approval_required;
+    try std.testing.expectError(
+        error.TaskCapacity,
+        workbench.createTask(capacity_rejected_input),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        workbench.defaultPermissionProfile(),
+    );
 }
 
 test "Run checkpoint commits immutable blob before durable descriptor" {
@@ -2661,6 +2702,10 @@ test "scheduled noninteractive permission request automatically stops the Produc
         .recurrence = .{ .once = .{ .at_unix_seconds = 2_000 } },
     });
     const task_id = try workbench.runScheduledTaskNow(schedule_id, 1);
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.approval_required,
+        workbench.defaultPermissionProfile(),
+    );
 
     for (0..10_000) |_| {
         fake_core.lock();

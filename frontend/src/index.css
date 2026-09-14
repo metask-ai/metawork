@@ -955,46 +955,12 @@ summary::-webkit-details-marker {
   box-shadow: 0 1px 2px rgba(37, 34, 45, 0.025);
 }
 
-.permission-policy-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
-  margin-top: 12px;
-  padding: 20px;
-  align-items: center;
-  gap: 18px 28px;
-  border: 1px solid var(--settings-line);
-  border-left: 3px solid var(--settings-brand);
-  border-radius: 14px;
-  background: var(--settings-paper);
-  box-shadow: 0 1px 2px rgba(37, 34, 45, 0.025);
-}
-
-.permission-policy-copy {
-  display: grid;
-  gap: 4px;
-}
-
-.permission-policy-kicker,
 .new-task-permission span {
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
   font-weight: 720;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-}
-
-.permission-policy-copy strong {
-  color: var(--settings-ink);
-  font-size: var(--text-lead);
-  font-weight: 720;
-}
-
-.permission-policy-copy p {
-  max-width: 560px;
-  margin: 2px 0 0;
-  color: var(--settings-muted);
-  font-size: var(--text-control);
-  line-height: 1.5;
 }
 
 .permission-profile-trigger {
@@ -2777,7 +2743,6 @@ button.run-process-tool:hover {
     gap: 12px;
   }
 
-  .permission-policy-card,
   .new-task-permission {
     grid-template-columns: 1fr;
   }

@@ -1222,11 +1222,6 @@ export type TaskCreateResult =
       reason: TaskCreateReason;
     };
 
-export type PermissionProfileMutationResult = {
-  changed: boolean;
-  defaultProfile: PermissionProfile;
-};
-
 export type TaskWorkspaceIntent =
   | { kind: "automatic" }
   | {

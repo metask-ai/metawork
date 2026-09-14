@@ -383,12 +383,6 @@ function settingsElement(account, overrides = {}) {
         secretCapture: false,
         modelTest: true,
       },
-      permissionProfiles: {
-        enabled: false,
-        available: [],
-        defaultProfile: "approval_required",
-        busy: false,
-      },
       focusTarget: "title",
       initialSection: "models",
       disabled: false,
@@ -425,7 +419,6 @@ function settingsElement(account, overrides = {}) {
       onSelectCustomModel() {},
       onBeginLogin() {},
       onLogout() {},
-      onSetDefaultPermissionProfile() {},
       ...overrides,
     }),
   );
@@ -1098,35 +1091,16 @@ test("Settings switches between one section page at a time", async () => {
   assert.equal(screen.queryByRole("heading", { name: "Account" }), null);
 });
 
-test("Settings changes only the future Task permission default in one action", async () => {
-  const selected = [];
-  const user = userEvent.setup({ document: dom.window.document });
-  renderSettings(readySettingsAccount, {
-    permissionProfiles: {
-      enabled: true,
-      available: ["approval_required", "full_access"],
-      defaultProfile: "approval_required",
-      busy: false,
-    },
-    initialSection: "permissions",
-    onSetDefaultPermissionProfile(profile) {
-      selected.push(profile);
-    },
-  });
+test("Settings keeps permission choices out of its navigation and pages", () => {
+  renderSettings(readySettingsAccount, { initialSection: "general" });
 
-  assert.ok(screen.getByRole("link", { name: "Permissions" }));
-  assert.match(
-    document.querySelector(".permission-policy-boundary").textContent,
-    /AgentCore protections.*not root access or a sandbox/,
+  assert.equal(screen.queryByRole("link", { name: "Permissions" }), null);
+  assert.equal(
+    screen.queryByRole("combobox", { name: "Default for new Tasks" }),
+    null,
   );
-  const trigger = screen.getByRole("combobox", {
-    name: "Default for new Tasks",
-  });
-  await user.click(trigger);
-  await screen.findByRole("listbox");
-  await user.keyboard("{ArrowDown}{Enter}");
-  assert.deepEqual(selected, ["full_access"]);
-  assert.equal(screen.queryByRole("alertdialog"), null);
+  assert.equal(document.querySelector(".permission-policy-boundary"), null);
+  assert.ok(screen.getByRole("combobox", { name: "Language" }));
 });
 
 test("Settings closes on Escape at the surface boundary", () => {

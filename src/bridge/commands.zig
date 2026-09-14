@@ -70,7 +70,6 @@ pub const custom_model_add = "metawork.models.customModels.add";
 pub const custom_model_replace = "metawork.models.customModels.replace";
 pub const custom_model_remove = "metawork.models.customModels.remove";
 pub const account_logout = "metawork.account.logout";
-pub const set_default_permission_profile = "metawork.permissions.setDefaultProfile";
 pub const create_task = "metawork.tasks.create";
 pub const run = "metawork.tasks.run";
 pub const select_task_model = "metawork.tasks.selectModel";
@@ -160,7 +159,6 @@ pub const product = [_][]const u8{
     custom_model_replace,
     custom_model_remove,
     account_logout,
-    set_default_permission_profile,
     create_task,
     run,
     select_task_model,

@@ -616,14 +616,14 @@ test("new Task places the Composer after the outcome prompt", () => {
   assert.doesNotMatch(markup, /task-examples|task-example/);
 });
 
-test("new Task exposes one immutable permission choice without a trust prompt", () => {
+test("new Task exposes and remembers one immutable permission choice", () => {
   const markup = renderNewTaskView(null, {
     permissionProfiles: ["approval_required", "full_access"],
     permissionProfile: "approval_required",
   });
   assert.match(markup, /Permission policy/);
   assert.match(markup, /Request approval/);
-  assert.match(markup, /set when the Task is created/);
+  assert.match(markup, /used as the default for your next new Task/);
   assert.doesNotMatch(markup, /trust this workspace|alertdialog/i);
 });
 

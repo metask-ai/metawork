@@ -298,7 +298,6 @@ export default function App() {
   const [accountBusy, setAccountBusy] = useState(false);
   const [executionBusy, setExecutionBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
-  const [permissionBusy, setPermissionBusy] = useState(false);
   const [newTaskPermissionOverride, setNewTaskPermissionOverride] =
     useState<PermissionProfile | null>(null);
   const [newTaskRequestedModel, setNewTaskRequestedModel] =
@@ -1703,30 +1702,6 @@ export default function App() {
       workspaceId: null,
     });
     window.requestAnimationFrame(() => composer.current?.focus());
-  }
-
-  async function setDefaultPermissionProfile(profile: PermissionProfile) {
-    if (bridgeUnavailable || permissionBusy) return;
-    setPermissionBusy(true);
-    try {
-      await client.setDefaultPermissionProfile(profile);
-      await refreshAfterCommit(
-        "permission.default_updated",
-        "operation.permission_default",
-        { scope: "account" },
-      );
-    } catch (error) {
-      await refreshSnapshot().catch(() => undefined);
-      setStatus(
-        attentionStatus(
-          "permission.default_update_failed",
-          { scope: "account" },
-          { diagnostic: errorText(error) },
-        ),
-      );
-    } finally {
-      setPermissionBusy(false);
-    }
   }
 
   function openTask(taskId: string) {
@@ -3390,12 +3365,6 @@ export default function App() {
           <SettingsPage
             account={snapshot.account}
             models={snapshot.models}
-            permissionProfiles={{
-              enabled: snapshot.capabilities.permissionProfiles,
-              available: snapshot.permissions.availableProfiles,
-              defaultProfile: snapshot.permissions.defaultProfile,
-              busy: permissionBusy,
-            }}
             customProviderCapabilities={{
               management: snapshot.capabilities.customProviderManagement,
               secretCapture: snapshot.capabilities.customProviderSecretCapture,
@@ -3536,9 +3505,6 @@ export default function App() {
               void runAccountCommand(() => client.retryAccountRefresh())
             }
             onLogout={() => void runAccountCommand(() => client.logout())}
-            onSetDefaultPermissionProfile={(profile) =>
-              void setDefaultPermissionProfile(profile)
-            }
           />
         ) : null
       }

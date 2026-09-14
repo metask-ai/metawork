@@ -61,7 +61,7 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - Workspace current / Task pinned Skill catalog、typed Skill Run 与独立 Skill rejection；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续；当前 AgentCore typed `run_state` observation 由 Workbench 投影为 Current activity，并按 transition sequence 丢弃过期观察。
 
-因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result 按需进入右侧单条详情，不展示 Run 用量，context pressure 提醒按需出现在 Composer 附近，历史自动压缩记录不单独占据入口。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。当前 PermissionProfile 只定义并开放 `请求批准 | 完全访问`；Plan、plan approval、Outputs、空的 Files changed 概览模块、持久权限管理和 custom UI 均保持隐藏。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route，以及设置与 New task 共享的默认 API/模型选择和 PermissionProfile；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result 按需进入右侧单条详情，不展示 Run 用量，context pressure 提醒按需出现在 Composer 附近，历史自动压缩记录不单独占据入口。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。当前 PermissionProfile 只定义并开放 `请求批准 | 完全访问`；Plan、plan approval、Outputs、空的 Files changed 概览模块、持久权限管理和 custom UI 均保持隐藏。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route、设置与 New task 共享的默认 API/模型选择，以及 New task 的 PermissionProfile 选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
 上述边界同时约束 Agent 对话渲染：工作过程必须在 terminal 前随真实 Snapshot revision 可见，过程与正式回复保持主次层级，长任务中可以检查 Tool 摘要而无需离开阅读上下文；仍不得泄漏 private reasoning、从文本猜测结构化事实或提前开放 gated capability。该信息架构只呈现实际到达的 commentary 与 typed activity，不承诺 Provider 在每个 Tool turn 输出自然语言，也不允许 Renderer 为提高信息密度而生成中间对话、推断模型意图或补造进度。
 
@@ -830,7 +830,7 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
 - `请求批准`：常规 Workspace 编辑自动执行，当前策略未覆盖的操作请求用户决定；映射为 `accept_edits + unrestricted`；
 - `完全访问`：MetaWork 不再为常规工具操作请求批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。它不是 root、Sandbox 或“信任 Workspace”。
 
-默认使用 `请求批准`。Settings 只设置后续新 Task 默认值，New task 可以覆盖本次选择；选择 `完全访问` 的同一菜单动作就是该 Task 的明确授权，不再叠加第二个确认 modal。Task 创建后保存并只读显示自己的 effective profile，Run history 保存 provenance；默认值变化不改写既有 Task，归档 Task 立即禁止新 Run，删除 Task 永久移除其 profile authority。已有 Task 不显示切换入口。
+首次默认使用 `请求批准`。New task 直接显示并允许修改本次选择；Task 成功创建后记住其 effective profile，作为下一次新建 Task 的默认值，创建失败或放弃草稿不改变默认值。选择 `完全访问` 的同一菜单动作就是该 Task 的明确授权，不再叠加第二个确认 modal。Task 创建后只读显示自己的 effective profile，Run history 保存 provenance；默认值变化不改写既有 Task，归档 Task 立即禁止新 Run，删除 Task 永久移除其 profile authority。已有 Task 不显示切换入口，Settings 不提供权限入口。
 
 Renderer 只能显示 Host capability projection 声明已端到端支持的两档。两档都必须覆盖 Task-create authority、same-profile fresh/restore、Task persistence、Run provenance、Task archive/delete 和 Scheduled noninteractive；不得用 Renderer preference、AgentCore enum 名称或 mode-change restore 模拟。
 
@@ -996,7 +996,7 @@ Providers（capability-gated）
 
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
 
-当前设置树包含独立 `Permissions` 分区，但只提供“新 Task 默认策略”；它不管理当前 Workspace、已有 Task 或 AgentCore 内部 enum。该分区只列 Host capability projection 支持的两个真实选项，不显示第三档、假开关或“即将推出”。已有 Task 的 effective profile 只在 Task 自身 surface 只读展示。
+设置树不提供权限分区或权限设置项。只有 Host capability projection 支持 PermissionProfile 时，New task 才显示两个真实选项并记住成功创建 Task 时的选择；不得显示第三档、假开关或“即将推出”。已有 Task 的 effective profile 只在 Task 自身 surface 只读展示。
 
 `Providers` 只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才整体进入设置树；它与 `Models` 平级，不是 Models 的下一级。不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 

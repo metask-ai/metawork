@@ -865,7 +865,6 @@ export const enUS = {
   "operation.task_delete": "Deleting the task record",
   "operation.workspace_remove": "Removing the workspace",
   "operation.skill_catalog_refresh": "Refreshing the Skill catalog",
-  "operation.permission_default": "Updating the permission default",
   "search.open": "Search",
   "search.title": "Search MetaWork",
   "search.placeholder": "Search workspaces, tasks, and completed work…",
@@ -886,12 +885,10 @@ export const enUS = {
     "Manage the defaults MetaWork uses when you start new work.",
   "settings.sections": "Settings sections",
   "settings.general": "General",
-  "settings.permissions": "Permissions",
   "settings.account": "Account",
   "settings.models": "Models",
   "settings.providers": "Providers",
   "settings.general_basics": "Basics",
-  "settings.permission_defaults": "Defaults for new tasks",
   "settings.account_profile": "Account information",
   "settings.account_security": "Security",
   "settings.providers_saved": "Model services",
@@ -940,22 +937,16 @@ export const enUS = {
     "MetaWork skips approval for routine tool operations. AgentCore protections and system or service permissions can still block them.",
   "permission.new_task.label": "Permission policy",
   "permission.new_task.help":
-    "This permission is set when the Task is created.",
+    "Fixed at creation and used as the default for your next new Task.",
   "permission.task.label": "Permission policy",
   "permission.task.help":
-    "Fixed when this Task was created. Changing the default does not affect it.",
+    "Fixed when this Task was created. Choices for later Tasks do not affect it.",
   "permission.task.full_access.help":
     "Fixed at creation. Routine approval is skipped; AgentCore and system protections still apply.",
-  "permission.default.label": "Default for new Tasks",
-  "permission.default.help":
-    "This choice applies only when you create a new Task. Existing Tasks keep their original policy.",
   "permission.menu_help":
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":
     "Full access skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
-  "permission.default_updated": "Permission default updated.",
-  "permission.default_update_failed":
-    "MetaWork could not update the permission default.",
   "settings.default_model_for_new_tasks": "Default model for new tasks",
   "settings.current_default": "Current",
   "settings.provider": "Provider",

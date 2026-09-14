@@ -353,7 +353,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.custom_model_replace, .function = customModelReplace },
             .{ .name = commands.custom_model_remove, .function = customModelRemove },
             .{ .name = commands.account_logout, .function = accountLogout },
-            .{ .name = commands.set_default_permission_profile, .function = setDefaultPermissionProfile },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.release_attachment, .function = releaseAttachment },
@@ -2338,33 +2337,6 @@ pub const Dispatcher = struct {
             binding_epoch,
             mcp_authority,
             null,
-        );
-    }
-
-    fn setDefaultPermissionProfile(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireWindow(invocation.source.window_id);
-        if (!product_control.permission_profiles_available)
-            return error.CapabilityUnavailable;
-        var parsed = try handlers.parsePayload(
-            handlers.PermissionProfileSelection,
-            invocation.request.payload,
-        );
-        defer parsed.deinit();
-        const profile = handlers.permissionProfile(parsed.value.permissionProfile) orelse
-            return error.InvalidBridgePayload;
-        const changed = try (try self.requireProductControl()).setDefaultPermissionProfile(profile);
-        if (changed) self.notifyCommitted();
-        return std.fmt.bufPrint(
-            output,
-            "{{\"changed\":{},\"defaultProfile\":\"{s}\"}}",
-            .{ changed, @tagName(profile) },
         );
     }
 
@@ -5831,17 +5803,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
         schedule_recovery,
         "\"outcome\":\"unavailable\"",
     ) != null);
-    const permission_default = native_dispatcher.dispatch(
-        "{\"id\":\"permission-default\",\"command\":\"metawork.permissions.setDefaultProfile\",\"payload\":{\"permissionProfile\":\"full_access\"}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        permission_default,
-        "\"changed\":true,\"defaultProfile\":\"full_access\"",
-    ) != null);
-    try std.testing.expectEqual(initial_revision + 1, workbench.currentRevision());
     const login = native_dispatcher.dispatch(
         "{\"id\":\"login\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
         source,

@@ -723,8 +723,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
           taskId: "11",
           reason: "catalog_unavailable",
         };
-      if (command === "metawork.permissions.setDefaultProfile")
-        return { changed: true, defaultProfile: "full_access" };
       assert.fail(`unexpected command ${command}`);
     }),
   });
@@ -822,10 +820,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
     taskId: "11",
     reason: "catalog_unavailable",
   });
-  assert.deepEqual(await client.setDefaultPermissionProfile("full_access"), {
-    changed: true,
-    defaultProfile: "full_access",
-  });
   assert.deepEqual(calls, [
     {
       command: "metawork.models.configureMetaskSelection",
@@ -913,10 +907,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
     {
       command: "metawork.tasks.refreshSkillCatalog",
       payload: { taskId: "11", expectedBindingEpoch: "13" },
-    },
-    {
-      command: "metawork.permissions.setDefaultProfile",
-      payload: { permissionProfile: "full_access" },
     },
   ]);
 });
