@@ -2459,7 +2459,7 @@ test("task information uses a keyboard-accessible icon and retains creation MCP 
     assert.equal(screen.queryByRole("combobox"), null);
     assert.match(
       document.body.textContent,
-      /Fixed when this Task was created.*default does not affect it/,
+      /Fixed when this Task was created.*Choices for later Tasks do not affect it/,
     );
     assert.match(document.body.textContent, /not current connection status/);
     await user.keyboard("{Escape}");
