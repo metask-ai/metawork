@@ -405,7 +405,8 @@ const root_snapshot_overhead: usize = 1024;
 const account_snapshot_text_bytes: usize =
     account_contract.Limits.account_id_bytes +
     account_contract.Limits.display_name_bytes +
-    account_contract.Limits.safe_diagnostic_bytes;
+    3 * account_contract.Limits.safe_diagnostic_bytes +
+    11 * account_contract.Limits.decimal_bytes;
 const custom_provider_snapshot_text_bytes: usize =
     models_contract.Limits.custom_provider_entries *
     (models_contract.Limits.instance_id_bytes +
@@ -4883,7 +4884,61 @@ pub const Runtime = struct {
             @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.safe_diagnostic);
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        const summary = view.summary;
+        writer.print(",\"summary\":{{\"operation\":\"{s}\",\"usageEligibility\":\"{s}\",\"wallet\":{{\"availability\":\"{s}\",\"balanceU\":", .{
+            @tagName(summary.operation),
+            @tagName(summary.usage_eligibility),
+            @tagName(summary.wallet.availability),
+        }) catch return error.SnapshotTooLarge;
+        try writeNullableProjectedJsonValue(self, writer, summary.wallet.balance_u);
+        writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
+        try writeNullableProjectedJsonValue(self, writer, summary.wallet.synced_at_unix_ms);
+        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.wallet.error_code)}) catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, summary.wallet.safe_diagnostic);
+        writer.print("}},\"usage\":{{\"availability\":\"{s}\",\"today\":", .{@tagName(summary.usage.availability)}) catch
+            return error.SnapshotTooLarge;
+        if (summary.usage.today) |today| {
+            writer.writeAll("{\"inputTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, today.input_tokens);
+            writer.writeAll(",\"outputTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, today.output_tokens);
+            writer.writeAll(",\"cacheCreationTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, today.cache_creation_tokens);
+            writer.writeAll(",\"cacheReadTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, today.cache_read_tokens);
+            writer.writeAll(",\"totalTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, today.total_tokens);
+            writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, today.actual_cost_u);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"total\":") catch return error.SnapshotTooLarge;
+        if (summary.usage.total) |total| {
+            writer.writeAll("{\"totalTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, total.total_tokens);
+            writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, total.actual_cost_u);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"syncedAt\":") catch return error.SnapshotTooLarge;
+        try writeNullableProjectedJsonValue(self, writer, summary.usage.synced_at_unix_ms);
+        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.usage.error_code)}) catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, summary.usage.safe_diagnostic);
+        writer.writeAll("}}}") catch return error.SnapshotTooLarge;
+    }
+
+    fn writeNullableProjectedJsonValue(
+        self: *Runtime,
+        writer: *std.Io.Writer,
+        value: []const u8,
+    ) Error!void {
+        if (value.len == 0) {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else {
+            try self.projectedJsonValue(writer, value);
+        }
     }
 
     fn writeModels(self: *Runtime, writer: *std.Io.Writer) Error!void {
@@ -9402,6 +9457,50 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"baseUrl\"") == null,
     );
+}
+
+test "Product Control serializes complete Account summary decimals as strings" {
+    var control = try testRuntime();
+    defer control.deinit();
+    control.commitAccountFactNoFail(.{
+        .kind = .summary_changed,
+        .view = .{
+            .state = .authenticated,
+            .account_id = "account-1",
+            .display_name = "Fixture User",
+            .summary = .{
+                .usage_eligibility = .enabled,
+                .wallet = .{
+                    .availability = .ready,
+                    .balance_u = "-1.25",
+                    .synced_at_unix_ms = "1720000000000",
+                },
+                .usage = .{
+                    .availability = .ready,
+                    .today = .{
+                        .input_tokens = "10",
+                        .output_tokens = "20",
+                        .cache_creation_tokens = "3",
+                        .cache_read_tokens = "4",
+                        .total_tokens = "37",
+                        .actual_cost_u = "0.125",
+                    },
+                    .total = .{ .total_tokens = "300", .actual_cost_u = "2.5" },
+                    .synced_at_unix_ms = "1720000000000",
+                },
+            },
+        },
+    });
+    var storage: [8192]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&storage);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer parsed.deinit();
+    const summary = parsed.value.object.get("account").?.object.get("summary").?.object;
+    const wallet = summary.get("wallet").?.object;
+    const usage = summary.get("usage").?.object;
+    try std.testing.expectEqualStrings("-1.25", wallet.get("balanceU").?.string);
+    try std.testing.expectEqualStrings("37", usage.get("today").?.object.get("totalTokens").?.string);
+    try std.testing.expectEqualStrings("2.5", usage.get("total").?.object.get("actualCostU").?.string);
 }
 
 test "Task completion receipt is identity-bound idempotent and order-neutral" {

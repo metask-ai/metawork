@@ -76,6 +76,25 @@ export const initialWorkbenchState: WorkbenchState = {
       displayName: "",
       errorCode: "none",
       safeDiagnostic: "",
+      summary: {
+        operation: "idle",
+        usageEligibility: "unknown",
+        wallet: {
+          availability: "unavailable",
+          balanceU: null,
+          syncedAt: null,
+          errorCode: "none",
+          safeDiagnostic: "",
+        },
+        usage: {
+          availability: "unavailable",
+          today: null,
+          total: null,
+          syncedAt: null,
+          errorCode: "none",
+          safeDiagnostic: "",
+        },
+      },
     },
     models: {
       availability: "needs_authentication",

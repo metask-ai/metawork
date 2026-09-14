@@ -53,6 +53,26 @@ function clone(value) {
   return structuredClone(value);
 }
 
+const emptyAccountSummary = {
+  operation: "idle",
+  usageEligibility: "unknown",
+  wallet: {
+    availability: "unavailable",
+    balanceU: null,
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+  usage: {
+    availability: "unavailable",
+    today: null,
+    total: null,
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+};
+
 test("Skill recovery state matches the Host fixture and enforces Retry authority", () => {
   const asset = JSON.parse(
     readFileSync(
@@ -424,6 +444,7 @@ test("durable Metask intent remains decodable when the current catalog is unavai
     displayName: "",
     errorCode: "none",
     safeDiagnostic: "",
+    summary: emptyAccountSummary,
   };
   catalogUnavailable.newTaskAdmission = {
     available: false,
@@ -1446,6 +1467,7 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
     displayName: "",
     errorCode: "none",
     safeDiagnostic: "",
+    summary: emptyAccountSummary,
   };
   const customMetadata = clone(snapshot.models.providers[0].models[0].metadata);
   snapshot.models = {
@@ -1923,6 +1945,46 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /safe diagnostic requires an Account error/,
   );
 
+  const readySummary = clone(fixture);
+  readySummary.account.summary = {
+    operation: "idle",
+    usageEligibility: "enabled",
+    wallet: {
+      availability: "ready",
+      balanceU: "-1.25",
+      syncedAt: "1720000000000",
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
+    usage: {
+      availability: "ready",
+      today: {
+        inputTokens: "10",
+        outputTokens: "20",
+        cacheCreationTokens: "3",
+        cacheReadTokens: "4",
+        totalTokens: "37",
+        actualCostU: "0.125",
+      },
+      total: { totalTokens: "300", actualCostU: "2.5" },
+      syncedAt: "1720000000000",
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(readySummary), readySummary);
+  for (const mutate of [
+    (value) => (value.account.summary.wallet.balanceU = 1.25),
+    (value) => (value.account.summary.wallet.balanceU = "01.25"),
+    (value) => (value.account.summary.usage.today = null),
+    (value) => (value.account.summary.usage.total.actualCostU = "2.50"),
+    (value) => (value.account.summary.usage.extra = true),
+  ]) {
+    const invalid = clone(readySummary);
+    mutate(invalid);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+
   const refreshingCatalog = clone(fixture);
   refreshingCatalog.models.operation = "refreshing_catalog";
   refreshingCatalog.models.availability = "loading";
@@ -1939,6 +2001,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     displayName: "",
     errorCode: "none",
     safeDiagnostic: "",
+    summary: emptyAccountSummary,
   };
   signedOut.models.availability = "needs_authentication";
   signedOut.models.providers[0].catalogState = "needs_authentication";
@@ -1955,6 +2018,13 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   signedOut.newTaskAdmission.activeSelectionRevision = "0";
   signedOut.newTaskAdmission.available = false;
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(signedOut));
+
+  const leakedSignedOutSummary = clone(signedOut);
+  leakedSignedOutSummary.account.summary = readySummary.account.summary;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(leakedSignedOutSummary),
+    /must hide its summary/,
+  );
 
   const duplicateModel = clone(fixture);
   duplicateModel.models.providers[0].models = [

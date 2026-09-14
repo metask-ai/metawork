@@ -337,6 +337,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_begin_login, .function = accountBeginLogin },
             .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
             .{ .name = commands.account_retry_refresh, .function = accountRetryRefresh },
+            .{ .name = commands.account_refresh_summary, .function = accountRefreshSummary },
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
             .{ .name = commands.models_reset_store, .function = modelsResetStore },
             .{ .name = commands.models_select_metask_api_key, .function = selectMetaskApiKey },
@@ -1663,6 +1664,19 @@ pub const Dispatcher = struct {
             invocation,
             output,
             .retry_refresh,
+        );
+    }
+
+    fn accountRefreshSummary(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitEmptyAccountCommand(
+            context,
+            invocation,
+            output,
+            .refresh_summary,
         );
     }
 
@@ -5854,6 +5868,24 @@ test "Dispatcher validates authority before domain calls and preserves committed
             null,
     );
     try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    const refreshed_summary = native_dispatcher.dispatch(
+        "{\"id\":\"refresh-summary\",\"command\":\"metawork.account.refreshSummary\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        refreshed_summary,
+        "\"accepted\":true,\"errorCode\":\"none\",\"attemptId\":\"41\"",
+    ) != null);
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
+    const invalid_summary_payload = native_dispatcher.dispatch(
+        "{\"id\":\"bad-refresh-summary\",\"command\":\"metawork.account.refreshSummary\",\"payload\":{\"extra\":true}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, invalid_summary_payload, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     const empty_model = native_dispatcher.dispatch(
         "{\"id\":\"empty-model\",\"command\":\"metawork.models.configureMetaskSelection\",\"payload\":{\"sourceId\":\"\",\"modelId\":\"\",\"expectedMetaskSelectionRevision\":\"0\",\"expectedSourceGeneration\":\"0\",\"expectedCatalogGeneration\":\"0\"}}",
         source,
@@ -5862,7 +5894,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(
         std.mem.indexOf(u8, empty_model, "\"handler_failed\"") != null,
     );
-    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     const forwarded_selection = native_dispatcher.dispatch(
         "{\"id\":\"refresh-models\",\"command\":\"metawork.models.refreshCatalog\",\"payload\":{}}",
         source,
@@ -5873,7 +5905,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         forwarded_selection,
         "\"accepted\":true",
     ) != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     try std.testing.expectEqual(@as(usize, 1), harness.models_calls);
     var reset_request_storage: [256]u8 = undefined;
     const reset_request = try std.fmt.bufPrint(
@@ -5911,7 +5943,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
-    try std.testing.expectEqual(@as(usize, 1), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
     harness.on_main_thread = true;
     harness.account_result = .rejected(.invalid_state);
     const rejected = native_dispatcher.dispatch(
@@ -5919,7 +5951,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
-    try std.testing.expectEqual(@as(usize, 2), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
     try std.testing.expect(
         std.mem.indexOf(
             u8,
@@ -5933,7 +5965,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
-    try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 4), harness.account_calls);
     try std.testing.expect(
         std.mem.indexOf(
             u8,
@@ -6045,7 +6077,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     // Models commands are routed through the Models host and never manufacture
     // an Account attempt identity.
-    try std.testing.expectEqual(@as(usize, 3), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 4), harness.account_calls);
     try std.testing.expectEqual(@as(usize, 4), harness.models_calls);
     try std.testing.expect(std.mem.indexOf(
         u8,

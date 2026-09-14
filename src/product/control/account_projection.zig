@@ -33,6 +33,26 @@ pub const Projection = struct {
     display_name: FixedText(account.Limits.display_name_bytes) = .{},
     safe_diagnostic: FixedText(account.Limits.safe_diagnostic_bytes) = .{},
     error_code: account.ErrorCode = .none,
+    summary_operation: account.SummaryOperation = .idle,
+    usage_eligibility: account.UsageEligibility = .unknown,
+    wallet_availability: account.SummaryAvailability = .unavailable,
+    wallet_balance_u: FixedText(account.Limits.decimal_bytes) = .{},
+    wallet_synced_at_unix_ms: FixedText(account.Limits.decimal_bytes) = .{},
+    wallet_error_code: account.ErrorCode = .none,
+    wallet_safe_diagnostic: FixedText(account.Limits.safe_diagnostic_bytes) = .{},
+    usage_availability: account.SummaryAvailability = .unavailable,
+    usage_has_data: bool = false,
+    usage_today_input_tokens: FixedText(account.Limits.decimal_bytes) = .{},
+    usage_today_output_tokens: FixedText(account.Limits.decimal_bytes) = .{},
+    usage_today_cache_creation_tokens: FixedText(account.Limits.decimal_bytes) = .{},
+    usage_today_cache_read_tokens: FixedText(account.Limits.decimal_bytes) = .{},
+    usage_today_total_tokens: FixedText(account.Limits.decimal_bytes) = .{},
+    usage_today_actual_cost_u: FixedText(account.Limits.decimal_bytes) = .{},
+    usage_total_tokens: FixedText(account.Limits.decimal_bytes) = .{},
+    usage_total_actual_cost_u: FixedText(account.Limits.decimal_bytes) = .{},
+    usage_synced_at_unix_ms: FixedText(account.Limits.decimal_bytes) = .{},
+    usage_error_code: account.ErrorCode = .none,
+    usage_safe_diagnostic: FixedText(account.Limits.safe_diagnostic_bytes) = .{},
 
     pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Projection {
         return .{ .allocator = allocator };
@@ -52,6 +72,39 @@ pub const Projection = struct {
         self.display_name.setNoFail(source.display_name);
         self.error_code = source.error_code;
         self.safe_diagnostic.setNoFail(source.safe_diagnostic);
+        const summary = source.summary;
+        self.summary_operation = summary.operation;
+        self.usage_eligibility = summary.usage_eligibility;
+        self.wallet_availability = summary.wallet.availability;
+        self.wallet_balance_u.setNoFail(summary.wallet.balance_u);
+        self.wallet_synced_at_unix_ms.setNoFail(summary.wallet.synced_at_unix_ms);
+        self.wallet_error_code = summary.wallet.error_code;
+        self.wallet_safe_diagnostic.setNoFail(summary.wallet.safe_diagnostic);
+        self.usage_availability = summary.usage.availability;
+        self.usage_synced_at_unix_ms.setNoFail(summary.usage.synced_at_unix_ms);
+        self.usage_error_code = summary.usage.error_code;
+        self.usage_safe_diagnostic.setNoFail(summary.usage.safe_diagnostic);
+        self.usage_has_data = summary.usage.today != null;
+        if (summary.usage.today) |today| {
+            const total = summary.usage.total.?;
+            self.usage_today_input_tokens.setNoFail(today.input_tokens);
+            self.usage_today_output_tokens.setNoFail(today.output_tokens);
+            self.usage_today_cache_creation_tokens.setNoFail(today.cache_creation_tokens);
+            self.usage_today_cache_read_tokens.setNoFail(today.cache_read_tokens);
+            self.usage_today_total_tokens.setNoFail(today.total_tokens);
+            self.usage_today_actual_cost_u.setNoFail(today.actual_cost_u);
+            self.usage_total_tokens.setNoFail(total.total_tokens);
+            self.usage_total_actual_cost_u.setNoFail(total.actual_cost_u);
+        } else {
+            self.usage_today_input_tokens.setNoFail("");
+            self.usage_today_output_tokens.setNoFail("");
+            self.usage_today_cache_creation_tokens.setNoFail("");
+            self.usage_today_cache_read_tokens.setNoFail("");
+            self.usage_today_total_tokens.setNoFail("");
+            self.usage_today_actual_cost_u.setNoFail("");
+            self.usage_total_tokens.setNoFail("");
+            self.usage_total_actual_cost_u.setNoFail("");
+        }
     }
 
     pub fn view(self: *const Projection) account.AccountView {
@@ -62,6 +115,35 @@ pub const Projection = struct {
             .display_name = self.display_name.view(),
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
+            .summary = .{
+                .operation = self.summary_operation,
+                .usage_eligibility = self.usage_eligibility,
+                .wallet = .{
+                    .availability = self.wallet_availability,
+                    .balance_u = self.wallet_balance_u.view(),
+                    .synced_at_unix_ms = self.wallet_synced_at_unix_ms.view(),
+                    .error_code = self.wallet_error_code,
+                    .safe_diagnostic = self.wallet_safe_diagnostic.view(),
+                },
+                .usage = .{
+                    .availability = self.usage_availability,
+                    .today = if (self.usage_has_data) .{
+                        .input_tokens = self.usage_today_input_tokens.view(),
+                        .output_tokens = self.usage_today_output_tokens.view(),
+                        .cache_creation_tokens = self.usage_today_cache_creation_tokens.view(),
+                        .cache_read_tokens = self.usage_today_cache_read_tokens.view(),
+                        .total_tokens = self.usage_today_total_tokens.view(),
+                        .actual_cost_u = self.usage_today_actual_cost_u.view(),
+                    } else null,
+                    .total = if (self.usage_has_data) .{
+                        .total_tokens = self.usage_total_tokens.view(),
+                        .actual_cost_u = self.usage_total_actual_cost_u.view(),
+                    } else null,
+                    .synced_at_unix_ms = self.usage_synced_at_unix_ms.view(),
+                    .error_code = self.usage_error_code,
+                    .safe_diagnostic = self.usage_safe_diagnostic.view(),
+                },
+            },
         };
     }
 
@@ -87,5 +169,49 @@ test "Account projection copies identity without allocating after initialization
     try std.testing.expectEqual(account.AccountState.signed_out, first.state);
     projection.commitNoFail(fact);
     _ = projection.view();
+    try std.testing.expectEqual(allocations_after_init, failing.alloc_index);
+}
+
+test "Account projection copies the complete summary without allocating" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var projection = try Projection.init(failing.allocator());
+    defer projection.deinit();
+    const fact: account.AccountFact = .{
+        .kind = .summary_changed,
+        .view = .{
+            .state = .authenticated,
+            .account_id = "42",
+            .display_name = "Fixture User",
+            .summary = .{
+                .usage_eligibility = .enabled,
+                .wallet = .{
+                    .availability = .ready,
+                    .balance_u = "-1.25",
+                    .synced_at_unix_ms = "1720000000000",
+                },
+                .usage = .{
+                    .availability = .ready,
+                    .today = .{
+                        .input_tokens = "10",
+                        .output_tokens = "20",
+                        .cache_creation_tokens = "3",
+                        .cache_read_tokens = "4",
+                        .total_tokens = "37",
+                        .actual_cost_u = "0.125",
+                    },
+                    .total = .{ .total_tokens = "300", .actual_cost_u = "2.5" },
+                    .synced_at_unix_ms = "1720000000000",
+                },
+            },
+        },
+    };
+    const allocations_after_init = failing.alloc_index;
+    failing.fail_index = allocations_after_init;
+    projection.commitNoFail(fact);
+    const view = projection.view();
+    try account.validateView(view);
+    try std.testing.expectEqualStrings("-1.25", view.summary.wallet.balance_u);
+    try std.testing.expectEqualStrings("37", view.summary.usage.today.?.total_tokens);
+    try std.testing.expectEqualStrings("2.5", view.summary.usage.total.?.actual_cost_u);
     try std.testing.expectEqual(allocations_after_init, failing.alloc_index);
 }

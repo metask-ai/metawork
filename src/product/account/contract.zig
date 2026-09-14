@@ -336,17 +336,23 @@ fn validateDecimal(value: []const u8, signed: bool) ValidationError!void {
         if (value.len == 1) return error.InconsistentState;
         index = 1;
     }
-    var decimal_seen = false;
-    while (index < value.len) : (index += 1) {
-        const byte = value[index];
-        if (byte == '.') {
-            if (decimal_seen or index == 0 or index + 1 == value.len)
-                return error.InconsistentState;
-            decimal_seen = true;
-        } else if (!std.ascii.isDigit(byte)) {
-            return error.InconsistentState;
-        }
+    const integer_start = index;
+    while (index < value.len and value[index] != '.') : (index += 1) {
+        if (!std.ascii.isDigit(value[index])) return error.InconsistentState;
     }
+    if (index == integer_start or
+        (index - integer_start > 1 and value[integer_start] == '0'))
+        return error.InconsistentState;
+    if (index < value.len) {
+        index += 1;
+        if (index == value.len) return error.InconsistentState;
+        while (index < value.len) : (index += 1) {
+            if (!std.ascii.isDigit(value[index])) return error.InconsistentState;
+        }
+        if (value[value.len - 1] == '0') return error.InconsistentState;
+    }
+    if (value[0] == '-' and value.len == 2 and value[1] == '0')
+        return error.InconsistentState;
 }
 
 pub fn validateFact(fact: AccountFact) ValidationError!void {
@@ -435,6 +441,18 @@ test "Account view validates identity and nested summary independently" {
             .usage = .{
                 .availability = .unavailable,
                 .error_code = .metask_service_unavailable,
+            },
+        },
+    }));
+    try std.testing.expectError(error.InconsistentState, validateView(.{
+        .state = .authenticated,
+        .account_id = "account-1",
+        .display_name = "Metask User",
+        .summary = .{
+            .wallet = .{
+                .availability = .ready,
+                .balance_u = "01.25",
+                .synced_at_unix_ms = "1000",
             },
         },
     }));

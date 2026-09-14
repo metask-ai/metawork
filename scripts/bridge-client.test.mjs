@@ -112,6 +112,24 @@ test("Renderer Bridge mismatch and malformed acceptance are terminal contract fa
   }
 });
 
+test("Account summary refresh uses the exact empty revision-one command", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { accepted: true, errorCode: "none", attemptId: "19" };
+    }),
+  });
+  assert.deepEqual(await client.refreshAccountSummary(), {
+    accepted: true,
+    errorCode: "none",
+    attemptId: "19",
+  });
+  assert.deepEqual(calls, [
+    { command: "metawork.account.refreshSummary", payload: {} },
+  ]);
+});
+
 test("Product store recovery uses revision-bound typed commands", async () => {
   const calls = [];
   const client = new BridgeClient({
