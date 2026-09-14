@@ -10,6 +10,7 @@ const login_attempt_impl = @import("account_login_attempt");
 const credentials_impl = @import("account_credentials_runtime");
 const network_attempt_impl = @import("account_network_attempt");
 const runtime_impl = @import("account_runtime");
+const summary_impl = @import("account_summary");
 
 pub const Runtime = runtime_impl.Runtime;
 pub const Prepared = runtime_impl.Prepared;
@@ -19,6 +20,7 @@ pub const Transport = metask_client_impl.Transport;
 pub const TransportRequest = metask_client_impl.Request;
 pub const TransportResponse = metask_client_impl.Response;
 pub const TransportError = metask_client_impl.TransportError;
+pub const SummaryCompletion = summary_impl.Completion;
 
 test {
     _ = state_impl;
@@ -31,4 +33,5 @@ test {
     _ = credentials_impl;
     _ = network_attempt_impl;
     _ = runtime_impl;
+    _ = summary_impl;
 }

@@ -599,6 +599,15 @@ test "current user decoder binds username to the token account" {
     );
 }
 
+test "optional account summary fields never become identity gates" {
+    const info = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"username":"Meta User","balance":"temporarily-invalid","run_mode":7}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqualStrings("Meta User", info.usernameView());
+}
+
 test "authorization code and refresh bodies do not widen client contract" {
     var code = try Secret.init(std.testing.allocator, "abc /?");
     defer code.deinit();

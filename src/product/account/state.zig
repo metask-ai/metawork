@@ -218,6 +218,9 @@ pub const Account = struct {
             .begin_login => self.prepareBeginLogin(),
             .cancel_operation => self.prepareCancel(),
             .retry_refresh => self.prepareRetryRefresh(),
+            // Summary effects are coordinated by Account Runtime and never
+            // enter the identity transaction state machine.
+            .refresh_summary => .{ .rejected = .invalid_state },
             .logout => self.prepareLogout(),
         };
     }

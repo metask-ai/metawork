@@ -3,14 +3,17 @@ const std = @import("std");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
+const summary = @import("account_summary");
 const transport_api = @import("metask_transport");
 
 pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
+pub const usage_dashboard_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/stats";
 
 pub const RequestKind = enum {
     exchange_code,
     refresh_token,
     current_user,
+    usage_dashboard,
 };
 
 pub const Request = struct {
@@ -169,6 +172,46 @@ pub fn fetchIdentity(
         tokens.accountId(),
         current_user.usernameView(),
     ) catch return error.ProtocolInvalid;
+}
+
+pub fn fetchWalletSummary(
+    transport: Transport,
+    bearer: []const u8,
+    principal_ref: []const u8,
+    control: ?RequestControl,
+) ClientError!summary.WalletData {
+    var storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &storage);
+    const response = transport.perform(
+        .{
+            .kind = .current_user,
+            .bearer = bearer,
+            .control = control,
+        },
+        &storage,
+    ) catch |err| return transportFailure(err);
+    if (response.status != 200) return classifyStatus(response.status, false);
+    return summary.parseWallet(response.body, principal_ref) catch
+        return error.ProtocolInvalid;
+}
+
+pub fn fetchUsageSummary(
+    transport: Transport,
+    bearer: []const u8,
+    control: ?RequestControl,
+) ClientError!summary.UsageData {
+    var storage: [32 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &storage);
+    const response = transport.perform(
+        .{
+            .kind = .usage_dashboard,
+            .bearer = bearer,
+            .control = control,
+        },
+        &storage,
+    ) catch |err| return transportFailure(err);
+    if (response.status != 200) return classifyStatus(response.status, false);
+    return summary.parseUsage(response.body) catch return error.ProtocolInvalid;
 }
 
 fn transportFailure(transport_error: TransportError) ClientError {

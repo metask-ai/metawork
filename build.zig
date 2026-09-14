@@ -1002,6 +1002,12 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const account_summary = b.createModule(.{
+        .root_source_file = b.path("src/product/account/summary.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_summary.addImport("metawork_account_contract", account_contract);
     const metask_client = b.createModule(.{
         .root_source_file = b.path("src/product/account/metask_client.zig"),
         .target = target,
@@ -1011,6 +1017,7 @@ fn wireAgentCore(
     metask_client.addImport("metawork_account_contract", account_contract);
     metask_client.addImport("account_state", account_state);
     metask_client.addImport("account_oauth", account_oauth);
+    metask_client.addImport("account_summary", account_summary);
     const account_login_attempt = b.createModule(.{
         .root_source_file = b.path("src/product/account/login_attempt.zig"),
         .target = target,
@@ -1120,6 +1127,7 @@ fn wireAgentCore(
     account_runtime.addImport("account_login_attempt", account_login_attempt);
     account_runtime.addImport("account_credentials_runtime", account_credentials_runtime);
     account_runtime.addImport("account_network_attempt", account_network_attempt);
+    account_runtime.addImport("account_summary", account_summary);
     const account = b.createModule(.{
         .root_source_file = b.path("src/product/account.zig"),
         .target = target,
@@ -1135,6 +1143,7 @@ fn wireAgentCore(
     account.addImport("account_credentials_runtime", account_credentials_runtime);
     account.addImport("account_network_attempt", account_network_attempt);
     account.addImport("account_runtime", account_runtime);
+    account.addImport("account_summary", account_summary);
     const executor = b.createModule(.{
         .root_source_file = b.path("src/product/control/executor.zig"),
         .target = target,

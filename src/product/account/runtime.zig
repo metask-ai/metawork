@@ -14,10 +14,124 @@ const loopback_impl = @import("account_loopback");
 const login_attempt = @import("account_login_attempt");
 const credentials_impl = @import("account_credentials_runtime");
 const network_attempt = @import("account_network_attempt");
+const summary_impl = @import("account_summary");
 
 const refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
 const refresh_skew_seconds: i64 = 60;
 const refresh_retry_ns: u64 = 30 * std.time.ns_per_s;
+
+const SummaryJob = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    transport: metask_client.Transport,
+    wake: WakeSink,
+    attempt_id: u64,
+    authorization_generation: u64,
+    synced_at_unix_ms: summary_impl.Decimal,
+    lease: contract.OwnedAuthorizationLease,
+    lease_active: bool = true,
+    cancellation: metask_client.Cancellation,
+    completion: ?summary_impl.Completion = null,
+    finished: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    fn create(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        transport: metask_client.Transport,
+        wake: WakeSink,
+        attempt_id: u64,
+        synced_at_unix_ms: summary_impl.Decimal,
+        lease: *contract.OwnedAuthorizationLease,
+    ) std.mem.Allocator.Error!*SummaryJob {
+        const self = try allocator.create(SummaryJob);
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .transport = transport,
+            .wake = wake,
+            .attempt_id = attempt_id,
+            .authorization_generation = lease.authorization_generation,
+            .synced_at_unix_ms = synced_at_unix_ms,
+            .lease = lease.take(),
+            .cancellation = metask_client.Cancellation.init(io),
+        };
+        return self;
+    }
+
+    fn start(self: *SummaryJob) std.Thread.SpawnError!void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn run(self: *SummaryJob) void {
+        defer {
+            self.lease.deinit();
+            self.lease_active = false;
+            self.finished.store(true, .release);
+            self.wake.notify();
+        }
+        var completion: summary_impl.Completion = .{
+            .attempt_id = self.attempt_id,
+            .authorization_generation = self.authorization_generation,
+            .principal_ref_len = self.lease.principal_ref.len,
+            .synced_at_unix_ms = self.synced_at_unix_ms,
+            .wallet = .{ .failed = .account_operation_failed },
+            .usage = .not_requested,
+        };
+        @memcpy(
+            completion.principal_ref[0..self.lease.principal_ref.len],
+            self.lease.principal_ref,
+        );
+        const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+            .raw = .fromSeconds(30),
+            .clock = .boot,
+        });
+        const control: metask_client.RequestControl = .{
+            .cancellation = &self.cancellation,
+            .deadline = deadline,
+        };
+        const wallet = metask_client.fetchWalletSummary(
+            self.transport,
+            self.lease.access_token,
+            self.lease.principal_ref,
+            control,
+        ) catch |err| {
+            completion.wallet = .{ .failed = metask_client.errorCode(err) };
+            self.completion = completion;
+            return;
+        };
+        completion.wallet = .{ .succeeded = wallet };
+        if (wallet.usage_eligibility == .enabled) {
+            completion.usage = if (metask_client.fetchUsageSummary(
+                self.transport,
+                self.lease.access_token,
+                control,
+            )) |usage|
+                .{ .succeeded = usage }
+            else |err|
+                .{ .failed = metask_client.errorCode(err) };
+        }
+        self.completion = completion;
+    }
+
+    fn cancel(self: *SummaryJob) void {
+        self.cancellation.cancel();
+    }
+
+    fn join(self: *SummaryJob) void {
+        const thread = self.thread orelse return;
+        thread.join();
+        self.thread = null;
+    }
+
+    fn deinit(self: *SummaryJob) void {
+        std.debug.assert(self.thread == null);
+        if (self.lease_active) self.lease.deinit();
+        const allocator = self.allocator;
+        self.* = undefined;
+        allocator.destroy(self);
+    }
+};
 
 pub const WakeSink = struct {
     context: *anyopaque,
@@ -434,6 +548,11 @@ pub const PrepareResult = union(enum) {
     ignored_stale,
 };
 
+pub const SummaryRefreshResult = struct {
+    result: contract.AccountCommandResult,
+    changed: bool,
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -443,6 +562,8 @@ pub const Runtime = struct {
     platform: ?ports_impl.Platform = null,
     credentials: credentials_impl.CredentialOwner = .{},
     authorization_generation: u64 = 0,
+    summary: summary_impl.State = .{},
+    summary_job: ?*SummaryJob = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -463,6 +584,7 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         self.assertMainThread();
         std.debug.assert(self.platform == null);
+        self.cancelSummaryJob();
         self.effects.deinit();
         self.credentials.deinit();
         self.* = undefined;
@@ -492,6 +614,7 @@ pub const Runtime = struct {
     ) PrepareResult {
         self.assertMainThread();
         if (command == .retry_refresh) return self.prepareRetryRefresh();
+        if (command == .refresh_summary) return .{ .rejected = .invalid_state };
         return wrapPrepareResult(self.account.prepareCommand(command));
     }
 
@@ -598,10 +721,80 @@ pub const Runtime = struct {
 
     pub fn view(self: *Runtime) contract.AccountView {
         self.assertMainThread();
-        const result = self.account.view();
+        var result = self.account.view();
+        if (result.state == .authenticated) result.summary = self.summary.view();
         contract.validateView(result) catch
             @panic("Account Runtime produced an invalid canonical AccountView");
         return result;
+    }
+
+    pub fn summaryFact(self: *Runtime) contract.AccountFact {
+        self.assertMainThread();
+        return .{ .kind = .summary_changed, .view = self.view() };
+    }
+
+    pub fn refreshSummary(self: *Runtime) SummaryRefreshResult {
+        self.assertMainThread();
+        if (self.summary_job != null)
+            return .{ .result = .rejected(.operation_in_progress), .changed = false };
+        var lease = (self.authorizationLease() catch
+            return .{ .result = .rejected(.local_resource_exhausted), .changed = false }) orelse
+            return .{ .result = .rejected(.invalid_state), .changed = false };
+        defer lease.deinit();
+        return self.startSummaryJob(&lease);
+    }
+
+    pub fn reconcileSummaryAuthorization(self: *Runtime) bool {
+        self.assertMainThread();
+        if (self.account.view().state != .authenticated) {
+            self.cancelSummaryJob();
+            return self.summary.clearAuthorization();
+        }
+        if (self.account.activeAttempt() != null) {
+            const job = self.summary_job orelse return false;
+            if (job.authorization_generation == self.authorization_generation)
+                return false;
+            const attempt_id = job.attempt_id;
+            self.cancelSummaryJob();
+            return self.summary.fail(attempt_id, .generation_mismatch);
+        }
+        var lease = (self.authorizationLease() catch {
+            self.cancelSummaryJob();
+            return self.summary.clearAuthorization();
+        }) orelse {
+            self.cancelSummaryJob();
+            return self.summary.clearAuthorization();
+        };
+        defer lease.deinit();
+        if (self.summary.matchesAuthority(
+            lease.principal_ref,
+            lease.authorization_generation,
+        )) return false;
+        self.cancelSummaryJob();
+        _ = self.summary.clearAuthorization();
+        _ = self.startSummaryJob(&lease);
+        return true;
+    }
+
+    pub fn drainSummary(self: *Runtime) bool {
+        self.assertMainThread();
+        const job = self.summary_job orelse return false;
+        if (!job.finished.load(.acquire)) return false;
+        job.join();
+        const changed = if (job.completion) |*completion|
+            self.acceptsAuthorizationGeneration(completion.authorization_generation) and
+                self.summary.complete(completion)
+        else
+            self.summary.fail(job.attempt_id, .account_operation_failed);
+        self.summary_job = null;
+        job.deinit();
+        return changed;
+    }
+
+    pub fn shutdownSummary(self: *Runtime) bool {
+        self.assertMainThread();
+        self.cancelSummaryJob();
+        return self.summary.clearAuthorization();
     }
 
     pub fn authorizationLease(
@@ -630,13 +823,69 @@ pub const Runtime = struct {
         prepared: *const Prepared,
     ) contract.AccountFact {
         self.assertMainThread();
+        var next_view = prepared.transition.view();
+        if (next_view.state == .authenticated) next_view.summary = self.summary.view();
         const fact: contract.AccountFact = .{
             .kind = prepared.factKind(),
-            .view = prepared.transition.view(),
+            .view = next_view,
         };
         contract.validateFact(fact) catch
             @panic("Account Runtime prepared an invalid canonical AccountFact");
         return fact;
+    }
+
+    fn startSummaryJob(
+        self: *Runtime,
+        lease: *contract.OwnedAuthorizationLease,
+    ) SummaryRefreshResult {
+        const platform = self.platform orelse return .{
+            .result = .rejected(.invalid_state),
+            .changed = false,
+        };
+        const now_seconds = platform.wall_clock.nowUnixSeconds() orelse
+            return .{ .result = .rejected(.account_operation_failed), .changed = false };
+        if (now_seconds < 0) return .{
+            .result = .rejected(.account_operation_failed),
+            .changed = false,
+        };
+        const now_ms = std.math.mul(i64, now_seconds, 1000) catch
+            return .{ .result = .rejected(.account_operation_failed), .changed = false };
+        const synced_at = summary_impl.Decimal.fromInteger(now_ms, false) catch
+            return .{ .result = .rejected(.account_operation_failed), .changed = false };
+        const preparation = self.summary.begin(
+            lease.principal_ref,
+            lease.authorization_generation,
+        ) catch return .{ .result = .rejected(.operation_in_progress), .changed = false };
+        const job = SummaryJob.create(
+            self.allocator,
+            self.io,
+            self.effects.transport,
+            self.effects.wake,
+            preparation.attempt_id,
+            synced_at,
+            lease,
+        ) catch {
+            _ = self.summary.fail(preparation.attempt_id, .local_resource_exhausted);
+            return .{ .result = .rejected(.local_resource_exhausted), .changed = true };
+        };
+        job.start() catch {
+            job.deinit();
+            _ = self.summary.fail(preparation.attempt_id, .local_resource_exhausted);
+            return .{ .result = .rejected(.local_resource_exhausted), .changed = true };
+        };
+        self.summary_job = job;
+        return .{
+            .result = .acceptedAttempt(preparation.attempt_id),
+            .changed = true,
+        };
+    }
+
+    fn cancelSummaryJob(self: *Runtime) void {
+        const job = self.summary_job orelse return;
+        job.cancel();
+        job.join();
+        self.summary_job = null;
+        job.deinit();
     }
 
     pub fn admitEffect(self: *Runtime, prepared: *Prepared) bool {
@@ -1290,6 +1539,12 @@ pub const TestSupport = if (builtin.is_test) struct {
 
     pub fn detachPlatform(runtime: *Runtime) void {
         runtime.platform = null;
+    }
+
+    pub fn joinSummary(runtime: *Runtime) void {
+        const job = runtime.summary_job orelse
+            @panic("test Account has no summary job");
+        job.join();
     }
 
     pub fn prepareLoggedOutAfterExternalCommit(runtime: *Runtime) Prepared {

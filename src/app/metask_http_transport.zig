@@ -59,6 +59,7 @@ pub const Adapter = struct {
                     .exchange_code => .exchange_code,
                     .refresh_token => .refresh_token,
                     .current_user => .current_user,
+                    .usage_dashboard => .usage_dashboard,
                 },
                 .body = request.body,
                 .bearer = request.bearer,
@@ -175,6 +176,7 @@ pub const Adapter = struct {
         const endpoint, const method: std.http.Method = switch (request.kind) {
             .exchange_code, .refresh_token => .{ oauth.token_url, .POST },
             .current_user => .{ account_metask.current_user_url, .GET },
+            .usage_dashboard => .{ account_metask.usage_dashboard_url, .GET },
             .keys => .{ models_metask.api_keys_url, .GET },
             .models => .{ models_metask.models_url, .GET },
         };

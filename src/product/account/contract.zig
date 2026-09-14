@@ -12,6 +12,7 @@ pub const Limits = struct {
     // Native SDK Keychain values are currently capped at 4096 bytes.
     pub const authorization_token_bytes: usize = 4096;
     pub const safe_diagnostic_bytes: usize = 512;
+    pub const decimal_bytes: usize = 64;
 };
 
 pub const AccountState = enum {
@@ -19,6 +20,62 @@ pub const AccountState = enum {
     signed_out,
     authorizing,
     authenticated,
+};
+
+pub const SummaryOperation = enum {
+    idle,
+    refreshing,
+};
+
+pub const SummaryAvailability = enum {
+    unavailable,
+    loading,
+    ready,
+    stale,
+};
+
+pub const UsageEligibility = enum {
+    unknown,
+    disabled,
+    enabled,
+};
+
+pub const WalletSummaryView = struct {
+    availability: SummaryAvailability = .unavailable,
+    balance_u: []const u8 = "",
+    synced_at_unix_ms: []const u8 = "",
+    error_code: ErrorCode = .none,
+    safe_diagnostic: []const u8 = "",
+};
+
+pub const UsageTodayView = struct {
+    input_tokens: []const u8,
+    output_tokens: []const u8,
+    cache_creation_tokens: []const u8,
+    cache_read_tokens: []const u8,
+    total_tokens: []const u8,
+    actual_cost_u: []const u8,
+};
+
+pub const UsageTotalView = struct {
+    total_tokens: []const u8,
+    actual_cost_u: []const u8,
+};
+
+pub const UsageSummaryView = struct {
+    availability: SummaryAvailability = .unavailable,
+    today: ?UsageTodayView = null,
+    total: ?UsageTotalView = null,
+    synced_at_unix_ms: []const u8 = "",
+    error_code: ErrorCode = .none,
+    safe_diagnostic: []const u8 = "",
+};
+
+pub const AccountSummaryView = struct {
+    operation: SummaryOperation = .idle,
+    usage_eligibility: UsageEligibility = .unknown,
+    wallet: WalletSummaryView = .{},
+    usage: UsageSummaryView = .{},
 };
 
 /// One bounded Account-owned authorization transfer. Application may move it
@@ -108,6 +165,7 @@ pub const AccountView = struct {
     display_name: []const u8 = "",
     error_code: ErrorCode = .none,
     safe_diagnostic: []const u8 = "",
+    summary: AccountSummaryView = .{},
 };
 
 pub const AccountFactKind = enum {
@@ -115,6 +173,7 @@ pub const AccountFactKind = enum {
     session_changed,
     operation_failed,
     signed_out,
+    summary_changed,
 };
 
 /// Canonical secret-free identity fact prepared by Account and installed by
@@ -128,6 +187,7 @@ pub const AccountCommand = enum {
     begin_login,
     cancel_operation,
     retry_refresh,
+    refresh_summary,
     logout,
 };
 
@@ -181,11 +241,111 @@ pub fn validateView(view: AccountView) ValidationError!void {
                 return error.InconsistentState;
             if (view.state != .authorizing and view.can_cancel)
                 return error.InconsistentState;
+            if (!isEmptySummary(view.summary)) return error.InconsistentState;
         },
         .authenticated => {
             if (view.account_id.len == 0 or view.display_name.len == 0)
                 return error.InconsistentState;
         },
+    }
+    try validateSummary(view.summary);
+}
+
+fn validateSummary(summary: AccountSummaryView) ValidationError!void {
+    try validateWallet(summary.wallet);
+    try validateUsage(summary.usage);
+    if (summary.usage_eligibility == .disabled and
+        (summary.usage.availability != .unavailable or
+            summary.usage.error_code != .none))
+        return error.InconsistentState;
+}
+
+fn validateWallet(wallet: WalletSummaryView) ValidationError!void {
+    try validateOptional(wallet.safe_diagnostic, Limits.safe_diagnostic_bytes);
+    try validateSummaryError(wallet.error_code, wallet.safe_diagnostic);
+    switch (wallet.availability) {
+        .unavailable, .loading => {
+            if (wallet.balance_u.len != 0 or wallet.synced_at_unix_ms.len != 0)
+                return error.InconsistentState;
+        },
+        .ready, .stale => {
+            try validateSignedDecimal(wallet.balance_u);
+            try validateUnsignedDecimal(wallet.synced_at_unix_ms);
+        },
+    }
+}
+
+fn validateUsage(usage: UsageSummaryView) ValidationError!void {
+    try validateOptional(usage.safe_diagnostic, Limits.safe_diagnostic_bytes);
+    try validateSummaryError(usage.error_code, usage.safe_diagnostic);
+    switch (usage.availability) {
+        .unavailable, .loading => {
+            if (usage.today != null or usage.total != null or
+                usage.synced_at_unix_ms.len != 0)
+                return error.InconsistentState;
+        },
+        .ready, .stale => {
+            const today = usage.today orelse return error.InconsistentState;
+            const total = usage.total orelse return error.InconsistentState;
+            try validateUnsignedDecimal(today.input_tokens);
+            try validateUnsignedDecimal(today.output_tokens);
+            try validateUnsignedDecimal(today.cache_creation_tokens);
+            try validateUnsignedDecimal(today.cache_read_tokens);
+            try validateUnsignedDecimal(today.total_tokens);
+            try validateUnsignedDecimal(today.actual_cost_u);
+            try validateUnsignedDecimal(total.total_tokens);
+            try validateUnsignedDecimal(total.actual_cost_u);
+            try validateUnsignedDecimal(usage.synced_at_unix_ms);
+        },
+    }
+}
+
+fn validateSummaryError(error_code: ErrorCode, diagnostic: []const u8) ValidationError!void {
+    if (error_code == .none and diagnostic.len != 0)
+        return error.InconsistentState;
+}
+
+fn isEmptySummary(summary: AccountSummaryView) bool {
+    return summary.operation == .idle and
+        summary.usage_eligibility == .unknown and
+        summary.wallet.availability == .unavailable and
+        summary.wallet.balance_u.len == 0 and
+        summary.wallet.synced_at_unix_ms.len == 0 and
+        summary.wallet.error_code == .none and
+        summary.wallet.safe_diagnostic.len == 0 and
+        summary.usage.availability == .unavailable and
+        summary.usage.today == null and
+        summary.usage.total == null and
+        summary.usage.synced_at_unix_ms.len == 0 and
+        summary.usage.error_code == .none and
+        summary.usage.safe_diagnostic.len == 0;
+}
+
+fn validateUnsignedDecimal(value: []const u8) ValidationError!void {
+    try validateDecimal(value, false);
+}
+
+fn validateSignedDecimal(value: []const u8) ValidationError!void {
+    try validateDecimal(value, true);
+}
+
+fn validateDecimal(value: []const u8, signed: bool) ValidationError!void {
+    try validateRequired(value, Limits.decimal_bytes);
+    var index: usize = 0;
+    if (signed and value[0] == '-') {
+        if (value.len == 1) return error.InconsistentState;
+        index = 1;
+    }
+    var decimal_seen = false;
+    while (index < value.len) : (index += 1) {
+        const byte = value[index];
+        if (byte == '.') {
+            if (decimal_seen or index == 0 or index + 1 == value.len)
+                return error.InconsistentState;
+            decimal_seen = true;
+        } else if (!std.ascii.isDigit(byte)) {
+            return error.InconsistentState;
+        }
     }
 }
 
@@ -231,14 +391,51 @@ test "Account command sink returns only public acceptance metadata" {
     try std.testing.expectEqual(@as(usize, 1), context.calls);
 }
 
-test "Account view contains only identity state" {
+test "Account view validates identity and nested summary independently" {
     try validateView(.{
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
+        .summary = .{
+            .usage_eligibility = .enabled,
+            .wallet = .{
+                .availability = .ready,
+                .balance_u = "-1.25",
+                .synced_at_unix_ms = "1000",
+            },
+            .usage = .{
+                .availability = .ready,
+                .today = .{
+                    .input_tokens = "1",
+                    .output_tokens = "2",
+                    .cache_creation_tokens = "3",
+                    .cache_read_tokens = "4",
+                    .total_tokens = "10",
+                    .actual_cost_u = "0.5",
+                },
+                .total = .{ .total_tokens = "20", .actual_cost_u = "1" },
+                .synced_at_unix_ms = "1000",
+            },
+        },
     });
     try std.testing.expectError(error.InconsistentState, validateView(.{
         .state = .signed_out,
         .account_id = "account-1",
+    }));
+    try std.testing.expectError(error.InconsistentState, validateView(.{
+        .state = .signed_out,
+        .summary = .{ .operation = .refreshing },
+    }));
+    try std.testing.expectError(error.InconsistentState, validateView(.{
+        .state = .authenticated,
+        .account_id = "account-1",
+        .display_name = "Metask User",
+        .summary = .{
+            .usage_eligibility = .disabled,
+            .usage = .{
+                .availability = .unavailable,
+                .error_code = .metask_service_unavailable,
+            },
+        },
     }));
 }

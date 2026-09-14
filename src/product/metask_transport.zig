@@ -9,6 +9,7 @@ pub const RequestKind = enum {
     exchange_code,
     refresh_token,
     current_user,
+    usage_dashboard,
     keys,
     models,
 };

@@ -5520,6 +5520,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .begin_login,
                 .cancel_operation,
                 .retry_refresh,
+                .refresh_summary,
                 .logout,
                 => {},
             }
