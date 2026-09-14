@@ -112,30 +112,30 @@ Workspace
 
 `en-US` 文案定义产品语义，`zh-CN` 是首个完整本地化版本。
 
-| English source       | 简体中文     | 使用说明                              |
-| -------------------- | ------------ | ------------------------------------- |
-| Workspace            | 工作区       | 本地目录和任务归属范围                |
-| Task                 | 任务         | 用户可持续补充的工作上下文            |
-| New task             | 新建任务     | 不使用 New session                    |
-| Skills               | 技能         | MetaWork 用户 Skill 目录与健康        |
-| MCP                  | MCP          | 可信服务、连接状态与已发现工具目录    |
-| Account              | 账号         | Metask 登录、身份、授权与退出         |
-| Providers            | Provider     | 用户管理的模型服务、协议、地址与凭据  |
-| Models               | 模型         | 所有 Provider 的模型与全局默认模型    |
+| English source       | 简体中文        | 使用说明                              |
+| -------------------- | --------------- | ------------------------------------- |
+| Workspace            | 工作区          | 本地目录和任务归属范围                |
+| Task                 | 任务            | 用户可持续补充的工作上下文            |
+| New task             | 新建任务        | 不使用 New session                    |
+| Skills               | 技能            | MetaWork 用户 Skill 目录与健康        |
+| MCP                  | MCP             | 可信服务、连接状态与已发现工具目录    |
+| Account              | 账号            | Metask 登录、身份、授权与退出         |
+| Providers            | Provider        | 用户管理的模型服务、协议、地址与凭据  |
+| Models               | 模型            | 所有 Provider 的模型与全局默认模型    |
 | Custom Provider      | 自定义 Provider | 用户创建并由 Models 持久化的 Provider |
-| Model                | 模型         | 新 Task 的执行模型，不称模式          |
-| Task Panel           | 任务面板     | 当前 Task 的统一右侧详情容器          |
-| Task information     | 任务信息     | 创建时 authority 的只读说明           |
-| Current activity     | 当前活动     | Agent 此刻正在进行的可观察动作        |
-| Plan                 | 计划         | 只在有真实结构化计划时显示            |
-| Outputs              | 结果文件     | 用户关心的最终交付，不称 Artifacts    |
-| Files changed        | 文件变更     | Agent 实际修改过的文件集合            |
-| Needs your attention | 需要你处理   | 权限审批或计划确认                    |
-| Allow once           | 允许一次     | 仅批准当前请求                        |
-| Stop task            | 停止任务     | 停止当前执行，不删除任务              |
-| Stopping             | 正在停止     | 等待真实停止结果                      |
-| Interrupted          | 意外中断     | 与明确失败区分                        |
-| Show in Finder       | 在访达中显示 | Windows 为 Show in Explorer           |
+| Model                | 模型            | 新 Task 的执行模型，不称模式          |
+| Task Panel           | 任务面板        | 当前 Task 的统一右侧详情容器          |
+| Task information     | 任务信息        | 创建时 authority 的只读说明           |
+| Current activity     | 当前活动        | Agent 此刻正在进行的可观察动作        |
+| Plan                 | 计划            | 只在有真实结构化计划时显示            |
+| Outputs              | 结果文件        | 用户关心的最终交付，不称 Artifacts    |
+| Files changed        | 文件变更        | Agent 实际修改过的文件集合            |
+| Needs your attention | 需要你处理      | 权限审批或计划确认                    |
+| Allow once           | 允许一次        | 仅批准当前请求                        |
+| Stop task            | 停止任务        | 停止当前执行，不删除任务              |
+| Stopping             | 正在停止        | 等待真实停止结果                      |
+| Interrupted          | 意外中断        | 与明确失败区分                        |
+| Show in Finder       | 在访达中显示    | Windows 为 Show in Explorer           |
 
 ## 4. 主窗口信息架构
 
@@ -574,7 +574,7 @@ AgentCore typed CoreEvent
 | Active process surface   | Run 为 queued/running/waiting UI/stopping                  | 唯一 live status 原位替换；存在 Tool 时同一 surface 才可展开技术行   |
 | Intervention             | 当前 Run 存在 pending UI                                   | 只显示唯一可操作控件，不伪装成 Assistant 文本                        |
 | Response                 | Host 已发布非空 final/partial response                     | 安全 Markdown；出现不等于正式 Product terminal 已发布                |
-| Terminal process surface | Run 已 terminal 且存在 Tool record                         | 位于 response 之后，弱化为默认折叠的“工作过程 · N 项操作”  |
+| Terminal process surface | Run 已 terminal 且存在 Tool record                         | 位于 response 之后，弱化为默认折叠的“工作过程 · N 项操作”            |
 | Terminal notice          | partial、非 completed outcome 或完成但无 response          | 与 partial 合并为唯一准确提示，不重复成功结果                        |
 
 `RunProcess` 是 active 与 terminal 共用的同一 presentation surface，但生命周期位置和职责不同：
@@ -978,6 +978,8 @@ General
 
 Account
 ├── Metask identity and authorization status
+├── Metask account usage（balance + today/total Token and actual cost）
+├── Refresh account usage
 ├── Sign in
 └── Sign out and clear this device
 
@@ -1005,7 +1007,10 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 
 `Account`规则：
 
-- 只显示 Metask identity、授权状态、登录/取消、refresh 恢复和退出；不得把 API/model catalog、默认模型、Models错误或连接状态显示成 Account字段；
+- 只显示 Metask identity、授权状态、登录/取消、token refresh恢复、账户用量摘要和退出；不得把 API/model catalog、默认模型、Models错误或连接状态显示成 Account字段；
+- authenticated且非 simple模式时，在现有设置 group/list语法中增加一个克制的“Metask账户用量”分组：余额为主要值，今日与累计各用一行显示 Token总量和实际费用，今日 Token分项按 `输入 / 输出 / 缓存创建 / 缓存读取` 作为辅助文本，组尾显示最近同步时间与唯一刷新动作。必须注明这些数字属于整个 Metask账户，不是 MetaWork单应用统计；金额单位统一为 U；
+- wallet与usage独立按 unavailable/loading/ready/stale显示。已有值刷新失败时继续显示并标注“可能已过期”，不得清空成0；初次不可用只给局部、可操作说明，不把Account伪装成未登录。刷新只由用户点击或authenticated/generation建立后的Host自动同步触发；进入设置、Renderer reload、snapshot update和本地timer都不能触发；
+- `usageEligibility = disabled`时不显示用量分组；unknown时只显示局部不可用说明与刷新动作，Renderer不得读取或推断raw run mode。不得显示email、account id、标准费用、请求数、RPM/TPM、响应时间、API Key数量、订阅额度、模型分布、趋势、最近请求、外部管理链接或装饰性图表；
 - 已验证 identity 的 refresh timer 或 wall clock 无法安排时继续显示 `authenticated`，在 Account 设置错误区说明自动刷新未安排并提供唯一 `重试登录刷新`；该动作调用 Host `retryRefresh`，不得由 Renderer timer、reload 或普通 snapshot update 自动重放；hard expiry 后 Metask 新目录/解析由 Host fail closed；
 - 重新登录或退出登录不得因 Models、Task、Session、Run、job、worker或 Task-owned credential的运行时引用而被阻止，也不得静默终止或改写这些引用；既有 Task按创建时取得的 ExecutionConfig继续收口；
 - 退出登录必须说明 Account设备凭据会清理、Metask模型将暂时不可用于新 Task、自定义模型不受影响且历史保留；不能把它描述成对 live Task的热撤权。
@@ -1042,7 +1047,7 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 - 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。
 - 桌面壳注册标准 `primary + ,` 设置快捷键，直接打开正式设置 route；快捷键只负责页面导航，不建立绕过 Account/Bridge gate 的第二命令面。
 
-Account与 Models状态在设置中分别投影：Account只按 `checking | signed_out | authorizing | authenticated`显示 identity action；Models独立按 `needs_authentication | loading | choosing | ready | failed | unavailable`显示 provider配置。Account authenticated不能被 Models failed伪装成未登录，Account signed_out也不能隐藏 Custom Provider。Renderer不从任一公开状态恢复内部 operation，也不区分或展示 credential persistence子步骤。
+Account与 Models状态在设置中分别投影：Account按 `checking | signed_out | authorizing | authenticated`显示 identity action，并在authenticated时直接消费Host发布的summary子投影；Models独立按 `needs_authentication | loading | choosing | ready | failed | unavailable`显示provider配置。Account authenticated不能被summary或Models失败伪装成未登录，Account signed_out也不能隐藏Custom Provider。Renderer不从任一公开状态恢复内部operation，也不区分或展示credential persistence子步骤。
 
 `Providers` 规则：
 
