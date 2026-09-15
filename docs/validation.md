@@ -186,6 +186,8 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、secure input、windo
 `E-ATTACHMENT-MACOS-20260902` 的 arm64 真实交互证据为：系统 picker 选择 `0b0a714cdf0e9cfb99830d2fd58afd78eedf655080c0ff09fbcb3dd3d5576e26`、逐项移除 `cb012ce2f8541d6b49921e74e403755b387235deeb98571322da9359bba49cb9`、取消 `ef8b8c08c528c997cc08115c72122511aedec78290fd5c47e90b898dc2474c17`、最终焦点 `f1b7121669516a2bc33a3e58cd934d3ae09a8edd4d6779b4d2981f553e00a695`、窄窗 `961c0eb23d274100bfcfa17967b113a4732982c9bcaccb2be8d7dffb030f0776`（均为截图 SHA-256）。窄窗附件由 automation 经正式 choose/staging 后续链路注入；其他四项使用真实 `NSOpenPanel` 和 Renderer 交互。
 
 
+`E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
+
 ## 未闭合验证缺口
 
 本节只防止错误能力声明。行为、边界和产品开放条件仍由所列真源定义；测试清单和逐项断言不在这里维护。
