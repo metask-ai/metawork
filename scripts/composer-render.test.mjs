@@ -899,6 +899,27 @@ test("Sidebar typography reserves bold weight for the product identity", async (
   );
 });
 
+test("Task list keeps compact row density without group-owned spacing", async () => {
+  const stylesheet = await readFile(
+    new URL("../frontend/src/index.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    stylesheet,
+    /\.task-list-item\s*\{[^}]*margin-top: 1px;[^}]*padding: 6px 10px;/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.task-list-heading \+ \.task-list-item\s*\{[^}]*margin-top: 6px;/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.task-list-row > span:first-child\s*\{[^}]*line-height: 18px;/s,
+  );
+  assert.doesNotMatch(stylesheet, /\.task-group/);
+});
+
 test("Task completion dot consumes only the canonical unread receipt", () => {
   const completed = {
     id: "1",

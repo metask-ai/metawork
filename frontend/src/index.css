@@ -6366,13 +6366,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-list-item {
   display: block;
   width: 100%;
-  margin-top: 4px;
-  padding: 9px 10px;
+  margin-top: 1px;
+  padding: 6px 10px;
   border: 1px solid transparent;
   border-radius: 8px;
   color: var(--ui-content-primary);
   background: transparent;
   text-align: left;
+}
+
+.task-list-heading + .task-list-item {
+  margin-top: 6px;
 }
 
 .task-list-item:hover {
@@ -6389,6 +6393,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow: hidden;
   font-size: var(--text-control);
   font-weight: 400;
+  line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
