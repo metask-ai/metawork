@@ -676,7 +676,8 @@ export const enUS = {
     "Work was interrupted before the response was complete",
   "run.terminal.partial_failed": "Work failed before the response was complete",
   "run.process.title": "Work process",
-  "run.process.open_tool": "View details for {name}",
+  "run.process.toggle_tool": "Show or hide details for {name}",
+  "run.process.tool_detail": "Details for {name}",
   "run.prepare_retry": "Copy instruction to Composer",
   "run.retry_help":
     "Copies this instruction to the Composer for review. Nothing is sent automatically.",
@@ -828,7 +829,6 @@ export const enUS = {
   "task_panel.title": "Side panel",
   "task_panel.empty": "No content to display here.",
   "task_panel.open": "Open side panel",
-  "task_panel.tool": "Tool details",
   "task_panel.close": "Close side panel",
   "approval.response_required": "Response required",
   "approval.allow_tool": "Allow {tool}?",

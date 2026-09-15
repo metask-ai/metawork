@@ -5,7 +5,6 @@ type RunTarget = { taskId: string; runId: string };
 export type TaskPanelTarget =
   | { kind: "empty" }
   | (RunTarget & { kind: "preview"; referenceId: string })
-  | (RunTarget & { kind: "tool"; toolId: string })
   | (RunTarget & { kind: "review" });
 
 export const emptyTaskPanelTarget: TaskPanelTarget = { kind: "empty" };
@@ -22,10 +21,6 @@ export function resolveTaskPanelTarget(
   if (!run) return emptyTaskPanelTarget;
   if (target.kind === "preview")
     return findRunFileReference(run, target.referenceId)
-      ? target
-      : emptyTaskPanelTarget;
-  if (target.kind === "tool")
-    return run.tools.some((tool) => tool.id === target.toolId)
       ? target
       : emptyTaskPanelTarget;
   if (!typedFileChanges || !run.fileChanges?.changes.length)

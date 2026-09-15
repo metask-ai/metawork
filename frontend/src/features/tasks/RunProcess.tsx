@@ -9,6 +9,9 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 import { runElapsedSeconds, type RunPresentation } from "./run-presentation.ts";
+import { ToolDetailView } from "./ToolDetailView.tsx";
+
+const emptyExpandedToolIds: ReadonlySet<string> = new Set();
 
 function toolActivityMessage(name: string | null): MessageId {
   switch (name) {
@@ -97,6 +100,20 @@ function toolStateMessage(tool: ToolView): MessageId {
   }
 }
 
+function toolDetailAvailable(tool: ToolView): boolean {
+  return Boolean(
+    tool.bash?.command != null ||
+    tool.bash?.result != null ||
+    tool.input ||
+    tool.progress ||
+    tool.content ||
+    tool.inputTruncated ||
+    tool.progressTruncated ||
+    tool.contentTruncated ||
+    tool.redacted,
+  );
+}
+
 function ProcessHeader({
   active,
   title,
@@ -181,18 +198,22 @@ function RunElapsed({
 
 function ProcessTool({
   tool,
-  onOpen,
+  expanded,
+  onExpandedChange,
   onPreviewFile,
 }: {
   tool: ToolView;
-  onOpen?: (opener: HTMLButtonElement) => void;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
   onPreviewFile?: (
     reference: FileReferenceView,
     opener: HTMLButtonElement,
   ) => void;
 }) {
   const { locale, t } = useI18n();
+  const detailId = useId();
   const elapsed = BigInt(tool.elapsedMs);
+  const hasDetails = toolDetailAvailable(tool);
   const content = (
     <>
       <span className="run-process-tool-mark" aria-hidden="true" />
@@ -215,26 +236,32 @@ function ProcessTool({
             })}
           </span>
         )}
-        {onOpen && <Icon name="chevron-right" />}
+        {hasDetails && (
+          <span className="run-process-tool-chevron" aria-hidden="true">
+            <Icon name="chevron" />
+          </span>
+        )}
       </span>
     </>
   );
 
   return (
     <li data-state={tool.state}>
-      {onOpen ? (
+      {hasDetails ? (
         <button
           type="button"
           className="run-process-tool focus-ring"
-          aria-label={t("run.process.open_tool", { name: tool.name })}
-          onClick={(event) => onOpen(event.currentTarget)}
+          aria-label={t("run.process.toggle_tool", { name: tool.name })}
+          aria-expanded={expanded}
+          aria-controls={detailId}
+          onClick={() => onExpandedChange(!expanded)}
         >
           {content}
         </button>
       ) : (
         <div className="run-process-tool">{content}</div>
       )}
-      {tool.progress && (
+      {tool.progress && !expanded && (
         <p className="run-process-tool-progress">
           {tool.progress.length > 240
             ? `${tool.progress.slice(0, 240)}…`
@@ -260,6 +287,7 @@ function ProcessTool({
           ))}
         </div>
       )}
+      {hasDetails && expanded && <ToolDetailView id={detailId} tool={tool} />}
     </li>
   );
 }
@@ -272,7 +300,8 @@ export function RunProcess({
   requestingStop = false,
   expanded,
   onExpandedChange,
-  onOpenTool,
+  expandedToolIds = emptyExpandedToolIds,
+  onToolExpandedChange = () => {},
   onPreviewFile,
 }: {
   presentation: RunPresentation;
@@ -282,7 +311,8 @@ export function RunProcess({
   requestingStop?: boolean;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
-  onOpenTool?: (tool: ToolView, opener: HTMLButtonElement) => void;
+  expandedToolIds?: ReadonlySet<string>;
+  onToolExpandedChange?: (toolId: string, expanded: boolean) => void;
   onPreviewFile?: (
     reference: FileReferenceView,
     opener: HTMLButtonElement,
@@ -345,10 +375,9 @@ export function RunProcess({
                 <ProcessTool
                   key={tool.id}
                   tool={tool}
-                  onOpen={
-                    onOpenTool
-                      ? (opener) => onOpenTool(tool, opener)
-                      : undefined
+                  expanded={expandedToolIds.has(tool.id)}
+                  onExpandedChange={(nextExpanded) =>
+                    onToolExpandedChange(tool.id, nextExpanded)
                   }
                   onPreviewFile={onPreviewFile}
                 />

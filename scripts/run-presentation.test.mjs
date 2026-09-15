@@ -138,7 +138,7 @@ test("presentation orders Tool evidence and only names one typed running Tool", 
   assert.equal(ambiguous.runningToolName, null);
 });
 
-test("successful final response hides process evidence without a duplicate notice", () => {
+test("successful final response retains Tool evidence without a duplicate notice", () => {
   const presentation = deriveRunPresentation(
     run({
       phase: "completed",
@@ -155,8 +155,8 @@ test("successful final response hides process evidence without a duplicate notic
       tools: [tool("read", "1")],
     }),
   );
-  assert.equal(presentation.processVisible, false);
-  assert.equal(presentation.processCanCollapse, false);
+  assert.equal(presentation.processVisible, true);
+  assert.equal(presentation.processCanCollapse, true);
   assert.equal(presentation.showTerminalNotice, false);
 });
 
@@ -190,7 +190,7 @@ test("failure, missing response, and partial response keep truthful terminal tre
   assert.equal(partial.showTerminalNotice, true);
 });
 
-test("technical process stays available only while the Run is active", () => {
+test("technical process remains available after a Tool-bearing Run completes", () => {
   const active = deriveRunPresentation(
     run({
       activity: { kind: "executing_tools", inFlight: "1" },
@@ -215,8 +215,8 @@ test("technical process stays available only while the Run is active", () => {
   );
   assert.equal(active.processVisible, true);
   assert.equal(active.processCanCollapse, true);
-  assert.equal(terminalPresentation.processVisible, false);
-  assert.equal(terminalPresentation.processCanCollapse, false);
+  assert.equal(terminalPresentation.processVisible, true);
+  assert.equal(terminalPresentation.processCanCollapse, true);
 });
 
 test("Run disclosure remains collapsed unless the user explicitly opens it", () => {

@@ -61,7 +61,6 @@ import {
 } from "../features/skills/SkillsPage.tsx";
 import { McpPage } from "../features/mcp/McpPage.tsx";
 import { ScheduledTasksPage } from "../features/scheduled-tasks/ScheduledTasksPage.tsx";
-import { ToolDetailView } from "../features/task-panel/ToolDetailView.tsx";
 import { TaskInformation } from "../features/tasks/TaskInformation.tsx";
 import { ConversationContext } from "../features/composer/ConversationContext.tsx";
 import { findRunFileReference } from "../workbench/run-file-references.ts";
@@ -1138,27 +1137,6 @@ export default function App() {
     const target = document.getElementById(`ui-request-${requestId}`);
     target?.scrollIntoView({ block: "center", behavior: "smooth" });
     window.requestAnimationFrame(() => target?.focus());
-  }
-
-  function openToolDetail(
-    runId: string,
-    toolId: string,
-    opener: HTMLButtonElement,
-  ) {
-    if (!activeTask) return;
-    closeFilePreview();
-    clearFileChanges();
-    setRightPanelOpen(true);
-    taskPanelOpener.current = opener;
-    taskPanel.selectTarget({
-      kind: "tool",
-      taskId: activeTask.id,
-      runId,
-      toolId,
-    });
-    window.requestAnimationFrame(() =>
-      document.getElementById("task-panel-title")?.focus(),
-    );
   }
 
   function dismissTaskPanel(restoreFocus = true) {
@@ -2968,14 +2946,6 @@ export default function App() {
           phase: filePreview.kind === "loading" ? "loading" : "settled",
           preview: filePreview.kind === "loading" ? null : filePreview.preview,
         };
-  const panelRun =
-    panelTarget.kind === "empty"
-      ? null
-      : activeTask?.runs.find((run) => run.id === panelTarget.runId);
-  const selectedTool =
-    panelTarget.kind === "tool"
-      ? panelRun?.tools.find((tool) => tool.id === panelTarget.toolId)
-      : null;
   const previewMatchesTarget =
     panelTarget.kind === "preview" &&
     filePreview.kind !== "closed" &&
@@ -3002,13 +2972,11 @@ export default function App() {
   const panelTitle =
     panelTarget.kind === "empty"
       ? t("task_panel.title")
-      : panelTarget.kind === "tool"
-        ? t("task_panel.tool")
-        : panelTarget.kind === "review"
-          ? t("file_changes.review")
-          : previewMatchesTarget && filePreviewViewState
-            ? filePreviewViewState.selected.displayPath
-            : t("file_preview.title");
+      : panelTarget.kind === "review"
+        ? t("file_changes.review")
+        : previewMatchesTarget && filePreviewViewState
+          ? filePreviewViewState.selected.displayPath
+          : t("file_preview.title");
 
   return (
     <AppShell
@@ -3246,8 +3214,6 @@ export default function App() {
           >
             {panelTarget.kind === "empty" ? (
               <p className="task-panel-empty">{t("task_panel.empty")}</p>
-            ) : panelTarget.kind === "tool" && selectedTool ? (
-              <ToolDetailView tool={selectedTool} />
             ) : panelTarget.kind === "preview" &&
               previewMatchesTarget &&
               filePreviewViewState ? (
@@ -3652,7 +3618,6 @@ export default function App() {
                 responseDisabled={bridgeUnavailable}
                 fileChangesEnabled={snapshot.capabilities.typedFileChanges}
                 onPrepareRetry={prepareRetry}
-                onOpenTool={openToolDetail}
                 onPreviewFile={openFilePreview}
                 onReviewFileChanges={openFileChanges}
                 onRespond={(payload) => void respondUi(payload)}

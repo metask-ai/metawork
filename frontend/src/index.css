@@ -2493,6 +2493,19 @@ button.run-process-tool:hover {
   white-space: nowrap;
 }
 
+.run-process-tool-chevron {
+  display: inline-flex;
+  color: var(--ui-content-muted);
+}
+
+.run-process-tool-chevron svg {
+  transition: transform 140ms ease;
+}
+
+.run-process-tool[aria-expanded="true"] .run-process-tool-chevron svg {
+  transform: rotate(180deg);
+}
+
 .run-process-files {
   display: flex;
   flex-wrap: wrap;
@@ -8202,37 +8215,28 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-micro);
   line-height: 1.35;
 }
-.tool-detail-view {
-  height: 100%;
-  overflow: auto;
-  padding: 16px 20px;
+.run-process-tool-detail {
+  min-width: 0;
+  margin: 0 2px 10px 15px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--ui-border) 82%, transparent);
+  border-radius: 7px;
+  background: var(--ui-surface-panel-2);
 }
-.tool-detail-view header {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-.tool-detail-view h3 {
-  width: 100%;
-  margin: 0;
-  overflow-wrap: anywhere;
-  font-size: var(--text-control);
-}
-.tool-detail-view header span {
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-}
-.tool-detail-view .code-block-preview {
-  max-height: none;
+
+.run-process-tool-detail .code-block-preview {
+  max-height: min(360px, 45vh);
   overflow: auto;
 }
-.tool-detail-view .detail-field + .detail-field {
-  margin-top: 16px;
-}
-.tool-detail-view .projection-note {
+
+.run-process-tool-detail .detail-field + .detail-field,
+.run-process-tool-detail .detail-field + .projection-note,
+.run-process-tool-detail .projection-note + .detail-field {
   margin-top: 12px;
+}
+
+.run-process-tool-detail .projection-note {
+  margin-block: 10px 0;
 }
 
 .task-panel-content {

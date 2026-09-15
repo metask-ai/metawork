@@ -288,7 +288,6 @@ function renderCompletedSurface(
         responseDisabled: false,
         fileChangesEnabled: false,
         onPrepareRetry() {},
-        onOpenTool() {},
         onPreviewFile() {},
         onReviewFileChanges() {},
         onRespond() {},
