@@ -581,6 +581,12 @@ export class BridgeClient {
     );
   }
 
+  async openAccountRecharge() {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.accountOpenRecharge, {}),
+    );
+  }
+
   async refreshModelsCatalog() {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelsRefreshCatalog, {}),

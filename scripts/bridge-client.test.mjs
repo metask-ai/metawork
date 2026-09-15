@@ -130,6 +130,24 @@ test("Account summary refresh uses the exact empty revision-one command", async 
   ]);
 });
 
+test("Account recharge opens through one fixed empty-payload command", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { accepted: true, errorCode: "none", attemptId: null };
+    }),
+  });
+  assert.deepEqual(await client.openAccountRecharge(), {
+    accepted: true,
+    errorCode: "none",
+    attemptId: null,
+  });
+  assert.deepEqual(calls, [
+    { command: "metawork.account.openRecharge", payload: {} },
+  ]);
+});
+
 test("Product store recovery uses revision-bound typed commands", async () => {
   const calls = [];
   const client = new BridgeClient({

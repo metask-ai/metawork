@@ -338,6 +338,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_cancel_operation, .function = accountCancelOperation },
             .{ .name = commands.account_retry_refresh, .function = accountRetryRefresh },
             .{ .name = commands.account_refresh_summary, .function = accountRefreshSummary },
+            .{ .name = commands.account_open_recharge, .function = accountOpenRecharge },
             .{ .name = commands.models_refresh_catalog, .function = modelsRefreshCatalog },
             .{ .name = commands.models_reset_store, .function = modelsResetStore },
             .{ .name = commands.models_select_metask_api_key, .function = selectMetaskApiKey },
@@ -1677,6 +1678,19 @@ pub const Dispatcher = struct {
             invocation,
             output,
             .refresh_summary,
+        );
+    }
+
+    fn accountOpenRecharge(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        return submitEmptyAccountCommand(
+            context,
+            invocation,
+            output,
+            .open_recharge,
         );
     }
 
@@ -5535,6 +5549,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .cancel_operation,
                 .retry_refresh,
                 .refresh_summary,
+                .open_recharge,
                 .logout,
                 => {},
             }

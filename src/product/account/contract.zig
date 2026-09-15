@@ -19,6 +19,8 @@ pub const Limits = struct {
     pub const usage_history_days: usize = 366;
 };
 
+pub const recharge_page_url = "https://napi.metask-ai.com/payment";
+
 pub const AccountState = enum {
     checking,
     signed_out,
@@ -215,6 +217,7 @@ pub const AccountCommand = enum {
     cancel_operation,
     retry_refresh,
     refresh_summary,
+    open_recharge,
     logout,
 };
 

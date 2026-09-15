@@ -96,6 +96,7 @@ export const zhCN: Record<MessageId, string> = {
     "该账号操作已不可用，MetaWork 已保留最新账号状态。",
   "account.command_failed":
     "MetaWork 无法完成该账号操作，请使用此处显示的恢复操作。",
+  "account.recharge_open_failed": "无法打开 Metask 充值页面，请稍后重试。",
   "execution.command_rejected": "默认模型来源未更新，请刷新执行状态后重试。",
   "execution.command_failed":
     "MetaWork 无法完成默认模型来源操作，请使用执行区域显示的恢复操作。",
@@ -815,6 +816,8 @@ export const zhCN: Record<MessageId, string> = {
     "数据来自整个 Metask 账户，不仅统计 MetaWork 中的使用。",
   "settings.account_usage_balance": "余额",
   "settings.account_concurrency_limit": "并发额度 {value}",
+  "settings.account_recharge": "充值",
+  "settings.account_recharge_browser_hint": "在浏览器中打开 Metask 充值页面",
   "settings.account_usage_total": "累计",
   "settings.account_usage_tokens": "{value} Token",
   "settings.account_usage_cost": "{value} U",

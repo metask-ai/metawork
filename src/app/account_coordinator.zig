@@ -50,6 +50,8 @@ pub const Coordinator = struct {
             if (refreshed.changed) self.commitSummaryNoFail();
             return refreshed.result;
         }
+        if (command == .open_recharge)
+            return self.runtime.openRechargePage();
         return switch (self.runtime.prepareCommand(command)) {
             .prepared => |prepared| self.commitPrepared(prepared),
             .rejected => |error_code| .rejected(error_code),

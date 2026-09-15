@@ -59,8 +59,12 @@ function SummaryState({
 
 export function AccountBalance({
   wallet,
+  disabled,
+  onRecharge,
 }: {
   wallet: AccountSummary["wallet"];
+  disabled: boolean;
+  onRecharge: () => void;
 }) {
   const { t } = useI18n();
   const ready =
@@ -68,23 +72,35 @@ export function AccountBalance({
     wallet.balanceU !== null;
 
   return (
-    <div
-      className="settings-identity-balance"
-      data-availability={wallet.availability}
-    >
-      <span className="settings-identity-balance-label">
-        {t("settings.account_usage_balance")}
-      </span>
-      {ready ? (
-        <strong>
-          {t("settings.account_usage_cost", {
-            value: formatAccountDecimal(wallet.balanceU!),
-          })}
-        </strong>
-      ) : (
-        <strong aria-label={t("settings.account_usage_unavailable")}>—</strong>
-      )}
-      <SummaryState {...wallet} />
+    <div className="settings-identity-wallet">
+      <div
+        className="settings-identity-balance"
+        data-availability={wallet.availability}
+      >
+        <span className="settings-identity-balance-label">
+          {t("settings.account_usage_balance")}
+        </span>
+        {ready ? (
+          <strong>
+            {t("settings.account_usage_cost", {
+              value: formatAccountDecimal(wallet.balanceU!),
+            })}
+          </strong>
+        ) : (
+          <strong aria-label={t("settings.account_usage_unavailable")}>—</strong>
+        )}
+        <SummaryState {...wallet} />
+      </div>
+      <Button
+        variant="primary"
+        size="lg"
+        disabled={disabled}
+        title={t("settings.account_recharge_browser_hint")}
+        onClick={onRecharge}
+      >
+        <Icon name="external-link" />
+        {t("settings.account_recharge")}
+      </Button>
     </div>
   );
 }

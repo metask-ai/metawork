@@ -760,6 +760,17 @@ pub const Runtime = struct {
         return self.startSummaryJob(&lease);
     }
 
+    pub fn openRechargePage(self: *Runtime) contract.AccountCommandResult {
+        self.assertMainThread();
+        if (self.account.view().state != .authenticated)
+            return .rejected(.invalid_state);
+        const platform = self.platform orelse
+            return .rejected(.metask_platform_unsupported);
+        platform.recharge_page.open() catch
+            return .rejected(.account_operation_failed);
+        return .acceptedAttempt(null);
+    }
+
     pub fn reconcileSummaryAuthorization(self: *Runtime) bool {
         self.assertMainThread();
         if (self.account.view().state != .authenticated) {
@@ -1323,9 +1334,11 @@ pub const TestSupport = if (builtin.is_test) struct {
         credential_write_fails: bool = false,
         credential_delete_fails: bool = false,
         authorization_open_fails: bool = false,
+        recharge_open_fails: bool = false,
         timer_start_fails: bool = false,
         timer_cancel_fails: bool = false,
         authorization_open_count: usize = 0,
+        recharge_open_count: usize = 0,
         timer_start_count: usize = 0,
         timer_cancel_count: usize = 0,
         last_timer_id: ?u64 = null,
@@ -1342,6 +1355,10 @@ pub const TestSupport = if (builtin.is_test) struct {
                 .authorization_url = .{
                     .context = self,
                     .open_fn = openAuthorizationUrl,
+                },
+                .recharge_page = .{
+                    .context = self,
+                    .open_fn = openRechargePage,
                 },
                 .timer = .{
                     .context = self,
@@ -1397,6 +1414,14 @@ pub const TestSupport = if (builtin.is_test) struct {
             const self: *Platform = @ptrCast(@alignCast(context));
             self.authorization_open_count += 1;
             if (self.authorization_open_fails) return error.OpenFailed;
+        }
+
+        fn openRechargePage(context: *anyopaque, url: []const u8) !void {
+            const self: *Platform = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, url, contract.recharge_page_url))
+                return error.InvalidUrl;
+            self.recharge_open_count += 1;
+            if (self.recharge_open_fails) return error.OpenFailed;
         }
 
         fn startTimer(
@@ -1503,7 +1528,12 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime.bumpAuthorizationGeneration();
         return .{ .transition = try state_impl.TestSupport.prepareAuthenticated(
             &runtime.account,
-            try state_impl.AccountIdentity.init(account_id, display_name),
+            try state_impl.AccountIdentity.init(
+                account_id,
+                display_name,
+                "u***@example.com",
+                5,
+            ),
         ) };
     }
 
@@ -1526,7 +1556,12 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime.bumpAuthorizationGeneration();
         return .{ .transition = try state_impl.TestSupport.prepareAuthenticated(
             &runtime.account,
-            try state_impl.AccountIdentity.init(identity_account_id, display_name),
+            try state_impl.AccountIdentity.init(
+                identity_account_id,
+                display_name,
+                "u***@example.com",
+                5,
+            ),
         ) };
     }
 
@@ -1791,6 +1826,45 @@ test "authorization lease requires authenticated matching unexpired credentials"
     platform.now_unix_seconds = 101;
     try std.testing.expect((try runtime.authorizationLease()) == null);
     try std.testing.expect(!runtime.acceptsAuthorizationGeneration(generation));
+}
+
+test "recharge page opens only for an authenticated Account" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+
+    try std.testing.expectEqual(
+        contract.ErrorCode.invalid_state,
+        runtime.openRechargePage().error_code,
+    );
+
+    var authenticated = try TestSupport.prepareAuthenticated(
+        &runtime,
+        "account-1",
+        "Metask User",
+        "access-token",
+        "refresh-token",
+        200,
+    );
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+
+    try std.testing.expect(runtime.openRechargePage().accepted);
+    try std.testing.expectEqual(@as(usize, 1), platform.recharge_open_count);
+
+    platform.recharge_open_fails = true;
+    const failed = runtime.openRechargePage();
+    try std.testing.expect(!failed.accepted);
+    try std.testing.expectEqual(
+        contract.ErrorCode.account_operation_failed,
+        failed.error_code,
+    );
+    try std.testing.expectEqual(@as(usize, 2), platform.recharge_open_count);
 }
 
 test "prepared attempt disposition distinguishes all four transition classes" {

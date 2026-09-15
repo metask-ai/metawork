@@ -102,6 +102,8 @@ export const enUS = {
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
     "MetaWork could not complete that account action. Use the recovery action shown here.",
+  "account.recharge_open_failed":
+    "MetaWork could not open the Metask recharge page. Try again shortly.",
   "execution.command_rejected":
     "The default model source was not updated. Refresh execution state and try again.",
   "execution.command_failed":
@@ -897,6 +899,9 @@ export const enUS = {
     "These figures cover your whole Metask account, not only activity in MetaWork.",
   "settings.account_usage_balance": "Balance",
   "settings.account_concurrency_limit": "Concurrency allowance {value}",
+  "settings.account_recharge": "Recharge",
+  "settings.account_recharge_browser_hint":
+    "Open the Metask recharge page in your browser",
   "settings.account_usage_total": "All time",
   "settings.account_usage_tokens": "{value} Token",
   "settings.account_usage_cost": "{value} U",

@@ -2,6 +2,7 @@
 const std = @import("std");
 const oauth = @import("account_oauth");
 const credential_store = @import("account_credential_store");
+const contract = @import("metawork_account_contract");
 
 pub const AuthorizationUrl = struct {
     context: *anyopaque,
@@ -13,6 +14,15 @@ pub const AuthorizationUrl = struct {
             !std.mem.startsWith(u8, url, oauth.authorize_url ++ "?"))
             return error.InvalidAuthorizationUrl;
         try self.open_fn(self.context, url);
+    }
+};
+
+pub const RechargePage = struct {
+    context: *anyopaque,
+    open_fn: *const fn (*anyopaque, []const u8) anyerror!void,
+
+    pub fn open(self: RechargePage) !void {
+        try self.open_fn(self.context, contract.recharge_page_url);
     }
 };
 
@@ -47,6 +57,7 @@ pub const WallClock = struct {
 pub const Platform = struct {
     credentials: credential_store.Backend,
     authorization_url: AuthorizationUrl,
+    recharge_page: RechargePage,
     timer: Timer,
     wall_clock: WallClock,
 };

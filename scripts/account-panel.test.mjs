@@ -157,6 +157,7 @@ const callbacks = {
   onBeginLogin() {},
   onRetryRefresh() {},
   onRefreshAccountSummary() {},
+  onOpenRecharge() {},
   onCancel() {},
   onRefresh() {},
   onSelectApiKey() {},
@@ -480,6 +481,8 @@ test("Account settings render the whole-account balance and exact usage ledger",
   assert.match(markup, /100\.25 U/);
   assert.match(markup, /m\*\*\*@example\.com/);
   assert.match(markup, /Concurrency allowance 5/);
+  assert.match(markup, /title="Open the Metask recharge page in your browser"/);
+  assert.match(markup, />Recharge</);
   assert.match(
     markup,
     /Account information[\s\S]*settings-identity-balance[\s\S]*100\.25 U[\s\S]*Account usage/,

@@ -1116,6 +1116,7 @@ fn wireAgentCore(
     });
     account_ports.addImport("account_oauth", account_oauth);
     account_ports.addImport("account_credential_store", account_credential_store);
+    account_ports.addImport("metawork_account_contract", account_contract);
     const account_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/account/runtime.zig"),
         .target = target,

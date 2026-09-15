@@ -203,6 +203,7 @@ export function SettingsPage({
   onBeginLogin,
   onRetryRefresh,
   onRefreshAccountSummary,
+  onOpenRecharge,
   onLogout,
 }: {
   account: AccountView;
@@ -274,6 +275,7 @@ export function SettingsPage({
   onBeginLogin: () => void;
   onRetryRefresh: () => void;
   onRefreshAccountSummary: () => void;
+  onOpenRecharge: () => void;
   onLogout: () => void;
 }) {
   const { locale, setLocale, t } = useI18n();
@@ -1150,7 +1152,11 @@ export function SettingsPage({
                   </div>
                   {authenticated &&
                   account.summary.usageEligibility !== "disabled" ? (
-                    <AccountBalance wallet={account.summary.wallet} />
+                    <AccountBalance
+                      wallet={account.summary.wallet}
+                      disabled={disabled || accountDisabled}
+                      onRecharge={onOpenRecharge}
+                    />
                   ) : null}
                   {account.canCancel ? (
                     <Button

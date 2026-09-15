@@ -1092,6 +1092,12 @@ summary::-webkit-details-marker {
   content: "·";
 }
 
+.settings-identity-wallet {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
 .settings-identity-balance {
   display: grid;
   min-width: 96px;
@@ -3183,6 +3189,15 @@ button.run-process-tool:hover {
 
   .settings-identity-row {
     grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .settings-identity-wallet {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: 100%;
+    padding-top: 12px;
+    border-top: 1px solid var(--settings-line);
   }
 
   .settings-identity-balance {
