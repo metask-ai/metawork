@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-09-15
+
+### Added
+
+- 新增 Metask Account 用量摘要，展示 U 余额、当日与累计 Token/费用、按上海自然周排列的每日用量热力图，以及脱敏邮箱、并发额度、手动刷新和充值入口。
+- 新增 Agent 回复与代码块复制；支持多格式剪贴板时一次写入原始 Markdown 和安全 HTML，明确不支持时回退为完整 Markdown；回复末行同时显示 Product 记录的完成时间。
+- 文件预览新增行号和有界语法高亮；未知格式、超限或高亮失败时保持完整纯文本。
+
+### Changed
+
+- 流式 provisional output 从首批安全字节开始按 Markdown 呈现，并在后续定性和运行状态更新时保持同一 Assistant 内容块。
+- 移除独立 Permission 设置；New Task 中成功创建时所选的 PermissionProfile 直接成为后续默认值，既有 Task 仍保持创建时的只读策略。
+- MCP static/client secret 改由 Renderer password 表单经专用 typed Bridge command 交给 Host 安全存储，删除原生 secure-input 兼容层。
+- Tool 详情改为在所属过程行内展开，并进一步收紧 Task 列表密度与终态呈现。
+- 刷新 Windows AgentCore bundles。
+
+### Fixed
+
+- 修复 Conversation 恢复后提交仍使用旧 binding epoch，导致后续指令被错误拒绝的问题。
+- 修复 Skill 文件事务恢复、损坏 store 原子重建，以及 Workspace identity 复用可能造成的策略错配。
+- 修复 Windows runtime stage 和安装包缺少 canonical 托盘图标的问题。
+
 ## [0.1.9] - 2026-09-13
 
 ### Added
@@ -226,7 +248,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.9...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/metask-ai/metawork/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/metask-ai/metawork/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/metask-ai/metawork/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/metask-ai/metawork/compare/v0.1.6...v0.1.7
