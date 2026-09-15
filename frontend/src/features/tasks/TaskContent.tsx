@@ -392,9 +392,6 @@ export function TaskContent({
                   onExpandedChange={setProcessExpanded}
                   expandedToolIds={expandedToolIds}
                   onToolExpandedChange={setToolExpanded}
-                  onPreviewFile={(reference, opener) =>
-                    onPreviewFile(task.id, run.id, reference, opener)
-                  }
                 />
                 {fileChangesEnabled && run.fileChanges && (
                   <RunFileChangesSummary
@@ -459,9 +456,6 @@ export function TaskContent({
                 onExpandedChange={setProcessExpanded}
                 expandedToolIds={expandedToolIds}
                 onToolExpandedChange={setToolExpanded}
-                onPreviewFile={(reference, opener) =>
-                  onPreviewFile(task.id, run.id, reference, opener)
-                }
               />
             )}
             {presentation.showTerminalNotice && terminal && (

@@ -200,13 +200,14 @@ test("Bash detail shows known fields with collapsed raw evidence and explicit em
   assert.ok(screen.getByText("raw envelope"));
 });
 
-test("expanded process shows bounded descriptions and progress without interpreting text", () => {
+test("expanded process keeps each Tool summary to one bounded line", async () => {
   const value = run({
     phase: "running",
     activity: { kind: "executing_tools", inFlight: "1" },
     terminal: null,
     tools: [
       technicalTool({
+        id: "bash-1",
         name: "Bash",
         progress: "<script>" + "x".repeat(500),
         bash: {
@@ -214,6 +215,16 @@ test("expanded process shows bounded descriptions and progress without interpret
           description: "Inspect " + "d".repeat(300),
           result: null,
         },
+      }),
+      technicalTool({
+        id: "read-1",
+        name: "Read",
+        progress: "Reading " + "p".repeat(300),
+      }),
+      technicalTool({
+        id: "write-1",
+        name: "Write",
+        fileRefs: [{ id: "file-1", displayPath: "src/report.html" }],
       }),
     ],
   });
@@ -231,12 +242,41 @@ test("expanded process shows bounded descriptions and progress without interpret
       .length,
     161,
   );
+  const rows = [...view.container.querySelectorAll(".run-process-tool")];
+  assert.equal(rows.length, 3);
+  assert.ok(
+    rows.every(
+      (row) =>
+        row.querySelectorAll(".run-process-tool-label > span").length <= 2,
+    ),
+  );
   assert.equal(
-    view.container.querySelector(".run-process-tool-progress").textContent
-      .length,
-    241,
+    rows[1].querySelector(".run-process-tool-description").textContent.length,
+    161,
+  );
+  assert.equal(
+    rows[2].querySelector(".run-process-tool-description").textContent,
+    "src/report.html",
+  );
+  assert.equal(
+    within(rows[2]).queryByRole("button", { name: "Preview src/report.html" }),
+    null,
+  );
+  assert.equal(
+    view.container.querySelector(".run-process-tool-progress"),
+    null,
   );
   assert.equal(view.container.querySelector("script"), null);
+
+  const stylesheet = await readFile("frontend/src/index.css", "utf8");
+  assert.match(
+    stylesheet,
+    /\.run-process-tool-label\s*\{[^}]*display: flex;[^}]*white-space: nowrap;/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.run-process-tool-description\s*\{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/s,
+  );
 });
 
 function fileChange(overrides = {}) {
@@ -1456,7 +1496,7 @@ test("typed Run activity uses safe localized labels", () => {
   assert.doesNotMatch(stoppingContent, />正在分析</);
 });
 
-test("active Run file previews belong to expanded tool operations", () => {
+test("Work process does not duplicate Tool file references", () => {
   const referenced = task({
     currentRunId: "9",
     currentRunPhase: "running",
@@ -1489,12 +1529,7 @@ test("active Run file previews belong to expanded tool operations", () => {
       }),
     ],
   });
-  const previews = [];
-  render(
-    taskContentElement(referenced, "1", {
-      onPreviewFile: (...args) => previews.push(args),
-    }),
-  );
+  render(taskContentElement(referenced));
   assert.equal(document.querySelector(".ai-exchange footer"), null);
   assert.equal(
     screen.queryByRole("button", { name: "Preview index.html" }),
@@ -1503,18 +1538,12 @@ test("active Run file previews belong to expanded tool operations", () => {
   fireEvent.click(document.querySelector(".run-process-header"));
   const rows = [...document.querySelectorAll(".run-process-tools > li")];
   assert.equal(rows.length, 8);
-  for (const [index, row] of rows.entries()) {
-    const preview = within(row).getByRole("button", {
-      name: "Preview index.html",
-    });
-    assert.equal(preview.parentElement.closest("button"), null);
-    fireEvent.click(preview);
-    assert.deepEqual(previews[index].slice(0, 3), [
-      "3",
-      "9",
-      referenced.runs[0].tools[index].fileRefs[0],
-    ]);
-    assert.equal(previews[index][3], preview);
+  for (const row of rows) {
+    assert.ok(within(row).getByText("index.html"));
+    assert.equal(
+      within(row).queryByRole("button", { name: "Preview index.html" }),
+      null,
+    );
     assert.equal(
       within(row).queryByRole("button", {
         name: "Show or hide details for Read",
@@ -2833,6 +2862,7 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
   );
   const first = snapshot.tasks[0];
   first.title = "First task";
+  first.runs[0].output.commentary = ["Working with `a.txt` and `b.txt`."];
   first.runs[0].tools = [
     technicalTool({
       fileRefs: [
@@ -3008,17 +3038,8 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   );
 });
 
-// Preview entry points are available only after explicitly expanding the process.
 function filePreviewOpener(path) {
-  const name = `Preview ${path}`;
-  if (!screen.queryByRole("button", { name })) {
-    const header = document.querySelector(
-      '.run-process-header[aria-expanded="false"]',
-    );
-    assert.ok(header);
-    fireEvent.click(header);
-  }
-  return screen.getByRole("button", { name });
+  return screen.getByRole("button", { name: `Preview ${path}` });
 }
 
 test("permanent panel toggle opens a continuous Review and clears it on close", async (ctx) => {
@@ -3334,6 +3355,14 @@ test("conversation file links preview directly without expanding tools and retur
 
 test("selecting another Markdown reference resets the display mode without retaining old content", async (ctx) => {
   const { previews } = await renderAppFixture(ctx, 1440, {
+    output: {
+      commentary: ["Working with `a.md` and `b.markdown`."],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
     tools: [
       technicalTool({
         fileRefs: [
@@ -3517,9 +3546,7 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
   await act(
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
   );
-  fireEvent.click(
-    document.querySelector('.run-process-header[aria-expanded="true"]'),
-  );
+  opener.remove();
   assert.equal(opener.isConnected, false);
   fireEvent.keyDown(screen.getByRole("heading", { name: "a.txt" }), {
     key: "Escape",

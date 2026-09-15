@@ -2452,21 +2452,21 @@ button.run-process-tool:hover {
 }
 
 .run-process-tool-label {
-  display: grid;
+  display: flex;
   min-width: 0;
-  gap: 3px;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
-.run-process-tool-description,
-.run-process-tool-progress {
+.run-process-tool-description {
+  min-width: 0;
+  overflow: hidden;
   color: var(--ui-content-muted);
   font-size: var(--text-micro);
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.run-process-tool-progress {
-  margin: 0 0 8px 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tool-raw-details > summary {
@@ -2477,8 +2477,10 @@ button.run-process-tool:hover {
 }
 
 .run-process-tool-name {
+  max-width: 40%;
   overflow: hidden;
   color: var(--ui-content-muted);
+  flex: 0 1 auto;
   font-family: var(--font-mono);
   font-size: var(--text-micro);
   text-overflow: ellipsis;
@@ -2504,39 +2506,6 @@ button.run-process-tool:hover {
 
 .run-process-tool[aria-expanded="true"] .run-process-tool-chevron svg {
   transform: rotate(180deg);
-}
-
-.run-process-files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0 12px;
-  padding-left: 15px;
-}
-
-.run-process-file {
-  display: inline-flex;
-  min-width: 0;
-  max-width: 100%;
-  min-height: 44px;
-  align-items: center;
-  gap: 6px;
-  padding: 4px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--ui-content-primary);
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  text-align: left;
-  cursor: pointer;
-}
-
-.run-process-file:hover {
-  background: var(--ui-action-hover-surface);
-}
-
-.run-process-file > span {
-  overflow-wrap: anywhere;
 }
 
 .ai-message[data-role="assistant"][data-streaming="true"]::after {
