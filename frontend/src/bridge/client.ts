@@ -488,12 +488,14 @@ export class BridgeClient {
     expectedDesiredGeneration: string,
     serverId: string,
     slot: McpSecretSlot,
+    secret: string,
   ) {
     return decodeMcpMutationResult(
       await this.invoke(commands.mcpCaptureSecret, {
         expectedDesiredGeneration,
         serverId,
         slot,
+        secret,
       }),
     );
   }

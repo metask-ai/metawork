@@ -74,8 +74,8 @@ pub fn platformHost(platform: *app_platform.Adapter) Host {
     return .{
         .context = platform,
         .confirmation_available = platform.supportsMcpConnectionApproval(),
-        .capture_available = builtin.os.tag == .windows and
-            platform.supportsSecureInput(),
+        // Credential entry is provided by the Renderer on every desktop platform.
+        .capture_available = true,
         .oauth_available = platform.supportsMcpExternalAuthorization(),
         .confirm_fn = platformConfirm,
         .capture_fn = platformCapture,
@@ -1079,6 +1079,7 @@ pub const Coordinator = struct {
         expected_generation: u64,
         server_id: []const u8,
         slot: SecretSlot,
+        value: []const u8,
     ) !Outcome {
         if (self.stopping or self.configuration_apply_job != null or
             self.connection_test_job != null or self.flow != null) return .rejected;
@@ -1088,7 +1089,8 @@ pub const Coordinator = struct {
         if (inspection.desired_generation != expected_generation)
             return .stale_generation;
         var prompt_storage: [secret_capture_prompt_bytes]u8 = undefined;
-        const prompt = self.control.writeMcpSecretCapturePrompt(
+        // Preserve the existing target/approval validation before storing input.
+        _ = self.control.writeMcpSecretCapturePrompt(
             expected_generation,
             server_id,
             slot,
@@ -1096,17 +1098,9 @@ pub const Coordinator = struct {
         ) catch return .rejected;
         var secret_storage: [mcp_platform.max_credential_secret_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &secret_storage);
-        const captured = switch (self.host.capture(
-            "Set MCP secret",
-            prompt,
-            &secret_storage,
-        )) {
-            .captured => |length| length,
-            .cancelled => return .cancelled,
-            .unavailable => return .capability_unavailable,
-        };
-        if (captured == 0 or captured > secret_storage.len) return .rejected;
-        const secret = secret_storage[0..captured];
+        if (value.len == 0 or value.len > secret_storage.len) return .rejected;
+        const secret = secret_storage[0..value.len];
+        @memcpy(secret, value);
         return switch (slot) {
             .stdio_environment => |name| mapManagementOutcome(
                 try self.control.captureMcpStaticSecret(

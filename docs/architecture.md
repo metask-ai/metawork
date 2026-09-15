@@ -75,7 +75,7 @@ Renderer 唯一可直接执行的标准 WebView 系统写入是 secure packaged 
 
 Bridge 是 Renderer 与 Host 之间的唯一产品通信边界。产品命令面只严格解码、校验 source/window authority、dispatch typed command 并运输 Snapshot/Event；受限平台 capability 面只接受已登记的封闭 intent 并交给 Application。两面可以复用 transport 和 origin policy，但不共享产品状态或系统执行 authority。
 
-Bridge 不决定 Task admission、Workspace authority、Agent cancellation、credential replacement、持久化或恢复，不持有 AgentCore handle、Product 内部指针或系统 handle。除 Custom Provider create/replace command 的调用期 API Key 外，Bridge 不接收 raw secret；该命令只做严格解码、边界校验和同步转交，不记录、缓存、投影或返回 secret。连接、command catalog、wire、snapshot identity、retry 和 fail-closed 规则只由[Renderer Bridge 合同](renderer-bridge-contract.md)定义。
+Bridge 不决定 Task admission、Workspace authority、Agent cancellation、credential replacement、持久化或恢复，不持有 AgentCore handle、Product 内部指针或系统 handle。除 Custom Provider create/replace 与 MCP captureSecret command 的调用期手动凭据外，Bridge 不接收 raw secret；这些命令只做严格解码、边界校验和同步转交，不记录、缓存、投影或返回 secret。连接、command catalog、wire、snapshot identity、retry 和 fail-closed 规则只由[Renderer Bridge 合同](renderer-bridge-contract.md)定义。
 
 ### 3.3 Product
 
@@ -162,7 +162,7 @@ Storage 当前不进入生产 Application/Product 运行图。直接 SQLite back
 
 ## 4. 跨模块合同
 
-- Renderer → Bridge 只提交产品语义命令或已登记的封闭平台 intent；不得携带平台实现名、任意 action、系统 handle 或任意执行配置。用户通过已开放 Native SDK UI/input surface 明确选择的物理路径，只能进入对应领域明确登记、容量有界的 typed command；路径值本身不建立 Workspace trust、文件读取成功或其他 Product authority，Host 必须按该领域合同重新校验。唯一 secret-bearing 产品命令是用户显式触发的 Custom Provider create/replace，其 API Key 只能作为有界字段一次性转交 Models credential mutation；
+- Renderer → Bridge 只提交产品语义命令或已登记的封闭平台 intent；不得携带平台实现名、任意 action、系统 handle 或任意执行配置。用户通过已开放 Native SDK UI/input surface 明确选择的物理路径，只能进入对应领域明确登记、容量有界的 typed command；路径值本身不建立 Workspace trust、文件读取成功或其他 Product authority，Host 必须按该领域合同重新校验。secret-bearing 产品命令只允许用户显式触发的 Custom Provider create/replace 与 MCP captureSecret，其手动凭据只能作为有界字段一次性转交对应 Host owner 的 credential mutation；
 - Bridge → Product 只提交严格解码后的 typed command；业务拒绝由 Product 返回 typed result，malformed payload、伪造 ownership 与 authority failure 由 Bridge fail closed；
 - Product → Bridge 只发布 canonical、无 secret projection；Bridge 只拥有编码后的 transport bytes、connection/snapshot identity 与 delivery 状态；
 - Product Control → Agent 只经 Agent 公共执行表面，Agent → AgentCore 是唯一 typed SDK/ABI 路径；Application 只管理 Agent composition、lifecycle 和 event-ready wake；
@@ -188,7 +188,7 @@ Product 在 Renderer 生命周期之外拥有产品状态。WebView reload 通�
 - Renderer 是可信应用组件；所有 Bridge payload 仍按可陈旧、可畸形的边界输入严格解码。command 默认拒绝，dev/release origin 分离，Host 重新校验 window、identity、ownership、generation、membership、资源范围与时效；这些校验维护 Product owner 与运行时一致性，不把 Renderer 定义为独立敌对安全主体；
 - Renderer-facing Native SDK API 是否可以交付路径、文件条目或其他本地输入，由具体产品合同按用户手势、生命周期、容量和后续 Host 校验定义；不得仅因数据先到达 Renderer 就要求 Native SDK 再提供语义重复的 Host-only API，也不得由此推导出通用任意文件或系统 effect 接口；
 - trusted Workspace 只能由 Host 原生选择和确认产生的 capability 授权；Renderer 不能提交路径、boolean 或显示名称自行建立 trust；
-- credential 和 secret 默认只能存在于对应 Product owner、系统 credential storage 和执行所需的 Application-owned bounded copy。用户显式填写的 Custom Provider API Key 可以短暂存在于 Renderer password form 与专用 create/replace Bridge command；提交后必须立即清除表单状态并交给 Models 写入系统 credential storage。Bridge 不得记录、缓存、投影或返回该字段；任何 secret 仍不得进入 event、snapshot、日志、raw diagnostic、产品历史、checkpoint record 或持久化 metadata；
+- credential 和 secret 默认只能存在于对应 Product owner、系统 credential storage 和执行所需的 Application-owned bounded copy。用户显式填写的 Custom Provider API Key 与 MCP static/client secret 可以短暂存在于 Renderer password form 与各自专用 typed Bridge command；输入生命周期按对应产品合同清理，并交给对应 Host owner 写入系统 credential storage。Bridge 不得记录、缓存、投影或返回该字段；任何 secret 仍不得进入 event、snapshot、日志、raw diagnostic、产品历史、checkpoint record 或持久化 metadata；
 - production protocol、endpoint、model 与 credential authority 只能来自 Product Models、Account/MCP 等对应合同；Custom Provider 表单只负责创建或替换 Models-owned source，不能把 API Key、arbitrary URL 或临时字段直接注入 Run；
 - Host 在形成 projection 前执行 schema-aware filtering、credential redaction、UTF-8 与容量验证；Renderer 不是 secret 过滤边界；
 - permission 是 Product/Agent 协作的安全事实，不是 Renderer preference 或平行 AgentCore protocol。持久规则必须绑定 stable Workspace、tool/version、operation、canonical resource constraint 与 rule schema；相关 authority 变化时 fail closed；

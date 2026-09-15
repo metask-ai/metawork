@@ -492,6 +492,57 @@ function McpCodeValues({ values, empty }: { values: string[]; empty: string }) {
   );
 }
 
+function McpSecretInput({
+  label,
+  status,
+  disabled,
+  onSave,
+}: {
+  label: string;
+  status: "missing" | "set";
+  disabled: boolean;
+  onSave: (secret: string) => Promise<McpMutationResult | null | undefined>;
+}) {
+  const { t } = useI18n();
+  return (
+    <form
+      key={String(disabled)}
+      className="mcp-secret-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (disabled) return;
+        const form = event.currentTarget;
+        const secret = new FormData(form).get("secret");
+        if (typeof secret !== "string" || secret.length === 0) return;
+        form.reset();
+        void onSave(secret);
+      }}
+    >
+      <label>
+        {label} · {t(`mcp.secret.${status}`)}
+        <Input
+          type="password"
+          name="secret"
+          aria-label={label}
+          autoComplete="new-password"
+          spellCheck={false}
+          defaultValue=""
+          disabled={disabled}
+          required
+        />
+      </label>
+      <footer>
+        <Button type="submit" variant="secondary" size="sm" disabled={disabled}>
+          {t("common.save")}
+        </Button>
+        <Button type="reset" variant="ghost" size="sm" disabled={disabled}>
+          {t("common.cancel")}
+        </Button>
+      </footer>
+    </form>
+  );
+}
+
 export function McpPage({
   management,
   query,
@@ -554,6 +605,7 @@ export function McpPage({
     expectedGeneration: string,
     serverId: string,
     slot: McpSecretSlot,
+    secret: string,
   ) => Promise<McpMutationResult>;
   onAuthorize: (
     expectedGeneration: string,
@@ -2207,39 +2259,38 @@ export function McpPage({
                           : []
                       ).map((slot) => (
                         <li key={slot.name}>
-                          <code>{slot.name}</code>
-                          <span>{t(`mcp.secret.${slot.status}`)}</span>
-                          {capabilities.secretCapture ? (
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              disabled={
-                                mutationLocked ||
-                                pendingServerId !== null ||
-                                selectedOperationBusy ||
-                                selected.approvalStatus !== "approved"
-                              }
-                              onClick={() =>
-                                void mutateServer(selected, (generation) =>
-                                  onCaptureSecret(generation, selected.id, {
+                          <McpSecretInput
+                            key={JSON.stringify([
+                              selected.id,
+                              management.desiredGeneration,
+                              slot.name,
+                            ])}
+                            label={slot.name}
+                            status={slot.status}
+                            disabled={
+                              !capabilities.secretCapture ||
+                              mutationLocked ||
+                              pendingServerId !== null ||
+                              selectedOperationBusy ||
+                              selected.approvalStatus !== "approved"
+                            }
+                            onSave={(secret) =>
+                              mutateServer(selected, (generation) =>
+                                onCaptureSecret(
+                                  generation,
+                                  selected.id,
+                                  {
                                     kind:
                                       selected.transport === "stdio"
                                         ? "stdio_environment"
                                         : "http_header",
                                     name: slot.name,
-                                  }),
-                                )
-                              }
-                            >
-                              {slot.status === "set"
-                                ? t("mcp.secret.replace")
-                                : t("mcp.secret.set")}
-                            </Button>
-                          ) : (
-                            <span>
-                              {t("mcp.capability.capture_unavailable")}
-                            </span>
-                          )}
+                                  },
+                                  secret,
+                                ),
+                              )
+                            }
+                          />
                         </li>
                       ))}
                     </ul>
@@ -2250,38 +2301,32 @@ export function McpPage({
                     selected.connection.registrationKind === "pre_registered" &&
                     selected.connection.clientSecretStatus !==
                       "not_required" && (
-                      <div className="mcp-client-secret-action">
-                        <span>
-                          {t(
-                            `mcp.secret.${selected.connection.clientSecretStatus}`,
-                          )}
-                        </span>
-                        {capabilities.secretCapture ? (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            disabled={
-                              mutationLocked ||
-                              pendingServerId !== null ||
-                              selectedOperationBusy ||
-                              selected.approvalStatus !== "approved"
-                            }
-                            onClick={() =>
-                              void mutateServer(selected, (generation) =>
-                                onCaptureSecret(generation, selected.id, {
-                                  kind: "oauth_client_secret",
-                                }),
-                              )
-                            }
-                          >
-                            {selected.connection.clientSecretStatus === "set"
-                              ? t("mcp.secret.replace")
-                              : t("mcp.secret.set")}
-                          </Button>
-                        ) : (
-                          <span>{t("mcp.capability.capture_unavailable")}</span>
-                        )}
-                      </div>
+                      <McpSecretInput
+                        key={JSON.stringify([
+                          selected.id,
+                          management.desiredGeneration,
+                          "oauth_client_secret",
+                        ])}
+                        label={t("mcp.secret.client_secret")}
+                        status={selected.connection.clientSecretStatus}
+                        disabled={
+                          !capabilities.secretCapture ||
+                          mutationLocked ||
+                          pendingServerId !== null ||
+                          selectedOperationBusy ||
+                          selected.approvalStatus !== "approved"
+                        }
+                        onSave={(secret) =>
+                          mutateServer(selected, (generation) =>
+                            onCaptureSecret(
+                              generation,
+                              selected.id,
+                              { kind: "oauth_client_secret" },
+                              secret,
+                            ),
+                          )
+                        }
+                      />
                     )}
 
                   <details className="mcp-advanced">

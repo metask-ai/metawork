@@ -63,6 +63,7 @@ fn captureSecret(
     expected_generation: u64,
     server_id: []const u8,
     slot: bridge_api.McpSecretSlot,
+    secret: []const u8,
 ) anyerror!bridge_api.McpHostOutcome {
     const coordinator: *mcp_management_coordinator.Coordinator = @ptrCast(@alignCast(context));
     const target: mcp_management_coordinator.SecretSlot = switch (slot) {
@@ -70,7 +71,7 @@ fn captureSecret(
         .http_header => |name| .{ .http_header = name },
         .oauth_client_secret => .oauth_client_secret,
     };
-    return outcome(try coordinator.captureSecret(expected_generation, server_id, target));
+    return outcome(try coordinator.captureSecret(expected_generation, server_id, target, secret));
 }
 
 fn authorizeOauth(

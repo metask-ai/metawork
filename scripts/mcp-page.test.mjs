@@ -19,6 +19,7 @@ Object.assign(globalThis, {
   DocumentFragment: dom.window.DocumentFragment,
   Element: dom.window.Element,
   Event: dom.window.Event,
+  FormData: dom.window.FormData,
   FocusEvent: dom.window.FocusEvent,
   HTMLElement: dom.window.HTMLElement,
   HTMLInputElement: dom.window.HTMLInputElement,
@@ -1504,7 +1505,151 @@ test("MCP freezes unconfirmed desired state and offers in-place apply recovery",
   assert.ok(screen.getByRole("button", { name: "Retry connection" }));
 });
 
-test("MCP Renderer source cannot access secrets or native APIs", async () => {
+test("MCP password input submits once and clears drafts on cancel, revision and close", async () => {
+  const server = {
+    ...servers[2],
+    authMode: "static",
+    connection: {
+      ...servers[2].connection,
+      environment: [{ name: "TOKEN", status: "set" }],
+    },
+  };
+  const management = {
+    availability: "ready",
+    managementHealth: "ready",
+    operation: "idle",
+    desiredGeneration: "7",
+    runtimeAlignment: "current",
+    redacted: false,
+    servers: [server],
+  };
+  const calls = [];
+  let complete;
+  const overrides = {
+    onCaptureSecret: (...args) => {
+      calls.push(args);
+      return new Promise((resolve) => {
+        complete = resolve;
+      });
+    },
+  };
+  const view = render(pageElement(management, "", overrides));
+  const open = () =>
+    fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
+  const field = () => screen.getByLabelText("TOKEN");
+  open();
+  assert.equal(field().type, "password");
+  assert.equal(field().value, "");
+  fireEvent.change(field(), { target: { value: " opaque Ω value " } });
+  fireEvent.submit(field().closest("form"));
+  fireEvent.submit(field().closest("form"));
+  assert.deepEqual(calls, [
+    [
+      "7",
+      server.id,
+      { kind: "stdio_environment", name: "TOKEN" },
+      " opaque Ω value ",
+    ],
+  ]);
+  assert.equal(field().value, "");
+  complete({ outcome: "rejected" });
+  await waitFor(() => assert.equal(field().disabled, false));
+  assert.equal(field().value, "");
+
+  fireEvent.change(field(), { target: { value: "cancelled-draft" } });
+  fireEvent.click(
+    within(field().closest("form")).getByRole("button", { name: "Cancel" }),
+  );
+  assert.equal(field().value, "");
+  fireEvent.change(field(), { target: { value: "stale-draft" } });
+  view.rerender(
+    pageElement({ ...management, desiredGeneration: "8" }, "", overrides),
+  );
+  assert.equal(field().value, "");
+
+  fireEvent.change(field(), { target: { value: "closed-draft" } });
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }),
+  );
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  open();
+  assert.equal(field().value, "");
+
+  fireEvent.change(field(), { target: { value: "unavailable-draft" } });
+  view.rerender(
+    pageElement({ ...management, desiredGeneration: "8" }, "", {
+      ...overrides,
+      disabled: true,
+    }),
+  );
+  await waitFor(() => assert.equal(field().value, ""));
+  assert.equal(field().disabled, true);
+  assert.equal(calls.length, 1);
+});
+
+test("MCP HTTP and OAuth credentials use the same empty password form", async () => {
+  for (const oauth of [false, true]) {
+    const server = {
+      ...servers[0],
+      authMode: oauth ? "oauth" : "static",
+      connection: {
+        ...servers[0].connection,
+        headers: oauth ? [] : [{ name: "Authorization", status: "missing" }],
+        registrationKind: oauth ? "pre_registered" : null,
+        clientId: oauth ? "client-1" : null,
+        tokenEndpointAuthMethod: oauth ? "client_secret_basic" : null,
+        clientSecretStatus: oauth ? "missing" : "not_required",
+      },
+      authorizationStatus: oauth
+        ? "missing_oauth_client_secret"
+        : "missing_static_secret",
+      runtimeStatus: "needs_authentication",
+      newTaskAccess: "unavailable",
+    };
+    const calls = [];
+    render(
+      pageElement(
+        {
+          availability: "degraded",
+          managementHealth: "ready",
+          operation: "idle",
+          desiredGeneration: "7",
+          runtimeAlignment: "current",
+          redacted: false,
+          servers: [server],
+        },
+        "",
+        {
+          onCaptureSecret: async (...args) => {
+            calls.push(args);
+            return { outcome: "saved" };
+          },
+        },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+    const input = screen.getByLabelText(
+      oauth ? "OAuth client secret" : "Authorization",
+    );
+    assert.equal(input.type, "password");
+    assert.equal(input.value, "");
+    fireEvent.change(input, { target: { value: "fixture-value" } });
+    fireEvent.submit(input.closest("form"));
+    await waitFor(() => assert.equal(calls.length, 1));
+    assert.deepEqual(calls[0], [
+      "7",
+      server.id,
+      oauth
+        ? { kind: "oauth_client_secret" }
+        : { kind: "http_header", name: "Authorization" },
+      "fixture-value",
+    ]);
+    assert.equal(input.value, "");
+    cleanup();
+  }
+});
+
+test("MCP Renderer does not persist credentials or access OAuth tokens or native APIs", async () => {
   const page = await readFile(
     join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
     "utf8",

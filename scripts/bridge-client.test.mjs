@@ -604,9 +604,14 @@ test("MCP management uses only typed revision 1 commands", async () => {
   await client.updateMcpHttpConnection("7", "server-1", http);
   await client.renameMcpServer("7", "server-1", "Search API");
   await client.approveMcpConnection("7", "server-1");
-  await client.captureMcpSecret("7", "server-1", {
-    kind: "oauth_client_secret",
-  });
+  await client.captureMcpSecret(
+    "7",
+    "server-1",
+    {
+      kind: "oauth_client_secret",
+    },
+    "fixture-client-secret",
+  );
   await client.authorizeMcpOAuth("7", "server-1");
   await client.cancelMcpAuthorization("oauth-op");
   await client.setMcpServerEnabled("7", "server-1", true);
@@ -663,6 +668,7 @@ test("MCP management uses only typed revision 1 commands", async () => {
         expectedDesiredGeneration: "7",
         serverId: "server-1",
         slot: { kind: "oauth_client_secret" },
+        secret: "fixture-client-secret",
       },
     },
     {

@@ -188,7 +188,7 @@ pub const McpManagementHost = struct {
     context: *anyopaque,
     test_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpConnectionTestStartOutcome,
     approve_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpHostOutcome,
-    capture_fn: *const fn (*anyopaque, u64, []const u8, McpSecretSlot) anyerror!McpHostOutcome,
+    capture_fn: *const fn (*anyopaque, u64, []const u8, McpSecretSlot, []const u8) anyerror!McpHostOutcome,
     authorize_fn: *const fn (*anyopaque, u64, []const u8) anyerror!McpAuthorizationStartOutcome,
     cancel_fn: *const fn (*anyopaque, []const u8) McpHostOutcome,
     apply_fn: *const fn (*anyopaque) anyerror!McpConfigurationApplyStartOutcome,
@@ -3451,7 +3451,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayloadWithLimit(
             handlers.McpCaptureSecret,
             invocation.request.payload,
-            8 * 1024,
+            native_sdk.platform.max_credential_secret_bytes * 6 + 8 * 1024,
         );
         defer parsed.deinit();
         const expected = try handlers.parseWireId(parsed.value.expectedDesiredGeneration);
@@ -3469,11 +3469,15 @@ pub const Dispatcher = struct {
             return error.InvalidBridgePayload;
         const host = self.mcp_management_host orelse
             return self.finishMcpHostMutation(workbench, output, .capability_unavailable);
+        if (parsed.value.secret.len == 0 or
+            parsed.value.secret.len > native_sdk.platform.max_credential_secret_bytes)
+            return error.InvalidBridgePayload;
         const outcome = try host.capture_fn(
             host.context,
             expected,
             parsed.value.serverId,
             slot,
+            parsed.value.secret,
         );
         return self.finishMcpHostMutation(workbench, output, outcome);
     }

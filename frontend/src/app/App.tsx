@@ -3622,9 +3622,9 @@ export default function App() {
               client.approveMcpConnection(generation, serverId),
             )
           }
-          onCaptureSecret={(generation, serverId, slot) =>
+          onCaptureSecret={(generation, serverId, slot, secret) =>
             commitMcpMutation(() =>
-              client.captureMcpSecret(generation, serverId, slot),
+              client.captureMcpSecret(generation, serverId, slot, secret),
             )
           }
           onAuthorize={(generation, serverId) =>

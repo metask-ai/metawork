@@ -1398,6 +1398,7 @@ export const enUS = {
   "mcp.secret.missing": "Missing",
   "mcp.secret.set": "Set",
   "mcp.secret.not_required": "Not required",
+  "mcp.secret.client_secret": "OAuth client secret",
   "mcp.secret.replace": "Replace",
   "mcp.authorization_phase.discovering": "Discovering OAuth metadata…",
   "mcp.authorization_phase.awaiting_consent": "Waiting for confirmation…",

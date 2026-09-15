@@ -257,7 +257,22 @@ pub const McpCaptureSecret = struct {
     expectedDesiredGeneration: []const u8,
     serverId: []const u8,
     slot: McpSecretSlot,
+    secret: []const u8,
 };
+
+test "MCP credential payload requires a value and rejects unrelated fields" {
+    var payload = try parsePayload(McpCaptureSecret,
+        \\{"expectedDesiredGeneration":"7","serverId":"server-1","slot":{"kind":"oauth_client_secret"},"secret":"fixture-client-secret"}
+    );
+    defer payload.deinit();
+    try std.testing.expectEqualStrings("fixture-client-secret", payload.value.secret);
+    try std.testing.expectError(error.InvalidBridgePayload, parsePayload(McpCaptureSecret,
+        \\{"expectedDesiredGeneration":"7","serverId":"server-1","slot":{"kind":"oauth_client_secret"}}
+    ));
+    try std.testing.expectError(error.InvalidBridgePayload, parsePayload(McpCaptureSecret,
+        \\{"expectedDesiredGeneration":"7","serverId":"server-1","slot":{"kind":"oauth_client_secret"},"secret":"fixture","accessToken":"not-allowed"}
+    ));
+}
 pub const McpCancelAuthorization = struct {
     operationId: []const u8,
 };

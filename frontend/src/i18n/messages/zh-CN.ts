@@ -1260,6 +1260,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.secret.missing": "缺失",
   "mcp.secret.set": "已设置",
   "mcp.secret.not_required": "不需要",
+  "mcp.secret.client_secret": "OAuth 客户端密钥",
   "mcp.secret.replace": "替换",
   "mcp.authorization_phase.discovering": "正在发现 OAuth 元数据…",
   "mcp.authorization_phase.awaiting_consent": "正在等待确认…",
