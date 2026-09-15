@@ -2209,7 +2209,7 @@ summary::-webkit-details-marker {
 .response-copy-actions {
   display: flex;
   min-height: 32px;
-  margin-top: 2px;
+  margin-top: 8px;
 }
 
 .response-copy-action {
@@ -2227,8 +2227,8 @@ summary::-webkit-details-marker {
 .response-copy-action[data-copy-state="copying"],
 .response-copy-action[data-copy-state="copied"],
 .response-copy-action[data-copy-state="failed"],
-.agent-response-surface:hover .response-copy-action,
-.agent-response-surface:focus-within .response-copy-action {
+.ai-exchange:hover .response-copy-action,
+.ai-exchange:focus-within .response-copy-action {
   opacity: 1;
   pointer-events: auto;
 }

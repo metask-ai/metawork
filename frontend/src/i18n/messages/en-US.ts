@@ -680,8 +680,6 @@ export const enUS = {
     "Work was interrupted before the response was complete",
   "run.terminal.partial_failed": "Work failed before the response was complete",
   "run.process.title": "Work process",
-  "run.process.tool_step_one": "{count} operation",
-  "run.process.tool_step_many": "{count} operations",
   "run.process.open_tool": "View details for {name}",
   "run.prepare_retry": "Copy instruction to Composer",
   "run.retry_help":
@@ -704,7 +702,7 @@ export const enUS = {
   "run.provider_failure.diagnostic_withheld":
     "MetaWork received additional technical diagnostics, but the current security boundary does not allow their contents to be shown here.",
   "run.provider_failure.review_tool_effects":
-    "Review the work process before running again to avoid repeating completed operations.",
+    "Some operations completed before the failure. Check their effects before running again.",
   "run.view_diagnostics": "View run details",
   "slash.title": "Composer actions",
   "slash.group.commands": "Commands",
@@ -1113,11 +1111,10 @@ export const enUS = {
   "cause.event_pipeline_failure": "Activity delivery failed",
   "cause.queue_capacity_failure": "Workbench capacity reached",
   "cause.ui_pipeline_failure": "Response delivery failed",
-  "cause.agent_failure":
-    "Agent execution failed. Review the work process and try again.",
+  "cause.agent_failure": "Agent execution failed. Try again.",
   "cause.provider_failure": "Model service request failed",
   "cause.tool_failure":
-    "Tool execution failed and could not recover. Review the work process and try again.",
+    "Tool execution failed and could not recover. Check any resulting changes before trying again.",
   "cause.image_input_unsupported":
     "The current model does not support image input. Choose a model that supports images and select the image again.",
   "cause.dependency_contract_failure": "Task runtime became incompatible",

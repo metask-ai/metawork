@@ -408,18 +408,6 @@ export function TaskContent({
                   >
                     {run.output.response}
                   </Markdown>
-                  {responseCopyable && (
-                    <div className="response-copy-actions">
-                      <CopyButton
-                        className="response-copy-action"
-                        data-latest={run.id === latestCopyableId}
-                        copyLabel={t("copy.response")}
-                        copiedLabel={t("copy.copied")}
-                        failedLabel={t("copy.failed")}
-                        onCopy={() => copyResponseMarkdown(run.output.response)}
-                      />
-                    </div>
-                  )}
                   {run.output.redacted && (
                     <p className="projection-note">
                       {t("privacy.sensitive_hidden")}
@@ -428,28 +416,13 @@ export function TaskContent({
                 </div>
               </Message>
             )}
-            {!presentation.active && (
-              <>
-                {fileChangesEnabled && run.fileChanges && (
-                  <RunFileChangesSummary
-                    fileChanges={run.fileChanges}
-                    onReview={(opener) =>
-                      onReviewFileChanges(task.id, run.id, opener)
-                    }
-                  />
-                )}
-                <RunProcess
-                  presentation={presentation}
-                  expanded={disclosure.expanded}
-                  onExpandedChange={setProcessExpanded}
-                  onOpenTool={(tool: ToolView, opener) =>
-                    onOpenTool(run.id, tool.id, opener)
-                  }
-                  onPreviewFile={(reference, opener) =>
-                    onPreviewFile(task.id, run.id, reference, opener)
-                  }
-                />
-              </>
+            {!presentation.active && fileChangesEnabled && run.fileChanges && (
+              <RunFileChangesSummary
+                fileChanges={run.fileChanges}
+                onReview={(opener) =>
+                  onReviewFileChanges(task.id, run.id, opener)
+                }
+              />
             )}
             {presentation.showTerminalNotice && terminal && (
               <Activity
@@ -519,6 +492,18 @@ export function TaskContent({
                   ) : undefined
                 }
               />
+            )}
+            {responseCopyable && (
+              <div className="response-copy-actions">
+                <CopyButton
+                  className="response-copy-action"
+                  data-latest={run.id === latestCopyableId}
+                  copyLabel={t("copy.response")}
+                  copiedLabel={t("copy.copied")}
+                  failedLabel={t("copy.failed")}
+                  onCopy={() => copyResponseMarkdown(run.output.response)}
+                />
+              </div>
             )}
           </section>
         );

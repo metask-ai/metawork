@@ -201,6 +201,9 @@ test("Bash detail shows known fields with collapsed raw evidence and explicit em
 
 test("expanded process shows bounded descriptions and progress without interpreting text", () => {
   const value = run({
+    phase: "running",
+    activity: { kind: "executing_tools", inFlight: "1" },
+    terminal: null,
     tools: [
       technicalTool({
         name: "Bash",
@@ -715,7 +718,7 @@ test("Run status keeps technical Tool summaries behind explicit disclosure", asy
   assert.deepEqual(expandedChanges, [false]);
 });
 
-test("terminal Run process summarizes Tool evidence without implying Run failure", () => {
+test("terminal Run hides Tool process evidence", () => {
   const value = run({
     output: {
       commentary: ["Finished checking"],
@@ -763,11 +766,7 @@ test("terminal Run process summarizes Tool evidence without implying Run failure
   const markup = renderToStaticMarkup(
     runProcessElement(value, { expanded: false }),
   );
-  assert.match(markup, />Work process</);
-  assert.match(markup, /2 operations/);
-  assert.doesNotMatch(markup, /1 failed/);
-  assert.doesNotMatch(markup, /Finished checking/);
-  assert.doesNotMatch(markup, />Work failed</);
+  assert.equal(markup, "");
 });
 
 test("technical process disclosure remains user-controlled across revisions and Task switches", async () => {
@@ -832,7 +831,7 @@ test("technical process disclosure remains user-controlled across revisions and 
   assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 });
 
-test("successful terminal keeps commentary visible and technical process collapsed", () => {
+test("successful terminal keeps commentary visible and removes technical process", () => {
   const activeRun = run({
     phase: "running",
     terminal: null,
@@ -870,13 +869,16 @@ test("successful terminal keeps commentary visible and technical process collaps
     ],
   });
   view.rerender(taskContentElement(completed, "2"));
-  const disclosure = screen.getByRole("button", { name: /^Work process/ });
-  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  assert.equal(screen.queryByRole("button", { name: /^Work process/ }), null);
   assert.ok(screen.getByText("Working through the task"));
   assert.ok(screen.getByText("Final response"));
+  assert.equal(
+    document.querySelector(".ai-exchange").lastElementChild.className,
+    "response-copy-actions",
+  );
 });
 
-test("terminal transition preserves reading position without expanding technical details", () => {
+test("terminal transition preserves reading position while removing technical details", () => {
   const activeRun = run({
     phase: "running",
     terminal: null,
@@ -926,8 +928,7 @@ test("terminal transition preserves reading position without expanding technical
       "2",
     ),
   );
-  const disclosure = screen.getByRole("button", { name: /^Work process/ });
-  assert.equal(disclosure.getAttribute("aria-expanded"), "false");
+  assert.equal(screen.queryByRole("button", { name: /^Work process/ }), null);
   assert.ok(screen.getByText("Evidence the reader is reviewing"));
   assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
 });
@@ -1025,6 +1026,10 @@ test("partial output and terminal failure render one composite notice", () => {
   assert.equal((markup.match(/class="ai-activity"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, />Work failed</);
 });
+  assert.ok(
+    markup.indexOf('class="ai-activity"') <
+      markup.indexOf('class="response-copy-actions"'),
+  );
 
 test("typed Agent failures render accurate recovery guidance", () => {
   const cases = [
@@ -1300,16 +1305,19 @@ test("typed Run activity uses safe localized labels", () => {
   assert.doesNotMatch(stoppingContent, />正在分析</);
 });
 
-test("Run file previews belong to expanded tool operations, never a reply footer", () => {
+test("active Run file previews belong to expanded tool operations", () => {
   const referenced = task({
-    currentRunId: "0",
-    currentRunPhase: null,
+    currentRunId: "9",
+    currentRunPhase: "running",
     runs: [
       run({
         output: {
           commentary: [],
-          response: "Done",
-          responseKind: "final",
+        phase: "running",
+        activity: { kind: "executing_tools", inFlight: "1" },
+        terminal: null,
+          response: "",
+          responseKind: null,
           provisional: "",
           redacted: false,
           provisionalRedacted: false,
@@ -1343,7 +1351,7 @@ test("Run file previews belong to expanded tool operations, never a reply footer
     screen.queryByRole("button", { name: "Preview index.html" }),
     null,
   );
-  fireEvent.click(screen.getByRole("button", { name: /Work process/ }));
+  fireEvent.click(document.querySelector(".run-process-header"));
   const rows = [...document.querySelectorAll(".run-process-tools > li")];
   assert.equal(rows.length, 8);
   for (const [index, row] of rows.entries()) {
@@ -1365,7 +1373,7 @@ test("Run file previews belong to expanded tool operations, never a reply footer
     fireEvent.click(detail);
     assert.deepEqual(details[index], ["9", `tool-${index}`, detail]);
   }
-  fireEvent.click(screen.getByRole("button", { name: /Work process/ }));
+  fireEvent.click(document.querySelector(".run-process-header"));
   assert.equal(
     screen.queryByRole("button", { name: "Preview index.html" }),
     null,
@@ -1471,11 +1479,13 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     /<button[^>]*>.*File changes.*Review changes.*<\/button>/,
   );
   assert.ok(
-    visible.indexOf(">File changes<") < visible.indexOf(">Work process<"),
+    visible.indexOf(">File changes<") <
+      visible.indexOf('class="response-copy-actions"'),
   );
 
   const incomplete = task({
     runs: [
+  assert.doesNotMatch(visible, />Work process</);
       run({
         fileChanges: { observation: "incomplete", changes: [] },
       }),

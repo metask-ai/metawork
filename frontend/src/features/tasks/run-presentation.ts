@@ -21,7 +21,6 @@ export type RunPresentation = {
   showTerminalNotice: boolean;
   tools: ToolView[];
   runningToolName: string | null;
-  toolCount: number;
 };
 
 /** A display estimate since a Host sample, never a liveness observation. */
@@ -71,13 +70,13 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
   const tools = orderedTools(run.tools);
   const runningTools = tools.filter((tool) => tool.state === "running");
   const responseVisible = run.output.response.length > 0;
-  const processCanCollapse = tools.length > 0;
+  const processCanCollapse = active && tools.length > 0;
 
   return {
     active,
     activity,
     responseVisible,
-    processVisible: active || processCanCollapse,
+    processVisible: active,
     processCanCollapse,
     showTerminalNotice:
       run.terminal !== null &&
@@ -89,7 +88,6 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
       activity?.kind === "executing_tools" && runningTools.length === 1
         ? runningTools[0]!.name
         : null,
-    toolCount: tools.length,
   };
 }
 

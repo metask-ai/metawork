@@ -264,21 +264,6 @@ function ProcessTool({
   );
 }
 
-function terminalDetail(
-  presentation: RunPresentation,
-  locale: I18nValue["locale"],
-  t: I18nValue["t"],
-): string | null {
-  if (presentation.toolCount === 0) return null;
-  const count = formatInteger(locale, BigInt(presentation.toolCount));
-  return t(
-    presentation.toolCount === 1
-      ? "run.process.tool_step_one"
-      : "run.process.tool_step_many",
-    { count },
-  );
-}
-
 export function RunProcess({
   presentation,
   elapsedMs = null,
@@ -323,7 +308,7 @@ export function RunProcess({
       ? null
       : activity
         ? activityDetail(activity, locale, t)
-        : terminalDetail(presentation, locale, t);
+        : null;
   const showBody = expanded && presentation.processCanCollapse;
 
   return (
