@@ -136,7 +136,6 @@ import type {
   FileChangeView,
   RunFileChanges,
   PermissionProfile,
-  WorkbenchSnapshot,
   UiResponsePayload,
 } from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
@@ -152,6 +151,7 @@ import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
 import { PendingScopes } from "../workbench/pendingScopes.ts";
 import { taskModelSelectionPolicy } from "./task-model-selection.ts";
+import { ConversationRecoveryCoordinator } from "./conversation-recovery.ts";
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -192,20 +192,6 @@ function mutationReasonMessageId(reason: MutationReason): MessageId {
 
 const automaticWorkspaceOptionId = "automatic";
 const continuationWaitTimeoutMs = 10_000;
-
-type ContinuationWaitResult =
-  | { kind: "ready" }
-  | { kind: "cancelled"; error: Error }
-  | { kind: "failed"; error: Error }
-  | { kind: "timeout"; error: Error };
-
-type ContinuationWaiter = {
-  taskId: string;
-  bindingEpoch: string;
-  attemptId: string;
-  resolve: (result: ContinuationWaitResult) => void;
-  timeout: ReturnType<typeof setTimeout>;
-};
 
 type FilePreviewIdentity = {
   taskId: string;
@@ -358,7 +344,7 @@ export default function App() {
   const taskInformationTrigger = useRef<HTMLButtonElement>(null);
   const taskPanelOpener = useRef<HTMLButtonElement | null>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const continuationWaiters = useRef(new Map<string, ContinuationWaiter>());
+  const conversationRecovery = useRef(new ConversationRecoveryCoordinator());
 
   function setStatus(status: ShellStatus) {
     setStatuses((current) => publishStatus(current, status));
@@ -995,108 +981,6 @@ export default function App() {
     return current ? current.refresh() : Promise.resolve();
   }, []);
 
-  function settleContinuationWaiter(
-    key: string,
-    result: ContinuationWaitResult,
-  ) {
-    const waiter = continuationWaiters.current.get(key);
-    if (!waiter) return;
-    continuationWaiters.current.delete(key);
-    clearTimeout(waiter.timeout);
-    waiter.resolve(result);
-  }
-
-  function observeContinuationSnapshot(next: WorkbenchSnapshot) {
-    for (const [key, waiter] of continuationWaiters.current) {
-      const task = next.tasks.find(
-        (candidate) => candidate.id === waiter.taskId,
-      );
-      if (!task) {
-        settleContinuationWaiter(key, {
-          kind: "failed",
-          error: new Error("The Task disappeared during conversation restore"),
-        });
-        continue;
-      }
-      if (task.binding.epoch !== waiter.bindingEpoch) {
-        settleContinuationWaiter(key, {
-          kind: "failed",
-          error: new Error(
-            "The Task binding changed during conversation restore",
-          ),
-        });
-        continue;
-      }
-      if (task.activeOperation?.kind === "restore") {
-        if (task.activeOperation.id !== waiter.attemptId)
-          settleContinuationWaiter(key, {
-            kind: "failed",
-            error: new Error("A different conversation restore is active"),
-          });
-        continue;
-      }
-      if (task.continuationAvailable && !task.continuationRecoveryAvailable) {
-        settleContinuationWaiter(key, { kind: "ready" });
-        continue;
-      }
-      if (
-        task.continuationUnavailableReason !== "session_recovery_required" &&
-        task.continuationUnavailableReason !== "session_recovery_in_progress"
-      ) {
-        settleContinuationWaiter(key, {
-          kind: "failed",
-          error: new Error(
-            task.continuationUnavailableReason ??
-              "Conversation restore did not produce a usable Session",
-          ),
-        });
-      }
-    }
-  }
-
-  function waitForTaskContinuation(
-    taskId: string,
-    bindingEpoch: string,
-    attemptId: string,
-  ): Promise<ContinuationWaitResult> {
-    const key = `${taskId}:${attemptId}`;
-    const existing = continuationWaiters.current.get(key);
-    if (existing)
-      return new Promise((resolve) => {
-        const previousResolve = existing.resolve;
-        existing.resolve = (result) => {
-          previousResolve(result);
-          resolve(result);
-        };
-      });
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        settleContinuationWaiter(key, {
-          kind: "timeout",
-          error: new Error("Timed out waiting for conversation restore"),
-        });
-      }, continuationWaitTimeoutMs);
-      continuationWaiters.current.set(key, {
-        taskId,
-        bindingEpoch,
-        attemptId,
-        resolve,
-        timeout,
-      });
-      observeContinuationSnapshot(workbench.snapshot);
-    });
-  }
-
-  function cancelContinuationWaitersForTask(taskId: string | null) {
-    for (const [key, waiter] of continuationWaiters.current) {
-      if (taskId !== null && waiter.taskId === taskId) continue;
-      settleContinuationWaiter(key, {
-        kind: "cancelled",
-        error: new Error("The active Task changed during conversation restore"),
-      });
-    }
-  }
-
   useEffect(() => {
     const errorCode = snapshot.account.errorCode;
     if (errorCode === "none" || errorCode === "user_cancelled") return;
@@ -1116,7 +1000,7 @@ export default function App() {
     const current = new WorkbenchConnection(client, {
       onSnapshot: (next, generation) => {
         if (!cancelled) {
-          observeContinuationSnapshot(next);
+          conversationRecovery.current.observeSnapshot(next, generation);
           observeUiResponseSnapshot(next);
           const projectedTaskIds = next.tasks.map((task) => task.id);
           const discardedAttachments = taskDrafts.pruneDrafts([
@@ -1161,6 +1045,7 @@ export default function App() {
       },
       onGeneration: (generation) => {
         if (!cancelled) {
+          conversationRecovery.current.resetGeneration(generation);
           bridgeGenerationRef.current = generation;
           if (attachmentOperation.current) {
             attachmentOperation.current.cancelled = true;
@@ -1190,6 +1075,7 @@ export default function App() {
     window.addEventListener("pagehide", onPageHide);
     return () => {
       cancelled = true;
+      conversationRecovery.current.dispose();
       if (connection.current === current) connection.current = null;
       setBridgeReady(false);
       setRootRenderBlockReason(null);
@@ -1229,10 +1115,8 @@ export default function App() {
     setEditingTitle(false);
     setConfirmDelete(false);
     taskPanelOpener.current = null;
-    cancelContinuationWaitersForTask(activeTask?.id ?? null);
+    conversationRecovery.current.cancelExceptTask(activeTask?.id ?? null);
   }, [activeTask?.id]);
-
-  useEffect(() => () => cancelContinuationWaitersForTask(null), []);
 
   useEffect(() => {
     if (
@@ -1754,7 +1638,8 @@ export default function App() {
         kind: "failed",
         error: new Error("The Task binding is no longer current"),
       };
-    if (task.continuationAvailable) return { kind: "ready" };
+    if (task.continuationAvailable)
+      return { kind: "ready", bindingEpoch: task.binding.epoch };
     if (
       task.continuationUnavailableReason !== "session_recovery_required" &&
       task.continuationUnavailableReason !== "session_recovery_failed"
@@ -1762,6 +1647,12 @@ export default function App() {
       return {
         kind: "failed",
         error: new Error("Conversation continuation is unavailable"),
+      };
+    const generation = bridgeGenerationRef.current;
+    if (generation === "0")
+      return {
+        kind: "failed",
+        error: new Error("The Host connection is unavailable"),
       };
     let restored;
     try {
@@ -1771,11 +1662,11 @@ export default function App() {
     }
     if (!restored.accepted)
       return { kind: "rejected", reason: restored.reason };
-    const completion = await waitForTaskContinuation(
-      taskId,
-      bindingEpoch,
-      restored.attemptId,
-    );
+    const attempt = { taskId, attemptId: restored.attemptId, generation };
+    const completion = await conversationRecovery.current.waitForAttempt({
+      ...attempt,
+      timeoutMs: continuationWaitTimeoutMs,
+    });
     if (completion.kind === "ready") {
       if (activeTaskIdRef.current !== taskId)
         return {
@@ -1784,7 +1675,23 @@ export default function App() {
             "The active Task changed after conversation restore",
           ),
         };
-      return { kind: "ready" };
+      return completion;
+    }
+    if (completion.kind === "timeout") {
+      await refreshSnapshot().catch(() => undefined);
+      const reconciled = conversationRecovery.current.inspectLatest(attempt);
+      if (reconciled.kind === "ready") {
+        if (activeTaskIdRef.current !== taskId)
+          return {
+            kind: "failed",
+            error: new Error(
+              "The active Task changed after conversation restore",
+            ),
+          };
+        return reconciled;
+      }
+      if (reconciled.kind === "failed" || reconciled.kind === "cancelled")
+        return { kind: "failed", error: reconciled.error };
     }
     return { kind: "failed", error: completion.error };
   }
