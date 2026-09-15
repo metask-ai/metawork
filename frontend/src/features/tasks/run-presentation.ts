@@ -4,6 +4,7 @@ import type {
   RunView,
   ToolView,
 } from "../../bridge/contracts.ts";
+import type { Locale } from "../../i18n/runtime.ts";
 
 const nonTerminalPhases = new Set<RunPhase>([
   "queued",
@@ -21,7 +22,6 @@ export type RunPresentation = {
   showTerminalNotice: boolean;
   tools: ToolView[];
   runningToolName: string | null;
-  toolCount: number;
 };
 
 /** A display estimate since a Host sample, never a liveness observation. */
@@ -34,6 +34,62 @@ export function runElapsedSeconds(
     (BigInt(elapsedMs) + BigInt(Math.floor(Math.max(0, now - receivedAt)))) /
     1000n
   );
+}
+
+export type RunFinishedTime = {
+  absolute: string;
+  dateTime: string;
+  relative: string;
+};
+
+export function formatRunFinishedTime(
+  locale: Locale,
+  finishedAtUnixMs: string | null,
+  nowUnixMs: number,
+): RunFinishedTime | null {
+  if (finishedAtUnixMs === null) return null;
+  const timestamp = Number(finishedAtUnixMs);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  const formatterLocale = locale === "pseudo" ? "en-US" : locale;
+  const delta = timestamp - nowUnixMs;
+  const absoluteDelta = Math.abs(delta);
+  let unit: Intl.RelativeTimeFormatUnit = "second";
+  let divisor = 1;
+  if (absoluteDelta >= 365 * 24 * 60 * 60 * 1000) {
+    unit = "year";
+    divisor = 365 * 24 * 60 * 60 * 1000;
+  } else if (absoluteDelta >= 30 * 24 * 60 * 60 * 1000) {
+    unit = "month";
+    divisor = 30 * 24 * 60 * 60 * 1000;
+  } else if (absoluteDelta >= 24 * 60 * 60 * 1000) {
+    unit = "day";
+    divisor = 24 * 60 * 60 * 1000;
+  } else if (absoluteDelta >= 60 * 60 * 1000) {
+    unit = "hour";
+    divisor = 60 * 60 * 1000;
+  } else if (absoluteDelta >= 60 * 1000) {
+    unit = "minute";
+    divisor = 60 * 1000;
+  }
+  const relativeValue =
+    unit === "second"
+      ? 0
+      : delta < 0
+        ? Math.ceil(delta / divisor)
+        : Math.floor(delta / divisor);
+  return {
+    absolute: new Intl.DateTimeFormat(formatterLocale, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(date),
+    dateTime: date.toISOString(),
+    relative: new Intl.RelativeTimeFormat(formatterLocale, {
+      numeric: "auto",
+      style: "long",
+    }).format(relativeValue, unit),
+  };
 }
 
 function fallbackActivity(phase: RunPhase): RunActivity | null {
@@ -71,13 +127,13 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
   const tools = orderedTools(run.tools);
   const runningTools = tools.filter((tool) => tool.state === "running");
   const responseVisible = run.output.response.length > 0;
-  const processCanCollapse = tools.length > 0;
+  const processCanCollapse = active && tools.length > 0;
 
   return {
     active,
     activity,
     responseVisible,
-    processVisible: active || processCanCollapse,
+    processVisible: active,
     processCanCollapse,
     showTerminalNotice:
       run.terminal !== null &&
@@ -89,7 +145,6 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
       activity?.kind === "executing_tools" && runningTools.length === 1
         ? runningTools[0]!.name
         : null,
-    toolCount: tools.length,
   };
 }
 

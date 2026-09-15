@@ -36,5 +36,5 @@ for (const [script, args] of steps) {
 }
 
 console.log(
-  "Windows integration baseline passed: staged exact GNU bundle, bundle guards, lifecycle, Custom Provider readiness, permission and restore probes, Native Debug/Release, and AgentCore vertical automation.",
+  "Windows integration baseline passed: staged exact GNU bundle, bundle guards, lifecycle, Custom Provider readiness, permission and restore probes, 70 KiB/256 KiB response clipboard, Native Debug/Release, and AgentCore vertical automation.",
 );

@@ -27,6 +27,8 @@ Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的
 
 Run 的 `elapsedMs` 是 nullable canonical decimal `u64` string：表示 Host 在本次 Snapshot 采样时，从本轮接纳起经过的单调时间，包含排队、批准等待和重试。正式 terminal 或没有可靠计时事实时必须为 null，不从历史补写。它不是事件活跃度、完成比例或剩余时间；时钟推进不发布 revision。Renderer 仅用本次 Snapshot 的本地接收时刻外推低频显示，reload 必须重新采样，不能从组件挂载时起算或将显示时间写回 Host。
 
+Run 的 `finishedAtUnixMs` 是 nullable canonical decimal `u64` string，表示 Product 在完整 terminal event-drain barrier 后首次把该 Run 收口为正式终态时观察到的 Unix epoch 毫秒。非 terminal Run 必须为 null；时钟不可用以及该字段引入前的历史记录继续为 null，不允许 Renderer 以 Snapshot 接收、reload、Run 顺序或 `elapsedMs` 反推。非空值必须大于零且不超过 ECMAScript Date 上界 `8640000000000000`，随 Run 历史持久化且写入后不可修改；Renderer 只进行本地化相对时间呈现，绝不把它解释为事件时间线或执行耗时。
+
 `metawork.tasks.create` 的 execution admission 字段精确为 `expectedExecutionGeneration + expectedSelectionRevision + modelSelection`，三者必须同时存在，其中前两者来自同一份根 `newTaskAdmission` snapshot 且均为非零 canonical wire id。`modelSelection` 精确为 `null | { targetModelRef: { sourceId, modelId }, expectedSourceGeneration, expectedCatalogGeneration }`：null 表示采用 active default；非 null 表示只为本次新 Task 选择同一 active source 中的另一个当前 ready 模型。Host 在创建事务中同时 compare-and-swap当前 active generation 与 selection revision，并对 override 重新校验 active source、protocol、source generation 与 catalog generation/membership；缺字段、revision/generation 已变化、跨 source 或模型已失效均 fail closed，绝不回退默认模型。这样同一 execution authority 内默认模型变化可以保持 generation 稳定，同时不会让旧 Renderer snapshot 静默采用新的默认模型，也不会把单 Task 选择写回 global default。
 
 每个 Task 根对象必须发布 Host-owned `modelSelectionAvailability`，精确取 `available | catalog_loading | catalog_unavailable | execution_replacing | runtime_detached | unsupported_source | authority_changed`。Product Control 根据 Task binding、当前 installed execution、replacement 与 Models catalog 的跨 owner 事实一次性计算；Renderer 只消费该枚举决定菜单可编辑、暂时禁用或只读及其原因，不得再比较根 `models`、`newTaskAdmission` 与 Task 字段重建 authority。缺失或未知值属于 snapshot contract failure。
@@ -35,7 +37,7 @@ Host 与 Renderer 随同一应用包原子发布，不承担旧 Renderer/新 Hos
 
 Renderer Bridge 使用独立合同身份 `metawork.renderer-bridge`，快速开发阶段固定 revision 为 `1`。Host 与 Renderer 随同一应用包原子发布，任何 command、event、payload 字段或 wire 语义变化都直接原地 hard cut，不为临时合同形态递增 revision、不维护兼容层，也不在 snapshot 内维护第二个局部版本。`contractRevision` 仍精确匹配，用于拒绝非当前固定标识，但不承诺识别同 revision 的开发产物错配。任何合同类版本标识的变更都必须先得到用户显式同意；对本文件即包括 Renderer Bridge revision。
 
-Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`、`assistantRedacted`、`status`，以及 Run 顶层 `outcome/cause` 与 Task 顶层 `lastRunOutcome/cause`。每个 Run 精确发布 `execution + output + activity + terminal`：`execution = { generation, protocol, model }`，generation 是非零 canonical decimal wire integer，protocol 为合同既有封闭枚举，model 是该 Run 实际持有的无 secret model identity；它们是不可由 Task 当前 binding 或 Models 当前默认值补写的逐 Run 历史 provenance。Task 最近结果由最后一个非空 Run terminal 派生，不发布第二份摘要。
+Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`、`assistantRedacted`、`status`，以及 Run 顶层 `outcome/cause` 与 Task 顶层 `lastRunOutcome/cause`。每个 Run 精确发布 `execution + elapsedMs + finishedAtUnixMs + output + activity + terminal`：`execution = { generation, protocol, model }`，generation 是非零 canonical decimal wire integer，protocol 为合同既有封闭枚举，model 是该 Run 实际持有的无 secret model identity；它们是不可由 Task 当前 binding 或 Models 当前默认值补写的逐 Run 历史 provenance。Task 最近结果由最后一个非空 Run terminal 派生，不发布第二份摘要。
 
 `output = { commentary, response, responseKind, provisional, redacted, provisionalRedacted }`，其中 `commentary` 是最多 256 项的有序 string array，每一项对应一个非空、已闭合的 Product commentary group；数组顺序只表达 Run 内的稳定叙事顺序，不运输时间戳、CoreEvent identity、Tool 关联或 raw event timeline。credential 清洗跨整个 canonical output 一次完成，可以使个别投影项为空，但不得改变项数或泄漏跨边界 credential。`responseKind = final | partial | null`；null 时 response 必须为空，分类后的 response 不得同时保留 provisional，terminal Run 的 provisional 必须为空。全部 commentary 项、response 与 provisional 来自同一个 Host output byte budget；provisional 只包含 open/continued buffer 中 credential-safe committed bytes，discard 后必须消失。
 
@@ -47,7 +49,7 @@ Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`
 
 Tool 的 `bash` 必填且 nullable，只由 Host 为精确 `Bash` identifier 投影：`{ command: string | null, description: string | null, result: null | { exitCode: i32, stdout: string, stderr: string, stdoutIncomplete: boolean, stderrIncomplete: boolean } }`。description 依附已解析的 command；运行中的 Tool 或截断的原始 content 不得提供 result，截断的 input 不得提供 command。未知、超出解析预算或不完整的 envelope 保留原始安全证据而不猜测可读字段；解码后的文本仍受 credential 清洗。DTO 不改变 Tool state、Run activity、terminal、fileRefs 或持久化格式。
 
-`output`、`activity`、`tools` 与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位、active→terminal process surface 迁移和 full Snapshot 渲染机制由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
+`output`、`activity`、`tools` 与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位、active→terminal 呈现收口和 full Snapshot 渲染机制由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
 
 ## Skill source settings
 

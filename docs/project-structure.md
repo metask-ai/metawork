@@ -46,7 +46,7 @@
 | `frontend/src/components/ui/` | Foundation UI             | 无产品语义的基础交互 primitive                                                             |
 | `frontend/src/components/ai/` | AI presentation           | 复用 Foundation UI 的对话呈现 primitive，不拥有 Task、Run 或 AgentCore 语义                |
 | `frontend/src/i18n/`          | Renderer localization     | message catalog、formatter 与 locale runtime                                               |
-| `frontend/src/platform/`      | Renderer-local capability | browser-side 本地偏好，不拥有原生平台能力                                                  |
+| `frontend/src/platform/`      | Renderer-local capability | browser-side 本地偏好与已登记的标准 WebView Clipboard 写入；不拥有 Product 或通用原生平台能力 |
 
 React component 不得直接访问 `window.zero`、拼装 Bridge wire payload、解析 AgentCore raw data 或拥有 Host lifecycle。feature 可以消费 `workbench/` selector、`bridge/` typed surface 与共享 component，不得导入其他 feature 的内部文件。`components/ai/` 可以向下依赖 Foundation UI 和共享 Renderer 工具，不得反向导入 `features/`、`workbench/`、`bridge/` 或 `app/`。
 

@@ -310,9 +310,21 @@ pub const WorkspaceOrderEffect = struct {
 pub const RunClock = struct {
     context: ?*anyopaque = null,
     now_ms_fn: ?*const fn (?*anyopaque) ?u64 = null,
+    now_unix_ms_fn: ?*const fn (?*anyopaque) ?u64 = null,
 
     pub fn now(self: RunClock) ?u64 {
         return if (self.now_ms_fn) |now_fn| now_fn(self.context) else null;
+    }
+
+    pub fn nowUnixMs(self: RunClock) ?u64 {
+        const value = if (self.now_unix_ms_fn) |now_fn|
+            now_fn(self.context) orelse return null
+        else
+            return null;
+        return if (value > 0 and value <= task_state.max_finished_at_unix_ms)
+            value
+        else
+            null;
     }
 };
 
@@ -623,6 +635,7 @@ pub const PreparedRun = struct {
             );
             run_record.terminal_observed = true;
             run_record.event_stream_finalized = true;
+            run_record.finished_at_unix_ms = self.effects.run_clock.nowUnixMs();
             self.task.runtime.active_operation = .none;
             self.active = false;
             return err;
@@ -2365,11 +2378,17 @@ pub const Runtime = struct {
         return changed;
     }
 
-    pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Runtime) bool {
+    pub fn finalizeMarkedTerminalRunsAfterEventDrain(
+        self: *Runtime,
+        finished_at_unix_ms: ?u64,
+    ) bool {
         var changed = false;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (!task_state.finalizeMarkedTerminalRunsAfterEventDrain(task)) continue;
+            if (!task_state.finalizeMarkedTerminalRunsAfterEventDrain(
+                task,
+                finished_at_unix_ms,
+            )) continue;
             _ = settleActiveRunTerminal(task);
             task.durable.recent_order = self.takeRecentOrder();
             changed = true;

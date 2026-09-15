@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deriveRunPresentation,
+  formatRunFinishedTime,
   runElapsedSeconds,
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
@@ -21,6 +22,20 @@ test("elapsed time uses the snapshot receipt rather than component mount or even
     runElapsedSeconds("18446744073709551615", 0, 1000),
     18446744073709552n,
   );
+});
+
+test("finished time uses a locale-aware relative label with an absolute value", () => {
+  const finishedAt = new Date(2026, 8, 11, 10, 25).getTime();
+  const now = finishedAt + 4 * 24 * 60 * 60 * 1000;
+  const english = formatRunFinishedTime("en-US", String(finishedAt), now);
+  assert.equal(english.relative, "4 days ago");
+  assert.equal(english.dateTime, new Date(finishedAt).toISOString());
+  assert.ok(english.absolute.includes("2026"));
+  assert.equal(
+    formatRunFinishedTime("zh-CN", String(finishedAt), now).relative,
+    "4天前",
+  );
+  assert.equal(formatRunFinishedTime("en-US", null, now), null);
 });
 
 function run(overrides = {}) {
@@ -44,6 +59,7 @@ function run(overrides = {}) {
       provisionalRedacted: false,
     },
     activity: { kind: "waiting_model" },
+    finishedAtUnixMs: null,
     terminal: null,
     usage: { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" },
     tools: [],
@@ -122,7 +138,7 @@ test("presentation orders Tool evidence and only names one typed running Tool", 
   assert.equal(ambiguous.runningToolName, null);
 });
 
-test("successful final response compresses process evidence without a duplicate notice", () => {
+test("successful final response hides process evidence without a duplicate notice", () => {
   const presentation = deriveRunPresentation(
     run({
       phase: "completed",
@@ -139,8 +155,8 @@ test("successful final response compresses process evidence without a duplicate 
       tools: [tool("read", "1")],
     }),
   );
-  assert.equal(presentation.processVisible, true);
-  assert.equal(presentation.processCanCollapse, true);
+  assert.equal(presentation.processVisible, false);
+  assert.equal(presentation.processCanCollapse, false);
   assert.equal(presentation.showTerminalNotice, false);
 });
 
@@ -174,7 +190,7 @@ test("failure, missing response, and partial response keep truthful terminal tre
   assert.equal(partial.showTerminalNotice, true);
 });
 
-test("technical process stays collapsed by default while activity remains visible", () => {
+test("technical process stays available only while the Run is active", () => {
   const active = deriveRunPresentation(
     run({
       activity: { kind: "executing_tools", inFlight: "1" },
@@ -199,7 +215,8 @@ test("technical process stays collapsed by default while activity remains visibl
   );
   assert.equal(active.processVisible, true);
   assert.equal(active.processCanCollapse, true);
-  assert.equal(terminalPresentation.processVisible, true);
+  assert.equal(terminalPresentation.processVisible, false);
+  assert.equal(terminalPresentation.processCanCollapse, false);
 });
 
 test("Run disclosure remains collapsed unless the user explicitly opens it", () => {

@@ -565,6 +565,7 @@ pub const RunWire = struct {
     commentary_ends: []const u64,
     assistant_output_kind: ?[]const u8,
     assistant_output_start: ?u64,
+    finished_at_unix_ms: ?u64 = null,
     phase: []const u8,
     outcome: ?[]const u8,
     cause: ?[]const u8,
@@ -1094,6 +1095,7 @@ fn projectRun(
         .commentary_ends = run.commentary_ends[0..run.commentary_count],
         .assistant_output_kind = if (run.assistant_output_kind) |kind| @tagName(kind) else null,
         .assistant_output_start = if (run.assistant_output_start) |start| @intCast(start) else null,
+        .finished_at_unix_ms = run.finished_at_unix_ms,
         .phase = @tagName(projection.phase),
         .outcome = if (terminal) |value| @tagName(value.outcome) else null,
         .cause = if (terminal) |value|
@@ -1521,6 +1523,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .commentary_count = wire.commentary_ends.len,
         .assistant_output_kind = assistant_output_kind,
         .assistant_output_start = assistant_output_start,
+        .finished_at_unix_ms = wire.finished_at_unix_ms,
         .active_phase = .queued,
         .tools = tools,
         .file_change_observation = if (wire.file_change_observation) |value|
@@ -2611,6 +2614,11 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             return error.Invalid;
         if ((run.assistant_output_kind == null) != (run.assistant_output_start == null))
             return error.Invalid;
+        if (run.finished_at_unix_ms) |finished_at|
+            if (finished_at == 0 or
+                finished_at > task_state.max_finished_at_unix_ms or
+                !persistedTerminalRunPhase(run.phase))
+                return error.Invalid;
         if (run.assistant_output_kind) |kind|
             if (!oneOf(kind, &.{ "final", "partial" })) return error.Invalid;
         if (run.assistant_output_start) |start_wire| {
@@ -3543,6 +3551,7 @@ test "task store round-trips per-run execution generations across binding adopti
         .commentary_ends = &.{5},
         .assistant_output_kind = "final",
         .assistant_output_start = 5,
+        .finished_at_unix_ms = 1_789_436_313_000,
         .phase = "completed",
         .outcome = "completed",
         .cause = null,
@@ -3628,6 +3637,10 @@ test "task store round-trips per-run execution generations across binding adopti
         decoded.value.tasks[0].runs[0].assistant_output_kind.?,
     );
     try std.testing.expectEqual(@as(?u64, 5), decoded.value.tasks[0].runs[0].assistant_output_start);
+    try std.testing.expectEqual(
+        @as(?u64, 1_789_436_313_000),
+        decoded.value.tasks[0].runs[0].finished_at_unix_ms,
+    );
     try std.testing.expectEqualSlices(
         u64,
         &.{5},

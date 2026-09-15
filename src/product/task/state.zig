@@ -20,6 +20,7 @@ pub const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 pub const tool_product_id_capacity = "tool-".len + 20;
 pub const file_change_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 pub const file_change_product_id_capacity = "change-".len + (20 * 3) + 2;
+pub const max_finished_at_unix_ms: u64 = 8_640_000_000_000_000;
 
 pub const Protocol = models_contract.Protocol;
 
@@ -477,6 +478,10 @@ pub const CheckpointPostprocess = struct {
 pub const RunRecord = struct {
     /// Runtime-only monotonic admission time. Never restored from history.
     admitted_at_ms: ?u64 = null,
+    /// Durable wall-clock observation captured exactly once when Product
+    /// exposes the Run as terminal. Older history and unavailable clocks stay
+    /// null rather than receiving a reconstructed time.
+    finished_at_unix_ms: ?u64 = null,
     id: u64,
     generation: u64,
     execution_generation: u64,
@@ -818,7 +823,10 @@ pub fn markTerminalRunsBeforeEventDrain(task: *Task) bool {
     return changed;
 }
 
-pub fn finalizeMarkedTerminalRunsAfterEventDrain(task: *Task) bool {
+pub fn finalizeMarkedTerminalRunsAfterEventDrain(
+    task: *Task,
+    finished_at_unix_ms: ?u64,
+) bool {
     var changed = false;
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
@@ -842,6 +850,11 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(task: *Task) bool {
         }
         run.output_retry_group = null;
         run.event_stream_finalized = true;
+        if (run.finished_at_unix_ms == null)
+            run.finished_at_unix_ms = if (finished_at_unix_ms) |value|
+                if (value > 0 and value <= max_finished_at_unix_ms) value else null
+            else
+                null;
         run.assistant.committed_len = run.assistant.list.items.len;
         if (run.assistant_output_start == null and run.commentary_count != 0) {
             std.debug.assert(run.commentary_ends.len >= run.commentary_count);
@@ -1637,7 +1650,8 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
         try std.testing.expect(projection.terminal == null);
     }
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
-    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
+    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task, 1_000));
+    try std.testing.expectEqual(@as(?u64, 1_000), run.finished_at_unix_ms);
     try std.testing.expectEqual(@as(usize, 6), run.assistant.committed_len);
     const terminal_projection = runProjectionFacts(run);
     try std.testing.expectEqual(RunPhase.completed, terminal_projection.phase);
@@ -1717,7 +1731,7 @@ test "event drain advances the final commentary boundary with the committed suff
     run.terminal_publication.store(.published, .release);
 
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
-    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
+    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task, null));
     try std.testing.expectEqual(@as(usize, "prefix-tail".len), run.assistant.committed_len);
     try std.testing.expectEqual(
         @as(u64, "prefix-tail".len),
@@ -1774,7 +1788,7 @@ test "event drain fails closed when an output segment remains unresolved" {
     run.terminal_publication.store(.published, .release);
 
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
-    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task));
+    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task, null));
     try std.testing.expectEqual(
         EventProjectionFailure.dependency_contract_failure,
         run.event_projection_failure.?,

@@ -65,6 +65,7 @@ type IconName =
   | "provider"
   | "refresh"
   | "check"
+  | "copy"
   | "clock"
   | "new-task"
   | "skills"
@@ -108,6 +109,7 @@ const icons: Record<IconName, LucideIcon> = {
   provider: Plug,
   refresh: RefreshCw,
   check: Check,
+  copy: Copy,
   clock: Clock3,
   "new-task": SquarePen,
   skills: Puzzle,

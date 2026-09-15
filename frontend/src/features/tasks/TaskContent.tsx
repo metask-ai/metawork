@@ -1,6 +1,12 @@
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import type {
   FileReferenceView,
@@ -19,15 +25,24 @@ import {
   Message,
 } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
+import { CopyButton } from "../../components/ui/CopyButton.tsx";
+import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
 import {
   deriveRunPresentation,
+  formatRunFinishedTime,
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
   type RunProcessDisclosure,
 } from "./run-presentation.ts";
+import {
+  copyCodeText,
+  copyResponseMarkdown,
+  latestCopyableResponseId,
+  responseCopyEligible,
+} from "./response-copy.ts";
 
 type ReadingState = { scrollTop: number; followingLatest: boolean };
 
@@ -206,18 +221,29 @@ export function TaskContent({
     respond: (payload: UiResponsePayload) => void;
   }) => ReactNode;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const viewport = useRef<HTMLDivElement>(null);
   const reading = useRef(new Map<string, ReadingState>());
   const processDisclosure = useRef(new Map<string, RunProcessDisclosure>());
   const [, setDisclosureRevision] = useState(0);
   const previousTaskId = useRef<string | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
+  const [nowUnixMs, setNowUnixMs] = useState(() => Date.now());
+  const hasFinishedTimes =
+    task?.runs.some((run) => run.finishedAtUnixMs !== null) ?? false;
   const currentRun = task
     ? (task.runs.find((run) => run.id === task.currentRunId) ??
       task.runs.at(-1) ??
       null)
     : null;
+  const latestCopyableId = latestCopyableResponseId(task?.runs ?? []);
+
+  useEffect(() => {
+    if (!hasFinishedTimes) return;
+    setNowUnixMs(Date.now());
+    const interval = window.setInterval(() => setNowUnixMs(Date.now()), 60_000);
+    return () => window.clearInterval(interval);
+  }, [hasFinishedTimes, task?.id]);
 
   useLayoutEffect(() => {
     const node = viewport.current;
@@ -285,6 +311,12 @@ export function TaskContent({
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
+        const responseCopyable = responseCopyEligible(run);
+        const finishedTime = formatRunFinishedTime(
+          locale,
+          run.finishedAtUnixMs,
+          nowUnixMs,
+        );
         const references = new Map(
           [...runFileReferenceLinks(run)].map(([text, reference]) => [
             text,
@@ -382,38 +414,38 @@ export function TaskContent({
             )}
             {presentation.responseVisible && (
               <Message role="assistant">
-                <Markdown className="agent-response" references={references}>
-                  {run.output.response}
-                </Markdown>
-                {run.output.redacted && (
-                  <p className="projection-note">
-                    {t("privacy.sensitive_hidden")}
-                  </p>
-                )}
+                <div className="agent-response-surface">
+                  <Markdown
+                    className="agent-response"
+                    references={references}
+                    codeCopy={
+                      responseCopyable
+                        ? {
+                            label: t("copy.code"),
+                            copiedLabel: t("copy.copied"),
+                            failedLabel: t("copy.failed"),
+                            onCopy: copyCodeText,
+                          }
+                        : undefined
+                    }
+                  >
+                    {run.output.response}
+                  </Markdown>
+                  {run.output.redacted && (
+                    <p className="projection-note">
+                      {t("privacy.sensitive_hidden")}
+                    </p>
+                  )}
+                </div>
               </Message>
             )}
-            {!presentation.active && (
-              <>
-                {fileChangesEnabled && run.fileChanges && (
-                  <RunFileChangesSummary
-                    fileChanges={run.fileChanges}
-                    onReview={(opener) =>
-                      onReviewFileChanges(task.id, run.id, opener)
-                    }
-                  />
-                )}
-                <RunProcess
-                  presentation={presentation}
-                  expanded={disclosure.expanded}
-                  onExpandedChange={setProcessExpanded}
-                  onOpenTool={(tool: ToolView, opener) =>
-                    onOpenTool(run.id, tool.id, opener)
-                  }
-                  onPreviewFile={(reference, opener) =>
-                    onPreviewFile(task.id, run.id, reference, opener)
-                  }
-                />
-              </>
+            {!presentation.active && fileChangesEnabled && run.fileChanges && (
+              <RunFileChangesSummary
+                fileChanges={run.fileChanges}
+                onReview={(opener) =>
+                  onReviewFileChanges(task.id, run.id, opener)
+                }
+              />
             )}
             {presentation.showTerminalNotice && terminal && (
               <Activity
@@ -483,6 +515,39 @@ export function TaskContent({
                   ) : undefined
                 }
               />
+            )}
+            {responseCopyable && (
+              <div className="response-copy-actions">
+                <CopyButton
+                  className="response-copy-action"
+                  data-latest={run.id === latestCopyableId}
+                  copyLabel={t("copy.response")}
+                  copiedLabel={t("copy.copied")}
+                  failedLabel={t("copy.failed")}
+                  onCopy={() => copyResponseMarkdown(run.output.response)}
+                />
+                {finishedTime && (
+                  <Tooltip.Root>
+                    <Tooltip.Trigger
+                      render={
+                        <time
+                          className="response-finished-time"
+                          dateTime={finishedTime.dateTime}
+                          aria-label={finishedTime.absolute}
+                          tabIndex={0}
+                        />
+                      }
+                    >
+                      {finishedTime.relative}
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Positioner side="top">
+                        <Tooltip.Popup>{finishedTime.absolute}</Tooltip.Popup>
+                      </Tooltip.Positioner>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                )}
+              </div>
             )}
           </section>
         );

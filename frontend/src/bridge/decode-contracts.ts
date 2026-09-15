@@ -1887,6 +1887,7 @@ function decodeBashPresentation(
 function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
     "elapsedMs",
+    "finishedAtUnixMs",
     "id",
     "phase",
     "permissionProfile",
@@ -1998,9 +1999,25 @@ function decodeRun(value: unknown, path: string): RunView {
       (elapsedMs.length === 20 && elapsedMs > "18446744073709551615"))
   )
     fail(`${path}.elapsedMs`, "expected u64 elapsed milliseconds");
+  const finishedAtUnixMs =
+    item.finishedAtUnixMs === null
+      ? null
+      : wireId(item.finishedAtUnixMs, `${path}.finishedAtUnixMs`);
+  if (
+    finishedAtUnixMs !== null &&
+    (finishedAtUnixMs === "0" ||
+      finishedAtUnixMs.length > 16 ||
+      (finishedAtUnixMs.length === 16 && finishedAtUnixMs > "8640000000000000"))
+  )
+    fail(
+      `${path}.finishedAtUnixMs`,
+      "expected a displayable non-zero Unix millisecond timestamp",
+    );
   const isTerminal = terminal !== null;
   if (isTerminal && elapsedMs !== null)
     fail(path, "terminal Run cannot expose active elapsed time");
+  if (!isTerminal && finishedAtUnixMs !== null)
+    fail(path, "active Run cannot expose a finished time");
   if (isTerminal !== (activity === null))
     fail(path, "Run phase and activity must describe the same terminal state");
   if (phase === "queued" && activity?.kind !== "queued")
@@ -2038,6 +2055,7 @@ function decodeRun(value: unknown, path: string): RunView {
     output,
     activity,
     elapsedMs,
+    finishedAtUnixMs,
     terminal,
     usage: {
       input: wireId(usage.input, `${path}.usage.input`),
