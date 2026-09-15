@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Button, type ButtonProps } from "./button.tsx";
 import { Icon } from "./Icon.tsx";
+import { Tooltip } from "./tooltip.tsx";
 
 type CopyState = "idle" | "copying" | "copied" | "failed";
 
@@ -59,22 +60,40 @@ export function CopyButton({
         : copyLabel;
 
   return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="sm"
-      data-copy-state={state}
-      aria-busy={state === "copying" || undefined}
-      disabled={disabled || state === "copying"}
-      onClick={copy}
-      {...props}
-    >
-      <Icon
-        name={
-          state === "copied" ? "check" : state === "failed" ? "warning" : "copy"
+    <Tooltip.Root>
+      <Tooltip.Trigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            data-copy-state={state}
+            aria-label={label}
+            aria-busy={state === "copying" || undefined}
+            disabled={disabled || state === "copying"}
+            onClick={copy}
+            {...props}
+          />
         }
-      />
-      <span aria-live="polite">{label}</span>
-    </Button>
+      >
+        <Icon
+          name={
+            state === "copied"
+              ? "check"
+              : state === "failed"
+                ? "warning"
+                : "copy"
+          }
+        />
+        <span className="sr-only" aria-live="polite">
+          {label}
+        </span>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Positioner side="top">
+          <Tooltip.Popup>{label}</Tooltip.Popup>
+        </Tooltip.Positioner>
+      </Tooltip.Portal>
+    </Tooltip.Root>
   );
 }

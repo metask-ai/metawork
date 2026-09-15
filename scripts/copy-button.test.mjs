@@ -19,6 +19,8 @@ Object.assign(globalThis, {
   HTMLButtonElement: dom.window.HTMLButtonElement,
   MutationObserver: dom.window.MutationObserver,
   getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+  requestAnimationFrame: dom.window.requestAnimationFrame.bind(dom.window),
+  cancelAnimationFrame: dom.window.cancelAnimationFrame.bind(dom.window),
 });
 Object.defineProperty(globalThis, "navigator", {
   configurable: true,
@@ -62,14 +64,32 @@ test("copy feedback reports actual success and restores the action", async () =>
     calls += 1;
   });
 
-  await user.click(screen.getByRole("button", { name: "Copy response" }));
+  const button = screen.getByRole("button", { name: "Copy response" });
+  assert.equal(button.title, "");
+  assert.equal(button.querySelector("span").className, "sr-only");
+  await user.click(button);
   assert.equal(calls, 1);
   assert.equal(screen.getByRole("button").dataset.copyState, "copied");
+  assert.equal(screen.getByRole("button").getAttribute("aria-label"), "Copied");
   assert.equal(screen.getByRole("button").textContent, "Copied");
 
   await delay(1250);
   assert.equal(screen.getByRole("button").dataset.copyState, "idle");
   assert.equal(screen.getByRole("button").textContent, "Copy response");
+});
+
+test("icon-only copy exposes the product tooltip", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  renderCopyButton(async () => {});
+
+  const button = screen.getByRole("button", { name: "Copy response" });
+  assert.equal(button.hasAttribute("title"), false);
+  await user.hover(button);
+  await delay(650);
+
+  const tooltip = document.querySelector("[data-base-ui-portal]");
+  assert.equal(tooltip.textContent, "Copy response");
+  assert.ok(tooltip.querySelector("[data-open]"));
 });
 
 test("copy feedback exposes rejection instead of fake success", async () => {
@@ -80,6 +100,10 @@ test("copy feedback exposes rejection instead of fake success", async () => {
 
   await user.click(screen.getByRole("button", { name: "Copy response" }));
   assert.equal(screen.getByRole("button").dataset.copyState, "failed");
+  assert.equal(
+    screen.getByRole("button").getAttribute("aria-label"),
+    "Copy failed",
+  );
   assert.equal(screen.getByRole("button").textContent, "Copy failed");
 });
 

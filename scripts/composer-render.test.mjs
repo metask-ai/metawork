@@ -328,8 +328,9 @@ test("terminal responses expose response and code copy without copying process U
     "Answer\n\n```ts\nconst answer = 42;\n```",
   );
   assert.match(markup, /data-latest="true"/);
-  assert.match(markup, />Copy response<\/span>/);
-  assert.match(markup, />Copy code<\/span>/);
+  assert.match(markup, /aria-label="Copy response"/);
+  assert.match(markup, /aria-label="Copy code"/);
+  assert.equal((markup.match(/class="sr-only"/g) ?? []).length, 2);
   assert.equal((markup.match(/data-copy-state="idle"/g) ?? []).length, 2);
 });
 

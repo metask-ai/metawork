@@ -2213,6 +2213,10 @@ summary::-webkit-details-marker {
 }
 
 .response-copy-action {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 14px;
   color: var(--ui-content-muted);
   opacity: 0;
   pointer-events: none;
@@ -2227,6 +2231,10 @@ summary::-webkit-details-marker {
 .agent-response-surface:focus-within .response-copy-action {
   opacity: 1;
   pointer-events: auto;
+}
+
+.response-copy-action[data-copy-state="failed"] {
+  color: var(--ui-content-error);
 }
 
 .ai-message {
@@ -6896,6 +6904,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   z-index: 1;
   top: 5px;
   right: 5px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 14px;
   color: color-mix(in srgb, var(--ui-content-on-primary) 82%, transparent);
   background: color-mix(in srgb, var(--ui-content-primary) 82%, transparent);
   opacity: 0;
