@@ -54,7 +54,7 @@
 
 - 当前请求未明确授权时，不得破坏 public API、持久化数据或格式、外部集成合同及其他稳定外部格式；明确授权的迁移仍必须同步收口实现、验证和对应真源。
 - 必须遵守对应架构真源定义的 owner 与依赖方向，不得通过反向 import、通用 facade、直接系统 effect 或平行协议绕过 owner。
-- credential 和 secret 默认只能存在于对应 Host owner 与执行所需的有界 owned copy。唯一例外是用户在本地桌面客户端显式填写的 Custom Provider API Key：它可以在 Renderer 表单和 `create`/`replaceCredential` typed Bridge command 中短暂存在，Bridge 不得记录、缓存或投影，Models 必须立即交给系统 credential storage；任何 secret 仍不得进入日志、event、snapshot、产品历史或持久化 metadata。Account、OAuth、MCP 与其他 secret 不得借此建立 Renderer/Bridge 数据路径。
+- credential 和 secret 默认只能存在于对应 Host owner 与执行所需的有界 owned copy。例外仅限用户在本地桌面客户端显式填写的 Custom Provider API Key 与 MCP static/client secret：它们可以在 Renderer password 表单和各自专用 typed Bridge command 中短暂存在，Bridge 不得记录、缓存或投影，对应 Host owner 必须交给系统 credential storage；输入生命周期由对应产品合同定义；任何 secret 仍不得进入日志、event、snapshot、产品历史或持久化 metadata。Account、OAuth 自动取得的 token/code/PKCE 与其他 secret 不得借此建立 Renderer/Bridge 数据路径。
 - 外部依赖只通过架构批准的 canonical 输入消费；不得使用源码复制、可变版本或静默 fallback 绕过依赖验证。
 - machine guard、allowlist 与 fail-closed verifier 的拒绝是强制结果。除非用户明确请求对应政策变化，不得修改或弱化它们，也不得用等价重试、替代路径或跳过验证绕过拒绝；required evidence 或 dependency 缺失时必须明确失败。
 

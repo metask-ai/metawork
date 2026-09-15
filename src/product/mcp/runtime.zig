@@ -26,6 +26,7 @@ pub const Error = agent.Error || std.mem.Allocator.Error || error{
 pub const Capabilities = struct {
     management: bool,
     host: state_module.McpHostCapabilities,
+    secret_max_bytes: usize = 0,
 };
 pub const ViewError = view.Error;
 pub const TextProjection = view.TextProjection;
@@ -216,6 +217,10 @@ pub const Runtime = struct {
         return .{
             .management = management,
             .host = if (management) self.state.host_capabilities else .{},
+            .secret_max_bytes = if (management)
+                self.state.management.?.limits.max_credential_secret_bytes
+            else
+                0,
         };
     }
 
@@ -351,13 +356,12 @@ pub const Runtime = struct {
         return writer.buffered();
     }
 
-    pub fn writeSecretCapturePrompt(
+    pub fn validateSecretCapture(
         self: *const Runtime,
         expected_generation: u64,
         server_id: []const u8,
         target: state_module.McpSecretCaptureTarget,
-        output: []u8,
-    ) ![]const u8 {
+    ) !void {
         if (self.refresh_job != null or policy.serverMutationBusy(&self.state, server_id))
             return error.McpManagementUnavailable;
         const management = if (self.state.management) |*value| value else return error.McpManagementUnavailable;
@@ -371,8 +375,6 @@ pub const Runtime = struct {
         if (server.connection_approval == null or
             configuration.serverProblem(server, management.limits) != null)
             return error.McpManagementUnavailable;
-        var writer = std.Io.Writer.fixed(output);
-        try writeQuotedField(&writer, "MCP server", server.display_name);
         switch (target) {
             .stdio_environment => |requested_name| {
                 if (!std.mem.eql(u8, server.auth.kind, "static") or
@@ -380,8 +382,7 @@ pub const Runtime = struct {
                     return error.McpManagementUnavailable;
                 for (server.transport.environment) |slot| {
                     if (!std.ascii.eqlIgnoreCase(slot.name, requested_name)) continue;
-                    try writeQuotedField(&writer, "Environment variable", slot.name);
-                    return writer.buffered();
+                    return;
                 }
                 return error.McpManagementUnavailable;
             },
@@ -391,8 +392,7 @@ pub const Runtime = struct {
                     return error.McpManagementUnavailable;
                 for (server.transport.headers) |slot| {
                     if (!std.ascii.eqlIgnoreCase(slot.name, requested_name)) continue;
-                    try writeQuotedField(&writer, "HTTP header", slot.name);
-                    return writer.buffered();
+                    return;
                 }
                 return error.McpManagementUnavailable;
             },
@@ -402,14 +402,8 @@ pub const Runtime = struct {
                 const method = oauth.registration.token_endpoint_auth_method orelse
                     return error.McpManagementUnavailable;
                 if (!std.mem.eql(u8, oauth.registration.kind, "pre_registered") or
-                    std.mem.eql(u8, method, "none"))
+                    std.mem.eql(u8, method, "none") or oauth.registration.client_id == null)
                     return error.McpManagementUnavailable;
-                try writeQuotedField(
-                    &writer,
-                    "OAuth client ID",
-                    oauth.registration.client_id orelse return error.McpManagementUnavailable,
-                );
-                return writer.buffered();
             },
         }
     }
@@ -1719,6 +1713,78 @@ const test_limits: configuration.Limits = .{
 fn fillTestMcpIdentity(_: ?*anyopaque, bytes: *[16]u8) bool {
     bytes.* = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     return true;
+}
+
+test "Product MCP secret validation preserves target transport and authority checks" {
+    for ([_]bool{ true, false }) |stdio| {
+        var limits = test_limits;
+        limits.max_credential_secret_bytes = if (stdio) 4096 else 8192;
+        var slots = [_]configuration.SecretSlotWire{.{ .name = "TOKEN", .credential_ref = null }};
+        var servers = [_]configuration.ServerWire{.{
+            .id = "fixture",
+            .namespace = "fixture",
+            .display_name = "Fixture",
+            .enabled = false,
+            .negotiation = "automatic",
+            .timeout_ms = 1000,
+            .transport = if (stdio)
+                .{ .kind = "stdio", .command = "fixture-mcp", .environment = &slots }
+            else
+                .{ .kind = "streamable_http", .url = "https://mcp.example.test/rpc", .headers = &slots },
+            .auth = .{ .kind = "static", .oauth = null },
+            .connection_approval = null,
+            .tools = &.{},
+        }};
+        const fingerprint = configuration.connectionFingerprint(servers[0]);
+        servers[0].connection_approval = .{ .fingerprint = &fingerprint };
+        var harness = TestHarness{};
+        var runtime = Runtime.init(std.testing.allocator, harness.ports(), .{
+            .preparation = .{ .allocator = std.testing.allocator, .state = .empty },
+            .activation = null,
+            .activation_failed = false,
+            .management = try configuration.ManagementPort.init(std.testing.allocator, .{
+                .schema_version = configuration.schema_version,
+                .generation = 1,
+                .oauth_operation = null,
+                .servers = &servers,
+            }, .{
+                .persistence = .{ .available = true },
+                .credentials = .{ .available = true },
+                .limits = limits,
+            }),
+            .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
+            .host_capabilities = .{ .secret_capture = true },
+        });
+        defer runtime.deinit();
+        try std.testing.expect(!runtime.capabilities().host.secret_capture);
+        try std.testing.expectEqual(0, runtime.capabilities().secret_max_bytes);
+        try std.testing.expect(runtime.syncInitialHealth());
+        try std.testing.expect(runtime.capabilities().host.secret_capture);
+        try std.testing.expectEqual(limits.max_credential_secret_bytes, runtime.capabilities().secret_max_bytes);
+
+        const target: McpSecretCaptureTarget = if (stdio)
+            .{ .stdio_environment = "token" }
+        else
+            .{ .http_header = "token" };
+        const mismatched: McpSecretCaptureTarget = if (stdio)
+            .{ .http_header = "TOKEN" }
+        else
+            .{ .stdio_environment = "TOKEN" };
+        try runtime.validateSecretCapture(1, "fixture", target);
+        try std.testing.expectError(error.McpManagementUnavailable, runtime.validateSecretCapture(1, "fixture", mismatched));
+        try std.testing.expectError(error.McpManagementUnavailable, runtime.validateSecretCapture(1, "fixture", .oauth_client_secret));
+        try std.testing.expectError(error.McpManagementUnavailable, runtime.validateSecretCapture(2, "fixture", target));
+        try std.testing.expectError(error.McpManagementUnavailable, runtime.validateSecretCapture(1, "missing", target));
+        const missing: McpSecretCaptureTarget = if (stdio)
+            .{ .stdio_environment = "MISSING" }
+        else
+            .{ .http_header = "MISSING" };
+        try std.testing.expectError(error.McpManagementUnavailable, runtime.validateSecretCapture(1, "fixture", missing));
+
+        const desired = runtime.state.management.?.desiredRegistry().?;
+        desired.servers[0].connection_approval = null;
+        try std.testing.expectError(error.McpManagementUnavailable, runtime.validateSecretCapture(1, "fixture", target));
+    }
 }
 
 test "Product MCP Runtime retains refresh requested during apply and starts it on settlement" {

@@ -1,6 +1,6 @@
 //! Application-owned MCP management effects. Product Control remains the sole
 //! product-state owner; this coordinator sequences native confirmation,
-//! secure capture, browser, loopback, bounded network workers and isolated
+//! credential submission, browser, loopback, bounded network workers and isolated
 //! connection-test Runtimes around the Product Control transaction seams.
 
 const std = @import("std");
@@ -18,15 +18,8 @@ const app_platform = @import("platform.zig");
 
 const connection_approval_details_bytes: usize = mcp_configuration.max_store_bytes * 6 + 4096;
 const oauth_consent_details_bytes: usize = mcp_oauth.Limits.metadata_body_bytes * 6 + 4096;
-const secret_capture_prompt_bytes: usize = 32 * 1024;
 
 pub const Confirmation = enum { approved, cancelled, unavailable };
-
-pub const CaptureResult = union(enum) {
-    captured: usize,
-    cancelled,
-    unavailable,
-};
 
 pub const Host = struct {
     context: *anyopaque,
@@ -34,7 +27,6 @@ pub const Host = struct {
     capture_available: bool = false,
     oauth_available: bool = false,
     confirm_fn: *const fn (*anyopaque, []const u8, []const u8, []const u8) Confirmation,
-    capture_fn: *const fn (*anyopaque, []const u8, []const u8, []u8) CaptureResult,
     open_url_fn: *const fn (*anyopaque, []const u8) bool,
     now_unix_ms_fn: *const fn (*anyopaque) ?u64,
     notify_fn: *const fn (*anyopaque) void,
@@ -46,15 +38,6 @@ pub const Host = struct {
         approval_label: []const u8,
     ) Confirmation {
         return self.confirm_fn(self.context, title, details, approval_label);
-    }
-
-    fn capture(
-        self: Host,
-        title: []const u8,
-        prompt: []const u8,
-        output: []u8,
-    ) CaptureResult {
-        return self.capture_fn(self.context, title, prompt, output);
     }
 
     fn openUrl(self: Host, url: []const u8) bool {
@@ -74,11 +57,10 @@ pub fn platformHost(platform: *app_platform.Adapter) Host {
     return .{
         .context = platform,
         .confirmation_available = platform.supportsMcpConnectionApproval(),
-        .capture_available = builtin.os.tag == .windows and
-            platform.supportsSecureInput(),
+        // Credential entry is provided by the Renderer on every desktop platform.
+        .capture_available = true,
         .oauth_available = platform.supportsMcpExternalAuthorization(),
         .confirm_fn = platformConfirm,
-        .capture_fn = platformCapture,
         .open_url_fn = platformOpenUrl,
         .now_unix_ms_fn = platformNowUnixMs,
         .notify_fn = platformNotify,
@@ -95,30 +77,6 @@ fn platformConfirm(
     const result = platform.confirmMcpDetails(title, details, approval_label) orelse
         return .unavailable;
     return if (result) .approved else .cancelled;
-}
-
-fn platformCapture(
-    context: *anyopaque,
-    title: []const u8,
-    prompt: []const u8,
-    output: []u8,
-) CaptureResult {
-    const platform: *app_platform.Adapter = @ptrCast(@alignCast(context));
-    const result = platform.captureSecureInput(
-        title,
-        prompt,
-        "Save",
-        "Cancel",
-        output,
-    ) orelse return .unavailable;
-    return mapPlatformCapture(result);
-}
-
-fn mapPlatformCapture(result: app_platform.SecureInputResult) CaptureResult {
-    return switch (result) {
-        .submitted => |length| .{ .captured = length },
-        .cancelled => .cancelled,
-    };
 }
 
 fn platformOpenUrl(context: *anyopaque, url: []const u8) bool {
@@ -1079,6 +1037,7 @@ pub const Coordinator = struct {
         expected_generation: u64,
         server_id: []const u8,
         slot: SecretSlot,
+        value: []const u8,
     ) !Outcome {
         if (self.stopping or self.configuration_apply_job != null or
             self.connection_test_job != null or self.flow != null) return .rejected;
@@ -1087,26 +1046,16 @@ pub const Coordinator = struct {
             return .rejected;
         if (inspection.desired_generation != expected_generation)
             return .stale_generation;
-        var prompt_storage: [secret_capture_prompt_bytes]u8 = undefined;
-        const prompt = self.control.writeMcpSecretCapturePrompt(
+        self.control.validateMcpSecretCapture(
             expected_generation,
             server_id,
             slot,
-            &prompt_storage,
         ) catch return .rejected;
         var secret_storage: [mcp_platform.max_credential_secret_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &secret_storage);
-        const captured = switch (self.host.capture(
-            "Set MCP secret",
-            prompt,
-            &secret_storage,
-        )) {
-            .captured => |length| length,
-            .cancelled => return .cancelled,
-            .unavailable => return .capability_unavailable,
-        };
-        if (captured == 0 or captured > secret_storage.len) return .rejected;
-        const secret = secret_storage[0..captured];
+        if (value.len == 0 or value.len > secret_storage.len) return .rejected;
+        const secret = secret_storage[0..value.len];
+        @memcpy(secret, value);
         return switch (slot) {
             .stdio_environment => |name| mapManagementOutcome(
                 try self.control.captureMcpStaticSecret(
@@ -1713,17 +1662,6 @@ test "MCP durable request cleanup distinguishes pre-send cancellation" {
     try std.testing.expect(durableFailureRequiresRecovery(.outcome_unknown));
 }
 
-test "MCP secure input preserves submit and cancel outcomes" {
-    try std.testing.expectEqualDeep(
-        CaptureResult{ .captured = 17 },
-        mapPlatformCapture(.{ .submitted = 17 }),
-    );
-    try std.testing.expectEqualDeep(
-        CaptureResult.cancelled,
-        mapPlatformCapture(.cancelled),
-    );
-}
-
 test "MCP configuration apply publishes failed when preparation cannot start" {
     const Effects = struct {
         fn commit(_: ?*anyopaque, _: []const u8) mcp_configuration.PersistenceEffect {
@@ -1748,9 +1686,6 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
     };
     const TestHost = struct {
         fn confirm(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8) Confirmation {
-            return .unavailable;
-        }
-        fn capture(_: *anyopaque, _: []const u8, _: []const u8, _: []u8) CaptureResult {
             return .unavailable;
         }
         fn open(_: *anyopaque, _: []const u8) bool {
@@ -1843,7 +1778,6 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
         .{
             .context = &host_context,
             .confirm_fn = TestHost.confirm,
-            .capture_fn = TestHost.capture,
             .open_url_fn = TestHost.open,
             .now_unix_ms_fn = TestHost.now,
             .notify_fn = TestHost.notify,
@@ -1963,9 +1897,6 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
             _ = self.confirmations.fetchAdd(1, .acq_rel);
             return .approved;
         }
-        fn capture(_: *anyopaque, _: []const u8, _: []const u8, _: []u8) CaptureResult {
-            return .unavailable;
-        }
         fn open(_: *anyopaque, _: []const u8) bool {
             return true;
         }
@@ -2068,7 +1999,6 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
             .confirmation_available = true,
             .oauth_available = true,
             .confirm_fn = FakeHost.confirm,
-            .capture_fn = FakeHost.capture,
             .open_url_fn = FakeHost.open,
             .now_unix_ms_fn = FakeHost.now,
             .notify_fn = FakeHost.notify,

@@ -19,6 +19,7 @@ Object.assign(globalThis, {
   DocumentFragment: dom.window.DocumentFragment,
   Element: dom.window.Element,
   Event: dom.window.Event,
+  FormData: dom.window.FormData,
   FocusEvent: dom.window.FocusEvent,
   HTMLElement: dom.window.HTMLElement,
   HTMLInputElement: dom.window.HTMLInputElement,
@@ -181,6 +182,7 @@ function pageElement(management, query = "", overrides = {}) {
       capabilities: {
         connectionApproval: true,
         secretCapture: true,
+        secretMaxBytes: 2560,
         oauth: true,
       },
       query,
@@ -1053,7 +1055,7 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
   assert.equal(JSON.stringify(calls).includes("clientSecret"), false);
 });
 
-test("MCP gates OAuth client secret recovery and configuration on secure capture", async () => {
+test("MCP gates OAuth client secret recovery and configuration on credential submission", async () => {
   const oauthAwaitingSecret = {
     ...servers[0],
     connection: {
@@ -1083,6 +1085,7 @@ test("MCP gates OAuth client secret recovery and configuration on secure capture
         capabilities: {
           connectionApproval: true,
           secretCapture: false,
+          secretMaxBytes: 2560,
           oauth: true,
         },
       },
@@ -1093,7 +1096,7 @@ test("MCP gates OAuth client secret recovery and configuration on secure capture
   const detail = screen.getByRole("dialog", { name: "GitHub" });
   assert.ok(
     within(detail).getAllByText(
-      "Secure secret capture is unavailable on this device.",
+      "Credential submission is currently unavailable.",
     ).length >= 1,
   );
   assert.equal(
@@ -1122,7 +1125,7 @@ test("MCP gates OAuth client secret recovery and configuration on secure capture
   assert.equal(post.getAttribute("aria-disabled"), "true");
   assert.ok(
     within(form).getByText(
-      "Secret-based methods require secure secret capture. An existing selection can be preserved.",
+      "Credential submission is temporarily unavailable. An existing selection can be preserved.",
     ),
   );
 });
@@ -1504,7 +1507,206 @@ test("MCP freezes unconfirmed desired state and offers in-place apply recovery",
   assert.ok(screen.getByRole("button", { name: "Retry connection" }));
 });
 
-test("MCP Renderer source cannot access secrets or native APIs", async () => {
+test("MCP password input submits once and clears drafts on cancel, byte limit, revision and close", async () => {
+  const server = {
+    ...servers[2],
+    authMode: "static",
+    connection: {
+      ...servers[2].connection,
+      environment: [{ name: "TOKEN", status: "set" }],
+    },
+  };
+  const management = {
+    availability: "ready",
+    managementHealth: "ready",
+    operation: "idle",
+    desiredGeneration: "7",
+    runtimeAlignment: "current",
+    redacted: false,
+    servers: [server],
+  };
+  const calls = [];
+  let complete;
+  const overrides = {
+    onCaptureSecret: (...args) => {
+      calls.push(args);
+      return new Promise((resolve) => {
+        complete = resolve;
+      });
+    },
+  };
+  const view = render(pageElement(management, "", overrides));
+  const open = () =>
+    fireEvent.click(screen.getByRole("button", { name: /Filesystem/ }));
+  const field = () => screen.getByLabelText("TOKEN");
+  open();
+  assert.equal(field().type, "password");
+  assert.equal(field().value, "");
+  fireEvent.change(field(), { target: { value: " opaque Ω value " } });
+  fireEvent.submit(field().closest("form"));
+  fireEvent.submit(field().closest("form"));
+  assert.deepEqual(calls, [
+    [
+      "7",
+      server.id,
+      { kind: "stdio_environment", name: "TOKEN" },
+      " opaque Ω value ",
+    ],
+  ]);
+  assert.equal(field().value, "");
+  complete({ outcome: "rejected" });
+  await waitFor(() => assert.equal(field().disabled, false));
+  assert.equal(field().value, "");
+
+  fireEvent.change(field(), { target: { value: "cancelled-draft" } });
+  fireEvent.click(
+    within(field().closest("form")).getByRole("button", { name: "Cancel" }),
+  );
+  assert.equal(field().value, "");
+  fireEvent.change(field(), { target: { value: "x".repeat(2561) } });
+  assert.equal(field().validity.customError, true);
+  view.rerender(
+    pageElement(management, "", {
+      ...overrides,
+      capabilities: {
+        connectionApproval: true,
+        secretCapture: true,
+        secretMaxBytes: 1024,
+        oauth: true,
+      },
+    }),
+  );
+  assert.equal(field().value, "");
+  assert.equal(field().validity.customError, false);
+  fireEvent.change(field(), { target: { value: "x".repeat(1025) } });
+  fireEvent.submit(field().closest("form"));
+  assert.equal(field().validity.customError, true);
+  assert.equal(calls.length, 1);
+  fireEvent.change(field(), { target: { value: "stale-draft" } });
+  view.rerender(
+    pageElement({ ...management, desiredGeneration: "8" }, "", overrides),
+  );
+  assert.equal(field().value, "");
+
+  fireEvent.change(field(), { target: { value: "closed-draft" } });
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }),
+  );
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  open();
+  assert.equal(field().value, "");
+
+  fireEvent.change(field(), { target: { value: "unavailable-draft" } });
+  view.rerender(
+    pageElement({ ...management, desiredGeneration: "8" }, "", {
+      ...overrides,
+      disabled: true,
+    }),
+  );
+  await waitFor(() => assert.equal(field().value, ""));
+  assert.equal(field().disabled, true);
+  assert.equal(calls.length, 1);
+});
+
+test("MCP HTTP and OAuth credentials use the same empty password form", async () => {
+  for (const [oauth, maxBytes] of [
+    [false, 2560],
+    [true, 4096],
+  ]) {
+    const server = {
+      ...servers[0],
+      authMode: oauth ? "oauth" : "static",
+      connection: {
+        ...servers[0].connection,
+        headers: oauth ? [] : [{ name: "Authorization", status: "missing" }],
+        registrationKind: oauth ? "pre_registered" : null,
+        clientId: oauth ? "client-1" : null,
+        tokenEndpointAuthMethod: oauth ? "client_secret_basic" : null,
+        clientSecretStatus: oauth ? "missing" : "not_required",
+      },
+      authorizationStatus: oauth
+        ? "missing_oauth_client_secret"
+        : "missing_static_secret",
+      runtimeStatus: "needs_authentication",
+      newTaskAccess: "unavailable",
+    };
+    const calls = [];
+    render(
+      pageElement(
+        {
+          availability: "degraded",
+          managementHealth: "ready",
+          operation: "idle",
+          desiredGeneration: "7",
+          runtimeAlignment: "current",
+          redacted: false,
+          servers: [server],
+        },
+        "",
+        {
+          capabilities: {
+            connectionApproval: true,
+            secretCapture: true,
+            secretMaxBytes: maxBytes,
+            oauth: true,
+          },
+          onCaptureSecret: async (...args) => {
+            calls.push(args);
+            return { outcome: "saved" };
+          },
+        },
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /GitHub/ }));
+    const input = screen.getByLabelText(
+      oauth ? "OAuth client secret" : "Authorization",
+    );
+    assert.equal(input.type, "password");
+    assert.equal(input.value, "");
+    for (const value of [
+      "x".repeat(maxBytes + 1),
+      "界".repeat(Math.floor(maxBytes / 3) + 1),
+      "🔑".repeat(maxBytes / 4 + 1),
+    ]) {
+      fireEvent.change(input, { target: { value } });
+      assert.equal(input.validity.customError, true);
+      assert.equal(
+        input.validationMessage,
+        `The credential exceeds ${maxBytes.toLocaleString("en-US")} UTF-8 bytes. Shorten it and try again.`,
+      );
+      fireEvent.submit(input.closest("form"));
+      assert.equal(calls.length, 0);
+      assert.equal(input.value, value);
+    }
+    fireEvent.click(
+      within(input.closest("form")).getByRole("button", { name: "Cancel" }),
+    );
+    assert.equal(input.value, "");
+    assert.equal(input.validity.customError, false);
+    const cjkBoundary =
+      "界".repeat(Math.floor(maxBytes / 3)) + "x".repeat(maxBytes % 3);
+    fireEvent.change(input, { target: { value: cjkBoundary } });
+    assert.equal(input.checkValidity(), true);
+    // Accept the Host-provided bound for both ASCII and supplementary Unicode.
+    const secret = oauth ? "🔑".repeat(maxBytes / 4) : "x".repeat(maxBytes);
+    fireEvent.change(input, { target: { value: secret } });
+    assert.equal(input.checkValidity(), true);
+    fireEvent.submit(input.closest("form"));
+    await waitFor(() => assert.equal(calls.length, 1));
+    assert.deepEqual(calls[0], [
+      "7",
+      server.id,
+      oauth
+        ? { kind: "oauth_client_secret" }
+        : { kind: "http_header", name: "Authorization" },
+      secret,
+    ]);
+    assert.equal(input.value, "");
+    cleanup();
+  }
+});
+
+test("MCP Renderer does not persist credentials or access OAuth tokens or native APIs", async () => {
   const page = await readFile(
     join(process.cwd(), "frontend/src/features/mcp/McpPage.tsx"),
     "utf8",

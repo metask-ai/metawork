@@ -3460,6 +3460,7 @@ export default function App() {
           capabilities={{
             connectionApproval: snapshot.capabilities.mcpConnectionApproval,
             secretCapture: snapshot.capabilities.mcpSecretCapture,
+            secretMaxBytes: snapshot.capabilities.mcpSecretMaxBytes,
             oauth: snapshot.capabilities.mcpOAuth,
           }}
           query={mcpQuery}
@@ -3495,9 +3496,9 @@ export default function App() {
               client.approveMcpConnection(generation, serverId),
             )
           }
-          onCaptureSecret={(generation, serverId, slot) =>
+          onCaptureSecret={(generation, serverId, slot, secret) =>
             commitMcpMutation(() =>
-              client.captureMcpSecret(generation, serverId, slot),
+              client.captureMcpSecret(generation, serverId, slot, secret),
             )
           }
           onAuthorize={(generation, serverId) =>

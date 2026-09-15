@@ -5615,6 +5615,21 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-panel);
 }
 
+.mcp-secret-form {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.mcp-secret-form footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.mcp-secret-form input,
+.mcp-secret-form button {
+  min-height: 44px;
+}
 .mcp-secret-slots li + li {
   border-top: 1px solid var(--ui-border);
 }
