@@ -1,14 +1,13 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 
-import type {
-  FileReferenceView,
-  RunActivity,
-  ToolView,
-} from "../../bridge/contracts.ts";
+import type { RunActivity, ToolView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
 import { runElapsedSeconds, type RunPresentation } from "./run-presentation.ts";
+import { ToolDetailView } from "./ToolDetailView.tsx";
+
+const emptyExpandedToolIds: ReadonlySet<string> = new Set();
 
 function toolActivityMessage(name: string | null): MessageId {
   switch (name) {
@@ -97,6 +96,29 @@ function toolStateMessage(tool: ToolView): MessageId {
   }
 }
 
+function toolDetailAvailable(tool: ToolView): boolean {
+  return Boolean(
+    tool.bash?.command != null ||
+    tool.bash?.result != null ||
+    tool.input ||
+    tool.progress ||
+    tool.content ||
+    tool.inputTruncated ||
+    tool.progressTruncated ||
+    tool.contentTruncated ||
+    tool.redacted,
+  );
+}
+
+function toolSummary(tool: ToolView): string | null {
+  const fileNames = tool.fileRefs
+    .map((reference) => reference.displayPath)
+    .join(", ");
+  const summary = tool.bash?.description || tool.progress || fileNames;
+  if (!summary) return null;
+  return summary.length > 160 ? `${summary.slice(0, 160)}…` : summary;
+}
+
 function ProcessHeader({
   active,
   title,
@@ -181,28 +203,26 @@ function RunElapsed({
 
 function ProcessTool({
   tool,
-  onOpen,
-  onPreviewFile,
+  expanded,
+  onExpandedChange,
 }: {
   tool: ToolView;
-  onOpen?: (opener: HTMLButtonElement) => void;
-  onPreviewFile?: (
-    reference: FileReferenceView,
-    opener: HTMLButtonElement,
-  ) => void;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
 }) {
   const { locale, t } = useI18n();
+  const detailId = useId();
   const elapsed = BigInt(tool.elapsedMs);
+  const hasDetails = toolDetailAvailable(tool);
+  const summary = toolSummary(tool);
   const content = (
     <>
       <span className="run-process-tool-mark" aria-hidden="true" />
       <span className="run-process-tool-label">
         <span className="run-process-tool-name">{tool.name}</span>
-        {tool.bash?.description && (
-          <span className="run-process-tool-description">
-            {tool.bash.description.length > 160
-              ? `${tool.bash.description.slice(0, 160)}…`
-              : tool.bash.description}
+        {summary && (
+          <span className="run-process-tool-description" title={summary}>
+            {summary}
           </span>
         )}
       </span>
@@ -215,51 +235,32 @@ function ProcessTool({
             })}
           </span>
         )}
-        {onOpen && <Icon name="chevron-right" />}
+        {hasDetails && (
+          <span className="run-process-tool-chevron" aria-hidden="true">
+            <Icon name="chevron" />
+          </span>
+        )}
       </span>
     </>
   );
 
   return (
     <li data-state={tool.state}>
-      {onOpen ? (
+      {hasDetails ? (
         <button
           type="button"
           className="run-process-tool focus-ring"
-          aria-label={t("run.process.open_tool", { name: tool.name })}
-          onClick={(event) => onOpen(event.currentTarget)}
+          aria-label={t("run.process.toggle_tool", { name: tool.name })}
+          aria-expanded={expanded}
+          aria-controls={detailId}
+          onClick={() => onExpandedChange(!expanded)}
         >
           {content}
         </button>
       ) : (
         <div className="run-process-tool">{content}</div>
       )}
-      {tool.progress && (
-        <p className="run-process-tool-progress">
-          {tool.progress.length > 240
-            ? `${tool.progress.slice(0, 240)}…`
-            : tool.progress}
-        </p>
-      )}
-      {onPreviewFile && tool.fileRefs.length > 0 && (
-        <div className="run-process-files">
-          {tool.fileRefs.map((reference) => (
-            <button
-              key={reference.id}
-              type="button"
-              className="run-process-file focus-ring"
-              title={reference.displayPath}
-              aria-label={t("file_preview.open", {
-                path: reference.displayPath,
-              })}
-              onClick={(event) => onPreviewFile(reference, event.currentTarget)}
-            >
-              <Icon name="skill-file" />
-              <span>{reference.displayPath}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      {hasDetails && expanded && <ToolDetailView id={detailId} tool={tool} />}
     </li>
   );
 }
@@ -272,8 +273,8 @@ export function RunProcess({
   requestingStop = false,
   expanded,
   onExpandedChange,
-  onOpenTool,
-  onPreviewFile,
+  expandedToolIds = emptyExpandedToolIds,
+  onToolExpandedChange = () => {},
 }: {
   presentation: RunPresentation;
   elapsedMs?: string | null;
@@ -282,11 +283,8 @@ export function RunProcess({
   requestingStop?: boolean;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
-  onOpenTool?: (tool: ToolView, opener: HTMLButtonElement) => void;
-  onPreviewFile?: (
-    reference: FileReferenceView,
-    opener: HTMLButtonElement,
-  ) => void;
+  expandedToolIds?: ReadonlySet<string>;
+  onToolExpandedChange?: (toolId: string, expanded: boolean) => void;
 }) {
   const { locale, t } = useI18n();
   const bodyId = useId();
@@ -345,12 +343,10 @@ export function RunProcess({
                 <ProcessTool
                   key={tool.id}
                   tool={tool}
-                  onOpen={
-                    onOpenTool
-                      ? (opener) => onOpenTool(tool, opener)
-                      : undefined
+                  expanded={expandedToolIds.has(tool.id)}
+                  onExpandedChange={(nextExpanded) =>
+                    onToolExpandedChange(tool.id, nextExpanded)
                   }
-                  onPreviewFile={onPreviewFile}
                 />
               ))}
             </ul>

@@ -369,7 +369,7 @@ test("a detached Task restores before its first continued Run", async () => {
     continuationRecoveryAvailable: true,
     ensureContinuation: async (taskId, bindingEpoch) => {
       calls.push(["restore", taskId, bindingEpoch]);
-      return { kind: "ready" };
+      return { kind: "ready", bindingEpoch: "13" };
     },
     onTaskCreated() {
       assert.fail("existing Task must not create a Task");
@@ -377,7 +377,7 @@ test("a detached Task restores before its first continued Run", async () => {
   });
   assert.deepEqual(calls, [
     ["restore", "9", "12"],
-    ["run", "9", "12", { kind: "text", text: "Continue after restart" }],
+    ["run", "9", "13", { kind: "text", text: "Continue after restart" }],
   ]);
   assert.deepEqual(result, { kind: "started", taskId: "9", created: false });
 });
@@ -414,6 +414,54 @@ test("a failed detached restore never sends the pending Run", async () => {
     error: failure,
   });
   assert.equal(runCalled, false);
+});
+
+test("a recovered Run CAS rejection uses the adopted epoch once and never retries", async () => {
+  const calls = [];
+  const result = await submitTaskInstruction({
+    client: {
+      async createTask() {
+        assert.fail("existing Task must not create a Task");
+      },
+      async run(taskId, expectedBindingEpoch, input) {
+        calls.push(["run", taskId, expectedBindingEpoch, input]);
+        return {
+          accepted: false,
+          taskId,
+          runId: null,
+          reason: "binding_changed",
+        };
+      },
+    },
+    taskId: "9",
+    workspace: { kind: "automatic" },
+    expectedExecutionGeneration: "19",
+    expectedSelectionRevision: "23",
+    modelSelection: null,
+    expectedBindingEpoch: "12",
+    permissionProfile: "approval_required",
+    input: { kind: "text", text: "Keep this draft after CAS rejection" },
+    continuationRecoveryAvailable: true,
+    ensureContinuation: async () => ({
+      kind: "ready",
+      bindingEpoch: "13",
+    }),
+    onTaskCreated() {},
+  });
+  assert.deepEqual(calls, [
+    [
+      "run",
+      "9",
+      "13",
+      { kind: "text", text: "Keep this draft after CAS rejection" },
+    ],
+  ]);
+  assert.deepEqual(result, {
+    kind: "run_rejected",
+    taskId: "9",
+    created: false,
+    reason: "binding_changed",
+  });
 });
 
 test("a Host-rejected Run preserves the structured product reason", async () => {

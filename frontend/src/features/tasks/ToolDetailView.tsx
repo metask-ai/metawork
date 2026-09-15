@@ -2,15 +2,22 @@ import type { ToolView } from "../../bridge/contracts.ts";
 import { CodeBlock } from "../../components/ai/index.ts";
 import { useI18n } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
+import { copyCodeText } from "./response-copy.ts";
 
-export function ToolDetailView({ tool }: { tool: ToolView }) {
+export function ToolDetailView({ tool, id }: { tool: ToolView; id?: string }) {
   const { locale, t } = useI18n();
   const bash = tool.bash;
   const hasReadableDetails = bash?.command != null || bash?.result != null;
+  const copy = {
+    label: t("copy.code"),
+    copiedLabel: t("copy.copied"),
+    failedLabel: t("copy.failed"),
+    onCopy: copyCodeText,
+  };
   const field = (label: string, value: string) => (
     <div className="detail-field">
       <p className="detail-field-label">{label}</p>
-      <CodeBlock aria-label={label} value={value} />
+      <CodeBlock aria-label={label} value={value} copy={copy} />
     </div>
   );
   const rawDetails = (["input", "content"] as const).map((name) =>
@@ -23,19 +30,14 @@ export function ToolDetailView({ tool }: { tool: ToolView }) {
       </div>
     ) : null,
   );
+
   return (
-    <div className="tool-detail-view">
-      <header>
-        <h3>{tool.name}</h3>
-        <span>{t(`inspector.tool.${tool.state}`)}</span>
-        {BigInt(tool.elapsedMs) > 0n && (
-          <span>
-            {t("inspector.tool.elapsed", {
-              duration: formatInteger(locale, BigInt(tool.elapsedMs)),
-            })}
-          </span>
-        )}
-      </header>
+    <div
+      className="run-process-tool-detail"
+      id={id}
+      role="region"
+      aria-label={t("run.process.tool_detail", { name: tool.name })}
+    >
       {bash?.command != null &&
         field(t("inspector.tool.command"), bash.command)}
       {tool.progress && field(t("inspector.tool.progress"), tool.progress)}
@@ -43,7 +45,7 @@ export function ToolDetailView({ tool }: { tool: ToolView }) {
         <>
           <p className="detail-field-label">
             {t("inspector.tool.exit_code", {
-              code: formatInteger(locale, bash.result.exitCode),
+              code: formatInteger(locale, BigInt(bash.result.exitCode)),
             })}
           </p>
           {(["stdout", "stderr"] as const).map((stream) => (

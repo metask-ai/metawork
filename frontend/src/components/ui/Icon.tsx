@@ -1,5 +1,6 @@
 import {
   Activity,
+  Archive,
   ArrowLeft,
   CalendarDays,
   Check,
@@ -46,6 +47,7 @@ type IconName =
   | "maximize"
   | "restore"
   | "activity"
+  | "archive"
   | "sidebar-right"
   | "loading"
   | "chevron"
@@ -91,6 +93,7 @@ const icons: Record<IconName, LucideIcon> = {
   maximize: Square,
   restore: Copy,
   activity: Activity,
+  archive: Archive,
   "sidebar-right": PanelRight,
   loading: LoaderCircle,
   chevron: ChevronDown,

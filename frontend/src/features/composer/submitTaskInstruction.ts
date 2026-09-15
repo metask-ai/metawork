@@ -28,7 +28,7 @@ export type TaskSubmissionClient = {
 };
 
 export type EnsureTaskContinuationResult =
-  | { kind: "ready" }
+  | { kind: "ready"; bindingEpoch: string }
   | { kind: "rejected"; reason: TaskRestoreReason }
   | { kind: "failed"; error: unknown };
 
@@ -151,6 +151,7 @@ export async function submitTaskInstruction({
         created,
         error: continuation.error,
       };
+    targetBindingEpoch = continuation.bindingEpoch;
   }
   try {
     const run = await client.run(targetTaskId, targetBindingEpoch, input);

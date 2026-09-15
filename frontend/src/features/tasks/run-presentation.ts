@@ -127,13 +127,13 @@ export function deriveRunPresentation(run: RunView): RunPresentation {
   const tools = orderedTools(run.tools);
   const runningTools = tools.filter((tool) => tool.state === "running");
   const responseVisible = run.output.response.length > 0;
-  const processCanCollapse = active && tools.length > 0;
+  const processCanCollapse = tools.length > 0;
 
   return {
     active,
     activity,
     responseVisible,
-    processVisible: active,
+    processVisible: active || tools.length > 0,
     processCanCollapse,
     showTerminalNotice:
       run.terminal !== null &&

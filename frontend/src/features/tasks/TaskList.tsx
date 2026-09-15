@@ -5,7 +5,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
 import { useI18n } from "../../i18n/context.ts";
-import { taskGroups, taskSignals } from "../../workbench/selectors.ts";
+import { orderedTasks, taskSignals } from "../../workbench/selectors.ts";
 
 export type TaskMenuAction = "rename" | "archive" | "delete";
 
@@ -33,11 +33,8 @@ export function TaskList({
   const { locale, t } = useI18n();
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
   const menuAnchor = useRef<HTMLElement | null>(null);
-  const groupedTasks = taskGroups(tasks, showArchived);
-  const visibleTaskCount = groupedTasks.reduce(
-    (count, group) => count + group.tasks.length,
-    0,
-  );
+  const visibleTasks = orderedTasks(tasks, showArchived);
+  const visibleTaskCount = visibleTasks.length;
   const archivedCount = tasks.filter((task) => task.archived).length;
 
   const menuTask =
@@ -61,29 +58,24 @@ export function TaskList({
           })}
         </span>
       </div>
-      {groupedTasks.map((group) => (
-        <section className="task-group" key={group.kind}>
-          <h3>{t(`task.group.${group.kind}`)}</h3>
-          {group.tasks.map((task) => (
-            <button
-              key={task.id}
-              data-task-id={task.id}
-              className="task-list-item focus-ring"
-              aria-current={activeTaskId === task.id ? "page" : undefined}
-              onClick={() => onSelectTask(task.id)}
-              onContextMenu={(event) => openTaskMenu(event, task.id)}
-            >
-              <span className="task-list-row">
-                <span>{task.title || t("task.item", { id: task.id })}</span>
-                <TaskSignals
-                  task={task}
-                  synchronized={synchronized}
-                  completionSuppressed={suppressedCompletionTaskId === task.id}
-                />
-              </span>
-            </button>
-          ))}
-        </section>
+      {visibleTasks.map((task) => (
+        <button
+          key={task.id}
+          data-task-id={task.id}
+          className="task-list-item focus-ring"
+          aria-current={activeTaskId === task.id ? "page" : undefined}
+          onClick={() => onSelectTask(task.id)}
+          onContextMenu={(event) => openTaskMenu(event, task.id)}
+        >
+          <span className="task-list-row">
+            <span>{task.title || t("task.item", { id: task.id })}</span>
+            <TaskSignals
+              task={task}
+              synchronized={synchronized}
+              completionSuppressed={suppressedCompletionTaskId === task.id}
+            />
+          </span>
+        </button>
       ))}
       {visibleTaskCount === 0 && (
         <p className="task-list-empty">
@@ -194,7 +186,9 @@ export function TaskSignals({
             showCompleted &&
             !completionSuppressed
           ? "completed"
-          : null;
+          : task.archived
+            ? "archived"
+            : null;
   if (signal === null) return null;
 
   const label = t(`task.signal.${signal}`);
@@ -210,7 +204,15 @@ export function TaskSignals({
       {signal === "completed" ? (
         <span className="task-notification-dot" aria-hidden="true" />
       ) : (
-        <Icon name={signal === "running" ? "loading" : "warning"} />
+        <Icon
+          name={
+            signal === "running"
+              ? "loading"
+              : signal === "archived"
+                ? "archive"
+                : "warning"
+          }
+        />
       )}
     </span>
   );

@@ -61,9 +61,9 @@ MetaWork 的视觉记忆点不是装饰性的暖色、通用衬线大标题、�
 - Workspace current / Task pinned Skill catalog、typed Skill Run 与独立 Skill rejection；
 - Run 状态、六种终止原因，以及 Session 是否仍可继续；当前 AgentCore typed `run_state` observation 由 Workbench 投影为 Current activity，并按 transition sequence 丢弃过期观察。
 
-因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result 按需进入右侧单条详情，不展示 Run 用量，context pressure 提醒按需出现在 Composer 附近，历史自动压缩记录不单独占据入口。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。当前 PermissionProfile 只定义并开放 `请求批准 | 完全访问`；Plan、plan approval、Outputs、空的 Files changed 概览模块、持久权限管理和 custom UI 均保持隐藏。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route、设置与 New task 共享的默认 API/模型选择，以及 New task 的 PermissionProfile 选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
+因此当前产品在 Task 内容区显示用户输入、Agent 可见输出、权限决策面、唯一当前状态、紧凑 Tool 摘要和必要的终止结果；Tool input/progress/result 按需在所属 Tool 行下方展开，不展示 Run 用量，context pressure 提醒按需出现在 Composer 附近，历史自动压缩记录不单独占据入口。普通信息不足时，Agent 通过可见回复说明问题并结束当前 Run，用户从 Composer 继续，不进入结构化 Question wait。工具记录只作为所属 Run 的可检查过程证据，不成为 raw event 时间线。当前 PermissionProfile 只定义并开放 `请求批准 | 完全访问`；Plan、plan approval、Outputs、空的 Files changed 概览模块、持久权限管理和 custom UI 均保持隐藏。Renderer 不解析工具参数、stdout 或普通文本来猜测这些状态；Current activity 只来自 Host 对受序列保护的 `run_state` 以及 typed text、Tool、retry、context 和 output control event 的产品投影。当前 Renderer 合同已提供独立 Workspace projection、Task-bound ExecutionConfig facts、正式设置 route、设置与 New task 共享的默认 API/模型选择，以及 New task 的 PermissionProfile 选择；跨重启 rebind 等仍须等对应 capability 落地后才能宣称可用，差距由 [验证规范](validation.md)明确记录。
 
-上述边界同时约束 Agent 对话渲染：工作过程必须在 terminal 前随真实 Snapshot revision 可见，过程与正式回复保持主次层级，长任务中可以检查 Tool 摘要而无需离开阅读上下文；仍不得泄漏 private reasoning、从文本猜测结构化事实或提前开放 gated capability。该信息架构只呈现实际到达的 commentary 与 typed activity，不承诺 Provider 在每个 Tool turn 输出自然语言，也不允许 Renderer 为提高信息密度而生成中间对话、推断模型意图或补造进度。
+上述边界同时约束 Agent 对话渲染：工作过程必须在 terminal 前随真实 Snapshot revision 可见，存在 Tool 时在 terminal 后继续提供折叠的历史检查入口；过程与正式回复保持主次层级，用户可以检查 Tool 证据而无需离开阅读上下文。仍不得泄漏 private reasoning、从文本猜测结构化事实或提前开放 gated capability。该信息架构只呈现实际到达的 commentary 与 typed activity，不承诺 Provider 在每个 Tool turn 输出自然语言，也不允许 Renderer 为提高信息密度而生成中间对话、推断模型意图或补造进度。
 
 ### 2.2 Capability 标记
 
@@ -203,13 +203,13 @@ Workspace
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 单列表导航和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Task 列表与路径上下文
 
 登录后的左栏从上到下只承担五类稳定职责：品牌/窗口识别、New task、已接通的全局能力入口、Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
 
-- 左栏不显示 Workspace 标题、添加动作或切换器；它直接列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 Manual/Automatic Task，并按统一行动优先级分组。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
+- 左栏不显示 Workspace 标题、添加动作或切换器；它直接以一个连续列表列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 Manual/Automatic Task，不按状态拆分栏目。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
 - Task 被选择后使用自身绑定的 Workspace 路径，不提交额外的全局 Workspace 导航动作；不同路径下的后台 Task 都必须持续可见；
 - New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。Manual Workspace 直接显示 canonical directory，Automatic Workspace 统一显示“默认”，不得暴露随机目录或内部 kind 术语；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
@@ -411,22 +411,22 @@ Disabled
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
 
-### 5.6 Task 分组与排序
+### 5.6 Task 单列表与排序
 
-Task 按行动优先级分组，而不是全部按时间混排：
+Task 在一个连续列表中只出现一次。状态排序与视觉结构分离：当前仍依次按需要处理、正在运行、排队、其他未归档与已归档的优先级排列，同一优先级内按 `recentOrder` 倒序，但这些优先级不生成标题、分隔或独立栏目：
 
 ```text
-Needs your attention
-Running
-Queued
-Recent
+Tasks
+  [Task name]  [status icon]
+  [Task name]  [status icon]
+  [Task name]
 ```
 
-- 空分组自动隐藏；
-- `Recent` 内部按更新时间排序；
+- 列表不显示 `Needs your attention / Running / Queued / Recent / Archived` 等状态标题；
+- 当前排序优先级只决定行的位置，不在视觉上形成分组；排序规则后续变化不得重新引入状态栏目；
 - Task 列表项只显示任务名称与必要状态信号，不在名称下追加 Workspace、`Default / 默认`、模型或其他配置标签；同名 Task 仍保持原名称，由用户按需重命名，不用第二行元数据替代命名；
 - 运行中、排队、等待用户、失败和中断使用图标和颜色共同表达；可访问名称通过 `aria-label` 和 tooltip 提供，不在行内保留文字状态标签；
-- 后台 Task 产生待处理请求时必须进入 `Needs your attention`；
+- 后台 Task 产生待处理请求时必须取得最高排序优先级，并继续由行内图标表达；
 - 不能只用绿点、灰点区分状态。
 
 ### 5.7 创建、命名、归档与删除
@@ -526,7 +526,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策、compact 历史、无 secret execution binding 与 checkpoint record；不得把当前默认配置静默写入历史 Task；
 2. 没有 live owner 的 non-terminal Run 或 compact 显示为 `Interrupted`，不显示 Running/Stopping，不自动重放输入、工具或 permission；
 3. 点击左栏 Task 始终只是导航。满足资格的 detached Task 使用普通 Composer，不显示恢复卡片、恢复按钮、专用 placeholder 或其他 capability continuity 提示；用户发送第一条新消息时，Renderer 才在同一次发送意图内提交现有 restore，并等待 Host snapshot 确认 attachment 后继续提交该条 Run；选择、reload 或 timeout 不会自动触发 restore；
-4. restore 只表现为该次普通发送的 preparing/busy 状态，期间禁用发送、compact 和重复提交，不显示 `Restoring conversation / 正在恢复对话`。左栏可以把该 Task 归入正在运行分组，但不能伪造 Agent Run 或 Stop 按钮；
+4. restore 只表现为该次普通发送的 preparing/busy 状态，期间禁用发送、compact 和重复提交，不显示 `Restoring conversation / 正在恢复对话`。左栏只更新该 Task 的运行状态图标与排序位置，不能创建恢复分组、伪造 Agent Run 或 Stop 按钮；
 5. restore 失败时保留可阅读历史、用户草稿与稳定原因，并显示准确、可执行的失败说明；Host 仍发布 `continuationRecoveryAvailable = true` 时，下一次普通发送重试同一前置流程，不建立专用 `Try again / 重试` 按钮。timeout 只触发 canonical snapshot resync，绝不重放 restore 或 Run；
 6. 成功后 Host 原子发布 attachment 与 `continuationAvailable = true`，Renderer 只在这一状态确认后提交一次 Run。`continuationAvailable`、`continuationUnavailableReason` 和 `continuationRecoveryAvailable` 是同一 continuation 模型；不得建立第二个 `recovery.state` 或由 Renderer 猜测资格；
 7. checkpoint、Task/Workspace/Execution identity、Agent Runtime 或 checkpoint store 任一恢复事实不满足时显示对应 unavailable 说明，不开放该历史 Conversation 的恢复发送。Workspace 是否因导航语义 `visible=false`、Skill catalog 是否 ready、MCP selection 是否可重建、Permission 是否仍有效、projection capacity 以及 Task persistence health 都不是 Product Task 的全局运行资格；这些可选能力缺失时 Host 可以发布成功但 degraded 的 attachment，普通 Text 立即可用，相关能力按各自现有显式流程恢复。Task store read/corrupt/write/outcome-unknown health 由 Host 发布，Renderer 只提示，不自行清空、修复、迁移或阻塞 mutation；
@@ -554,7 +554,7 @@ AgentCore typed CoreEvent
   → Renderer Bridge revision 1：完整 Run snapshot
   → deriveRunPresentation(run)：纯 presentation derivation
   → TaskContent：稳定 Run exchange 槽位
-  → RunProcess：仅 active status 与可展开 technical evidence
+  → RunProcess：active status 与可展开的 current/historical technical evidence
 ```
 
 各层职责不可互换：
@@ -563,21 +563,21 @@ AgentCore typed CoreEvent
 - Bridge 运输完整 typed facts，不运输 raw event identity、时间线、private reasoning 或组件状态；
 - `deriveRunPresentation()` 只派生 active、response/process visibility、Host-order Tool 列表、唯一 running Tool presentation 和 terminal notice 条件，不保存或推进产品状态；
 - `TaskContent` 只按 Task/Run 稳定 identity 组合槽位，不把 Snapshot revision 当消息、不从文本或 Tool 内容推断新事实；
-- Renderer 本地只拥有 Task+Run disclosure、Tool focus request、每 Task 阅读位置和 following-latest 等可丢弃 UI 状态；reload 后它们可以重置，不能写回 Product history。
+- Renderer 本地只拥有 Task+Run disclosure、逐 Tool disclosure、每 Task 阅读位置和 following-latest 等可丢弃 UI 状态；reload 后它们可以重置，不能写回 Product history。
 
 每个 Run exchange 使用以下条件槽位，而不是为每类事件创建节点：
 
-| 槽位                   | 出现条件                                                   | 更新方式                                                             |
-| ---------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------- |
-| User instruction       | Run 存在                                                   | 历史稳定，不随 activity 更新                                         |
-| Process narrative      | 至少一个非空 commentary、provisional 或必要 redaction note | closed commentary 只追加稳定 block；provisional 原位增长、迁移或回滚 |
-| Active process surface | Run 为 queued/running/waiting UI/stopping                  | 唯一 live status 原位替换；存在 Tool 时同一 surface 才可展开技术行   |
-| Intervention           | 当前 Run 存在 pending UI                                   | 只显示唯一可操作控件，不伪装成 Assistant 文本                        |
-| Response               | Host 已发布非空 final/partial response                     | 安全 Markdown；出现不等于正式 Product terminal 已发布                |
-| Terminal notice        | partial、非 completed outcome 或完成但无 response          | 与 partial 合并为唯一准确提示，不重复成功结果                        |
-| Response metadata      | Run 已 terminal 且存在非空 final/partial response          | 整个 Run 的最后一行；纯图标复制入口 + 可用时的弱化完成时间           |
+| 槽位              | 出现条件                                                   | 更新方式                                                             |
+| ----------------- | ---------------------------------------------------------- | -------------------------------------------------------------------- |
+| User instruction  | Run 存在                                                   | 历史稳定，不随 activity 更新                                         |
+| Process narrative | 至少一个非空 commentary、provisional 或必要 redaction note | closed commentary 只追加稳定 block；provisional 原位增长、迁移或回滚 |
+| Process surface   | Run active，或 terminal Run 存在 Tool                      | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开   |
+| Intervention      | 当前 Run 存在 pending UI                                   | 只显示唯一可操作控件，不伪装成 Assistant 文本                        |
+| Response          | Host 已发布非空 final/partial response                     | 安全 Markdown；出现不等于正式 Product terminal 已发布                |
+| Terminal notice   | partial、非 completed outcome 或完成但无 response          | 与 partial 合并为唯一准确提示，不重复成功结果                        |
+| Response metadata | Run 已 terminal 且存在非空 final/partial response          | 整个 Run 的最后一行；纯图标复制入口 + 可用时的弱化完成时间           |
 
-`RunProcess` 只属于 active Run：
+`RunProcess` 同时承担 active Run 的唯一 live status 与 terminal Run 的历史 Tool 入口：
 
 ```text
 active Run:
@@ -590,11 +590,12 @@ terminal Run:
   narrative
   response
   optional File Changes
+  optional collapsed RunProcess when Tools exist
   terminal notice
   response copy action + optional finished time
 ```
 
-active→terminal 时，live activity 与 technical process surface 必须一起消失；Tool 与 disclosure 状态不能在最终结果下保留摘要、空壳或操作入口。Tool/Run 产品历史不因此删除。存在非空 final/partial response 时，末行位于文件更改和必要 terminal notice 之后：复制图标在左，Product 提供完成时间时在其右侧显示弱化的本地相对时间；两者共同成为该 Run 的最后一行。
+active→terminal 时，live activity 与持续计时必须消失；没有 Tool 的 process surface 同步卸载，存在 Tool 时则在最终结果之后保留默认折叠的稳定摘要。展开 Work process 后，用户可以独立展开多条 Tool 行；完整 input/progress/result 在所属行下方挂载，长代码面有界滚动，安全 raw details 继续二次折叠。折叠 Work process 不清除逐 Tool disclosure；Renderer reload 后这些本地状态可以重置。存在非空 final/partial response 时，复制元数据仍是整个 Run 的最后一行：它位于文件更改、历史 Work process 和必要 terminal notice 之后，复制图标在左，Product 提供完成时间时在其右侧显示弱化的本地相对时间。
 
 #### Output projection 与可见迁移
 
@@ -616,7 +617,7 @@ Renderer 每次只读取当前完整 `RunOutput`，不在本地累积 text chunk
 
 非 terminal Run 必须有唯一 canonical activity；terminal Run 必须没有 activity。Renderer 不复制 activity 状态机，只把 Host activity 本地化并做两项有界派生：phase 缺失时只能使用同 phase 的防御性通用标签，`executing_tools` 且恰有一个真实 running Tool 时可以把固定 Tool identifier 映射为“检查工作区”“更新内容”或“运行操作”。多个、零个或未知 Tool 时回退到 canonical activity，不读取参数、结果或历史 Tool 推断 Agent 当前意图。
 
-Tool start/progress/result 只更新同一 Tool record 和 process surface，不在主阅读流追加行。active Run 中展开技术过程只用于检查当前证据；terminal 后相同 Tool records 仍保留在产品历史，但不再生成过程摘要或入口。展开后的 Tool 行显示名称、状态、Host elapsed，并可附 Host 安全 description、有限 progress 摘录和已有 fileRefs；完整输入和结果在用户点击对应 Tool 后于 Task Panel 挂载，同刻至多一个对象详情。
+Tool start/progress/result 只更新同一 Tool record 和 process surface，不在主阅读流追加行。active Run 中展开技术过程用于检查当前证据；terminal 后相同 Tool records 继续通过默认折叠的稳定 process 摘要提供历史检查入口。每条 Tool 主记录固定为单行：左侧依次显示名称及至多一项 Host 安全摘要，右侧固定显示状态、Host elapsed 与可用的 disclosure 箭头；摘要依次取 Bash description、有限 progress 摘录或结构化 fileRefs 的 `displayPath`，空间不足时单行省略，不把不同来源拆成多行。fileRefs 在这里仅作为只读文件名摘要，不提供图标、按钮或预览交互；存在可呈现的 input/progress/result、Bash 字段、截断或脱敏说明时，用户点击对应 Tool 后在该行下方独立展开详情，多个 Tool disclosure 可以同时打开。没有详情正文或说明的 Tool 行保持只读摘要，不提供空 disclosure。
 
 #### Snapshot revision、阅读位置与稀疏输出
 
@@ -651,11 +652,11 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 ### 7.5 当前状态、请求与结果
 
 - active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。`executing_tools` 且恰有一个 typed running Tool 时，Renderer 可以依据固定 Tool identifier 映射为“检查工作区”“更新内容”“运行操作”等宽泛但真实的用户文案；不满足条件时回退到 canonical activity，不在主状态中暴露原始 Tool 名称、参数或命令；
-- Tool 摘要属于运行中的次要 technical work evidence，只在 active Run 内默认折叠；展开内容遵守本节 Tool 证据规则，不带入完整 input/result、usage 或 Run ID。Run terminal 后整个工作过程 surface 隐藏，不保留操作数量摘要；底层 Tool/Run 历史仍由产品保留。disclosure choice 按 Task+Run 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态或恢复过程入口；
+- Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。Run terminal 后 live status 消失；没有 Tool 时整个 surface 卸载，存在 Tool 时保留默认折叠的操作数量摘要，并允许在所属 Tool 行下方查看完整 input/result。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - terminal cause 使用最具体的稳定本地化文案：`provider_failure` 显示“模型服务请求失败”，并在同一 notice 中说明本次 Run 未生成可用回复或只生成了可能不完整的部分回复；`tool_failure` 说明工具失败且 Agent 未能恢复，`image_input_unsupported` 明确要求更换支持图片的模型并重新选择图片；不得把三者统一写成“检查模型或网络”，也不得直接展示 provider raw body；
-- `provider_failure` 的主区 notice 只表达失败原因、回复影响和匹配的恢复动作，不重复技术诊断边界；若该 Run 已有 Tool 记录，提醒用户失败前已有部分操作完成，应在重试前检查其影响，不能引导用户打开已从终态隐藏的工作过程；
+- `provider_failure` 的主区 notice 只表达失败原因、回复影响和匹配的恢复动作，不重复技术诊断边界；若该 Run 已有 Tool 记录，提醒用户失败前已有部分操作完成，应在重试前通过同 Run 保留的折叠工作过程检查其影响；
 - 失败 Run 的主区“查看运行详情”是该 notice 下的默认折叠 disclosure，仅展开时挂载诊断边界与精确 provenance：`absent` 表示 MetaWork 未收到该 Run 的附加诊断，`withheld` 表示当前安全边界不允许显示已收到的附加技术诊断；均不得猜测 401、API Key、限流、网络或设置问题。字段仅为稳定错误标识、精确 Run ID、该 Run 的 model 和 protocol，不使用当前 Task binding 或 Models 默认值，不默认展示 execution generation；折叠卸载诊断正文。只有当前 Task 真实可重试且输入区无待保留草稿时才沿用既有“准备重试”流程，动作文字必须明确只把指令重新填入 Composer；详情入口本身不触发重试、设置跳转、模型测试或任何外部操作；
 - Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。同步失败或 Bridge 不可用时，保留已有内容，但 active Run 的唯一状态改为“状态尚未同步”、停止活动动效并暂停耗时外推；恢复后以新 Host Snapshot 为准，不因静默时长推断 Agent 卡死，也不自动终止或重跑。停止命令尚未应答时显示“正在请求停止”；应答不等于终态，正式 stopping/terminal 仍由 Host 确认，失败沿用当前 Task 的操作反馈。
 
@@ -842,7 +843,7 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的两�
 
 > Capability：**当前**。右侧栏是应用三栏布局的辅助容器，Task Panel 是其中承载任务内容的视图；布局开关不属于该视图或任一具体功能，不提供概览根页、日志时间线、任意文件浏览、文件编辑或 Git 操作。
 
-主阅读流拥有叙事、唯一 live status、审批和失败恢复。默认折叠的 Work process 展开规则见 §7.2；点击后打开精确 `taskId + runId + toolId` 的单条详情，并随 Snapshot 更新。不复制整份 Tool 列表，不从 Tool 内容推断 Agent 发言、File Changes 或 Output。完整 input/progress/result 仅在活动详情中以纯文本/代码面挂载，不进入全局搜索或 live announcement。Host 提供可读 Bash 字段时，详情优先呈现 command、exit code、stdout/stderr，并明确空输出及不完整捕获；安全原始详情置于可展开区域。不可解释的结果直接保留安全原始详情，不从空输出推断目录为空或任务完成。
+主阅读流拥有叙事、唯一 live status、审批、失败恢复与所属 Work process。默认折叠规则见 §7.2；用户展开 Work process 后，可以在精确 `taskId + runId + toolId` 的 Tool 行下方独立展开详情，详情随 Snapshot 原位更新，不打开或替换右栏内容。不复制整份 Tool 列表，不从 Tool 内容推断 Agent 发言、File Changes 或 Output。完整 input/progress/result 只在对应 disclosure 中以纯文本/代码面挂载，不进入全局搜索或 live announcement；每个代码面最大高度为 `min(360px, 45vh)`，超出后内部滚动。Host 提供可读 Bash 字段时，详情优先呈现 command、exit code、stdout/stderr，并明确空输出及不完整捕获；安全原始详情置于第二层 disclosure。不可解释的结果直接保留安全原始详情，不从空输出推断目录为空或任务完成。
 
 信息按事实的生命周期放置：
 
@@ -851,7 +852,7 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的两�
 - Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后只读展示固定 permission profile（受 capability gate 控制）与创建时 MCP 三态，不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
 - pendingUi 派生“需要处理”定位入口，不存已读或自动展开记忆；只有原始主区审批提供操作按钮。用户点击定位时，overlay 先关闭再滚动/聚焦原请求；停靠面板保持。新请求自身不触发滚动、焦点移动或面板开合，全宽覆盖时定位入口仍可达。
 
-右栏显隐不属于内容目标。内容可以为空、当前文件预览、指定 Tool 详情或同 Run 修改审查，各内容互斥挂载；未选择有效对象时呈现通用空态。文件预览以对话内联引用为主要入口，并在 Run active 时保留工作过程的辅助入口；Tool 详情只保留运行中对应操作入口，记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。目标只保存身份，不复制 Tool 或 Snapshot 正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；不建立记录列表、单条详情页、返回层级、并行标签或旧概览兼容开关。
+右栏显隐不属于内容目标。内容可以为空、当前文件预览或同 Run 修改审查，两种文档内容互斥挂载；未选择有效对象时呈现通用空态。文件预览只从对话内联引用进入，工作过程不重复文件入口；记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；不建立记录列表、单条详情页、返回层级、并行标签或旧概览兼容开关。
 
 打开任何对象替换当前模式。关闭右栏清空目标和正文；再次打开保持空态，只有显式选择具体对象才展示详情，不恢复旧正文。切换 Task 清空旧目标，右栏保持用户已选择的显隐；无 Task 或离开任务页面时呈现空态。普通 Run 开始、终态和 Snapshot revision 不关闭仍有效的详情。Review 中单条记录失效只移除该记录及正文；所属 Run、全部记录或其他目标失效才清空目标；目标有效性不控制右栏显隐。
 
@@ -869,8 +870,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
 - 主要入口位于所属 Run 的已闭合过程说明与 final/partial 回复中：普通文字中的完整文件名、行内代码和显式 Markdown 文件链接，只有能匹配本 Run 结构化引用时才呈现为可点击内联入口。保持原文字与正文行高，使用链接色、下划线、完整 accessible name 和可见键盘焦点；点击直接在右栏预览，不要求展开工作过程。provisional 仍为纯文本；代码块、图片说明和外部链接不做文件识别，也不把未知文件文本伪装成可打开入口；
 - 匹配只使用 Host `displayPath`、其显式相对写法及无歧义文件名，区分大小写，不查询文件系统、不从 Tool 参数拼装 authority。同一路径的重复引用为正文入口选择最后一条有序引用以读取当前内容，不宣称它是该句的历史版本或新文件身份；不同目录的同名文件不得仅按文件名选中，未匹配的本地 Markdown 路径不作为网页导航。引用晚到或失效随 Snapshot 更新可点击状态，不触发自动读取；
-- Run active 时，展开的工作过程仍按各 Tool 的 `fileRefs` 顺序提供辅助入口，保留原始来源，与 Tool 详情按钮独立，不嵌套交互控件。这里的文件按钮显示 `displayPath`，具备至少 44px 点击高度，长路径在窄窗内可换行。没有结构化引用时不占位，不把全部引用聚合到回复 footer 或右栏列表；
-- 任一入口都按精确引用身份在 Task Panel 打开独占预览；只显示所选文件，不提供全部引用选择器。切换文件从对话内联入口或对应工具操作发起，不需要先打开 Tool 详情；
+- 工作过程不提供 fileRefs 预览入口，只允许在 Tool 单行摘要缺少 description/progress 时显示只读 `displayPath`，也不把引用聚合到回复 footer 或右栏列表；正文内联入口按精确引用身份在 Task Panel 打开独占预览，只显示所选文件，不提供全部引用选择器；
 - 文件预览复用 Task Panel 的唯一头部：标题直接显示当前路径，右侧只提供刷新和关闭图标动作，正文不追加资源副标题、状态标签、常驻说明或信息入口。`.md`、`.markdown`（后缀不区分大小写）默认安全渲染文档，支持标题、列表、表格、引用与代码块，并在正文上方提供“预览 / 源码”切换；切换只使用已读取正文、不重新请求文件。刷新保持当前模式，切换精确文件目标或关闭后重开恢复默认模式，非活动视图不保留隐藏正文；
 - Markdown 复用安全 Markdown 呈现边界，不执行内嵌 HTML 或脚本；图片只显示替代文字，不请求本地或远程资源；相对资源链接不作为应用导航，HTTP(S) 链接的显式点击仍服从 Host 导航策略，不新增资源读取或网络权限。文档主体纵向滚动，宽表格与代码块各自横向滚动；
 - 普通文本、代码文件及其他已支持的文本格式显示中性等宽源码，保留空白并允许自身横向滚动，不增加模式切换。源码左侧显示从 1 开始的单列行号；行号与正文共用滚动容器，横向滚动时固定在左侧，不进入文本选择、复制内容或辅助技术朗读，只编号当前实际显示的文件前缀且不推断截断后的未读取行数。已识别且处于 Renderer 高亮预算内的代码文件自动渐进增强为主题适配的语法颜色，Markdown 的“源码”模式同样适用；未知格式、超出预算、模块加载失败、grammar 异常或高亮结果校验失败时静默保留完整纯文本，不自动猜测语言、不增加状态、重试、开关或语言选择。HTML、SVG 与 XML 即使显示 markup 语法颜色也始终只渲染惰性源码，不形成真实元素、执行脚本或加载资源，界面不为这一限制增加常驻提示或说明入口。只有具备经验证的独立隔离容器和受控资源读取能力后才能开放页面渲染，不能复用应用主页面执行 HTML 或放宽安全策略作为临时方案。文件预览不做 diff、range 高亮、自动刷新或文件 watcher；
@@ -1307,7 +1307,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 ### 19.6 内容状态
 
 - 短文本和长文本流；
-- 多个连续 Tool Call 保持独立的有界顺序摘要，不自动归并或追加主阅读流卡片；
+- 多个连续 Tool Call 保持独立的单行有界顺序摘要，不自动归并或追加主阅读流卡片；
 - Bash 失败和长 stdout/stderr 使用有界预览；没有真实 Tool projection 时不显示假详情入口；
 - Read 大量文件；
 - Edit diff；
@@ -1339,7 +1339,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 长英文、中文和 pseudo-locale 不溢出；
 - `queued / running / waiting_user` 的可见 Stop 只出现在 Composer 发送位置；顶部命令栏不重复出现，`stopping` 阻止重复请求并等待真实 terminal；
 - 右侧栏常驻开关可由键盘操作，无 Task 时也能独立开合；Task 切换、删除、目标失效不改变布局显隐或宽度；任务信息纯图标、上下文压力提醒与审批定位入口可由键盘操作，缺少 pressure 时不显示上下文入口；Run 用量和历史 auto compact 不独立展示；
-- 右侧仅挂载一个 Tool、当前文件详情或同 Run File Changes Review；关闭回到真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 关闭右栏并回到真实对话入口；
+- 右侧仅挂载当前文件详情或同 Run File Changes Review；关闭回到真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 关闭右栏并回到真实对话入口；
 - 普通 Run start/terminal、新 pendingUi 和 usage revision 不自动开合右栏、不抢焦点；切换 Task、关闭或对象失效不泄漏旧详情和已读取 bytes，晚到 Promise 不覆盖新对象；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Task Panel 关闭或 overlay 显示后功能不丢失；停靠态始终保留至少 480 px 中央工作面，低于 820 px 与左栏互斥，低于 620 px 使用全宽 overlay。
 - Windows Renderer 窗口按钮在登录页与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；

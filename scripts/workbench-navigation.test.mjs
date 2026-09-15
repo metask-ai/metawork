@@ -29,7 +29,7 @@ import {
   isRunInFlight,
   searchWorkbench,
   taskDisplayState,
-  taskGroups,
+  orderedTasks,
   taskSignals,
   workspaceDirectoryLabel,
 } from "../frontend/src/workbench/selectors.ts";
@@ -106,37 +106,41 @@ function task(overrides) {
   };
 }
 
-test("Task list groups action before recency and keeps Host order exact", () => {
-  const groups = taskGroups(
-    [
-      task({ id: "recent-old", recentOrder: "9007199254740993" }),
-      task({ id: "queued", currentRunPhase: "queued", recentOrder: "8" }),
-      task({ id: "running", currentRunPhase: "running", recentOrder: "9" }),
-      task({
-        id: "attention-old",
-        currentRunPhase: "waiting_ui",
-        recentOrder: "10",
-      }),
-      task({
-        id: "attention-new",
-        currentRunPhase: "waiting_ui",
-        recentOrder: "11",
-      }),
-      task({ id: "recent-new", recentOrder: "9007199254740994" }),
-      task({ id: "archived", archived: true, recentOrder: "12" }),
-    ],
-    true,
-  );
+test("Task list stays flat while ordering action before recency", () => {
+  const tasks = [
+    task({ id: "recent-old", recentOrder: "9007199254740993" }),
+    task({ id: "queued", currentRunPhase: "queued", recentOrder: "8" }),
+    task({ id: "running", currentRunPhase: "running", recentOrder: "9" }),
+    task({
+      id: "attention-old",
+      currentRunPhase: "waiting_ui",
+      recentOrder: "10",
+    }),
+    task({
+      id: "attention-new",
+      currentRunPhase: "waiting_ui",
+      recentOrder: "11",
+    }),
+    task({ id: "recent-new", recentOrder: "9007199254740994" }),
+    task({ id: "archived", archived: true, recentOrder: "12" }),
+  ];
+  const ordered = orderedTasks(tasks, true);
 
   assert.deepEqual(
-    groups.map((group) => [group.kind, group.tasks.map((item) => item.id)]),
+    ordered.map((item) => item.id),
     [
-      ["attention", ["attention-new", "attention-old"]],
-      ["running", ["running"]],
-      ["queued", ["queued"]],
-      ["recent", ["recent-new", "recent-old"]],
-      ["archived", ["archived"]],
+      "attention-new",
+      "attention-old",
+      "running",
+      "queued",
+      "recent-new",
+      "recent-old",
+      "archived",
     ],
+  );
+  assert.deepEqual(
+    orderedTasks(tasks, false).map((item) => item.id),
+    ordered.slice(0, -1).map((item) => item.id),
   );
 });
 
@@ -230,7 +234,7 @@ test("Task display state preserves Run, lifecycle, archive, and outcome preceden
   assert.deepEqual(taskDisplayState(task({})), { kind: "ready" });
 });
 
-test("manual Compact participates in Task action grouping without becoming a Run", () => {
+test("manual Compact participates in Task action ordering without becoming a Run", () => {
   const compacting = task({
     activeOperation: { kind: "compact", id: "11" },
     compacts: [
@@ -255,9 +259,7 @@ test("manual Compact participates in Task action grouping without becoming a Run
     kind: "compact_phase",
     value: "compacting",
   });
-  assert.deepEqual(taskGroups([compacting], false), [
-    { kind: "running", tasks: [compacting] },
-  ]);
+  assert.deepEqual(orderedTasks([compacting], false), [compacting]);
   assert.equal(taskSignals(compacting).running, true);
 });
 
@@ -270,9 +272,7 @@ test("Conversation recovery remains visible as Task work without becoming a Run"
   });
   assert.equal(isRunInFlight(restoring), false);
   assert.deepEqual(taskDisplayState(restoring), { kind: "recovery" });
-  assert.deepEqual(taskGroups([restoring], false), [
-    { kind: "running", tasks: [restoring] },
-  ]);
+  assert.deepEqual(orderedTasks([restoring], false), [restoring]);
   assert.equal(taskSignals(restoring).running, true);
 });
 

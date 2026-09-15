@@ -15,7 +15,6 @@ import type {
   RunOutcome,
   RunView,
   TaskView,
-  ToolView,
   UiResponsePayload,
 } from "../../bridge/contracts.ts";
 import {
@@ -45,6 +44,7 @@ import {
 } from "./response-copy.ts";
 
 type ReadingState = { scrollTop: number; followingLatest: boolean };
+const emptyToolDisclosure: ReadonlySet<string> = new Set();
 
 function formatAttachmentSize(value: string) {
   const bytes = Number(value);
@@ -181,7 +181,6 @@ export function TaskContent({
   responseDisabled,
   fileChangesEnabled,
   onPrepareRetry,
-  onOpenTool,
   onPreviewFile,
   onReviewFileChanges,
   onRespond,
@@ -197,11 +196,6 @@ export function TaskContent({
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
   onPrepareRetry: (input: RunInputView) => void;
-  onOpenTool: (
-    runId: string,
-    toolId: string,
-    opener: HTMLButtonElement,
-  ) => void;
   onPreviewFile: (
     taskId: string,
     runId: string,
@@ -225,6 +219,7 @@ export function TaskContent({
   const viewport = useRef<HTMLDivElement>(null);
   const reading = useRef(new Map<string, ReadingState>());
   const processDisclosure = useRef(new Map<string, RunProcessDisclosure>());
+  const toolDisclosure = useRef(new Map<string, ReadonlySet<string>>());
   const [, setDisclosureRevision] = useState(0);
   const previousTaskId = useRef<string | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
@@ -332,12 +327,22 @@ export function TaskContent({
           processDisclosure.current.get(disclosureKey),
         );
         processDisclosure.current.set(disclosureKey, disclosure);
+        const expandedToolIds =
+          toolDisclosure.current.get(disclosureKey) ?? emptyToolDisclosure;
 
         function setProcessExpanded(expanded: boolean) {
           processDisclosure.current.set(
             disclosureKey,
             toggleRunProcessDisclosure(expanded),
           );
+          setDisclosureRevision((value) => value + 1);
+        }
+
+        function setToolExpanded(toolId: string, expanded: boolean) {
+          const next = new Set(toolDisclosure.current.get(disclosureKey) ?? []);
+          if (expanded) next.add(toolId);
+          else next.delete(toolId);
+          toolDisclosure.current.set(disclosureKey, next);
           setDisclosureRevision((value) => value + 1);
         }
 
@@ -385,12 +390,8 @@ export function TaskContent({
                   requestingStop={requestingStop}
                   expanded={disclosure.expanded}
                   onExpandedChange={setProcessExpanded}
-                  onOpenTool={(tool: ToolView, opener) =>
-                    onOpenTool(run.id, tool.id, opener)
-                  }
-                  onPreviewFile={(reference, opener) =>
-                    onPreviewFile(task.id, run.id, reference, opener)
-                  }
+                  expandedToolIds={expandedToolIds}
+                  onToolExpandedChange={setToolExpanded}
                 />
                 {fileChangesEnabled && run.fileChanges && (
                   <RunFileChangesSummary
@@ -445,6 +446,16 @@ export function TaskContent({
                 onReview={(opener) =>
                   onReviewFileChanges(task.id, run.id, opener)
                 }
+              />
+            )}
+            {!presentation.active && presentation.processVisible && (
+              <RunProcess
+                presentation={presentation}
+                synchronized={synchronized}
+                expanded={disclosure.expanded}
+                onExpandedChange={setProcessExpanded}
+                expandedToolIds={expandedToolIds}
+                onToolExpandedChange={setToolExpanded}
               />
             )}
             {presentation.showTerminalNotice && terminal && (

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { JSDOM } from "jsdom";
-import { createElement } from "react";
+import { createElement, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
@@ -56,7 +56,7 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 const { ToolDetailView } = await vite.ssrLoadModule(
-  "/src/features/task-panel/ToolDetailView.tsx",
+  "/src/features/tasks/ToolDetailView.tsx",
 );
 const { TaskInformation } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskInformation.tsx",
@@ -200,13 +200,14 @@ test("Bash detail shows known fields with collapsed raw evidence and explicit em
   assert.ok(screen.getByText("raw envelope"));
 });
 
-test("expanded process shows bounded descriptions and progress without interpreting text", () => {
+test("expanded process keeps each Tool summary to one bounded line", async () => {
   const value = run({
     phase: "running",
     activity: { kind: "executing_tools", inFlight: "1" },
     terminal: null,
     tools: [
       technicalTool({
+        id: "bash-1",
         name: "Bash",
         progress: "<script>" + "x".repeat(500),
         bash: {
@@ -214,6 +215,16 @@ test("expanded process shows bounded descriptions and progress without interpret
           description: "Inspect " + "d".repeat(300),
           result: null,
         },
+      }),
+      technicalTool({
+        id: "read-1",
+        name: "Read",
+        progress: "Reading " + "p".repeat(300),
+      }),
+      technicalTool({
+        id: "write-1",
+        name: "Write",
+        fileRefs: [{ id: "file-1", displayPath: "src/report.html" }],
       }),
     ],
   });
@@ -231,12 +242,41 @@ test("expanded process shows bounded descriptions and progress without interpret
       .length,
     161,
   );
+  const rows = [...view.container.querySelectorAll(".run-process-tool")];
+  assert.equal(rows.length, 3);
+  assert.ok(
+    rows.every(
+      (row) =>
+        row.querySelectorAll(".run-process-tool-label > span").length <= 2,
+    ),
+  );
   assert.equal(
-    view.container.querySelector(".run-process-tool-progress").textContent
-      .length,
-    241,
+    rows[1].querySelector(".run-process-tool-description").textContent.length,
+    161,
+  );
+  assert.equal(
+    rows[2].querySelector(".run-process-tool-description").textContent,
+    "src/report.html",
+  );
+  assert.equal(
+    within(rows[2]).queryByRole("button", { name: "Preview src/report.html" }),
+    null,
+  );
+  assert.equal(
+    view.container.querySelector(".run-process-tool-progress"),
+    null,
   );
   assert.equal(view.container.querySelector("script"), null);
+
+  const stylesheet = await readFile("frontend/src/index.css", "utf8");
+  assert.match(
+    stylesheet,
+    /\.run-process-tool-label\s*\{[^}]*display: flex;[^}]*white-space: nowrap;/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.run-process-tool-description\s*\{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/s,
+  );
 });
 
 function fileChange(overrides = {}) {
@@ -297,7 +337,6 @@ function renderTaskContent(value, locale = "en-US") {
         responseDisabled: false,
         fileChangesEnabled: false,
         onPrepareRetry() {},
-        onOpenTool() {},
         onPreviewFile() {},
         onReviewFileChanges() {},
         onRespond() {},
@@ -334,7 +373,6 @@ function taskContentElement(value, revision = "1", overrides = {}) {
       responseDisabled: false,
       fileChangesEnabled: false,
       onPrepareRetry() {},
-      onOpenTool() {},
       onPreviewFile() {},
       onReviewFileChanges() {},
       onRespond() {},
@@ -348,16 +386,26 @@ function taskContentElement(value, revision = "1", overrides = {}) {
 
 function runProcessElement(
   value,
-  { expanded = true, onExpandedChange = () => {}, onOpenTool } = {},
+  { expanded = true, onExpandedChange = () => {} } = {},
 ) {
-  return localizedView(
-    createElement(RunProcess, {
+  function Harness() {
+    const [expandedToolIds, setExpandedToolIds] = useState(new Set());
+    return createElement(RunProcess, {
       presentation: deriveRunPresentation(value),
       expanded,
       onExpandedChange,
-      onOpenTool,
-    }),
-  );
+      expandedToolIds,
+      onToolExpandedChange(toolId, nextExpanded) {
+        setExpandedToolIds((current) => {
+          const next = new Set(current);
+          if (nextExpanded) next.add(toolId);
+          else next.delete(toolId);
+          return next;
+        });
+      },
+    });
+  }
+  return localizedView(createElement(Harness));
 }
 
 test("elapsed display advances without snapshots, rebases on receipt and disappears at terminal", (context) => {
@@ -659,9 +707,8 @@ test("discarded provisional output disappears on the next Snapshot revision", ()
   assert.ok(screen.getByText("Waiting for the next step"));
 });
 
-test("Run status keeps technical Tool summaries behind explicit disclosure", async () => {
+test("Run status keeps technical Tool details behind nested disclosures", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  const opened = [];
   const expandedChanges = [];
   const value = run({
     phase: "running",
@@ -697,7 +744,6 @@ test("Run status keeps technical Tool summaries behind explicit disclosure", asy
   render(
     runProcessElement(value, {
       onExpandedChange: (expanded) => expandedChanges.push(expanded),
-      onOpenTool: (tool) => opened.push(tool.id),
     }),
   );
 
@@ -712,14 +758,71 @@ test("Run status keeps technical Tool summaries behind explicit disclosure", asy
   assert.equal(screen.queryByText("private result"), null);
 
   await user.click(
-    screen.getByRole("button", { name: "View details for Read" }),
+    screen.getByRole("button", { name: "Show or hide details for Read" }),
   );
-  assert.deepEqual(opened, ["tool-1"]);
+  assert.ok(screen.getByRole("region", { name: "Details for Read" }));
+  assert.ok(screen.getByText("private input"));
+  assert.ok(screen.getByText("private result"));
   await user.click(header);
   assert.deepEqual(expandedChanges, [false]);
 });
 
-test("terminal Run hides Tool process evidence", () => {
+test("Tool disclosures expand independently and survive Work process collapse", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const value = run({
+    phase: "running",
+    terminal: null,
+    activity: { kind: "executing_tools", inFlight: "1" },
+    tools: [
+      technicalTool({ id: "read-1", name: "Read", content: "read result" }),
+      technicalTool({ id: "bash-1", name: "Bash", content: "bash result" }),
+    ],
+  });
+
+  function Harness() {
+    const [expanded, setExpanded] = useState(false);
+    const [expandedToolIds, setExpandedToolIds] = useState(new Set());
+    return createElement(RunProcess, {
+      presentation: deriveRunPresentation(value),
+      expanded,
+      onExpandedChange: setExpanded,
+      expandedToolIds,
+      onToolExpandedChange(toolId, nextExpanded) {
+        setExpandedToolIds((current) => {
+          const next = new Set(current);
+          if (nextExpanded) next.add(toolId);
+          else next.delete(toolId);
+          return next;
+        });
+      },
+    });
+  }
+
+  render(localizedView(createElement(Harness)));
+  const process = screen.getByRole("button", {
+    name: /Working/,
+  });
+  await user.click(process);
+  await user.click(
+    screen.getByRole("button", { name: "Show or hide details for Read" }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Show or hide details for Bash" }),
+  );
+  assert.ok(screen.getByRole("region", { name: "Details for Read" }));
+  assert.ok(screen.getByRole("region", { name: "Details for Bash" }));
+
+  await user.click(process);
+  assert.equal(
+    screen.queryByRole("region", { name: "Details for Read" }),
+    null,
+  );
+  await user.click(process);
+  assert.ok(screen.getByRole("region", { name: "Details for Read" }));
+  assert.ok(screen.getByRole("region", { name: "Details for Bash" }));
+});
+
+test("terminal Run keeps Tool process evidence behind a collapsed summary", () => {
   const value = run({
     output: {
       commentary: ["Finished checking"],
@@ -767,7 +870,8 @@ test("terminal Run hides Tool process evidence", () => {
   const markup = renderToStaticMarkup(
     runProcessElement(value, { expanded: false }),
   );
-  assert.equal(markup, "");
+  assert.match(markup, /Work process/);
+  assert.doesNotMatch(markup, /run-process-tools/);
 });
 
 test("technical process disclosure remains user-controlled across revisions and Task switches", async () => {
@@ -832,7 +936,7 @@ test("technical process disclosure remains user-controlled across revisions and 
   assert.equal(disclosure.getAttribute("aria-expanded"), "true");
 });
 
-test("successful terminal keeps commentary visible and removes technical process", () => {
+test("successful terminal keeps commentary and collapsed technical process visible", () => {
   const activeRun = run({
     phase: "running",
     terminal: null,
@@ -870,13 +974,76 @@ test("successful terminal keeps commentary visible and removes technical process
     ],
   });
   view.rerender(taskContentElement(completed, "2"));
-  assert.equal(screen.queryByRole("button", { name: /^Work process/ }), null);
+  assert.equal(
+    screen
+      .getByRole("button", { name: /^Work process/ })
+      .getAttribute("aria-expanded"),
+    "false",
+  );
   assert.ok(screen.getByText("Working through the task"));
   assert.ok(screen.getByText("Final response"));
   assert.equal(
     document.querySelector(".ai-exchange").lastElementChild.className,
     "response-copy-actions",
   );
+});
+
+test("terminal transition preserves an explicitly expanded Tool detail", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const activeRun = run({
+    phase: "running",
+    terminal: null,
+    activity: { kind: "executing_tools", inFlight: "1" },
+    tools: [
+      technicalTool({
+        state: "running",
+        elapsedMs: "0",
+        content: "live evidence",
+      }),
+    ],
+  });
+  const view = render(
+    taskContentElement(
+      task({
+        currentRunId: "9",
+        currentRunPhase: "running",
+        runs: [activeRun],
+      }),
+    ),
+  );
+  await user.click(
+    screen.getByRole("button", { name: /Inspecting the workspace/ }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Show or hide details for Read" }),
+  );
+  assert.ok(screen.getByText("live evidence"));
+
+  view.rerender(
+    taskContentElement(
+      task({
+        runs: [
+          {
+            ...activeRun,
+            phase: "completed",
+            activity: null,
+            terminal: terminal(),
+            output: {
+              ...activeRun.output,
+              response: "Done",
+              responseKind: "final",
+            },
+            tools: [
+              technicalTool({ content: "recorded evidence", elapsedMs: "12" }),
+            ],
+          },
+        ],
+      }),
+      "2",
+    ),
+  );
+  assert.ok(screen.getByRole("region", { name: "Details for Read" }));
+  assert.ok(screen.getByText("recorded evidence"));
 });
 
 test("reply footer uses the product tooltip for the finished time", async (context) => {
@@ -906,7 +1073,7 @@ test("reply footer uses the product tooltip for the finished time", async (conte
   );
 });
 
-test("terminal transition preserves reading position while removing technical details", () => {
+test("terminal transition preserves reading position and collapses technical details", () => {
   const activeRun = run({
     phase: "running",
     terminal: null,
@@ -956,7 +1123,12 @@ test("terminal transition preserves reading position while removing technical de
       "2",
     ),
   );
-  assert.equal(screen.queryByRole("button", { name: /^Work process/ }), null);
+  assert.equal(
+    screen
+      .getByRole("button", { name: /^Work process/ })
+      .getAttribute("aria-expanded"),
+    "false",
+  );
   assert.ok(screen.getByText("Evidence the reader is reviewing"));
   assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
 });
@@ -981,9 +1153,8 @@ test("Task switches restore each Task reading position without cross-contaminati
   assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
 });
 
-test("Tool summary forwards exact Run, Tool, and opener identity", async () => {
+test("Tool summary expands its exact inline details", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  const calls = [];
   const value = task({
     currentRunId: "9",
     currentRunPhase: "running",
@@ -1013,23 +1184,15 @@ test("Tool summary forwards exact Run, Tool, and opener identity", async () => {
       }),
     ],
   });
-  render(
-    taskContentElement(value, "1", {
-      onOpenTool: (runId, toolId, opener) =>
-        calls.push({ runId, toolId, opener }),
-    }),
-  );
+  render(taskContentElement(value));
   await user.click(
     screen.getByRole("button", { name: "Running an operation" }),
   );
   await user.click(
-    screen.getByRole("button", { name: "View details for Bash" }),
+    screen.getByRole("button", { name: "Show or hide details for Bash" }),
   );
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].runId, "9");
-  assert.equal(calls[0].toolId, "tool-7");
-  assert.ok(calls[0].opener instanceof HTMLButtonElement);
-  assert.equal(screen.queryByText("private input"), null);
+  assert.ok(screen.getByRole("region", { name: "Details for Bash" }));
+  assert.ok(screen.getByText("private input"));
 });
 
 test("partial output and terminal failure render one composite notice", () => {
@@ -1333,7 +1496,7 @@ test("typed Run activity uses safe localized labels", () => {
   assert.doesNotMatch(stoppingContent, />正在分析</);
 });
 
-test("active Run file previews belong to expanded tool operations", () => {
+test("Work process does not duplicate Tool file references", () => {
   const referenced = task({
     currentRunId: "9",
     currentRunPhase: "running",
@@ -1366,14 +1529,7 @@ test("active Run file previews belong to expanded tool operations", () => {
       }),
     ],
   });
-  const previews = [],
-    details = [];
-  render(
-    taskContentElement(referenced, "1", {
-      onPreviewFile: (...args) => previews.push(args),
-      onOpenTool: (...args) => details.push(args),
-    }),
-  );
+  render(taskContentElement(referenced));
   assert.equal(document.querySelector(".ai-exchange footer"), null);
   assert.equal(
     screen.queryByRole("button", { name: "Preview index.html" }),
@@ -1382,24 +1538,18 @@ test("active Run file previews belong to expanded tool operations", () => {
   fireEvent.click(document.querySelector(".run-process-header"));
   const rows = [...document.querySelectorAll(".run-process-tools > li")];
   assert.equal(rows.length, 8);
-  for (const [index, row] of rows.entries()) {
-    const preview = within(row).getByRole("button", {
-      name: "Preview index.html",
-    });
-    const detail = within(row).getByRole("button", {
-      name: "View details for Read",
-    });
-    assert.equal(preview.parentElement.closest("button"), null);
-    fireEvent.click(preview);
-    assert.equal(details.length, index);
-    assert.deepEqual(previews[index].slice(0, 3), [
-      "3",
-      "9",
-      referenced.runs[0].tools[index].fileRefs[0],
-    ]);
-    assert.equal(previews[index][3], preview);
-    fireEvent.click(detail);
-    assert.deepEqual(details[index], ["9", `tool-${index}`, detail]);
+  for (const row of rows) {
+    assert.ok(within(row).getByText("index.html"));
+    assert.equal(
+      within(row).queryByRole("button", { name: "Preview index.html" }),
+      null,
+    );
+    assert.equal(
+      within(row).queryByRole("button", {
+        name: "Show or hide details for Read",
+      }),
+      null,
+    );
   }
   fireEvent.click(document.querySelector(".run-process-header"));
   assert.equal(
@@ -1510,7 +1660,12 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     visible.indexOf(">File changes<") <
       visible.indexOf('class="response-copy-actions"'),
   );
-  assert.doesNotMatch(visible, />Work process</);
+  assert.match(visible, />Work process</);
+  assert.ok(
+    visible.indexOf(">File changes<") < visible.indexOf(">Work process<") &&
+      visible.indexOf(">Work process<") <
+        visible.indexOf('class="response-copy-actions"'),
+  );
 
   const incomplete = task({
     runs: [
@@ -2354,7 +2509,7 @@ test("Escape dismissal and focus return preserve the real Task Panel opener", ()
   );
 });
 
-test("detail targets resolve exact identities for one continuous review", () => {
+test("right-panel targets resolve exact document identities", () => {
   const value = task({
     runs: [
       run({
@@ -2365,7 +2520,6 @@ test("detail targets resolve exact identities for one continuous review", () => 
   });
   const base = { taskId: "3", runId: "9" };
   for (const target of [
-    { ...base, kind: "tool", toolId: "tool-1" },
     { ...base, kind: "preview", referenceId: "ref-a" },
     { ...base, kind: "review" },
   ]) {
@@ -2392,14 +2546,6 @@ test("detail targets resolve exact identities for one continuous review", () => 
     ).kind,
     "empty",
   );
-  assert.equal(
-    resolveTaskPanelTarget(
-      { ...base, kind: "tool", toolId: "gone" },
-      value,
-      true,
-    ).kind,
-    "empty",
-  );
 });
 
 test("content targets clear on Task switch and never own layout visibility", () => {
@@ -2412,7 +2558,9 @@ test("content targets clear on Task switch and never own layout visibility", () 
       session.target.kind,
     );
   }
-  const value = task({ runs: [run({ tools: [technicalTool()] })] });
+  const value = task({
+    runs: [run({ tools: [technicalTool({ fileRefs: [{ id: "ref-a" }] })] })],
+  });
   const view = render(createElement(Harness, { value }));
   assert.equal(session.target.kind, "empty");
   assert.equal("open" in session, false);
@@ -2437,11 +2585,16 @@ test("content targets clear on Task switch and never own layout visibility", () 
   view.rerender(
     createElement(Opener, {
       value,
-      target: { kind: "tool", taskId: "3", runId: "9", toolId: "tool-1" },
+      target: {
+        kind: "preview",
+        taskId: "3",
+        runId: "9",
+        referenceId: "ref-a",
+      },
     }),
   );
   fireEvent.click(screen.getByRole("button"));
-  assert.equal(session.target.kind, "tool");
+  assert.equal(session.target.kind, "preview");
   view.rerender(
     createElement(Opener, {
       value: {
@@ -2452,7 +2605,7 @@ test("content targets clear on Task switch and never own layout visibility", () 
       target: emptyTaskPanelTarget,
     }),
   );
-  assert.equal(session.target.kind, "tool");
+  assert.equal(session.target.kind, "preview");
   view.rerender(
     createElement(Opener, {
       value: task({ id: "4" }),
@@ -2466,7 +2619,7 @@ test("content targets clear on Task switch and never own layout visibility", () 
   assert.equal("open" in session, false);
 });
 
-test("single Tool detail follows live props without mounting another tool or unsafe markup", () => {
+test("inline Tool detail follows live props without unsafe markup", () => {
   const value = technicalTool({
     input: "<script>input</script>",
     progress: "progress one",
@@ -2709,6 +2862,7 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
   );
   const first = snapshot.tasks[0];
   first.title = "First task";
+  first.runs[0].output.commentary = ["Working with `a.txt` and `b.txt`."];
   first.runs[0].tools = [
     technicalTool({
       fileRefs: [
@@ -2884,17 +3038,8 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   );
 });
 
-// Preview entry points are available only after explicitly expanding the process.
 function filePreviewOpener(path) {
-  const name = `Preview ${path}`;
-  if (!screen.queryByRole("button", { name })) {
-    const header = document.querySelector(
-      '.run-process-header[aria-expanded="false"]',
-    );
-    assert.ok(header);
-    fireEvent.click(header);
-  }
-  return screen.getByRole("button", { name });
+  return screen.getByRole("button", { name: `Preview ${path}` });
 }
 
 test("permanent panel toggle opens a continuous Review and clears it on close", async (ctx) => {
@@ -3210,6 +3355,14 @@ test("conversation file links preview directly without expanding tools and retur
 
 test("selecting another Markdown reference resets the display mode without retaining old content", async (ctx) => {
   const { previews } = await renderAppFixture(ctx, 1440, {
+    output: {
+      commentary: ["Working with `a.md` and `b.markdown`."],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
     tools: [
       technicalTool({
         fileRefs: [
@@ -3393,9 +3546,7 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
   await act(
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
   );
-  fireEvent.click(
-    document.querySelector('.run-process-header[aria-expanded="true"]'),
-  );
+  opener.remove();
   assert.equal(opener.isConnected, false);
   fireEvent.keyDown(screen.getByRole("heading", { name: "a.txt" }), {
     key: "Escape",

@@ -32,72 +32,38 @@ export type TaskSignals = {
   failed: boolean;
 };
 
-export type TaskGroupKind =
-  "attention" | "running" | "queued" | "recent" | "archived";
-
-export type TaskGroup = {
-  kind: TaskGroupKind;
-  tasks: TaskView[];
-};
-
-export function taskGroups(
+export function orderedTasks(
   tasks: TaskView[],
   showArchived: boolean,
-): TaskGroup[] {
+): TaskView[] {
   const byRecent = (left: TaskView, right: TaskView) => {
     const leftOrder = BigInt(left.recentOrder);
     const rightOrder = BigInt(right.recentOrder);
     return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
   };
-  const active = tasks.filter((task) => !task.archived);
-  const orderedGroups: TaskGroup[] = [
-    {
-      kind: "attention",
-      tasks: active
-        .filter((task) => task.currentRunPhase === "waiting_ui")
-        .sort(byRecent),
-    },
-    {
-      kind: "running",
-      tasks: active
-        .filter((task) => {
-          const compact = activeCompact(task);
-          return (
-            task.currentRunPhase === "running" ||
-            task.currentRunPhase === "stopping" ||
-            compact?.phase === "compacting" ||
-            compact?.phase === "stopping" ||
-            task.activeOperation?.kind === "restore"
-          );
-        })
-        .sort(byRecent),
-    },
-    {
-      kind: "queued",
-      tasks: active
-        .filter(
-          (task) =>
-            task.currentRunPhase === "queued" ||
-            activeCompact(task)?.phase === "queued",
-        )
-        .sort(byRecent),
-    },
-    {
-      kind: "recent",
-      tasks: active
-        .filter(
-          (task) =>
-            task.currentRunPhase === null && task.activeOperation == null,
-        )
-        .sort(byRecent),
-    },
-  ];
-  const groups = orderedGroups.filter((group) => group.tasks.length > 0);
-  if (showArchived) {
-    const archived = tasks.filter((task) => task.archived).sort(byRecent);
-    if (archived.length > 0) groups.push({ kind: "archived", tasks: archived });
-  }
-  return groups;
+  const priority = (task: TaskView) => {
+    if (task.archived) return 4;
+    if (task.currentRunPhase === "waiting_ui") return 0;
+    const compact = activeCompact(task);
+    if (
+      task.currentRunPhase === "running" ||
+      task.currentRunPhase === "stopping" ||
+      compact?.phase === "compacting" ||
+      compact?.phase === "stopping" ||
+      task.activeOperation?.kind === "restore"
+    )
+      return 1;
+    if (task.currentRunPhase === "queued" || compact?.phase === "queued")
+      return 2;
+    return 3;
+  };
+
+  return tasks
+    .filter((task) => showArchived || !task.archived)
+    .sort(
+      (left, right) =>
+        priority(left) - priority(right) || byRecent(left, right),
+    );
 }
 
 export type TaskDisplayState =
