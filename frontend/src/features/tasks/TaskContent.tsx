@@ -29,6 +29,7 @@ import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
+import { deriveAssistantOutputParts } from "./assistant-output.ts";
 import {
   deriveRunPresentation,
   formatRunFinishedTime,
@@ -306,6 +307,17 @@ export function TaskContent({
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
+        const outputParts = deriveAssistantOutputParts(run.id, run.output);
+        const commentaryParts = outputParts.filter(
+          (part) => part.disposition === "commentary",
+        );
+        const provisionalPart = outputParts.find(
+          (part) => part.disposition === "provisional",
+        );
+        const responsePart = outputParts.find(
+          (part) =>
+            part.disposition === "final" || part.disposition === "partial",
+        );
         const responseCopyable = responseCopyEligible(run);
         const finishedTime = formatRunFinishedTime(
           locale,
@@ -351,25 +363,25 @@ export function TaskContent({
             <Message role="user">
               <TaskInput input={run.input} />
             </Message>
-            {(run.output.commentary.some(Boolean) ||
-              run.output.provisional ||
+            {(commentaryParts.some((part) => Boolean(part.content)) ||
+              provisionalPart?.content ||
               run.output.provisionalRedacted ||
               (run.output.redacted && !presentation.responseVisible)) && (
               <Message role="assistant" className="run-narrative">
-                {run.output.commentary.map((commentary, index) =>
-                  commentary ? (
+                {commentaryParts.map((part) =>
+                  part.content ? (
                     <Markdown
                       className="run-commentary-item"
-                      key={index}
+                      key={part.identity}
                       references={references}
                     >
-                      {commentary}
+                      {part.content}
                     </Markdown>
                   ) : null,
                 )}
-                {run.output.provisional && (
+                {provisionalPart?.content && (
                   <p className="run-provisional" aria-live="polite">
-                    {run.output.provisional}
+                    {provisionalPart.content}
                   </p>
                 )}
                 {(run.output.provisionalRedacted ||
@@ -430,7 +442,7 @@ export function TaskContent({
                         : undefined
                     }
                   >
-                    {run.output.response}
+                    {responsePart?.content ?? ""}
                   </Markdown>
                   {run.output.redacted && (
                     <p className="projection-note">
