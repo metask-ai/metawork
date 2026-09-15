@@ -94,6 +94,15 @@ export const initialWorkbenchState: WorkbenchState = {
           errorCode: "none",
           safeDiagnostic: "",
         },
+        history: {
+          availability: "unavailable",
+          startDate: null,
+          endDate: null,
+          days: [],
+          syncedAt: null,
+          errorCode: "none",
+          safeDiagnostic: "",
+        },
       },
     },
     models: {

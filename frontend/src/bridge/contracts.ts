@@ -194,6 +194,23 @@ export type AccountView = {
       errorCode: AccountErrorCode;
       safeDiagnostic: string;
     };
+    history: {
+      availability: "unavailable" | "loading" | "ready" | "stale";
+      startDate: string | null;
+      endDate: string | null;
+      days: Array<{
+        date: string;
+        inputTokens: string;
+        outputTokens: string;
+        cacheCreationTokens: string;
+        cacheReadTokens: string;
+        totalTokens: string;
+        actualCostU: string;
+      }>;
+      syncedAt: string | null;
+      errorCode: AccountErrorCode;
+      safeDiagnostic: string;
+    };
   };
 };
 

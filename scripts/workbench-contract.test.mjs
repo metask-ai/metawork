@@ -71,6 +71,15 @@ const emptyAccountSummary = {
     errorCode: "none",
     safeDiagnostic: "",
   },
+  history: {
+    availability: "unavailable",
+    startDate: null,
+    endDate: null,
+    days: [],
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
 };
 
 test("Skill recovery state matches the Host fixture and enforces Retry authority", () => {
@@ -1971,6 +1980,34 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
       errorCode: "none",
       safeDiagnostic: "",
     },
+    history: {
+      availability: "ready",
+      startDate: "2025-09-16",
+      endDate: "2026-09-15",
+      days: [
+        {
+          date: "2026-09-14",
+          inputTokens: "1",
+          outputTokens: "2",
+          cacheCreationTokens: "3",
+          cacheReadTokens: "4",
+          totalTokens: "10",
+          actualCostU: "0.25",
+        },
+        {
+          date: "2026-09-15",
+          inputTokens: "10",
+          outputTokens: "20",
+          cacheCreationTokens: "30",
+          cacheReadTokens: "40",
+          totalTokens: "100",
+          actualCostU: "2.5",
+        },
+      ],
+      syncedAt: "1720000000000",
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
   };
   assert.deepEqual(decodeWorkbenchSnapshot(readySummary), readySummary);
   for (const mutate of [
@@ -1979,6 +2016,11 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     (value) => (value.account.summary.usage.today = null),
     (value) => (value.account.summary.usage.total.actualCostU = "2.50"),
     (value) => (value.account.summary.usage.extra = true),
+    (value) => (value.account.summary.history.days[0].date = "2026-02-30"),
+    (value) => (value.account.summary.history.days[1].date = "2026-09-14"),
+    (value) => (value.account.summary.history.days[0].totalTokens = "010"),
+    (value) => (value.account.summary.history.startDate = null),
+    (value) => (value.account.summary.history.startDate = "2025-09-17"),
   ]) {
     const invalid = clone(readySummary);
     mutate(invalid);

@@ -457,6 +457,47 @@ function nullableWireId(value: unknown, path: string) {
   return value === null ? null : wireId(value, path);
 }
 
+function calendarDate(value: unknown, path: string) {
+  const result = stringValue(value, path);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(result);
+  if (match === null) fail(path, "expected YYYY-MM-DD calendar date");
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [
+    31,
+    leap ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  if (
+    year === 0 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > monthDays[month - 1]!
+  )
+    fail(path, "expected valid calendar date");
+  return result;
+}
+
+function nullableCalendarDate(value: unknown, path: string) {
+  return value === null ? null : calendarDate(value, path);
+}
+
+function calendarDayNumber(value: string) {
+  return Math.floor(Date.parse(`${value}T00:00:00Z`) / 86_400_000);
+}
+
 function booleanValue(value: unknown, path: string) {
   if (typeof value !== "boolean") fail(path, "expected boolean");
   return value;
@@ -1278,6 +1319,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "usageEligibility",
     "wallet",
     "usage",
+    "history",
   ]);
   const operation = enumValue(
     summaryItem.operation,
@@ -1398,6 +1440,99 @@ function decodeAccount(value: unknown, path: string): AccountView {
       `${usagePath}.safeDiagnostic`,
     ),
   };
+  const historyPath = `${summaryPath}.history`;
+  const historyItem = object(summaryItem.history, historyPath, [
+    "availability",
+    "startDate",
+    "endDate",
+    "days",
+    "syncedAt",
+    "errorCode",
+    "safeDiagnostic",
+  ]);
+  const history = {
+    availability: enumValue(
+      historyItem.availability,
+      `${historyPath}.availability`,
+      accountSummaryAvailabilities,
+    ),
+    startDate: nullableCalendarDate(
+      historyItem.startDate,
+      `${historyPath}.startDate`,
+    ),
+    endDate: nullableCalendarDate(
+      historyItem.endDate,
+      `${historyPath}.endDate`,
+    ),
+    days: arrayValue(
+      historyItem.days,
+      `${historyPath}.days`,
+      (value, dayPath) => {
+        const day = object(value, dayPath, [
+          "date",
+          "inputTokens",
+          "outputTokens",
+          "cacheCreationTokens",
+          "cacheReadTokens",
+          "totalTokens",
+          "actualCostU",
+        ]);
+        return {
+          date: calendarDate(day.date, `${dayPath}.date`),
+          inputTokens: decimalString(day.inputTokens, `${dayPath}.inputTokens`),
+          outputTokens: decimalString(
+            day.outputTokens,
+            `${dayPath}.outputTokens`,
+          ),
+          cacheCreationTokens: decimalString(
+            day.cacheCreationTokens,
+            `${dayPath}.cacheCreationTokens`,
+          ),
+          cacheReadTokens: decimalString(
+            day.cacheReadTokens,
+            `${dayPath}.cacheReadTokens`,
+          ),
+          totalTokens: decimalString(day.totalTokens, `${dayPath}.totalTokens`),
+          actualCostU: decimalString(day.actualCostU, `${dayPath}.actualCostU`),
+        };
+      },
+    ),
+    syncedAt: nullableWireId(historyItem.syncedAt, `${historyPath}.syncedAt`),
+    errorCode: enumValue(
+      historyItem.errorCode,
+      `${historyPath}.errorCode`,
+      accountErrorCodes,
+    ),
+    safeDiagnostic: stringValue(
+      historyItem.safeDiagnostic,
+      `${historyPath}.safeDiagnostic`,
+    ),
+  };
+  if (history.days.length > 366) fail(historyPath, "too many history days");
+  if (history.startDate !== null && history.endDate !== null) {
+    if (history.startDate > history.endDate)
+      fail(historyPath, "history range must be ordered");
+    if (
+      calendarDayNumber(history.endDate) -
+        calendarDayNumber(history.startDate) !==
+      364
+    )
+      fail(historyPath, "history range must contain 365 calendar days");
+    let previousDate: string | null = null;
+    for (const [index, day] of history.days.entries()) {
+      if (day.date < history.startDate || day.date > history.endDate)
+        fail(
+          `${historyPath}.days[${index}]`,
+          "history date is outside the range",
+        );
+      if (previousDate !== null && previousDate >= day.date)
+        fail(
+          `${historyPath}.days[${index}]`,
+          "history dates must be strictly ordered",
+        );
+      previousDate = day.date;
+    }
+  }
   if (
     state !== "authenticated" &&
     (accountId.length !== 0 || displayName.length !== 0)
@@ -1416,6 +1551,8 @@ function decodeAccount(value: unknown, path: string): AccountView {
     fail(walletPath, "safe diagnostic requires an Account error");
   if (usage.errorCode === "none" && usage.safeDiagnostic.length !== 0)
     fail(usagePath, "safe diagnostic requires an Account error");
+  if (history.errorCode === "none" && history.safeDiagnostic.length !== 0)
+    fail(historyPath, "safe diagnostic requires an Account error");
   if (
     (wallet.availability === "ready" || wallet.availability === "stale") !==
     (wallet.balanceU !== null && wallet.syncedAt !== null)
@@ -1426,9 +1563,29 @@ function decodeAccount(value: unknown, path: string): AccountView {
     (usage.today !== null && usage.total !== null && usage.syncedAt !== null)
   )
     fail(usagePath, "summary data must match availability");
+  const historyCarriesData =
+    history.availability === "ready" || history.availability === "stale";
+  if (historyCarriesData) {
+    if (
+      history.startDate === null ||
+      history.endDate === null ||
+      history.syncedAt === null
+    )
+      fail(historyPath, "summary data must match availability");
+  } else if (
+    history.startDate !== null ||
+    history.endDate !== null ||
+    history.days.length !== 0 ||
+    history.syncedAt !== null
+  ) {
+    fail(historyPath, "summary data must match availability");
+  }
   if (
     usageEligibility === "disabled" &&
-    (usage.availability !== "unavailable" || usage.errorCode !== "none")
+    (usage.availability !== "unavailable" ||
+      usage.errorCode !== "none" ||
+      history.availability !== "unavailable" ||
+      history.errorCode !== "none")
   )
     fail(usagePath, "disabled usage must remain unavailable");
   if (
@@ -1438,7 +1595,9 @@ function decodeAccount(value: unknown, path: string): AccountView {
       wallet.availability !== "unavailable" ||
       wallet.errorCode !== "none" ||
       usage.availability !== "unavailable" ||
-      usage.errorCode !== "none")
+      usage.errorCode !== "none" ||
+      history.availability !== "unavailable" ||
+      history.errorCode !== "none")
   )
     fail(summaryPath, "a non-authenticated Account must hide its summary");
   return {
@@ -1448,7 +1607,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
     displayName,
     errorCode,
     safeDiagnostic,
-    summary: { operation, usageEligibility, wallet, usage },
+    summary: { operation, usageEligibility, wallet, usage, history },
   };
 }
 

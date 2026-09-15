@@ -405,8 +405,12 @@ const root_snapshot_overhead: usize = 1024;
 const account_snapshot_text_bytes: usize =
     account_contract.Limits.account_id_bytes +
     account_contract.Limits.display_name_bytes +
-    3 * account_contract.Limits.safe_diagnostic_bytes +
-    11 * account_contract.Limits.decimal_bytes;
+    4 * account_contract.Limits.safe_diagnostic_bytes +
+    12 * account_contract.Limits.decimal_bytes +
+    (2 + account_contract.Limits.usage_history_days) *
+        account_contract.Limits.calendar_date_bytes +
+    account_contract.Limits.usage_history_days * 6 *
+        account_contract.Limits.decimal_bytes;
 const custom_provider_snapshot_text_bytes: usize =
     models_contract.Limits.custom_provider_entries *
     (models_contract.Limits.instance_id_bytes +
@@ -416,7 +420,8 @@ const custom_provider_snapshot_text_bytes: usize =
         models_contract.Limits.custom_provider_model_entries *
             (models_contract.Limits.model_id_bytes +
                 models_contract.Limits.model_display_name_bytes));
-const account_snapshot_overhead: usize = 1024;
+const account_snapshot_overhead: usize = 1024 +
+    account_contract.Limits.usage_history_days * 192;
 const model_metadata_snapshot_bytes: usize = 1024;
 const custom_provider_snapshot_overhead: usize = 1024 +
     models_contract.Limits.custom_provider_entries * 256;
@@ -4926,6 +4931,35 @@ pub const Runtime = struct {
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.usage.error_code)}) catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, summary.usage.safe_diagnostic);
+        writer.print("}},\"history\":{{\"availability\":\"{s}\",\"startDate\":", .{@tagName(summary.history.availability)}) catch
+            return error.SnapshotTooLarge;
+        try writeNullableProjectedJsonValue(self, writer, summary.history.start_date);
+        writer.writeAll(",\"endDate\":") catch return error.SnapshotTooLarge;
+        try writeNullableProjectedJsonValue(self, writer, summary.history.end_date);
+        writer.writeAll(",\"days\":[") catch return error.SnapshotTooLarge;
+        for (summary.history.days, 0..) |day, index| {
+            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            writer.writeAll("{\"date\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, day.date);
+            writer.writeAll(",\"inputTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, day.input_tokens);
+            writer.writeAll(",\"outputTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, day.output_tokens);
+            writer.writeAll(",\"cacheCreationTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, day.cache_creation_tokens);
+            writer.writeAll(",\"cacheReadTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, day.cache_read_tokens);
+            writer.writeAll(",\"totalTokens\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, day.total_tokens);
+            writer.writeAll(",\"actualCostU\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, day.actual_cost_u);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        }
+        writer.writeAll("],\"syncedAt\":") catch return error.SnapshotTooLarge;
+        try writeNullableProjectedJsonValue(self, writer, summary.history.synced_at_unix_ms);
+        writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{@tagName(summary.history.error_code)}) catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, summary.history.safe_diagnostic);
         writer.writeAll("}}}") catch return error.SnapshotTooLarge;
     }
 
@@ -9459,9 +9493,18 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
     );
 }
 
-test "Product Control serializes complete Account summary decimals as strings" {
+test "Product Control snapshot serializer preserves complete Account summary history" {
     var control = try testRuntime();
     defer control.deinit();
+    const history_days = [_]account_contract.UsageHistoryDayView{.{
+        .date = "2026-09-15",
+        .input_tokens = "1",
+        .output_tokens = "2",
+        .cache_creation_tokens = "3",
+        .cache_read_tokens = "4",
+        .total_tokens = "10",
+        .actual_cost_u = "0.25",
+    }};
     control.commitAccountFactNoFail(.{
         .kind = .summary_changed,
         .view = .{
@@ -9488,6 +9531,13 @@ test "Product Control serializes complete Account summary decimals as strings" {
                     .total = .{ .total_tokens = "300", .actual_cost_u = "2.5" },
                     .synced_at_unix_ms = "1720000000000",
                 },
+                .history = .{
+                    .availability = .ready,
+                    .start_date = "2025-09-16",
+                    .end_date = "2026-09-15",
+                    .days = &history_days,
+                    .synced_at_unix_ms = "1720000000000",
+                },
             },
         },
     });
@@ -9498,9 +9548,12 @@ test "Product Control serializes complete Account summary decimals as strings" {
     const summary = parsed.value.object.get("account").?.object.get("summary").?.object;
     const wallet = summary.get("wallet").?.object;
     const usage = summary.get("usage").?.object;
+    const history = summary.get("history").?.object;
     try std.testing.expectEqualStrings("-1.25", wallet.get("balanceU").?.string);
     try std.testing.expectEqualStrings("37", usage.get("today").?.object.get("totalTokens").?.string);
     try std.testing.expectEqualStrings("2.5", usage.get("total").?.object.get("actualCostU").?.string);
+    try std.testing.expectEqualStrings("2025-09-16", history.get("startDate").?.string);
+    try std.testing.expectEqualStrings("10", history.get("days").?.array.items[0].object.get("totalTokens").?.string);
 }
 
 test "Task completion receipt is identity-bound idempotent and order-neutral" {
