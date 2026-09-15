@@ -21,6 +21,9 @@ const { SettingsPage } = await vite.ssrLoadModule(
 );
 const { formatAccountDecimal, formatAccountSyncedAt } =
   await vite.ssrLoadModule("/src/features/settings/account-summary-format.ts");
+const { buildUsageCalendar } = await vite.ssrLoadModule(
+  "/src/features/settings/AccountUsageHeatmap.tsx",
+);
 const { requiresAccountGate, requiresAccountSetup } = await vite.ssrLoadModule(
   "/src/features/account/gating.ts",
 );
@@ -54,6 +57,15 @@ const emptyAccountSummary = {
     availability: "unavailable",
     today: null,
     total: null,
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+  history: {
+    availability: "unavailable",
+    startDate: null,
+    endDate: null,
+    days: [],
     syncedAt: null,
     errorCode: "none",
     safeDiagnostic: "",
@@ -434,6 +446,25 @@ test("Account settings render the whole-account balance and exact usage ledger",
           errorCode: "none",
           safeDiagnostic: "",
         },
+        history: {
+          availability: "ready",
+          startDate: "2025-09-16",
+          endDate: "2026-09-15",
+          days: [
+            {
+              date: "2026-09-15",
+              inputTokens: "344800",
+              outputTokens: "496100",
+              cacheCreationTokens: "0",
+              cacheReadTokens: "1490000",
+              totalTokens: "2330900",
+              actualCostU: "149.739",
+            },
+          ],
+          syncedAt: "1789344000000",
+          errorCode: "none",
+          safeDiagnostic: "",
+        },
       },
     },
     readyModels,
@@ -445,6 +476,10 @@ test("Account settings render the whole-account balance and exact usage ledger",
   assert.match(markup, /2,330,900 Token/);
   assert.match(markup, /1,204,200,000 Token/);
   assert.match(markup, /Input 344,800 · Output 496,100/);
+  assert.match(markup, /Token usage history/);
+  assert.match(markup, /Daily Token usage calendar/);
+  assert.equal(markup.match(/settings-account-calendar-day/g)?.length, 365);
+  assert.match(markup, /September 15, 2,330,900 Token/);
   assert.match(markup, />Refresh account usage</);
   assert.doesNotMatch(markup, /RPM|TPM|response time|API keys|standard cost/i);
 });
@@ -466,6 +501,15 @@ test("Account summary failure stays local, stale values remain, and simple mode 
         availability: "unavailable",
         today: null,
         total: null,
+        syncedAt: null,
+        errorCode: "metask_service_unavailable",
+        safeDiagnostic: "",
+      },
+      history: {
+        availability: "unavailable",
+        startDate: null,
+        endDate: null,
+        days: [],
         syncedAt: null,
         errorCode: "metask_service_unavailable",
         safeDiagnostic: "",
@@ -495,6 +539,25 @@ test("Account summary failure stays local, stale values remain, and simple mode 
     errorCode: "metask_service_unavailable",
     safeDiagnostic: "",
   };
+  stale.summary.history = {
+    availability: "stale",
+    startDate: "2025-09-16",
+    endDate: "2026-09-15",
+    days: [
+      {
+        date: "2026-09-14",
+        inputTokens: "1",
+        outputTokens: "2",
+        cacheCreationTokens: "3",
+        cacheReadTokens: "4",
+        totalTokens: "10",
+        actualCostU: "0.5",
+      },
+    ],
+    syncedAt: "1789343000000",
+    errorCode: "metask_service_unavailable",
+    safeDiagnostic: "",
+  };
   assert.match(
     renderSettings(stale, readyModels, { initialSection: "account" }),
     /May be out of date/,
@@ -506,6 +569,38 @@ test("Account summary failure stays local, stale values remain, and simple mode 
     renderSettings(simple, readyModels, { initialSection: "account" }),
     /Metask account usage|Refresh account usage/,
   );
+});
+
+test("Account history calendar fills sparse days and limits the compact view to 91 days", () => {
+  const history = {
+    availability: "ready",
+    startDate: "2025-09-16",
+    endDate: "2026-09-15",
+    days: [
+      {
+        date: "2026-09-15",
+        inputTokens: "1",
+        outputTokens: "2",
+        cacheCreationTokens: "3",
+        cacheReadTokens: "4",
+        totalTokens: "10",
+        actualCostU: "0.5",
+      },
+    ],
+    syncedAt: "1789343000000",
+    errorCode: "none",
+    safeDiagnostic: "",
+  };
+  const desktop = buildUsageCalendar(history, 365);
+  assert.equal(desktop.length, 365);
+  assert.equal(desktop[0].date, "2025-09-16");
+  assert.equal(desktop[0].totalTokens, "0");
+  assert.equal(desktop.at(-1).totalTokens, "10");
+
+  const compact = buildUsageCalendar(history, 91);
+  assert.equal(compact.length, 91);
+  assert.equal(compact[0].date, "2026-06-17");
+  assert.equal(compact.at(-1).date, "2026-09-15");
 });
 
 test("unknown Account usage remains actionable without guessing a mode", () => {

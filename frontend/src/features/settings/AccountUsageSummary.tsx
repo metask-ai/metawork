@@ -7,13 +7,16 @@ import {
   formatAccountDecimal,
   formatAccountSyncedAt,
 } from "./account-summary-format.ts";
+import { AccountUsageHeatmap } from "./AccountUsageHeatmap.tsx";
 
 type AccountSummary = AccountView["summary"];
 
 function oldestSyncedAt(summary: AccountSummary) {
-  const values = [summary.wallet.syncedAt, summary.usage.syncedAt].filter(
-    (value): value is string => value !== null,
-  );
+  const values = [
+    summary.wallet.syncedAt,
+    summary.usage.syncedAt,
+    summary.history.syncedAt,
+  ].filter((value): value is string => value !== null);
   return values.reduce<string | null>(
     (oldest, value) =>
       oldest === null || BigInt(value) < BigInt(oldest) ? value : oldest,
@@ -209,6 +212,8 @@ export function AccountUsageSummary({
                 )}
               </div>
             </div>
+
+            <AccountUsageHeatmap history={summary.history} />
           </>
         )}
 
