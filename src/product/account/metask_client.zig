@@ -8,12 +8,14 @@ const transport_api = @import("metask_transport");
 
 pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
 pub const usage_dashboard_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/stats";
+pub const usage_history_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/trend";
 
 pub const RequestKind = enum {
     exchange_code,
     refresh_token,
     current_user,
     usage_dashboard,
+    usage_history,
 };
 
 pub const Request = struct {
@@ -21,6 +23,12 @@ pub const Request = struct {
     body: []const u8 = "",
     bearer: ?[]const u8 = null,
     control: ?RequestControl = null,
+    usage_history_range: ?UsageHistoryRange = null,
+};
+
+pub const UsageHistoryRange = struct {
+    start_date: []const u8,
+    end_date: []const u8,
 };
 
 pub const Response = transport_api.Response;
@@ -212,6 +220,31 @@ pub fn fetchUsageSummary(
     ) catch |err| return transportFailure(err);
     if (response.status != 200) return classifyStatus(response.status, false);
     return summary.parseUsage(response.body) catch return error.ProtocolInvalid;
+}
+
+pub fn fetchUsageHistory(
+    transport: Transport,
+    bearer: []const u8,
+    range: summary.HistoryRange,
+    control: ?RequestControl,
+) ClientError!summary.UsageHistoryData {
+    var storage: [192 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &storage);
+    const response = transport.perform(
+        .{
+            .kind = .usage_history,
+            .bearer = bearer,
+            .control = control,
+            .usage_history_range = .{
+                .start_date = range.start_date.view(),
+                .end_date = range.end_date.view(),
+            },
+        },
+        &storage,
+    ) catch |err| return transportFailure(err);
+    if (response.status != 200) return classifyStatus(response.status, false);
+    return summary.parseUsageHistory(response.body, range) catch
+        return error.ProtocolInvalid;
 }
 
 fn transportFailure(transport_error: TransportError) ClientError {

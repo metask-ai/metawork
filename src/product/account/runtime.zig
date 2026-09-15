@@ -28,6 +28,7 @@ const SummaryJob = struct {
     attempt_id: u64,
     authorization_generation: u64,
     synced_at_unix_ms: summary_impl.Decimal,
+    history_range: ?summary_impl.HistoryRange,
     lease: contract.OwnedAuthorizationLease,
     lease_active: bool = true,
     cancellation: metask_client.Cancellation,
@@ -42,6 +43,7 @@ const SummaryJob = struct {
         wake: WakeSink,
         attempt_id: u64,
         synced_at_unix_ms: summary_impl.Decimal,
+        history_range: ?summary_impl.HistoryRange,
         lease: *contract.OwnedAuthorizationLease,
     ) std.mem.Allocator.Error!*SummaryJob {
         const self = try allocator.create(SummaryJob);
@@ -53,6 +55,7 @@ const SummaryJob = struct {
             .attempt_id = attempt_id,
             .authorization_generation = lease.authorization_generation,
             .synced_at_unix_ms = synced_at_unix_ms,
+            .history_range = history_range,
             .lease = lease.take(),
             .cancellation = metask_client.Cancellation.init(io),
         };
@@ -77,6 +80,7 @@ const SummaryJob = struct {
             .synced_at_unix_ms = self.synced_at_unix_ms,
             .wallet = .{ .failed = .account_operation_failed },
             .usage = .not_requested,
+            .history = .not_requested,
         };
         @memcpy(
             completion.principal_ref[0..self.lease.principal_ref.len],
@@ -110,6 +114,18 @@ const SummaryJob = struct {
                 .{ .succeeded = usage }
             else |err|
                 .{ .failed = metask_client.errorCode(err) };
+            completion.history = if (self.history_range) |range|
+                if (metask_client.fetchUsageHistory(
+                    self.transport,
+                    self.lease.access_token,
+                    range,
+                    control,
+                )) |history|
+                    .{ .succeeded = history }
+                else |err|
+                    .{ .failed = metask_client.errorCode(err) }
+            else
+                .{ .failed = .account_operation_failed };
         }
         self.completion = completion;
     }
@@ -852,6 +868,7 @@ pub const Runtime = struct {
             return .{ .result = .rejected(.account_operation_failed), .changed = false };
         const synced_at = summary_impl.Decimal.fromInteger(now_ms, false) catch
             return .{ .result = .rejected(.account_operation_failed), .changed = false };
+        const history_range = summary_impl.HistoryRange.fromUnixSeconds(now_seconds) catch null;
         const preparation = self.summary.begin(
             lease.principal_ref,
             lease.authorization_generation,
@@ -863,6 +880,7 @@ pub const Runtime = struct {
             self.effects.wake,
             preparation.attempt_id,
             synced_at,
+            history_range,
             lease,
         ) catch {
             _ = self.summary.fail(preparation.attempt_id, .local_resource_exhausted);

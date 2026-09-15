@@ -287,8 +287,10 @@ const SummaryTransport = struct {
     run_mode: enum { standard, simple } = .standard,
     fail_wallet: bool = false,
     fail_usage: bool = false,
+    fail_history: bool = false,
     request_count: usize = 0,
     usage_request_count: usize = 0,
+    history_request_count: usize = 0,
 
     fn port(self: *SummaryTransport) account_api.Transport {
         return .{ .context = self, .perform_fn = perform };
@@ -330,6 +332,22 @@ const SummaryTransport = struct {
                 \\{"code":0,"data":{"total_tokens":120400000,"total_actual_cost":23420.1178,"today_input_tokens":344800,"today_output_tokens":496100,"today_cache_creation_tokens":0,"today_cache_read_tokens":1490000,"today_tokens":2340900,"today_actual_cost":149.739}}
                 ;
             },
+            .usage_history => {
+                self.history_request_count += 1;
+                if (self.fail_history) {
+                    const failure = "{}";
+                    @memcpy(output[0..failure.len], failure);
+                    return .{ .status = 503, .body = output[0..failure.len] };
+                }
+                const range = request.usage_history_range orelse
+                    return error.ProtocolFailed;
+                const rendered = std.fmt.bufPrint(
+                    output,
+                    "{{\"code\":0,\"data\":{{\"trend\":[{{\"date\":\"{s}\",\"requests\":1,\"input_tokens\":10,\"output_tokens\":20,\"cache_creation_tokens\":0,\"cache_read_tokens\":30,\"total_tokens\":60,\"cost\":2,\"actual_cost\":1.25}}],\"start_date\":\"{s}\",\"end_date\":\"{s}\",\"granularity\":\"day\"}}}}",
+                    .{ range.end_date, range.start_date, range.end_date },
+                ) catch return error.ResponseTooLarge;
+                return .{ .status = 200, .body = rendered };
+            },
             else => return error.ProtocolFailed,
         };
         if (body.len > output.len) return error.ResponseTooLarge;
@@ -352,7 +370,7 @@ fn initRuntimeForSummaryTest(transport: *SummaryTransport) account_api.Runtime {
 test "Account summary auto-sync is single-flight and preserves partial stale data" {
     var transport: SummaryTransport = .{};
     var runtime = initRuntimeForSummaryTest(&transport);
-    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 1_789_440_000 };
     account_api.TestSupport.attachPlatform(&runtime, &platform);
     defer {
         account_api.TestSupport.detachPlatform(&runtime);
@@ -366,7 +384,7 @@ test "Account summary auto-sync is single-flight and preserves partial stale dat
         "Meta User",
         "access-token",
         "refresh-token",
-        200,
+        1_789_441_000,
     ));
     try std.testing.expectEqual(account_contract.SummaryOperation.refreshing, runtime.view().summary.operation);
     account_api.TestSupport.joinSummary(&runtime);
@@ -374,8 +392,11 @@ test "Account summary auto-sync is single-flight and preserves partial stale dat
     const ready = runtime.view();
     try std.testing.expectEqual(account_contract.SummaryAvailability.ready, ready.summary.wallet.availability);
     try std.testing.expectEqual(account_contract.SummaryAvailability.ready, ready.summary.usage.availability);
+    try std.testing.expectEqual(@as(usize, 1), transport.history_request_count);
+    try std.testing.expectEqual(account_contract.SummaryAvailability.ready, ready.summary.history.availability);
     try std.testing.expectEqualStrings("100.25", ready.summary.wallet.balance_u);
     try std.testing.expectEqualStrings("2340900", ready.summary.usage.today.?.total_tokens);
+    try std.testing.expectEqualStrings("60", ready.summary.history.days[0].total_tokens);
     try std.testing.expect(std.mem.indexOf(u8, ready.summary.wallet.balance_u, "access-token") == null);
 
     transport.fail_usage = true;
@@ -389,10 +410,22 @@ test "Account summary auto-sync is single-flight and preserves partial stale dat
     const partial = runtime.view();
     try std.testing.expectEqual(account_contract.SummaryAvailability.ready, partial.summary.wallet.availability);
     try std.testing.expectEqual(account_contract.SummaryAvailability.stale, partial.summary.usage.availability);
+    try std.testing.expectEqual(account_contract.SummaryAvailability.ready, partial.summary.history.availability);
     try std.testing.expectEqual(account_contract.ErrorCode.metask_service_unavailable, partial.summary.usage.error_code);
     try std.testing.expectEqualStrings("120400000", partial.summary.usage.total.?.total_tokens);
 
     transport.fail_usage = false;
+    transport.fail_history = true;
+    try std.testing.expect(coordinator.commandSink().submit(.refresh_summary).accepted);
+    account_api.TestSupport.joinSummary(&runtime);
+    coordinator.drain();
+    const history_stale = runtime.view();
+    try std.testing.expectEqual(account_contract.SummaryAvailability.ready, history_stale.summary.usage.availability);
+    try std.testing.expectEqual(account_contract.SummaryAvailability.stale, history_stale.summary.history.availability);
+    try std.testing.expectEqual(account_contract.ErrorCode.metask_service_unavailable, history_stale.summary.history.error_code);
+    try std.testing.expectEqualStrings("60", history_stale.summary.history.days[0].total_tokens);
+
+    transport.fail_history = false;
     transport.fail_wallet = true;
     try std.testing.expect(coordinator.commandSink().submit(.refresh_summary).accepted);
     account_api.TestSupport.joinSummary(&runtime);
@@ -427,8 +460,10 @@ test "Account summary skips usage endpoint in simple mode" {
     const summary = runtime.view().summary;
     try std.testing.expectEqual(@as(usize, 1), transport.request_count);
     try std.testing.expectEqual(@as(usize, 0), transport.usage_request_count);
+    try std.testing.expectEqual(@as(usize, 0), transport.history_request_count);
     try std.testing.expectEqual(account_contract.UsageEligibility.disabled, summary.usage_eligibility);
     try std.testing.expectEqual(account_contract.SummaryAvailability.unavailable, summary.usage.availability);
+    try std.testing.expectEqual(account_contract.SummaryAvailability.unavailable, summary.history.availability);
 }
 
 test "Account coordinator commits identity before notifying Product" {
