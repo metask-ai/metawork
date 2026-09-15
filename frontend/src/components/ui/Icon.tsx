@@ -25,6 +25,7 @@ import {
   RefreshCw,
   Search,
   Download,
+  ExternalLink,
   Send,
   Settings,
   ShieldCheck,
@@ -76,6 +77,7 @@ type IconName =
   | "package"
   | "paperclip"
   | "download"
+  | "external-link"
   | "trash"
   | "scheduled-tasks"
   | "mcp"
@@ -120,6 +122,7 @@ const icons: Record<IconName, LucideIcon> = {
   package: Package,
   paperclip: Paperclip,
   download: Download,
+  "external-link": ExternalLink,
   trash: Trash2,
   "scheduled-tasks": Clock3,
   mcp: Plug,

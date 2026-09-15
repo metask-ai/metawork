@@ -106,6 +106,8 @@ export const enUS = {
     "That account action is no longer available. MetaWork kept the latest account state.",
   "account.command_failed":
     "MetaWork could not complete that account action. Use the recovery action shown here.",
+  "account.recharge_open_failed":
+    "MetaWork could not open the Metask recharge page. Try again shortly.",
   "execution.command_rejected":
     "The default model source was not updated. Refresh execution state and try again.",
   "execution.command_failed":
@@ -894,6 +896,37 @@ export const enUS = {
   "settings.providers": "Providers",
   "settings.general_basics": "Basics",
   "settings.account_profile": "Account information",
+  "settings.account_usage": "Account usage",
+  "settings.account_usage_scope":
+    "These figures cover your whole Metask account, not only activity in MetaWork.",
+  "settings.account_usage_balance": "Balance",
+  "settings.account_concurrency_limit": "Concurrency allowance {value}",
+  "settings.account_concurrency_unlimited": "Unlimited",
+  "settings.account_recharge": "Recharge",
+  "settings.account_recharge_browser_hint":
+    "Open the Metask recharge page in your browser",
+  "settings.account_usage_total": "All time",
+  "settings.account_usage_tokens": "{value} Token",
+  "settings.account_usage_cost": "{value} U",
+  "settings.account_usage_stale": "May be out of date",
+  "settings.account_usage_syncing": "Syncing…",
+  "settings.account_usage_unavailable": "Temporarily unavailable",
+  "settings.account_usage_mode_unknown":
+    "MetaWork cannot confirm this account's usage mode yet. Refresh to try again.",
+  "settings.account_usage_synced_at": "Data synced {value}",
+  "settings.account_usage_not_synced": "Account usage has not synced yet",
+  "settings.account_usage_refreshing": "Refreshing account usage…",
+  "settings.account_usage_refresh": "Refresh account usage",
+  "settings.account_history_title": "Token usage history",
+  "settings.account_history_range": "Past {weeks} weeks · Daily",
+  "settings.account_history_weekdays": "Mon|Tue|Wed|Thu|Fri|Sat|Sun",
+  "settings.account_history_grid_label": "Daily Token usage calendar",
+  "settings.account_history_day_label": "{date}, {tokens} Token",
+  "settings.account_history_day_detail":
+    "Input {input} · Output {output} · Cache created {cacheCreation} · Cache read {cacheRead} · {cost} U",
+  "settings.account_history_legend_label": "Usage intensity from less to more",
+  "settings.account_history_less": "Less",
+  "settings.account_history_more": "More",
   "settings.account_security": "Security",
   "settings.providers_saved": "Model services",
   "settings.back_to_providers": "Back to providers",

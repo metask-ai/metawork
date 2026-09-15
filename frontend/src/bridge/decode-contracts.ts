@@ -167,6 +167,14 @@ const accountStates = [
   "authorizing",
   "authenticated",
 ] as const;
+const accountSummaryOperations = ["idle", "refreshing"] as const;
+const accountSummaryAvailabilities = [
+  "unavailable",
+  "loading",
+  "ready",
+  "stale",
+] as const;
+const accountUsageEligibilities = ["unknown", "disabled", "enabled"] as const;
 const modelsCatalogStates = [
   "needs_authentication",
   "loading",
@@ -427,6 +435,67 @@ function positiveWireId(value: unknown, path: string) {
   const result = wireId(value, path);
   if (result === "0") fail(path, "expected positive wire integer");
   return result;
+}
+
+function decimalString(value: unknown, path: string, signed = false) {
+  const result = stringValue(value, path);
+  const unsignedPattern = /^(0|[1-9][0-9]*)(?:\.[0-9]*[1-9])?$/;
+  const signedPattern = /^-?(0|[1-9][0-9]*)(?:\.[0-9]*[1-9])?$/;
+  if (
+    !(signed ? signedPattern : unsignedPattern).test(result) ||
+    result === "-0"
+  )
+    fail(path, "expected canonical decimal string");
+  return result;
+}
+
+function nullableDecimalString(value: unknown, path: string, signed = false) {
+  return value === null ? null : decimalString(value, path, signed);
+}
+
+function nullableWireId(value: unknown, path: string) {
+  return value === null ? null : wireId(value, path);
+}
+
+function calendarDate(value: unknown, path: string) {
+  const result = stringValue(value, path);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(result);
+  if (match === null) fail(path, "expected YYYY-MM-DD calendar date");
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [
+    31,
+    leap ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  if (
+    year === 0 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > monthDays[month - 1]!
+  )
+    fail(path, "expected valid calendar date");
+  return result;
+}
+
+function nullableCalendarDate(value: unknown, path: string) {
+  return value === null ? null : calendarDate(value, path);
+}
+
+function calendarDayNumber(value: string) {
+  return Math.floor(Date.parse(`${value}T00:00:00Z`) / 86_400_000);
 }
 
 function booleanValue(value: unknown, path: string) {
@@ -1227,13 +1296,21 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "canCancel",
     "accountId",
     "displayName",
+    "emailHint",
+    "concurrencyLimit",
     "errorCode",
     "safeDiagnostic",
+    "summary",
   ]);
   const state = enumValue(item.state, `${path}.state`, accountStates);
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
+  const emailHint = stringValue(item.emailHint, `${path}.emailHint`);
+  const concurrencyLimit =
+    item.concurrencyLimit === null
+      ? null
+      : nonNegativeNumber(item.concurrencyLimit, `${path}.concurrencyLimit`);
   const errorCode = enumValue(
     item.errorCode,
     `${path}.errorCode`,
@@ -1243,27 +1320,306 @@ function decodeAccount(value: unknown, path: string): AccountView {
     item.safeDiagnostic,
     `${path}.safeDiagnostic`,
   );
+  const summaryPath = `${path}.summary`;
+  const summaryItem = object(item.summary, summaryPath, [
+    "operation",
+    "usageEligibility",
+    "wallet",
+    "usage",
+    "history",
+  ]);
+  const operation = enumValue(
+    summaryItem.operation,
+    `${summaryPath}.operation`,
+    accountSummaryOperations,
+  );
+  const usageEligibility = enumValue(
+    summaryItem.usageEligibility,
+    `${summaryPath}.usageEligibility`,
+    accountUsageEligibilities,
+  );
+  const walletPath = `${summaryPath}.wallet`;
+  const walletItem = object(summaryItem.wallet, walletPath, [
+    "availability",
+    "balanceU",
+    "syncedAt",
+    "errorCode",
+    "safeDiagnostic",
+  ]);
+  const wallet = {
+    availability: enumValue(
+      walletItem.availability,
+      `${walletPath}.availability`,
+      accountSummaryAvailabilities,
+    ),
+    balanceU: nullableDecimalString(
+      walletItem.balanceU,
+      `${walletPath}.balanceU`,
+      true,
+    ),
+    syncedAt: nullableWireId(walletItem.syncedAt, `${walletPath}.syncedAt`),
+    errorCode: enumValue(
+      walletItem.errorCode,
+      `${walletPath}.errorCode`,
+      accountErrorCodes,
+    ),
+    safeDiagnostic: stringValue(
+      walletItem.safeDiagnostic,
+      `${walletPath}.safeDiagnostic`,
+    ),
+  };
+  const usagePath = `${summaryPath}.usage`;
+  const usageItem = object(summaryItem.usage, usagePath, [
+    "availability",
+    "today",
+    "total",
+    "syncedAt",
+    "errorCode",
+    "safeDiagnostic",
+  ]);
+  const todayPath = `${usagePath}.today`;
+  const today = nullableObject(usageItem.today, todayPath, (value) => {
+    const todayItem = object(value, todayPath, [
+      "inputTokens",
+      "outputTokens",
+      "cacheCreationTokens",
+      "cacheReadTokens",
+      "totalTokens",
+      "actualCostU",
+    ]);
+    return {
+      inputTokens: decimalString(
+        todayItem.inputTokens,
+        `${todayPath}.inputTokens`,
+      ),
+      outputTokens: decimalString(
+        todayItem.outputTokens,
+        `${todayPath}.outputTokens`,
+      ),
+      cacheCreationTokens: decimalString(
+        todayItem.cacheCreationTokens,
+        `${todayPath}.cacheCreationTokens`,
+      ),
+      cacheReadTokens: decimalString(
+        todayItem.cacheReadTokens,
+        `${todayPath}.cacheReadTokens`,
+      ),
+      totalTokens: decimalString(
+        todayItem.totalTokens,
+        `${todayPath}.totalTokens`,
+      ),
+      actualCostU: decimalString(
+        todayItem.actualCostU,
+        `${todayPath}.actualCostU`,
+      ),
+    };
+  });
+  const totalPath = `${usagePath}.total`;
+  const total = nullableObject(usageItem.total, totalPath, (value) => {
+    const totalItem = object(value, totalPath, ["totalTokens", "actualCostU"]);
+    return {
+      totalTokens: decimalString(
+        totalItem.totalTokens,
+        `${totalPath}.totalTokens`,
+      ),
+      actualCostU: decimalString(
+        totalItem.actualCostU,
+        `${totalPath}.actualCostU`,
+      ),
+    };
+  });
+  const usage = {
+    availability: enumValue(
+      usageItem.availability,
+      `${usagePath}.availability`,
+      accountSummaryAvailabilities,
+    ),
+    today,
+    total,
+    syncedAt: nullableWireId(usageItem.syncedAt, `${usagePath}.syncedAt`),
+    errorCode: enumValue(
+      usageItem.errorCode,
+      `${usagePath}.errorCode`,
+      accountErrorCodes,
+    ),
+    safeDiagnostic: stringValue(
+      usageItem.safeDiagnostic,
+      `${usagePath}.safeDiagnostic`,
+    ),
+  };
+  const historyPath = `${summaryPath}.history`;
+  const historyItem = object(summaryItem.history, historyPath, [
+    "availability",
+    "startDate",
+    "endDate",
+    "days",
+    "syncedAt",
+    "errorCode",
+    "safeDiagnostic",
+  ]);
+  const history = {
+    availability: enumValue(
+      historyItem.availability,
+      `${historyPath}.availability`,
+      accountSummaryAvailabilities,
+    ),
+    startDate: nullableCalendarDate(
+      historyItem.startDate,
+      `${historyPath}.startDate`,
+    ),
+    endDate: nullableCalendarDate(
+      historyItem.endDate,
+      `${historyPath}.endDate`,
+    ),
+    days: arrayValue(
+      historyItem.days,
+      `${historyPath}.days`,
+      (value, dayPath) => {
+        const day = object(value, dayPath, [
+          "date",
+          "inputTokens",
+          "outputTokens",
+          "cacheCreationTokens",
+          "cacheReadTokens",
+          "totalTokens",
+          "actualCostU",
+        ]);
+        return {
+          date: calendarDate(day.date, `${dayPath}.date`),
+          inputTokens: decimalString(day.inputTokens, `${dayPath}.inputTokens`),
+          outputTokens: decimalString(
+            day.outputTokens,
+            `${dayPath}.outputTokens`,
+          ),
+          cacheCreationTokens: decimalString(
+            day.cacheCreationTokens,
+            `${dayPath}.cacheCreationTokens`,
+          ),
+          cacheReadTokens: decimalString(
+            day.cacheReadTokens,
+            `${dayPath}.cacheReadTokens`,
+          ),
+          totalTokens: decimalString(day.totalTokens, `${dayPath}.totalTokens`),
+          actualCostU: decimalString(day.actualCostU, `${dayPath}.actualCostU`),
+        };
+      },
+    ),
+    syncedAt: nullableWireId(historyItem.syncedAt, `${historyPath}.syncedAt`),
+    errorCode: enumValue(
+      historyItem.errorCode,
+      `${historyPath}.errorCode`,
+      accountErrorCodes,
+    ),
+    safeDiagnostic: stringValue(
+      historyItem.safeDiagnostic,
+      `${historyPath}.safeDiagnostic`,
+    ),
+  };
+  if (history.days.length > 371) fail(historyPath, "too many history days");
+  if (history.startDate !== null && history.endDate !== null) {
+    if (history.startDate > history.endDate)
+      fail(historyPath, "history range must be ordered");
+    const startDay = calendarDayNumber(history.startDate);
+    const rangeDays = calendarDayNumber(history.endDate) - startDay + 1;
+    if ((startDay + 3) % 7 !== 0 || rangeDays < 365 || rangeDays > 371)
+      fail(historyPath, "history range must align 53 week columns from Monday");
+    let previousDate: string | null = null;
+    for (const [index, day] of history.days.entries()) {
+      if (day.date < history.startDate || day.date > history.endDate)
+        fail(
+          `${historyPath}.days[${index}]`,
+          "history date is outside the range",
+        );
+      if (previousDate !== null && previousDate >= day.date)
+        fail(
+          `${historyPath}.days[${index}]`,
+          "history dates must be strictly ordered",
+        );
+      previousDate = day.date;
+    }
+  }
   if (
     state !== "authenticated" &&
-    (accountId.length !== 0 || displayName.length !== 0)
+    (accountId.length !== 0 ||
+      displayName.length !== 0 ||
+      emailHint.length !== 0 ||
+      concurrencyLimit !== null)
   )
     fail(path, "a non-authenticated Account must hide identity");
   if (
     state === "authenticated" &&
-    (accountId.length === 0 || displayName.length === 0)
+    (accountId.length === 0 ||
+      displayName.length === 0 ||
+      concurrencyLimit === null)
   )
     fail(path, "an authenticated Account requires identity");
   if (canCancel && state !== "authorizing")
     fail(path, "cancellation requires active authorization");
   if (errorCode === "none" && safeDiagnostic.length !== 0)
     fail(path, "safe diagnostic requires an Account error");
+  if (wallet.errorCode === "none" && wallet.safeDiagnostic.length !== 0)
+    fail(walletPath, "safe diagnostic requires an Account error");
+  if (usage.errorCode === "none" && usage.safeDiagnostic.length !== 0)
+    fail(usagePath, "safe diagnostic requires an Account error");
+  if (history.errorCode === "none" && history.safeDiagnostic.length !== 0)
+    fail(historyPath, "safe diagnostic requires an Account error");
+  if (
+    (wallet.availability === "ready" || wallet.availability === "stale") !==
+    (wallet.balanceU !== null && wallet.syncedAt !== null)
+  )
+    fail(walletPath, "summary data must match availability");
+  if (
+    (usage.availability === "ready" || usage.availability === "stale") !==
+    (usage.today !== null && usage.total !== null && usage.syncedAt !== null)
+  )
+    fail(usagePath, "summary data must match availability");
+  const historyCarriesData =
+    history.availability === "ready" || history.availability === "stale";
+  if (historyCarriesData) {
+    if (
+      history.startDate === null ||
+      history.endDate === null ||
+      history.syncedAt === null
+    )
+      fail(historyPath, "summary data must match availability");
+  } else if (
+    history.startDate !== null ||
+    history.endDate !== null ||
+    history.days.length !== 0 ||
+    history.syncedAt !== null
+  ) {
+    fail(historyPath, "summary data must match availability");
+  }
+  if (
+    usageEligibility === "disabled" &&
+    (usage.availability !== "unavailable" ||
+      usage.errorCode !== "none" ||
+      history.availability !== "unavailable" ||
+      history.errorCode !== "none")
+  )
+    fail(usagePath, "disabled usage must remain unavailable");
+  if (
+    state !== "authenticated" &&
+    (operation !== "idle" ||
+      usageEligibility !== "unknown" ||
+      wallet.availability !== "unavailable" ||
+      wallet.errorCode !== "none" ||
+      usage.availability !== "unavailable" ||
+      usage.errorCode !== "none" ||
+      history.availability !== "unavailable" ||
+      history.errorCode !== "none")
+  )
+    fail(summaryPath, "a non-authenticated Account must hide its summary");
   return {
     state,
     canCancel,
     accountId,
     displayName,
+    emailHint,
+    concurrencyLimit,
     errorCode,
     safeDiagnostic,
+    summary: { operation, usageEligibility, wallet, usage, history },
   };
 }
 

@@ -1433,6 +1433,31 @@ export default function App() {
     }
   }
 
+  async function openAccountRecharge() {
+    if (bridgeUnavailable || accountBusyRef.current) return;
+    accountBusyRef.current = true;
+    setAccountBusy(true);
+    try {
+      const result = await client.openAccountRecharge();
+      if (!result.accepted) {
+        setStatus(
+          attentionStatus("account.recharge_open_failed", {
+            scope: "account",
+          }),
+        );
+      }
+    } catch {
+      setStatus(
+        attentionStatus("account.recharge_open_failed", {
+          scope: "account",
+        }),
+      );
+    } finally {
+      accountBusyRef.current = false;
+      setAccountBusy(false);
+    }
+  }
+
   async function runExecutionCommand(
     invoke: () => Promise<{
       accepted: boolean;
@@ -3504,6 +3529,10 @@ export default function App() {
             onRetryRefresh={() =>
               void runAccountCommand(() => client.retryAccountRefresh())
             }
+            onRefreshAccountSummary={() =>
+              void runAccountCommand(() => client.refreshAccountSummary())
+            }
+            onOpenRecharge={() => void openAccountRecharge()}
             onLogout={() => void runAccountCommand(() => client.logout())}
           />
         ) : null

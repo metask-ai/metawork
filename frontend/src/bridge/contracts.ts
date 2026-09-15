@@ -164,8 +164,56 @@ export type AccountView = {
   canCancel: boolean;
   accountId: string;
   displayName: string;
+  emailHint: string;
+  concurrencyLimit: number | null;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
+  summary: {
+    operation: "idle" | "refreshing";
+    usageEligibility: "unknown" | "disabled" | "enabled";
+    wallet: {
+      availability: "unavailable" | "loading" | "ready" | "stale";
+      balanceU: string | null;
+      syncedAt: string | null;
+      errorCode: AccountErrorCode;
+      safeDiagnostic: string;
+    };
+    usage: {
+      availability: "unavailable" | "loading" | "ready" | "stale";
+      today: {
+        inputTokens: string;
+        outputTokens: string;
+        cacheCreationTokens: string;
+        cacheReadTokens: string;
+        totalTokens: string;
+        actualCostU: string;
+      } | null;
+      total: {
+        totalTokens: string;
+        actualCostU: string;
+      } | null;
+      syncedAt: string | null;
+      errorCode: AccountErrorCode;
+      safeDiagnostic: string;
+    };
+    history: {
+      availability: "unavailable" | "loading" | "ready" | "stale";
+      startDate: string | null;
+      endDate: string | null;
+      days: Array<{
+        date: string;
+        inputTokens: string;
+        outputTokens: string;
+        cacheCreationTokens: string;
+        cacheReadTokens: string;
+        totalTokens: string;
+        actualCostU: string;
+      }>;
+      syncedAt: string | null;
+      errorCode: AccountErrorCode;
+      safeDiagnostic: string;
+    };
+  };
 };
 
 export type ModelsErrorCode =

@@ -53,6 +53,35 @@ function clone(value) {
   return structuredClone(value);
 }
 
+const emptyAccountSummary = {
+  operation: "idle",
+  usageEligibility: "unknown",
+  wallet: {
+    availability: "unavailable",
+    balanceU: null,
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+  usage: {
+    availability: "unavailable",
+    today: null,
+    total: null,
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+  history: {
+    availability: "unavailable",
+    startDate: null,
+    endDate: null,
+    days: [],
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+};
+
 test("Skill recovery state matches the Host fixture and enforces Retry authority", () => {
   const asset = JSON.parse(
     readFileSync(
@@ -450,8 +479,11 @@ test("durable Metask intent remains decodable when the current catalog is unavai
     canCancel: false,
     accountId: "",
     displayName: "",
+    emailHint: "",
+    concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
+    summary: emptyAccountSummary,
   };
   catalogUnavailable.newTaskAdmission = {
     available: false,
@@ -466,6 +498,16 @@ test("durable Metask intent remains decodable when the current catalog is unavai
     decodeWorkbenchSnapshot(catalogUnavailable).models,
     modelsUnavailableFixture,
   );
+});
+
+test("Account concurrency accepts the backend unlimited sentinel", () => {
+  const unlimited = clone(fixture);
+  unlimited.account.concurrencyLimit = 0;
+  assert.deepEqual(decodeWorkbenchSnapshot(unlimited), unlimited);
+
+  const invalid = clone(fixture);
+  invalid.account.concurrencyLimit = -1;
+  assert.throws(() => decodeWorkbenchSnapshot(invalid));
 });
 
 test("Models recovery-required health crosses the strict snapshot decoder", () => {
@@ -1472,8 +1514,11 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
     canCancel: false,
     accountId: "",
     displayName: "",
+    emailHint: "",
+    concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
+    summary: emptyAccountSummary,
   };
   const customMetadata = clone(snapshot.models.providers[0].models[0].metadata);
   snapshot.models = {
@@ -1951,6 +1996,79 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     /safe diagnostic requires an Account error/,
   );
 
+  const readySummary = clone(fixture);
+  readySummary.account.summary = {
+    operation: "idle",
+    usageEligibility: "enabled",
+    wallet: {
+      availability: "ready",
+      balanceU: "-1.25",
+      syncedAt: "1720000000000",
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
+    usage: {
+      availability: "ready",
+      today: {
+        inputTokens: "10",
+        outputTokens: "20",
+        cacheCreationTokens: "3",
+        cacheReadTokens: "4",
+        totalTokens: "37",
+        actualCostU: "0.125",
+      },
+      total: { totalTokens: "300", actualCostU: "2.5" },
+      syncedAt: "1720000000000",
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
+    history: {
+      availability: "ready",
+      startDate: "2025-09-15",
+      endDate: "2026-09-15",
+      days: [
+        {
+          date: "2026-09-14",
+          inputTokens: "1",
+          outputTokens: "2",
+          cacheCreationTokens: "3",
+          cacheReadTokens: "4",
+          totalTokens: "10",
+          actualCostU: "0.25",
+        },
+        {
+          date: "2026-09-15",
+          inputTokens: "10",
+          outputTokens: "20",
+          cacheCreationTokens: "30",
+          cacheReadTokens: "40",
+          totalTokens: "100",
+          actualCostU: "2.5",
+        },
+      ],
+      syncedAt: "1720000000000",
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(readySummary), readySummary);
+  for (const mutate of [
+    (value) => (value.account.summary.wallet.balanceU = 1.25),
+    (value) => (value.account.summary.wallet.balanceU = "01.25"),
+    (value) => (value.account.summary.usage.today = null),
+    (value) => (value.account.summary.usage.total.actualCostU = "2.50"),
+    (value) => (value.account.summary.usage.extra = true),
+    (value) => (value.account.summary.history.days[0].date = "2026-02-30"),
+    (value) => (value.account.summary.history.days[1].date = "2026-09-14"),
+    (value) => (value.account.summary.history.days[0].totalTokens = "010"),
+    (value) => (value.account.summary.history.startDate = null),
+    (value) => (value.account.summary.history.startDate = "2025-09-17"),
+  ]) {
+    const invalid = clone(readySummary);
+    mutate(invalid);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+
   const refreshingCatalog = clone(fixture);
   refreshingCatalog.models.operation = "refreshing_catalog";
   refreshingCatalog.models.availability = "loading";
@@ -1965,8 +2083,11 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     canCancel: false,
     accountId: "",
     displayName: "",
+    emailHint: "",
+    concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
+    summary: emptyAccountSummary,
   };
   signedOut.models.availability = "needs_authentication";
   signedOut.models.providers[0].catalogState = "needs_authentication";
@@ -1983,6 +2104,13 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   signedOut.newTaskAdmission.activeSelectionRevision = "0";
   signedOut.newTaskAdmission.available = false;
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(signedOut));
+
+  const leakedSignedOutSummary = clone(signedOut);
+  leakedSignedOutSummary.account.summary = readySummary.account.summary;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(leakedSignedOutSummary),
+    /must hide its summary/,
+  );
 
   const duplicateModel = clone(fixture);
   duplicateModel.models.providers[0].models = [

@@ -575,6 +575,18 @@ export class BridgeClient {
     );
   }
 
+  async refreshAccountSummary() {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.accountRefreshSummary, {}),
+    );
+  }
+
+  async openAccountRecharge() {
+    return decodeAccountCommandResult(
+      await this.invoke(commands.accountOpenRecharge, {}),
+    );
+  }
+
   async refreshModelsCatalog() {
     return decodeExecutionCommandResult(
       await this.invoke(commands.modelsRefreshCatalog, {}),

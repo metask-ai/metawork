@@ -48,6 +48,10 @@ pub const Adapter = struct {
                 .context = self,
                 .open_fn = openAuthorizationUrl,
             },
+            .recharge_page = .{
+                .context = self,
+                .open_fn = openRechargePage,
+            },
             .timer = .{
                 .context = self,
                 .start_fn = startTimer,
@@ -66,6 +70,12 @@ pub const Adapter = struct {
     }
 
     fn openAuthorizationUrl(context: *anyopaque, url: []const u8) !void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        try self.assertMainThread();
+        try self.services.openExternalUrl(url);
+    }
+
+    fn openRechargePage(context: *anyopaque, url: []const u8) !void {
         const self: *Adapter = @ptrCast(@alignCast(context));
         try self.assertMainThread();
         try self.services.openExternalUrl(url);

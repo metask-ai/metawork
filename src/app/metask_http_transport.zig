@@ -59,10 +59,16 @@ pub const Adapter = struct {
                     .exchange_code => .exchange_code,
                     .refresh_token => .refresh_token,
                     .current_user => .current_user,
+                    .usage_dashboard => .usage_dashboard,
+                    .usage_history => .usage_history,
                 },
                 .body = request.body,
                 .bearer = request.bearer,
                 .control = request.control,
+                .usage_history_range = if (request.usage_history_range) |range| .{
+                    .start_date = range.start_date,
+                    .end_date = range.end_date,
+                } else null,
             },
             response_buffer,
         );
@@ -172,9 +178,26 @@ pub const Adapter = struct {
             authorization = authorization_storage[0 .. "Bearer ".len + bearer.len];
         }
 
+        var endpoint_storage: [256]u8 = undefined;
         const endpoint, const method: std.http.Method = switch (request.kind) {
             .exchange_code, .refresh_token => .{ oauth.token_url, .POST },
             .current_user => .{ account_metask.current_user_url, .GET },
+            .usage_dashboard => .{ account_metask.usage_dashboard_url, .GET },
+            .usage_history => blk: {
+                const range = request.usage_history_range orelse
+                    return .protocol_failed;
+                const endpoint = std.fmt.bufPrint(
+                    &endpoint_storage,
+                    "{s}?start_date={s}&end_date={s}&granularity=day&timezone={s}",
+                    .{
+                        account_metask.usage_history_url,
+                        range.start_date,
+                        range.end_date,
+                        account_metask.usage_history_timezone,
+                    },
+                ) catch return .protocol_failed;
+                break :blk .{ endpoint, .GET };
+            },
             .keys => .{ models_metask.api_keys_url, .GET },
             .models => .{ models_metask.models_url, .GET },
         };

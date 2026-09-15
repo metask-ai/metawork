@@ -308,8 +308,38 @@ const readySettingsAccount = {
   canCancel: false,
   accountId: "account-1",
   displayName: "Metask User",
+  emailHint: "m***@example.com",
+  concurrencyLimit: 5,
   errorCode: "none",
   safeDiagnostic: "",
+  summary: {
+    operation: "idle",
+    usageEligibility: "unknown",
+    wallet: {
+      availability: "unavailable",
+      balanceU: null,
+      syncedAt: null,
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
+    usage: {
+      availability: "unavailable",
+      today: null,
+      total: null,
+      syncedAt: null,
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
+    history: {
+      availability: "unavailable",
+      startDate: null,
+      endDate: null,
+      days: [],
+      syncedAt: null,
+      errorCode: "none",
+      safeDiagnostic: "",
+    },
+  },
 };
 
 const readySettingsModels = {
@@ -418,6 +448,7 @@ function settingsElement(account, overrides = {}) {
       onTestCustomModel() {},
       onSelectCustomModel() {},
       onBeginLogin() {},
+      onOpenRecharge() {},
       onLogout() {},
       ...overrides,
     }),

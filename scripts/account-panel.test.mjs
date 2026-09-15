@@ -19,6 +19,11 @@ const { AccountGate } = await vite.ssrLoadModule(
 const { SettingsPage } = await vite.ssrLoadModule(
   "/src/features/settings/SettingsPage.tsx",
 );
+const { formatAccountDecimal, formatAccountSyncedAt } =
+  await vite.ssrLoadModule("/src/features/settings/account-summary-format.ts");
+const { buildUsageCalendar } = await vite.ssrLoadModule(
+  "/src/features/settings/AccountUsageHeatmap.tsx",
+);
 const { requiresAccountGate, requiresAccountSetup } = await vite.ssrLoadModule(
   "/src/features/account/gating.ts",
 );
@@ -38,13 +43,45 @@ const appSource = readFileSync(
 
 test.after(async () => vite.close());
 
+const emptyAccountSummary = {
+  operation: "idle",
+  usageEligibility: "unknown",
+  wallet: {
+    availability: "unavailable",
+    balanceU: null,
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+  usage: {
+    availability: "unavailable",
+    today: null,
+    total: null,
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+  history: {
+    availability: "unavailable",
+    startDate: null,
+    endDate: null,
+    days: [],
+    syncedAt: null,
+    errorCode: "none",
+    safeDiagnostic: "",
+  },
+};
+
 const signedOut = {
   state: "signed_out",
   canCancel: false,
   accountId: "",
   displayName: "",
+  emailHint: "",
+  concurrencyLimit: null,
   errorCode: "none",
   safeDiagnostic: "",
+  summary: emptyAccountSummary,
 };
 
 const unavailableModels = {
@@ -81,6 +118,8 @@ const readyAccount = {
   state: "authenticated",
   accountId: "account-1",
   displayName: "Metask User",
+  emailHint: "m***@example.com",
+  concurrencyLimit: 5,
 };
 
 const readyModels = {
@@ -117,6 +156,8 @@ const callbacks = {
   onReconnect() {},
   onBeginLogin() {},
   onRetryRefresh() {},
+  onRefreshAccountSummary() {},
+  onOpenRecharge() {},
   onCancel() {},
   onRefresh() {},
   onSelectApiKey() {},
@@ -379,6 +420,245 @@ test("refresh scheduling failure exposes the explicit Account retry", () => {
   );
   assert.match(markup, /Automatic sign-in refresh could not be scheduled/);
   assert.match(markup, />Retry sign-in refresh</);
+});
+
+test("Account settings render the whole-account balance and exact usage ledger", () => {
+  const markup = renderSettings(
+    {
+      ...readyAccount,
+      summary: {
+        operation: "idle",
+        usageEligibility: "enabled",
+        wallet: {
+          availability: "ready",
+          balanceU: "100.25",
+          syncedAt: "1789344000000",
+          errorCode: "none",
+          safeDiagnostic: "",
+        },
+        usage: {
+          availability: "ready",
+          today: {
+            inputTokens: "344800",
+            outputTokens: "496100",
+            cacheCreationTokens: "0",
+            cacheReadTokens: "1490000",
+            totalTokens: "2330900",
+            actualCostU: "149.739",
+          },
+          total: { totalTokens: "1204200000", actualCostU: "23420.1178" },
+          syncedAt: "1789344000000",
+          errorCode: "none",
+          safeDiagnostic: "",
+        },
+        history: {
+          availability: "ready",
+          startDate: "2025-09-15",
+          endDate: "2026-09-15",
+          days: [
+            {
+              date: "2026-09-15",
+              inputTokens: "344800",
+              outputTokens: "496100",
+              cacheCreationTokens: "0",
+              cacheReadTokens: "1490000",
+              totalTokens: "2330900",
+              actualCostU: "149.739",
+            },
+          ],
+          syncedAt: "1789344000000",
+          errorCode: "none",
+          safeDiagnostic: "",
+        },
+      },
+    },
+    readyModels,
+    { initialSection: "account" },
+  );
+  assert.match(markup, /Account usage/);
+  assert.doesNotMatch(markup, /Metask connected/);
+  assert.match(markup, /whole Metask account, not only activity in MetaWork/);
+  assert.match(markup, /100\.25 U/);
+  assert.match(markup, /m\*\*\*@example\.com/);
+  assert.match(markup, /Concurrency allowance 5/);
+  assert.match(markup, /title="Open the Metask recharge page in your browser"/);
+  assert.match(markup, />Recharge</);
+  assert.match(
+    markup,
+    /Account information[\s\S]*settings-identity-balance[\s\S]*100\.25 U[\s\S]*Account usage/,
+  );
+  assert.match(markup, /2,330,900 Token/);
+  assert.match(markup, /1,204,200,000 Token/);
+  assert.match(markup, /Input 344,800 · Output 496,100/);
+  assert.match(markup, /Token usage history/);
+  assert.match(markup, /Daily Token usage calendar/);
+  assert.equal(markup.match(/settings-account-calendar-day/g)?.length, 366);
+  assert.match(markup, /September 15, 2026, 2,330,900 Token/);
+  assert.doesNotMatch(markup, />Today</);
+  assert.match(markup, />Refresh account usage</);
+  assert.doesNotMatch(markup, /RPM|TPM|response time|API keys|standard cost/i);
+});
+
+test("Account summary failure stays local, stale values remain, and simple mode hides usage", () => {
+  const partial = {
+    ...readyAccount,
+    summary: {
+      operation: "idle",
+      usageEligibility: "enabled",
+      wallet: {
+        availability: "ready",
+        balanceU: "12",
+        syncedAt: "1789344000000",
+        errorCode: "none",
+        safeDiagnostic: "",
+      },
+      usage: {
+        availability: "unavailable",
+        today: null,
+        total: null,
+        syncedAt: null,
+        errorCode: "metask_service_unavailable",
+        safeDiagnostic: "",
+      },
+      history: {
+        availability: "unavailable",
+        startDate: null,
+        endDate: null,
+        days: [],
+        syncedAt: null,
+        errorCode: "metask_service_unavailable",
+        safeDiagnostic: "",
+      },
+    },
+  };
+  const partialMarkup = renderSettings(partial, readyModels, {
+    initialSection: "account",
+  });
+  assert.match(partialMarkup, /12 U/);
+  assert.match(partialMarkup, /Metask is temporarily unavailable/);
+  assert.match(partialMarkup, /Metask User/);
+
+  const usageOnlyFailure = structuredClone(partial);
+  usageOnlyFailure.summary.history = {
+    availability: "ready",
+    startDate: "2025-09-15",
+    endDate: "2026-09-15",
+    days: [],
+    syncedAt: "1789344000000",
+    errorCode: "none",
+    safeDiagnostic: "",
+  };
+  assert.match(
+    renderSettings(usageOnlyFailure, readyModels, {
+      initialSection: "account",
+    }),
+    /Metask is temporarily unavailable/,
+  );
+
+  const stale = structuredClone(partial);
+  stale.summary.usage = {
+    availability: "stale",
+    today: {
+      inputTokens: "1",
+      outputTokens: "2",
+      cacheCreationTokens: "3",
+      cacheReadTokens: "4",
+      totalTokens: "10",
+      actualCostU: "0.5",
+    },
+    total: { totalTokens: "20", actualCostU: "1" },
+    syncedAt: "1789343000000",
+    errorCode: "metask_service_unavailable",
+    safeDiagnostic: "",
+  };
+  stale.summary.history = {
+    availability: "stale",
+    startDate: "2025-09-15",
+    endDate: "2026-09-15",
+    days: [
+      {
+        date: "2026-09-14",
+        inputTokens: "1",
+        outputTokens: "2",
+        cacheCreationTokens: "3",
+        cacheReadTokens: "4",
+        totalTokens: "10",
+        actualCostU: "0.5",
+      },
+    ],
+    syncedAt: "1789343000000",
+    errorCode: "metask_service_unavailable",
+    safeDiagnostic: "",
+  };
+  assert.match(
+    renderSettings(stale, readyModels, { initialSection: "account" }),
+    /May be out of date/,
+  );
+
+  const simple = structuredClone(readyAccount);
+  simple.summary.usageEligibility = "disabled";
+  assert.doesNotMatch(
+    renderSettings(simple, readyModels, { initialSection: "account" }),
+    /Account usage|Refresh account usage|>Balance</,
+  );
+});
+
+test("Account history calendar fills sparse days and keeps complete week columns", () => {
+  const history = {
+    availability: "ready",
+    startDate: "2025-09-15",
+    endDate: "2026-09-15",
+    days: [
+      {
+        date: "2026-09-15",
+        inputTokens: "1",
+        outputTokens: "2",
+        cacheCreationTokens: "3",
+        cacheReadTokens: "4",
+        totalTokens: "10",
+        actualCostU: "0.5",
+      },
+    ],
+    syncedAt: "1789343000000",
+    errorCode: "none",
+    safeDiagnostic: "",
+  };
+  const desktop = buildUsageCalendar(history, 53);
+  assert.equal(desktop.length, 366);
+  assert.equal(desktop[0].date, "2025-09-15");
+  assert.equal(desktop[0].totalTokens, "0");
+  assert.equal(desktop.at(-1).totalTokens, "10");
+
+  const compact = buildUsageCalendar(history, 13);
+  assert.equal(compact.length, 86);
+  assert.equal(compact[0].date, "2026-06-22");
+  assert.equal(compact.at(-1).date, "2026-09-15");
+});
+
+test("unknown Account usage remains actionable without guessing a mode", () => {
+  const markup = renderSettings(readyAccount, readyModels, {
+    initialSection: "account",
+  });
+  assert.match(markup, /cannot confirm this account&#x27;s usage mode yet/);
+  assert.match(markup, />Refresh account usage</);
+  assert.match(markup, />Balance</);
+});
+
+test("an unlimited Account concurrency value stays visible", () => {
+  const unlimited = { ...readyAccount, concurrencyLimit: 0 };
+  const markup = renderSettings(unlimited, readyModels, {
+    initialSection: "account",
+  });
+  assert.match(markup, /Concurrency allowance Unlimited/);
+});
+
+test("Account usage formatting preserves decimal precision without number coercion", () => {
+  assert.equal(
+    formatAccountDecimal("12042000000000001.125"),
+    "12,042,000,000,000,001.125",
+  );
+  assert.equal(formatAccountDecimal("-1.25"), "−1.25");
+  assert.equal(formatAccountSyncedAt("18446744073709551615", "en-US"), null);
 });
 
 test("Models canonical recovery preserves Account identity and freezes selectors", () => {

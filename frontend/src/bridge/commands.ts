@@ -53,6 +53,8 @@ export const commands = {
   accountBeginLogin: "metawork.account.beginLogin",
   accountCancelOperation: "metawork.account.cancelOperation",
   accountRetryRefresh: "metawork.account.retryRefresh",
+  accountRefreshSummary: "metawork.account.refreshSummary",
+  accountOpenRecharge: "metawork.account.openRecharge",
   modelsRefreshCatalog: "metawork.models.refreshCatalog",
   modelsResetStore: "metawork.models.resetStore",
   selectMetaskApiKey: "metawork.models.selectMetaskApiKey",

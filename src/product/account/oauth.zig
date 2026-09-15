@@ -298,9 +298,16 @@ pub fn parseTokenResponse(
 pub const CurrentUser = struct {
     username: [contract.Limits.display_name_bytes]u8 = undefined,
     username_len: usize = 0,
+    email_hint: [contract.Limits.email_hint_bytes]u8 = undefined,
+    email_hint_len: usize = 0,
+    concurrency_limit: u32 = 0,
 
     pub fn usernameView(self: *const CurrentUser) []const u8 {
         return self.username[0..self.username_len];
+    }
+
+    pub fn emailHintView(self: *const CurrentUser) []const u8 {
+        return self.email_hint[0..self.email_hint_len];
     }
 };
 
@@ -312,7 +319,34 @@ const CurrentUserEnvelope = struct {
 const CurrentUserResponse = struct {
     id: i64,
     username: []const u8,
+    email: []const u8 = "",
+    concurrency: i64,
 };
+
+fn maskEmail(output: []u8, email: []const u8) ProtocolError![]const u8 {
+    if (email.len == 0) return output[0..0];
+    if (email.len > contract.Limits.email_bytes or
+        !std.unicode.utf8ValidateSlice(email))
+        return error.InvalidCurrentUserResponse;
+    for (email) |byte| {
+        if (byte < 0x20 or byte == 0x7f)
+            return error.InvalidCurrentUserResponse;
+    }
+    const at = std.mem.lastIndexOfScalar(u8, email, '@') orelse
+        return error.InvalidCurrentUserResponse;
+    if (at == 0 or at + 1 >= email.len or
+        std.mem.indexOfScalar(u8, email[0..at], '@') != null)
+        return error.InvalidCurrentUserResponse;
+    const first_len = std.unicode.utf8ByteSequenceLength(email[0]) catch
+        return error.InvalidCurrentUserResponse;
+    var writer = std.Io.Writer.fixed(output);
+    writer.writeAll(email[0..first_len]) catch
+        return error.InvalidCurrentUserResponse;
+    writer.writeAll("***@") catch return error.InvalidCurrentUserResponse;
+    writer.writeAll(email[at + 1 ..]) catch
+        return error.InvalidCurrentUserResponse;
+    return writer.buffered();
+}
 
 pub fn parseCurrentUser(
     body: []const u8,
@@ -341,11 +375,18 @@ pub fn parseCurrentUser(
         !std.mem.eql(u8, account_id, expected_account_id) or
         raw.data.username.len == 0 or
         raw.data.username.len > contract.Limits.display_name_bytes or
-        !std.unicode.utf8ValidateSlice(raw.data.username))
+        !std.unicode.utf8ValidateSlice(raw.data.username) or
+        raw.data.concurrency > std.math.maxInt(u32))
         return error.InvalidCurrentUserResponse;
     var result: CurrentUser = .{};
     @memcpy(result.username[0..raw.data.username.len], raw.data.username);
     result.username_len = raw.data.username.len;
+    const email_hint = try maskEmail(&result.email_hint, raw.data.email);
+    result.email_hint_len = email_hint.len;
+    result.concurrency_limit = if (raw.data.concurrency <= 0)
+        0
+    else
+        @intCast(raw.data.concurrency);
     return result;
 }
 
@@ -576,15 +617,29 @@ test "token decoder validates consumed fields and tolerates additive metadata" {
 
 test "current user decoder binds username to the token account" {
     const info = try parseCurrentUser(
-        \\{"code":0,"message":"success","data":{"id":42,"email":"user@example.com","username":"Meta User","role":"user","unknown":true}}
+        \\{"code":0,"message":"success","data":{"id":42,"email":"user@example.com","username":"Meta User","concurrency":5,"role":"user","unknown":true}}
     ,
         "42",
     );
     try std.testing.expectEqualStrings("Meta User", info.usernameView());
+    try std.testing.expectEqualStrings("u***@example.com", info.emailHintView());
+    try std.testing.expectEqual(@as(u32, 5), info.concurrency_limit);
+    const unlimited = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":0}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqual(@as(u32, 0), unlimited.concurrency_limit);
+    const legacy_unlimited = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":-1}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqual(@as(u32, 0), legacy_unlimited.concurrency_limit);
     try std.testing.expectError(
         error.InvalidCurrentUserResponse,
         parseCurrentUser(
-            \\{"code":0,"data":{"id":43,"username":"Meta User"}}
+            \\{"code":0,"data":{"id":43,"username":"Meta User","concurrency":5}}
         ,
             "42",
         ),
@@ -592,11 +647,46 @@ test "current user decoder binds username to the token account" {
     try std.testing.expectError(
         error.InvalidCurrentUserResponse,
         parseCurrentUser(
-            \\{"code":0,"data":{"id":42,"username":""}}
+            \\{"code":0,"data":{"id":42,"username":"","concurrency":5}}
         ,
             "42",
         ),
     );
+}
+
+test "current user decoder publishes only a bounded masked email hint" {
+    const unicode = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"email":"朱健@example.com","username":"Meta User","concurrency":3}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqualStrings("朱***@example.com", unicode.emailHintView());
+
+    const absent = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":3}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqualStrings("", absent.emailHintView());
+
+    for ([_][]const u8{
+        \\{"code":0,"data":{"id":42,"email":"invalid","username":"Meta User","concurrency":3}},
+        \\{"code":0,"data":{"id":42,"email":"a@@example.com","username":"Meta User","concurrency":3}},
+    }) |payload| {
+        try std.testing.expectError(
+            error.InvalidCurrentUserResponse,
+            parseCurrentUser(payload, "42"),
+        );
+    }
+}
+
+test "optional account summary fields never become identity gates" {
+    const info = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":5,"balance":"temporarily-invalid","run_mode":7}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqualStrings("Meta User", info.usernameView());
 }
 
 test "authorization code and refresh bodies do not widen client contract" {

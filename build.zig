@@ -103,6 +103,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-models-contract", .root_module = test_modules.models_contract },
         .{ .name = "metawork-product-agent-protocol-adapter", .root_module = test_modules.product_agent_protocol_adapter },
         .{ .name = "metawork-account-contract", .root_module = test_modules.account_contract },
+        .{ .name = "metawork-account-summary", .root_module = test_modules.account_summary },
         .{ .name = "metawork-account-oauth", .root_module = test_modules.account_oauth },
         .{ .name = "metawork-metask-client", .root_module = test_modules.metask_client },
         .{ .name = "metawork-account-credential-store", .root_module = test_modules.account_credential_store },
@@ -196,6 +197,7 @@ pub fn build(b: *std.Build) void {
         root_module: *std.Build.Module,
     }{
         .{ .name = "metawork-account-contract-focused", .root_module = test_modules.account_contract },
+        .{ .name = "metawork-account-summary-focused", .root_module = test_modules.account_summary },
         .{ .name = "metawork-account-oauth-focused", .root_module = test_modules.account_oauth },
         .{ .name = "metawork-metask-client-focused", .root_module = test_modules.metask_client },
         .{ .name = "metawork-account-credential-store-focused", .root_module = test_modules.account_credential_store },
@@ -353,6 +355,7 @@ const WiredModules = struct {
     models_runtime: *std.Build.Module,
     models: *std.Build.Module,
     account_contract: *std.Build.Module,
+    account_summary: *std.Build.Module,
     account_credential_store: *std.Build.Module,
     account_loopback: *std.Build.Module,
     oauth_loopback_transport: *std.Build.Module,
@@ -1002,6 +1005,12 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const account_summary = b.createModule(.{
+        .root_source_file = b.path("src/product/account/summary.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    account_summary.addImport("metawork_account_contract", account_contract);
     const metask_client = b.createModule(.{
         .root_source_file = b.path("src/product/account/metask_client.zig"),
         .target = target,
@@ -1011,6 +1020,7 @@ fn wireAgentCore(
     metask_client.addImport("metawork_account_contract", account_contract);
     metask_client.addImport("account_state", account_state);
     metask_client.addImport("account_oauth", account_oauth);
+    metask_client.addImport("account_summary", account_summary);
     const account_login_attempt = b.createModule(.{
         .root_source_file = b.path("src/product/account/login_attempt.zig"),
         .target = target,
@@ -1106,6 +1116,7 @@ fn wireAgentCore(
     });
     account_ports.addImport("account_oauth", account_oauth);
     account_ports.addImport("account_credential_store", account_credential_store);
+    account_ports.addImport("metawork_account_contract", account_contract);
     const account_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/account/runtime.zig"),
         .target = target,
@@ -1120,6 +1131,7 @@ fn wireAgentCore(
     account_runtime.addImport("account_login_attempt", account_login_attempt);
     account_runtime.addImport("account_credentials_runtime", account_credentials_runtime);
     account_runtime.addImport("account_network_attempt", account_network_attempt);
+    account_runtime.addImport("account_summary", account_summary);
     const account = b.createModule(.{
         .root_source_file = b.path("src/product/account.zig"),
         .target = target,
@@ -1135,6 +1147,7 @@ fn wireAgentCore(
     account.addImport("account_credentials_runtime", account_credentials_runtime);
     account.addImport("account_network_attempt", account_network_attempt);
     account.addImport("account_runtime", account_runtime);
+    account.addImport("account_summary", account_summary);
     const executor = b.createModule(.{
         .root_source_file = b.path("src/product/control/executor.zig"),
         .target = target,
@@ -1783,6 +1796,7 @@ fn wireAgentCore(
         .models_runtime = models_runtime,
         .models = models,
         .account_contract = account_contract,
+        .account_summary = account_summary,
         .account_credential_store = account_credential_store,
         .account_loopback = account_loopback,
         .oauth_loopback_transport = oauth_loopback_transport,

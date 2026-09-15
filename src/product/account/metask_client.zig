@@ -3,14 +3,20 @@ const std = @import("std");
 const contract = @import("metawork_account_contract");
 const state = @import("account_state");
 const oauth = @import("account_oauth");
+const summary = @import("account_summary");
 const transport_api = @import("metask_transport");
 
 pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
+pub const usage_dashboard_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/stats";
+pub const usage_history_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/trend";
+pub const usage_history_timezone = summary.history_timezone;
 
 pub const RequestKind = enum {
     exchange_code,
     refresh_token,
     current_user,
+    usage_dashboard,
+    usage_history,
 };
 
 pub const Request = struct {
@@ -18,6 +24,12 @@ pub const Request = struct {
     body: []const u8 = "",
     bearer: ?[]const u8 = null,
     control: ?RequestControl = null,
+    usage_history_range: ?UsageHistoryRange = null,
+};
+
+pub const UsageHistoryRange = struct {
+    start_date: []const u8,
+    end_date: []const u8,
 };
 
 pub const Response = transport_api.Response;
@@ -168,7 +180,74 @@ pub fn fetchIdentity(
     return state.AccountIdentity.init(
         tokens.accountId(),
         current_user.usernameView(),
+        current_user.emailHintView(),
+        current_user.concurrency_limit,
     ) catch return error.ProtocolInvalid;
+}
+
+pub fn fetchWalletSummary(
+    transport: Transport,
+    bearer: []const u8,
+    principal_ref: []const u8,
+    control: ?RequestControl,
+) ClientError!summary.WalletData {
+    var storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &storage);
+    const response = transport.perform(
+        .{
+            .kind = .current_user,
+            .bearer = bearer,
+            .control = control,
+        },
+        &storage,
+    ) catch |err| return transportFailure(err);
+    if (response.status != 200) return classifyStatus(response.status, false);
+    return summary.parseWallet(response.body, principal_ref) catch
+        return error.ProtocolInvalid;
+}
+
+pub fn fetchUsageSummary(
+    transport: Transport,
+    bearer: []const u8,
+    control: ?RequestControl,
+) ClientError!summary.UsageData {
+    var storage: [32 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &storage);
+    const response = transport.perform(
+        .{
+            .kind = .usage_dashboard,
+            .bearer = bearer,
+            .control = control,
+        },
+        &storage,
+    ) catch |err| return transportFailure(err);
+    if (response.status != 200) return classifyStatus(response.status, false);
+    return summary.parseUsage(response.body) catch return error.ProtocolInvalid;
+}
+
+pub fn fetchUsageHistory(
+    transport: Transport,
+    bearer: []const u8,
+    range: summary.HistoryRange,
+    control: ?RequestControl,
+) ClientError!summary.UsageHistoryData {
+    var storage: [192 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &storage);
+    const response = transport.perform(
+        .{
+            .kind = .usage_history,
+            .bearer = bearer,
+            .control = control,
+            .usage_history_range = .{
+                .start_date = range.start_date.view(),
+                .end_date = range.end_date.view(),
+            },
+        },
+        &storage,
+    ) catch |err| return transportFailure(err);
+    if (response.status != 200) return classifyStatus(response.status, false);
+    return summary.parseUsageHistory(response.body, range) catch
+        return error.ProtocolInvalid;
 }
 
 fn transportFailure(transport_error: TransportError) ClientError {
@@ -232,7 +311,7 @@ const FakeTransport = struct {
                     !std.mem.eql(u8, request.bearer orelse "", "access"))
                     return error.ProtocolFailed;
                 break :blk
-                \\{"code":0,"message":"success","data":{"id":1,"email":"user@example.com","username":"Meta User","role":"user"}}
+                \\{"code":0,"message":"success","data":{"id":1,"email":"user@example.com","username":"Meta User","concurrency":5,"role":"user"}}
                 ;
             },
             else => return error.ProtocolFailed,
@@ -272,6 +351,11 @@ test "login exchanges tokens before resolving a strict identity" {
         "Meta User",
         identity.displayName(),
     );
+    try std.testing.expectEqualStrings(
+        "u***@example.com",
+        identity.emailHint(),
+    );
+    try std.testing.expectEqual(@as(u32, 5), identity.concurrency_limit);
     try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
 

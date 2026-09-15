@@ -15,6 +15,7 @@ import {
 } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
+import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection = "general" | "account" | "models" | "providers";
@@ -198,6 +199,8 @@ export function SettingsPage({
   onSelectCustomModel,
   onBeginLogin,
   onRetryRefresh,
+  onRefreshAccountSummary,
+  onOpenRecharge,
   onLogout,
 }: {
   account: AccountView;
@@ -268,6 +271,8 @@ export function SettingsPage({
   ) => void;
   onBeginLogin: () => void;
   onRetryRefresh: () => void;
+  onRefreshAccountSummary: () => void;
+  onOpenRecharge: () => void;
   onLogout: () => void;
 }) {
   const { locale, setLocale, t } = useI18n();
@@ -376,9 +381,8 @@ export function SettingsPage({
       : account.state === "authorizing"
         ? t("account.authorizing.title")
         : t("account.sign_in_required.title");
-  const accountIdentityBody = authenticated
-    ? t("account.connected")
-    : account.state === "checking"
+  const accountIdentityBody =
+    account.state === "checking"
       ? t("account.checking.body")
       : account.state === "authorizing"
         ? t("account.authorizing.body")
@@ -1126,8 +1130,34 @@ export function SettingsPage({
                     <strong title={account.displayName}>
                       {accountIdentityTitle}
                     </strong>
-                    <span>{accountIdentityBody}</span>
+                    {authenticated ? (
+                      <div className="settings-identity-meta">
+                        {account.emailHint ? (
+                          <span title={account.emailHint}>
+                            {account.emailHint}
+                          </span>
+                        ) : null}
+                        <span>
+                          {t("settings.account_concurrency_limit", {
+                            value:
+                              account.concurrencyLimit === 0
+                                ? t("settings.account_concurrency_unlimited")
+                                : (account.concurrencyLimit ?? "—"),
+                          })}
+                        </span>
+                      </div>
+                    ) : (
+                      <span>{accountIdentityBody}</span>
+                    )}
                   </div>
+                  {authenticated &&
+                  account.summary.usageEligibility !== "disabled" ? (
+                    <AccountBalance
+                      wallet={account.summary.wallet}
+                      disabled={disabled || accountDisabled}
+                      onRecharge={onOpenRecharge}
+                    />
+                  ) : null}
                   {account.canCancel ? (
                     <Button
                       variant="secondary"
@@ -1175,6 +1205,14 @@ export function SettingsPage({
                     )}
                   </div>
                 )}
+
+              {authenticated && (
+                <AccountUsageSummary
+                  summary={account.summary}
+                  disabled={disabled || accountDisabled}
+                  onRefresh={onRefreshAccountSummary}
+                />
+              )}
 
               {authenticated && (
                 <div className="settings-group">
