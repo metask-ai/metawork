@@ -1,6 +1,7 @@
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -29,6 +30,7 @@ import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
+import { deriveAssistantOutputParts } from "./assistant-output.ts";
 import {
   deriveRunPresentation,
   formatRunFinishedTime,
@@ -291,6 +293,20 @@ export function TaskContent({
     setShowJumpLatest(false);
   }
 
+  const followDeferredOutput = useCallback(() => {
+    const node = viewport.current;
+    const taskId = task?.id;
+    if (!node || !taskId) return;
+    const saved = reading.current.get(taskId);
+    if (saved && !saved.followingLatest) return;
+    node.scrollTop = node.scrollHeight;
+    reading.current.set(taskId, {
+      scrollTop: node.scrollTop,
+      followingLatest: true,
+    });
+    setShowJumpLatest(false);
+  }, [task?.id]);
+
   return (
     <Conversation
       aria-label={task?.title}
@@ -306,6 +322,8 @@ export function TaskContent({
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
+        const outputParts = deriveAssistantOutputParts(run.id, run.output);
+        const visibleOutputParts = outputParts.filter((part) => part.content);
         const responseCopyable = responseCopyEligible(run);
         const finishedTime = formatRunFinishedTime(
           locale,
@@ -351,29 +369,43 @@ export function TaskContent({
             <Message role="user">
               <TaskInput input={run.input} />
             </Message>
-            {(run.output.commentary.some(Boolean) ||
-              run.output.provisional ||
+            {(visibleOutputParts.length > 0 ||
               run.output.provisionalRedacted ||
-              (run.output.redacted && !presentation.responseVisible)) && (
-              <Message role="assistant" className="run-narrative">
-                {run.output.commentary.map((commentary, index) =>
-                  commentary ? (
+              run.output.redacted) && (
+              <Message role="assistant" className="run-assistant-output">
+                {visibleOutputParts.map((part) => {
+                  const streaming = part.disposition === "provisional";
+                  const response =
+                    part.disposition === "final" ||
+                    part.disposition === "partial";
+                  return (
                     <Markdown
-                      className="run-commentary-item"
-                      key={index}
-                      references={references}
+                      className={`assistant-output-part ${
+                        response ? "agent-response" : "run-commentary-item"
+                      }`}
+                      data-output-identity={part.identity}
+                      data-output-disposition={part.disposition}
+                      key={part.identity}
+                      references={streaming ? undefined : references}
+                      interactive={!streaming}
+                      streaming={streaming}
+                      onStreamingCommit={followDeferredOutput}
+                      codeCopy={
+                        response && responseCopyable
+                          ? {
+                              label: t("copy.code"),
+                              copiedLabel: t("copy.copied"),
+                              failedLabel: t("copy.failed"),
+                              onCopy: copyCodeText,
+                            }
+                          : undefined
+                      }
                     >
-                      {commentary}
+                      {part.content}
                     </Markdown>
-                  ) : null,
-                )}
-                {run.output.provisional && (
-                  <p className="run-provisional" aria-live="polite">
-                    {run.output.provisional}
-                  </p>
-                )}
-                {(run.output.provisionalRedacted ||
-                  (run.output.redacted && !presentation.responseVisible)) && (
+                  );
+                })}
+                {(run.output.provisionalRedacted || run.output.redacted) && (
                   <p className="projection-note">
                     {t("privacy.sensitive_hidden")}
                   </p>
@@ -381,27 +413,17 @@ export function TaskContent({
               </Message>
             )}
             {presentation.active && (
-              <>
-                <RunProcess
-                  presentation={presentation}
-                  elapsedMs={run.elapsedMs}
-                  snapshotReceivedAt={snapshotReceivedAt}
-                  synchronized={synchronized}
-                  requestingStop={requestingStop}
-                  expanded={disclosure.expanded}
-                  onExpandedChange={setProcessExpanded}
-                  expandedToolIds={expandedToolIds}
-                  onToolExpandedChange={setToolExpanded}
-                />
-                {fileChangesEnabled && run.fileChanges && (
-                  <RunFileChangesSummary
-                    fileChanges={run.fileChanges}
-                    onReview={(opener) =>
-                      onReviewFileChanges(task.id, run.id, opener)
-                    }
-                  />
-                )}
-              </>
+              <RunProcess
+                presentation={presentation}
+                elapsedMs={run.elapsedMs}
+                snapshotReceivedAt={snapshotReceivedAt}
+                synchronized={synchronized}
+                requestingStop={requestingStop}
+                expanded={disclosure.expanded}
+                onExpandedChange={setProcessExpanded}
+                expandedToolIds={expandedToolIds}
+                onToolExpandedChange={setToolExpanded}
+              />
             )}
             {isCurrent && task.pendingUi && (
               <div className="ai-exchange-intervention">
@@ -413,34 +435,7 @@ export function TaskContent({
                 })}
               </div>
             )}
-            {presentation.responseVisible && (
-              <Message role="assistant">
-                <div className="agent-response-surface">
-                  <Markdown
-                    className="agent-response"
-                    references={references}
-                    codeCopy={
-                      responseCopyable
-                        ? {
-                            label: t("copy.code"),
-                            copiedLabel: t("copy.copied"),
-                            failedLabel: t("copy.failed"),
-                            onCopy: copyCodeText,
-                          }
-                        : undefined
-                    }
-                  >
-                    {run.output.response}
-                  </Markdown>
-                  {run.output.redacted && (
-                    <p className="projection-note">
-                      {t("privacy.sensitive_hidden")}
-                    </p>
-                  )}
-                </div>
-              </Message>
-            )}
-            {!presentation.active && fileChangesEnabled && run.fileChanges && (
+            {fileChangesEnabled && run.fileChanges && (
               <RunFileChangesSummary
                 fileChanges={run.fileChanges}
                 onReview={(opener) =>

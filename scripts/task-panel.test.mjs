@@ -557,7 +557,7 @@ test("queued and starting are distinct and missing Host timing is not invented",
   );
 });
 
-test("conversation separates commentary, Markdown response, and plain provisional output", () => {
+test("conversation renders commentary, provisional, and response through one Markdown surface", () => {
   const active = task({
     currentRunId: "9",
     currentRunPhase: "running",
@@ -579,11 +579,14 @@ test("conversation separates commentary, Markdown response, and plain provisiona
   });
   const activeMarkup = renderTaskContent(active);
   assert.match(activeMarkup, />Preparing a response</);
-  assert.match(activeMarkup, /data-streaming="false"/);
   assert.doesNotMatch(activeMarkup, /aria-expanded=/);
   assert.match(activeMarkup, /Checked <strong>two files<\/strong>\./);
-  assert.match(activeMarkup, /Draft \*\*not Markdown\*\*/);
-  assert.doesNotMatch(activeMarkup, /Draft <strong>not Markdown<\/strong>/);
+  assert.match(activeMarkup, /Draft <strong>not Markdown<\/strong>/);
+  assert.equal(
+    (activeMarkup.match(/class="ai-message run-assistant-output"/g) ?? [])
+      .length,
+    1,
+  );
 
   const completed = task({
     runs: [
@@ -603,6 +606,301 @@ test("conversation separates commentary, Markdown response, and plain provisiona
   assert.doesNotMatch(completedMarkup, /aria-expanded=/);
   assert.match(completedMarkup, /A historical update/);
   assert.match(completedMarkup, /<strong>Ready<\/strong>/);
+});
+
+test("provisional Markdown is formatted from the first bytes but remains inert", () => {
+  const active = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [
+      run({
+        phase: "running",
+        terminal: null,
+        activity: { kind: "writing_response" },
+        output: {
+          commentary: [],
+          response: "",
+          responseKind: null,
+          provisional:
+            "**Bold**\n\n- item\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n[web](https://example.com) [file](report.md) ![remote image](https://example.com/a.png) <b>raw html</b>\n\n```ts\nconst answer = 42",
+          redacted: false,
+          provisionalRedacted: false,
+        },
+      }),
+    ],
+  });
+  const view = render(taskContentElement(active));
+  const output = view.container.querySelector(
+    '[data-output-disposition="provisional"]',
+  );
+  assert.ok(output);
+  assert.ok(within(output).getByText("Bold", { selector: "strong" }));
+  assert.ok(within(output).getByText("item", { selector: "li" }));
+  assert.ok(within(output).getByRole("table"));
+  assert.ok(within(output).getByText("const answer = 42", { selector: "pre" }));
+  assert.ok(within(output).getByText("remote image"));
+  assert.equal(output.querySelector("a"), null);
+  assert.equal(output.querySelector("button"), null);
+  assert.equal(output.querySelector("img"), null);
+  assert.equal(output.querySelector("b"), null);
+  assert.equal(output.querySelector("[aria-live]"), null);
+});
+
+test("growing provisional Markdown preserves follow state, text selection, and Composer focus", async () => {
+  const activeRun = run({
+    phase: "running",
+    terminal: null,
+    activity: { kind: "writing_response" },
+    output: {
+      commentary: [],
+      response: "",
+      responseKind: null,
+      provisional: `Selectable prefix\n\n${"x".repeat(16 * 1024)}`,
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const activeTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const surface = (value, revision) =>
+    createElement(
+      "div",
+      null,
+      createElement("textarea", { "aria-label": "Composer" }),
+      taskContentElement(value, revision),
+    );
+  const view = render(surface(activeTask, "1"));
+  const viewport = view.container.querySelector(".ai-conversation-viewport");
+  let scrollHeight = 1_000;
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, get: () => scrollHeight },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 600 },
+  });
+  fireEvent.scroll(viewport);
+
+  const composer = screen.getByRole("textbox", { name: "Composer" });
+  composer.focus();
+  const prefix = screen.getByText("Selectable prefix");
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.setStart(prefix.firstChild, 0);
+  range.setEnd(prefix.firstChild, "Selectable".length);
+  selection.removeAllRanges();
+  selection.addRange(range);
+
+  scrollHeight = 1_200;
+  view.rerender(
+    surface(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            output: {
+              ...activeRun.output,
+              provisional: `Selectable prefix\n\n${"x".repeat(64 * 1024)}\n\nGrowing marker`,
+            },
+          },
+        ],
+      },
+      "2",
+    ),
+  );
+  await waitFor(() => assert.ok(screen.getByText("Growing marker")));
+  assert.equal(viewport.scrollTop, 1_200);
+  assert.equal(document.activeElement, composer);
+  assert.equal(selection.toString(), "Selectable");
+
+  viewport.scrollTop = 200;
+  fireEvent.scroll(viewport);
+  scrollHeight = 1_400;
+  view.rerender(
+    surface(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            output: {
+              ...activeRun.output,
+              provisional: `Selectable prefix\n\n${"x".repeat(96 * 1024)}\n\nPaused marker`,
+            },
+          },
+        ],
+      },
+      "3",
+    ),
+  );
+  await waitFor(() => assert.ok(screen.getByText("Paused marker")));
+  assert.equal(viewport.scrollTop, 200);
+  assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
+  assert.equal(document.activeElement, composer);
+  assert.equal(selection.toString(), "Selectable");
+});
+
+test("output classification preserves the same parent and part DOM roots", () => {
+  const activeRun = run({
+    phase: "running",
+    terminal: null,
+    activity: { kind: "writing_response" },
+    output: {
+      commentary: ["Earlier"],
+      response: "",
+      responseKind: null,
+      provisional: "**Stable tail**",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const activeTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(activeTask));
+  const parent = view.container.querySelector(".run-assistant-output");
+  const part = view.container.querySelector(
+    '[data-output-identity="9:output:1"]',
+  );
+  assert.ok(parent);
+  assert.ok(part);
+
+  view.rerender(
+    taskContentElement(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            output: {
+              ...activeRun.output,
+              commentary: ["Earlier", "**Stable tail**"],
+              provisional: "",
+            },
+          },
+        ],
+      },
+      "2",
+    ),
+  );
+  assert.equal(view.container.querySelector(".run-assistant-output"), parent);
+  assert.equal(
+    view.container.querySelector('[data-output-identity="9:output:1"]'),
+    part,
+  );
+  assert.equal(part.dataset.outputDisposition, "commentary");
+
+  view.rerender(
+    taskContentElement(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            output: {
+              ...activeRun.output,
+              response: "**Stable tail**",
+              responseKind: "final",
+              provisional: "",
+            },
+          },
+        ],
+      },
+      "3",
+    ),
+  );
+  assert.equal(view.container.querySelector(".run-assistant-output"), parent);
+  assert.equal(
+    view.container.querySelector('[data-output-identity="9:output:1"]'),
+    part,
+  );
+  assert.equal(part.dataset.outputDisposition, "final");
+});
+
+test("closed output keeps its DOM root across status revisions and activates late references", () => {
+  const activeRun = run({
+    phase: "running",
+    terminal: null,
+    activity: { kind: "thinking" },
+    output: {
+      commentary: ["Inspect `report.md`."],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const activeTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const opened = [];
+  const props = { onPreviewFile: (...args) => opened.push(args) };
+  const view = render(taskContentElement(activeTask, "1", props));
+  const part = view.container.querySelector(
+    '[data-output-identity="9:output:0"]',
+  );
+  assert.ok(part);
+  assert.equal(within(part).queryByRole("button"), null);
+
+  view.rerender(
+    taskContentElement(
+      {
+        ...activeTask,
+        runs: [{ ...activeRun, activity: { kind: "waiting_model" } }],
+      },
+      "2",
+      props,
+    ),
+  );
+  assert.equal(
+    view.container.querySelector('[data-output-identity="9:output:0"]'),
+    part,
+  );
+
+  view.rerender(
+    taskContentElement(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            activity: { kind: "executing_tools", inFlight: "1" },
+            tools: [
+              technicalTool({
+                id: "write-1",
+                name: "Write",
+                fileRefs: [
+                  {
+                    id: "report-ref",
+                    title: "report.md",
+                    displayPath: "report.md",
+                  },
+                ],
+              }),
+            ],
+          },
+        ],
+      },
+      "3",
+      props,
+    ),
+  );
+  assert.equal(
+    view.container.querySelector('[data-output-identity="9:output:0"]'),
+    part,
+  );
+  const opener = within(part).getByRole("button", {
+    name: "Preview report.md",
+  });
+  fireEvent.click(opener);
+  assert.deepEqual(opened[0].slice(0, 2), ["3", "9"]);
 });
 
 test("live revisions extend the narrative while replacing one bottom status in place", () => {

@@ -68,3 +68,22 @@ test("Windows desktop vertical exercises real large response and code clipboard 
   assert.match(windowsClipboardProbe, /mouse_event\(2,/);
   assert.match(windowsClipboardProbe, /Copy failed/);
 });
+
+test("macOS desktop vertical streams the 256 KiB Markdown gate through the real WebView", () => {
+  assert.match(
+    source,
+    /textSseChunks\(\s*process\.platform === "win32" \? "m12" : "m6",\s*streamingMarkdown256,\s*8 \* 1024,?\s*\)/,
+  );
+  assert.match(source, /count >= 8 \? count : null/);
+  assert.match(source, /Streaming Markdown ProductDelivery revisions/);
+  assert.match(source, /Streaming Markdown WebView evidence:/);
+  const invokeBridge = source.slice(
+    source.indexOf("async function invokeBridge"),
+    source.indexOf("function productDeliveryEmitCount"),
+  );
+  assert.ok(
+    invokeBridge.indexOf("const responseWatch =") <
+      invokeBridge.indexOf('result = await automate("bridge"'),
+    "Bridge response observation must begin before automation dispatch",
+  );
+});

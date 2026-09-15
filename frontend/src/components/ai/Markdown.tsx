@@ -1,6 +1,9 @@
 import {
   createContext,
+  memo,
+  useDeferredValue,
   useContext,
+  useLayoutEffect,
   type ComponentPropsWithoutRef,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -27,6 +30,7 @@ export type MarkdownCodeCopy = {
 };
 
 const CodeCopyContext = createContext<MarkdownCodeCopy | undefined>(undefined);
+const InteractionContext = createContext(true);
 
 function referencePlugin(references: ReadonlyMap<string, MarkdownReference>) {
   const aliases = [...references.keys()]
@@ -148,7 +152,9 @@ const components: Components = {
     <code {...props}>{children}</code>
   ),
   a: function ReferenceLink({ href, children: content, node, ...props }) {
+    const interactive = useContext(InteractionContext);
     const references = useContext(ReferenceContext);
+    if (!interactive) return <span>{content}</span>;
     const alias = node?.properties["data-inline-reference"];
     const reference =
       typeof alias === "string" ? references?.get(alias) : undefined;
@@ -176,6 +182,7 @@ const components: Components = {
       </a>
     );
   },
+  img: ({ alt }) => <span>{alt}</span>,
 };
 
 function clipboardHref(href: string | undefined): string | null {
@@ -228,38 +235,89 @@ const textResourceComponents: Components = {
   },
 };
 
+type MarkdownBodyProps = {
+  children: string;
+  references?: ReadonlyMap<string, MarkdownReference>;
+  referenceFingerprint: string;
+  textResourcesOnly: boolean;
+};
+
+const MarkdownBody = memo(
+  function MarkdownBody({
+    children,
+    references,
+    textResourcesOnly,
+  }: MarkdownBodyProps) {
+    return (
+      <ReactMarkdown
+        skipHtml
+        remarkPlugins={
+          references?.size
+            ? [remarkGfm, referencePlugin(references)]
+            : [remarkGfm]
+        }
+        components={textResourcesOnly ? textResourceComponents : components}
+      >
+        {children}
+      </ReactMarkdown>
+    );
+  },
+  (previous, next) =>
+    previous.children === next.children &&
+    previous.referenceFingerprint === next.referenceFingerprint &&
+    previous.textResourcesOnly === next.textResourcesOnly,
+);
+
+export type MarkdownProps = Omit<
+  ComponentPropsWithoutRef<"div">,
+  "children"
+> & {
+  children: string;
+  references?: ReadonlyMap<string, MarkdownReference>;
+  textResourcesOnly?: boolean;
+  codeCopy?: MarkdownCodeCopy;
+  interactive?: boolean;
+  onStreamingCommit?: () => void;
+  streaming?: boolean;
+};
+
 export function Markdown({
   className,
   children,
   references,
   textResourcesOnly = false,
   codeCopy,
-}: {
-  className?: string;
-  children: string;
-  references?: ReadonlyMap<string, MarkdownReference>;
-  textResourcesOnly?: boolean;
-  codeCopy?: MarkdownCodeCopy;
-}) {
+  interactive = true,
+  onStreamingCommit,
+  streaming = false,
+  ...props
+}: MarkdownProps) {
+  const deferredChildren = useDeferredValue(children);
+  const visibleChildren = streaming && children ? deferredChildren : children;
+  const referenceFingerprint = references?.size
+    ? JSON.stringify([...references.keys()].sort())
+    : "";
+  useLayoutEffect(() => {
+    if (streaming) onStreamingCommit?.();
+  }, [onStreamingCommit, streaming, visibleChildren]);
   return (
-    <div className={className ? `ai-markdown ${className}` : "ai-markdown"}>
+    <div
+      className={className ? `ai-markdown ${className}` : "ai-markdown"}
+      {...props}
+    >
       <ReferenceContext.Provider value={references}>
         <CodeCopyContext.Provider value={codeCopy}>
-          <ReactMarkdown
-            skipHtml
-            remarkPlugins={
-              references?.size
-                ? [remarkGfm, referencePlugin(references)]
-                : [remarkGfm]
-            }
-            components={textResourcesOnly ? textResourceComponents : components}
-          >
-            {children}
-          </ReactMarkdown>
+          <InteractionContext.Provider value={interactive}>
+            <MarkdownBody
+              references={references}
+              referenceFingerprint={referenceFingerprint}
+              textResourcesOnly={textResourcesOnly}
+            >
+              {visibleChildren}
+            </MarkdownBody>
+          </InteractionContext.Provider>
         </CodeCopyContext.Provider>
       </ReferenceContext.Provider>
     </div>
   );
 }
-
-export type MarkdownProps = ComponentPropsWithoutRef<typeof Markdown>;

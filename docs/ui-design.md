@@ -542,7 +542,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 7.1 内容模型
 
-Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Assistant process narrative → Live status → Intervention → Response → Technical work evidence → Terminal notice`，不存在的部分不占位。process narrative 按 Host 保存的 closed commentary group 顺序连续承载多个 Markdown block，并在其后承载未定性的可回滚 provisional，是用户理解 Agent 当前方向的主阅读内容；block 只用正文留白区分，不增加卡片、时间戳、Tool 标签或阶段标题。live status 是位于当前过程底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 才承载按 Host order 排列的 Tool 摘要，并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Response 是已由 Host 定性为 final/partial 的正式主阅读内容。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
+Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Assistant output → Live status / Technical work evidence → Intervention → File Changes → Terminal notice → Response metadata`，不存在的部分不占位。Assistant output 是单一 message，按 Host 保存的 closed commentary group 顺序承载多个 Markdown part，并以相同 part 槽位承载尾部未定性的可回滚 provisional 或已定性的 final/partial；part 只用正文留白区分，不增加卡片、时间戳、Tool 标签或阶段标题。live status 是位于当前输出底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 承载按 Host order 排列的 Tool 摘要并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
 
 ### 7.2 Agent 对话渲染机制
 
@@ -567,28 +567,25 @@ AgentCore typed CoreEvent
 
 每个 Run exchange 使用以下条件槽位，而不是为每类事件创建节点：
 
-| 槽位              | 出现条件                                                   | 更新方式                                                             |
-| ----------------- | ---------------------------------------------------------- | -------------------------------------------------------------------- |
-| User instruction  | Run 存在                                                   | 历史稳定，不随 activity 更新                                         |
-| Process narrative | 至少一个非空 commentary、provisional 或必要 redaction note | closed commentary 只追加稳定 block；provisional 原位增长、迁移或回滚 |
-| Process surface   | Run active，或 terminal Run 存在 Tool                      | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开   |
-| Intervention      | 当前 Run 存在 pending UI                                   | 只显示唯一可操作控件，不伪装成 Assistant 文本                        |
-| Response          | Host 已发布非空 final/partial response                     | 安全 Markdown；出现不等于正式 Product terminal 已发布                |
-| Terminal notice   | partial、非 completed outcome 或完成但无 response          | 与 partial 合并为唯一准确提示，不重复成功结果                        |
-| Response metadata | Run 已 terminal 且存在非空 final/partial response          | 整个 Run 的最后一行；纯图标复制入口 + 可用时的弱化完成时间           |
+| 槽位              | 出现条件                                                                  | 更新方式                                                           |
+| ----------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| User instruction  | Run 存在                                                                  | 历史稳定，不随 activity 更新                                       |
+| Assistant output  | 至少一个非空 commentary、provisional、final/partial 或必要 redaction note | closed commentary 只追加稳定 part；尾部 part 原位增长、定性或回滚  |
+| Process surface   | Run active，或 terminal Run 存在 Tool                                     | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开 |
+| Intervention      | 当前 Run 存在 pending UI                                                  | 只显示唯一可操作控件，不伪装成 Assistant 文本                      |
+| Terminal notice   | partial、非 completed outcome 或完成但无 response                         | 与 partial 合并为唯一准确提示，不重复成功结果                      |
+| Response metadata | Run 已 terminal 且存在非空 final/partial response                         | 整个 Run 的最后一行；纯图标复制入口 + 可用时的弱化完成时间         |
 
 `RunProcess` 同时承担 active Run 的唯一 live status 与 terminal Run 的历史 Tool 入口：
 
 ```text
 active Run:
-  narrative
+  Assistant output
   RunProcess = live status header + optional collapsed Tool body
   intervention
-  response
 
 terminal Run:
-  narrative
-  response
+  Assistant output
   optional File Changes
   optional collapsed RunProcess when Tools exist
   terminal notice
@@ -603,15 +600,19 @@ Renderer 每次只读取当前完整 `RunOutput`，不在本地累积 text chunk
 
 | Host output 状态                              | Renderer 行为                                                  |
 | --------------------------------------------- | -------------------------------------------------------------- |
-| open/continued segment 有安全 committed bytes | 作为 commentary 后的纯文本 provisional 原位显示                |
-| segment 关闭为 commentary                     | provisional 对应内容迁入新的稳定 commentary Markdown block     |
-| segment 关闭为 final/partial                  | provisional 清空，内容进入独立 response Markdown 槽位          |
+| open/continued segment 有安全 committed bytes | 作为 commentary 后的惰性交互 Markdown provisional 原位显示     |
+| segment 关闭为 commentary                     | 同一尾部 part 原位定性为稳定 commentary                        |
+| segment 关闭为 final/partial                  | 同一尾部 part 原位定性为 final/partial response                |
 | segment 关闭为 discarded                      | provisional 从下一 Snapshot 消失，不保留撤回占位               |
 | closed commentary 已持久化                    | terminal、reload 后仍按原 group 顺序恢复                       |
 | response 已定性但 terminal 尚未发布           | response 可以显示，同时 active process surface 保持 finalizing |
 | formal terminal 已发布                        | activity 必须为 null；未决 provisional 必须为空                |
 
-因此 provisional 在 DOM 中迁移或消失是 output-segment 协议的产品语义，不是 Renderer 自行重排历史；commentary array index、Run identity 和 Tool product identity 才是稳定渲染 key。credential 清理可能使某个 commentary item 为空，但 Renderer 不合并相邻 item，也不改变后续边界。
+Renderer 从 `Run identity + output ordinal` 纯派生每个 part 的 identity；provisional 定性只改变 disposition，不改变所属 Assistant message、React key 或 part DOM 根。只有 discarded、空内容或整个 Run 卸载才移除对应节点。credential 清理可能使某个 commentary item 为空，但 Renderer 不合并相邻 item，也不改变后续边界。
+
+provisional 与 closed output 复用同一个安全 GFM 渲染根并始终跳过 raw HTML；代码块、列表、引用和表格可随已到达字节渐进形成，未闭合 Markdown 按当前完整前缀做 best-effort 解析，不引入修复器、第二套 parser、逐字动画或分类时交叉淡入。provisional 必须是惰性交互态：链接与文件引用只显示文字，图片只显示 alt text，代码与整段均无复制动作，也不新增正文 live region；唯一 canonical Activity 负责状态播报。final/partial 或 commentary 定性后才开放其对应链接、结构化文件引用和 terminal-only copy policy。
+
+只有非空且仍在增长的 provisional 可以通过 React 调度让旧前缀短暂保留以避免高频 parse 阻塞；分类、discard、Task 切换和 terminal projection 必须立即使用最新 canonical 内容，不能显示 deferred stale text。已闭合 part 在正文与可用引用 alias 集不变时不得因 activity、Tool、elapsed 或无关 Snapshot revision 重新解析；alias 集晚到或失效时必须重新解析并更新可点击状态。第一阶段不维护增量 Markdown AST 或并行兼容 renderer；真实 WebView 的 256 KiB 混合 GFM 验收不通过时，应单独建立增量 parser 评估任务，而不是在运行时静默回退。
 
 #### Activity 与 Tool presentation
 
@@ -642,7 +643,7 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 - 不使用头像和大气泡，使用正文排版；
 - 支持 Markdown、表格、代码、引用和链接；
 - commentary 作为 Assistant 过程叙事按 Host 提供的有序 group array 渲染为同一 Assistant message 内的独立 Markdown block；Renderer 不自行按换行切组，也不按 chunk 或 Tool 穿插伪造顺序。Host 发布新的 closed commentary group 后，主阅读流随 Snapshot revision 追加一个稳定 block；
-- `final | partial` response 使用安全 Markdown；尚未收到 output-segment 定性的 provisional 紧随 commentary 以中性纯文本呈现，不称为草稿、不解释 Markdown，discard 后随下一 Snapshot 消失；流式生成只显示克制的单一活动指示；
+- `commentary | provisional | final | partial` 共用安全 Markdown 排版；尚未收到 output-segment 定性的 provisional 不称为草稿，保持惰性交互并在 discard 后随下一 Snapshot 立即消失；流式生成不增加光标、骨架或第二个活动指示；
 - 已 terminal 且非空的 `final | partial` response 在整个 Run 的最后一行提供纯图标“复制回复”：最新一条始终可见，历史条目在所属 Run hover 或 focus-within 时显示，coarse pointer 设备始终显示；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML；真实写入完成前不得显示成功，成功约 1.2 秒切换为勾选，失败约 1.5 秒切换为 warning，重复操作重置反馈周期，动态 accessible name、tooltip 和读屏状态分别使用“复制回复 / 已复制 / 复制失败”。代码块右上角提供独立的纯图标“复制代码”，只复制当前显示的代码正文；两类按钮都具备可见键盘焦点、明确 accessible name、tooltip 和至少 32px 点击区，不把语言名、围栏、行号或 UI 文案带入剪贴板；
 - 回复末行在复制图标右侧显示 Product 提供的 Run 完成时间，使用 12px muted 文本和本地化相对表达，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name，不使用浏览器原生 `title` 提示；时间始终可见而复制图标仍遵守最新/历史显隐规则。Renderer 每分钟低频更新相对文案，不发布 Snapshot、不自动滚动、不改变历史；时间缺失或超出可信范围时整项隐藏，禁止使用 `Date.now()`、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造；
 - 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
@@ -868,7 +869,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
 > Capability：**当前**。可预览目标只来自 AgentCore 已发布并由 Workbench 持久化的结构化 `tool_result.file_refs`；它是按需读取当前文件内容的只读能力，不是 Files changed 或 Output。
 
-- 主要入口位于所属 Run 的已闭合过程说明与 final/partial 回复中：普通文字中的完整文件名、行内代码和显式 Markdown 文件链接，只有能匹配本 Run 结构化引用时才呈现为可点击内联入口。保持原文字与正文行高，使用链接色、下划线、完整 accessible name 和可见键盘焦点；点击直接在右栏预览，不要求展开工作过程。provisional 仍为纯文本；代码块、图片说明和外部链接不做文件识别，也不把未知文件文本伪装成可打开入口；
+- 主要入口位于所属 Run 的已闭合 commentary 与 final/partial 回复中：普通文字中的完整文件名、行内代码和显式 Markdown 文件链接，只有能匹配本 Run 结构化引用时才呈现为可点击内联入口。保持原文字与正文行高，使用链接色、下划线、完整 accessible name 和可见键盘焦点；点击直接在右栏预览，不要求展开工作过程。provisional 虽按 Markdown 排版但保持惰性交互，不执行引用识别；代码块、图片说明和外部链接不做文件识别，也不把未知文件文本伪装成可打开入口；
 - 匹配只使用 Host `displayPath`、其显式相对写法及无歧义文件名，区分大小写，不查询文件系统、不从 Tool 参数拼装 authority。同一路径的重复引用为正文入口选择最后一条有序引用以读取当前内容，不宣称它是该句的历史版本或新文件身份；不同目录的同名文件不得仅按文件名选中，未匹配的本地 Markdown 路径不作为网页导航。引用晚到或失效随 Snapshot 更新可点击状态，不触发自动读取；
 - 工作过程不提供 fileRefs 预览入口，只允许在 Tool 单行摘要缺少 description/progress 时显示只读 `displayPath`，也不把引用聚合到回复 footer 或右栏列表；正文内联入口按精确引用身份在 Task Panel 打开独占预览，只显示所选文件，不提供全部引用选择器；
 - 文件预览复用 Task Panel 的唯一头部：标题直接显示当前路径，右侧只提供刷新和关闭图标动作，正文不追加资源副标题、状态标签、常驻说明或信息入口。`.md`、`.markdown`（后缀不区分大小写）默认安全渲染文档，支持标题、列表、表格、引用与代码块，并在正文上方提供“预览 / 源码”切换；切换只使用已读取正文、不重新请求文件。刷新保持当前模式，切换精确文件目标或关闭后重开恢复默认模式，非活动视图不保留隐藏正文；
