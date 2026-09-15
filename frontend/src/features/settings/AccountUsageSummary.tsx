@@ -57,6 +57,38 @@ function SummaryState({
   return null;
 }
 
+export function AccountBalance({
+  wallet,
+}: {
+  wallet: AccountSummary["wallet"];
+}) {
+  const { t } = useI18n();
+  const ready =
+    (wallet.availability === "ready" || wallet.availability === "stale") &&
+    wallet.balanceU !== null;
+
+  return (
+    <div
+      className="settings-identity-balance"
+      data-availability={wallet.availability}
+    >
+      <span className="settings-identity-balance-label">
+        {t("settings.account_usage_balance")}
+      </span>
+      {ready ? (
+        <strong>
+          {t("settings.account_usage_cost", {
+            value: formatAccountDecimal(wallet.balanceU!),
+          })}
+        </strong>
+      ) : (
+        <strong aria-label={t("settings.account_usage_unavailable")}>—</strong>
+      )}
+      <SummaryState {...wallet} />
+    </div>
+  );
+}
+
 export function AccountUsageSummary({
   summary,
   disabled,
@@ -74,14 +106,9 @@ export function AccountUsageSummary({
   const formattedSyncedAt = syncedAt
     ? formatAccountSyncedAt(syncedAt, locale)
     : null;
-  const walletReady =
-    (summary.wallet.availability === "ready" ||
-      summary.wallet.availability === "stale") &&
-    summary.wallet.balanceU !== null;
   const usageReady =
     (summary.usage.availability === "ready" ||
       summary.usage.availability === "stale") &&
-    summary.usage.today !== null &&
     summary.usage.total !== null;
 
   return (
@@ -103,82 +130,6 @@ export function AccountUsageSummary({
           </div>
         ) : (
           <>
-            <div
-              className="settings-account-usage-row settings-account-usage-wallet"
-              data-availability={summary.wallet.availability}
-            >
-              <div className="settings-account-usage-copy">
-                <span>{t("settings.account_usage_balance")}</span>
-                <SummaryState {...summary.wallet} />
-              </div>
-              <div className="settings-account-usage-balance">
-                {walletReady ? (
-                  <strong>
-                    {t("settings.account_usage_cost", {
-                      value: formatAccountDecimal(summary.wallet.balanceU!),
-                    })}
-                  </strong>
-                ) : (
-                  <strong aria-label={t("settings.account_usage_unavailable")}>
-                    —
-                  </strong>
-                )}
-              </div>
-            </div>
-
-            <div
-              className="settings-account-usage-row"
-              data-availability={summary.usage.availability}
-            >
-              <div className="settings-account-usage-copy">
-                <span>{t("settings.account_usage_today")}</span>
-                {usageReady ? (
-                  <span>
-                    {t("settings.account_usage_breakdown", {
-                      input: formatAccountDecimal(
-                        summary.usage.today!.inputTokens,
-                      ),
-                      output: formatAccountDecimal(
-                        summary.usage.today!.outputTokens,
-                      ),
-                      cacheCreation: formatAccountDecimal(
-                        summary.usage.today!.cacheCreationTokens,
-                      ),
-                      cacheRead: formatAccountDecimal(
-                        summary.usage.today!.cacheReadTokens,
-                      ),
-                    })}
-                  </span>
-                ) : (
-                  <SummaryState {...summary.usage} />
-                )}
-              </div>
-              <div className="settings-account-usage-values">
-                {usageReady ? (
-                  <>
-                    <strong>
-                      {t("settings.account_usage_tokens", {
-                        value: formatAccountDecimal(
-                          summary.usage.today!.totalTokens,
-                        ),
-                      })}
-                    </strong>
-                    <span>
-                      {t("settings.account_usage_cost", {
-                        value: formatAccountDecimal(
-                          summary.usage.today!.actualCostU,
-                        ),
-                      })}
-                    </span>
-                  </>
-                ) : (
-                  <strong aria-label={t("settings.account_usage_unavailable")}>
-                    —
-                  </strong>
-                )}
-              </div>
-            </div>
-
             <div
               className="settings-account-usage-row"
               data-availability={summary.usage.availability}

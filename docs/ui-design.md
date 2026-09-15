@@ -977,8 +977,8 @@ General
 └── Language
 
 Account
-├── Metask identity and authorization status
-├── Metask account usage（balance + today/total Token and actual cost）
+├── Account information（authenticated identity and balance; sign-in state when unauthenticated）
+├── Account usage（all-time Token, actual cost and daily history）
 ├── Refresh account usage
 ├── Sign in
 └── Sign out and clear this device
@@ -1008,7 +1008,7 @@ Workspace 生命周期不属于 Settings surface。New task 路径控件负责�
 `Account`规则：
 
 - 只显示 Metask identity、授权状态、登录/取消、token refresh恢复、账户用量摘要和退出；不得把 API/model catalog、默认模型、Models错误或连接状态显示成 Account字段；
-- authenticated且非 simple模式时，在现有设置 group/list语法中增加一个克制的“Metask账户用量”分组：余额为主要值，今日与累计各用一行显示 Token总量和实际费用，今日 Token分项按 `输入 / 输出 / 缓存创建 / 缓存读取` 作为辅助文本，随后显示“Token 使用记录”日历热力图；组尾显示最近同步时间与唯一刷新动作。必须注明这些数字属于整个 Metask账户，不是 MetaWork单应用统计；金额单位统一为 U；
+- authenticated且非 simple模式时，“账户信息”组只显示已认证 identity 与余额，不重复显示“Metask 已连接”或成功状态点；非 authenticated 状态仍显示检查、授权或登录说明及其有效动作。随后在现有设置 group/list语法中增加一个克制的“账户用量”分组，以单行显示累计 Token总量和实际费用，再显示“Token 使用记录”日历热力图。热力图默认选择范围结束日，以完整日期、总量、输入、输出、缓存创建、缓存读取和实际费用承担当日明细，不重复设置“今日”摘要行；组尾显示最近同步时间与唯一刷新动作。必须注明这些数字属于整个 Metask账户，不是 MetaWork单应用统计；金额单位统一为 U；
 - 热力图按每日 total Token 使用紫色五级强度呈现。宽窗显示最近365个日历日、按周排列；小于620px时显示最近91个日历日且不产生水平滚动。范围外占位与成功响应中的零使用日必须视觉可区分；颜色不能作为唯一信息，图例必须同时给出“少/多”文本和强度格。焦点日下方持续显示完整日期、总量、输入、输出、缓存创建、缓存读取和实际费用；鼠标悬停、点击以及键盘方向键移动都能选择日期，并有可见focus样式；
 - wallet、usage与history独立按 unavailable/loading/ready/stale显示。已有值刷新失败时继续显示并标注“可能已过期”，不得清空成0；初次不可用只给局部、可操作说明，不把Account伪装成未登录。只有整个history范围成功且通过严格验证时，范围内缺失日期才显示为0；失败不能生成零值热力图。刷新只由用户点击或authenticated/generation建立后的Host自动同步触发；进入设置、Renderer reload、snapshot update和本地timer都不能触发；
 - `usageEligibility = disabled`时不显示用量分组；unknown时只显示局部不可用说明与刷新动作，Renderer不得读取或推断raw run mode。不得显示email、account id、标准费用、请求数、RPM/TPM、响应时间、API Key数量、订阅额度、模型分布、按模型趋势、最近请求、外部管理链接或其他装饰性图表；

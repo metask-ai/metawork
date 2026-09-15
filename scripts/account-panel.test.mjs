@@ -470,9 +470,14 @@ test("Account settings render the whole-account balance and exact usage ledger",
     readyModels,
     { initialSection: "account" },
   );
-  assert.match(markup, /Metask account usage/);
+  assert.match(markup, /Account usage/);
+  assert.doesNotMatch(markup, /Metask connected/);
   assert.match(markup, /whole Metask account, not only activity in MetaWork/);
   assert.match(markup, /100\.25 U/);
+  assert.match(
+    markup,
+    /Account information[\s\S]*settings-identity-balance[\s\S]*100\.25 U[\s\S]*Account usage/,
+  );
   assert.match(markup, /2,330,900 Token/);
   assert.match(markup, /1,204,200,000 Token/);
   assert.match(markup, /Input 344,800 · Output 496,100/);
@@ -480,6 +485,7 @@ test("Account settings render the whole-account balance and exact usage ledger",
   assert.match(markup, /Daily Token usage calendar/);
   assert.equal(markup.match(/settings-account-calendar-day/g)?.length, 365);
   assert.match(markup, /September 15, 2,330,900 Token/);
+  assert.doesNotMatch(markup, />Today</);
   assert.match(markup, />Refresh account usage</);
   assert.doesNotMatch(markup, /RPM|TPM|response time|API keys|standard cost/i);
 });
@@ -567,7 +573,7 @@ test("Account summary failure stays local, stale values remain, and simple mode 
   simple.summary.usageEligibility = "disabled";
   assert.doesNotMatch(
     renderSettings(simple, readyModels, { initialSection: "account" }),
-    /Metask account usage|Refresh account usage/,
+    /Account usage|Refresh account usage|>Balance</,
   );
 });
 
@@ -609,7 +615,7 @@ test("unknown Account usage remains actionable without guessing a mode", () => {
   });
   assert.match(markup, /cannot confirm this account&#x27;s usage mode yet/);
   assert.match(markup, />Refresh account usage</);
-  assert.doesNotMatch(markup, />Balance</);
+  assert.match(markup, />Balance</);
 });
 
 test("Account usage formatting preserves decimal precision without number coercion", () => {

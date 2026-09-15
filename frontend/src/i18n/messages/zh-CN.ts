@@ -810,16 +810,13 @@ export const zhCN: Record<MessageId, string> = {
   "settings.providers": "Provider",
   "settings.general_basics": "常规",
   "settings.account_profile": "账户信息",
-  "settings.account_usage": "Metask 账户用量",
+  "settings.account_usage": "账户用量",
   "settings.account_usage_scope":
     "数据来自整个 Metask 账户，不仅统计 MetaWork 中的使用。",
   "settings.account_usage_balance": "余额",
-  "settings.account_usage_today": "今日",
   "settings.account_usage_total": "累计",
   "settings.account_usage_tokens": "{value} Token",
   "settings.account_usage_cost": "{value} U",
-  "settings.account_usage_breakdown":
-    "输入 {input} · 输出 {output} · 缓存创建 {cacheCreation} · 缓存读取 {cacheRead}",
   "settings.account_usage_stale": "可能已过期",
   "settings.account_usage_syncing": "正在同步…",
   "settings.account_usage_unavailable": "暂时无法获取",

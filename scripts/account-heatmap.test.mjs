@@ -69,7 +69,7 @@ const history = {
   endDate: "2026-09-15",
   days: [
     {
-      date: "2026-09-15",
+      date: "2026-09-14",
       inputTokens: "1",
       outputTokens: "2",
       cacheCreationTokens: "3",
@@ -99,24 +99,24 @@ function renderHeatmap() {
   );
 }
 
-test("Account history heatmap uses one roving tab stop and arrow-key navigation", () => {
+test("Account history heatmap selects today and uses one roving tab stop with arrow-key navigation", () => {
   renderHeatmap();
   const cells = screen.getAllByRole("gridcell");
   assert.equal(cells.length, 365);
   assert.equal(cells.filter((cell) => cell.tabIndex === 0).length, 1);
 
   const latest = screen.getByRole("gridcell", {
-    name: /September 15, 10 Token/,
+    name: /September 15, 0 Token/,
   });
   latest.focus();
   fireEvent.keyDown(latest, { key: "ArrowLeft" });
 
   assert.match(
     document.activeElement?.getAttribute("aria-label") ?? "",
-    /September 14, 0 Token/,
+    /September 14, 10 Token/,
   );
   assert.match(
-    screen.getByText(/September 14, 0 Token/).textContent ?? "",
+    screen.getByText(/September 14, 10 Token/).textContent ?? "",
     /September 14/,
   );
 });

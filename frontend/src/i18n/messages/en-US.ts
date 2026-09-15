@@ -892,16 +892,13 @@ export const enUS = {
   "settings.providers": "Providers",
   "settings.general_basics": "Basics",
   "settings.account_profile": "Account information",
-  "settings.account_usage": "Metask account usage",
+  "settings.account_usage": "Account usage",
   "settings.account_usage_scope":
     "These figures cover your whole Metask account, not only activity in MetaWork.",
   "settings.account_usage_balance": "Balance",
-  "settings.account_usage_today": "Today",
   "settings.account_usage_total": "All time",
   "settings.account_usage_tokens": "{value} Token",
   "settings.account_usage_cost": "{value} U",
-  "settings.account_usage_breakdown":
-    "Input {input} · Output {output} · Cache created {cacheCreation} · Cache read {cacheRead}",
   "settings.account_usage_stale": "May be out of date",
   "settings.account_usage_syncing": "Syncing…",
   "settings.account_usage_unavailable": "Temporarily unavailable",

@@ -135,13 +135,6 @@ function monthLabels(days: CalendarDay[], locale: Locale) {
   return labels;
 }
 
-function latestActiveDate(days: CalendarDay[]) {
-  for (let index = days.length - 1; index >= 0; index -= 1) {
-    if (days[index]!.totalTokens !== "0") return days[index]!.date;
-  }
-  return days.at(-1)?.date ?? null;
-}
-
 export function AccountUsageHeatmap({ history }: { history: History }) {
   const { locale, t } = useI18n();
   const narrow = useSyncExternalStore(
@@ -154,7 +147,7 @@ export function AccountUsageHeatmap({ history }: { history: History }) {
     () => buildUsageCalendar(history, visibleDays),
     [history, visibleDays],
   );
-  const defaultDate = useMemo(() => latestActiveDate(days), [days]);
+  const defaultDate = days.at(-1)?.date ?? null;
   const [selectedDate, setSelectedDate] = useState<string | null>(defaultDate);
   const dayRefs = useRef(new Map<string, HTMLButtonElement>());
 

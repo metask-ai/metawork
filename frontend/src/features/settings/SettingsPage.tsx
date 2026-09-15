@@ -15,7 +15,10 @@ import {
 } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
-import { AccountUsageSummary } from "./AccountUsageSummary.tsx";
+import {
+  AccountBalance,
+  AccountUsageSummary,
+} from "./AccountUsageSummary.tsx";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection = "general" | "account" | "models" | "providers";
@@ -379,9 +382,8 @@ export function SettingsPage({
       : account.state === "authorizing"
         ? t("account.authorizing.title")
         : t("account.sign_in_required.title");
-  const accountIdentityBody = authenticated
-    ? t("account.connected")
-    : account.state === "checking"
+  const accountIdentityBody =
+    account.state === "checking"
       ? t("account.checking.body")
       : account.state === "authorizing"
         ? t("account.authorizing.body")
@@ -1129,8 +1131,12 @@ export function SettingsPage({
                     <strong title={account.displayName}>
                       {accountIdentityTitle}
                     </strong>
-                    <span>{accountIdentityBody}</span>
+                    {!authenticated ? <span>{accountIdentityBody}</span> : null}
                   </div>
+                  {authenticated &&
+                  account.summary.usageEligibility !== "disabled" ? (
+                    <AccountBalance wallet={account.summary.wallet} />
+                  ) : null}
                   {account.canCancel ? (
                     <Button
                       variant="secondary"

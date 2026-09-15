@@ -1082,6 +1082,36 @@ summary::-webkit-details-marker {
   content: "";
 }
 
+.settings-identity-balance {
+  display: grid;
+  min-width: 96px;
+  justify-items: end;
+  gap: 2px;
+  text-align: right;
+  font-family: var(--metask-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-identity-balance-label,
+.settings-identity-balance > span:last-child {
+  color: var(--settings-muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-label);
+}
+
+.settings-identity-balance strong {
+  color: var(--settings-brand-strong);
+  font-size: var(--text-title);
+  font-weight: 720;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+}
+
+.settings-identity-balance[data-availability="loading"] strong,
+.settings-identity-balance[data-availability="unavailable"] strong {
+  color: var(--settings-muted);
+}
+
 .settings-account-usage-scope {
   max-width: 560px;
   margin: 5px 0 0;
@@ -1112,15 +1142,6 @@ summary::-webkit-details-marker {
   border-top: 0;
 }
 
-.settings-account-usage-wallet {
-  min-height: 88px;
-  background: color-mix(
-    in srgb,
-    var(--settings-brand-mist) 36%,
-    var(--settings-paper)
-  );
-}
-
 .settings-account-usage-copy {
   display: grid;
   min-width: 0;
@@ -1144,7 +1165,6 @@ summary::-webkit-details-marker {
   font-weight: 680;
 }
 
-.settings-account-usage-balance,
 .settings-account-usage-values {
   display: grid;
   justify-items: end;
@@ -1152,13 +1172,6 @@ summary::-webkit-details-marker {
   font-family: var(--metask-font-mono);
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
-}
-
-.settings-account-usage-balance strong {
-  color: var(--settings-brand-strong);
-  font-size: var(--text-display);
-  font-weight: 720;
-  letter-spacing: -0.035em;
 }
 
 .settings-account-usage-values {
@@ -1177,24 +1190,14 @@ summary::-webkit-details-marker {
 }
 
 .settings-account-usage-row[data-availability="loading"]
-  .settings-account-usage-balance,
-.settings-account-usage-row[data-availability="loading"]
   .settings-account-usage-values,
-.settings-account-usage-row[data-availability="unavailable"]
-  .settings-account-usage-balance,
 .settings-account-usage-row[data-availability="unavailable"]
   .settings-account-usage-values {
   color: var(--settings-muted);
 }
 
 .settings-account-usage-row[data-availability="loading"]
-  .settings-account-usage-balance
-  strong,
-.settings-account-usage-row[data-availability="loading"]
   .settings-account-usage-values
-  strong,
-.settings-account-usage-row[data-availability="unavailable"]
-  .settings-account-usage-balance
   strong,
 .settings-account-usage-row[data-availability="unavailable"]
   .settings-account-usage-values
@@ -1358,13 +1361,27 @@ summary::-webkit-details-marker {
   background: var(--settings-brand-strong);
 }
 
-.settings-account-calendar-day:hover,
-.settings-account-calendar-day:focus-visible,
-.settings-account-calendar-day[data-selected="true"] {
+.settings-account-calendar-day:hover {
   position: relative;
   z-index: 1;
-  outline: 2px solid var(--settings-ink);
+  outline: 1px solid
+    color-mix(in srgb, var(--settings-brand) 56%, transparent);
   outline-offset: 1px;
+}
+
+.settings-account-calendar-day[data-selected="true"] {
+  position: relative;
+  z-index: 2;
+  outline: 2px solid var(--settings-brand);
+  outline-offset: 1px;
+  box-shadow: inset 0 0 0 1px var(--settings-paper);
+}
+
+.settings-account-calendar-day:focus-visible {
+  z-index: 3;
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: 2px;
+  box-shadow: inset 0 0 0 1px var(--settings-paper);
 }
 
 .settings-account-calendar-footer {
@@ -3160,7 +3177,6 @@ button.run-process-tool:hover {
     padding: 15px 14px;
   }
 
-  .settings-account-usage-balance,
   .settings-account-usage-values {
     justify-items: start;
     text-align: left;
