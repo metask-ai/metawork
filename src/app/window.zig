@@ -1,3 +1,4 @@
+const std = @import("std");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
@@ -52,11 +53,13 @@ pub const State = struct {
 
     pub fn installTray(
         self: *State,
+        io: std.Io,
         runtime: *native_sdk.Runtime,
         schedule: control_ports.ScheduleHost,
     ) !void {
+        var icon_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         try runtime.createTray(.{
-            .icon_path = tray_icon_path,
+            .icon_path = resolveTrayIconPath(io, &icon_path_buffer),
             .tooltip = "MetaWork",
             .items = &tray_items,
         });
@@ -214,6 +217,31 @@ pub const State = struct {
     }
 };
 
+fn resolveTrayIconPath(io: std.Io, output: []u8) []const u8 {
+    if (comptime builtin.os.tag != .windows) return tray_icon_path;
+
+    var executable_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const executable_len = std.process.executablePath(io, &executable_buffer) catch
+        return tray_icon_path;
+    const candidate = windowsPackagedTrayIconPath(
+        executable_buffer[0..executable_len],
+        output,
+    ) orelse return tray_icon_path;
+    const stat = std.Io.Dir.cwd().statFile(io, candidate, .{}) catch
+        return tray_icon_path;
+    return if (stat.kind == .file) candidate else tray_icon_path;
+}
+
+fn windowsPackagedTrayIconPath(executable_path: []const u8, output: []u8) ?[]const u8 {
+    const executable_dir = std.fs.path.dirnameWindows(executable_path) orelse return null;
+    const package_root = std.fs.path.dirnameWindows(executable_dir) orelse return null;
+    return std.fmt.bufPrint(
+        output,
+        "{s}\\assets\\icons\\tray-icon.ico",
+        .{package_root},
+    ) catch null;
+}
+
 fn requireMainWindow(window_id: native_sdk.platform.WindowId) !void {
     if (window_id != main_window_id) return error.WindowIdentityMismatch;
 }
@@ -241,4 +269,16 @@ test {
     _ = drag_region;
     _ = startup_window;
     _ = window_controls;
+}
+
+test "Windows packaged tray icon resolves from the executable's package root" {
+    var buffer: [256]u8 = undefined;
+    const resolved = windowsPackagedTrayIconPath(
+        "C:\\Users\\demo\\AppData\\Local\\Programs\\MetaWork\\bin\\metawork.exe",
+        &buffer,
+    ).?;
+    try std.testing.expectEqualStrings(
+        "C:\\Users\\demo\\AppData\\Local\\Programs\\MetaWork\\assets\\icons\\tray-icon.ico",
+        resolved,
+    );
 }

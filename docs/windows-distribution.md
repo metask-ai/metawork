@@ -35,7 +35,7 @@ Inno Setup 只负责把 Native SDK runtime stage 安装和卸载为一个 Window
 
 1. 在开始构建前解析参数并检查 Inno；signed mode 还必须先发现 Windows SDK SignTool、校验证书 thumbprint 和时间戳 URL，缺失时立即失败。
 2. 构建 Renderer，再以所选 x64 或 ARM64 target 和隔离 prefix 生成 Windows `ReleaseFast` 主程序并检查 release automation isolation。
-3. 调用 Native SDK 生成完整 runtime stage，验证版本、App ID、GUI subsystem、主程序与 WebView2 loader 的精确 PE machine、Renderer assets 与应用图标；从已验证的 canonical AgentCore bundle 部署 rg 和许可证到 Host 同目录，并在编译安装器前再次核验 checksum。runtime asset 接受与解析边界由 [AgentCore ABI v1 合同](agentcore-abi-v1.md)定义。
+3. 调用 Native SDK 生成完整 runtime stage，验证版本、App ID、GUI subsystem、主程序与 WebView2 loader 的精确 PE machine、Renderer assets、应用图标与 canonical Windows 托盘图标；从已验证的 canonical AgentCore bundle 部署 rg 和许可证到 Host 同目录，并在编译安装器前再次核验 checksum。runtime asset 接受与解析边界由 [AgentCore ABI v1 合同](agentcore-abi-v1.md)定义。
 4. signed mode 签署 MetaWork 主程序并立即验证，同时验证 WebView2 loader 的微软原厂签名；unsigned mode 完整跳过签名身份读取。
 5. Inno Setup 将 runtime stage 编译为单 EXE；signed mode 由同一个 SignTool definition 签署卸载器模板和最终安装器。
 6. signed mode 验证最终安装器；随后统一检查安装器 PE identity、精确文件名与非空内容，并输出最终文件 SHA-256。

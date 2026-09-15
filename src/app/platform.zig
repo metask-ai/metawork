@@ -78,6 +78,7 @@ pub const Adapter = struct {
         schedule: control_ports.ScheduleHost,
     ) !void {
         try self.window.installTray(
+            self.io,
             self.native_runtime orelse return error.RuntimeUnavailable,
             schedule,
         );

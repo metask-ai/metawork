@@ -21,6 +21,7 @@ import {
   readPortableExecutableSubsystem,
   resolveInnoSetupCompiler,
   resolveWindowsSignTool,
+  stageWindowsTrayIcon,
   verifyWindowsInstaller,
   verifyWindowsRuntimeStage,
   windowsFileVersion,
@@ -111,6 +112,18 @@ test("Windows application icon is embedded and assigned to installed shortcuts",
   assert.equal(shortcuts.length, 2);
   for (const shortcut of shortcuts) {
     assert.match(shortcut, /IconFilename: "\{app\}\\app-icon\.ico"/u);
+  }
+});
+
+test("Windows packaging stages the canonical tray icon at its runtime path", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "metawork-windows-tray-icon-"));
+  try {
+    const source = new URL("../assets/icons/tray-icon.ico", import.meta.url);
+    const target = path.join(root, "assets", "icons", "tray-icon.ico");
+    assert.equal(stageWindowsTrayIcon(root), target);
+    assert.deepEqual(readFileSync(target), readFileSync(source));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -320,6 +333,7 @@ test("Windows runtime gate requires the Native release package and GUI executabl
       guiExecutableBytes(512, 0x8664),
     );
     writeFileSync(path.join(root, "app-icon.ico"), "icon");
+    stageWindowsTrayIcon(root);
     writeFileSync(
       path.join(root, "resources", "frontend", "dist", "index.html"),
       "<main></main>",
@@ -356,6 +370,13 @@ test("Windows runtime gate requires the Native release package and GUI executabl
       readPortableExecutableMachine(path.join(root, "bin", "metawork.exe")),
       0x8664,
     );
+    const trayIconPath = path.join(root, "assets", "icons", "tray-icon.ico");
+    writeFileSync(trayIconPath, "not the canonical tray icon");
+    assert.throws(
+      () => verifyWindowsRuntimeStage(root, distribution, manifest),
+      /exact canonical ICO/u,
+    );
+    stageWindowsTrayIcon(root);
     writeFileSync(
       path.join(root, "bin", "WebView2Loader.dll"),
       guiExecutableBytes(512, 0xaa64),

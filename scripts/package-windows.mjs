@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -22,6 +24,17 @@ import {
 } from "./agentcore-runtime-assets.mjs";
 
 const packageManifest = readNativePackageManifest(repositoryRoot);
+const windowsTrayIconSourcePath = path.join(
+  repositoryRoot,
+  "assets",
+  "icons",
+  "tray-icon.ico",
+);
+const windowsTrayIconRelativePath = path.join(
+  "assets",
+  "icons",
+  "tray-icon.ico",
+);
 
 const windowsArchitecturePolicies = Object.freeze({
   x64: Object.freeze({
@@ -420,6 +433,38 @@ function requireRegularFile(filePath) {
   }
 }
 
+export function stageWindowsTrayIcon(
+  stagePath,
+  sourcePath = windowsTrayIconSourcePath,
+) {
+  requireRegularFile(sourcePath);
+  const targetPath = path.join(stagePath, windowsTrayIconRelativePath);
+  mkdirSync(path.dirname(targetPath), { recursive: true });
+  copyFileSync(sourcePath, targetPath);
+  return targetPath;
+}
+
+function verifyWindowsTrayIcon(
+  stagePath,
+  sourcePath = windowsTrayIconSourcePath,
+) {
+  requireRegularFile(sourcePath);
+  const targetPath = path.join(stagePath, windowsTrayIconRelativePath);
+  requireRegularFile(targetPath);
+  const source = readFileSync(sourcePath);
+  const packaged = readFileSync(targetPath);
+  if (
+    packaged.length < 6 ||
+    !packaged.subarray(0, 4).equals(Buffer.from([0, 0, 1, 0])) ||
+    packaged.readUInt16LE(4) === 0 ||
+    !packaged.equals(source)
+  ) {
+    throw new Error(
+      "packaged Windows tray icon is not the exact canonical ICO",
+    );
+  }
+}
+
 export function verifyWindowsRuntimeStage(
   stagePath,
   distribution,
@@ -439,6 +484,7 @@ export function verifyWindowsRuntimeStage(
   ]) {
     requireRegularFile(path.join(stagePath, relativePath));
   }
+  verifyWindowsTrayIcon(stagePath);
   requireRegularFile(executablePath);
   const loaderPath = path.join(stagePath, "bin", "WebView2Loader.dll");
   if (readPortableExecutableSubsystem(executablePath) !== 2) {
@@ -568,6 +614,7 @@ async function packageWindows() {
       timeoutMs: null,
     },
   );
+  stageWindowsTrayIcon(distribution.runtimeStagePath);
   verifyWindowsRuntimeStage(distribution.runtimeStagePath, distribution);
   await stageAgentCoreRuntimeAssets(
     bundle,
