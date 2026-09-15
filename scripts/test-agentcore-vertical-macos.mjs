@@ -147,11 +147,12 @@ const windowsClipboard70 = clipboardMarkdownFixture(
   "70K",
   "multimodal",
 );
-const windowsClipboard256 = clipboardMarkdownFixture(
+const streamingMarkdown256 = clipboardMarkdownFixture(
   256 * 1024,
   "256K",
   "text",
 );
+const windowsClipboard256 = streamingMarkdown256;
 const windowsClipboard70Path = join(canonicalWorkspace, "clipboard-70k.md");
 const windowsClipboard256Path = join(canonicalWorkspace, "clipboard-256k.md");
 if (process.platform === "win32") {
@@ -270,11 +271,14 @@ const responses = [
         : "metawork multimodal checkpoint complete",
     );
   },
-  textSse(
-    process.platform === "win32" ? "m12" : "m6",
-    process.platform === "win32"
-      ? windowsClipboard256
-      : "metawork text checkpoint complete",
+  streamedSse(
+    textSseChunks(
+      process.platform === "win32" ? "m12" : "m6",
+      streamingMarkdown256,
+      8 * 1024,
+    ),
+    80,
+    1_500,
   ),
   textSse(
     process.platform === "win32" ? "m14" : "m8",
@@ -1100,12 +1104,13 @@ try {
     (item) => item.id === taskId,
   );
   const priorRunIds = new Set(currentTask.runs.map((item) => item.id));
+  const deliveryCountBeforeTextRun = productDeliveryEmitCount();
   const textRunResult = await invokeBridge("metawork.tasks.run", {
     taskId,
     expectedBindingEpoch,
     input: {
       kind: "text",
-      text: "Produce a short checkpoint validation response.",
+      text: "Produce the streaming Markdown validation response.",
     },
   });
   if (
@@ -1137,6 +1142,14 @@ try {
     throw new Error(
       "Text checkpoint Run snapshot disagrees with its accepted identity",
     );
+  const textDeliveryEvents = await poll(
+    async () => {
+      const count = productDeliveryEmitCount() - deliveryCountBeforeTextRun;
+      return count >= 8 ? count : null;
+    },
+    runTimeoutMs,
+    "Streaming Markdown ProductDelivery revisions",
+  );
   const textTerminal = await poll(
     async () => {
       const current = await snapshot();
@@ -1152,14 +1165,15 @@ try {
   );
   if (
     textTerminal.run.phase !== "completed" ||
-    !(
-      textTerminal.run.output.commentary.join("") +
-      textTerminal.run.output.response
-    ).includes("metawork text checkpoint complete")
+    Buffer.byteLength(textTerminal.run.output.response) !== 256 * 1024 ||
+    !textTerminal.run.output.response.includes("CLIPBOARD_256K_END")
   )
     throw new Error(
       `Text checkpoint Run did not complete: ${JSON.stringify(textTerminal.run)}`,
     );
+  process.stdout.write(
+    `Streaming Markdown WebView evidence: ${JSON.stringify({ responseBytes: Buffer.byteLength(textTerminal.run.output.response), textDeliveryEvents })}\n`,
+  );
   await probeWindowsClipboard({
     expectedPath: windowsClipboard256Path,
     expectedBytes: 256 * 1024,
@@ -1672,10 +1686,30 @@ async function expectMissing(filePath) {
 
 async function invokeBridge(command, payload) {
   const id = `agentcore-vertical-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const result = await automate(
-    "bridge",
-    JSON.stringify({ id, command, payload }),
-  );
+  let stopResponseWatch = false;
+  const responseWatch = (async () => {
+    const deadline = Date.now() + commandTimeoutMs;
+    while (!stopResponseWatch && Date.now() < deadline) {
+      try {
+        const latest = JSON.parse(
+          await readFile(join(automationDir, "bridge-response.txt"), "utf8"),
+        );
+        if (latest.id === id) return latest;
+      } catch {
+        // The artifact is atomically replaced and may not exist between runs.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    return null;
+  })();
+  let result;
+  try {
+    result = await automate("bridge", JSON.stringify({ id, command, payload }));
+  } catch (error) {
+    stopResponseWatch = true;
+    await responseWatch;
+    throw error;
+  }
   const responses = result.stdout
     .trim()
     .split("\n")
@@ -1689,16 +1723,9 @@ async function invokeBridge(command, payload) {
     })
     .filter(Boolean);
   let response = responses.find((value) => value.id === id) ?? null;
-  if (response === null) {
-    try {
-      const latest = JSON.parse(
-        await readFile(join(automationDir, "bridge-response.txt"), "utf8"),
-      );
-      if (latest.id === id) response = latest;
-    } catch {
-      // The runtime replaces this file, so another bridge call may win.
-    }
-  }
+  if (response === null) response = await responseWatch;
+  stopResponseWatch = true;
+  await responseWatch;
   if (response && !response.ok) {
     const error = new Error(
       `${command} failed: ${JSON.stringify(response.error)}`,
@@ -2266,7 +2293,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
         await streamProviderResponse(
           response,
           body,
-          initialDelayMs,
+          fixture?.initialDelayMs ?? initialDelayMs,
           fixture?.frameDelayMs ?? frameDelayMs,
         );
       } catch (error) {
@@ -2449,6 +2476,51 @@ function textSse(messageId, text) {
   ]);
 }
 
+function textSseChunks(messageId, text, targetChunkBytes) {
+  const chunks = [];
+  let chunk = "";
+  let chunkBytes = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character);
+    if (chunk && chunkBytes + characterBytes > targetChunkBytes) {
+      chunks.push(chunk);
+      chunk = "";
+      chunkBytes = 0;
+    }
+    chunk += character;
+    chunkBytes += characterBytes;
+  }
+  if (chunk) chunks.push(chunk);
+  return sse([
+    {
+      type: "message_start",
+      message: {
+        id: messageId,
+        role: "assistant",
+        model: "fixture",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    },
+    ...chunks.map((value) => ({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: value },
+    })),
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 1 },
+    },
+    { type: "message_stop" },
+  ]);
+}
+
 function clipboardMarkdownFixture(targetBytes, label, checkpointKind) {
   const prefix = [
     `# Clipboard ${label}`,
@@ -2481,8 +2553,8 @@ function sse(events) {
   return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
 }
 
-function streamedSse(body, frameDelayMs) {
-  return { body, frameDelayMs };
+function streamedSse(body, frameDelayMs, initialDelayMs) {
+  return { body, frameDelayMs, initialDelayMs };
 }
 
 function assertTransport(snapshot) {

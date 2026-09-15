@@ -646,6 +646,102 @@ test("provisional Markdown is formatted from the first bytes but remains inert",
   assert.equal(output.querySelector("[aria-live]"), null);
 });
 
+test("growing provisional Markdown preserves follow state, text selection, and Composer focus", async () => {
+  const activeRun = run({
+    phase: "running",
+    terminal: null,
+    activity: { kind: "writing_response" },
+    output: {
+      commentary: [],
+      response: "",
+      responseKind: null,
+      provisional: `Selectable prefix\n\n${"x".repeat(16 * 1024)}`,
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const activeTask = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const surface = (value, revision) =>
+    createElement(
+      "div",
+      null,
+      createElement("textarea", { "aria-label": "Composer" }),
+      taskContentElement(value, revision),
+    );
+  const view = render(surface(activeTask, "1"));
+  const viewport = view.container.querySelector(".ai-conversation-viewport");
+  let scrollHeight = 1_000;
+  Object.defineProperties(viewport, {
+    scrollHeight: { configurable: true, get: () => scrollHeight },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, writable: true, value: 600 },
+  });
+  fireEvent.scroll(viewport);
+
+  const composer = screen.getByRole("textbox", { name: "Composer" });
+  composer.focus();
+  const prefix = screen.getByText("Selectable prefix");
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.setStart(prefix.firstChild, 0);
+  range.setEnd(prefix.firstChild, "Selectable".length);
+  selection.removeAllRanges();
+  selection.addRange(range);
+
+  scrollHeight = 1_200;
+  view.rerender(
+    surface(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            output: {
+              ...activeRun.output,
+              provisional: `Selectable prefix\n\n${"x".repeat(64 * 1024)}\n\nGrowing marker`,
+            },
+          },
+        ],
+      },
+      "2",
+    ),
+  );
+  await waitFor(() => assert.ok(screen.getByText("Growing marker")));
+  assert.equal(viewport.scrollTop, 1_200);
+  assert.equal(document.activeElement, composer);
+  assert.equal(selection.toString(), "Selectable");
+
+  viewport.scrollTop = 200;
+  fireEvent.scroll(viewport);
+  scrollHeight = 1_400;
+  view.rerender(
+    surface(
+      {
+        ...activeTask,
+        runs: [
+          {
+            ...activeRun,
+            output: {
+              ...activeRun.output,
+              provisional: `Selectable prefix\n\n${"x".repeat(96 * 1024)}\n\nPaused marker`,
+            },
+          },
+        ],
+      },
+      "3",
+    ),
+  );
+  await waitFor(() => assert.ok(screen.getByText("Paused marker")));
+  assert.equal(viewport.scrollTop, 200);
+  assert.ok(screen.getByRole("button", { name: "Jump to latest" }));
+  assert.equal(document.activeElement, composer);
+  assert.equal(selection.toString(), "Selectable");
+});
+
 test("output classification preserves the same parent and part DOM roots", () => {
   const activeRun = run({
     phase: "running",
