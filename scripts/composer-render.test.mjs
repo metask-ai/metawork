@@ -827,13 +827,22 @@ test("Task list shows tasks from different workspaces without workspace controls
     pendingUi: null,
     uiHistory: [],
   });
-  const markup = renderTaskList([
-    task("1", "Alpha task", "workspace-a", "2"),
-    task("2", "Beta task", "workspace-b", "1"),
-  ]);
+  const archived = task("3", "Archived task", "workspace-b", "3");
+  archived.archived = true;
+  const markup = renderTaskList(
+    [
+      task("1", "Alpha task", "workspace-a", "2"),
+      task("2", "Beta task", "workspace-b", "1"),
+      archived,
+    ],
+    { showArchived: true },
+  );
 
   assert.match(markup, /Alpha task/);
   assert.match(markup, /Beta task/);
+  assert.match(markup, /Archived task/);
+  assert.match(markup, /aria-label="Archived"/);
+  assert.doesNotMatch(markup, /<section|<h3/);
   assert.doesNotMatch(markup, /workspace-card|workspace-picker|>Add</);
 });
 
@@ -874,7 +883,7 @@ test("Sidebar typography reserves bold weight for the product identity", async (
     "utf8",
   );
   assert.match(stylesheet, /\.sidebar-capability\s*\{[^}]*font-weight: 500/s);
-  assert.match(stylesheet, /\.task-group h3\s*\{[^}]*font-weight: 500/s);
+  assert.doesNotMatch(stylesheet, /\.task-group/);
   assert.match(stylesheet, /\.section-label\s*\{[^}]*font-weight: 500/s);
   assert.match(
     stylesheet,

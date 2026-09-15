@@ -495,46 +495,6 @@ summary::-webkit-details-marker {
   margin-top: 0;
 }
 
-.task-group {
-  margin-top: 14px;
-}
-
-.task-group h3 {
-  margin: 0 8px 6px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  font-weight: 500;
-  letter-spacing: 0.04em;
-}
-
-.task-group .task-list-item {
-  position: relative;
-  margin-top: 2px;
-  padding: 8px 10px 8px 12px;
-  border-radius: 8px;
-}
-
-.task-group .task-list-item::before {
-  position: absolute;
-  top: 9px;
-  bottom: 9px;
-  left: 3px;
-  width: 2px;
-  border-radius: 2px;
-  content: "";
-  background: transparent;
-}
-
-.task-group .task-list-item[aria-current="page"] {
-  border-color: transparent;
-  background: var(--ui-surface-panel);
-  box-shadow: 0 1px 2px rgba(28, 41, 47, 0.06);
-}
-
-.task-group .task-list-item[aria-current="page"]::before {
-  background: var(--ui-action-primary);
-}
-
 .account-identity {
   position: relative;
   padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));

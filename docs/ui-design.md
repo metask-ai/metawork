@@ -203,13 +203,13 @@ Workspace
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 导航、行动优先分组和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 单列表导航和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Task 列表与路径上下文
 
 登录后的左栏从上到下只承担五类稳定职责：品牌/窗口识别、New task、已接通的全局能力入口、Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
 
-- 左栏不显示 Workspace 标题、添加动作或切换器；它直接列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 Manual/Automatic Task，并按统一行动优先级分组。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
+- 左栏不显示 Workspace 标题、添加动作或切换器；它直接以一个连续列表列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 Manual/Automatic Task，不按状态拆分栏目。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
 - Task 被选择后使用自身绑定的 Workspace 路径，不提交额外的全局 Workspace 导航动作；不同路径下的后台 Task 都必须持续可见；
 - New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。Manual Workspace 直接显示 canonical directory，Automatic Workspace 统一显示“默认”，不得暴露随机目录或内部 kind 术语；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
@@ -411,22 +411,22 @@ Disabled
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
 
-### 5.6 Task 分组与排序
+### 5.6 Task 单列表与排序
 
-Task 按行动优先级分组，而不是全部按时间混排：
+Task 在一个连续列表中只出现一次。状态排序与视觉结构分离：当前仍依次按需要处理、正在运行、排队、其他未归档与已归档的优先级排列，同一优先级内按 `recentOrder` 倒序，但这些优先级不生成标题、分隔或独立栏目：
 
 ```text
-Needs your attention
-Running
-Queued
-Recent
+Tasks
+  [Task name]  [status icon]
+  [Task name]  [status icon]
+  [Task name]
 ```
 
-- 空分组自动隐藏；
-- `Recent` 内部按更新时间排序；
+- 列表不显示 `Needs your attention / Running / Queued / Recent / Archived` 等状态标题；
+- 当前排序优先级只决定行的位置，不在视觉上形成分组；排序规则后续变化不得重新引入状态栏目；
 - Task 列表项只显示任务名称与必要状态信号，不在名称下追加 Workspace、`Default / 默认`、模型或其他配置标签；同名 Task 仍保持原名称，由用户按需重命名，不用第二行元数据替代命名；
 - 运行中、排队、等待用户、失败和中断使用图标和颜色共同表达；可访问名称通过 `aria-label` 和 tooltip 提供，不在行内保留文字状态标签；
-- 后台 Task 产生待处理请求时必须进入 `Needs your attention`；
+- 后台 Task 产生待处理请求时必须取得最高排序优先级，并继续由行内图标表达；
 - 不能只用绿点、灰点区分状态。
 
 ### 5.7 创建、命名、归档与删除
@@ -526,7 +526,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 1. Host 从 bounded Workbench store 恢复 Workspace/Task、消息、Run/tool/UI 决策、compact 历史、无 secret execution binding 与 checkpoint record；不得把当前默认配置静默写入历史 Task；
 2. 没有 live owner 的 non-terminal Run 或 compact 显示为 `Interrupted`，不显示 Running/Stopping，不自动重放输入、工具或 permission；
 3. 点击左栏 Task 始终只是导航。满足资格的 detached Task 使用普通 Composer，不显示恢复卡片、恢复按钮、专用 placeholder 或其他 capability continuity 提示；用户发送第一条新消息时，Renderer 才在同一次发送意图内提交现有 restore，并等待 Host snapshot 确认 attachment 后继续提交该条 Run；选择、reload 或 timeout 不会自动触发 restore；
-4. restore 只表现为该次普通发送的 preparing/busy 状态，期间禁用发送、compact 和重复提交，不显示 `Restoring conversation / 正在恢复对话`。左栏可以把该 Task 归入正在运行分组，但不能伪造 Agent Run 或 Stop 按钮；
+4. restore 只表现为该次普通发送的 preparing/busy 状态，期间禁用发送、compact 和重复提交，不显示 `Restoring conversation / 正在恢复对话`。左栏只更新该 Task 的运行状态图标与排序位置，不能创建恢复分组、伪造 Agent Run 或 Stop 按钮；
 5. restore 失败时保留可阅读历史、用户草稿与稳定原因，并显示准确、可执行的失败说明；Host 仍发布 `continuationRecoveryAvailable = true` 时，下一次普通发送重试同一前置流程，不建立专用 `Try again / 重试` 按钮。timeout 只触发 canonical snapshot resync，绝不重放 restore 或 Run；
 6. 成功后 Host 原子发布 attachment 与 `continuationAvailable = true`，Renderer 只在这一状态确认后提交一次 Run。`continuationAvailable`、`continuationUnavailableReason` 和 `continuationRecoveryAvailable` 是同一 continuation 模型；不得建立第二个 `recovery.state` 或由 Renderer 猜测资格；
 7. checkpoint、Task/Workspace/Execution identity、Agent Runtime 或 checkpoint store 任一恢复事实不满足时显示对应 unavailable 说明，不开放该历史 Conversation 的恢复发送。Workspace 是否因导航语义 `visible=false`、Skill catalog 是否 ready、MCP selection 是否可重建、Permission 是否仍有效、projection capacity 以及 Task persistence health 都不是 Product Task 的全局运行资格；这些可选能力缺失时 Host 可以发布成功但 degraded 的 attachment，普通 Text 立即可用，相关能力按各自现有显式流程恢复。Task store read/corrupt/write/outcome-unknown health 由 Host 发布，Renderer 只提示，不自行清空、修复、迁移或阻塞 mutation；
