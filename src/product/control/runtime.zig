@@ -9546,7 +9546,7 @@ test "Product Control snapshot serializer preserves complete Account summary his
                 },
                 .history = .{
                     .availability = .ready,
-                    .start_date = "2025-09-16",
+                    .start_date = "2025-09-15",
                     .end_date = "2026-09-15",
                     .days = &history_days,
                     .synced_at_unix_ms = "1720000000000",
@@ -9565,7 +9565,7 @@ test "Product Control snapshot serializer preserves complete Account summary his
     try std.testing.expectEqualStrings("-1.25", wallet.get("balanceU").?.string);
     try std.testing.expectEqualStrings("37", usage.get("today").?.object.get("totalTokens").?.string);
     try std.testing.expectEqualStrings("2.5", usage.get("total").?.object.get("actualCostU").?.string);
-    try std.testing.expectEqualStrings("2025-09-16", history.get("startDate").?.string);
+    try std.testing.expectEqualStrings("2025-09-15", history.get("startDate").?.string);
     try std.testing.expectEqualStrings("10", history.get("days").?.array.items[0].object.get("totalTokens").?.string);
 }
 

@@ -1515,16 +1515,14 @@ function decodeAccount(value: unknown, path: string): AccountView {
       `${historyPath}.safeDiagnostic`,
     ),
   };
-  if (history.days.length > 366) fail(historyPath, "too many history days");
+  if (history.days.length > 371) fail(historyPath, "too many history days");
   if (history.startDate !== null && history.endDate !== null) {
     if (history.startDate > history.endDate)
       fail(historyPath, "history range must be ordered");
-    if (
-      calendarDayNumber(history.endDate) -
-        calendarDayNumber(history.startDate) !==
-      364
-    )
-      fail(historyPath, "history range must contain 365 calendar days");
+    const startDay = calendarDayNumber(history.startDate);
+    const rangeDays = calendarDayNumber(history.endDate) - startDay + 1;
+    if ((startDay + 3) % 7 !== 0 || rangeDays < 365 || rangeDays > 371)
+      fail(historyPath, "history range must align 53 week columns from Monday");
     let previousDate: string | null = null;
     for (const [index, day] of history.days.entries()) {
       if (day.date < history.startDate || day.date > history.endDate)

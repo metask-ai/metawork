@@ -4,6 +4,10 @@ const contract = @import("metawork_account_contract");
 
 pub const ProtocolError = error{InvalidSummaryResponse};
 
+pub const history_timezone = "Asia/Shanghai";
+const history_timezone_offset_seconds: i64 = 8 * std.time.s_per_hour;
+const history_week_columns: i64 = 53;
+
 pub const Decimal = struct {
     bytes: [contract.Limits.decimal_bytes]u8 = undefined,
     len: usize = 0,
@@ -115,9 +119,17 @@ pub const HistoryRange = struct {
 
     pub fn fromUnixSeconds(now_unix_seconds: i64) ProtocolError!HistoryRange {
         if (now_unix_seconds < 0) return error.InvalidSummaryResponse;
-        const end_day = @divFloor(now_unix_seconds, std.time.s_per_day);
+        const shanghai_seconds = std.math.add(
+            i64,
+            now_unix_seconds,
+            history_timezone_offset_seconds,
+        ) catch return error.InvalidSummaryResponse;
+        const end_day = @divFloor(shanghai_seconds, std.time.s_per_day);
+        const weekday_from_monday = @mod(end_day + 3, 7);
+        const start_day = end_day - weekday_from_monday -
+            (history_week_columns - 1) * 7;
         return .{
-            .start_date = try CalendarDate.fromDayNumber(end_day - 364),
+            .start_date = try CalendarDate.fromDayNumber(start_day),
             .end_date = try CalendarDate.fromDayNumber(end_day),
         };
     }
@@ -698,19 +710,27 @@ test "usage summary rejects negative counters and normalizes costs" {
     );
 }
 
-test "history range uses a 365 day inclusive UTC calendar window" {
+test "history range uses 53 Monday-aligned weeks in Asia Shanghai" {
     const range = try HistoryRange.fromUnixSeconds(1_789_440_000);
-    try std.testing.expectEqualStrings("2025-09-16", range.start_date.view());
+    try std.testing.expectEqualStrings("2025-09-15", range.start_date.view());
     try std.testing.expectEqualStrings("2026-09-15", range.end_date.view());
+}
+
+test "history range rolls over at Asia Shanghai midnight" {
+    const before_midnight = try HistoryRange.fromUnixSeconds(1_789_401_599);
+    try std.testing.expectEqualStrings("2026-09-14", before_midnight.end_date.view());
+
+    const at_midnight = try HistoryRange.fromUnixSeconds(1_789_401_600);
+    try std.testing.expectEqualStrings("2026-09-15", at_midnight.end_date.view());
 }
 
 test "daily usage history strictly validates dates order range and values" {
     const range: HistoryRange = .{
-        .start_date = try CalendarDate.parse("2025-09-16"),
+        .start_date = try CalendarDate.parse("2025-09-15"),
         .end_date = try CalendarDate.parse("2026-09-15"),
     };
     const history = try parseUsageHistory(
-        \\{"code":0,"data":{"trend":[{"date":"2026-09-14","requests":1,"input_tokens":10,"output_tokens":20,"cache_creation_tokens":0,"cache_read_tokens":30,"total_tokens":60,"cost":2,"actual_cost":1.25},{"date":"2026-09-15","requests":2,"input_tokens":40,"output_tokens":50,"cache_creation_tokens":60,"cache_read_tokens":70,"total_tokens":220,"cost":3,"actual_cost":2.5}],"start_date":"2025-09-16","end_date":"2026-09-15","granularity":"day"}}
+        \\{"code":0,"data":{"trend":[{"date":"2026-09-14","requests":1,"input_tokens":10,"output_tokens":20,"cache_creation_tokens":0,"cache_read_tokens":30,"total_tokens":60,"cost":2,"actual_cost":1.25},{"date":"2026-09-15","requests":2,"input_tokens":40,"output_tokens":50,"cache_creation_tokens":60,"cache_read_tokens":70,"total_tokens":220,"cost":3,"actual_cost":2.5}],"start_date":"2025-09-15","end_date":"2026-09-15","granularity":"day"}}
     , range);
     try std.testing.expectEqual(@as(usize, 2), history.days_len);
     try std.testing.expectEqualStrings("2026-09-14", history.days[0].date.view());
@@ -718,14 +738,14 @@ test "daily usage history strictly validates dates order range and values" {
     try std.testing.expectEqualStrings("2.5", history.days[1].actual_cost_u.view());
 
     const duplicate =
-        \\{"code":0,"data":{"trend":[{"date":"2026-09-15","input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"actual_cost":0},{"date":"2026-09-15","input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"actual_cost":0}],"start_date":"2025-09-16","end_date":"2026-09-15","granularity":"day"}}
+        \\{"code":0,"data":{"trend":[{"date":"2026-09-15","input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"actual_cost":0},{"date":"2026-09-15","input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"actual_cost":0}],"start_date":"2025-09-15","end_date":"2026-09-15","granularity":"day"}}
     ;
     try std.testing.expectError(
         error.InvalidSummaryResponse,
         parseUsageHistory(duplicate, range),
     );
     const invalid_value =
-        \\{"code":0,"data":{"trend":[{"date":"2026-02-30","input_tokens":-1,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"actual_cost":0}],"start_date":"2025-09-16","end_date":"2026-09-15","granularity":"day"}}
+        \\{"code":0,"data":{"trend":[{"date":"2026-02-30","input_tokens":-1,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"actual_cost":0}],"start_date":"2025-09-15","end_date":"2026-09-15","granularity":"day"}}
     ;
     try std.testing.expectError(
         error.InvalidSummaryResponse,
@@ -756,9 +776,9 @@ test "summary state preserves partial success as stale and clears on authorizati
             \\{"code":0,"data":{"total_tokens":8,"total_actual_cost":2,"today_input_tokens":1,"today_output_tokens":2,"today_cache_creation_tokens":3,"today_cache_read_tokens":4,"today_tokens":10,"today_actual_cost":1}}
         ) },
         .history = .{ .succeeded = try parseUsageHistory(
-            \\{"code":0,"data":{"trend":[{"date":"2026-09-15","input_tokens":1,"output_tokens":2,"cache_creation_tokens":3,"cache_read_tokens":4,"total_tokens":10,"actual_cost":1}],"start_date":"2025-09-16","end_date":"2026-09-15","granularity":"day"}}
+            \\{"code":0,"data":{"trend":[{"date":"2026-09-15","input_tokens":1,"output_tokens":2,"cache_creation_tokens":3,"cache_read_tokens":4,"total_tokens":10,"actual_cost":1}],"start_date":"2025-09-15","end_date":"2026-09-15","granularity":"day"}}
         , .{
-            .start_date = try CalendarDate.parse("2025-09-16"),
+            .start_date = try CalendarDate.parse("2025-09-15"),
             .end_date = try CalendarDate.parse("2026-09-15"),
         }) },
     };

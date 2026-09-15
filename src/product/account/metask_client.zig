@@ -9,6 +9,7 @@ const transport_api = @import("metask_transport");
 pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
 pub const usage_dashboard_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/stats";
 pub const usage_history_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/trend";
+pub const usage_history_timezone = summary.history_timezone;
 
 pub const RequestKind = enum {
     exchange_code,

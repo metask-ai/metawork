@@ -278,7 +278,7 @@ test "Account projection copies the complete summary without allocating" {
                 },
                 .history = .{
                     .availability = .ready,
-                    .start_date = "2025-09-16",
+                    .start_date = "2025-09-15",
                     .end_date = "2026-09-15",
                     .days = &history_days,
                     .synced_at_unix_ms = "1720000000000",
@@ -294,7 +294,7 @@ test "Account projection copies the complete summary without allocating" {
     try std.testing.expectEqualStrings("-1.25", view.summary.wallet.balance_u);
     try std.testing.expectEqualStrings("37", view.summary.usage.today.?.total_tokens);
     try std.testing.expectEqualStrings("2.5", view.summary.usage.total.?.actual_cost_u);
-    try std.testing.expectEqualStrings("2025-09-16", view.summary.history.start_date);
+    try std.testing.expectEqualStrings("2025-09-15", view.summary.history.start_date);
     try std.testing.expectEqualStrings("10", view.summary.history.days[0].total_tokens);
     try std.testing.expectEqual(allocations_after_init, failing.alloc_index);
 }

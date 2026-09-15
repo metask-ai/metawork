@@ -1986,7 +1986,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     },
     history: {
       availability: "ready",
-      startDate: "2025-09-16",
+      startDate: "2025-09-15",
       endDate: "2026-09-15",
       days: [
         {

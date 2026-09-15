@@ -188,11 +188,12 @@ pub const Adapter = struct {
                     return .protocol_failed;
                 const endpoint = std.fmt.bufPrint(
                     &endpoint_storage,
-                    "{s}?start_date={s}&end_date={s}&granularity=day",
+                    "{s}?start_date={s}&end_date={s}&granularity=day&timezone={s}",
                     .{
                         account_metask.usage_history_url,
                         range.start_date,
                         range.end_date,
+                        account_metask.usage_history_timezone,
                     },
                 ) catch return .protocol_failed;
                 break :blk .{ endpoint, .GET };

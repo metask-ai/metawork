@@ -16,7 +16,7 @@ pub const Limits = struct {
     pub const safe_diagnostic_bytes: usize = 512;
     pub const decimal_bytes: usize = 64;
     pub const calendar_date_bytes: usize = 10;
-    pub const usage_history_days: usize = 366;
+    pub const usage_history_days: usize = 371;
 };
 
 pub const recharge_page_url = "https://napi.metask-ai.com/payment";
@@ -547,7 +547,7 @@ test "Account view validates identity and nested summary independently" {
             },
             .history = .{
                 .availability = .ready,
-                .start_date = "2025-09-16",
+                .start_date = "2025-09-15",
                 .end_date = "2026-09-15",
                 .days = &history_days,
                 .synced_at_unix_ms = "1000",
@@ -598,7 +598,7 @@ test "Account view validates identity and nested summary independently" {
             .usage_eligibility = .enabled,
             .history = .{
                 .availability = .ready,
-                .start_date = "2025-09-16",
+                .start_date = "2025-09-15",
                 .end_date = "2026-09-15",
                 .days = &duplicate_days,
                 .synced_at_unix_ms = "1000",
