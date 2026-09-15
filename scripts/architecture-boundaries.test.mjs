@@ -2468,18 +2468,13 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     "src/native_sdk_compat/system_webview_window_controls/windows.zig";
   const startupWindowsPath =
     "src/native_sdk_compat/system_webview_startup_window/windows.zig";
-  const securePath = "src/native_sdk_compat/secure_input.zig";
-  const secureWindowsPath = "src/native_sdk_compat/secure_input/windows.zig";
-  const secureWindowsUiaPath =
-    "src/native_sdk_compat/secure_input/windows_uia.zig";
-  const secureMacosPath = "src/native_sdk_compat/secure_input/macos.zig";
   const instancePath = "src/native_sdk_compat/app_single_instance.zig";
   const instanceWindowsPath =
     "src/native_sdk_compat/app_single_instance/windows.zig";
   const instanceMacosPath =
     "src/native_sdk_compat/app_single_instance/macos.zig";
 
-  for (const seamPath of [dragPath, controlsPath, securePath]) {
+  for (const seamPath of [dragPath, controlsPath]) {
     assert.deepEqual(
       zigFiles("src/").filter((file) =>
         read(file).includes(`native_sdk_compat/${seamPath.split("/").at(-1)}`),
@@ -2539,66 +2534,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     ["IsZoomed", "PostMessageW", "ShowWindow"].sort(),
   );
   assert.deepEqual(
-    externSymbols(read(secureWindowsPath), ["user32", "kernel32", "gdi32"]),
-    [
-      "AdjustWindowRectEx",
-      "CreateWindowExW",
-      "DefWindowProcW",
-      "DestroyWindow",
-      "DispatchMessageW",
-      "EnableWindow",
-      "GetDpiForWindow",
-      "GetLastError",
-      "GetMessageW",
-      "GetModuleHandleW",
-      "GetStockObject",
-      "GetWindowRect",
-      "GetWindowTextLengthW",
-      "GetWindowTextW",
-      "IsDialogMessageW",
-      "IsWindow",
-      "IsWindowEnabled",
-      "LoadCursorW",
-      "PostQuitMessage",
-      "RegisterClassExW",
-      "SendMessageW",
-      "SetActiveWindow",
-      "SetFocus",
-      "SetLastError",
-      "SetWindowTextW",
-      "ShowWindow",
-      "TranslateMessage",
-      "UpdateWindow",
-      "WideCharToMultiByte",
-    ].sort(),
-  );
-  assert.deepEqual(
-    zigFiles("src/").filter((file) =>
-      read(file).includes('@import("windows_uia.zig")'),
-    ),
-    [secureWindowsPath],
-  );
-  assert.deepEqual(
-    externSymbols(read(secureWindowsUiaPath), [
-      "user32",
-      "kernel32",
-      "uiautomationcore",
-    ]),
-    [
-      "CallWindowProcW",
-      "DefWindowProcW",
-      "GetLastError",
-      "SetLastError",
-      "SetWindowLongPtrW",
-      "UiaHostProviderFromHwnd",
-      "UiaReturnRawElementProvider",
-    ].sort(),
-  );
-  assert.match(
-    read("build.zig"),
-    /target\.result\.os\.tag == \.windows[\s\S]*app\.linkSystemLibrary\("uiautomationcore"/u,
-  );
-  assert.deepEqual(
     externSymbols(read(startupWindowsPath), ["user32", "kernel32", "comctl32"]),
     [
       "CallNextHookEx",
@@ -2613,10 +2548,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
       "SetWindowsHookExW",
       "UnhookWindowsHookEx",
     ].sort(),
-  );
-  assert.deepEqual(
-    externSymbols(read(secureMacosPath), ["objc"]),
-    ["objc_getClass", "objc_msgSend", "sel_registerName"].sort(),
   );
   assert.deepEqual(
     externSymbols(read(instanceWindowsPath), [

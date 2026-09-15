@@ -51,7 +51,7 @@ pub const Runtime = struct {
     /// Enables only the automation transport and an injected Workspace for
     /// the real Windows Custom Provider readiness harness. Unlike `active`,
     /// this mode does not install fixture Account/Models state and therefore
-    /// exercises normal platform services, secure input and credential vaults.
+    /// exercises normal platform services and credential vaults.
     pub fn customProviderReadinessActive(self: *const Runtime) bool {
         const env_map = self.env_map orelse return false;
         const value = env_map.get(custom_provider_readiness_env) orelse

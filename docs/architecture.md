@@ -127,13 +127,10 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 | --- | --- | --- | --- |
 | `system_webview_drag_region` | macOS 一级；Windows 二级 | 只补 System WebView drag region，不提供通用窗口 action | SDK 等价 drag-region Runtime API 通过目标平台验收 |
 | `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
-| `secure_input` | 二级 | 原生安全文本输入，不接收 Product 对象、Bridge DTO、credential slot 或系统 handle | SDK secure-input Runtime API 通过 Windows/macOS 验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
 
 Window compatibility 共享的 startup window identity 只能由 Application 在窗口创建期建立一次并验证，再注入需要它的 seam；消费者不得复制捕获机制或把 identity 当成通用 system handle。`minimize` 等 Runtime API 已提供的能力必须保持正常路径，不能因相邻按钮使用 compatibility 而被吸入 seam。
-
-`secure_input` 只接受有界 UTF-8 文案和调用方拥有的可清零输出缓冲区，只返回提交长度或取消；不得截断。取消、失败和 owner 释放必须清零 MetaWork-owned plaintext。原生 modal loop 可能继续派发应用事件，因此正式调用必须证明 prompt 打开期间后台事件可继续处理且不会产生未声明的状态机重入；只有编译成功不能证明该 capability 可用。
 
 `app_single_instance` 必须同时满足：
 

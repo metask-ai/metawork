@@ -3,7 +3,6 @@ const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const control_ports = @import("metawork_product_control_ports");
 const drag_region = @import("../native_sdk_compat/system_webview_drag_region.zig");
-const secure_input = @import("../native_sdk_compat/secure_input.zig");
 const startup_window = @import("../native_sdk_compat/system_webview_startup_window.zig");
 const window_controls = @import("../native_sdk_compat/system_webview_window_controls.zig");
 
@@ -25,7 +24,6 @@ const tray_icon_path = switch (builtin.os.tag) {
 pub const State = struct {
     startup_window_capture: startup_window.Capture = .{},
     drag_region_capability: drag_region.Capability = drag_region.Capability.init(main_window_id),
-    secure_input_capability: secure_input.Capability = .{},
     window_controls_capability: window_controls.Capability = window_controls.Capability.init(main_window_id),
     tray_installed: bool = false,
 
@@ -38,7 +36,6 @@ pub const State = struct {
     pub fn captureStartupWindow(self: *State) !void {
         const startup_binding = try self.startup_window_capture.take(main_window_id);
         try self.drag_region_capability.captureStartupWindow(startup_binding);
-        try self.secure_input_capability.captureStartupWindow(startup_binding);
         try self.window_controls_capability.captureStartupWindow(startup_binding);
     }
 
@@ -50,20 +47,7 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         self.startup_window_capture.deinit();
         self.window_controls_capability.deinit();
-        self.secure_input_capability.deinit();
         self.drag_region_capability.deinit();
-    }
-
-    pub fn secureInputAvailable(self: *const State) bool {
-        return self.secure_input_capability.available();
-    }
-
-    pub fn captureSecureInput(
-        self: *State,
-        options: secure_input.Options,
-        output: []u8,
-    ) secure_input.Error!secure_input.Result {
-        return self.secure_input_capability.capture(options, output);
     }
 
     pub fn installTray(
