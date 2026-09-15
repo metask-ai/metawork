@@ -74,6 +74,8 @@ export const initialWorkbenchState: WorkbenchState = {
       canCancel: false,
       accountId: "",
       displayName: "",
+      emailHint: "",
+      concurrencyLimit: null,
       errorCode: "none",
       safeDiagnostic: "",
       summary: {

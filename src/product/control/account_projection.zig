@@ -41,6 +41,8 @@ pub const Projection = struct {
     can_cancel: bool = false,
     account_id: FixedText(account.Limits.account_id_bytes) = .{},
     display_name: FixedText(account.Limits.display_name_bytes) = .{},
+    email_hint: FixedText(account.Limits.email_hint_bytes) = .{},
+    concurrency_limit: ?u32 = null,
     safe_diagnostic: FixedText(account.Limits.safe_diagnostic_bytes) = .{},
     error_code: account.ErrorCode = .none,
     summary_operation: account.SummaryOperation = .idle,
@@ -91,6 +93,8 @@ pub const Projection = struct {
         self.can_cancel = source.can_cancel;
         self.account_id.setNoFail(source.account_id);
         self.display_name.setNoFail(source.display_name);
+        self.email_hint.setNoFail(source.email_hint);
+        self.concurrency_limit = source.concurrency_limit;
         self.error_code = source.error_code;
         self.safe_diagnostic.setNoFail(source.safe_diagnostic);
         const summary = source.summary;
@@ -161,6 +165,8 @@ pub const Projection = struct {
             .can_cancel = self.can_cancel,
             .account_id = self.account_id.view(),
             .display_name = self.display_name.view(),
+            .email_hint = self.email_hint.view(),
+            .concurrency_limit = self.concurrency_limit,
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
             .summary = .{
@@ -248,6 +254,8 @@ test "Account projection copies the complete summary without allocating" {
             .state = .authenticated,
             .account_id = "42",
             .display_name = "Fixture User",
+            .email_hint = "f***@example.com",
+            .concurrency_limit = 5,
             .summary = .{
                 .usage_eligibility = .enabled,
                 .wallet = .{

@@ -4885,6 +4885,15 @@ pub const Runtime = struct {
         writer.writeAll(",\"displayName\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.display_name);
+        writer.writeAll(",\"emailHint\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.email_hint);
+        writer.writeAll(",\"concurrencyLimit\":") catch
+            return error.SnapshotTooLarge;
+        if (view.concurrency_limit) |limit|
+            writer.print("{d}", .{limit}) catch return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
             @tagName(view.error_code),
         }) catch return error.SnapshotTooLarge;
@@ -7620,6 +7629,8 @@ pub const TestSupport = if (builtin.is_test) struct {
                 .state = .authenticated,
                 .account_id = "account-1",
                 .display_name = "Fixture User",
+                .email_hint = "f***@example.com",
+                .concurrency_limit = 5,
             },
         });
     }
@@ -9511,6 +9522,8 @@ test "Product Control snapshot serializer preserves complete Account summary his
             .state = .authenticated,
             .account_id = "account-1",
             .display_name = "Fixture User",
+            .email_hint = "f***@example.com",
+            .concurrency_limit = 5,
             .summary = .{
                 .usage_eligibility = .enabled,
                 .wallet = .{
@@ -13983,6 +13996,8 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
         @splat('a');
     const display_name: [account_contract.Limits.display_name_bytes]u8 =
         @splat('d');
+    const email_hint: [account_contract.Limits.email_hint_bytes]u8 =
+        @splat('e');
     const diagnostic: [account_contract.Limits.safe_diagnostic_bytes]u8 =
         @splat('x');
     control.commitAccountFactNoFail(.{
@@ -13991,6 +14006,8 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
             .state = .authenticated,
             .account_id = &account_id,
             .display_name = &display_name,
+            .email_hint = &email_hint,
+            .concurrency_limit = std.math.maxInt(u32),
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
         },

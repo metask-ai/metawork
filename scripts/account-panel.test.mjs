@@ -77,6 +77,8 @@ const signedOut = {
   canCancel: false,
   accountId: "",
   displayName: "",
+  emailHint: "",
+  concurrencyLimit: null,
   errorCode: "none",
   safeDiagnostic: "",
   summary: emptyAccountSummary,
@@ -116,6 +118,8 @@ const readyAccount = {
   state: "authenticated",
   accountId: "account-1",
   displayName: "Metask User",
+  emailHint: "m***@example.com",
+  concurrencyLimit: 5,
 };
 
 const readyModels = {
@@ -474,6 +478,8 @@ test("Account settings render the whole-account balance and exact usage ledger",
   assert.doesNotMatch(markup, /Metask connected/);
   assert.match(markup, /whole Metask account, not only activity in MetaWork/);
   assert.match(markup, /100\.25 U/);
+  assert.match(markup, /m\*\*\*@example\.com/);
+  assert.match(markup, /Concurrency allowance 5/);
   assert.match(
     markup,
     /Account information[\s\S]*settings-identity-balance[\s\S]*100\.25 U[\s\S]*Account usage/,

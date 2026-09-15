@@ -179,6 +179,8 @@ pub fn fetchIdentity(
     return state.AccountIdentity.init(
         tokens.accountId(),
         current_user.usernameView(),
+        current_user.emailHintView(),
+        current_user.concurrency_limit,
     ) catch return error.ProtocolInvalid;
 }
 
@@ -308,7 +310,7 @@ const FakeTransport = struct {
                     !std.mem.eql(u8, request.bearer orelse "", "access"))
                     return error.ProtocolFailed;
                 break :blk
-                \\{"code":0,"message":"success","data":{"id":1,"email":"user@example.com","username":"Meta User","role":"user"}}
+                \\{"code":0,"message":"success","data":{"id":1,"email":"user@example.com","username":"Meta User","concurrency":5,"role":"user"}}
                 ;
             },
             else => return error.ProtocolFailed,
@@ -348,6 +350,11 @@ test "login exchanges tokens before resolving a strict identity" {
         "Meta User",
         identity.displayName(),
     );
+    try std.testing.expectEqualStrings(
+        "u***@example.com",
+        identity.emailHint(),
+    );
+    try std.testing.expectEqual(@as(u32, 5), identity.concurrency_limit);
     try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
 

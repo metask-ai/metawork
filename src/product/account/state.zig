@@ -10,6 +10,7 @@ const contract = @import("metawork_account_contract");
 
 const AccountId = BoundedString(contract.Limits.account_id_bytes);
 const DisplayName = BoundedString(contract.Limits.display_name_bytes);
+const EmailHint = BoundedString(contract.Limits.email_hint_bytes);
 const SafeDiagnostic = BoundedString(contract.Limits.safe_diagnostic_bytes);
 
 fn BoundedString(comptime capacity: usize) type {
@@ -117,6 +118,8 @@ const CommittedState = struct {
     transaction: Transaction = .none,
     account_id: AccountId = .{},
     display_name: DisplayName = .{},
+    email_hint: EmailHint = .{},
+    concurrency_limit: ?u32 = null,
     error_code: contract.ErrorCode = .none,
     safe_diagnostic: SafeDiagnostic = .{},
     next_attempt_id: u64 = 1,
@@ -136,6 +139,8 @@ const CommittedState = struct {
     fn clearIdentity(self: *CommittedState) void {
         self.account_id.clear();
         self.display_name.clear();
+        self.email_hint.clear();
+        self.concurrency_limit = null;
     }
 
     fn clearError(self: *CommittedState) void {
@@ -161,6 +166,8 @@ const CommittedState = struct {
             .can_cancel = self.canCancel(),
             .account_id = if (publish_identity) self.account_id.view() else "",
             .display_name = if (publish_identity) self.display_name.view() else "",
+            .email_hint = if (publish_identity) self.email_hint.view() else "",
+            .concurrency_limit = if (publish_identity) self.concurrency_limit else null,
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
         };
@@ -203,6 +210,8 @@ pub const Account = struct {
         return .{
             .account_id = self.state.account_id,
             .display_name = self.state.display_name,
+            .email_hint = self.state.email_hint,
+            .concurrency_limit = self.state.concurrency_limit orelse return null,
         };
     }
 
@@ -221,6 +230,7 @@ pub const Account = struct {
             // Summary effects are coordinated by Account Runtime and never
             // enter the identity transaction state machine.
             .refresh_summary => .{ .rejected = .invalid_state },
+            .open_recharge => .{ .rejected = .invalid_state },
             .logout => self.prepareLogout(),
         };
     }
@@ -452,6 +462,8 @@ pub const Account = struct {
         next.clearTransaction();
         next.account_id = identity.account_id;
         next.display_name = identity.display_name;
+        next.email_hint = identity.email_hint;
+        next.concurrency_limit = identity.concurrency_limit;
         next.clearError();
         return transitionNoEffect(next, .session_changed, loading.attempt_id);
     }
@@ -580,10 +592,23 @@ pub const PreparedTransition = struct {
 pub const AccountIdentity = struct {
     account_id: AccountId,
     display_name: DisplayName,
+    email_hint: EmailHint,
+    concurrency_limit: u32,
 
-    pub fn init(account_id: []const u8, display_name: []const u8) contract.ValidationError!AccountIdentity {
-        if (account_id.len == 0) return error.FieldEmpty;
-        return .{ .account_id = try .init(account_id), .display_name = try .init(display_name) };
+    pub fn init(
+        account_id: []const u8,
+        display_name: []const u8,
+        email_hint: []const u8,
+        concurrency_limit: u32,
+    ) contract.ValidationError!AccountIdentity {
+        if (account_id.len == 0 or concurrency_limit == 0)
+            return error.FieldEmpty;
+        return .{
+            .account_id = try .init(account_id),
+            .display_name = try .init(display_name),
+            .email_hint = try .init(email_hint),
+            .concurrency_limit = concurrency_limit,
+        };
     }
 
     pub fn accountId(self: *const AccountIdentity) []const u8 {
@@ -592,6 +617,10 @@ pub const AccountIdentity = struct {
 
     pub fn displayName(self: *const AccountIdentity) []const u8 {
         return self.display_name.view();
+    }
+
+    pub fn emailHint(self: *const AccountIdentity) []const u8 {
+        return self.email_hint.view();
     }
 };
 
@@ -637,6 +666,8 @@ pub const TestSupport = if (builtin.is_test) struct {
         next.session_state = .authenticated;
         next.account_id = identity.account_id;
         next.display_name = identity.display_name;
+        next.email_hint = identity.email_hint;
+        next.concurrency_limit = identity.concurrency_limit;
         next.clearError();
         return .{ .next = next, .fact_kind = .restored, .attempt_id = null };
     }
@@ -704,7 +735,7 @@ test "matching malformed completion fails the authorization attempt" {
 
     var malformed: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("account-1", "User") },
+        .payload = .{ .identity_loaded = try .init("account-1", "User", "u***@example.com", 5) },
     };
     var failed = switch (account.prepareCompletion(&malformed)) {
         .transition => |value| value,
@@ -741,7 +772,7 @@ test "explicit login persists tokens before publishing identity" {
 
     var identity: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("account-1", "User") },
+        .payload = .{ .identity_loaded = try .init("account-1", "User", "u***@example.com", 5) },
     };
     var authenticated = switch (account.prepareCompletion(&identity)) {
         .transition => |value| value,
@@ -750,13 +781,15 @@ test "explicit login persists tokens before publishing identity" {
     commitPrepared(&account, &authenticated);
     try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
     try std.testing.expectEqualStrings("account-1", account.view().account_id);
+    try std.testing.expectEqualStrings("u***@example.com", account.view().email_hint);
+    try std.testing.expectEqual(@as(?u32, 5), account.view().concurrency_limit);
 }
 
 test "explicit login accepts a newly verified identity" {
     var account = Account.initRestoring();
     var restored = try TestSupport.prepareAuthenticated(
         &account,
-        try AccountIdentity.init("account-1", "Old User"),
+        try AccountIdentity.init("account-1", "Old User", "o***@example.com", 5),
     );
     commitPrepared(&account, &restored);
     var begin = switch (account.prepareCommand(.begin_login)) {
@@ -777,7 +810,7 @@ test "explicit login accepts a newly verified identity" {
 
     var identity: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("account-2", "New User") },
+        .payload = .{ .identity_loaded = try .init("account-2", "New User", "n***@example.com", 8) },
     };
     var authenticated = switch (account.prepareCompletion(&identity)) {
         .transition => |value| value,
@@ -786,13 +819,15 @@ test "explicit login accepts a newly verified identity" {
     commitPrepared(&account, &authenticated);
     try std.testing.expectEqualStrings("account-2", account.view().account_id);
     try std.testing.expectEqualStrings("New User", account.view().display_name);
+    try std.testing.expectEqualStrings("n***@example.com", account.view().email_hint);
+    try std.testing.expectEqual(@as(?u32, 8), account.view().concurrency_limit);
 }
 
 test "failed login before token commit preserves the current identity" {
     var account = Account.initRestoring();
     var restored = try TestSupport.prepareAuthenticated(
         &account,
-        try AccountIdentity.init("account-1", "Current User"),
+        try AccountIdentity.init("account-1", "Current User", "c***@example.com", 5),
     );
     commitPrepared(&account, &restored);
     var begin = switch (account.prepareCommand(.begin_login)) {
@@ -841,7 +876,7 @@ test "cold refresh publishes identity only after verification" {
 
     var identified: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("22", "朱健") },
+        .payload = .{ .identity_loaded = try .init("22", "朱健", "z***@example.com", 6) },
     };
     var completed = switch (account.prepareCompletion(&identified)) {
         .transition => |value| value,
@@ -888,7 +923,7 @@ test "refresh failure distinguishes retryable and invalid credentials" {
     var active = Account.initRestoring();
     var active_restore = try TestSupport.prepareAuthenticated(
         &active,
-        try AccountIdentity.init("account-1", "Metask User"),
+        try AccountIdentity.init("account-1", "Metask User", "m***@example.com", 5),
     );
     commitPrepared(&active, &active_restore);
     var active_refresh = switch (active.prepareTokenRefresh()) {
@@ -950,7 +985,7 @@ test "refresh schedule failure is restricted to authenticated idle state" {
     var account = Account.initRestoring();
     var restored = try TestSupport.prepareAuthenticated(
         &account,
-        try AccountIdentity.init("account-1", "Metask User"),
+        try AccountIdentity.init("account-1", "Metask User", "m***@example.com", 5),
     );
     commitPrepared(&account, &restored);
     var failed = switch (account.prepareRefreshScheduleFailure()) {

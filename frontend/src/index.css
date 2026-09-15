@@ -1049,7 +1049,7 @@ summary::-webkit-details-marker {
 }
 
 .settings-identity-copy strong,
-.settings-identity-copy span {
+.settings-identity-copy > span {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1062,24 +1062,34 @@ summary::-webkit-details-marker {
   font-weight: 710;
 }
 
-.settings-identity-copy span {
-  position: relative;
+.settings-identity-copy > span {
   margin-top: 3px;
-  padding-left: 12px;
   color: var(--settings-muted);
   font-size: var(--text-control);
 }
 
-.settings-identity-copy span::before {
-  position: absolute;
-  top: 50%;
-  left: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--metask-state-complete);
-  transform: translateY(-50%);
-  content: "";
+.settings-identity-meta {
+  display: flex;
+  min-width: 0;
+  margin-top: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  color: var(--settings-muted);
+  font-size: var(--text-control);
+}
+
+.settings-identity-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-identity-meta span + span::before {
+  margin-right: 8px;
+  color: var(--settings-line-strong);
+  content: "·";
 }
 
 .settings-identity-balance {
@@ -3169,6 +3179,15 @@ button.run-process-tool:hover {
 
   .settings-danger-zone {
     grid-template-columns: 1fr;
+  }
+
+  .settings-identity-row {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .settings-identity-balance {
+    justify-items: start;
+    text-align: left;
   }
 
   .settings-account-usage-row {

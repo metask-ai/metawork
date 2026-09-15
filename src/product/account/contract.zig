@@ -9,6 +9,8 @@ const std = @import("std");
 pub const Limits = struct {
     pub const account_id_bytes: usize = 256;
     pub const display_name_bytes: usize = 256;
+    pub const email_bytes: usize = 320;
+    pub const email_hint_bytes: usize = 324;
     // Native SDK Keychain values are currently capped at 4096 bytes.
     pub const authorization_token_bytes: usize = 4096;
     pub const safe_diagnostic_bytes: usize = 512;
@@ -186,6 +188,8 @@ pub const AccountView = struct {
     can_cancel: bool = false,
     account_id: []const u8 = "",
     display_name: []const u8 = "",
+    email_hint: []const u8 = "",
+    concurrency_limit: ?u32 = null,
     error_code: ErrorCode = .none,
     safe_diagnostic: []const u8 = "",
     summary: AccountSummaryView = .{},
@@ -253,6 +257,7 @@ pub fn validateCommand(_: AccountCommand) ValidationError!void {}
 pub fn validateView(view: AccountView) ValidationError!void {
     try validateOptional(view.account_id, Limits.account_id_bytes);
     try validateOptional(view.display_name, Limits.display_name_bytes);
+    try validateOptional(view.email_hint, Limits.email_hint_bytes);
     try validateOptional(view.safe_diagnostic, Limits.safe_diagnostic_bytes);
     if (view.error_code == .none and view.safe_diagnostic.len != 0)
         return error.InconsistentState;
@@ -260,7 +265,8 @@ pub fn validateView(view: AccountView) ValidationError!void {
         return error.InconsistentState;
     switch (view.state) {
         .checking, .signed_out, .authorizing => {
-            if (view.account_id.len != 0 or view.display_name.len != 0)
+            if (view.account_id.len != 0 or view.display_name.len != 0 or
+                view.email_hint.len != 0 or view.concurrency_limit != null)
                 return error.InconsistentState;
             if (view.state != .authorizing and view.can_cancel)
                 return error.InconsistentState;
@@ -269,6 +275,9 @@ pub fn validateView(view: AccountView) ValidationError!void {
         .authenticated => {
             if (view.account_id.len == 0 or view.display_name.len == 0)
                 return error.InconsistentState;
+            const limit = view.concurrency_limit orelse
+                return error.InconsistentState;
+            if (limit == 0) return error.InconsistentState;
         },
     }
     try validateSummary(view.summary);
@@ -512,6 +521,7 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
+        .concurrency_limit = 5,
         .summary = .{
             .usage_eligibility = .enabled,
             .wallet = .{
@@ -553,6 +563,7 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
+        .concurrency_limit = 5,
         .summary = .{
             .usage_eligibility = .disabled,
             .usage = .{
@@ -565,6 +576,7 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
+        .concurrency_limit = 5,
         .summary = .{
             .wallet = .{
                 .availability = .ready,
@@ -578,6 +590,7 @@ test "Account view validates identity and nested summary independently" {
         .state = .authenticated,
         .account_id = "account-1",
         .display_name = "Metask User",
+        .concurrency_limit = 5,
         .summary = .{
             .usage_eligibility = .enabled,
             .history = .{

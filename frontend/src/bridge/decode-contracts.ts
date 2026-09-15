@@ -1296,6 +1296,8 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "canCancel",
     "accountId",
     "displayName",
+    "emailHint",
+    "concurrencyLimit",
     "errorCode",
     "safeDiagnostic",
     "summary",
@@ -1304,6 +1306,11 @@ function decodeAccount(value: unknown, path: string): AccountView {
   const canCancel = booleanValue(item.canCancel, `${path}.canCancel`);
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
+  const emailHint = stringValue(item.emailHint, `${path}.emailHint`);
+  const concurrencyLimit =
+    item.concurrencyLimit === null
+      ? null
+      : positiveNumber(item.concurrencyLimit, `${path}.concurrencyLimit`);
   const errorCode = enumValue(
     item.errorCode,
     `${path}.errorCode`,
@@ -1535,12 +1542,17 @@ function decodeAccount(value: unknown, path: string): AccountView {
   }
   if (
     state !== "authenticated" &&
-    (accountId.length !== 0 || displayName.length !== 0)
+    (accountId.length !== 0 ||
+      displayName.length !== 0 ||
+      emailHint.length !== 0 ||
+      concurrencyLimit !== null)
   )
     fail(path, "a non-authenticated Account must hide identity");
   if (
     state === "authenticated" &&
-    (accountId.length === 0 || displayName.length === 0)
+    (accountId.length === 0 ||
+      displayName.length === 0 ||
+      concurrencyLimit === null)
   )
     fail(path, "an authenticated Account requires identity");
   if (canCancel && state !== "authorizing")
@@ -1605,6 +1617,8 @@ function decodeAccount(value: unknown, path: string): AccountView {
     canCancel,
     accountId,
     displayName,
+    emailHint,
+    concurrencyLimit,
     errorCode,
     safeDiagnostic,
     summary: { operation, usageEligibility, wallet, usage, history },

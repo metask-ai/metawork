@@ -896,6 +896,7 @@ export const enUS = {
   "settings.account_usage_scope":
     "These figures cover your whole Metask account, not only activity in MetaWork.",
   "settings.account_usage_balance": "Balance",
+  "settings.account_concurrency_limit": "Concurrency allowance {value}",
   "settings.account_usage_total": "All time",
   "settings.account_usage_tokens": "{value} Token",
   "settings.account_usage_cost": "{value} U",

@@ -1131,7 +1131,22 @@ export function SettingsPage({
                     <strong title={account.displayName}>
                       {accountIdentityTitle}
                     </strong>
-                    {!authenticated ? <span>{accountIdentityBody}</span> : null}
+                    {authenticated ? (
+                      <div className="settings-identity-meta">
+                        {account.emailHint ? (
+                          <span title={account.emailHint}>
+                            {account.emailHint}
+                          </span>
+                        ) : null}
+                        <span>
+                          {t("settings.account_concurrency_limit", {
+                            value: account.concurrencyLimit ?? "—",
+                          })}
+                        </span>
+                      </div>
+                    ) : (
+                      <span>{accountIdentityBody}</span>
+                    )}
                   </div>
                   {authenticated &&
                   account.summary.usageEligibility !== "disabled" ? (

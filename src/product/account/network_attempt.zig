@@ -348,7 +348,7 @@ const RefreshTransport = struct {
         const self: *RefreshTransport = @ptrCast(@alignCast(context));
         if (request.kind == .current_user) {
             const body =
-                \\{"code":0,"message":"success","data":{"id":1,"username":"Stored User"}}
+                \\{"code":0,"message":"success","data":{"id":1,"email":"stored@example.com","username":"Stored User","concurrency":5}}
             ;
             @memcpy(output[0..body.len], body);
             return .{ .status = 200, .body = output[0..body.len] };

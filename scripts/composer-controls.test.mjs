@@ -308,6 +308,8 @@ const readySettingsAccount = {
   canCancel: false,
   accountId: "account-1",
   displayName: "Metask User",
+  emailHint: "m***@example.com",
+  concurrencyLimit: 5,
   errorCode: "none",
   safeDiagnostic: "",
   summary: {
@@ -446,6 +448,7 @@ function settingsElement(account, overrides = {}) {
       onTestCustomModel() {},
       onSelectCustomModel() {},
       onBeginLogin() {},
+      onOpenRecharge() {},
       onLogout() {},
       ...overrides,
     }),

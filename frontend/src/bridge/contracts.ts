@@ -164,6 +164,8 @@ export type AccountView = {
   canCancel: boolean;
   accountId: string;
   displayName: string;
+  emailHint: string;
+  concurrencyLimit: number | null;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;
   summary: {
