@@ -4427,19 +4427,17 @@ pub const Runtime = struct {
         );
     }
 
-    pub fn writeMcpSecretCapturePrompt(
+    pub fn validateMcpSecretCapture(
         self: *const Runtime,
         expected_generation: u64,
         server_id: []const u8,
         target: McpSecretCaptureTarget,
-        output: []u8,
-    ) ![]const u8 {
+    ) !void {
         const runtime = if (self.mcp) |*value| value else return error.McpManagementUnavailable;
-        return runtime.writeSecretCapturePrompt(
+        return runtime.validateSecretCapture(
             expected_generation,
             server_id,
             target,
-            output,
         );
     }
     /// Binds metadata-validated consent to the current approved server and
@@ -7430,7 +7428,7 @@ pub const Runtime = struct {
             .finish_authorization_fn = controlMcpFinishAuthorization,
             .write_approval_fn = controlMcpWriteApproval,
             .approve_connection_fn = controlMcpApproveConnection,
-            .write_secret_prompt_fn = controlMcpWriteSecretPrompt,
+            .validate_secret_capture_fn = controlMcpValidateSecretCapture,
             .capture_static_secret_fn = controlMcpCaptureStaticSecret,
             .capture_oauth_client_secret_fn = controlMcpCaptureOauthClientSecret,
             .begin_dynamic_registration_fn = controlMcpBeginDynamicRegistration,
@@ -7739,8 +7737,8 @@ fn controlMcpWriteApproval(context: *anyopaque, generation: u64, server_id: []co
 fn controlMcpApproveConnection(context: *anyopaque, generation: u64, input: mcp_configuration.ApproveConnectionInput) anyerror!mcp_configuration.ManagementOutcome {
     return controlOwner(context).approveMcpConnection(generation, input);
 }
-fn controlMcpWriteSecretPrompt(context: *anyopaque, generation: u64, server_id: []const u8, target: McpSecretCaptureTarget, output: []u8) anyerror![]const u8 {
-    return controlOwner(context).writeMcpSecretCapturePrompt(generation, server_id, target, output);
+fn controlMcpValidateSecretCapture(context: *anyopaque, generation: u64, server_id: []const u8, target: McpSecretCaptureTarget) anyerror!void {
+    return controlOwner(context).validateMcpSecretCapture(generation, server_id, target);
 }
 fn controlMcpCaptureStaticSecret(context: *anyopaque, generation: u64, input: mcp_configuration.CaptureStaticSecretInput) anyerror!mcp_configuration.ManagementOutcome {
     return controlOwner(context).captureMcpStaticSecret(generation, input);

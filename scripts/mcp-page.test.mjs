@@ -1054,7 +1054,7 @@ test("MCP OAuth add carries an explicit client auth method and no secret", async
   assert.equal(JSON.stringify(calls).includes("clientSecret"), false);
 });
 
-test("MCP gates OAuth client secret recovery and configuration on secure capture", async () => {
+test("MCP gates OAuth client secret recovery and configuration on credential submission", async () => {
   const oauthAwaitingSecret = {
     ...servers[0],
     connection: {
@@ -1094,7 +1094,7 @@ test("MCP gates OAuth client secret recovery and configuration on secure capture
   const detail = screen.getByRole("dialog", { name: "GitHub" });
   assert.ok(
     within(detail).getAllByText(
-      "Secure secret capture is unavailable on this device.",
+      "Credential submission is currently unavailable.",
     ).length >= 1,
   );
   assert.equal(
@@ -1633,7 +1633,30 @@ test("MCP HTTP and OAuth credentials use the same empty password form", async ()
     );
     assert.equal(input.type, "password");
     assert.equal(input.value, "");
-    fireEvent.change(input, { target: { value: "fixture-value" } });
+    for (const value of [
+      "x".repeat(2561),
+      "界".repeat(854),
+      "🔑".repeat(641),
+    ]) {
+      fireEvent.change(input, { target: { value } });
+      assert.equal(input.validity.customError, true);
+      assert.equal(
+        input.validationMessage,
+        "The credential exceeds 2,560 UTF-8 bytes. Shorten it and try again.",
+      );
+      fireEvent.submit(input.closest("form"));
+      assert.equal(calls.length, 0);
+      assert.equal(input.value, value);
+    }
+    fireEvent.click(
+      within(input.closest("form")).getByRole("button", { name: "Cancel" }),
+    );
+    assert.equal(input.value, "");
+    assert.equal(input.validity.customError, false);
+    // ASCII and supplementary Unicode must both accept exactly 2,560 bytes.
+    const secret = oauth ? "🔑".repeat(640) : "x".repeat(2560);
+    fireEvent.change(input, { target: { value: secret } });
+    assert.equal(input.checkValidity(), true);
     fireEvent.submit(input.closest("form"));
     await waitFor(() => assert.equal(calls.length, 1));
     assert.deepEqual(calls[0], [
@@ -1642,7 +1665,7 @@ test("MCP HTTP and OAuth credentials use the same empty password form", async ()
       oauth
         ? { kind: "oauth_client_secret" }
         : { kind: "http_header", name: "Authorization" },
-      "fixture-value",
+      secret,
     ]);
     assert.equal(input.value, "");
     cleanup();

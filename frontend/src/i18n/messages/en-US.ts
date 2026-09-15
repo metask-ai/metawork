@@ -340,7 +340,7 @@ export const enUS = {
   "mcp.confirm.allow_all.body":
     "All currently discovered tools will be allowed; tools discovered later stay excluded by default.",
   "mcp.confirm.allow_all.action": "Allow all",
-  "mcp.auth.static_locked": " (unavailable: secure input required)",
+  "mcp.auth.static_locked": " (credential submission unavailable)",
   "mcp.auth.oauth_secret_locked":
     "Secret-based methods require secure secret capture. An existing selection can be preserved.",
   "mcp.confirm.enable.title": "Enable this server?",
@@ -1380,7 +1380,7 @@ export const enUS = {
   "mcp.capability.approval_unavailable":
     "Connection review is unavailable on this device.",
   "mcp.capability.capture_unavailable":
-    "Secure secret capture is unavailable on this device.",
+    "Credential submission is currently unavailable.",
   "mcp.capability.oauth_unavailable": "OAuth is unavailable on this device.",
   "mcp.authorization_status.not_required": "No authorization required",
   "mcp.authorization_status.missing_static_secret":
@@ -1399,7 +1399,8 @@ export const enUS = {
   "mcp.secret.set": "Set",
   "mcp.secret.not_required": "Not required",
   "mcp.secret.client_secret": "OAuth client secret",
-  "mcp.secret.replace": "Replace",
+  "mcp.secret.too_long":
+    "The credential exceeds 2,560 UTF-8 bytes. Shorten it and try again.",
   "mcp.authorization_phase.discovering": "Discovering OAuth metadata…",
   "mcp.authorization_phase.awaiting_consent": "Waiting for confirmation…",
   "mcp.authorization_phase.registering": "Registering client…",

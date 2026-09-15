@@ -132,7 +132,7 @@ pub const McpManagementPort = struct {
     finish_authorization_fn: *const fn (*anyopaque, []const u8) bool,
     write_approval_fn: *const fn (*anyopaque, u64, []const u8, []u8) anyerror![]const u8,
     approve_connection_fn: *const fn (*anyopaque, u64, mcp_contract.ApproveConnectionInput) anyerror!mcp_contract.ManagementOutcome,
-    write_secret_prompt_fn: *const fn (*anyopaque, u64, []const u8, mcp.McpSecretCaptureTarget, []u8) anyerror![]const u8,
+    validate_secret_capture_fn: *const fn (*anyopaque, u64, []const u8, mcp.McpSecretCaptureTarget) anyerror!void,
     capture_static_secret_fn: *const fn (*anyopaque, u64, mcp_contract.CaptureStaticSecretInput) anyerror!mcp_contract.ManagementOutcome,
     capture_oauth_client_secret_fn: *const fn (*anyopaque, u64, mcp_contract.CaptureOauthClientSecretInput) anyerror!mcp_contract.ManagementOutcome,
     begin_dynamic_registration_fn: *const fn (*anyopaque, mcp_contract.OauthConsentInput) anyerror!mcp.McpOauthOperationBeginOutcome,
@@ -182,8 +182,8 @@ pub const McpManagementPort = struct {
     pub fn approveMcpConnection(self: McpManagementPort, generation: u64, input: mcp_contract.ApproveConnectionInput) anyerror!mcp_contract.ManagementOutcome {
         return self.approve_connection_fn(self.context, generation, input);
     }
-    pub fn writeMcpSecretCapturePrompt(self: McpManagementPort, generation: u64, server_id: []const u8, target: mcp.McpSecretCaptureTarget, output: []u8) anyerror![]const u8 {
-        return self.write_secret_prompt_fn(self.context, generation, server_id, target, output);
+    pub fn validateMcpSecretCapture(self: McpManagementPort, generation: u64, server_id: []const u8, target: mcp.McpSecretCaptureTarget) anyerror!void {
+        return self.validate_secret_capture_fn(self.context, generation, server_id, target);
     }
     pub fn captureMcpStaticSecret(self: McpManagementPort, generation: u64, input: mcp_contract.CaptureStaticSecretInput) anyerror!mcp_contract.ManagementOutcome {
         return self.capture_static_secret_fn(self.context, generation, input);

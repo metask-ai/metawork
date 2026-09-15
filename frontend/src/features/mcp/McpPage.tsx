@@ -512,10 +512,15 @@ function McpSecretInput({
         event.preventDefault();
         if (disabled) return;
         const form = event.currentTarget;
+        if (!form.reportValidity()) return;
         const secret = new FormData(form).get("secret");
         if (typeof secret !== "string" || secret.length === 0) return;
         form.reset();
         void onSave(secret);
+      }}
+      onReset={(event) => {
+        const input = event.currentTarget.elements.namedItem("secret");
+        if (input instanceof HTMLInputElement) input.setCustomValidity("");
       }}
     >
       <label>
@@ -529,6 +534,15 @@ function McpSecretInput({
           defaultValue=""
           disabled={disabled}
           required
+          onChange={(event) => {
+            const input = event.currentTarget;
+            // Match Native SDK credential storage's UTF-8 byte limit.
+            input.setCustomValidity(
+              new TextEncoder().encode(input.value).length > 2560
+                ? t("mcp.secret.too_long")
+                : "",
+            );
+          }}
         />
       </label>
       <footer>

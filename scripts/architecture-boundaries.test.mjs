@@ -2079,7 +2079,7 @@ test("Product MCP kernels have one physical home and isolate refresh workers", (
     "authorityStable",
     "recoveryGeneration",
     "writeConnectionApprovalDetails",
-    "writeSecretCapturePrompt",
+    "validateSecretCapture",
     "capabilities",
   ]) {
     assert.match(runtime, new RegExp(`pub fn ${name}\\b`));
