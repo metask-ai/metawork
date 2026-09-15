@@ -453,7 +453,7 @@ test("Account settings render the whole-account balance and exact usage ledger",
         },
         history: {
           availability: "ready",
-          startDate: "2025-09-16",
+          startDate: "2025-09-15",
           endDate: "2026-09-15",
           days: [
             {
@@ -492,8 +492,8 @@ test("Account settings render the whole-account balance and exact usage ledger",
   assert.match(markup, /Input 344,800 · Output 496,100/);
   assert.match(markup, /Token usage history/);
   assert.match(markup, /Daily Token usage calendar/);
-  assert.equal(markup.match(/settings-account-calendar-day/g)?.length, 365);
-  assert.match(markup, /September 15, 2,330,900 Token/);
+  assert.equal(markup.match(/settings-account-calendar-day/g)?.length, 366);
+  assert.match(markup, /September 15, 2026, 2,330,900 Token/);
   assert.doesNotMatch(markup, />Today</);
   assert.match(markup, />Refresh account usage</);
   assert.doesNotMatch(markup, /RPM|TPM|response time|API keys|standard cost/i);
@@ -556,7 +556,7 @@ test("Account summary failure stays local, stale values remain, and simple mode 
   };
   stale.summary.history = {
     availability: "stale",
-    startDate: "2025-09-16",
+    startDate: "2025-09-15",
     endDate: "2026-09-15",
     days: [
       {
@@ -586,10 +586,10 @@ test("Account summary failure stays local, stale values remain, and simple mode 
   );
 });
 
-test("Account history calendar fills sparse days and limits the compact view to 91 days", () => {
+test("Account history calendar fills sparse days and keeps complete week columns", () => {
   const history = {
     availability: "ready",
-    startDate: "2025-09-16",
+    startDate: "2025-09-15",
     endDate: "2026-09-15",
     days: [
       {
@@ -606,15 +606,15 @@ test("Account history calendar fills sparse days and limits the compact view to 
     errorCode: "none",
     safeDiagnostic: "",
   };
-  const desktop = buildUsageCalendar(history, 365);
-  assert.equal(desktop.length, 365);
-  assert.equal(desktop[0].date, "2025-09-16");
+  const desktop = buildUsageCalendar(history, 53);
+  assert.equal(desktop.length, 366);
+  assert.equal(desktop[0].date, "2025-09-15");
   assert.equal(desktop[0].totalTokens, "0");
   assert.equal(desktop.at(-1).totalTokens, "10");
 
-  const compact = buildUsageCalendar(history, 91);
-  assert.equal(compact.length, 91);
-  assert.equal(compact[0].date, "2026-06-17");
+  const compact = buildUsageCalendar(history, 13);
+  assert.equal(compact.length, 86);
+  assert.equal(compact[0].date, "2026-06-22");
   assert.equal(compact.at(-1).date, "2026-09-15");
 });
 

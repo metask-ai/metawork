@@ -80,12 +80,15 @@ function intensityLevels(days: HistoryDay[]) {
   });
 }
 
-export function buildUsageCalendar(history: History, visibleDays: number) {
+export function buildUsageCalendar(history: History, visibleWeeks: number) {
   if (history.startDate === null || history.endDate === null) return [];
   const byDate = new Map(history.days.map((day) => [day.date, day]));
   const rangeStart = dayNumber(history.startDate);
   const rangeEnd = dayNumber(history.endDate);
-  const visibleStart = Math.max(rangeStart, rangeEnd - visibleDays + 1);
+  const visibleStart = Math.max(
+    rangeStart,
+    rangeEnd - mondayRow(history.endDate) - (visibleWeeks - 1) * 7,
+  );
   const days: HistoryDay[] = [];
   for (let day = visibleStart; day <= rangeEnd; day += 1) {
     const date = calendarDate(day);
@@ -107,6 +110,7 @@ function displayLocale(locale: Locale) {
 
 function formatDate(date: string, locale: Locale) {
   return new Intl.DateTimeFormat(displayLocale(locale), {
+    year: "numeric",
     month: "long",
     day: "numeric",
     weekday: "short",
@@ -142,10 +146,10 @@ export function AccountUsageHeatmap({ history }: { history: History }) {
     isNarrowSnapshot,
     serverNarrowSnapshot,
   );
-  const visibleDays = narrow ? 91 : 365;
+  const visibleWeeks = narrow ? 13 : 53;
   const days = useMemo(
-    () => buildUsageCalendar(history, visibleDays),
-    [history, visibleDays],
+    () => buildUsageCalendar(history, visibleWeeks),
+    [history, visibleWeeks],
   );
   const defaultDate = days.at(-1)?.date ?? null;
   const [selectedDate, setSelectedDate] = useState<string | null>(defaultDate);
@@ -226,11 +230,7 @@ export function AccountUsageHeatmap({ history }: { history: History }) {
           <h4 id="account-history-title">
             {t("settings.account_history_title")}
           </h4>
-          <p>
-            {narrow
-              ? t("settings.account_history_range_compact")
-              : t("settings.account_history_range_year")}
-          </p>
+          <p>{t("settings.account_history_range", { weeks: visibleWeeks })}</p>
         </div>
         {history.availability === "stale" ? (
           <span className="settings-account-usage-stale" role="status">

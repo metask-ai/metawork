@@ -65,7 +65,7 @@ test.after(async () => {
 
 const history = {
   availability: "ready",
-  startDate: "2025-09-16",
+  startDate: "2025-09-15",
   endDate: "2026-09-15",
   days: [
     {
@@ -102,28 +102,28 @@ function renderHeatmap() {
 test("Account history heatmap selects today and uses one roving tab stop with arrow-key navigation", () => {
   renderHeatmap();
   const cells = screen.getAllByRole("gridcell");
-  assert.equal(cells.length, 365);
+  assert.equal(cells.length, 366);
   assert.equal(cells.filter((cell) => cell.tabIndex === 0).length, 1);
 
   const latest = screen.getByRole("gridcell", {
-    name: /September 15, 0 Token/,
+    name: /September 15, 2026, 0 Token/,
   });
   latest.focus();
   fireEvent.keyDown(latest, { key: "ArrowLeft" });
 
   assert.match(
     document.activeElement?.getAttribute("aria-label") ?? "",
-    /September 14, 10 Token/,
+    /September 14, 2026, 10 Token/,
   );
   assert.match(
-    screen.getByText(/September 14, 10 Token/).textContent ?? "",
-    /September 14/,
+    screen.getByText(/September 14, 2026, 10 Token/).textContent ?? "",
+    /September 14, 2026/,
   );
 });
 
-test("Account history heatmap renders only the latest 91 days on narrow screens", () => {
+test("Account history heatmap renders the latest 13 week columns on narrow screens", () => {
   narrow = true;
   renderHeatmap();
-  assert.equal(screen.getAllByRole("gridcell").length, 91);
+  assert.equal(screen.getAllByRole("gridcell").length, 86);
   assert.ok(screen.getByText("Past 13 weeks · Daily"));
 });
