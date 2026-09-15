@@ -477,13 +477,16 @@ test("Assistant reply is primary and completed does not add a redundant outcome"
   const markup = renderCompletedSurface();
   assert.match(markup, /class="ai-conversation"/);
   assert.match(markup, /class="ai-message" data-role="user"/);
-  assert.match(markup, /class="ai-message" data-role="assistant"/);
+  assert.match(
+    markup,
+    /class="ai-message run-assistant-output" data-role="assistant"/,
+  );
   assert.match(markup, /Release is ready/);
   assert.doesNotMatch(markup, /Read|Work completed/);
   assert.match(renderCompletedSurface(""), /Work completed/);
 });
 
-test("pending UI follows the live status before response without technical history", () => {
+test("pending UI follows the unified Assistant output without technical history", () => {
   const markup = renderCompletedSurface(
     "Review this before continuing",
     undefined,
@@ -518,7 +521,7 @@ test("pending UI follows the live status before response without technical histo
   );
   const assistant = markup.indexOf("Review this before continuing");
   const pending = markup.indexOf("Pending decision");
-  assert.ok(pending < assistant);
+  assert.ok(assistant < pending);
   assert.match(markup, />Needs attention</);
   assert.doesNotMatch(markup, />Read</);
   assert.doesNotMatch(markup, /fixture\.txt|>ready<|Resolved decision/);

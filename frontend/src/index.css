@@ -2552,10 +2552,6 @@ summary::-webkit-details-marker {
   margin-top: 38px;
 }
 
-.agent-response-surface {
-  position: relative;
-}
-
 .response-copy-actions {
   display: flex;
   align-items: center;
@@ -2678,27 +2674,16 @@ summary::-webkit-details-marker {
   margin-top: 20px;
 }
 
-.run-narrative {
+.run-assistant-output {
   color: var(--ui-content-primary);
 }
 
-.run-commentary-item {
+.assistant-output-part {
   line-height: 1.72;
 }
 
-.run-commentary-item + .run-commentary-item {
+.assistant-output-part + .assistant-output-part {
   margin-top: 14px;
-}
-
-.run-provisional {
-  margin: 12px 0 0;
-  color: color-mix(
-    in srgb,
-    var(--ui-content-primary) 84%,
-    var(--ui-content-muted)
-  );
-  line-height: 1.72;
-  white-space: pre-wrap;
 }
 
 .run-process {
@@ -2896,18 +2881,6 @@ button.run-process-tool:hover {
 
 .run-process-tool[aria-expanded="true"] .run-process-tool-chevron svg {
   transform: rotate(180deg);
-}
-
-.ai-message[data-role="assistant"][data-streaming="true"]::after {
-  display: inline-block;
-  width: 5px;
-  height: 14px;
-  margin-left: 4px;
-  border-radius: 999px;
-  background: var(--ui-action-primary);
-  vertical-align: -2px;
-  animation: ai-response-caret 900ms steps(1, end) infinite;
-  content: "";
 }
 
 .ai-activity,
@@ -7462,18 +7435,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-weight: 650;
 }
 
-@keyframes ai-response-caret {
-  0%,
-  49% {
-    opacity: 1;
-  }
-
-  50%,
-  100% {
-    opacity: 0;
-  }
-}
-
 @keyframes ai-activity-pulse {
   0%,
   100% {
@@ -7486,7 +7447,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ai-message[data-role="assistant"][data-streaming="true"]::after,
   .ai-activity-mark,
   .run-process-mark {
     animation: none;
