@@ -687,6 +687,16 @@ try {
     throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.terminal?.outcome !== "completed")
     throw new Error(`run did not complete truthfully: ${JSON.stringify(run)}`);
+  const finishedAtUnixMs = Number(run.finishedAtUnixMs);
+  if (
+    typeof run.finishedAtUnixMs !== "string" ||
+    !Number.isSafeInteger(finishedAtUnixMs) ||
+    finishedAtUnixMs <= 0 ||
+    Math.abs(Date.now() - finishedAtUnixMs) > 60_000
+  )
+    throw new Error(
+      `run did not publish a credible terminal time: ${JSON.stringify(run.finishedAtUnixMs)}`,
+    );
   assertFileChanges(run.fileChanges, process.platform === "win32");
   const fileChangeDiff = await invokeBridge("metawork.files.diff", {
     taskId,

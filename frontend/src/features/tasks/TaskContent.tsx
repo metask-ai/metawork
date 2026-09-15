@@ -1,6 +1,12 @@
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import type {
   FileReferenceView,
@@ -20,11 +26,13 @@ import {
 } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { CopyButton } from "../../components/ui/CopyButton.tsx";
+import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
 import {
   deriveRunPresentation,
+  formatRunFinishedTime,
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
   type RunProcessDisclosure,
@@ -213,19 +221,29 @@ export function TaskContent({
     respond: (payload: UiResponsePayload) => void;
   }) => ReactNode;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const viewport = useRef<HTMLDivElement>(null);
   const reading = useRef(new Map<string, ReadingState>());
   const processDisclosure = useRef(new Map<string, RunProcessDisclosure>());
   const [, setDisclosureRevision] = useState(0);
   const previousTaskId = useRef<string | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
+  const [nowUnixMs, setNowUnixMs] = useState(() => Date.now());
+  const hasFinishedTimes =
+    task?.runs.some((run) => run.finishedAtUnixMs !== null) ?? false;
   const currentRun = task
     ? (task.runs.find((run) => run.id === task.currentRunId) ??
       task.runs.at(-1) ??
       null)
     : null;
   const latestCopyableId = latestCopyableResponseId(task?.runs ?? []);
+
+  useEffect(() => {
+    if (!hasFinishedTimes) return;
+    setNowUnixMs(Date.now());
+    const interval = window.setInterval(() => setNowUnixMs(Date.now()), 60_000);
+    return () => window.clearInterval(interval);
+  }, [hasFinishedTimes, task?.id]);
 
   useLayoutEffect(() => {
     const node = viewport.current;
@@ -294,6 +312,11 @@ export function TaskContent({
         const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
         const responseCopyable = responseCopyEligible(run);
+        const finishedTime = formatRunFinishedTime(
+          locale,
+          run.finishedAtUnixMs,
+          nowUnixMs,
+        );
         const references = new Map(
           [...runFileReferenceLinks(run)].map(([text, reference]) => [
             text,
@@ -503,6 +526,27 @@ export function TaskContent({
                   failedLabel={t("copy.failed")}
                   onCopy={() => copyResponseMarkdown(run.output.response)}
                 />
+                {finishedTime && (
+                  <Tooltip.Root>
+                    <Tooltip.Trigger
+                      render={
+                        <time
+                          className="response-finished-time"
+                          dateTime={finishedTime.dateTime}
+                          aria-label={finishedTime.absolute}
+                          tabIndex={0}
+                        />
+                      }
+                    >
+                      {finishedTime.relative}
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Positioner side="top">
+                        <Tooltip.Popup>{finishedTime.absolute}</Tooltip.Popup>
+                      </Tooltip.Positioner>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                )}
               </div>
             )}
           </section>

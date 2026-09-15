@@ -2208,8 +2208,19 @@ summary::-webkit-details-marker {
 
 .response-copy-actions {
   display: flex;
+  align-items: center;
+  gap: 6px;
   min-height: 32px;
   margin-top: 8px;
+}
+
+.response-finished-time {
+  color: var(--ui-content-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  opacity: 0.72;
+  white-space: nowrap;
 }
 
 .response-copy-action {

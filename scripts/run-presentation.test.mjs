@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deriveRunPresentation,
+  formatRunFinishedTime,
   runElapsedSeconds,
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
@@ -21,6 +22,20 @@ test("elapsed time uses the snapshot receipt rather than component mount or even
     runElapsedSeconds("18446744073709551615", 0, 1000),
     18446744073709552n,
   );
+});
+
+test("finished time uses a locale-aware relative label with an absolute value", () => {
+  const finishedAt = new Date(2026, 8, 11, 10, 25).getTime();
+  const now = finishedAt + 4 * 24 * 60 * 60 * 1000;
+  const english = formatRunFinishedTime("en-US", String(finishedAt), now);
+  assert.equal(english.relative, "4 days ago");
+  assert.equal(english.dateTime, new Date(finishedAt).toISOString());
+  assert.ok(english.absolute.includes("2026"));
+  assert.equal(
+    formatRunFinishedTime("zh-CN", String(finishedAt), now).relative,
+    "4天前",
+  );
+  assert.equal(formatRunFinishedTime("en-US", null, now), null);
 });
 
 function run(overrides = {}) {
@@ -44,6 +59,7 @@ function run(overrides = {}) {
       provisionalRedacted: false,
     },
     activity: { kind: "waiting_model" },
+    finishedAtUnixMs: null,
     terminal: null,
     usage: { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" },
     tools: [],

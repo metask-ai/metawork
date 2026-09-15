@@ -112,30 +112,30 @@ Workspace
 
 `en-US` 文案定义产品语义，`zh-CN` 是首个完整本地化版本。
 
-| English source       | 简体中文     | 使用说明                              |
-| -------------------- | ------------ | ------------------------------------- |
-| Workspace            | 工作区       | 本地目录和任务归属范围                |
-| Task                 | 任务         | 用户可持续补充的工作上下文            |
-| New task             | 新建任务     | 不使用 New session                    |
-| Skills               | 技能         | MetaWork 用户 Skill 目录与健康        |
-| MCP                  | MCP          | 可信服务、连接状态与已发现工具目录    |
-| Account              | 账号         | Metask 登录、身份、授权与退出         |
-| Providers            | Provider     | 用户管理的模型服务、协议、地址与凭据  |
-| Models               | 模型         | 所有 Provider 的模型与全局默认模型    |
+| English source       | 简体中文        | 使用说明                              |
+| -------------------- | --------------- | ------------------------------------- |
+| Workspace            | 工作区          | 本地目录和任务归属范围                |
+| Task                 | 任务            | 用户可持续补充的工作上下文            |
+| New task             | 新建任务        | 不使用 New session                    |
+| Skills               | 技能            | MetaWork 用户 Skill 目录与健康        |
+| MCP                  | MCP             | 可信服务、连接状态与已发现工具目录    |
+| Account              | 账号            | Metask 登录、身份、授权与退出         |
+| Providers            | Provider        | 用户管理的模型服务、协议、地址与凭据  |
+| Models               | 模型            | 所有 Provider 的模型与全局默认模型    |
 | Custom Provider      | 自定义 Provider | 用户创建并由 Models 持久化的 Provider |
-| Model                | 模型         | 新 Task 的执行模型，不称模式          |
-| Task Panel           | 任务面板     | 当前 Task 的统一右侧详情容器          |
-| Task information     | 任务信息     | 创建时 authority 的只读说明           |
-| Current activity     | 当前活动     | Agent 此刻正在进行的可观察动作        |
-| Plan                 | 计划         | 只在有真实结构化计划时显示            |
-| Outputs              | 结果文件     | 用户关心的最终交付，不称 Artifacts    |
-| Files changed        | 文件变更     | Agent 实际修改过的文件集合            |
-| Needs your attention | 需要你处理   | 权限审批或计划确认                    |
-| Allow once           | 允许一次     | 仅批准当前请求                        |
-| Stop task            | 停止任务     | 停止当前执行，不删除任务              |
-| Stopping             | 正在停止     | 等待真实停止结果                      |
-| Interrupted          | 意外中断     | 与明确失败区分                        |
-| Show in Finder       | 在访达中显示 | Windows 为 Show in Explorer           |
+| Model                | 模型            | 新 Task 的执行模型，不称模式          |
+| Task Panel           | 任务面板        | 当前 Task 的统一右侧详情容器          |
+| Task information     | 任务信息        | 创建时 authority 的只读说明           |
+| Current activity     | 当前活动        | Agent 此刻正在进行的可观察动作        |
+| Plan                 | 计划            | 只在有真实结构化计划时显示            |
+| Outputs              | 结果文件        | 用户关心的最终交付，不称 Artifacts    |
+| Files changed        | 文件变更        | Agent 实际修改过的文件集合            |
+| Needs your attention | 需要你处理      | 权限审批或计划确认                    |
+| Allow once           | 允许一次        | 仅批准当前请求                        |
+| Stop task            | 停止任务        | 停止当前执行，不删除任务              |
+| Stopping             | 正在停止        | 等待真实停止结果                      |
+| Interrupted          | 意外中断        | 与明确失败区分                        |
+| Show in Finder       | 在访达中显示    | Windows 为 Show in Explorer           |
 
 ## 4. 主窗口信息架构
 
@@ -554,7 +554,7 @@ AgentCore typed CoreEvent
   → Renderer Bridge revision 1：完整 Run snapshot
   → deriveRunPresentation(run)：纯 presentation derivation
   → TaskContent：稳定 Run exchange 槽位
-  → RunProcess：active status 或 terminal technical evidence
+  → RunProcess：仅 active status 与可展开 technical evidence
 ```
 
 各层职责不可互换：
@@ -567,17 +567,17 @@ AgentCore typed CoreEvent
 
 每个 Run exchange 使用以下条件槽位，而不是为每类事件创建节点：
 
-| 槽位                     | 出现条件                                                   | 更新方式                                                             |
-| ------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------- |
-| User instruction         | Run 存在                                                   | 历史稳定，不随 activity 更新                                         |
-| Process narrative        | 至少一个非空 commentary、provisional 或必要 redaction note | closed commentary 只追加稳定 block；provisional 原位增长、迁移或回滚 |
-| Active process surface   | Run 为 queued/running/waiting UI/stopping                  | 唯一 live status 原位替换；存在 Tool 时同一 surface 才可展开技术行   |
-| Intervention             | 当前 Run 存在 pending UI                                   | 只显示唯一可操作控件，不伪装成 Assistant 文本                        |
-| Response                 | Host 已发布非空 final/partial response                     | 安全 Markdown；出现不等于正式 Product terminal 已发布                |
-| Terminal process surface | Run 已 terminal 且存在 Tool record                         | 位于 response 之后，弱化为默认折叠的“工作过程 · N 项操作”  |
-| Terminal notice          | partial、非 completed outcome 或完成但无 response          | 与 partial 合并为唯一准确提示，不重复成功结果                        |
+| 槽位                   | 出现条件                                                   | 更新方式                                                             |
+| ---------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------- |
+| User instruction       | Run 存在                                                   | 历史稳定，不随 activity 更新                                         |
+| Process narrative      | 至少一个非空 commentary、provisional 或必要 redaction note | closed commentary 只追加稳定 block；provisional 原位增长、迁移或回滚 |
+| Active process surface | Run 为 queued/running/waiting UI/stopping                  | 唯一 live status 原位替换；存在 Tool 时同一 surface 才可展开技术行   |
+| Intervention           | 当前 Run 存在 pending UI                                   | 只显示唯一可操作控件，不伪装成 Assistant 文本                        |
+| Response               | Host 已发布非空 final/partial response                     | 安全 Markdown；出现不等于正式 Product terminal 已发布                |
+| Terminal notice        | partial、非 completed outcome 或完成但无 response          | 与 partial 合并为唯一准确提示，不重复成功结果                        |
+| Response metadata      | Run 已 terminal 且存在非空 final/partial response          | 整个 Run 的最后一行；纯图标复制入口 + 可用时的弱化完成时间           |
 
-`RunProcess` 是 active 与 terminal 共用的同一 presentation surface，但生命周期位置和职责不同：
+`RunProcess` 只属于 active Run：
 
 ```text
 active Run:
@@ -589,11 +589,12 @@ active Run:
 terminal Run:
   narrative
   response
-  RunProcess = weak technical summary + optional collapsed Tool body
+  optional File Changes
   terminal notice
+  response copy action + optional finished time
 ```
 
-active→terminal 时，live activity 必须消失，technical evidence 移到正式回复之后；Task+Run disclosure choice 保持不变，不因 revision、Tool completion 或 terminal 自动展开/折叠。没有 Tool 的 terminal Run 不保留空 process surface。
+active→terminal 时，live activity 与 technical process surface 必须一起消失；Tool 与 disclosure 状态不能在最终结果下保留摘要、空壳或操作入口。Tool/Run 产品历史不因此删除。存在非空 final/partial response 时，末行位于文件更改和必要 terminal notice 之后：复制图标在左，Product 提供完成时间时在其右侧显示弱化的本地相对时间；两者共同成为该 Run 的最后一行。
 
 #### Output projection 与可见迁移
 
@@ -615,7 +616,7 @@ Renderer 每次只读取当前完整 `RunOutput`，不在本地累积 text chunk
 
 非 terminal Run 必须有唯一 canonical activity；terminal Run 必须没有 activity。Renderer 不复制 activity 状态机，只把 Host activity 本地化并做两项有界派生：phase 缺失时只能使用同 phase 的防御性通用标签，`executing_tools` 且恰有一个真实 running Tool 时可以把固定 Tool identifier 映射为“检查工作区”“更新内容”或“运行操作”。多个、零个或未知 Tool 时回退到 canonical activity，不读取参数、结果或历史 Tool 推断 Agent 当前意图。
 
-Tool start/progress/result 只更新同一 Tool record 和 process surface，不在主阅读流追加行。active Run 中展开技术过程只用于检查当前证据；terminal 后相同 Tool records 转为弱化历史摘要。展开后的 Tool 行显示名称、状态、Host elapsed，并可附 Host 安全 description、有限 progress 摘录和已有 fileRefs；完整输入和结果在用户点击对应 Tool 后于 Task Panel 挂载，同刻至多一个对象详情。
+Tool start/progress/result 只更新同一 Tool record 和 process surface，不在主阅读流追加行。active Run 中展开技术过程只用于检查当前证据；terminal 后相同 Tool records 仍保留在产品历史，但不再生成过程摘要或入口。展开后的 Tool 行显示名称、状态、Host elapsed，并可附 Host 安全 description、有限 progress 摘录和已有 fileRefs；完整输入和结果在用户点击对应 Tool 后于 Task Panel 挂载，同刻至多一个对象详情。
 
 #### Snapshot revision、阅读位置与稀疏输出
 
@@ -641,7 +642,8 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 - 支持 Markdown、表格、代码、引用和链接；
 - commentary 作为 Assistant 过程叙事按 Host 提供的有序 group array 渲染为同一 Assistant message 内的独立 Markdown block；Renderer 不自行按换行切组，也不按 chunk 或 Tool 穿插伪造顺序。Host 发布新的 closed commentary group 后，主阅读流随 Snapshot revision 追加一个稳定 block；
 - `final | partial` response 使用安全 Markdown；尚未收到 output-segment 定性的 provisional 紧随 commentary 以中性纯文本呈现，不称为草稿、不解释 Markdown，discard 后随下一 Snapshot 消失；流式生成只显示克制的单一活动指示；
-- 已 terminal 且非空的 `final | partial` response 在正文下方提供“复制回复”：最新一条始终可见，历史条目在 response hover 或 focus-within 时显示，coarse pointer 设备始终显示；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML，成功切换为勾选和“已复制”约 1.2 秒，失败显示 warning 和“复制失败”约 1.5 秒，重复操作重置反馈周期，真实写入完成前不得显示成功。代码块右上角提供独立“复制代码”，只复制当前显示的代码正文；按钮具备可见键盘焦点、明确 accessible name 和至少 32px 点击高度，不把语言名、围栏、行号或 UI 文案带入剪贴板；
+- 已 terminal 且非空的 `final | partial` response 在整个 Run 的最后一行提供纯图标“复制回复”：最新一条始终可见，历史条目在所属 Run hover 或 focus-within 时显示，coarse pointer 设备始终显示；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML；真实写入完成前不得显示成功，成功约 1.2 秒切换为勾选，失败约 1.5 秒切换为 warning，重复操作重置反馈周期，动态 accessible name、tooltip 和读屏状态分别使用“复制回复 / 已复制 / 复制失败”。代码块右上角提供独立的纯图标“复制代码”，只复制当前显示的代码正文；两类按钮都具备可见键盘焦点、明确 accessible name、tooltip 和至少 32px 点击区，不把语言名、围栏、行号或 UI 文案带入剪贴板；
+- 回复末行在复制图标右侧显示 Product 提供的 Run 完成时间，使用 12px muted 文本和本地化相对表达，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name，不使用浏览器原生 `title` 提示；时间始终可见而复制图标仍遵守最新/历史显隐规则。Renderer 每分钟低频更新相对文案，不发布 Snapshot、不自动滚动、不改变历史；时间缺失或超出可信范围时整项隐藏，禁止使用 `Date.now()`、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造；
 - 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
 - output 只表示 Agent 可见输出，不标记为 Delivery、Output artifact 或最终成果；
 - 不从回复文本解析活动、计划、文件变化或完成状态；不得为每条内容重复“Agent”标签或品牌头像。
@@ -649,11 +651,11 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 ### 7.5 当前状态、请求与结果
 
 - active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。`executing_tools` 且恰有一个 typed running Tool 时，Renderer 可以依据固定 Tool identifier 映射为“检查工作区”“更新内容”“运行操作”等宽泛但真实的用户文案；不满足条件时回退到 canonical activity，不在主状态中暴露原始 Tool 名称、参数或命令；
-- Tool 摘要属于次要 technical work evidence，active 与 terminal Run 都默认折叠；展开内容遵守本节 Tool 证据规则，不带入完整 input/result、usage 或 Run ID。terminal 摘要弱化为“工作过程 · N 项操作”，不单独强调已被整个 Run 恢复的 Tool failure；失败事实仍在展开详情中保留。disclosure choice 按 Task+Run 仅存于当前 Renderer 会话，不写入 Bridge 或持久化，也不随 revision 或终态自动翻转；late terminal observation 不得重新打开 live 状态；
+- Tool 摘要属于运行中的次要 technical work evidence，只在 active Run 内默认折叠；展开内容遵守本节 Tool 证据规则，不带入完整 input/result、usage 或 Run ID。Run terminal 后整个工作过程 surface 隐藏，不保留操作数量摘要；底层 Tool/Run 历史仍由产品保留。disclosure choice 按 Task+Run 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态或恢复过程入口；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - terminal cause 使用最具体的稳定本地化文案：`provider_failure` 显示“模型服务请求失败”，并在同一 notice 中说明本次 Run 未生成可用回复或只生成了可能不完整的部分回复；`tool_failure` 说明工具失败且 Agent 未能恢复，`image_input_unsupported` 明确要求更换支持图片的模型并重新选择图片；不得把三者统一写成“检查模型或网络”，也不得直接展示 provider raw body；
-- `provider_failure` 的主区 notice 只表达失败原因、回复影响和匹配的恢复动作，不重复技术诊断边界；若该 Run 已有 Tool 记录，重试前提醒用户先检查工作过程，避免重复外部 effect；
+- `provider_failure` 的主区 notice 只表达失败原因、回复影响和匹配的恢复动作，不重复技术诊断边界；若该 Run 已有 Tool 记录，提醒用户失败前已有部分操作完成，应在重试前检查其影响，不能引导用户打开已从终态隐藏的工作过程；
 - 失败 Run 的主区“查看运行详情”是该 notice 下的默认折叠 disclosure，仅展开时挂载诊断边界与精确 provenance：`absent` 表示 MetaWork 未收到该 Run 的附加诊断，`withheld` 表示当前安全边界不允许显示已收到的附加技术诊断；均不得猜测 401、API Key、限流、网络或设置问题。字段仅为稳定错误标识、精确 Run ID、该 Run 的 model 和 protocol，不使用当前 Task binding 或 Models 默认值，不默认展示 execution generation；折叠卸载诊断正文。只有当前 Task 真实可重试且输入区无待保留草稿时才沿用既有“准备重试”流程，动作文字必须明确只把指令重新填入 Composer；详情入口本身不触发重试、设置跳转、模型测试或任何外部操作；
 - Renderer reload、成功同步、Tool completion 与 Compact history 不生成主区记录；只有同步失败、当前 maintenance 或内容可能不完整时显示相应状态。同步失败或 Bridge 不可用时，保留已有内容，但 active Run 的唯一状态改为“状态尚未同步”、停止活动动效并暂停耗时外推；恢复后以新 Host Snapshot 为准，不因静默时长推断 Agent 卡死，也不自动终止或重跑。停止命令尚未应答时显示“正在请求停止”；应答不等于终态，正式 stopping/terminal 仍由 Host 确认，失败沿用当前 Task 的操作反馈。
 
@@ -849,7 +851,7 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的两�
 - Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后只读展示固定 permission profile（受 capability gate 控制）与创建时 MCP 三态，不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
 - pendingUi 派生“需要处理”定位入口，不存已读或自动展开记忆；只有原始主区审批提供操作按钮。用户点击定位时，overlay 先关闭再滚动/聚焦原请求；停靠面板保持。新请求自身不触发滚动、焦点移动或面板开合，全宽覆盖时定位入口仍可达。
 
-右栏显隐不属于内容目标。内容可以为空、当前文件预览、指定 Tool 详情或同 Run 修改审查，各内容互斥挂载；未选择有效对象时呈现通用空态。文件预览以对话内联引用为主要入口并保留工作过程的辅助入口，Tool 详情保留对应操作入口，记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。目标只保存身份，不复制 Tool 或 Snapshot 正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；不建立记录列表、单条详情页、返回层级、并行标签或旧概览兼容开关。
+右栏显隐不属于内容目标。内容可以为空、当前文件预览、指定 Tool 详情或同 Run 修改审查，各内容互斥挂载；未选择有效对象时呈现通用空态。文件预览以对话内联引用为主要入口，并在 Run active 时保留工作过程的辅助入口；Tool 详情只保留运行中对应操作入口，记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。目标只保存身份，不复制 Tool 或 Snapshot 正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；不建立记录列表、单条详情页、返回层级、并行标签或旧概览兼容开关。
 
 打开任何对象替换当前模式。关闭右栏清空目标和正文；再次打开保持空态，只有显式选择具体对象才展示详情，不恢复旧正文。切换 Task 清空旧目标，右栏保持用户已选择的显隐；无 Task 或离开任务页面时呈现空态。普通 Run 开始、终态和 Snapshot revision 不关闭仍有效的详情。Review 中单条记录失效只移除该记录及正文；所属 Run、全部记录或其他目标失效才清空目标；目标有效性不控制右栏显隐。
 
@@ -867,7 +869,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
 - 主要入口位于所属 Run 的已闭合过程说明与 final/partial 回复中：普通文字中的完整文件名、行内代码和显式 Markdown 文件链接，只有能匹配本 Run 结构化引用时才呈现为可点击内联入口。保持原文字与正文行高，使用链接色、下划线、完整 accessible name 和可见键盘焦点；点击直接在右栏预览，不要求展开工作过程。provisional 仍为纯文本；代码块、图片说明和外部链接不做文件识别，也不把未知文件文本伪装成可打开入口；
 - 匹配只使用 Host `displayPath`、其显式相对写法及无歧义文件名，区分大小写，不查询文件系统、不从 Tool 参数拼装 authority。同一路径的重复引用为正文入口选择最后一条有序引用以读取当前内容，不宣称它是该句的历史版本或新文件身份；不同目录的同名文件不得仅按文件名选中，未匹配的本地 Markdown 路径不作为网页导航。引用晚到或失效随 Snapshot 更新可点击状态，不触发自动读取；
-- 展开的工作过程仍按各 Tool 的 `fileRefs` 顺序提供辅助入口，保留原始来源，与 Tool 详情按钮独立，不嵌套交互控件。这里的文件按钮显示 `displayPath`，具备至少 44px 点击高度，长路径在窄窗内可换行。没有结构化引用时不占位，不把全部引用聚合到回复 footer 或右栏列表；
+- Run active 时，展开的工作过程仍按各 Tool 的 `fileRefs` 顺序提供辅助入口，保留原始来源，与 Tool 详情按钮独立，不嵌套交互控件。这里的文件按钮显示 `displayPath`，具备至少 44px 点击高度，长路径在窄窗内可换行。没有结构化引用时不占位，不把全部引用聚合到回复 footer 或右栏列表；
 - 任一入口都按精确引用身份在 Task Panel 打开独占预览；只显示所选文件，不提供全部引用选择器。切换文件从对话内联入口或对应工具操作发起，不需要先打开 Tool 详情；
 - 文件预览复用 Task Panel 的唯一头部：标题直接显示当前路径，右侧只提供刷新和关闭图标动作，正文不追加资源副标题、状态标签、常驻说明或信息入口。`.md`、`.markdown`（后缀不区分大小写）默认安全渲染文档，支持标题、列表、表格、引用与代码块，并在正文上方提供“预览 / 源码”切换；切换只使用已读取正文、不重新请求文件。刷新保持当前模式，切换精确文件目标或关闭后重开恢复默认模式，非活动视图不保留隐藏正文；
 - Markdown 复用安全 Markdown 呈现边界，不执行内嵌 HTML 或脚本；图片只显示替代文字，不请求本地或远程资源；相对资源链接不作为应用导航，HTTP(S) 链接的显式点击仍服从 Host 导航策略，不新增资源读取或网络权限。文档主体纵向滚动，宽表格与代码块各自横向滚动；
@@ -880,7 +882,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
 > Capability：File Changes **当前**；typed Output **未来**。File Changes 只消费 AgentCore typed `file_changes` observation，不能从 Tool 文本、Bash 输出、Git、文件后缀或 File Preview reference 推断。它是已记录副作用的审查视图，不承诺 Workspace 当前净状态。
 
-- 每个 Run 在 Assistant response 后、terminal“工作过程”之前显示紧凑的单行“文件更改”入口，使结果审查保持主于次要技术证据。至少一条记录时，整行使用一个原生按钮，只显示中性 diff 图标、“文件更改 · 唯一文件数”和“审查更改”动作；不使用卡片、图标底板、过程竖线或第二行状态，也不暴露内部修改记录次数。`incomplete` 在同一行明确提示记录可能不完整；`incomplete` 且零记录时只显示非交互警告，不提供空 Review 动作；其他零记录状态不占位；
+- 每个 Run 在 Assistant response 后、必要 terminal notice 和末行复制动作之前显示紧凑的单行“文件更改”入口。至少一条记录时，整行使用一个原生按钮，只显示中性 diff 图标、“文件更改 · 唯一文件数”和“审查更改”动作；不使用卡片、图标底板、过程竖线或第二行状态，也不暴露内部修改记录次数。`incomplete` 在同一行明确提示记录可能不完整；`incomplete` 且零记录时只显示非交互警告，不提供空 Review 动作；其他零记录状态不占位；
 - “审查更改”在既有右侧 Task Panel 打开，不建立独立 route 或占用整个工作区。Review 绑定一个明确 Task + Run，Task Panel 顶栏直接使用“审查更改”标题，下面立即进入按文件首次出现顺序排列的连续差异文档；不重复显示类型、标题或常规说明区。打开即请求并展示首个文件的首条 diff，同文件后续记录在该文件区块接近可见区域时按稳定 `order` 逐条接入，后续文件纵向衔接，不经过列表页、单条详情页或返回动作。打开时显式展开右栏；关闭或 Escape 返回真实入口并恢复焦点，入口失效时回到稳定 Task Panel 开关；
 - 每个文件使用一个克制文件头区分身份和边界：文件名前以 Git 惯例的 `A/M/D/R` 等宽字母和对应语义色表示聚合后的 created/modified/deleted/moved，不再重复状态文字；partial 是正交的异常事实，只在文件名后显示 warning 图标，并以“更改可能未完整应用”的可访问说明解释。文件头继续显示完整可取得的 `displayPath`、moved 的 `from → to` 与增删摘要，不显示同路径记录序号。文件默认展开，整个文件头是带 `aria-expanded` 的原生按钮，点击、Enter 或 Space 只折叠/展开所属文件的 diff、加载状态和错误说明，文件身份及增删摘要保持可见；折叠状态只属于当前挂载的 Review，不持久化，也不触发尚未开始的按需读取。ready 后可从已经汇入该文件区块的 recorded diff 派生增删行数，但不得据此宣称 Workspace、Git 或 Run 的当前净变化。区块使用分隔线形成连续文档，不包装成可导航卡片；底层多条记录、稳定顺序、独立读取失败与 stale identity 不得因呈现聚合而丢失。停靠、左栏互斥和窄窗全宽 overlay 仅沿用 Task Panel 的统一响应式规则；
 - diff 只通过 `metawork.files.diff` 读取 Product 已记录的 credential-safe unified diff。首条立即读取；其余区块仅在进入或接近 Review 可见区域时各自按需读取，不因打开而批量预取。已读取正文只在当前挂载的 Review 内并存，不形成跨次打开的 Renderer cache。每条请求绑定精确 `taskId + runId + changeId + request generation`；关闭右栏、切换对象/Task、目标 Run/记录消失或同记录后续请求开始，都必须使对应旧 Promise stale，不能覆盖其他记录或新 Review；

@@ -554,6 +554,7 @@ export type RunActivity =
 
 export type RunView = {
   elapsedMs: string | null;
+  finishedAtUnixMs: string | null;
   id: string;
   phase: RunPhase;
   permissionProfile: PermissionProfile;

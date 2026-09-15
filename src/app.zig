@@ -522,6 +522,7 @@ pub fn run(init: std.process.Init) !void {
         .run_clock = .{
             .context = &app.platform,
             .now_ms_fn = app_platform.Adapter.runNowMonotonicMs,
+            .now_unix_ms_fn = app_platform.Adapter.runNowUnixMs,
         },
         .mcp_refresh_timer = .{
             .context = &app.platform,

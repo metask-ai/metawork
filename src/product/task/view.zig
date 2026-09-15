@@ -351,6 +351,11 @@ fn writeRun(
         writer.print("\"{d}\"", .{elapsed}) catch return error.SnapshotTooLarge
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"finishedAtUnixMs\":") catch return error.SnapshotTooLarge;
+    if (terminal != null and run.finished_at_unix_ms != null)
+        writer.print("\"{d}\"", .{run.finished_at_unix_ms.?}) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
     switch (run.input) {
         .text => |text| {

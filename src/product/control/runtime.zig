@@ -4728,7 +4728,9 @@ pub const Runtime = struct {
     /// Agent event pump following `markTerminalRunsBeforeEventDrain`.
     /// Any later event for the Run is rejected by `applyEvent`.
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Runtime) void {
-        const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain();
+        const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain(
+            self.run_clock.nowUnixMs(),
+        );
         if (changed) {
             self.commitTaskStateNoFail();
             self.bumpRevision();
@@ -15078,6 +15080,17 @@ test "Task deletion removes installed and late file change artifacts" {
 test "completed terminal drain closes collecting file change observation" {
     var control = try testRuntime();
     defer control.deinit();
+    const Clock = struct {
+        fn now(context: ?*anyopaque) ?u64 {
+            const value: *u64 = @ptrCast(@alignCast(context.?));
+            return value.*;
+        }
+    };
+    var now_unix_ms: u64 = 1_789_436_313_000;
+    control.run_clock = .{
+        .context = &now_unix_ms,
+        .now_unix_ms_fn = Clock.now,
+    };
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
     try std.testing.expect(commitTerminal(
@@ -15092,6 +15105,14 @@ test "completed terminal drain closes collecting file change observation" {
     control.markTerminalRunsBeforeEventDrain();
     control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expectEqual(task_test_state.FileChangeObservation.complete, run.file_change_observation.?);
+    try std.testing.expectEqual(@as(?u64, now_unix_ms), run.finished_at_unix_ms);
+    var storage: [96 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"finishedAtUnixMs\":\"1789436313000\"",
+    ) != null);
 }
 
 test "terminal persistence degrades pending file change observation without mutating the live Run" {

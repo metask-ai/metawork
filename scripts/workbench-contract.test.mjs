@@ -274,6 +274,34 @@ test("Run elapsed time is nullable, bounded, and unavailable for terminal histor
   );
 });
 
+test("Run finished time is terminal-only, bounded, and lossless", () => {
+  const candidate = clone(fixture);
+  const task = candidate.tasks[0];
+  const run = task.runs[0];
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.activeOperation = null;
+  run.phase = "failed";
+  run.activity = null;
+  run.output.provisional = "";
+  run.terminal = terminal("failed", "timeout");
+  run.elapsedMs = null;
+  run.finishedAtUnixMs = "1789436313000";
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+
+  for (const value of ["0", "01", "8640000000000001", -1, undefined]) {
+    const invalid = clone(candidate);
+    invalid.tasks[0].runs[0].finishedAtUnixMs = value;
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+  const active = clone(fixture);
+  active.tasks[0].runs[0].finishedAtUnixMs = "1789436313000";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(active),
+    /active Run cannot expose a finished time/,
+  );
+});
+
 function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
   return { outcome, cause, diagnosticDisposition };
 }

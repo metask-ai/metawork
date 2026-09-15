@@ -135,6 +135,7 @@ function run(overrides = {}) {
       provisionalRedacted: false,
     },
     activity: null,
+    finishedAtUnixMs: null,
     terminal: terminal(),
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
     tools: [],
@@ -878,6 +879,33 @@ test("successful terminal keeps commentary visible and removes technical process
   );
 });
 
+test("reply footer uses the product tooltip for the finished time", async (context) => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const finishedAt = new Date(2026, 8, 11, 10, 25).getTime();
+  context.mock.method(Date, "now", () => finishedAt + 4 * 24 * 60 * 60 * 1000);
+  const view = render(
+    taskContentElement(
+      task({ runs: [run({ finishedAtUnixMs: String(finishedAt) })] }),
+    ),
+  );
+  const footer = view.container.querySelector(".response-copy-actions");
+  assert.equal(footer.children[0].tagName, "BUTTON");
+  assert.equal(footer.children[1].tagName, "TIME");
+  assert.equal(footer.querySelector("time").textContent, "4 days ago");
+  const time = footer.querySelector("time");
+  assert.equal(time.hasAttribute("title"), false);
+  assert.equal(time.tabIndex, 0);
+  assert.ok(time.getAttribute("aria-label").includes("2026"));
+
+  await user.hover(time);
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector("[data-base-ui-portal]")?.textContent,
+      time.getAttribute("aria-label"),
+    ),
+  );
+});
+
 test("terminal transition preserves reading position while removing technical details", () => {
   const activeRun = run({
     phase: "running",
@@ -1025,11 +1053,11 @@ test("partial output and terminal failure render one composite notice", () => {
   assert.match(markup, />Work failed before the response was complete</);
   assert.equal((markup.match(/class="ai-activity"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, />Work failed</);
-});
   assert.ok(
     markup.indexOf('class="ai-activity"') <
       markup.indexOf('class="response-copy-actions"'),
   );
+});
 
 test("typed Agent failures render accurate recovery guidance", () => {
   const cases = [
@@ -1311,11 +1339,11 @@ test("active Run file previews belong to expanded tool operations", () => {
     currentRunPhase: "running",
     runs: [
       run({
-        output: {
-          commentary: [],
         phase: "running",
         activity: { kind: "executing_tools", inFlight: "1" },
         terminal: null,
+        output: {
+          commentary: [],
           response: "",
           responseKind: null,
           provisional: "",
@@ -1482,10 +1510,10 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     visible.indexOf(">File changes<") <
       visible.indexOf('class="response-copy-actions"'),
   );
+  assert.doesNotMatch(visible, />Work process</);
 
   const incomplete = task({
     runs: [
-  assert.doesNotMatch(visible, />Work process</);
       run({
         fileChanges: { observation: "incomplete", changes: [] },
       }),
