@@ -601,8 +601,7 @@ pub const AccountIdentity = struct {
         email_hint: []const u8,
         concurrency_limit: u32,
     ) contract.ValidationError!AccountIdentity {
-        if (account_id.len == 0 or concurrency_limit == 0)
-            return error.FieldEmpty;
+        if (account_id.len == 0) return error.FieldEmpty;
         return .{
             .account_id = try .init(account_id),
             .display_name = try .init(display_name),
@@ -810,7 +809,7 @@ test "explicit login accepts a newly verified identity" {
 
     var identity: WorkerCompletion = .{
         .attempt_id = account.activeAttempt().?,
-        .payload = .{ .identity_loaded = try .init("account-2", "New User", "n***@example.com", 8) },
+        .payload = .{ .identity_loaded = try .init("account-2", "New User", "n***@example.com", 0) },
     };
     var authenticated = switch (account.prepareCompletion(&identity)) {
         .transition => |value| value,
@@ -820,7 +819,7 @@ test "explicit login accepts a newly verified identity" {
     try std.testing.expectEqualStrings("account-2", account.view().account_id);
     try std.testing.expectEqualStrings("New User", account.view().display_name);
     try std.testing.expectEqualStrings("n***@example.com", account.view().email_hint);
-    try std.testing.expectEqual(@as(?u32, 8), account.view().concurrency_limit);
+    try std.testing.expectEqual(@as(?u32, 0), account.view().concurrency_limit);
 }
 
 test "failed login before token commit preserves the current identity" {

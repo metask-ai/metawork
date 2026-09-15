@@ -15,10 +15,7 @@ import {
 } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
-import {
-  AccountBalance,
-  AccountUsageSummary,
-} from "./AccountUsageSummary.tsx";
+import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
 type SettingsSection = "general" | "account" | "models" | "providers";
@@ -1142,7 +1139,10 @@ export function SettingsPage({
                         ) : null}
                         <span>
                           {t("settings.account_concurrency_limit", {
-                            value: account.concurrencyLimit ?? "—",
+                            value:
+                              account.concurrencyLimit === 0
+                                ? t("settings.account_concurrency_unlimited")
+                                : (account.concurrencyLimit ?? "—"),
                           })}
                         </span>
                       </div>

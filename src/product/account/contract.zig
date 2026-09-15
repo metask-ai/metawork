@@ -278,9 +278,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
         .authenticated => {
             if (view.account_id.len == 0 or view.display_name.len == 0)
                 return error.InconsistentState;
-            const limit = view.concurrency_limit orelse
-                return error.InconsistentState;
-            if (limit == 0) return error.InconsistentState;
+            _ = view.concurrency_limit orelse return error.InconsistentState;
         },
     }
     try validateSummary(view.summary);

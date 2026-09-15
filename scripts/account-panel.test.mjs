@@ -538,6 +538,23 @@ test("Account summary failure stays local, stale values remain, and simple mode 
   assert.match(partialMarkup, /Metask is temporarily unavailable/);
   assert.match(partialMarkup, /Metask User/);
 
+  const usageOnlyFailure = structuredClone(partial);
+  usageOnlyFailure.summary.history = {
+    availability: "ready",
+    startDate: "2025-09-15",
+    endDate: "2026-09-15",
+    days: [],
+    syncedAt: "1789344000000",
+    errorCode: "none",
+    safeDiagnostic: "",
+  };
+  assert.match(
+    renderSettings(usageOnlyFailure, readyModels, {
+      initialSection: "account",
+    }),
+    /Metask is temporarily unavailable/,
+  );
+
   const stale = structuredClone(partial);
   stale.summary.usage = {
     availability: "stale",
@@ -625,6 +642,14 @@ test("unknown Account usage remains actionable without guessing a mode", () => {
   assert.match(markup, /cannot confirm this account&#x27;s usage mode yet/);
   assert.match(markup, />Refresh account usage</);
   assert.match(markup, />Balance</);
+});
+
+test("an unlimited Account concurrency value stays visible", () => {
+  const unlimited = { ...readyAccount, concurrencyLimit: 0 };
+  const markup = renderSettings(unlimited, readyModels, {
+    initialSection: "account",
+  });
+  assert.match(markup, /Concurrency allowance Unlimited/);
 });
 
 test("Account usage formatting preserves decimal precision without number coercion", () => {

@@ -320,7 +320,7 @@ const CurrentUserResponse = struct {
     id: i64,
     username: []const u8,
     email: []const u8 = "",
-    concurrency: u32,
+    concurrency: i64,
 };
 
 fn maskEmail(output: []u8, email: []const u8) ProtocolError![]const u8 {
@@ -376,14 +376,17 @@ pub fn parseCurrentUser(
         raw.data.username.len == 0 or
         raw.data.username.len > contract.Limits.display_name_bytes or
         !std.unicode.utf8ValidateSlice(raw.data.username) or
-        raw.data.concurrency == 0)
+        raw.data.concurrency > std.math.maxInt(u32))
         return error.InvalidCurrentUserResponse;
     var result: CurrentUser = .{};
     @memcpy(result.username[0..raw.data.username.len], raw.data.username);
     result.username_len = raw.data.username.len;
     const email_hint = try maskEmail(&result.email_hint, raw.data.email);
     result.email_hint_len = email_hint.len;
-    result.concurrency_limit = raw.data.concurrency;
+    result.concurrency_limit = if (raw.data.concurrency <= 0)
+        0
+    else
+        @intCast(raw.data.concurrency);
     return result;
 }
 
@@ -621,6 +624,18 @@ test "current user decoder binds username to the token account" {
     try std.testing.expectEqualStrings("Meta User", info.usernameView());
     try std.testing.expectEqualStrings("u***@example.com", info.emailHintView());
     try std.testing.expectEqual(@as(u32, 5), info.concurrency_limit);
+    const unlimited = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":0}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqual(@as(u32, 0), unlimited.concurrency_limit);
+    const legacy_unlimited = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":-1}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqual(@as(u32, 0), legacy_unlimited.concurrency_limit);
     try std.testing.expectError(
         error.InvalidCurrentUserResponse,
         parseCurrentUser(
@@ -657,7 +672,6 @@ test "current user decoder publishes only a bounded masked email hint" {
     for ([_][]const u8{
         \\{"code":0,"data":{"id":42,"email":"invalid","username":"Meta User","concurrency":3}},
         \\{"code":0,"data":{"id":42,"email":"a@@example.com","username":"Meta User","concurrency":3}},
-        \\{"code":0,"data":{"id":42,"email":"user@example.com","username":"Meta User","concurrency":0}},
     }) |payload| {
         try std.testing.expectError(
             error.InvalidCurrentUserResponse,

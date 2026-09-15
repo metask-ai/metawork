@@ -816,6 +816,7 @@ export const zhCN: Record<MessageId, string> = {
     "数据来自整个 Metask 账户，不仅统计 MetaWork 中的使用。",
   "settings.account_usage_balance": "余额",
   "settings.account_concurrency_limit": "并发额度 {value}",
+  "settings.account_concurrency_unlimited": "不限",
   "settings.account_recharge": "充值",
   "settings.account_recharge_browser_hint": "在浏览器中打开 Metask 充值页面",
   "settings.account_usage_total": "累计",

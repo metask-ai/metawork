@@ -1380,8 +1380,7 @@ summary::-webkit-details-marker {
 .settings-account-calendar-day:hover {
   position: relative;
   z-index: 1;
-  outline: 1px solid
-    color-mix(in srgb, var(--settings-brand) 56%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--settings-brand) 56%, transparent);
   outline-offset: 1px;
 }
 

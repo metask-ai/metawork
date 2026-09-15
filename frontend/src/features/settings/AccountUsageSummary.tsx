@@ -87,7 +87,9 @@ export function AccountBalance({
             })}
           </strong>
         ) : (
-          <strong aria-label={t("settings.account_usage_unavailable")}>—</strong>
+          <strong aria-label={t("settings.account_usage_unavailable")}>
+            —
+          </strong>
         )}
         <SummaryState {...wallet} />
       </div>
@@ -152,7 +154,7 @@ export function AccountUsageSummary({
             >
               <div className="settings-account-usage-copy">
                 <span>{t("settings.account_usage_total")}</span>
-                {usageReady ? <SummaryState {...summary.usage} /> : null}
+                <SummaryState {...summary.usage} />
               </div>
               <div className="settings-account-usage-values">
                 {usageReady ? (

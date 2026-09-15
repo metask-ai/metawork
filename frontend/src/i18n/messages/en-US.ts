@@ -899,6 +899,7 @@ export const enUS = {
     "These figures cover your whole Metask account, not only activity in MetaWork.",
   "settings.account_usage_balance": "Balance",
   "settings.account_concurrency_limit": "Concurrency allowance {value}",
+  "settings.account_concurrency_unlimited": "Unlimited",
   "settings.account_recharge": "Recharge",
   "settings.account_recharge_browser_hint":
     "Open the Metask recharge page in your browser",

@@ -1310,7 +1310,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
   const concurrencyLimit =
     item.concurrencyLimit === null
       ? null
-      : positiveNumber(item.concurrencyLimit, `${path}.concurrencyLimit`);
+      : nonNegativeNumber(item.concurrencyLimit, `${path}.concurrencyLimit`);
   const errorCode = enumValue(
     item.errorCode,
     `${path}.errorCode`,

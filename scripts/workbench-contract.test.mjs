@@ -472,6 +472,16 @@ test("durable Metask intent remains decodable when the current catalog is unavai
   );
 });
 
+test("Account concurrency accepts the backend unlimited sentinel", () => {
+  const unlimited = clone(fixture);
+  unlimited.account.concurrencyLimit = 0;
+  assert.deepEqual(decodeWorkbenchSnapshot(unlimited), unlimited);
+
+  const invalid = clone(fixture);
+  invalid.account.concurrencyLimit = -1;
+  assert.throws(() => decodeWorkbenchSnapshot(invalid));
+});
+
 test("Models recovery-required health crosses the strict snapshot decoder", () => {
   const recoveryRequired = clone(fixture);
   recoveryRequired.models.availability = "unavailable";
