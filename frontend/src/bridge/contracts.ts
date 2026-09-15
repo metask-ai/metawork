@@ -853,6 +853,7 @@ export type WorkbenchSnapshot = {
     mcpManagement: boolean;
     mcpConnectionApproval: boolean;
     mcpSecretCapture: boolean;
+    mcpSecretMaxBytes: number;
     mcpOAuth: boolean;
     attachments: {
       enabled: boolean;

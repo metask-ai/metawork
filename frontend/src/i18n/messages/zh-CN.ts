@@ -315,8 +315,7 @@ export const zhCN: Record<MessageId, string> = {
     "将放行当前已发现的全部工具；此后新发现的工具仍默认不放行。",
   "mcp.confirm.allow_all.action": "全部放行",
   "mcp.auth.static_locked": "（暂时无法提交凭据）",
-  "mcp.auth.oauth_secret_locked":
-    "需要 Client Secret 的方式依赖安全密钥采集；既有选择可以原样保留。",
+  "mcp.auth.oauth_secret_locked": "凭据提交暂不可用；既有选择可以原样保留。",
   "mcp.confirm.enable.title": "启用这个服务？",
   "mcp.confirm.enable.body":
     "连接就绪后，这会向新任务开放之前已允许的 {count} 个工具；已打开的任务保持现有访问权限。",
@@ -1261,7 +1260,7 @@ export const zhCN: Record<MessageId, string> = {
   "mcp.secret.set": "已设置",
   "mcp.secret.not_required": "不需要",
   "mcp.secret.client_secret": "OAuth 客户端密钥",
-  "mcp.secret.too_long": "凭据超过 2,560 个 UTF-8 字节，请缩短后重试。",
+  "mcp.secret.too_long": "凭据超过 {maxBytes} 个 UTF-8 字节，请缩短后重试。",
   "mcp.authorization_phase.discovering": "正在发现 OAuth 元数据…",
   "mcp.authorization_phase.awaiting_consent": "正在等待确认…",
   "mcp.authorization_phase.registering": "正在注册客户端…",

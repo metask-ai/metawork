@@ -4606,8 +4606,9 @@ pub const Runtime = struct {
         return runtime.updateStdioConnection(expected_generation, input) catch |err| return @errorCast(err);
     }
 
-    /// Host-only secure capture boundary. Product MCP Runtime consumes and
-    /// zeroes the secret on every path after this owner boundary is present.
+    /// Accepts the Host-owned copy of a manually entered secret forwarded by
+    /// Bridge. Product validates and persists it through the credential transaction;
+    /// the mutable input is consumed and zeroed on every path, including rejection.
     pub fn captureMcpStaticSecret(
         self: *Runtime,
         expected_generation: u64,
@@ -4621,7 +4622,8 @@ pub const Runtime = struct {
         return runtime.captureStaticSecret(expected_generation, input) catch |err| return @errorCast(err);
     }
 
-    /// Host-only secure capture boundary for a pre-registered OAuth client.
+    /// The same owned-copy boundary for a manually entered, pre-registered OAuth
+    /// client secret; automatically acquired OAuth credentials do not use Bridge.
     pub fn captureMcpOauthClientSecret(
         self: *Runtime,
         expected_generation: u64,
@@ -4752,7 +4754,7 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":true,\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":true,\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -4773,6 +4775,7 @@ pub const Runtime = struct {
             mcp_capabilities.management,
             mcp_capabilities.host.connection_approval,
             mcp_capabilities.host.secret_capture,
+            mcp_capabilities.secret_max_bytes,
             mcp_capabilities.host.oauth,
             self.limits.max_attachments_per_draft,
             self.limits.max_attachment_file_bytes,
@@ -16531,6 +16534,11 @@ test "MCP startup health commits a safe degraded Runtime projection" {
         u8,
         snapshot,
         "\"mcpManagement\":true",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"mcpSecretMaxBytes\":16384",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

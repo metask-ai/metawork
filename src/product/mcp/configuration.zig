@@ -532,8 +532,9 @@ pub const UpdateOauthHttpConnectionInput = struct {
     client: OauthClientPlan,
 };
 
-/// Host-only secure capture. Client secrets use the same locator journal as
-/// static credentials and are never accepted from Renderer or Bridge.
+/// Host-owned mutable copy of a manually entered client secret, forwarded once
+/// by its dedicated Bridge command. Product validates and stores it through the
+/// static-credential locator journal, consuming and zeroing `secret` on every path.
 pub const CaptureOauthClientSecretInput = struct {
     server_id: []const u8,
     secret: []u8,
@@ -656,8 +657,9 @@ pub const UpdateHttpConnectionInput = struct {
     header_names: []const []const u8 = &.{},
 };
 
-/// Host-only result of a secure capture capability. Renderer and Bridge never
-/// construct this value. The call consumes and zeroes `secret` on every path.
+/// Host-owned mutable copy of a manually entered static secret, forwarded once
+/// by its dedicated Bridge command. Product validates and stores it through the
+/// credential transaction, consuming and zeroing `secret` on every path.
 pub const CaptureStaticSecretInput = struct {
     server_id: []const u8,
     slot_name: []const u8,

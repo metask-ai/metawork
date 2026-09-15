@@ -4049,6 +4049,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "mcpManagement",
     "mcpConnectionApproval",
     "mcpSecretCapture",
+    "mcpSecretMaxBytes",
     "mcpOAuth",
     "attachments",
   ]);
@@ -4178,6 +4179,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     mcpSecretCapture: booleanValue(
       capabilityItem.mcpSecretCapture,
       "$.capabilities.mcpSecretCapture",
+    ),
+    mcpSecretMaxBytes: nonNegativeNumber(
+      capabilityItem.mcpSecretMaxBytes,
+      "$.capabilities.mcpSecretMaxBytes",
     ),
     mcpOAuth: booleanValue(capabilityItem.mcpOAuth, "$.capabilities.mcpOAuth"),
     attachments: {
@@ -4333,6 +4338,11 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   } else if (mcp.managementHealth === "unavailable") {
     fail("$.mcp.managementHealth", "enabled MCP management requires its owner");
   }
+  if (capabilities.mcpManagement !== capabilities.mcpSecretMaxBytes > 0)
+    fail(
+      "$.capabilities.mcpSecretMaxBytes",
+      "MCP secret byte limit must be positive when management is enabled and zero otherwise",
+    );
   if (
     new Set(workspaces.map((workspace) => workspace.id)).size !==
     workspaces.length

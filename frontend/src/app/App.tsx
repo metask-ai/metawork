@@ -3587,6 +3587,7 @@ export default function App() {
           capabilities={{
             connectionApproval: snapshot.capabilities.mcpConnectionApproval,
             secretCapture: snapshot.capabilities.mcpSecretCapture,
+            secretMaxBytes: snapshot.capabilities.mcpSecretMaxBytes,
             oauth: snapshot.capabilities.mcpOAuth,
           }}
           query={mcpQuery}

@@ -342,7 +342,7 @@ export const enUS = {
   "mcp.confirm.allow_all.action": "Allow all",
   "mcp.auth.static_locked": " (credential submission unavailable)",
   "mcp.auth.oauth_secret_locked":
-    "Secret-based methods require secure secret capture. An existing selection can be preserved.",
+    "Credential submission is temporarily unavailable. An existing selection can be preserved.",
   "mcp.confirm.enable.title": "Enable this server?",
   "mcp.confirm.enable.body":
     "When the connection is ready, this restores the previous tool access ({count} selected) for new tasks. Open tasks keep their current access.",
@@ -1400,7 +1400,7 @@ export const enUS = {
   "mcp.secret.not_required": "Not required",
   "mcp.secret.client_secret": "OAuth client secret",
   "mcp.secret.too_long":
-    "The credential exceeds 2,560 UTF-8 bytes. Shorten it and try again.",
+    "The credential exceeds {maxBytes} UTF-8 bytes. Shorten it and try again.",
   "mcp.authorization_phase.discovering": "Discovering OAuth metadata…",
   "mcp.authorization_phase.awaiting_consent": "Waiting for confirmation…",
   "mcp.authorization_phase.registering": "Registering client…",

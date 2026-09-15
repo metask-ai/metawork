@@ -1130,6 +1130,7 @@ test("MCP management is capability-gated and identity checked", () => {
   withMcp.capabilities.mcpManagement = true;
   withMcp.capabilities.mcpConnectionApproval = true;
   withMcp.capabilities.mcpSecretCapture = true;
+  withMcp.capabilities.mcpSecretMaxBytes = 4096;
   withMcp.capabilities.mcpOAuth = true;
   withMcp.mcp = {
     availability: "degraded",
@@ -1203,6 +1204,31 @@ test("MCP management is capability-gated and identity checked", () => {
     ],
   };
   assert.deepEqual(decodeWorkbenchSnapshot(withMcp), withMcp);
+
+  for (const limit of [
+    undefined,
+    null,
+    "4096",
+    -1,
+    0,
+    1.5,
+    NaN,
+    Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    const invalidLimit = clone(withMcp);
+    invalidLimit.capabilities.mcpSecretMaxBytes = limit;
+    assert.throws(
+      () => decodeWorkbenchSnapshot(invalidLimit),
+      /mcpSecretMaxBytes/,
+    );
+  }
+  const unavailableWithLimit = clone(fixture);
+  unavailableWithLimit.capabilities.mcpSecretMaxBytes = 4096;
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unavailableWithLimit),
+    /mcpSecretMaxBytes/,
+  );
 
   const hiddenCatalog = clone(withMcp);
   hiddenCatalog.capabilities.mcpManagement = false;

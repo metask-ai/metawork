@@ -26,6 +26,7 @@ pub const Error = agent.Error || std.mem.Allocator.Error || error{
 pub const Capabilities = struct {
     management: bool,
     host: state_module.McpHostCapabilities,
+    secret_max_bytes: usize = 0,
 };
 pub const ViewError = view.Error;
 pub const TextProjection = view.TextProjection;
@@ -216,6 +217,10 @@ pub const Runtime = struct {
         return .{
             .management = management,
             .host = if (management) self.state.host_capabilities else .{},
+            .secret_max_bytes = if (management)
+                self.state.management.?.limits.max_credential_secret_bytes
+            else
+                0,
         };
     }
 
@@ -1712,6 +1717,8 @@ fn fillTestMcpIdentity(_: ?*anyopaque, bytes: *[16]u8) bool {
 
 test "Product MCP secret validation preserves target transport and authority checks" {
     for ([_]bool{ true, false }) |stdio| {
+        var limits = test_limits;
+        limits.max_credential_secret_bytes = if (stdio) 4096 else 8192;
         var slots = [_]configuration.SecretSlotWire{.{ .name = "TOKEN", .credential_ref = null }};
         var servers = [_]configuration.ServerWire{.{
             .id = "fixture",
@@ -1743,15 +1750,17 @@ test "Product MCP secret validation preserves target transport and authority che
             }, .{
                 .persistence = .{ .available = true },
                 .credentials = .{ .available = true },
-                .limits = test_limits,
+                .limits = limits,
             }),
             .admission = .{ .ready = .{ .selection = null, .catalog_generation = null } },
             .host_capabilities = .{ .secret_capture = true },
         });
         defer runtime.deinit();
         try std.testing.expect(!runtime.capabilities().host.secret_capture);
+        try std.testing.expectEqual(0, runtime.capabilities().secret_max_bytes);
         try std.testing.expect(runtime.syncInitialHealth());
         try std.testing.expect(runtime.capabilities().host.secret_capture);
+        try std.testing.expectEqual(limits.max_credential_secret_bytes, runtime.capabilities().secret_max_bytes);
 
         const target: McpSecretCaptureTarget = if (stdio)
             .{ .stdio_environment = "token" }

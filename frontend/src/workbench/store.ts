@@ -56,6 +56,7 @@ export const initialWorkbenchState: WorkbenchState = {
       mcpManagement: false,
       mcpConnectionApproval: false,
       mcpSecretCapture: false,
+      mcpSecretMaxBytes: 0,
       mcpOAuth: false,
       attachments: {
         enabled: false,

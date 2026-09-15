@@ -496,17 +496,19 @@ function McpSecretInput({
   label,
   status,
   disabled,
+  maxBytes,
   onSave,
 }: {
   label: string;
   status: "missing" | "set";
   disabled: boolean;
+  maxBytes: number;
   onSave: (secret: string) => Promise<McpMutationResult | null | undefined>;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   return (
     <form
-      key={String(disabled)}
+      key={`${disabled}:${maxBytes}`}
       className="mcp-secret-form"
       onSubmit={(event) => {
         event.preventDefault();
@@ -536,10 +538,13 @@ function McpSecretInput({
           required
           onChange={(event) => {
             const input = event.currentTarget;
-            // Match Native SDK credential storage's UTF-8 byte limit.
             input.setCustomValidity(
-              new TextEncoder().encode(input.value).length > 2560
-                ? t("mcp.secret.too_long")
+              new TextEncoder().encode(input.value).length > maxBytes
+                ? t("mcp.secret.too_long", {
+                    maxBytes: maxBytes.toLocaleString(
+                      locale === "pseudo" ? "en-US" : locale,
+                    ),
+                  })
                 : "",
             );
           }}
@@ -583,6 +588,7 @@ export function McpPage({
   capabilities: {
     connectionApproval: boolean;
     secretCapture: boolean;
+    secretMaxBytes: number;
     oauth: boolean;
   };
   query: string;
@@ -2281,6 +2287,7 @@ export function McpPage({
                             ])}
                             label={slot.name}
                             status={slot.status}
+                            maxBytes={capabilities.secretMaxBytes}
                             disabled={
                               !capabilities.secretCapture ||
                               mutationLocked ||
@@ -2323,6 +2330,7 @@ export function McpPage({
                         ])}
                         label={t("mcp.secret.client_secret")}
                         status={selected.connection.clientSecretStatus}
+                        maxBytes={capabilities.secretMaxBytes}
                         disabled={
                           !capabilities.secretCapture ||
                           mutationLocked ||

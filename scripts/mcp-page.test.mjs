@@ -182,6 +182,7 @@ function pageElement(management, query = "", overrides = {}) {
       capabilities: {
         connectionApproval: true,
         secretCapture: true,
+        secretMaxBytes: 2560,
         oauth: true,
       },
       query,
@@ -1084,6 +1085,7 @@ test("MCP gates OAuth client secret recovery and configuration on credential sub
         capabilities: {
           connectionApproval: true,
           secretCapture: false,
+          secretMaxBytes: 2560,
           oauth: true,
         },
       },
@@ -1123,7 +1125,7 @@ test("MCP gates OAuth client secret recovery and configuration on credential sub
   assert.equal(post.getAttribute("aria-disabled"), "true");
   assert.ok(
     within(form).getByText(
-      "Secret-based methods require secure secret capture. An existing selection can be preserved.",
+      "Credential submission is temporarily unavailable. An existing selection can be preserved.",
     ),
   );
 });
@@ -1505,7 +1507,7 @@ test("MCP freezes unconfirmed desired state and offers in-place apply recovery",
   assert.ok(screen.getByRole("button", { name: "Retry connection" }));
 });
 
-test("MCP password input submits once and clears drafts on cancel, revision and close", async () => {
+test("MCP password input submits once and clears drafts on cancel, byte limit, revision and close", async () => {
   const server = {
     ...servers[2],
     authMode: "static",
@@ -1561,6 +1563,25 @@ test("MCP password input submits once and clears drafts on cancel, revision and 
     within(field().closest("form")).getByRole("button", { name: "Cancel" }),
   );
   assert.equal(field().value, "");
+  fireEvent.change(field(), { target: { value: "x".repeat(2561) } });
+  assert.equal(field().validity.customError, true);
+  view.rerender(
+    pageElement(management, "", {
+      ...overrides,
+      capabilities: {
+        connectionApproval: true,
+        secretCapture: true,
+        secretMaxBytes: 1024,
+        oauth: true,
+      },
+    }),
+  );
+  assert.equal(field().value, "");
+  assert.equal(field().validity.customError, false);
+  fireEvent.change(field(), { target: { value: "x".repeat(1025) } });
+  fireEvent.submit(field().closest("form"));
+  assert.equal(field().validity.customError, true);
+  assert.equal(calls.length, 1);
   fireEvent.change(field(), { target: { value: "stale-draft" } });
   view.rerender(
     pageElement({ ...management, desiredGeneration: "8" }, "", overrides),
@@ -1588,7 +1609,10 @@ test("MCP password input submits once and clears drafts on cancel, revision and 
 });
 
 test("MCP HTTP and OAuth credentials use the same empty password form", async () => {
-  for (const oauth of [false, true]) {
+  for (const [oauth, maxBytes] of [
+    [false, 2560],
+    [true, 4096],
+  ]) {
     const server = {
       ...servers[0],
       authMode: oauth ? "oauth" : "static",
@@ -1620,6 +1644,12 @@ test("MCP HTTP and OAuth credentials use the same empty password form", async ()
         },
         "",
         {
+          capabilities: {
+            connectionApproval: true,
+            secretCapture: true,
+            secretMaxBytes: maxBytes,
+            oauth: true,
+          },
           onCaptureSecret: async (...args) => {
             calls.push(args);
             return { outcome: "saved" };
@@ -1634,15 +1664,15 @@ test("MCP HTTP and OAuth credentials use the same empty password form", async ()
     assert.equal(input.type, "password");
     assert.equal(input.value, "");
     for (const value of [
-      "x".repeat(2561),
-      "界".repeat(854),
-      "🔑".repeat(641),
+      "x".repeat(maxBytes + 1),
+      "界".repeat(Math.floor(maxBytes / 3) + 1),
+      "🔑".repeat(maxBytes / 4 + 1),
     ]) {
       fireEvent.change(input, { target: { value } });
       assert.equal(input.validity.customError, true);
       assert.equal(
         input.validationMessage,
-        "The credential exceeds 2,560 UTF-8 bytes. Shorten it and try again.",
+        `The credential exceeds ${maxBytes.toLocaleString("en-US")} UTF-8 bytes. Shorten it and try again.`,
       );
       fireEvent.submit(input.closest("form"));
       assert.equal(calls.length, 0);
@@ -1653,8 +1683,12 @@ test("MCP HTTP and OAuth credentials use the same empty password form", async ()
     );
     assert.equal(input.value, "");
     assert.equal(input.validity.customError, false);
-    // ASCII and supplementary Unicode must both accept exactly 2,560 bytes.
-    const secret = oauth ? "🔑".repeat(640) : "x".repeat(2560);
+    const cjkBoundary =
+      "界".repeat(Math.floor(maxBytes / 3)) + "x".repeat(maxBytes % 3);
+    fireEvent.change(input, { target: { value: cjkBoundary } });
+    assert.equal(input.checkValidity(), true);
+    // Accept the Host-provided bound for both ASCII and supplementary Unicode.
+    const secret = oauth ? "🔑".repeat(maxBytes / 4) : "x".repeat(maxBytes);
     fireEvent.change(input, { target: { value: secret } });
     assert.equal(input.checkValidity(), true);
     fireEvent.submit(input.closest("form"));
