@@ -1,6 +1,6 @@
 //! Application-owned compatibility seam for System WebView window controls.
 //!
-//! Native SDK 0.9.2 owns the startup window and provides minimize through its
+//! Native SDK 0.10.1 owns the startup window and provides minimize through its
 //! Runtime API. It does not expose maximize/restore, user-close, or maximized
 //! state for that window. These independently removable capabilities share one
 //! narrow file only because they require the same startup-window binding.

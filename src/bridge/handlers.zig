@@ -32,10 +32,11 @@ pub const WindowChromeSync = struct {
     viewportHeight: f64,
     regions: []const WindowChromeRegion,
 };
-pub const WindowChromeGesture = struct {
+pub const WindowChromePointer = struct {
     generation: []const u8,
-    x: f64,
-    y: f64,
+    phase: []const u8,
+    x: ?f64 = null,
+    y: ?f64 = null,
 };
 pub const WindowChromeControl = struct {
     generation: []const u8,

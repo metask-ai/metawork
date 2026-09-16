@@ -178,16 +178,28 @@ pub const State = struct {
         );
     }
 
-    pub fn beginLivePointerDrag(
+    pub fn handlePointer(
         self: *State,
         services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
-        x: f64,
-        y: f64,
+        pointer: bridge_api.WindowChromePointer,
     ) !bridge_api.WindowChromePlatformEnvironment {
         try requireMainWindow(window_id);
+        const outcome = switch (pointer) {
+            .down => |down| try self.drag_region_capability.handlePointerDown(
+                services,
+                down.x,
+                down.y,
+            ),
+            .reset => reset: {
+                self.drag_region_capability.resetPointerSequence();
+                break :reset drag_region.PointerOutcome.ignored;
+            },
+        };
+        if (outcome == .toggle_maximize)
+            try self.window_controls_capability.toggleMaximize();
         return environment(
-            try self.drag_region_capability.beginLivePointerDrag(services, x, y),
+            self.drag_region_capability.current(services),
             self.window_controls_capability.state(),
         );
     }

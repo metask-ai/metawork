@@ -1,7 +1,8 @@
 //! Application-owned compatibility seam for System WebView drag regions.
 //!
-//! Native SDK 0.9.2 owns the window, chrome geometry, and platform drag loop.
-//! It does not yet expose drag regions for the startup System WebView, so
+//! Native SDK 0.10.1 owns the window, chrome geometry, and platform drag loop.
+//! Its Windows drag-region public API only covers GPU surfaces, not the startup
+//! System WebView, so
 //! MetaWork keeps this bounded seam until that Runtime API is available.
 //! Renderer input is constrained to one top-band candidate plus bounded
 //! exclusions; it never carries native window identity.
@@ -10,6 +11,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const startup_window = @import("system_webview_startup_window.zig");
+const types = @import("system_webview_drag_region/types.zig");
+pub const PointerOutcome = types.PointerOutcome;
 
 const Platform = switch (builtin.os.tag) {
     .windows => @import("system_webview_drag_region/windows.zig"),
@@ -35,9 +38,11 @@ const Platform = switch (builtin.os.tag) {
             return error.SystemWebViewChromeUnavailable;
         }
 
-        pub fn beginLivePointerDrag(_: *State, _: native_sdk.platform.PlatformServices, _: native_sdk.platform.WindowId) !void {
-            return error.UnsupportedWindowChromeGesture;
+        pub fn handlePointerDown(_: *State, _: native_sdk.platform.PlatformServices, _: native_sdk.platform.WindowId, _: f64, _: f64) !PointerOutcome {
+            return .ignored;
         }
+
+        pub fn resetPointerSequence(_: *State) void {}
 
         pub fn deinit(_: *State) void {}
     },
@@ -46,7 +51,7 @@ const Platform = switch (builtin.os.tag) {
 pub const max_regions: usize = 33;
 const max_coordinate: f64 = 65_536;
 const geometry_epsilon: f64 = 0.5;
-const PointIsDraggableFn = *const fn (*const anyopaque, f64, f64) bool;
+const PointIsDraggableFn = types.PointIsDraggableFn;
 
 pub const Region = struct {
     x: f64,
@@ -114,6 +119,7 @@ pub const Capability = struct {
         services: native_sdk.platform.PlatformServices,
     ) !Environment {
         try self.requirePlatform(services);
+        self.resetPointerSequence();
         self.clearRegions();
         self.document_attached = self.platform_ready;
         return self.environment(services);
@@ -142,22 +148,27 @@ pub const Capability = struct {
         return self.environmentFromChrome(chrome);
     }
 
-    pub fn beginLivePointerDrag(
+    pub fn handlePointerDown(
         self: *Capability,
         services: native_sdk.platform.PlatformServices,
         x: f64,
         y: f64,
-    ) !Environment {
-        if (!self.document_attached or
-            !validCoordinate(x) or !validCoordinate(y) or
-            !self.pointIsDraggable(x, y))
+    ) !PointerOutcome {
+        if (!self.document_attached or !validCoordinate(x) or !validCoordinate(y)) {
+            self.resetPointerSequence();
             return error.InvalidWindowChromeGesture;
-        try Platform.beginLivePointerDrag(
+        }
+        return Platform.handlePointerDown(
             &self.platform,
             services,
             self.window_id,
+            x,
+            y,
         );
-        return self.environment(services);
+    }
+
+    pub fn resetPointerSequence(self: *Capability) void {
+        Platform.resetPointerSequence(&self.platform);
     }
 
     pub fn current(
@@ -168,6 +179,7 @@ pub const Capability = struct {
     }
 
     pub fn disconnect(self: *Capability) void {
+        self.resetPointerSequence();
         self.document_attached = false;
         self.clearRegions();
     }
@@ -357,6 +369,98 @@ test "invalid chrome geometry cannot partially replace live regions" {
     try std.testing.expect(!capability.pointIsDraggable(20, 20));
 }
 
+test "window chrome sync preserves Windows pointer sequence for stable regions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var capability = Capability.init(1);
+    capability.document_attached = true;
+    capability.platform.first_press = .{
+        .tick_ms = 100,
+        .screen_point = .{ .x = 400, .y = 20 },
+        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
+    };
+    const first_press = capability.platform.first_press.?;
+    const regions = [_]Region{
+        .{ .x = 0, .y = 0, .width = 500, .height = 40, .exclusion = false },
+        .{ .x = 450, .y = 0, .width = 46, .height = 40, .exclusion = true },
+    };
+
+    _ = try capability.sync(.{}, 800, 600, &regions);
+    _ = try capability.sync(.{}, 800, 600, &regions);
+
+    try std.testing.expect(std.meta.eql(
+        first_press,
+        capability.platform.first_press.?,
+    ));
+}
+
+test "window chrome sync preserves Windows pointer sequence across changed and empty regions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var capability = Capability.init(1);
+    capability.document_attached = true;
+    capability.platform.first_press = .{
+        .tick_ms = 100,
+        .screen_point = .{ .x = 400, .y = 20 },
+        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
+    };
+    const first_press = capability.platform.first_press.?;
+    const initial = [_]Region{
+        .{ .x = 0, .y = 0, .width = 500, .height = 40, .exclusion = false },
+    };
+    const changed = [_]Region{
+        .{ .x = 0, .y = 0, .width = 600, .height = 40, .exclusion = false },
+        .{ .x = 550, .y = 0, .width = 46, .height = 40, .exclusion = true },
+    };
+
+    _ = try capability.sync(.{}, 800, 600, &initial);
+    _ = try capability.sync(.{}, 800, 600, &changed);
+    try std.testing.expect(std.meta.eql(
+        first_press,
+        capability.platform.first_press.?,
+    ));
+    _ = try capability.sync(.{}, 800, 600, &.{});
+    try std.testing.expect(std.meta.eql(
+        first_press,
+        capability.platform.first_press.?,
+    ));
+}
+
+test "invalid window chrome sync preserves regions and Windows pointer sequence" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var capability = Capability.init(1);
+    capability.document_attached = true;
+    capability.platform.first_press = .{
+        .tick_ms = 100,
+        .screen_point = .{ .x = 400, .y = 20 },
+        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
+    };
+    const first_press = capability.platform.first_press.?;
+    const valid = [_]Region{
+        .{ .x = 0, .y = 0, .width = 500, .height = 40, .exclusion = false },
+        .{ .x = 450, .y = 0, .width = 46, .height = 40, .exclusion = true },
+    };
+    _ = try capability.sync(.{}, 800, 600, &valid);
+
+    var invalid = valid;
+    invalid[1].x = 700;
+    try std.testing.expectError(
+        error.InvalidWindowChromeRegions,
+        capability.sync(.{}, 800, 600, &invalid),
+    );
+
+    try std.testing.expectEqualSlices(
+        Region,
+        &valid,
+        capability.regions[0..capability.region_count],
+    );
+    try std.testing.expect(std.meta.eql(
+        first_press,
+        capability.platform.first_press.?,
+    ));
+}
+
 test "disconnect clears document-owned regions without owning generation" {
     var capability = Capability.init(1);
     capability.document_attached = true;
@@ -364,4 +468,20 @@ test "disconnect clears document-owned regions without owning generation" {
     capability.disconnect();
     try std.testing.expect(!capability.document_attached);
     try std.testing.expectEqual(@as(usize, 0), capability.region_count);
+}
+
+test "macOS pointer path preserves Host region authorization before startWindowDrag" {
+    const macos = @import("system_webview_drag_region/macos.zig");
+    const Reject = struct {
+        fn point(_: *const anyopaque, _: f64, _: f64) bool {
+            return false;
+        }
+    };
+    var state = macos.State{};
+    try macos.prepareStartup(&state, &state, Reject.point);
+    try std.testing.expectEqual(
+        PointerOutcome.ignored,
+        try macos.handlePointerDown(&state, undefined, 1, 20, 20),
+    );
+    macos.deinit(&state);
 }

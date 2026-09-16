@@ -126,7 +126,7 @@ pub const Adapter = struct {
             .random_fn = random,
             .window_chrome_connect_fn = windowChromeConnect,
             .window_chrome_sync_fn = windowChromeSync,
-            .window_chrome_begin_drag_fn = windowChromeBeginDrag,
+            .window_chrome_pointer_fn = windowChromePointer,
             .window_chrome_control_fn = windowChromeControl,
             .window_chrome_disconnect_fn = windowChromeDisconnect,
             .now_fn = now,
@@ -405,18 +405,16 @@ pub const Adapter = struct {
         );
     }
 
-    fn windowChromeBeginDrag(
+    fn windowChromePointer(
         context: ?*anyopaque,
         window_id: native_sdk.platform.WindowId,
-        x: f64,
-        y: f64,
+        pointer: bridge_api.WindowChromePointer,
     ) anyerror!bridge_api.WindowChromePlatformEnvironment {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        return self.window.beginLivePointerDrag(
+        return self.window.handlePointer(
             self.platform_services orelse return error.RuntimeUnavailable,
             window_id,
-            x,
-            y,
+            pointer,
         );
     }
 

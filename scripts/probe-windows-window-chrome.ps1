@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('drag', 'resize', 'controls', 'close', 'minimize', 'activated')]
+    [ValidateSet('doubleclick', 'drag', 'resize', 'controls', 'close', 'minimize', 'activated')]
     [string]$Mode = 'drag'
 )
 
@@ -34,6 +34,12 @@ public static class MetaWorkChromeProbe {
 
     [DllImport("user32.dll")]
     public static extern bool IsZoomed(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetDoubleClickTime();
+
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int index);
 
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr window, int command);
@@ -81,6 +87,19 @@ function Invoke-MetaWorkClick([int]$x, [int]$y) {
     [MetaWorkChromeProbe]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
 
+function Invoke-MetaWorkTitleClick([int]$x, [int]$y) {
+    [MetaWorkChromeProbe]::SetCursorPos($x, $y) | Out-Null
+    [MetaWorkChromeProbe]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 80
+    [MetaWorkChromeProbe]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+}
+
+function Invoke-MetaWorkTitleDoubleClick([int]$x, [int]$y, [int]$gap) {
+    Invoke-MetaWorkTitleClick $x $y
+    Start-Sleep -Milliseconds $gap
+    Invoke-MetaWorkTitleClick $x $y
+}
+
 function Invoke-MetaWorkDrag([int]$x, [int]$y, [int]$deltaX, [int]$deltaY) {
     [MetaWorkChromeProbe]::SetCursorPos($x, $y) | Out-Null
     [MetaWorkChromeProbe]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
@@ -109,6 +128,70 @@ $window = $process.MainWindowHandle
 [MetaWorkChromeProbe]::SetForegroundWindow($window) | Out-Null
 Start-Sleep -Milliseconds 200
 $rect = Get-MetaWorkRect $window
+
+if ($Mode -eq 'doubleclick') {
+    $doubleClickTime = [int][MetaWorkChromeProbe]::GetDoubleClickTime()
+    $gap = [Math]::Max(30, [Math]::Min(100, [Math]::Floor($doubleClickTime / 4)))
+    $titleX = $rect.Left + [Math]::Min(600, ($rect.Right - $rect.Left) / 2)
+    $titleY = $rect.Top + 25
+    $contentY = $rect.Top + 100
+
+    Invoke-MetaWorkTitleClick $titleX $titleY
+    Start-Sleep -Milliseconds ($doubleClickTime + 100)
+    Invoke-MetaWorkTitleClick $titleX $titleY
+    Start-Sleep -Milliseconds 150
+    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'Titlebar presses outside GetDoubleClickTime were classified as a double click'
+    }
+    Invoke-MetaWorkTitleClick $titleX $contentY
+
+    $distance = [Math]::Max(
+        [MetaWorkChromeProbe]::GetSystemMetrics(36),
+        [MetaWorkChromeProbe]::GetSystemMetrics(37)
+    ) + 8
+    Invoke-MetaWorkTitleClick $titleX $titleY
+    Start-Sleep -Milliseconds $gap
+    Invoke-MetaWorkTitleClick ($titleX + $distance) $titleY
+    Start-Sleep -Milliseconds 150
+    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'Titlebar presses outside the system double-click rectangle were classified as a double click'
+    }
+    Invoke-MetaWorkTitleClick $titleX $contentY
+
+    Invoke-MetaWorkTitleClick $titleX $titleY
+    Start-Sleep -Milliseconds $gap
+    Invoke-MetaWorkTitleClick $titleX $contentY
+    Start-Sleep -Milliseconds $gap
+    Invoke-MetaWorkTitleClick $titleX $titleY
+    Start-Sleep -Milliseconds 120
+    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'A content-area pointer press did not reset the titlebar double-click sequence'
+    }
+    Start-Sleep -Milliseconds $gap
+    Invoke-MetaWorkTitleClick $titleX $titleY
+    Start-Sleep -Milliseconds 350
+    if (-not [MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'Renderer titlebar double click did not maximize the Native window'
+    }
+
+    $rect = Get-MetaWorkRect $window
+    $titleX = $rect.Left + (($rect.Right - $rect.Left) / 2)
+    $titleY = $rect.Top + 25
+    Invoke-MetaWorkTitleClick $titleX $titleY
+    Start-Sleep -Milliseconds 120
+    if (-not [MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'A third titlebar click toggled the Native window again'
+    }
+    Invoke-MetaWorkTitleClick $titleX ($rect.Top + 100)
+    Invoke-MetaWorkTitleDoubleClick $titleX $titleY $gap
+    Start-Sleep -Milliseconds 350
+    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
+        throw 'Renderer titlebar double click did not restore the Native window'
+    }
+
+    Write-Output 'doubleClickMaximize=true doubleClickRestore=true timeoutRejected=true distanceRejected=true contentReset=true tripleClickStable=true'
+    return
+}
 
 if ($Mode -eq 'resize') {
     $originalWidth = $rect.Right - $rect.Left

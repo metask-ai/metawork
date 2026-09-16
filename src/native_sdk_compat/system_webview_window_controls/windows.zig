@@ -1,4 +1,4 @@
-//! Native SDK 0.9.2 System WebView window-control compatibility for Windows.
+//! Native SDK 0.10.1 System WebView window-control compatibility for Windows.
 //!
 //! The SDK does not expose maximize/restore, user-close, or maximized state.
 //! These capabilities consume the one shared startup-window binding but retain

@@ -219,25 +219,31 @@ export function installWindowChromeBridge() {
     )
       return;
     const requestGeneration = generation;
-    const activeCandidate = candidate();
-    const target = event.target instanceof Element ? event.target : null;
-    const bounds = activeCandidate?.getBoundingClientRect();
-    if (
-      !activeCandidate ||
-      !bounds ||
-      !target ||
-      event.clientX < bounds.left ||
-      event.clientX >= bounds.right ||
-      event.clientY < bounds.top ||
-      event.clientY >= bounds.bottom ||
-      target.closest(exclusionSelector)
-    )
-      return;
     void bridge
-      .invoke(commands.windowChromeBeginDrag, {
+      .invoke(commands.windowChromePointer, {
         generation: requestGeneration,
+        phase: "down",
         x: event.clientX,
         y: event.clientY,
+      })
+      .then(decodeWindowChromeEnvironment)
+      .then((value) => {
+        if (
+          generation === requestGeneration &&
+          value.generation === requestGeneration
+        )
+          applyEnvironment(value);
+      })
+      .catch(() => undefined);
+  }
+
+  function onWindowBlur() {
+    if (!environment?.livePointerDrag || !generation) return;
+    const requestGeneration = generation;
+    void bridge
+      .invoke(commands.windowChromePointer, {
+        generation: requestGeneration,
+        phase: "reset",
       })
       .then(decodeWindowChromeEnvironment)
       .then((value) => {
@@ -310,6 +316,7 @@ export function installWindowChromeBridge() {
   window.addEventListener("pagehide", onPageHide, {
     once: true,
   });
+  window.addEventListener("blur", onWindowBlur);
   document.addEventListener("pointerdown", onPointerDown, true);
   document.addEventListener("click", onControlClick, true);
 
@@ -319,6 +326,7 @@ export function installWindowChromeBridge() {
     mutationObserver.disconnect();
     unsubscribeResize();
     window.removeEventListener("pagehide", onPageHide);
+    window.removeEventListener("blur", onWindowBlur);
     document.removeEventListener("pointerdown", onPointerDown, true);
     document.removeEventListener("click", onControlClick, true);
     void disconnect(bridge);

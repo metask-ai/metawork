@@ -93,6 +93,21 @@ try {
         "-ProcessId",
         String(app.pid),
         "-Mode",
+        "doubleclick",
+      ],
+      { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+    );
+    await execFileAsync(
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        hitTestProbe,
+        "-ProcessId",
+        String(app.pid),
+        "-Mode",
         "drag",
       ],
       { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
@@ -161,7 +176,7 @@ try {
   process.stdout.write(
     resizeSessionOnly
       ? "Windows resize session, Renderer controls, close-policy hide/reopen, and clean Runtime shutdown passed.\n"
-      : "Windows Renderer controls, close-policy hide/reopen, ordinary drag, maximized drag restore, and clean Runtime shutdown passed.\n",
+      : "Windows titlebar double-click maximize/restore, Renderer controls, close-policy hide/reopen, ordinary drag, maximized drag restore, and clean Runtime shutdown passed.\n",
   );
 } catch (error) {
   process.stderr.write(output);

@@ -451,11 +451,25 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   );
   assert.match(chromeBridge, /commands\.windowChromeConnect/);
   assert.match(chromeBridge, /commands\.windowChromeSync/);
+  assert.match(chromeBridge, /commands\.windowChromePointer/);
   assert.match(chromeBridge, /commands\.windowChromeControl/);
   assert.match(chromeBridge, /commands\.windowChromeDisconnect/);
   assert.match(chromeBridge, /decodeWindowChromeEnvironment/);
   assert.match(chromeBridge, /document\.querySelectorAll\(exclusionSelector\)/);
   assert.match(chromeBridge, /bridge\.on\("resize", scheduleSync\)/);
+  assert.match(
+    chromeBridge,
+    /window\.addEventListener\("blur", onWindowBlur\)/,
+  );
+  const pointerHandler = chromeBridge.match(
+    /function onPointerDown\([\s\S]*?\n  \}/,
+  )?.[0];
+  assert.ok(pointerHandler);
+  assert.match(pointerHandler, /phase: "down"/);
+  assert.doesNotMatch(
+    pointerHandler,
+    /candidate\(|closest\(exclusionSelector\)/,
+  );
   assert.match(
     chromeBridge,
     /async function sync\(\)[\s\S]*commands\.windowChromeSync[\s\S]*generation === requestGeneration[\s\S]*value\.generation === requestGeneration/,
