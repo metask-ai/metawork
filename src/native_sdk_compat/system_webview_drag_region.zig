@@ -132,7 +132,6 @@ pub const Capability = struct {
         viewport_height: f64,
         regions: []const Region,
     ) !Environment {
-        self.resetPointerSequence();
         if (!validExtent(viewport_width) or !validExtent(viewport_height))
             return error.InvalidWindowChromeGeometry;
         const chrome = services.windowChrome(self.window_id);
@@ -368,6 +367,98 @@ test "invalid chrome geometry cannot partially replace live regions" {
     capability.document_attached = true;
     try std.testing.expect(capability.pointIsDraggable(200, 20));
     try std.testing.expect(!capability.pointIsDraggable(20, 20));
+}
+
+test "window chrome sync preserves Windows pointer sequence for stable regions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var capability = Capability.init(1);
+    capability.document_attached = true;
+    capability.platform.first_press = .{
+        .tick_ms = 100,
+        .screen_point = .{ .x = 400, .y = 20 },
+        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
+    };
+    const first_press = capability.platform.first_press.?;
+    const regions = [_]Region{
+        .{ .x = 0, .y = 0, .width = 500, .height = 40, .exclusion = false },
+        .{ .x = 450, .y = 0, .width = 46, .height = 40, .exclusion = true },
+    };
+
+    _ = try capability.sync(.{}, 800, 600, &regions);
+    _ = try capability.sync(.{}, 800, 600, &regions);
+
+    try std.testing.expect(std.meta.eql(
+        first_press,
+        capability.platform.first_press.?,
+    ));
+}
+
+test "window chrome sync preserves Windows pointer sequence across changed and empty regions" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var capability = Capability.init(1);
+    capability.document_attached = true;
+    capability.platform.first_press = .{
+        .tick_ms = 100,
+        .screen_point = .{ .x = 400, .y = 20 },
+        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
+    };
+    const first_press = capability.platform.first_press.?;
+    const initial = [_]Region{
+        .{ .x = 0, .y = 0, .width = 500, .height = 40, .exclusion = false },
+    };
+    const changed = [_]Region{
+        .{ .x = 0, .y = 0, .width = 600, .height = 40, .exclusion = false },
+        .{ .x = 550, .y = 0, .width = 46, .height = 40, .exclusion = true },
+    };
+
+    _ = try capability.sync(.{}, 800, 600, &initial);
+    _ = try capability.sync(.{}, 800, 600, &changed);
+    try std.testing.expect(std.meta.eql(
+        first_press,
+        capability.platform.first_press.?,
+    ));
+    _ = try capability.sync(.{}, 800, 600, &.{});
+    try std.testing.expect(std.meta.eql(
+        first_press,
+        capability.platform.first_press.?,
+    ));
+}
+
+test "invalid window chrome sync preserves regions and Windows pointer sequence" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var capability = Capability.init(1);
+    capability.document_attached = true;
+    capability.platform.first_press = .{
+        .tick_ms = 100,
+        .screen_point = .{ .x = 400, .y = 20 },
+        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
+    };
+    const first_press = capability.platform.first_press.?;
+    const valid = [_]Region{
+        .{ .x = 0, .y = 0, .width = 500, .height = 40, .exclusion = false },
+        .{ .x = 450, .y = 0, .width = 46, .height = 40, .exclusion = true },
+    };
+    _ = try capability.sync(.{}, 800, 600, &valid);
+
+    var invalid = valid;
+    invalid[1].x = 700;
+    try std.testing.expectError(
+        error.InvalidWindowChromeRegions,
+        capability.sync(.{}, 800, 600, &invalid),
+    );
+
+    try std.testing.expectEqualSlices(
+        Region,
+        &valid,
+        capability.regions[0..capability.region_count],
+    );
+    try std.testing.expect(std.meta.eql(
+        first_press,
+        capability.platform.first_press.?,
+    ));
 }
 
 test "disconnect clears document-owned regions without owning generation" {
