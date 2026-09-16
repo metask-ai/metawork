@@ -9,3 +9,7 @@ else
         pub fn attach(_: *@This(), _: startup_window.Binding, _: *anyopaque, _: *const fn (*anyopaque) void) !void {}
         pub fn deinit(_: *@This()) void {}
     };
+
+test {
+    _ = Capability;
+}

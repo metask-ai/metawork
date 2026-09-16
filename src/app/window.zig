@@ -290,6 +290,7 @@ test {
     _ = drag_region;
     _ = startup_window;
     _ = window_controls;
+    _ = resize;
 }
 
 test "Windows packaged tray icon resolves from the executable's package root" {
