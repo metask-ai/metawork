@@ -891,6 +891,32 @@ export const enUS = {
   "settings.models": "Models",
   "settings.providers": "Providers",
   "settings.general_basics": "Basics",
+  "settings.automatic_workspace.title": "Automatic Workspace location",
+  "settings.automatic_workspace.help":
+    "New automatic workspaces use a new random folder inside this location. Existing tasks and conversations do not move.",
+  "settings.automatic_workspace.system_default": "System default",
+  "settings.automatic_workspace.location_unavailable": "Location unavailable",
+  "settings.automatic_workspace.choose": "Choose folder…",
+  "settings.automatic_workspace.choosing": "Choosing…",
+  "settings.automatic_workspace.reset": "Use system default",
+  "settings.automatic_workspace.resetting": "Resetting…",
+  "settings.automatic_workspace.retry": "Retry",
+  "settings.automatic_workspace.retrying": "Retrying…",
+  "settings.automatic_workspace.command_failed":
+    "The location could not be changed. Try again.",
+  "settings.automatic_workspace.health.ready": "",
+  "settings.automatic_workspace.health.path_unavailable":
+    "This folder is unavailable. New automatic workspaces are paused until you retry or choose another folder.",
+  "settings.automatic_workspace.health.persistence_unavailable":
+    "Automatic Workspace location settings are unavailable in this installation.",
+  "settings.automatic_workspace.health.read_failed":
+    "MetaWork could not read the saved location. Choose a folder or restore the system default.",
+  "settings.automatic_workspace.health.corrupt":
+    "The saved location setting is invalid. Choose a folder or restore the system default.",
+  "settings.automatic_workspace.health.write_failed":
+    "The new choice could not be saved. The previously saved location remains active.",
+  "settings.automatic_workspace.health.outcome_unknown":
+    "MetaWork cannot confirm whether the location was saved. New automatic workspaces are paused; choose a folder or restore the system default.",
   "settings.account_profile": "Account information",
   "settings.account_usage": "Account usage",
   "settings.account_usage_scope":

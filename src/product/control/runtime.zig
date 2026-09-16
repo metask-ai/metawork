@@ -301,6 +301,9 @@ pub const AutomaticWorkspaceRootConfigurationView = struct {
     mode: ?product_workspace.AutomaticRootConfigurationMode,
     canonical_root: ?[]const u8,
     health: product_workspace.AutomaticRootConfigurationHealth,
+    can_choose: bool,
+    can_reset: bool,
+    can_retry: bool,
 };
 
 pub const SkillManagementHealth = skill_runtime.ManagementHealth;
@@ -2066,14 +2069,37 @@ pub const Runtime = struct {
     pub fn automaticWorkspaceRootConfiguration(
         self: *const Runtime,
     ) AutomaticWorkspaceRootConfigurationView {
+        const configuration = self.automatic_root_configuration.configuration;
+        const canonical_root = switch (self.automatic_root_configuration.health) {
+            .ready => self.workspace.automaticRootPath(),
+            .path_unavailable, .write_failed => self.automatic_root_configuration.committedRoot(
+                self.automatic_workspace_system_root,
+            ),
+            .persistence_unavailable,
+            .read_failed,
+            .corrupt,
+            .outcome_unknown,
+            => null,
+        };
+        const store_available = self.automatic_workspace_configuration_store != null and
+            !self.shutting_down;
         return .{
             .generation = self.automatic_root_configuration.generation,
-            .mode = if (self.automatic_root_configuration.configuration) |configuration|
-                configuration.mode
+            .mode = if (configuration) |value|
+                value.mode
             else
                 null,
-            .canonical_root = self.workspace.automaticRootPath(),
+            .canonical_root = canonical_root,
             .health = self.automatic_root_configuration.health,
+            .can_choose = store_available,
+            .can_reset = store_available and
+                self.automatic_workspace_system_root != null and
+                (configuration == null or
+                    configuration.?.mode != .system_default or
+                    self.automatic_root_configuration.health != .ready),
+            .can_retry = !self.shutting_down and
+                self.automatic_root_configuration.health == .path_unavailable and
+                canonical_root != null,
         };
     }
 
@@ -5055,6 +5081,9 @@ pub const Runtime = struct {
         try self.writeModels(&writer);
         writer.writeAll(",\"newTaskAdmission\":") catch return error.SnapshotTooLarge;
         try self.writeNewTaskAdmission(&writer);
+        writer.writeAll(",\"automaticWorkspaceRoot\":") catch
+            return error.SnapshotTooLarge;
+        try self.writeAutomaticWorkspaceRootConfiguration(&writer);
         writer.writeAll(",\"skillCatalog\":") catch
             return error.SnapshotTooLarge;
         try skill_runtime.Runtime.writeCatalogProjection(
@@ -5086,6 +5115,39 @@ pub const Runtime = struct {
         ) catch |err| return @errorCast(err);
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
         return writer.buffered();
+    }
+
+    fn writeAutomaticWorkspaceRootConfiguration(
+        self: *const Runtime,
+        writer: *std.Io.Writer,
+    ) Error!void {
+        const view = self.automaticWorkspaceRootConfiguration();
+        const redacted = if (view.canonical_root) |root|
+            self.containsKnownCredential(root)
+        else
+            false;
+        writer.print(
+            "{{\"generation\":\"{d}\",\"mode\":",
+            .{view.generation},
+        ) catch return error.SnapshotTooLarge;
+        if (view.mode) |mode|
+            writer.print("\"{s}\"", .{@tagName(mode)}) catch
+                return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"canonicalRoot\":") catch
+            return error.SnapshotTooLarge;
+        if (view.canonical_root) |root|
+            try self.projectedJsonValueWithKnownCredentials(writer, root)
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.print(",\"health\":\"{s}\",\"redacted\":{},\"canChoose\":{},\"canReset\":{},\"canRetry\":{}}}", .{
+            @tagName(view.health),
+            redacted,
+            view.can_choose,
+            view.can_reset,
+            view.can_retry,
+        }) catch return error.SnapshotTooLarge;
     }
 
     fn writeScheduleViewJson(

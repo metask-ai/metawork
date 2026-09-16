@@ -69,6 +69,7 @@ import {
   decodeAttachmentReleaseResult,
   decodeAttachmentReceiveResult,
   decodeAttachmentReceiveAcceptance,
+  decodeAutomaticWorkspaceRootMutationResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -281,6 +282,32 @@ export class BridgeClient {
     // Host work. Their lifetime must not be confused with a wedged command.
     return decodeWorkspaceChoice(
       await this.bridge().invoke(commands.chooseWorkspace, {}),
+    );
+  }
+
+  async chooseAutomaticWorkspaceRoot(expectedGeneration: string) {
+    // Native directory pickers are user-controlled modal interactions, so
+    // their lifetime must not be mistaken for a wedged Host command.
+    return decodeAutomaticWorkspaceRootMutationResult(
+      await this.bridge().invoke(commands.chooseAutomaticWorkspaceRoot, {
+        expectedGeneration,
+      }),
+    );
+  }
+
+  async resetAutomaticWorkspaceRoot(expectedGeneration: string) {
+    return decodeAutomaticWorkspaceRootMutationResult(
+      await this.invoke(commands.resetAutomaticWorkspaceRoot, {
+        expectedGeneration,
+      }),
+    );
+  }
+
+  async retryAutomaticWorkspaceRoot(expectedGeneration: string) {
+    return decodeAutomaticWorkspaceRootMutationResult(
+      await this.invoke(commands.retryAutomaticWorkspaceRoot, {
+        expectedGeneration,
+      }),
     );
   }
 

@@ -73,6 +73,11 @@ pub const Platform = struct {
         native_sdk.platform.OpenDialogOptions,
         []u8,
     ) anyerror!native_sdk.platform.OpenDialogResult,
+    canonicalize_directory_fn: *const fn (
+        ?*anyopaque,
+        []const u8,
+        []u8,
+    ) anyerror![]const u8,
     random_fn: *const fn (?*anyopaque, []u8) bool = unavailableRandom,
     window_chrome_connect_fn: *const fn (
         ?*anyopaque,
@@ -305,6 +310,9 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
+            .{ .name = commands.choose_automatic_workspace_root, .function = chooseAutomaticWorkspaceRoot },
+            .{ .name = commands.reset_automatic_workspace_root, .function = resetAutomaticWorkspaceRoot },
+            .{ .name = commands.retry_automatic_workspace_root, .function = retryAutomaticWorkspaceRoot },
             .{ .name = commands.refresh_workspace_skill_catalog, .function = refreshWorkspaceSkillCatalog },
             .{ .name = commands.refresh_skill_catalog, .function = refreshSkillCatalog },
             .{ .name = commands.set_skill_enabled, .function = setSkillEnabled },
@@ -2277,6 +2285,95 @@ pub const Dispatcher = struct {
             "{{\"selected\":true,\"workspaceId\":\"{d}\"}}",
             .{workspace_id},
         );
+    }
+
+    fn chooseAutomaticWorkspaceRoot(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        _: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        const expected_generation = try parseAutomaticWorkspaceRootMutation(
+            invocation.request.payload,
+        );
+        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
+        const selected = try self.platform.show_open_dialog_fn(
+            self.platform.context,
+            .{
+                .title = "Choose the Automatic Workspace location",
+                .allow_directories = true,
+                .allow_multiple = false,
+            },
+            &dialog_storage,
+        );
+        if (selected.count == 0) return "{\"outcome\":\"cancelled\"}";
+        if (selected.count != 1 or selected.paths.len == 0 or
+            selected.paths.len > workspace_path_capacity)
+            return error.InvalidWorkspace;
+        var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const canonical = try self.platform.canonicalize_directory_fn(
+            self.platform.context,
+            selected.paths,
+            &canonical_storage,
+        );
+        try (try self.requireProductControl()).chooseAutomaticWorkspaceRoot(
+            expected_generation,
+            canonical,
+        );
+        self.notifyCommitted();
+        return "{\"outcome\":\"applied\"}";
+    }
+
+    fn resetAutomaticWorkspaceRoot(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        _: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        const expected_generation = try parseAutomaticWorkspaceRootMutation(
+            invocation.request.payload,
+        );
+        try (try self.requireProductControl()).resetAutomaticWorkspaceRoot(
+            expected_generation,
+        );
+        self.notifyCommitted();
+        return "{\"outcome\":\"applied\"}";
+    }
+
+    fn retryAutomaticWorkspaceRoot(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        _: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        const expected_generation = try parseAutomaticWorkspaceRootMutation(
+            invocation.request.payload,
+        );
+        try (try self.requireProductControl()).retryAutomaticWorkspaceRoot(
+            expected_generation,
+        );
+        self.notifyCommitted();
+        return "{\"outcome\":\"applied\"}";
+    }
+
+    fn parseAutomaticWorkspaceRootMutation(payload: []const u8) !u64 {
+        var parsed = try handlers.parsePayload(
+            handlers.AutomaticWorkspaceRootMutation,
+            payload,
+        );
+        defer parsed.deinit();
+        const generation = try handlers.parseWireId(parsed.value.expectedGeneration);
+        if (generation == 0) return error.InvalidBridgeId;
+        return generation;
     }
 
     fn createTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -5360,6 +5457,7 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
         .on_main_thread_fn = Host.main,
         // This test dispatches only the byte-input commands, never OS effects.
         .show_open_dialog_fn = undefined,
+        .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_sync_fn = undefined,
         .window_chrome_begin_drag_fn = undefined,
@@ -5417,6 +5515,160 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
     try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
 }
 
+test "Automatic Workspace root Bridge keeps paths Host-only and mutates by generation" {
+    const fixture = @import("lifecycle_fixture");
+    const Harness = struct {
+        selected_path: []const u8,
+        cancel_next: bool = false,
+
+        fn wake(_: ?*anyopaque) anyerror!void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
+        fn startTimer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
+        fn cancelTimer(_: ?*anyopaque, _: u64) anyerror!void {}
+        fn open(
+            context: ?*anyopaque,
+            options: native_sdk.platform.OpenDialogOptions,
+            output: []u8,
+        ) anyerror!native_sdk.platform.OpenDialogResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expect(options.allow_directories);
+            try std.testing.expect(!options.allow_multiple);
+            if (self.cancel_next) {
+                self.cancel_next = false;
+                return .{ .paths = "", .count = 0 };
+            }
+            @memcpy(output[0..self.selected_path.len], self.selected_path);
+            return .{ .paths = output[0..self.selected_path.len], .count = 1 };
+        }
+        fn canonicalizeDirectory(
+            _: ?*anyopaque,
+            path: []const u8,
+            output: []u8,
+        ) anyerror![]const u8 {
+            @memcpy(output[0..path.len], path);
+            return output[0..path.len];
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn onMainThread(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "default", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "custom", .default_dir);
+    var default_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var custom_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const default_len = try tmp.dir.realPathFile(std.testing.io, "default", &default_storage);
+    const custom_len = try tmp.dir.realPathFile(std.testing.io, "custom", &custom_storage);
+    const default_root = default_storage[0..default_len];
+    const custom_root = custom_storage[0..custom_len];
+    var store: product_control.AutomaticWorkspaceRootConfigurationFileStore = .{
+        .io = std.testing.io,
+        .dir = tmp.dir,
+    };
+
+    fixture.fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    var configuration = fixture.productControlConfiguration();
+    configuration.directories = .{
+        .automatic_workspace_system_root = default_root,
+        .automatic_workspace_configuration_store = &store,
+    };
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
+        configuration,
+    );
+    var harness: Harness = .{ .selected_path = custom_root };
+    var dispatcher = try Dispatcher.init(
+        std.testing.allocator,
+        &workbench,
+        undefined,
+        undefined,
+        .{
+            .context = &harness,
+            .wake_fn = Harness.wake,
+            .emit_fn = Harness.emit,
+            .start_timer_fn = Harness.startTimer,
+            .cancel_timer_fn = Harness.cancelTimer,
+            .show_open_dialog_fn = Harness.open,
+            .canonicalize_directory_fn = Harness.canonicalizeDirectory,
+            .window_chrome_connect_fn = undefined,
+            .window_chrome_sync_fn = undefined,
+            .window_chrome_begin_drag_fn = undefined,
+            .window_chrome_control_fn = undefined,
+            .window_chrome_disconnect_fn = undefined,
+            .now_fn = Harness.now,
+            .on_main_thread_fn = Harness.onMainThread,
+        },
+        .{},
+        3,
+    );
+    defer {
+        dispatcher.deinit();
+        workbench.shutdownExecutor();
+        runtime.shutdown() catch unreachable;
+        workbench.deinit();
+        runtime.deinit();
+    }
+    const native = dispatcher.register(@import("policy.zig").product(.release));
+    const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    var output: [4096]u8 = undefined;
+    const connected = native.dispatch(
+        "{\"id\":\"connect\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}",
+        source,
+        &output,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, connected, "\"generation\":\"1\"") != null);
+
+    for ([_][]const u8{
+        "{\"id\":\"bad-choose\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\",\"path\":\"/tmp/leak\"}}",
+        "{\"id\":\"bad-reset\",\"command\":\"metawork.workspaces.resetAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"0\"}}",
+        "{\"id\":\"bad-retry\",\"command\":\"metawork.workspaces.retryAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\",\"extra\":true}}",
+    }) |request| {
+        const response = native.dispatch(request, source, &output);
+        try std.testing.expect(std.mem.indexOf(u8, response, "handler_failed") != null);
+    }
+    try std.testing.expectEqual(@as(u64, 1), workbench.automaticWorkspaceRootConfiguration().generation);
+
+    harness.cancel_next = true;
+    const cancelled = native.dispatch(
+        "{\"id\":\"cancel\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\"}}",
+        source,
+        &output,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, cancelled, "\"outcome\":\"cancelled\"") != null);
+    try std.testing.expectEqual(@as(u64, 1), workbench.automaticWorkspaceRootConfiguration().generation);
+
+    const chosen = native.dispatch(
+        "{\"id\":\"choose\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{\"expectedGeneration\":\"1\"}}",
+        source,
+        &output,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, chosen, "\"outcome\":\"applied\"") != null);
+    const custom_view = workbench.automaticWorkspaceRootConfiguration();
+    try std.testing.expectEqualStrings(custom_root, custom_view.canonical_root.?);
+    try std.testing.expectEqual(product_control.AutomaticWorkspaceRootConfigurationMode.custom, custom_view.mode.?);
+
+    var reset_request_storage: [256]u8 = undefined;
+    const reset_request = try std.fmt.bufPrint(
+        &reset_request_storage,
+        "{{\"id\":\"reset\",\"command\":\"metawork.workspaces.resetAutomaticRoot\",\"payload\":{{\"expectedGeneration\":\"{d}\"}}}}",
+        .{custom_view.generation},
+    );
+    const reset = native.dispatch(reset_request, source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, reset, "\"outcome\":\"applied\"") != null);
+    const reset_view = workbench.automaticWorkspaceRootConfiguration();
+    try std.testing.expectEqualStrings(default_root, reset_view.canonical_root.?);
+    try std.testing.expectEqual(product_control.AutomaticWorkspaceRootConfigurationMode.system_default, reset_view.mode.?);
+}
+
 test "Dispatcher validates authority before domain calls and preserves committed state on response loss" {
     const fixture = @import("lifecycle_fixture");
     const Harness = struct {
@@ -5450,6 +5702,15 @@ test "Dispatcher validates authority before domain calls and preserves committed
             const path = "/tmp";
             @memcpy(output[0..path.len], path);
             return .{ .paths = output[0..path.len], .count = 1 };
+        }
+
+        fn canonicalizeDirectory(
+            _: ?*anyopaque,
+            path: []const u8,
+            output: []u8,
+        ) anyerror![]const u8 {
+            @memcpy(output[0..path.len], path);
+            return output[0..path.len];
         }
 
         fn chromeEnvironment() WindowChromePlatformEnvironment {
@@ -5623,6 +5884,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .start_timer_fn = Harness.startTimer,
             .cancel_timer_fn = Harness.cancelTimer,
             .show_open_dialog_fn = Harness.open,
+            .canonicalize_directory_fn = Harness.canonicalizeDirectory,
             .window_chrome_connect_fn = Harness.connectWindowChrome,
             .window_chrome_sync_fn = Harness.syncWindowChrome,
             .window_chrome_begin_drag_fn = Harness.beginWindowChromeDrag,

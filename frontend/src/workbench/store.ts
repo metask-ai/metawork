@@ -31,6 +31,16 @@ export const initialWorkbenchState: WorkbenchState = {
   snapshotReceivedAt: null,
   snapshot: {
     revision: "0",
+    automaticWorkspaceRoot: {
+      generation: "1",
+      mode: null,
+      canonicalRoot: null,
+      health: "persistence_unavailable",
+      redacted: false,
+      canChoose: false,
+      canReset: false,
+      canRetry: false,
+    },
     capabilities: {
       taskHistoryPersistence: false,
       taskHistoryPersistenceHealth: "unavailable",

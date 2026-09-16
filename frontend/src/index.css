@@ -968,10 +968,49 @@ summary::-webkit-details-marker {
 }
 
 .settings-row label,
+.settings-row-label,
 .settings-field label {
   color: var(--settings-ink);
   font-size: var(--text-body);
   font-weight: 700;
+}
+
+.settings-automatic-root-copy {
+  min-width: 0;
+}
+
+.settings-automatic-root-location {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 10px;
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid var(--settings-line);
+  border-radius: 6px;
+  color: var(--settings-ink);
+  background: var(--ui-surface-panel-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-automatic-root-actions {
+  display: flex;
+  max-width: 320px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-row p.settings-automatic-root-health,
+.settings-row p.settings-automatic-root-error {
+  color: var(--ui-content-warning);
+}
+
+.settings-row p.settings-automatic-root-error {
+  color: var(--ui-content-error);
 }
 
 .settings-row p,
@@ -3092,6 +3131,11 @@ button.run-process-tool:hover {
   .settings-row {
     grid-template-columns: 1fr;
     gap: 12px;
+  }
+
+  .settings-automatic-root-actions {
+    max-width: none;
+    justify-content: flex-start;
   }
 
   .new-task-permission {

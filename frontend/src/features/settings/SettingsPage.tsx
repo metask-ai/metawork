@@ -5,6 +5,7 @@ import type {
   BuiltinProviderId,
   ModelsView,
   Protocol,
+  WorkbenchSnapshot,
 } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
@@ -61,6 +62,8 @@ type CustomModelRemoval = CustomProviderRemoval & {
 type CustomProviderCredentialEdit = CustomProviderRemoval & {
   apiKey: string;
 };
+type AutomaticWorkspaceRootAction = "choose" | "reset" | "retry";
+type AutomaticWorkspaceRootMutationOutcome = "applied" | "cancelled" | false;
 
 const customProviderBaseUrlExamples: Record<Protocol, string> = {
   openai_responses: "https://api.openai.com/v1",
@@ -174,6 +177,7 @@ function customModelTestStatusLabel(
 export function SettingsPage({
   account,
   models,
+  automaticWorkspaceRoot,
   customProviderCapabilities,
   focusTarget,
   initialSection = "general",
@@ -184,6 +188,9 @@ export function SettingsPage({
   onBack,
   onRefresh,
   onResetModels,
+  onChooseAutomaticWorkspaceRoot,
+  onResetAutomaticWorkspaceRoot,
+  onRetryAutomaticWorkspaceRoot,
   onCancel,
   onSelectApiKey,
   onSelectModel,
@@ -205,6 +212,7 @@ export function SettingsPage({
 }: {
   account: AccountView;
   models: ModelsView;
+  automaticWorkspaceRoot: WorkbenchSnapshot["automaticWorkspaceRoot"];
   customProviderCapabilities: {
     management: boolean;
     secretCapture: boolean;
@@ -219,6 +227,15 @@ export function SettingsPage({
   onBack: () => void;
   onRefresh: () => void;
   onResetModels: () => Promise<boolean>;
+  onChooseAutomaticWorkspaceRoot: (
+    expectedGeneration: string,
+  ) => Promise<AutomaticWorkspaceRootMutationOutcome>;
+  onResetAutomaticWorkspaceRoot: (
+    expectedGeneration: string,
+  ) => Promise<AutomaticWorkspaceRootMutationOutcome>;
+  onRetryAutomaticWorkspaceRoot: (
+    expectedGeneration: string,
+  ) => Promise<AutomaticWorkspaceRootMutationOutcome>;
   onCancel: () => void;
   onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
@@ -313,6 +330,12 @@ export function SettingsPage({
   const [customProviderCredentialEdit, setCustomProviderCredentialEdit] =
     useState<CustomProviderCredentialEdit | null>(null);
   const [mutatingCustomProvider, setMutatingCustomProvider] = useState(false);
+  const [automaticRootPending, setAutomaticRootPending] = useState<{
+    action: AutomaticWorkspaceRootAction;
+    generation: string;
+  } | null>(null);
+  const [automaticRootMutationFailed, setAutomaticRootMutationFailed] =
+    useState(false);
   const content = useRef<HTMLDivElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
   const generalHeading = useRef<HTMLHeadingElement>(null);
@@ -321,6 +344,11 @@ export function SettingsPage({
   const providersHeading = useRef<HTMLHeadingElement>(null);
   const signOut = useRef<HTMLButtonElement>(null);
   const signOutCancel = useRef<HTMLButtonElement>(null);
+  const automaticRootChooseButton = useRef<HTMLButtonElement>(null);
+  const automaticRootResetButton = useRef<HTMLButtonElement>(null);
+  const automaticRootRetryButton = useRef<HTMLButtonElement>(null);
+  const automaticRootGeneration = useRef(automaticWorkspaceRoot.generation);
+  automaticRootGeneration.current = automaticWorkspaceRoot.generation;
   const metaskProvider = models.providers.find(
     (provider) => provider.id === "metask",
   );
@@ -682,6 +710,71 @@ export function SettingsPage({
     );
     return () => window.cancelAnimationFrame(frame);
   }, [confirmSignOut]);
+
+  useEffect(() => {
+    if (
+      !automaticRootPending ||
+      automaticRootPending.generation === automaticWorkspaceRoot.generation
+    )
+      return;
+    const action = automaticRootPending.action;
+    setAutomaticRootPending(null);
+    setAutomaticRootMutationFailed(false);
+    restoreAutomaticRootFocus(action);
+  }, [automaticWorkspaceRoot.generation, automaticRootPending]);
+
+  function restoreAutomaticRootFocus(action: AutomaticWorkspaceRootAction) {
+    const origin =
+      action === "choose"
+        ? automaticRootChooseButton
+        : action === "reset"
+          ? automaticRootResetButton
+          : automaticRootRetryButton;
+    window.requestAnimationFrame(() =>
+      (
+        origin.current ??
+        automaticRootChooseButton.current ??
+        automaticRootResetButton.current ??
+        automaticRootRetryButton.current
+      )?.focus(),
+    );
+  }
+
+  async function mutateAutomaticWorkspaceRoot(
+    action: AutomaticWorkspaceRootAction,
+  ) {
+    if (automaticRootPending) return;
+    const generation = automaticWorkspaceRoot.generation;
+    setAutomaticRootMutationFailed(false);
+    setAutomaticRootPending({ action, generation });
+    const invoke =
+      action === "choose"
+        ? onChooseAutomaticWorkspaceRoot
+        : action === "reset"
+          ? onResetAutomaticWorkspaceRoot
+          : onRetryAutomaticWorkspaceRoot;
+    let outcome: AutomaticWorkspaceRootMutationOutcome;
+    try {
+      outcome = await invoke(generation);
+    } catch {
+      outcome = false;
+    }
+    // A canonical refresh can win the race with a lost/late command result.
+    // Once generation advances, that Snapshot is authoritative for both the
+    // value and the action state; never paint a stale local failure over it.
+    if (automaticRootGeneration.current !== generation) return;
+    if (outcome === "applied") return;
+    setAutomaticRootPending(null);
+    setAutomaticRootMutationFailed(outcome === false);
+    restoreAutomaticRootFocus(action);
+  }
+
+  const automaticRootDisplay =
+    automaticWorkspaceRoot.mode === "system_default"
+      ? t("settings.automatic_workspace.system_default")
+      : (automaticWorkspaceRoot.canonicalRoot ??
+        t("settings.automatic_workspace.location_unavailable"));
+  const automaticRootHasAttention = automaticWorkspaceRoot.health !== "ready";
 
   useEffect(() => {
     if (customProviderCapabilities.secretCapture) return;
@@ -1101,6 +1194,85 @@ export function SettingsPage({
                       triggerClassName="settings-control settings-control-compact"
                       onValueChange={(value) => setLocale(value as Locale)}
                     />
+                  </div>
+                  <div className="settings-row settings-automatic-root-row">
+                    <div className="settings-automatic-root-copy">
+                      <span className="settings-row-label">
+                        {t("settings.automatic_workspace.title")}
+                      </span>
+                      <p>{t("settings.automatic_workspace.help")}</p>
+                      <code
+                        className="settings-automatic-root-location"
+                        title={automaticRootDisplay}
+                      >
+                        {automaticRootDisplay}
+                      </code>
+                      {automaticRootHasAttention ? (
+                        <p
+                          className="settings-automatic-root-health"
+                          role="status"
+                        >
+                          {t(
+                            `settings.automatic_workspace.health.${automaticWorkspaceRoot.health}`,
+                          )}
+                        </p>
+                      ) : null}
+                      {automaticRootMutationFailed ? (
+                        <p
+                          className="settings-automatic-root-error"
+                          role="alert"
+                        >
+                          {t("settings.automatic_workspace.command_failed")}
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="settings-automatic-root-actions">
+                      {automaticWorkspaceRoot.canChoose ? (
+                        <Button
+                          ref={automaticRootChooseButton}
+                          variant="secondary"
+                          size="sm"
+                          disabled={disabled || automaticRootPending !== null}
+                          onClick={() =>
+                            void mutateAutomaticWorkspaceRoot("choose")
+                          }
+                        >
+                          {automaticRootPending?.action === "choose"
+                            ? t("settings.automatic_workspace.choosing")
+                            : t("settings.automatic_workspace.choose")}
+                        </Button>
+                      ) : null}
+                      {automaticWorkspaceRoot.canReset ? (
+                        <Button
+                          ref={automaticRootResetButton}
+                          variant="secondary"
+                          size="sm"
+                          disabled={disabled || automaticRootPending !== null}
+                          onClick={() =>
+                            void mutateAutomaticWorkspaceRoot("reset")
+                          }
+                        >
+                          {automaticRootPending?.action === "reset"
+                            ? t("settings.automatic_workspace.resetting")
+                            : t("settings.automatic_workspace.reset")}
+                        </Button>
+                      ) : null}
+                      {automaticWorkspaceRoot.canRetry ? (
+                        <Button
+                          ref={automaticRootRetryButton}
+                          variant="secondary"
+                          size="sm"
+                          disabled={disabled || automaticRootPending !== null}
+                          onClick={() =>
+                            void mutateAutomaticWorkspaceRoot("retry")
+                          }
+                        >
+                          {automaticRootPending?.action === "retry"
+                            ? t("settings.automatic_workspace.retrying")
+                            : t("settings.automatic_workspace.retry")}
+                        </Button>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
               </div>

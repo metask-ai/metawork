@@ -73,6 +73,7 @@ import {
   type FileChangeDiffResult,
   type UiRecord,
   type WorkbenchSnapshot,
+  type AutomaticWorkspaceRootMutationResult,
   type WorkspaceChoice,
   type WorkspaceView,
 } from "./contracts.ts";
@@ -4017,6 +4018,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "account",
     "models",
     "newTaskAdmission",
+    "automaticWorkspaceRoot",
     "skillCatalog",
     "skillManagement",
     "mcp",
@@ -4024,6 +4026,109 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "scheduledTasks",
     "tasks",
   ]);
+  const automaticRootItem = object(
+    root.automaticWorkspaceRoot,
+    "$.automaticWorkspaceRoot",
+    [
+      "generation",
+      "mode",
+      "canonicalRoot",
+      "health",
+      "redacted",
+      "canChoose",
+      "canReset",
+      "canRetry",
+    ],
+  );
+  const automaticWorkspaceRoot = {
+    generation: positiveWireId(
+      automaticRootItem.generation,
+      "$.automaticWorkspaceRoot.generation",
+    ),
+    mode:
+      automaticRootItem.mode === null
+        ? null
+        : enumValue(automaticRootItem.mode, "$.automaticWorkspaceRoot.mode", [
+            "system_default",
+            "custom",
+          ] as const),
+    canonicalRoot:
+      automaticRootItem.canonicalRoot === null
+        ? null
+        : nonEmptyString(
+            automaticRootItem.canonicalRoot,
+            "$.automaticWorkspaceRoot.canonicalRoot",
+          ),
+    health: enumValue(
+      automaticRootItem.health,
+      "$.automaticWorkspaceRoot.health",
+      [
+        "ready",
+        "path_unavailable",
+        "persistence_unavailable",
+        "read_failed",
+        "corrupt",
+        "write_failed",
+        "outcome_unknown",
+      ] as const,
+    ),
+    redacted: booleanValue(
+      automaticRootItem.redacted,
+      "$.automaticWorkspaceRoot.redacted",
+    ),
+    canChoose: booleanValue(
+      automaticRootItem.canChoose,
+      "$.automaticWorkspaceRoot.canChoose",
+    ),
+    canReset: booleanValue(
+      automaticRootItem.canReset,
+      "$.automaticWorkspaceRoot.canReset",
+    ),
+    canRetry: booleanValue(
+      automaticRootItem.canRetry,
+      "$.automaticWorkspaceRoot.canRetry",
+    ),
+  };
+  if (
+    automaticWorkspaceRoot.mode === null &&
+    automaticWorkspaceRoot.canonicalRoot !== null
+  )
+    fail(
+      "$.automaticWorkspaceRoot.canonicalRoot",
+      "untrusted root cannot expose a canonical path",
+    );
+  if (
+    automaticWorkspaceRoot.mode !== null &&
+    automaticWorkspaceRoot.canonicalRoot === null
+  )
+    fail(
+      "$.automaticWorkspaceRoot.canonicalRoot",
+      "trusted root must expose its canonical path",
+    );
+  if (
+    automaticWorkspaceRoot.health === "ready" &&
+    automaticWorkspaceRoot.mode === null
+  )
+    fail(
+      "$.automaticWorkspaceRoot.mode",
+      "ready root must expose a trusted mode",
+    );
+  if (
+    automaticWorkspaceRoot.canRetry &&
+    automaticWorkspaceRoot.health !== "path_unavailable"
+  )
+    fail(
+      "$.automaticWorkspaceRoot.canRetry",
+      "retry authority requires unavailable-path health",
+    );
+  if (
+    automaticWorkspaceRoot.redacted &&
+    automaticWorkspaceRoot.canonicalRoot === null
+  )
+    fail(
+      "$.automaticWorkspaceRoot.redacted",
+      "redaction requires a projected path",
+    );
   const capabilityItem = object(root.capabilities, "$.capabilities", [
     "taskHistoryPersistence",
     "taskHistoryPersistenceHealth",
@@ -4385,6 +4490,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   }
   return {
     revision: wireId(root.revision, "$.revision"),
+    automaticWorkspaceRoot,
     capabilities,
     permissions,
     account: decodeAccount(root.account, "$.account"),
@@ -5366,6 +5472,18 @@ export function decodeAttachmentChooseResult(
 export function decodeAttachmentReleaseResult(value: unknown) {
   const item = object(value, "$", ["released"]);
   return { released: booleanValue(item.released, "$.released") };
+}
+
+export function decodeAutomaticWorkspaceRootMutationResult(
+  value: unknown,
+): AutomaticWorkspaceRootMutationResult {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "applied",
+      "cancelled",
+    ] as const),
+  };
 }
 
 export function decodeAttachmentReceiveResult(
