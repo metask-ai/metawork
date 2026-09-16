@@ -89,22 +89,10 @@ try {
   const rendererChromeReady = waitForRendererChromeReady();
   await waitForOutput(/metawork\.smoke\.event_ack sequence=1/);
   await rendererChromeReady;
-  const topResize = await execFileAsync(
-    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      hitTestProbe,
-      "-ProcessId",
-      String(app.pid),
-      "-Mode",
-      "top-resize",
-    ],
-    { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-  );
-  process.stdout.write(topResize.stdout);
+  // Keep this isolated window unobscured until the harness shuts it down.
+  // Stationary paint checks must not raise or activate it after a DOM update.
+  await runProbe("top-resize", ["-Direct", "-KeepTopmost"]);
+  await runProbe("top-resize");
   await runProbe("top-lifecycle");
   await runProbe("top-resize", ["-Repeat", "3"]);
   await probeTopResizePaint({ port: debugPort, runProbe, evidenceDir });
@@ -115,6 +103,7 @@ try {
   });
   await waitForOutput(/metawork\.smoke\.event_ack sequence=2/);
   await waitForRendererChromeReady();
+  await runProbe("top-resize", ["-Direct"]);
   await runProbe("top-resize", ["-AllMonitors"]);
   if (evidenceDir) {
     await execFileAsync(
@@ -219,7 +208,7 @@ try {
     [native, "automate", "tray-action", "1"],
     { cwd: appCwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
   );
-  await runProbe("top-resize");
+  await runProbe("top-resize", ["-Direct"]);
   await execFileAsync(
     process.execPath,
     [native, "automate", "tray-action", "2"],

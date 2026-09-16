@@ -137,7 +137,7 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 
 Window compatibility 共享的 startup window identity 只能由 Application 在窗口创建期建立一次并验证，再注入需要它的 seam；消费者不得复制捕获机制或把 identity 当成通用 system handle。`minimize` 等 Runtime API 已提供的能力必须保持正常路径，不能因相邻按钮使用 compatibility 而被吸入 seam。
 
-`system_webview_resize` 只拥有输入子窗口和同 UI 线程的宿主生命周期回调；仅在系统上沿窄带内让缩放命中优先于隐藏标题栏残留的 DWM caption-button 命中。窗口尺寸限制与 resize loop 仍由 SDK/OS 决定，不建立第二份主窗口状态或 Renderer resize 协议。输入层须保持 WebView 原有绘制，跟随客户区及 DPI 更新，最大化或不可缩放时不截获输入；安装失败回滚，运行更新失败移除失效输入层并报告，主窗口销毁与 Application cleanup 均释放资源。真实鼠标缩放和无损绘制必须同时验收，不以程序化 resize 代替。
+`system_webview_resize` 只拥有输入子窗口和同 UI 线程的宿主生命周期回调；仅在系统上沿窄带内让缩放命中优先于隐藏标题栏残留的 DWM caption-button 命中。窗口尺寸限制与 resize loop 仍由 SDK/OS 决定，不建立第二份主窗口状态或 Renderer resize 协议。输入层须保持 WebView 原有绘制，跟随客户区及 DPI 更新，最大化或不可缩放时不截获输入；安装失败回滚并使应用启动失败，避免在未完成窗口能力初始化时继续启动；运行更新失败则移除失效输入层并报告，保留已运行的应用。主窗口销毁与 Application cleanup 均释放资源。真实鼠标缩放和无损绘制必须同时验收，不以程序化 resize 代替。
 
 `app_single_instance` 必须同时满足：
 

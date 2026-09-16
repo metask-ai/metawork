@@ -78,8 +78,8 @@ const refresh_name = std.unicode.utf8ToUtf16LeStringLiteral("MetaWork.SystemWebV
 const wm_nccreate = 0x0081;
 const wm_ncdestroy = 0x0082;
 const wm_nchittest = 0x0084;
-const wm_ncbuttondown = 0x00a1;
-const wm_ncbuttondoubleclick = 0x00a3;
+const wm_nclbuttondown = 0x00a1;
+const wm_nclbuttondblclk = 0x00a3;
 const wm_setcursor = 0x0020;
 const gwlp_userdata = -21;
 const ht_top = 12;
@@ -282,7 +282,7 @@ fn childProc(child: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM) callcon
                 return 1;
             }
         },
-        wm_ncbuttondown, wm_ncbuttondoubleclick => {
+        wm_nclbuttondown, wm_nclbuttondblclk => {
             const root = self.root;
             const hit = self.hitTest(lparam);
             if (isTopResize(hit)) {
