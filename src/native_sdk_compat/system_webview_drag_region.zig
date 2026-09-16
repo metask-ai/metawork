@@ -378,3 +378,19 @@ test "disconnect clears document-owned regions without owning generation" {
     try std.testing.expect(!capability.document_attached);
     try std.testing.expectEqual(@as(usize, 0), capability.region_count);
 }
+
+test "macOS pointer path preserves Host region authorization before startWindowDrag" {
+    const macos = @import("system_webview_drag_region/macos.zig");
+    const Reject = struct {
+        fn point(_: *const anyopaque, _: f64, _: f64) bool {
+            return false;
+        }
+    };
+    var state = macos.State{};
+    try macos.prepareStartup(&state, &state, Reject.point);
+    try std.testing.expectEqual(
+        PointerOutcome.ignored,
+        try macos.handlePointerDown(&state, undefined, 1, 20, 20),
+    );
+    macos.deinit(&state);
+}
