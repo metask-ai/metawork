@@ -3441,15 +3441,15 @@ test("permanent panel toggle opens a continuous Review and clears it on close", 
   cleanup();
 });
 
-test("layout visibility and width survive Task changes, invalidation, and non-Task pages", async (ctx) => {
+test("layout visibility and share survive Task changes, invalidation, and non-Task pages", async (ctx) => {
   const { snapshot, previews, publish } = await renderAppFixture(ctx);
   fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
   fireEvent.click(screen.getByRole("button", { name: "Open side panel" }));
   const shell = document.querySelector(".app-window");
   const resize = screen.getByRole("separator", { name: "Resize side panel" });
   fireEvent.keyDown(resize, { key: "ArrowLeft" });
-  const width = shell.style.getPropertyValue("--right-column-width");
-  assert.equal(width, "416px");
+  const share = shell.style.getPropertyValue("--task-panel-share");
+  assert.notEqual(share, String(1 / 3));
   fireEvent.click(filePreviewOpener("a.txt"));
   snapshot.tasks[0].runs[0].tools = [];
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
@@ -3469,7 +3469,7 @@ test("layout visibility and width survive Task changes, invalidation, and non-Ta
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
   fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
-  assert.equal(shell.style.getPropertyValue("--right-column-width"), width);
+  assert.equal(shell.style.getPropertyValue("--task-panel-share"), share);
   fireEvent.click(
     screen.getByRole("button", { name: "New task", exact: true }),
   );
@@ -3487,7 +3487,7 @@ test("layout visibility and width survive Task changes, invalidation, and non-Ta
   await act(async () => publish());
   await screen.findByText("No content to display here.");
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
-  assert.equal(shell.style.getPropertyValue("--right-column-width"), width);
+  assert.equal(shell.style.getPropertyValue("--task-panel-share"), share);
   fireEvent.click(
     within(document.querySelector("#task-panel")).getByRole("button", {
       name: "Close side panel",
@@ -3495,7 +3495,7 @@ test("layout visibility and width survive Task changes, invalidation, and non-Ta
   );
   fireEvent.click(screen.getByRole("button", { name: /First task/ }));
   assert.equal(shell.getAttribute("data-right-panel-open"), "false");
-  assert.equal(shell.style.getPropertyValue("--right-column-width"), width);
+  assert.equal(shell.style.getPropertyValue("--task-panel-share"), share);
   cleanup();
 });
 

@@ -25,19 +25,81 @@ const defaultLeftWidth = 320;
 const minimumLeftWidth = 240;
 const maximumLeftWidth = 480;
 const leftWidthStep = 16;
-const rightWidthPreference = "metawork.panel.task.width";
-const defaultRightWidth = 400;
-const minimumRightWidth = 320;
+const rightSharePreference = "metawork.panel.task.share";
+const defaultRightShare = 1 / 3;
+const minimumRightShare = 0.25;
+const maximumRightShare = 0.5;
+const defaultRightOverlayWidth = 400;
+const minimumRightWidth = 360;
 const maximumRightWidth = 640;
 const minimumTaskStageWidth = 480;
+const minimumDockedWorkAreaWidth = minimumTaskStageWidth + minimumRightWidth;
 const rightWidthStep = 16;
 
-export function shouldDockTaskPanel(
-  viewportWidth: number,
-  leftWidth: number,
-  rightWidth: number,
-) {
-  return viewportWidth - leftWidth - rightWidth >= minimumTaskStageWidth;
+function clampRightShare(value: number) {
+  return Math.min(maximumRightShare, Math.max(minimumRightShare, value));
+}
+
+export function resolveWorkbenchColumns({
+  viewportWidth,
+  leftOpen,
+  leftWidth,
+  rightOpen,
+  rightShare,
+}: {
+  viewportWidth: number;
+  leftOpen: boolean;
+  leftWidth: number;
+  rightOpen: boolean;
+  rightShare: number;
+}) {
+  const dockedLeftWidth =
+    leftOpen && viewportWidth >= 820 ? clampLeftWidth(leftWidth) : 0;
+  const availableWidth = Math.max(0, viewportWidth - dockedLeftWidth);
+  const normalizedRightShare = clampRightShare(rightShare);
+  const rightMinimum = Math.min(
+    maximumRightWidth,
+    Math.max(minimumRightWidth, availableWidth * minimumRightShare),
+  );
+  const rightMaximum = Math.max(
+    rightMinimum,
+    Math.min(
+      maximumRightWidth,
+      availableWidth - minimumTaskStageWidth,
+      availableWidth * maximumRightShare,
+    ),
+  );
+  const docked = rightOpen && availableWidth >= minimumDockedWorkAreaWidth;
+
+  if (!docked) {
+    return {
+      availableWidth,
+      docked,
+      middleWidth: availableWidth,
+      rightWidth: rightOpen
+        ? Math.min(defaultRightOverlayWidth, Math.max(0, viewportWidth - 44))
+        : 0,
+      rightMinimum,
+      rightMaximum,
+      rightShare: normalizedRightShare,
+    };
+  }
+
+  const rightWidth = Math.ceil(
+    Math.min(
+      rightMaximum,
+      Math.max(rightMinimum, availableWidth * normalizedRightShare),
+    ),
+  );
+  return {
+    availableWidth,
+    docked,
+    middleWidth: availableWidth - rightWidth,
+    rightWidth,
+    rightMinimum: Math.ceil(rightMinimum),
+    rightMaximum: Math.ceil(rightMaximum),
+    rightShare: normalizedRightShare,
+  };
 }
 
 export function isTaskStageExposed({
@@ -71,15 +133,11 @@ function initialLeftWidth() {
   return Number.isFinite(parsed) ? clampLeftWidth(parsed) : defaultLeftWidth;
 }
 
-function clampRightWidth(value: number) {
-  return Math.min(maximumRightWidth, Math.max(minimumRightWidth, value));
-}
-
-function initialRightWidth() {
-  const stored = readLocalPreference(rightWidthPreference);
-  if (stored === null) return defaultRightWidth;
+function initialRightShare() {
+  const stored = readLocalPreference(rightSharePreference);
+  if (stored === null) return defaultRightShare;
   const parsed = Number(stored);
-  return Number.isFinite(parsed) ? clampRightWidth(parsed) : defaultRightWidth;
+  return Number.isFinite(parsed) ? clampRightShare(parsed) : defaultRightShare;
 }
 
 function initialPanel(key: string, minimumWidth: number) {
@@ -126,7 +184,7 @@ export function AppShell({
     initialPanel(leftPreference, 820),
   );
   const [leftWidth, setLeftWidth] = useState(initialLeftWidth);
-  const [rightWidth, setRightWidth] = useState(initialRightWidth);
+  const [rightShare, setRightShare] = useState(initialRightShare);
   const [resizingLeft, setResizingLeft] = useState(false);
   const [resizingRight, setResizingRight] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() =>
@@ -136,18 +194,14 @@ export function AppShell({
   const effectiveLeftOpen = leftAvailable && leftOpen;
   const rightPanelAvailable = rightPanel !== null;
   const effectiveRightPanelOpen = rightPanelOpen;
-  const rightResizeMaximum = Math.max(
-    minimumRightWidth,
-    Math.min(maximumRightWidth, viewportWidth - 44),
-  );
-  const renderedRightWidth = Math.min(rightWidth, rightResizeMaximum);
-  const rightPanelDocked =
-    effectiveRightPanelOpen &&
-    shouldDockTaskPanel(
-      viewportWidth,
-      effectiveLeftOpen ? leftWidth : 0,
-      rightWidth,
-    );
+  const columns = resolveWorkbenchColumns({
+    viewportWidth,
+    leftOpen: effectiveLeftOpen,
+    leftWidth,
+    rightOpen: effectiveRightPanelOpen,
+    rightShare,
+  });
+  const rightPanelDocked = columns.docked;
   const taskStageExposed = isTaskStageExposed({
     viewportWidth,
     leftOpen: effectiveLeftOpen,
@@ -183,10 +237,10 @@ export function AppShell({
   }, [effectiveRightPanelOpen]);
 
   useEffect(() => {
-    if (effectiveRightPanelOpen || !resizingRight) return;
-    writeLocalPreference(rightWidthPreference, String(rightWidth));
+    if (!resizingRight || (effectiveRightPanelOpen && rightPanelDocked)) return;
+    writeLocalPreference(rightSharePreference, String(rightShare));
     setResizingRight(false);
-  }, [effectiveRightPanelOpen, resizingRight, rightWidth]);
+  }, [effectiveRightPanelOpen, resizingRight, rightPanelDocked, rightShare]);
 
   useEffect(() => {
     if (overlay && attentionDetails.current)
@@ -200,6 +254,22 @@ export function AppShell({
     setLeftOpen(next);
   }
 
+  function shareForRightWidth(width: number) {
+    if (columns.availableWidth <= 0) return defaultRightShare;
+    return clampRightShare(width / columns.availableWidth);
+  }
+
+  function changeRightWidth(width: number) {
+    setRightShare(shareForRightWidth(width));
+  }
+
+  function commitRightWidth(width: number) {
+    writeLocalPreference(
+      rightSharePreference,
+      String(shareForRightWidth(width)),
+    );
+  }
+
   return (
     <main
       className="app-window"
@@ -211,8 +281,9 @@ export function AppShell({
       style={
         {
           "--left-column-width": `${leftWidth}px`,
-          "--right-column-width": `${rightWidth}px`,
-          "--right-panel-rendered-width": `${renderedRightWidth}px`,
+          "--task-stage-share": 1 - columns.rightShare,
+          "--task-panel-share": columns.rightShare,
+          "--right-panel-overlay-width": `${columns.rightWidth}px`,
         } as CSSProperties
       }
       onKeyDown={(event) => {
@@ -346,19 +417,17 @@ export function AppShell({
           />
         )}
         <section className="task-stage">{children}</section>
-        {(effectiveRightPanelOpen || resizingRight) && (
+        {rightPanelDocked && (
           <ResizableSeparator
             className="task-panel-resize-handle"
             label={t("app.resize_task_panel")}
-            value={renderedRightWidth}
-            minimum={minimumRightWidth}
-            maximum={rightResizeMaximum}
+            value={columns.rightWidth}
+            minimum={columns.rightMinimum}
+            maximum={columns.rightMaximum}
             step={rightWidthStep}
             reverse
-            onChange={setRightWidth}
-            onCommit={(width) =>
-              writeLocalPreference(rightWidthPreference, String(width))
-            }
+            onChange={changeRightWidth}
+            onCommit={commitRightWidth}
             onResizeStart={() => setResizingRight(true)}
             onResizeEnd={() => setResizingRight(false)}
           />

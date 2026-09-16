@@ -396,6 +396,40 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
   assert.doesNotMatch(settings, /settings-workspaces|WorkspaceSettings/);
 });
 
+test("workbench columns use bounded proportional Flex without an overlay resizer", async () => {
+  const shell = await readFile(
+    resolve(sourceRoot, "app", "AppShell.tsx"),
+    "utf8",
+  );
+  const css = await readFile(resolve(sourceRoot, "index.css"), "utf8");
+
+  assert.match(css, /\.app-columns\s*\{[^}]*display: flex;[^}]*\}/);
+  assert.doesNotMatch(css, /\.app-columns\s*\{[^}]*grid-template-columns:/);
+  assert.match(
+    css,
+    /\.workspace-sidebar\s*\{[\s\S]*?flex: 0 0 var\(--left-column\);/,
+  );
+  assert.match(
+    css,
+    /data-right-panel-docked="true"\] \.task-stage\s*\{[\s\S]*?flex-grow: var\(--task-stage-share\);[\s\S]*?min-width: 480px;/,
+  );
+  assert.match(
+    css,
+    /data-right-panel-docked="true"\] \.task-panel\s*\{[\s\S]*?flex: var\(--task-panel-share\) 1 0;[\s\S]*?min-width: 360px;[\s\S]*?max-width: 640px;/,
+  );
+  assert.match(
+    css,
+    /\.task-panel-resize-handle\s*\{[\s\S]*?position: relative;[\s\S]*?flex: 0 0 10px;[\s\S]*?margin-inline: -5px;/,
+  );
+  assert.doesNotMatch(
+    css,
+    /data-right-panel-docked="false"\] \.task-panel-resize-handle/,
+  );
+  assert.match(shell, /metawork\.panel\.task\.share/);
+  assert.doesNotMatch(shell, /metawork\.panel\.task\.width/);
+  assert.match(shell, /\{rightPanelDocked && \(/);
+});
+
 test("Renderer draws declarative titlebar controls while Bridge and Host own native behavior", async () => {
   const shell = await readFile(
     resolve(sourceRoot, "app", "AppShell.tsx"),

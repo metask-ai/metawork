@@ -3385,9 +3385,9 @@ button.run-process-tool:hover {
 .app-window {
   --left-column: 0px;
   --left-column-width: 320px;
-  --right-column: 0px;
-  --right-column-width: 400px;
-  --right-panel-rendered-width: var(--right-column-width);
+  --task-stage-share: 0.6666667;
+  --task-panel-share: 0.3333333;
+  --right-panel-overlay-width: 400px;
   --workbench-content-surface: var(--ui-surface-panel);
   display: grid;
   grid-template-rows: var(--window-bar-height) minmax(0, 1fr);
@@ -3401,10 +3401,6 @@ button.run-process-tool:hover {
 
 .app-window[data-left-open="true"] {
   --left-column: var(--left-column-width);
-}
-
-.app-window[data-right-panel-docked="true"] {
-  --right-column: var(--right-column-width);
 }
 
 .workbench-commandbar {
@@ -3644,10 +3640,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .app-columns {
   position: relative;
-  display: grid;
-  grid-template-columns: var(--left-column) minmax(0, 1fr) var(--right-column);
+  display: flex;
   min-height: 0;
-  transition: grid-template-columns 160ms ease;
 }
 
 .workspace-resize-handle {
@@ -3665,12 +3659,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-panel-resize-handle {
-  position: absolute;
+  position: relative;
   z-index: 30;
-  top: 0;
-  right: calc(var(--right-column-width) - 5px);
-  bottom: 0;
+  align-self: stretch;
+  flex: 0 0 10px;
   width: 10px;
+  margin-inline: -5px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -3720,9 +3714,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   outline: none;
 }
 
+.app-window[data-resizing-left="true"] .workspace-sidebar,
+.app-window[data-resizing-left="true"] .task-stage,
+.app-window[data-resizing-left="true"] .task-panel,
+.app-window[data-resizing-right="true"] .workspace-sidebar,
+.app-window[data-resizing-right="true"] .task-stage,
+.app-window[data-resizing-right="true"] .task-panel {
+  transition: none;
+}
+
 .app-window[data-resizing-left="true"] .app-columns,
 .app-window[data-resizing-right="true"] .app-columns {
-  transition: none;
   cursor: col-resize;
   user-select: none;
 }
@@ -3748,10 +3750,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-panel {
   min-width: 0;
   overflow: hidden auto;
+  transition:
+    flex-basis 160ms ease,
+    flex-grow 160ms ease,
+    min-width 160ms ease,
+    max-width 160ms ease;
 }
 
 .workspace-sidebar {
-  grid-column: 1;
+  flex: 0 0 var(--left-column);
   padding: 0;
   border-right: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
@@ -3759,7 +3766,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-panel {
-  grid-column: 3;
+  flex: 0 0 0;
+  max-width: 0;
   overflow: hidden;
   border-left: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
@@ -3768,12 +3776,26 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-stage {
   position: relative;
   display: flex;
-  grid-column: 2;
+  flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
   border-top: 1px solid var(--ui-border);
   background: var(--workbench-content-surface);
+  transition:
+    flex-grow 160ms ease,
+    min-width 160ms ease;
+}
+
+.app-window[data-right-panel-docked="true"] .task-stage {
+  flex-grow: var(--task-stage-share);
+  min-width: 480px;
+}
+
+.app-window[data-right-panel-docked="true"] .task-panel {
+  flex: var(--task-panel-share) 1 0;
+  min-width: 360px;
+  max-width: 640px;
 }
 
 .workbench-view {
@@ -9244,17 +9266,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
   right: 0;
   bottom: 0;
-  width: var(--right-panel-rendered-width);
+  width: var(--right-panel-overlay-width);
+  max-width: none;
   transform: translateX(100%);
   transition: transform 160ms ease;
-}
-
-.app-window[data-right-panel-docked="false"] .task-panel-resize-handle {
-  position: fixed;
-  z-index: 46;
-  top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
-  right: calc(var(--right-panel-rendered-width) - 5px);
-  bottom: 0;
 }
 
 .app-window[data-right-panel-open="true"][data-right-panel-docked="false"]
