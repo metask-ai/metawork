@@ -904,7 +904,7 @@ export const enUS = {
   "settings.automatic_workspace.retrying": "Retrying…",
   "settings.automatic_workspace.command_failed":
     "The location could not be changed. Try again.",
-  "settings.automatic_workspace.health.ready": "",
+  "settings.automatic_workspace.health.ready": "Ready",
   "settings.automatic_workspace.health.path_unavailable":
     "This folder is unavailable. New automatic workspaces are paused until you retry or choose another folder.",
   "settings.automatic_workspace.health.persistence_unavailable":

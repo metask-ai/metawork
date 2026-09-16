@@ -819,7 +819,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.automatic_workspace.retry": "重试",
   "settings.automatic_workspace.retrying": "正在重试…",
   "settings.automatic_workspace.command_failed": "位置修改失败，请重试。",
-  "settings.automatic_workspace.health.ready": "",
+  "settings.automatic_workspace.health.ready": "可用",
   "settings.automatic_workspace.health.path_unavailable":
     "此文件夹当前不可用。重试或选择其他文件夹前，新自动工作区将暂停创建。",
   "settings.automatic_workspace.health.persistence_unavailable":
