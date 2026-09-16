@@ -123,6 +123,7 @@ pub const Adapter = struct {
             .start_timer_fn = startTimer,
             .cancel_timer_fn = cancelTimer,
             .show_open_dialog_fn = showOpenDialog,
+            .canonicalize_directory_fn = canonicalizeDirectory,
             .random_fn = random,
             .window_chrome_connect_fn = windowChromeConnect,
             .window_chrome_sync_fn = windowChromeSync,
@@ -358,6 +359,24 @@ pub const Adapter = struct {
             options,
             output,
         );
+    }
+
+    fn canonicalizeDirectory(
+        context: ?*anyopaque,
+        absolute_path: []const u8,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Adapter = @ptrCast(@alignCast(context.?));
+        if (!std.fs.path.isAbsolute(absolute_path)) return error.InvalidPath;
+        const length = try std.Io.Dir.realPathFileAbsolute(
+            self.io,
+            absolute_path,
+            output,
+        );
+        const canonical = output[0..length];
+        const stat = try std.Io.Dir.cwd().statFile(self.io, canonical, .{});
+        if (stat.kind != .directory) return error.NotDir;
+        return canonical;
     }
 
     fn random(context: ?*anyopaque, output: []u8) bool {

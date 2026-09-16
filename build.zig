@@ -143,6 +143,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-control-attachment-staging", .root_module = test_modules.product_control_attachment_staging },
         .{ .name = "metawork-product-control-file-change-io", .root_module = test_modules.product_control_file_change_io },
         .{ .name = "metawork-product-workspace-automatic-root", .root_module = test_modules.product_workspace_automatic_root },
+        .{ .name = "metawork-product-workspace-configuration", .root_module = test_modules.product_workspace_configuration },
         .{ .name = "metawork-product-workspace", .root_module = test_modules.product_workspace_runtime },
         .{ .name = "metawork-product-workspace-view", .root_module = test_modules.product_workspace_view },
         .{ .name = "metawork-product-schedule", .root_module = test_modules.product_schedule },
@@ -397,6 +398,7 @@ const WiredModules = struct {
     product_control_attachment_staging: *std.Build.Module,
     product_control_file_change_io: *std.Build.Module,
     product_workspace_automatic_root: *std.Build.Module,
+    product_workspace_configuration: *std.Build.Module,
     product_workspace: *std.Build.Module,
     product_workspace_runtime: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
@@ -1174,6 +1176,15 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const product_workspace_configuration = b.createModule(.{
+        .root_source_file = b.path("src/product/workspace/configuration.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_workspace_configuration.addImport(
+        "product_workspace_automatic_root",
+        product_workspace_automatic_root,
+    );
     const product_schedule_state = b.createModule(.{
         .root_source_file = b.path("src/product/schedule/state.zig"),
         .target = target,
@@ -1610,6 +1621,10 @@ fn wireAgentCore(
     });
     product_workspace.addImport("product_workspace_runtime", product_workspace_runtime);
     product_workspace.addImport("product_workspace_view", product_workspace_view);
+    product_workspace.addImport(
+        "product_workspace_configuration",
+        product_workspace_configuration,
+    );
     const product_control_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/control/runtime.zig"),
         .target = target,
@@ -1835,6 +1850,7 @@ fn wireAgentCore(
         .product_control_attachment_staging = attachment_staging,
         .product_control_file_change_io = file_change_io,
         .product_workspace_automatic_root = product_workspace_automatic_root,
+        .product_workspace_configuration = product_workspace_configuration,
         .product_workspace = product_workspace,
         .product_workspace_runtime = product_workspace_runtime,
         .product_workspace_view = product_workspace_view,

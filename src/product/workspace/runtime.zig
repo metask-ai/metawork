@@ -10,6 +10,14 @@ const automatic_root = @import("product_workspace_automatic_root");
 
 pub const AutomaticRoot = automatic_root.Root;
 
+pub fn automaticPathEqual(left: []const u8, right: []const u8) bool {
+    return automatic_root.pathEqual(left, right);
+}
+
+pub fn automaticPathStrictlyWithin(parent: []const u8, child: []const u8) bool {
+    return automatic_root.strictPathWithin(parent, child);
+}
+
 pub const Kind = enum { manual, automatic };
 pub const Authorization = enum { available, removing, reauthorization_required };
 pub const RemovalFailure = enum { none, task_close_failed };
@@ -334,6 +342,45 @@ pub const Runtime = struct {
         return allocator.containsCanonicalPath(path);
     }
 
+    pub fn validateAutomaticRootCandidate(
+        self: *const Runtime,
+        canonical_root: []const u8,
+    ) Error!void {
+        if (canonical_root.len == 0 or
+            !std.fs.path.isAbsolute(canonical_root) or
+            !std.unicode.utf8ValidateSlice(canonical_root) or
+            std.mem.indexOfScalar(u8, canonical_root, 0) != null or
+            canonical_root.len > self.max_workspace_bytes or
+            self.max_workspace_bytes - canonical_root.len < automatic_root.key_hex_bytes + 1)
+            return error.InvalidWorkspace;
+        for (self.records) |entry| {
+            const record = entry orelse continue;
+            switch (record.kind) {
+                .manual => if (automatic_root.pathEqual(
+                    canonical_root,
+                    record.canonical_root,
+                )) return error.InvalidWorkspace,
+                .automatic => if (automatic_root.pathWithin(
+                    record.canonical_root,
+                    canonical_root,
+                )) return error.InvalidWorkspace,
+            }
+        }
+    }
+
+    pub fn replaceAutomaticRoot(self: *Runtime, root: *AutomaticRoot) void {
+        for (self.pending_automatic) |pending| std.debug.assert(pending == null);
+        const replacement = automatic_root.Allocator.init(root);
+        if (self.automatic_allocator) |*current| current.deinit();
+        self.automatic_allocator = replacement;
+    }
+
+    pub fn disableAutomaticRoot(self: *Runtime) void {
+        for (self.pending_automatic) |pending| std.debug.assert(pending == null);
+        if (self.automatic_allocator) |*current| current.deinit();
+        self.automatic_allocator = null;
+    }
+
     pub fn slotCount(self: *const Runtime) usize {
         return self.records.len;
     }
@@ -560,6 +607,7 @@ pub const Runtime = struct {
 
         if (self.findIndexByRoot(canonical)) |index| {
             const record = &self.records[index].?;
+            if (record.kind == .automatic) return error.InvalidWorkspace;
             if (record.authorization == .removing)
                 return error.WorkspaceRemovalInProgress;
             const reopening_removed = !record.visible;
@@ -1088,7 +1136,7 @@ pub const Runtime = struct {
 
     fn findIndexByRoot(self: *const Runtime, root: []const u8) ?usize {
         for (self.records, 0..) |entry, index| if (entry) |record|
-            if (std.mem.eql(u8, record.canonical_root, root)) return index;
+            if (automatic_root.pathEqual(record.canonical_root, root)) return index;
         return null;
     }
 };
@@ -1138,10 +1186,7 @@ fn findEmpty(records: []?Record) ?usize {
 }
 
 fn pathWithin(parent: []const u8, child: []const u8) bool {
-    if (std.mem.eql(u8, parent, child)) return true;
-    if (!std.mem.startsWith(u8, child, parent)) return false;
-    if (parent.len != 0 and std.fs.path.isSep(parent[parent.len - 1])) return true;
-    return child.len > parent.len and std.fs.path.isSep(child[parent.len]);
+    return automatic_root.pathWithin(parent, child);
 }
 
 pub const testing = if (builtin.is_test) struct {
@@ -1261,6 +1306,149 @@ fn testStorageFree(_: *anyopaque, value: []u8) void {
 
 fn testStorageRedact(_: *anyopaque, _: []u8, _: *usize, _: []const u8) bool {
     return false;
+}
+
+fn testAutomaticContains(context: *const anyopaque, path: []const u8) bool {
+    const runtime: *const Runtime = @ptrCast(@alignCast(context));
+    return runtime.automaticRootContains(path);
+}
+
+fn testNeverReusable(_: *const anyopaque, _: u64) bool {
+    return false;
+}
+
+test "automatic root candidate conflicts preserve old records and allow ancestors" {
+    var context: u8 = 0;
+    const storage: Storage = .{
+        .context = &context,
+        .copy_fn = testStorageCopy,
+        .project_fn = testStorageProject,
+        .free_fn = testStorageFree,
+        .redact_fn = testStorageRedact,
+    };
+    var runtime = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        1,
+        1,
+        1024,
+        null,
+    );
+    defer runtime.deinit(storage);
+    testing.installOwned(&runtime, 0, .{
+        .id = 1,
+        .canonical_root = try storage.copy("/manual", 1024),
+        .projected_root_storage = try storage.copy("/manual", 1024),
+        .projected_root_len = "/manual".len,
+        .display_name_storage = try storage.copy("manual", 1024),
+        .display_name_len = "manual".len,
+        .recent_order = 1,
+    });
+    testing.installOwned(&runtime, 1, .{
+        .id = 2,
+        .kind = .automatic,
+        .automatic_task_id = 9,
+        .canonical_root = try storage.copy("/automatic/0000000000000001", 1024),
+        .projected_root_storage = try storage.copy("/automatic/0000000000000001", 1024),
+        .projected_root_len = "/automatic/0000000000000001".len,
+        .display_name_storage = try storage.copy("automatic", 1024),
+        .display_name_len = "automatic".len,
+        .visible = false,
+        .recent_order = 0,
+    });
+
+    try std.testing.expectError(
+        error.InvalidWorkspace,
+        runtime.validateAutomaticRootCandidate("/manual"),
+    );
+    try std.testing.expectError(
+        error.InvalidWorkspace,
+        runtime.validateAutomaticRootCandidate("/automatic/0000000000000001"),
+    );
+    try std.testing.expectError(
+        error.InvalidWorkspace,
+        runtime.validateAutomaticRootCandidate("/automatic/0000000000000001/nested"),
+    );
+    try runtime.validateAutomaticRootCandidate("/automatic");
+    try runtime.validateAutomaticRootCandidate("/manual/nested");
+}
+
+test "automatic root replacement affects only new allocations and old automatic roots stay non-manual" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "a", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "b", .default_dir);
+    var root_a_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var root_b_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_a_len = try tmp.dir.realPathFile(std.testing.io, "a", &root_a_storage);
+    const root_b_len = try tmp.dir.realPathFile(std.testing.io, "b", &root_b_storage);
+    var root_a = try AutomaticRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_a_storage[0..root_a_len],
+    );
+    defer root_a.deinit();
+    var context: u8 = 0;
+    const storage: Storage = .{
+        .context = &context,
+        .copy_fn = testStorageCopy,
+        .project_fn = testStorageProject,
+        .free_fn = testStorageFree,
+        .redact_fn = testStorageRedact,
+    };
+    var runtime = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        1,
+        2,
+        std.Io.Dir.max_path_bytes,
+        &root_a,
+    );
+    defer runtime.deinit(storage);
+
+    var first = try runtime.prepareAutomatic("", storage, true);
+    const first_path = try std.testing.allocator.dupe(
+        u8,
+        runtime.preparedAutomaticFacts(&first).canonical_root,
+    );
+    const first_id = first.id();
+    defer std.testing.allocator.free(first_path);
+    runtime.completeAutomatic(&first);
+    try std.testing.expect(automatic_root.strictPathWithin(
+        root_a_storage[0..root_a_len],
+        first_path,
+    ));
+
+    var root_b = try AutomaticRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_b_storage[0..root_b_len],
+    );
+    defer root_b.deinit();
+    runtime.replaceAutomaticRoot(&root_b);
+    var second = try runtime.prepareAutomatic("", storage, true);
+    const second_path = runtime.preparedAutomaticFacts(&second).canonical_root;
+    try std.testing.expect(automatic_root.strictPathWithin(
+        root_b_storage[0..root_b_len],
+        second_path,
+    ));
+    try std.testing.expectEqualStrings(first_path, runtime.facts(first_id).?.canonical_root);
+    runtime.completeAutomatic(&second);
+
+    try std.testing.expectError(
+        error.InvalidWorkspace,
+        runtime.prepareOpen(
+            first_path,
+            .explicitly_trusted,
+            "",
+            storage,
+            .{
+                .context = &runtime,
+                .automatic_contains_fn = testAutomaticContains,
+                .reusable_fn = testNeverReusable,
+            },
+        ),
+    );
 }
 
 test "automatic Workspace preparation owns capacity and settles its private allocation" {

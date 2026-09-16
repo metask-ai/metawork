@@ -1362,6 +1362,22 @@ export default function App() {
     }
   }
 
+  async function mutateAutomaticWorkspaceRoot(
+    invoke: () => Promise<{ outcome: "applied" | "cancelled" }>,
+  ): Promise<"applied" | "cancelled" | false> {
+    if (bridgeUnavailable) return false;
+    try {
+      const result = await invoke();
+      if (result.outcome === "applied") {
+        await refreshSnapshot();
+      }
+      return result.outcome;
+    } catch {
+      await refreshSnapshot().catch(() => undefined);
+      return false;
+    }
+  }
+
   async function selectModelForTask(selectionId: string) {
     const task = activeTask;
     if (!task || bridgeUnavailable) return;
@@ -3263,6 +3279,7 @@ export default function App() {
           <SettingsPage
             account={snapshot.account}
             models={snapshot.models}
+            automaticWorkspaceRoot={snapshot.automaticWorkspaceRoot}
             customProviderCapabilities={{
               management: snapshot.capabilities.customProviderManagement,
               secretCapture: snapshot.capabilities.customProviderSecretCapture,
@@ -3280,6 +3297,21 @@ export default function App() {
             onResetModels={() =>
               runExecutionCommand(() =>
                 client.resetModelsStore(snapshot.revision),
+              )
+            }
+            onChooseAutomaticWorkspaceRoot={(expectedGeneration) =>
+              mutateAutomaticWorkspaceRoot(() =>
+                client.chooseAutomaticWorkspaceRoot(expectedGeneration),
+              )
+            }
+            onResetAutomaticWorkspaceRoot={(expectedGeneration) =>
+              mutateAutomaticWorkspaceRoot(() =>
+                client.resetAutomaticWorkspaceRoot(expectedGeneration),
+              )
+            }
+            onRetryAutomaticWorkspaceRoot={(expectedGeneration) =>
+              mutateAutomaticWorkspaceRoot(() =>
+                client.retryAutomaticWorkspaceRoot(expectedGeneration),
               )
             }
             onCancel={() => void cancelAccountOperation()}

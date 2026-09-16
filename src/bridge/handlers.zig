@@ -160,6 +160,9 @@ pub const WorkspaceIdentity = struct {
     workspaceId: []const u8,
     expectedWorkspaceEpoch: []const u8,
 };
+pub const AutomaticWorkspaceRootMutation = struct {
+    expectedGeneration: []const u8,
+};
 pub const SkillImportChoice = struct { kind: []const u8 };
 pub const SkillSourceSetEnabled = struct { sourceId: std.json.Value, enabled: bool, expectedRevision: []const u8 };
 pub const SkillSourceRecover = struct { action: []const u8, expectedRecoveryToken: []const u8 };

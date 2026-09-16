@@ -807,6 +807,33 @@ export const zhCN: Record<MessageId, string> = {
   "settings.models": "模型",
   "settings.providers": "Provider",
   "settings.general_basics": "常规",
+  "settings.automatic_workspace.title": "自动工作区位置",
+  "settings.automatic_workspace.help":
+    "新自动工作区会在此位置下继续创建随机目录；已有任务和会话不会移动。",
+  "settings.automatic_workspace.system_default": "默认",
+  "settings.automatic_workspace.location_unavailable": "位置不可用",
+  "settings.automatic_workspace.choose": "选择文件夹…",
+  "settings.automatic_workspace.choosing": "正在选择…",
+  "settings.automatic_workspace.reset": "使用系统默认位置",
+  "settings.automatic_workspace.resetting": "正在恢复…",
+  "settings.automatic_workspace.retry": "重试",
+  "settings.automatic_workspace.retrying": "正在重试…",
+  "settings.automatic_workspace.command_failed": "位置修改失败，请重试。",
+  "settings.automatic_workspace.health.ready": "可用",
+  "settings.automatic_workspace.health.path_unavailable":
+    "此文件夹当前不可用。重试或选择其他文件夹前，新自动工作区将暂停创建。",
+  "settings.automatic_workspace.health.persistence_unavailable":
+    "当前安装无法保存自动工作区位置设置。",
+  "settings.automatic_workspace.health.read_failed":
+    "MetaWork 无法读取已保存的位置。请选择文件夹或恢复系统默认位置。",
+  "settings.automatic_workspace.health.corrupt":
+    "已保存的位置设置无效。请选择文件夹或恢复系统默认位置。",
+  "settings.automatic_workspace.health.write_failed":
+    "无法保存新选择；之前已保存的位置仍然有效。",
+  "settings.automatic_workspace.health.write_failed_no_active":
+    "无法保存位置。选择文件夹或恢复系统默认位置前，新自动工作区将暂停创建。",
+  "settings.automatic_workspace.health.outcome_unknown":
+    "MetaWork 无法确认位置是否已保存。新自动工作区已暂停；请选择文件夹或恢复系统默认位置。",
   "settings.account_profile": "账户信息",
   "settings.account_usage": "账户用量",
   "settings.account_usage_scope":

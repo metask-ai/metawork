@@ -36,6 +36,17 @@ const { accountErrorMessageId } = await vite.ssrLoadModule(
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
+const readyAutomaticWorkspaceRoot = {
+  generation: "1",
+  mode: "system_default",
+  canonicalRoot: "/tmp/MetaWork/Automatic Workspaces",
+  health: "ready",
+  redacted: false,
+  canChoose: true,
+  canReset: false,
+  canRetry: false,
+};
+
 const appSource = readFileSync(
   new URL("../frontend/src/app/App.tsx", import.meta.url),
   "utf8",
@@ -205,6 +216,7 @@ function renderSettings(account, models = readyModels, options = {}) {
     createElement(SettingsPage, {
       account,
       models,
+      automaticWorkspaceRoot: readyAutomaticWorkspaceRoot,
       initialSection: options.initialSection ?? "general",
       customProviderCapabilities: {
         management: false,
@@ -229,6 +241,9 @@ function renderSettings(account, models = readyModels, options = {}) {
       onTestCustomModel() {},
       onSelectCustomProvider() {},
       onResetModels: async () => false,
+      onChooseAutomaticWorkspaceRoot: async () => false,
+      onResetAutomaticWorkspaceRoot: async () => false,
+      onRetryAutomaticWorkspaceRoot: async () => false,
       onSetDefaultPermissionProfile() {},
       ...callbacks,
       ...options,

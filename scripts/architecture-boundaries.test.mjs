@@ -534,6 +534,10 @@ test("named module roots exist and lower owners cannot import composition", () =
     true,
   );
   assert.equal(
+    existsSync(new URL("src/product/workspace/configuration.zig", root)),
+    true,
+  );
+  assert.equal(
     existsSync(new URL("src/product/control/automatic_workspace.zig", root)),
     false,
   );
@@ -1013,14 +1017,19 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   const workspaceRuntime = read("src/product/workspace/runtime.zig");
   const workspaceView = read("src/product/workspace/view.zig");
   const automaticRoot = read("src/product/workspace/automatic_root.zig");
+  const automaticRootConfiguration = read(
+    "src/product/workspace/configuration.zig",
+  );
 
   assert.match(build, /src\/product\/workspace\.zig/);
   assert.match(build, /src\/product\/workspace\/runtime\.zig/);
   assert.match(build, /src\/product\/workspace\/view\.zig/);
   assert.match(build, /src\/product\/workspace\/automatic_root\.zig/);
+  assert.match(build, /src\/product\/workspace\/configuration\.zig/);
   assert.match(build, /metawork_product_workspace/);
   assert.match(build, /product_workspace_view/);
   assert.match(build, /product_workspace_automatic_root/);
+  assert.match(build, /product_workspace_configuration/);
   assert.match(control, /@import\("metawork_product_workspace"\)/);
   assert.match(control, /workspace: product_workspace\.Runtime/);
   assert.match(workspaceRoot, /pub const Runtime = runtime_impl\.Runtime/);
@@ -1028,6 +1037,10 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(
     workspaceRoot,
     /pub const AutomaticRoot = runtime_impl\.AutomaticRoot/,
+  );
+  assert.match(
+    workspaceRoot,
+    /pub const AutomaticRootConfiguration = configuration_impl\.Configuration/,
   );
   assert.match(
     workspaceRoot,
@@ -1085,6 +1098,12 @@ test("Product Workspace owns the bounded registry without owning the shared comm
   assert.match(automaticRoot, /pub const Allocator = struct/);
   assert.doesNotMatch(
     automaticRoot,
+    /@import\("(?:metawork_product_control|metawork_product_task|metawork_product_skill|metawork_product_mcp|metawork_product_schedule|metawork_agent|metawork_app|metawork_bridge|metawork_account)"\)|std\.Thread/,
+  );
+  assert.match(automaticRootConfiguration, /pub const Configuration = struct/);
+  assert.match(automaticRootConfiguration, /pub const FileStore = struct/);
+  assert.doesNotMatch(
+    automaticRootConfiguration,
     /@import\("(?:metawork_product_control|metawork_product_task|metawork_product_skill|metawork_product_mcp|metawork_product_schedule|metawork_agent|metawork_app|metawork_bridge|metawork_account)"\)|std\.Thread/,
   );
   assert.doesNotMatch(

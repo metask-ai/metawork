@@ -809,6 +809,23 @@ export type TaskView = {
 
 export type WorkbenchSnapshot = {
   revision: string;
+  automaticWorkspaceRoot: {
+    generation: string;
+    mode: "system_default" | "custom" | null;
+    canonicalRoot: string | null;
+    health:
+      | "ready"
+      | "path_unavailable"
+      | "persistence_unavailable"
+      | "read_failed"
+      | "corrupt"
+      | "write_failed"
+      | "outcome_unknown";
+    redacted: boolean;
+    canChoose: boolean;
+    canReset: boolean;
+    canRetry: boolean;
+  };
   capabilities: {
     taskHistoryPersistence: boolean;
     taskHistoryPersistenceHealth:
@@ -876,6 +893,10 @@ export type WorkbenchSnapshot = {
   workspaces: WorkspaceView[];
   scheduledTasks: ScheduledTaskView[];
   tasks: TaskView[];
+};
+
+export type AutomaticWorkspaceRootMutationResult = {
+  outcome: "applied" | "cancelled";
 };
 
 export type PersistenceRecoveryOutcome =

@@ -115,7 +115,7 @@ pub const Paths = struct {
         return self.data_buffer[0..self.data_len];
     }
 
-    pub fn automaticWorkspaceDir(self: *const Paths) ?[]const u8 {
+    pub fn automaticWorkspaceSystemRoot(self: *const Paths) ?[]const u8 {
         const len = self.automatic_workspace_len orelse return null;
         return self.automatic_workspace_buffer[0..len];
     }

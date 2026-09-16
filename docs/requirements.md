@@ -88,14 +88,15 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 用户可以选择并打开本地 Workspace；
 - Host 校验并保存 Workspace 的规范路径；
 - Workspace 记录 immutable `kind = manual | automatic`。Manual Workspace 可承载多个 Task；Automatic Workspace 精确归属一个 Task，两种 kind 不允许对同一 canonical root 相互转换；
-- Application 只通过 Native SDK `.data` 目录规则解析 `<MetaWork data dir>/workspaces` 并向 Workbench 注入可用或不可用 capability；Renderer、Bridge payload、cwd、home 和环境 fallback 都不能决定托管目录根；
-- 每个 automatic Task 使用 `<MetaWork data dir>/workspaces/<16 位随机小写 hex>` 独立目录，同一 Task 的后续 Run 复用该目录。分配必须 exclusive create、有界重试、校验 canonical containment；失败不能回退到共享目录；
-- automatic root 及其子目录是保留命名空间，不能注册为 Manual Workspace；用户通过原生 picker 明确选择 automatic root 的祖先仍只取得该 Manual Workspace authority，不因此获得 strict isolation；
+- Application 只通过 Native SDK `.data` 目录规则解析系统默认上级目录 `<MetaWork data dir>/workspaces`；Workspace owner 在独立的 schema 1 配置中持久化 `system_default | custom` 选择，custom 值是用户在 Host 原生目录选择器中确认的 canonical absolute path。Renderer、Bridge payload、cwd、home 和环境 fallback 都不能提交或决定该路径；
+- 每个 automatic Task 使用 `<effective automatic root>/<16 位随机小写 hex>` 独立目录，同一 Task 的后续 Run 复用该目录。分配必须 exclusive create、有界重试、校验 canonical containment；失败不能回退到共享目录或另一个上级目录；
+- automatic root 设置只影响修改后新建的 Task；已存在的 Workspace、Task、Run、Session、checkpoint 和历史记录继续引用创建时的 canonical root，不迁移、不扫描、不删除也不猜测旧目录。Scheduled occurrence 在每次触发时使用当时已提交的 effective root；
+- 任一历史 Automatic Workspace 的精确 canonical root 都不能重新注册为 Manual Workspace；当前 effective automatic root 及其子目录也是保留命名空间。custom root 不得等于既有 Manual Workspace，不得等于或位于任一既有 Automatic Workspace 内；它可以是既有 Automatic Workspace 的祖先。用户通过原生 picker 明确选择 automatic root 的祖先仍只取得该 Manual Workspace authority，不因此获得 strict isolation；
 - Workbench projection 必须把 Workspace 作为独立对象发布，至少包含稳定 identity、kind、显示名称、规范路径、当前授权状态和可汇总的 Task 信号；每个被 Task 引用的 Automatic Workspace 必须出现在同一 canonical snapshot；
 - 没有 Task 的 Manual Workspace 仍然存在于 New task 的路径选择器中；最近使用与重新授权不能依赖 Renderer 从 Task 列表猜测。Automatic Workspace 不进入普通选择器、recent 或重新授权入口，但其 owning Task 仍可导航；
-- New task 路径控件负责选择、添加和重新授权；设置页不再承担 Workspace 生命周期管理。设置以覆盖 Workbench 内容区的长期 surface 呈现，保留窗口壳层和底层 Workbench 挂载，关闭后恢复原 Task、草稿、滚动和焦点；Renderer 不维护全局 active Workspace 镜像；
+- New task 路径控件负责选择、添加和重新授权 Manual Workspace；设置页只提供 Automatic Workspace 上级目录的全局存储策略，不承担 Workspace 列表、打开、迁移、清理或重新授权。设置以覆盖 Workbench 内容区的长期 surface 呈现，保留窗口壳层和底层 Workbench 挂载，关闭后恢复原 Task、草稿、滚动和焦点；Renderer 不维护全局 active Workspace 镜像；
 - 后台创建 Automatic Workspace 不修改 Manual Workspace recent order 或 Renderer New task draft scope；manual 与 automatic record 使用独立容量，后台 Task 不得耗尽用户打开 Workspace 的能力；
-- automatic root 无法初始化时只关闭 `automaticWorkspaces` capability，并对 automatic admission 返回 typed unavailable；Account、显式 Manual Workspace 和普通 Workbench 仍可运行；
+- automatic root 配置缺失时初始化为 system default；读取失败、损坏或未知 schema、配置提交结果不确定、以及已保存路径不可用时必须保留原事实并 fail closed，不得静默回退到 system default。这些故障只关闭 `automaticWorkspaces` capability 并对 automatic admission 返回 typed unavailable；Account、显式 Manual Workspace 和普通 Workbench 仍可运行；
 - bounded Task/Workspace 产品历史跨 Host 重启恢复，但恢复后的 Task 只读且不得伪造 Agent Session 或 Conversation；Run、Task 删除、shutdown 和重启后 Automatic Workspace 目录保留，但不扫描目录恢复或猜测 Task/Workspace，目录浏览和磁盘清理属于后续独立能力；
 - Task/Workspace 历史持久化是交互式主流程的 best-effort projection：历史读取、解码或写入失败时保留原文件与诊断，当前进程仍允许 Workspace 选择、新建 Task、Run、权限响应、取消与后续 mutation；读取或解码失败后本进程不覆盖不可信 store，明确写失败或结果不确定则在后续完整 snapshot 时重新尝试保存。Host 必须为非健康 store 发布 Product-owned 显式恢复动作；用户确认后，Application 只把当前 canonical 文件改名保留为 recovery copy，并原子写入 Product 编码的当前内存 snapshot，不读取、迁移或删除旧格式。只有 Task 物理删除和 Scheduled occurrence 等明确要求 durable-before-release/effect 的局部事务可以因本次提交失败而拒绝，拒绝不得冻结其他 Product Task 或整个 Workbench；
 - 文件和工具能力最终必须受 Workspace 与显式权限约束；

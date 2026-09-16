@@ -106,6 +106,17 @@ const { GlobalSearch } = await vite.ssrLoadModule(
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
+const readyAutomaticWorkspaceRoot = {
+  generation: "1",
+  mode: "system_default",
+  canonicalRoot: "/tmp/MetaWork/Automatic Workspaces",
+  health: "ready",
+  redacted: false,
+  canChoose: true,
+  canReset: false,
+  canRetry: false,
+};
+
 test.afterEach(() => cleanup());
 test.after(async () => {
   await vite.close();
@@ -408,6 +419,7 @@ function settingsElement(account, overrides = {}) {
     createElement(SettingsPage, {
       account,
       models: readySettingsModels,
+      automaticWorkspaceRoot: readyAutomaticWorkspaceRoot,
       customProviderCapabilities: {
         management: true,
         secretCapture: false,
@@ -421,6 +433,18 @@ function settingsElement(account, overrides = {}) {
       cancelDisabled: false,
       onBack() {},
       onRefresh() {},
+      onResetModels() {
+        return Promise.resolve(false);
+      },
+      onChooseAutomaticWorkspaceRoot() {
+        return Promise.resolve(false);
+      },
+      onResetAutomaticWorkspaceRoot() {
+        return Promise.resolve(false);
+      },
+      onRetryAutomaticWorkspaceRoot() {
+        return Promise.resolve(false);
+      },
       onCancel() {},
       onSelectApiKey() {},
       onSelectModel() {},
@@ -454,6 +478,226 @@ function settingsElement(account, overrides = {}) {
     }),
   );
 }
+
+test("Automatic Workspace location shows the canonical system default path", () => {
+  render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: readyAutomaticWorkspaceRoot,
+    }),
+  );
+
+  assert.equal(
+    screen.getByText("/tmp/MetaWork/Automatic Workspaces").textContent,
+    "/tmp/MetaWork/Automatic Workspaces",
+  );
+  assert.equal(screen.getByText("Default").textContent, "Default");
+  assert.equal(screen.queryByText("System default"), null);
+});
+
+test("Automatic Workspace write failures distinguish active and unavailable locations", () => {
+  const active = render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        mode: "custom",
+        canonicalRoot: "/Volumes/Work/MetaWork",
+        health: "write_failed",
+      },
+    }),
+  );
+  assert.match(
+    screen.getByRole("status").textContent,
+    /previously saved location remains active/u,
+  );
+  active.unmount();
+
+  render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        mode: null,
+        canonicalRoot: null,
+        health: "write_failed",
+        canReset: true,
+      },
+    }),
+  );
+  assert.equal(
+    screen.getByText("Location unavailable").textContent,
+    "Location unavailable",
+  );
+  assert.match(
+    screen.getByRole("status").textContent,
+    /automatic workspaces are paused/u,
+  );
+});
+
+test("Automatic Workspace command errors stay local and do not duplicate Host health", async () => {
+  const ready = render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      onChooseAutomaticWorkspaceRoot: async () => false,
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+  await waitFor(() =>
+    assert.match(
+      screen.getByRole("alert").textContent,
+      /could not be changed/u,
+    ),
+  );
+  ready.unmount();
+
+  render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        mode: "custom",
+        canonicalRoot: "/Volumes/Missing/MetaWork",
+        health: "path_unavailable",
+        canReset: true,
+        canRetry: true,
+      },
+      onRetryAutomaticWorkspaceRoot: async () => false,
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() =>
+    assert.equal(screen.getByRole("button", { name: "Retry" }).disabled, false),
+  );
+  assert.match(
+    screen.getByRole("status").textContent,
+    /folder is unavailable/u,
+  );
+  assert.equal(screen.queryByRole("alert"), null);
+});
+
+test("Automatic Workspace location waits for the canonical snapshot and restores focus", async () => {
+  const calls = [];
+  const choose = async (generation) => {
+    calls.push(generation);
+    return "applied";
+  };
+  const { rerender } = render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        mode: "custom",
+        canonicalRoot: "/Volumes/Work/MetaWork",
+        canReset: true,
+      },
+      onChooseAutomaticWorkspaceRoot: choose,
+    }),
+  );
+
+  assert.equal(
+    screen.getByText("/Volumes/Work/MetaWork").textContent,
+    "/Volumes/Work/MetaWork",
+  );
+  const chooseButton = screen.getByRole("button", { name: "Choose folder…" });
+  fireEvent.click(chooseButton);
+  await Promise.resolve();
+  assert.deepEqual(calls, ["1"]);
+  assert.equal(
+    screen.getByRole("button", { name: "Choosing…" }).disabled,
+    true,
+  );
+  assert.equal(
+    screen.getByText("/Volumes/Work/MetaWork").textContent,
+    "/Volumes/Work/MetaWork",
+  );
+
+  assert.equal(
+    screen.getByRole("button", { name: "Choosing…" }).disabled,
+    true,
+  );
+
+  rerender(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        generation: "2",
+        mode: "custom",
+        canonicalRoot: "/Volumes/New/MetaWork",
+        canReset: true,
+      },
+      onChooseAutomaticWorkspaceRoot: choose,
+    }),
+  );
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  assert.equal(
+    screen.getByRole("button", { name: "Choose folder…" }),
+    document.activeElement,
+  );
+  assert.equal(
+    screen.getByText("/Volumes/New/MetaWork").textContent,
+    "/Volumes/New/MetaWork",
+  );
+
+  const cancelCalls = [];
+  rerender(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        generation: "2",
+        mode: "custom",
+        canonicalRoot: "/Volumes/New/MetaWork",
+        canReset: true,
+      },
+      onChooseAutomaticWorkspaceRoot: async (generation) => {
+        cancelCalls.push(generation);
+        return "cancelled";
+      },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+  await Promise.resolve();
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  assert.deepEqual(cancelCalls, ["2"]);
+  assert.equal(
+    screen.getByRole("button", { name: "Choose folder…" }),
+    document.activeElement,
+  );
+
+  const retryCalls = [];
+  rerender(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        generation: "2",
+        mode: "custom",
+        canonicalRoot: "/Volumes/New/MetaWork",
+        health: "path_unavailable",
+        canReset: true,
+        canRetry: true,
+      },
+      onRetryAutomaticWorkspaceRoot: async (generation) => {
+        retryCalls.push(generation);
+        return "cancelled";
+      },
+    }),
+  );
+  assert.match(
+    screen.getByRole("status").textContent,
+    /folder is unavailable/u,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await Promise.resolve();
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  assert.deepEqual(retryCalls, ["2"]);
+  assert.equal(
+    screen.getByRole("button", { name: "Retry" }),
+    document.activeElement,
+  );
+});
 
 function renderSettings(account, overrides = {}) {
   const selections = { api: [], model: [] };

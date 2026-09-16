@@ -507,8 +507,9 @@ pub fn run(init: std.process.Init) !void {
         },
         .directories = .{
             .canonical_user_home = paths_state.canonical_user_home,
-            .automatic_workspace_root = if (stores_state.automatic_workspace_root) |*root|
-                root
+            .automatic_workspace_system_root = paths_state.automaticWorkspaceSystemRoot(),
+            .automatic_workspace_configuration_store = if (stores_state.automatic_workspace_configuration) |*store|
+                store
             else
                 null,
         },

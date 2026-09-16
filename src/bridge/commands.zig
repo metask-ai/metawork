@@ -13,6 +13,9 @@ pub const window_chrome_pointer = "metawork.host.windowChrome.pointer";
 pub const window_chrome_control = "metawork.host.windowChrome.control";
 pub const window_chrome_disconnect = "metawork.host.windowChrome.disconnect";
 pub const choose_workspace = "metawork.workspaces.choose";
+pub const choose_automatic_workspace_root = "metawork.workspaces.chooseAutomaticRoot";
+pub const reset_automatic_workspace_root = "metawork.workspaces.resetAutomaticRoot";
+pub const retry_automatic_workspace_root = "metawork.workspaces.retryAutomaticRoot";
 pub const refresh_workspace_skill_catalog = "metawork.workspaces.refreshSkillCatalog";
 pub const refresh_skill_catalog = "metawork.skills.refreshCatalog";
 pub const set_skill_enabled = "metawork.skills.setEnabled";
@@ -104,6 +107,9 @@ pub const product = [_][]const u8{
     window_chrome_control,
     window_chrome_disconnect,
     choose_workspace,
+    choose_automatic_workspace_root,
+    reset_automatic_workspace_root,
+    retry_automatic_workspace_root,
     refresh_workspace_skill_catalog,
     refresh_skill_catalog,
     set_skill_enabled,

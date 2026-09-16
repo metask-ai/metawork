@@ -2,6 +2,7 @@
 
 const runtime_impl = @import("product_workspace_runtime");
 const view_impl = @import("product_workspace_view");
+const configuration_impl = @import("product_workspace_configuration");
 
 pub const Runtime = runtime_impl.Runtime;
 pub const Kind = runtime_impl.Kind;
@@ -32,4 +33,12 @@ pub const ViewError = view_impl.Error;
 pub const copyProjections = view_impl.copyProjections;
 pub const writeProjectionList = view_impl.writeProjectionList;
 pub const AutomaticRoot = runtime_impl.AutomaticRoot;
+pub const automaticPathEqual = runtime_impl.automaticPathEqual;
+pub const automaticPathStrictlyWithin = runtime_impl.automaticPathStrictlyWithin;
+pub const AutomaticRootConfiguration = configuration_impl.Configuration;
+pub const AutomaticRootConfigurationRuntime = configuration_impl.Runtime;
+pub const AutomaticRootConfigurationFileStore = configuration_impl.FileStore;
+pub const AutomaticRootConfigurationHealth = configuration_impl.Health;
+pub const AutomaticRootConfigurationMode = configuration_impl.Mode;
+pub const automatic_root_configuration = configuration_impl;
 pub const testing = runtime_impl.testing;

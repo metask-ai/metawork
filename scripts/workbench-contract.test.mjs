@@ -26,6 +26,7 @@ import {
   decodeFilePreview,
   decodeAttachmentChooseResult,
   decodeAttachmentReleaseResult,
+  decodeAutomaticWorkspaceRootMutationResult,
   decodeWorkbenchSnapshot,
 } from "../frontend/src/bridge/decode-contracts.ts";
 
@@ -81,6 +82,75 @@ const emptyAccountSummary = {
     safeDiagnostic: "",
   },
 };
+
+test("Automatic Workspace root projection and mutation results are strict", () => {
+  const candidate = clone(fixture);
+  candidate.automaticWorkspaceRoot = {
+    generation: "18446744073709551615",
+    mode: "custom",
+    canonicalRoot: "/tmp/custom-root",
+    health: "path_unavailable",
+    redacted: false,
+    canChoose: true,
+    canReset: true,
+    canRetry: true,
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+
+  const uncertain = clone(candidate);
+  uncertain.automaticWorkspaceRoot = {
+    ...uncertain.automaticWorkspaceRoot,
+    mode: null,
+    canonicalRoot: null,
+    health: "outcome_unknown",
+    canRetry: false,
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(uncertain), uncertain);
+
+  const inactiveWriteFailure = clone(uncertain);
+  inactiveWriteFailure.automaticWorkspaceRoot.health = "write_failed";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(inactiveWriteFailure),
+    inactiveWriteFailure,
+  );
+
+  for (const mutate of [
+    (value) => delete value.automaticWorkspaceRoot.canRetry,
+    (value) => (value.automaticWorkspaceRoot.generation = "0"),
+    (value) => (value.automaticWorkspaceRoot.health = "invented"),
+    (value) => (value.automaticWorkspaceRoot.mode = "temporary"),
+    (value) => (value.automaticWorkspaceRoot.path = "/tmp/leaked"),
+    (value) => (value.automaticWorkspaceRoot.health = "ready"),
+    (value) => (value.automaticWorkspaceRoot.mode = null),
+    (value) => (value.automaticWorkspaceRoot.canonicalRoot = null),
+  ]) {
+    const invalid = clone(candidate);
+    mutate(invalid);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+
+  assert.deepEqual(
+    decodeAutomaticWorkspaceRootMutationResult({ outcome: "applied" }),
+    {
+      outcome: "applied",
+    },
+  );
+  assert.deepEqual(
+    decodeAutomaticWorkspaceRootMutationResult({ outcome: "cancelled" }),
+    {
+      outcome: "cancelled",
+    },
+  );
+  assert.throws(() =>
+    decodeAutomaticWorkspaceRootMutationResult({
+      outcome: "applied",
+      path: "/tmp",
+    }),
+  );
+  assert.throws(() =>
+    decodeAutomaticWorkspaceRootMutationResult({ outcome: "unknown" }),
+  );
+});
 
 test("Skill recovery state matches the Host fixture and enforces Retry authority", () => {
   const asset = JSON.parse(
