@@ -475,7 +475,7 @@ test("bounded proportional columns preserve both docked minimums", () => {
     middleWidth: 746,
     rightWidth: 374,
     rightMinimum: 360,
-    rightMaximum: 560,
+    rightMaximum: 760,
     rightShare: 1 / 3,
   });
   assert.deepEqual(resolve(1200, true), {
@@ -484,10 +484,17 @@ test("bounded proportional columns preserve both docked minimums", () => {
     middleWidth: 520,
     rightWidth: 360,
     rightMinimum: 360,
-    rightMaximum: 400,
+    rightMaximum: 520,
     rightShare: 1 / 3,
   });
-  assert.equal(resolve(1200, true, 480).docked, false);
+  assert.deepEqual(
+    {
+      docked: resolve(1200, true, 480).docked,
+      middleWidth: resolve(1200, true, 480).middleWidth,
+      rightWidth: resolve(1200, true, 480).rightWidth,
+    },
+    { docked: true, middleWidth: 360, rightWidth: 360 },
+  );
   assert.deepEqual(
     {
       docked: resolve(960, false).docked,
@@ -500,8 +507,8 @@ test("bounded proportional columns preserve both docked minimums", () => {
 
   const ultrawide = resolve(2560, true);
   assert.equal(ultrawide.docked, true);
-  assert.equal(ultrawide.rightWidth, 640);
-  assert.equal(ultrawide.middleWidth, 1600);
+  assert.equal(ultrawide.rightWidth, 747);
+  assert.equal(ultrawide.middleWidth, 1493);
 });
 
 test("Settings uses the global stage without retaining the Task sidebar", () => {

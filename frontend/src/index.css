@@ -3753,8 +3753,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   transition:
     flex-basis 160ms ease,
     flex-grow 160ms ease,
-    min-width 160ms ease,
-    max-width 160ms ease;
+    min-width 160ms ease;
 }
 
 .workspace-sidebar {
@@ -3767,7 +3766,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .task-panel {
   flex: 0 0 0;
-  max-width: 0;
   overflow: hidden;
   border-left: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
@@ -3789,13 +3787,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .app-window[data-right-panel-docked="true"] .task-stage {
   flex-grow: var(--task-stage-share);
-  min-width: 480px;
+  min-width: 360px;
 }
 
 .app-window[data-right-panel-docked="true"] .task-panel {
   flex: var(--task-panel-share) 1 0;
   min-width: 360px;
-  max-width: 640px;
 }
 
 .workbench-view {

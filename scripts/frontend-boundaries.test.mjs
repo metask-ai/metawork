@@ -411,11 +411,15 @@ test("workbench columns use bounded proportional Flex without an overlay resizer
   );
   assert.match(
     css,
-    /data-right-panel-docked="true"\] \.task-stage\s*\{[\s\S]*?flex-grow: var\(--task-stage-share\);[\s\S]*?min-width: 480px;/,
+    /data-right-panel-docked="true"\] \.task-stage\s*\{[\s\S]*?flex-grow: var\(--task-stage-share\);[\s\S]*?min-width: 360px;/,
   );
   assert.match(
     css,
-    /data-right-panel-docked="true"\] \.task-panel\s*\{[\s\S]*?flex: var\(--task-panel-share\) 1 0;[\s\S]*?min-width: 360px;[\s\S]*?max-width: 640px;/,
+    /data-right-panel-docked="true"\] \.task-panel\s*\{[\s\S]*?flex: var\(--task-panel-share\) 1 0;[\s\S]*?min-width: 360px;/,
+  );
+  assert.doesNotMatch(
+    css,
+    /data-right-panel-docked="true"\] \.task-panel\s*\{[^}]*max-width:/,
   );
   assert.match(
     css,

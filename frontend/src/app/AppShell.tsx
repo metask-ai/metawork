@@ -27,17 +27,16 @@ const maximumLeftWidth = 480;
 const leftWidthStep = 16;
 const rightSharePreference = "metawork.panel.task.share";
 const defaultRightShare = 1 / 3;
-const minimumRightShare = 0.25;
-const maximumRightShare = 0.5;
 const defaultRightOverlayWidth = 400;
 const minimumRightWidth = 360;
-const maximumRightWidth = 640;
-const minimumTaskStageWidth = 480;
+const minimumTaskStageWidth = 360;
 const minimumDockedWorkAreaWidth = minimumTaskStageWidth + minimumRightWidth;
 const rightWidthStep = 16;
 
-function clampRightShare(value: number) {
-  return Math.min(maximumRightShare, Math.max(minimumRightShare, value));
+function normalizeRightShare(value: number) {
+  return Number.isFinite(value) && value > 0 && value < 1
+    ? value
+    : defaultRightShare;
 }
 
 export function resolveWorkbenchColumns({
@@ -56,18 +55,11 @@ export function resolveWorkbenchColumns({
   const dockedLeftWidth =
     leftOpen && viewportWidth >= 820 ? clampLeftWidth(leftWidth) : 0;
   const availableWidth = Math.max(0, viewportWidth - dockedLeftWidth);
-  const normalizedRightShare = clampRightShare(rightShare);
-  const rightMinimum = Math.min(
-    maximumRightWidth,
-    Math.max(minimumRightWidth, availableWidth * minimumRightShare),
-  );
+  const normalizedRightShare = normalizeRightShare(rightShare);
+  const rightMinimum = minimumRightWidth;
   const rightMaximum = Math.max(
-    rightMinimum,
-    Math.min(
-      maximumRightWidth,
-      availableWidth - minimumTaskStageWidth,
-      availableWidth * maximumRightShare,
-    ),
+    minimumRightWidth,
+    availableWidth - minimumTaskStageWidth,
   );
   const docked = rightOpen && availableWidth >= minimumDockedWorkAreaWidth;
 
@@ -137,7 +129,7 @@ function initialRightShare() {
   const stored = readLocalPreference(rightSharePreference);
   if (stored === null) return defaultRightShare;
   const parsed = Number(stored);
-  return Number.isFinite(parsed) ? clampRightShare(parsed) : defaultRightShare;
+  return normalizeRightShare(parsed);
 }
 
 function initialPanel(key: string, minimumWidth: number) {
@@ -256,7 +248,7 @@ export function AppShell({
 
   function shareForRightWidth(width: number) {
     if (columns.availableWidth <= 0) return defaultRightShare;
-    return clampRightShare(width / columns.availableWidth);
+    return normalizeRightShare(width / columns.availableWidth);
   }
 
   function changeRightWidth(width: number) {

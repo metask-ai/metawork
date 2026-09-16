@@ -210,7 +210,7 @@ test("left resizing recomputes the middle and right allocation without changing 
 });
 
 test("left resizing moves the right panel to overlay when docked minimums no longer fit", () => {
-  const { root } = renderTaskPanelShell(1200);
+  const { root } = renderTaskPanelShell(1079);
   const leftSeparator = screen.getByRole("separator", {
     name: "Resize task sidebar",
   });
@@ -300,7 +300,7 @@ test("lost pointer capture commits and closes the active resize transaction", ()
 
 test("an overlay Task Panel is not resizable and restores its saved share", () => {
   dom.window.localStorage.setItem("metawork.panel.task.share", "0.4");
-  const { root, resizeViewport } = renderTaskPanelShell(1159);
+  const { root, resizeViewport } = renderTaskPanelShell(1039);
   assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
   assert.equal(
     screen.queryByRole("separator", { name: "Resize side panel" }),
@@ -348,25 +348,29 @@ test("docked Task Panel exposes dynamic keyboard bounds", () => {
   });
 
   assert.equal(separator.getAttribute("aria-valuemin"), "360");
-  assert.equal(separator.getAttribute("aria-valuemax"), "400");
+  assert.equal(separator.getAttribute("aria-valuemax"), "520");
   fireEvent.keyDown(separator, { key: "End" });
-  assert.equal(separator.getAttribute("aria-valuenow"), "400");
+  assert.equal(separator.getAttribute("aria-valuenow"), "520");
   assert.equal(
     root?.style.getPropertyValue("--task-panel-share"),
-    String(400 / 880),
+    String(520 / 880),
   );
 });
 
-test("wide docked layouts include the minimum share in their Home bound", () => {
+test("wide docked layouts have no fixed maximum or proportional range", () => {
   const { root } = renderTaskPanelShell(1920);
   const separator = screen.getByRole("separator", {
     name: "Resize side panel",
   });
 
-  assert.equal(separator.getAttribute("aria-valuemin"), "400");
+  assert.equal(separator.getAttribute("aria-valuemin"), "360");
+  assert.equal(separator.getAttribute("aria-valuemax"), "1240");
+  fireEvent.keyDown(separator, { key: "End" });
+  assert.equal(separator.getAttribute("aria-valuenow"), "1240");
+  assert.equal(root?.style.getPropertyValue("--task-panel-share"), "0.775");
   fireEvent.keyDown(separator, { key: "Home" });
-  assert.equal(separator.getAttribute("aria-valuenow"), "400");
-  assert.equal(root?.style.getPropertyValue("--task-panel-share"), "0.25");
+  assert.equal(separator.getAttribute("aria-valuenow"), "360");
+  assert.equal(root?.style.getPropertyValue("--task-panel-share"), "0.225");
 });
 
 test("overlay width is independent from legacy absolute-width preferences", () => {
