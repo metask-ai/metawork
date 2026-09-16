@@ -4660,6 +4660,15 @@ export function assertDisconnected(value: unknown, generation: string) {
     fail("$", "disconnect response mismatch");
 }
 
+export function assertWindowChromeHandled(value: unknown, generation: string) {
+  const item = object(value, "$", ["generation", "handled"]);
+  if (
+    positiveWireId(item.generation, "$.generation") !== generation ||
+    booleanValue(item.handled, "$.handled") !== true
+  )
+    fail("$", "window chrome acknowledgement mismatch");
+}
+
 export type WindowChromeEnvironment = {
   generation: string;
   insets: { top: number; left: number; bottom: number; right: number };

@@ -19,19 +19,7 @@ pub const EventDisconnect = struct { generation: []const u8 };
 pub const ModelsResetStore = struct { expectedRevision: []const u8 };
 pub const ProductSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const Empty = struct {};
-pub const WindowChromeRegion = struct {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    exclusion: bool,
-};
-pub const WindowChromeSync = struct {
-    generation: []const u8,
-    viewportWidth: f64,
-    viewportHeight: f64,
-    regions: []const WindowChromeRegion,
-};
+pub const WindowChromeRefresh = struct { generation: []const u8 };
 pub const WindowChromePointer = struct {
     generation: []const u8,
     phase: []const u8,

@@ -129,7 +129,7 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 
 | Capability | 层级 | 允许边界 | 删除条件 |
 | --- | --- | --- | --- |
-| `system_webview_drag_region` | macOS 一级；Windows 二级 | 补齐 System WebView 的 live-pointer drag；Windows 同一 Host seam 依据 OS 阈值判定标题栏双击并请求既有 window-controls owner 切换最大化 | 官方发布版提供明确适用于 System WebView、可覆盖等价标题栏拖动与双击行为的 public API，并通过目标平台验收 |
+| `system_webview_drag_region` | macOS 一级；Windows 二级 | 补齐 System WebView 的 live-pointer drag，Host 限制原生 top band，DOM 交互排除由 Renderer 事件路径决定；Windows 独立复核 OS 指针并依据系统阈值判定双击，macOS 校验手势坐标范围后交给 SDK/AppKit；最大化复用既有 window-controls owner | 官方发布版提供明确适用于 System WebView、可覆盖等价标题栏拖动与双击行为的 public API，并通过目标平台验收 |
 | `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize，Application 在边缘按下时清除标题栏 pointer sequence | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |

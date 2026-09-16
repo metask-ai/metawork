@@ -4,8 +4,8 @@
 //! Its Windows drag-region public API only covers GPU surfaces, not the startup
 //! System WebView, so
 //! MetaWork keeps this bounded seam until that Runtime API is available.
-//! Renderer input is constrained to one top-band candidate plus bounded
-//! exclusions; it never carries native window identity.
+//! Renderer classifies DOM targets; Host restricts gestures to the native top
+//! band. Renderer input never carries native window identity.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -21,10 +21,6 @@ const Platform = switch (builtin.os.tag) {
         pub const live_pointer_drag = false;
         pub const chrome_top_override: ?f64 = null;
         pub const State = struct {};
-
-        pub fn prepareStartup(_: *State, _: *const anyopaque, _: PointIsDraggableFn) !void {
-            return error.SystemWebViewChromeUnavailable;
-        }
 
         pub fn captureStartupWindow(_: *State, _: startup_window.Binding) !void {
             return error.SystemWebViewChromeUnavailable;
@@ -48,19 +44,6 @@ const Platform = switch (builtin.os.tag) {
     },
 };
 
-pub const max_regions: usize = 33;
-const max_coordinate: f64 = 65_536;
-const geometry_epsilon: f64 = 0.5;
-const PointIsDraggableFn = types.PointIsDraggableFn;
-
-pub const Region = struct {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    exclusion: bool,
-};
-
 pub const Environment = struct {
     top: f64,
     left: f64,
@@ -77,17 +60,11 @@ pub const Capability = struct {
     window_id: native_sdk.platform.WindowId,
     platform_ready: bool = false,
     document_attached: bool = false,
-    regions: [max_regions]Region = undefined,
-    region_count: usize = 0,
     platform: Platform.State = .{},
 
     pub fn init(window_id: native_sdk.platform.WindowId) Capability {
         std.debug.assert(window_id != 0);
         return .{ .window_id = window_id };
-    }
-
-    pub fn prepareStartup(self: *Capability) !void {
-        try Platform.prepareStartup(&self.platform, self, platformPointIsDraggable);
     }
 
     pub fn captureStartupWindow(
@@ -120,32 +97,8 @@ pub const Capability = struct {
     ) !Environment {
         try self.requirePlatform(services);
         self.resetPointerSequence();
-        self.clearRegions();
         self.document_attached = self.platform_ready;
         return self.environment(services);
-    }
-
-    pub fn sync(
-        self: *Capability,
-        services: native_sdk.platform.PlatformServices,
-        viewport_width: f64,
-        viewport_height: f64,
-        regions: []const Region,
-    ) !Environment {
-        if (!validExtent(viewport_width) or !validExtent(viewport_height))
-            return error.InvalidWindowChromeGeometry;
-        const chrome = services.windowChrome(self.window_id);
-        if (regions.len == 0) {
-            self.clearRegions();
-            return self.environmentFromChrome(chrome);
-        }
-        try self.replaceRegions(
-            self.chromeTop(chrome),
-            viewport_width,
-            viewport_height,
-            regions,
-        );
-        return self.environmentFromChrome(chrome);
     }
 
     pub fn handlePointerDown(
@@ -154,7 +107,7 @@ pub const Capability = struct {
         x: f64,
         y: f64,
     ) !PointerOutcome {
-        if (!self.document_attached or !validCoordinate(x) or !validCoordinate(y)) {
+        if (!self.document_attached or !types.validCoordinate(x) or !types.validCoordinate(y)) {
             self.resetPointerSequence();
             return error.InvalidWindowChromeGesture;
         }
@@ -181,7 +134,6 @@ pub const Capability = struct {
     pub fn disconnect(self: *Capability) void {
         self.resetPointerSequence();
         self.document_attached = false;
-        self.clearRegions();
     }
 
     pub fn deinit(self: *Capability) void {
@@ -220,268 +172,51 @@ pub const Capability = struct {
     ) f64 {
         return Platform.chrome_top_override orelse chrome.insets.top;
     }
-
-    fn clearRegions(self: *Capability) void {
-        self.region_count = 0;
-    }
-
-    fn replaceRegions(
-        self: *Capability,
-        chrome_top: f64,
-        viewport_width: f64,
-        viewport_height: f64,
-        regions: []const Region,
-    ) !void {
-        try self.validateRegions(
-            chrome_top,
-            viewport_width,
-            viewport_height,
-            regions,
-        );
-        self.region_count = regions.len;
-        @memcpy(self.regions[0..regions.len], regions);
-    }
-
-    fn validateRegions(
-        _: *const Capability,
-        chrome_top: f64,
-        viewport_width: f64,
-        viewport_height: f64,
-        regions: []const Region,
-    ) !void {
-        if (regions.len > max_regions)
-            return error.InvalidWindowChromeRegions;
-        const candidate = regions[0];
-        if (candidate.exclusion or
-            !validRegion(candidate, viewport_width, viewport_height))
-            return error.InvalidWindowChromeRegions;
-        if (!validExtent(chrome_top) or
-            candidate.y + candidate.height > chrome_top + geometry_epsilon)
-            return error.WindowChromeRegionOutsideNativeBand;
-        for (regions[1..]) |region| {
-            if (!region.exclusion or
-                !validRegion(region, viewport_width, viewport_height) or
-                !contains(candidate, region))
-                return error.InvalidWindowChromeRegions;
-        }
-    }
-
-    fn pointIsDraggable(self: *const Capability, x: f64, y: f64) bool {
-        if (!self.document_attached or self.region_count == 0 or
-            !containsPoint(self.regions[0], x, y)) return false;
-        for (self.regions[1..self.region_count]) |region|
-            if (containsPoint(region, x, y)) return false;
-        return true;
-    }
-
-    fn platformPointIsDraggable(
-        context: *const anyopaque,
-        x: f64,
-        y: f64,
-    ) bool {
-        const self: *const Capability = @ptrCast(@alignCast(context));
-        return self.pointIsDraggable(x, y);
-    }
 };
 
-fn validCoordinate(value: f64) bool {
-    return std.math.isFinite(value) and value >= 0 and value <= max_coordinate;
-}
-
-fn validExtent(value: f64) bool {
-    return validCoordinate(value) and value > 0;
-}
-
-fn validRegion(
-    region: Region,
-    viewport_width: f64,
-    viewport_height: f64,
-) bool {
-    return validCoordinate(region.x) and validCoordinate(region.y) and
-        validExtent(region.width) and validExtent(region.height) and
-        region.x + region.width <= viewport_width + geometry_epsilon and
-        region.y + region.height <= viewport_height + geometry_epsilon;
-}
-
-fn contains(outer: Region, inner: Region) bool {
-    return inner.x + geometry_epsilon >= outer.x and
-        inner.y + geometry_epsilon >= outer.y and
-        inner.x + inner.width <= outer.x + outer.width + geometry_epsilon and
-        inner.y + inner.height <= outer.y + outer.height + geometry_epsilon;
-}
-
-fn containsPoint(region: Region, x: f64, y: f64) bool {
-    return x >= region.x and y >= region.y and
-        x < region.x + region.width and y < region.y + region.height;
-}
-
-test "chrome regions stay inside one native top band" {
-    var capability = Capability.init(1);
-    const valid = [_]Region{
-        .{ .x = 0, .y = 0, .width = 500, .height = 52, .exclusion = false },
-        .{ .x = 12, .y = 8, .width = 40, .height = 36, .exclusion = true },
-    };
-    try capability.validateRegions(52, 800, 600, &valid);
-    try std.testing.expect(capability.region_count == 0);
-
-    var outside = valid;
-    outside[0].height = 60;
-    try std.testing.expectError(
-        error.WindowChromeRegionOutsideNativeBand,
-        capability.validateRegions(52, 800, 600, &outside),
-    );
-    var escaped = valid;
-    escaped[1].x = 700;
-    try std.testing.expectError(
-        error.InvalidWindowChromeRegions,
-        capability.validateRegions(52, 800, 600, &escaped),
-    );
-}
-
-test "chrome hit testing only accepts candidate minus exclusions" {
+test "disconnect revokes gestures and clears the Windows press" {
     var capability = Capability.init(1);
     capability.document_attached = true;
-    capability.region_count = 2;
-    capability.regions[0] = .{ .x = 0, .y = 0, .width = 500, .height = 52, .exclusion = false };
-    capability.regions[1] = .{ .x = 12, .y = 8, .width = 40, .height = 36, .exclusion = true };
-    try std.testing.expect(capability.pointIsDraggable(200, 20));
-    try std.testing.expect(!capability.pointIsDraggable(20, 20));
-    try std.testing.expect(!capability.pointIsDraggable(700, 20));
-}
-
-test "invalid chrome geometry cannot partially replace live regions" {
-    var capability = Capability.init(1);
-    const valid = [_]Region{
-        .{ .x = 0, .y = 0, .width = 500, .height = 52, .exclusion = false },
-        .{ .x = 12, .y = 8, .width = 40, .height = 36, .exclusion = true },
-    };
-    try capability.replaceRegions(52, 800, 600, &valid);
-
-    var invalid = valid;
-    invalid[1].x = 700;
-    try std.testing.expectError(
-        error.InvalidWindowChromeRegions,
-        capability.replaceRegions(52, 800, 600, &invalid),
-    );
-    try std.testing.expectEqual(@as(usize, valid.len), capability.region_count);
-    capability.document_attached = true;
-    try std.testing.expect(capability.pointIsDraggable(200, 20));
-    try std.testing.expect(!capability.pointIsDraggable(20, 20));
-}
-
-test "window chrome sync preserves Windows pointer sequence for stable regions" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var capability = Capability.init(1);
-    capability.document_attached = true;
-    capability.platform.first_press = .{
-        .tick_ms = 100,
-        .screen_point = .{ .x = 400, .y = 20 },
-        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
-    };
-    const first_press = capability.platform.first_press.?;
-    const regions = [_]Region{
-        .{ .x = 0, .y = 0, .width = 500, .height = 40, .exclusion = false },
-        .{ .x = 450, .y = 0, .width = 46, .height = 40, .exclusion = true },
-    };
-
-    _ = try capability.sync(.{}, 800, 600, &regions);
-    _ = try capability.sync(.{}, 800, 600, &regions);
-
-    try std.testing.expect(std.meta.eql(
-        first_press,
-        capability.platform.first_press.?,
-    ));
-}
-
-test "window chrome sync preserves Windows pointer sequence across changed and empty regions" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var capability = Capability.init(1);
-    capability.document_attached = true;
-    capability.platform.first_press = .{
-        .tick_ms = 100,
-        .screen_point = .{ .x = 400, .y = 20 },
-        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
-    };
-    const first_press = capability.platform.first_press.?;
-    const initial = [_]Region{
-        .{ .x = 0, .y = 0, .width = 500, .height = 40, .exclusion = false },
-    };
-    const changed = [_]Region{
-        .{ .x = 0, .y = 0, .width = 600, .height = 40, .exclusion = false },
-        .{ .x = 550, .y = 0, .width = 46, .height = 40, .exclusion = true },
-    };
-
-    _ = try capability.sync(.{}, 800, 600, &initial);
-    _ = try capability.sync(.{}, 800, 600, &changed);
-    try std.testing.expect(std.meta.eql(
-        first_press,
-        capability.platform.first_press.?,
-    ));
-    _ = try capability.sync(.{}, 800, 600, &.{});
-    try std.testing.expect(std.meta.eql(
-        first_press,
-        capability.platform.first_press.?,
-    ));
-}
-
-test "invalid window chrome sync preserves regions and Windows pointer sequence" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var capability = Capability.init(1);
-    capability.document_attached = true;
-    capability.platform.first_press = .{
-        .tick_ms = 100,
-        .screen_point = .{ .x = 400, .y = 20 },
-        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
-    };
-    const first_press = capability.platform.first_press.?;
-    const valid = [_]Region{
-        .{ .x = 0, .y = 0, .width = 500, .height = 40, .exclusion = false },
-        .{ .x = 450, .y = 0, .width = 46, .height = 40, .exclusion = true },
-    };
-    _ = try capability.sync(.{}, 800, 600, &valid);
-
-    var invalid = valid;
-    invalid[1].x = 700;
-    try std.testing.expectError(
-        error.InvalidWindowChromeRegions,
-        capability.sync(.{}, 800, 600, &invalid),
-    );
-
-    try std.testing.expectEqualSlices(
-        Region,
-        &valid,
-        capability.regions[0..capability.region_count],
-    );
-    try std.testing.expect(std.meta.eql(
-        first_press,
-        capability.platform.first_press.?,
-    ));
-}
-
-test "disconnect clears document-owned regions without owning generation" {
-    var capability = Capability.init(1);
-    capability.document_attached = true;
-    capability.region_count = 1;
     capability.disconnect();
     try std.testing.expect(!capability.document_attached);
-    try std.testing.expectEqual(@as(usize, 0), capability.region_count);
+    try std.testing.expectError(error.InvalidWindowChromeGesture, capability.handlePointerDown(.{}, 20, 20));
 }
 
-test "macOS pointer path preserves Host region authorization before startWindowDrag" {
+test "refresh does not interrupt the Windows double-click sequence" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var capability = Capability.init(1);
+    capability.document_attached = true;
+    capability.platform.first_press = .{
+        .tick_ms = 100,
+        .screen_point = .{ .x = 400, .y = 20 },
+        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
+    };
+    const first = capability.platform.first_press.?;
+    _ = capability.current(.{});
+    try std.testing.expect(std.meta.eql(first, capability.platform.first_press.?));
+    try std.testing.expectError(error.InvalidWindowChromeGesture, capability.handlePointerDown(.{}, -1, 20));
+    try std.testing.expect(capability.platform.first_press == null);
+}
+
+test "macOS authorizes event coordinates against SDK top band before dragging" {
     const macos = @import("system_webview_drag_region/macos.zig");
-    const Reject = struct {
-        fn point(_: *const anyopaque, _: f64, _: f64) bool {
-            return false;
+    const Harness = struct {
+        var calls: usize = 0;
+        fn chrome(_: ?*anyopaque, _: native_sdk.platform.WindowId) native_sdk.platform.WindowChrome {
+            return .{ .insets = .{ .top = 52 } };
+        }
+        fn drag(_: ?*anyopaque, _: native_sdk.platform.WindowId) anyerror!void {
+            calls += 1;
         }
     };
-    var state = macos.State{};
-    try macos.prepareStartup(&state, &state, Reject.point);
-    try std.testing.expectEqual(
-        PointerOutcome.ignored,
-        try macos.handlePointerDown(&state, undefined, 1, 20, 20),
-    );
-    macos.deinit(&state);
+    Harness.calls = 0;
+    const services: native_sdk.platform.PlatformServices = .{ .window_chrome_fn = Harness.chrome, .start_window_drag_fn = Harness.drag };
+    var state: macos.State = .{};
+    for ([_]f64{ -1, 52, 100, std.math.nan(f64) }) |y| {
+        try std.testing.expectEqual(PointerOutcome.ignored, try macos.handlePointerDown(&state, services, 1, 20, y));
+    }
+    try std.testing.expectEqual(@as(usize, 0), Harness.calls);
+    try std.testing.expectEqual(PointerOutcome.drag_started, try macos.handlePointerDown(&state, services, 1, 20, 20));
+    try std.testing.expectEqual(@as(usize, 1), Harness.calls);
+    try std.testing.expectEqual(PointerOutcome.ignored, try macos.handlePointerDown(&state, .{}, 1, 20, 20));
 }

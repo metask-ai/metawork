@@ -165,6 +165,8 @@ Account credential outcome-certainty 由 `scripts/native-sdk-credential-contract
 | Windows arm64 GNU  | revision 15 bundle 与交叉链接已验证（`E-AGENTCORE-R15-20260907`）                        | ARM64 真机运行与安装                           |
 | Linux              | 尚未实现                                                                                 | 构建、运行、分发和平台验收均未开始             |
 
+System WebView window chrome 的区域授权变更须覆盖真实事件路径的控件、可编辑内容、弹层/遮罩和 inert 排除，以及 Host top-band 越界拒绝；Bridge 测试覆盖 generation、严格 payload、只读刷新与动作确认的跨语言 fixture，Renderer 测试覆盖迟到 connect、失效 refresh 和卸载后的动作响应。Windows 双击替代必须在目标 WebView2 用真实 OS 鼠标验证首击进入 caption move loop 后的第二击、默认及非默认系统双击时间、系统距离阈值内外、三击/四击、内容/控件/失焦/原生边缘插入后的序列中断，以及普通拖动和最大化拖动恢复。原生边缘只按下而不改变尺寸也必须中断。既定行为不能保持或证据不足时保留 Host 状态机，不以 JS 合成输入或上游通用源码代替平台证据。新证据须绑定 revision/artifact、OS、Native SDK 与 WebView2 版本；历史证据只覆盖当时 artifact，不自动证明改造后的实现。
+
 macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebView 可访问性与分发 artifact 是独立证据项。Windows development baseline 不证明安装、更新、完整安全矩阵或其他平台；程序化 resize 不证明真实 pointer resize、系统 snap 或焦点行为。签名成功只证明被测二进制和签名 policy，不证明安装启动、交互、更新、回滚或迁移。
 
 ## 长期证据账本

@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { buildAutomationDebugArtifact } from "./build.mjs";
 import {
   allocateWebViewTestPort,
+  connectTestWebView,
   probeTopResizePaint,
 } from "./window-top-resize-paint.mjs";
 
@@ -34,7 +35,6 @@ const hitTestProbe = path.join(
   "probe-windows-window-chrome.ps1",
 );
 const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
-const bridgeResponsePath = path.join(automationDir, "bridge-response.txt");
 const timeoutMs = 20_000;
 const resizeSessionOnly = process.argv.includes("--resize-session-only");
 const evidenceDir = process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR;
@@ -259,23 +259,22 @@ async function runProbe(mode, extraArgs = []) {
 }
 
 async function waitForRendererChromeReady() {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = JSON.parse(await readFile(bridgeResponsePath, "utf8"));
+  const webview = await connectTestWebView(debugPort);
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
       if (
-        response?.ok === true &&
-        /^[1-9][0-9]*$/.test(response.result?.generation) &&
-        Number.isFinite(response.result?.insets?.top)
+        await webview.evaluate(
+          `document.documentElement.dataset.metaworkWindowChrome === "ready"`,
+        )
       )
         return;
-    } catch (error) {
-      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError))
-        throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    throw new Error("Renderer window chrome did not become ready");
+  } finally {
+    webview.close();
   }
-  throw new Error("Renderer window chrome did not reach a synchronized state");
 }
 
 function waitForOutput(pattern) {

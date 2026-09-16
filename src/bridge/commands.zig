@@ -8,7 +8,7 @@ pub const ping_ack = "metawork.smoke.eventAck";
 pub const connect = "metawork.events.connect";
 pub const disconnect = "metawork.events.disconnect";
 pub const window_chrome_connect = "metawork.host.windowChrome.connect";
-pub const window_chrome_sync = "metawork.host.windowChrome.sync";
+pub const window_chrome_refresh = "metawork.host.windowChrome.refresh";
 pub const window_chrome_pointer = "metawork.host.windowChrome.pointer";
 pub const window_chrome_control = "metawork.host.windowChrome.control";
 pub const window_chrome_disconnect = "metawork.host.windowChrome.disconnect";
@@ -102,7 +102,7 @@ pub const product = [_][]const u8{
     connect,
     disconnect,
     window_chrome_connect,
-    window_chrome_sync,
+    window_chrome_refresh,
     window_chrome_pointer,
     window_chrome_control,
     window_chrome_disconnect,
