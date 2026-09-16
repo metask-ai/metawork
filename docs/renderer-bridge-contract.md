@@ -7,7 +7,7 @@
 
 ## 1. Bridge 定位
 
-Bridge 是 Renderer 与 Host 之间唯一的产品命令和 Product projection 边界，承运两类 surface。产品命令面：验证调用来源与启动窗口 identity、严格解码 payload、把合法输入转换为产品命令、dispatch 给 Product 中对应 owner、编码 typed result，并通过 Snapshot/Event 运输发布产品投影；Bridge 不决定 Task 是否可以运行、Workspace 是否有效、Agent 是否应取消、credential 是否可以替换或历史如何持久化，这些判断必须由 Product 内对应 owner 完成。受限平台 capability 面：只承运 window-chrome bootstrap capability，当前封闭枚举为 `metawork.host.windowChrome.connect / sync / pointer / control / disconnect` 五个 command，dispatch 给 Application 执行，原生窗口行为与真实状态由 Native SDK/OS 拥有。两面共用同一 transport、origin policy 与 source/window authority，不共用数据面；新增平台面 command 必须与 capability seam 同级登记（identity、SDK 缺口、删除条件），不因该面已存在而豁免。
+Bridge 是 Renderer 与 Host 之间唯一的产品命令和 Product projection 边界，承运两类 surface。产品命令面：验证调用来源与启动窗口 identity、严格解码 payload、把合法输入转换为产品命令、dispatch 给 Product 中对应 owner、编码 typed result，并通过 Snapshot/Event 运输发布产品投影；Bridge 不决定 Task 是否可以运行、Workspace 是否有效、Agent 是否应取消、credential 是否可以替换或历史如何持久化，这些判断必须由 Product 内对应 owner 完成。受限平台 capability 面：只承运 window-chrome bootstrap capability，当前封闭枚举为 `metawork.host.windowChrome.connect / refresh / pointer / control / disconnect` 五个 command，dispatch 给 Application 执行，原生窗口行为与真实状态由 Native SDK/OS 拥有。两面共用同一 transport、origin policy 与 source/window authority，不共用数据面；新增平台面 command 必须与 capability seam 同级登记（identity、SDK 缺口、删除条件），不因该面已存在而豁免。
 
 Renderer 的可信定位与 Native SDK WebView UI/input 边界以[高层架构](architecture.md#31-renderer)为准。Bridge 的严格 command catalog、runtime decode、source/window 校验、CAS 与 Product admission 用于维护 owner、处理陈旧 UI 状态、隔离实现错误并拒绝畸形输入。本地路径等输入只有在具体领域合同明确登记时才能通过容量有界的 typed command 转交，Host 仍独立校验文件类型、范围、当前 authority 与生命周期；这不形成 generic file、process 或 OS action command。
 
