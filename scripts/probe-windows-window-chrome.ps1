@@ -1,17 +1,55 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('doubleclick', 'drag', 'resize', 'controls', 'close', 'minimize', 'activated')]
-    [string]$Mode = 'drag'
+    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated')]
+    [string]$Mode = 'drag',
+    [string]$ColorHex,
+    [string]$OutputPath,
+    [int]$ProbeWidth = 900,
+    [ValidateRange(1, 3)]
+    [int]$Repeat = 1,
+    [switch]$AllMonitors,
+    [switch]$Direct,
+    [switch]$KeepTopmost
 )
 
 $ErrorActionPreference = 'Stop'
 
 Add-Type -TypeDefinition @'
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 
 public static class MetaWorkChromeProbe {
+    [DllImport("user32.dll")]
+    public static extern uint GetGuiResources(IntPtr process, uint flags);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr window);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct CursorInfo {
+        public uint Size, Flags;
+        public IntPtr Cursor;
+        public Point Position;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern bool GetCursorInfo(ref CursorInfo info);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr LoadCursorW(IntPtr instance, IntPtr name);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
+
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string name, string title);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Point {
+        public int X;
+        public int Y;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect {
         public int Left;
@@ -20,8 +58,40 @@ public static class MetaWorkChromeProbe {
         public int Bottom;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MinMaxInfo {
+        public Point Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize;
+    }
+
+    [DllImport("user32.dll", EntryPoint="SendMessageW")]
+    public static extern IntPtr GetMinMaxInfo(IntPtr window, uint message, UIntPtr wparam, ref MinMaxInfo info);
+
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr window, out Rect rect);
+
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr window, ref Point point);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(Point point);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr window, uint flags);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern int GetClassNameW(IntPtr window, StringBuilder name, int length);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessageW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
 
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr window);
@@ -40,6 +110,9 @@ public static class MetaWorkChromeProbe {
 
     [DllImport("user32.dll")]
     public static extern int GetSystemMetrics(int index);
+
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetricsForDpi(int index, uint dpi);
 
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr window, int command);
@@ -79,6 +152,26 @@ function Get-MetaWorkRect([IntPtr]$window) {
         throw 'GetWindowRect failed'
     }
     return $rect
+}
+
+function Get-MetaWorkSizeLimits([IntPtr]$window) {
+    $limits = New-Object MetaWorkChromeProbe+MinMaxInfo
+    # WM_GETMINMAXINFO overrides caller-supplied defaults; DefWindowProc does
+    # not populate an empty structure for a manually sent message.
+    $dpi = [MetaWorkChromeProbe]::GetDpiForWindow($window)
+    $minimum = New-Object MetaWorkChromeProbe+Point
+    $minimum.X = [MetaWorkChromeProbe]::GetSystemMetricsForDpi(34, $dpi)
+    $minimum.Y = [MetaWorkChromeProbe]::GetSystemMetricsForDpi(35, $dpi)
+    $maximum = New-Object MetaWorkChromeProbe+Point
+    $maximum.X = [MetaWorkChromeProbe]::GetSystemMetricsForDpi(59, $dpi)
+    $maximum.Y = [MetaWorkChromeProbe]::GetSystemMetricsForDpi(60, $dpi)
+    $limits.MinTrackSize = $minimum
+    $limits.MaxTrackSize = $maximum
+    [MetaWorkChromeProbe]::GetMinMaxInfo($window, 0x0024, [UIntPtr]::Zero, [ref]$limits) | Out-Null
+    if ($limits.MinTrackSize.X -le 0 -or $limits.MinTrackSize.Y -le 0) {
+        throw 'Window did not provide its native minimum tracking size'
+    }
+    return $limits
 }
 
 function Invoke-MetaWorkClick([int]$x, [int]$y) {
@@ -125,9 +218,227 @@ if ($process.MainWindowHandle -eq 0) {
 }
 
 $window = $process.MainWindowHandle
-[MetaWorkChromeProbe]::SetForegroundWindow($window) | Out-Null
-Start-Sleep -Milliseconds 200
+$wasTopmost = ([MetaWorkChromeProbe]::GetWindowLongPtrW($window, -20).ToInt64() -band 8) -ne 0
+[MetaWorkChromeProbe]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
+if ($Direct -and (-not [MetaWorkChromeProbe]::IsWindowVisible($window) -or
+    [MetaWorkChromeProbe]::IsIconic($window) -or [MetaWorkChromeProbe]::IsZoomed($window))) {
+    throw 'Direct resize requires an already visible, restored window'
+}
+try {
+if ($Mode -ne 'paint-stationary') {
+    # Keep real mouse input on this test-owned window, even if Codex takes focus.
+    if (-not [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr](-1), 0, 0, 0, 0, 0x0013)) {
+        throw 'Could not establish unobscured pointer input'
+    }
+    [MetaWorkChromeProbe]::SetForegroundWindow($window) | Out-Null
+    Start-Sleep -Milliseconds 200
+} elseif (-not $wasTopmost) {
+    throw 'Stationary paint requires the harness to keep its window unobscured before changing the DOM'
+}
 $rect = Get-MetaWorkRect $window
+
+if ($Mode -eq 'top-resize') {
+    if ($Direct -and ($AllMonitors -or $Repeat -ne 1)) { throw 'Direct resize must be the first input on the current window' }
+    if (-not $Direct) { [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null }
+    $userBefore = [MetaWorkChromeProbe]::GetGuiResources($process.Handle, 1)
+    $gdiBefore = [MetaWorkChromeProbe]::GetGuiResources($process.Handle, 0)
+    $positions = @(@{ X = 100; Y = 100 })
+    if ($AllMonitors) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $positions = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+            @{ X = $_.WorkingArea.Left + 60; Y = $_.WorkingArea.Top + 60 }
+        })
+    }
+    foreach ($position in $positions) {
+    for ($iteration = 0; $iteration -lt $Repeat; $iteration++) {
+    $edges = if ($Direct) { @('top') } else { @('top', 'top-left', 'top-right') }
+    foreach ($edge in $edges) {
+        # SetWindowPos establishes a repeatable precondition only. All changes
+        # checked below must be caused by real OS mouse input. The direct
+        # lifecycle probe must not resize or restore the window beforehand.
+        if (-not $Direct) {
+            if (-not [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr](-1), $position.X, $position.Y, 900, 620, 0x0010)) {
+                throw 'Could not establish top-resize precondition'
+            }
+            Start-Sleep -Milliseconds 250
+            # Query after moving to the target monitor so SDK/OS minimum sizes
+            # already reflect its DPI. Leave room for the 40 physical-pixel drag.
+            $limits = Get-MetaWorkSizeLimits $window
+            $width = [Math]::Max(900, $limits.MinTrackSize.X + 80)
+            $height = [Math]::Max(620, $limits.MinTrackSize.Y + 80)
+            if ($width -gt $limits.MaxTrackSize.X -or $height -gt $limits.MaxTrackSize.Y) {
+                throw 'Monitor tracking limits leave insufficient room for the resize probe'
+            }
+            if (-not [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr]::Zero, 0, 0, $width, $height, 0x0016)) {
+                throw 'Could not establish DPI-aware top-resize dimensions'
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        $before = Get-MetaWorkRect $window
+        $dy = 40
+        if ($Direct) {
+            $limits = Get-MetaWorkSizeLimits $window
+            if ($before.Bottom - $before.Top - $limits.MinTrackSize.Y -lt 40) {
+                Add-Type -AssemblyName System.Windows.Forms
+                $area = [System.Windows.Forms.Screen]::FromHandle($window).WorkingArea
+                if ($before.Top - $area.Top -lt 40 -or
+                    $before.Bottom - $before.Top + 40 -gt $limits.MaxTrackSize.Y) {
+                    throw 'Current window has insufficient room for a direct top resize'
+                }
+                $dy = -40
+            }
+        }
+        $client = New-Object MetaWorkChromeProbe+Rect
+        $origin = New-Object MetaWorkChromeProbe+Point
+        if (-not [MetaWorkChromeProbe]::GetClientRect($window, [ref]$client) -or
+            -not [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$origin)) {
+            throw 'Could not read the physical client frame'
+        }
+        $x = $origin.X + [int]($client.Right / 2)
+        $dx = 0
+        if ($edge -eq 'top-left') { $x = $origin.X + 2; $dx = 40 }
+        if ($edge -eq 'top-right') { $x = $origin.X + $client.Right - 3; $dx = -40 }
+        $point = New-Object MetaWorkChromeProbe+Point
+        $point.X = $x
+        $point.Y = $origin.Y + 2
+        $pointerRoot = [MetaWorkChromeProbe]::GetAncestor([MetaWorkChromeProbe]::WindowFromPoint($point), 2)
+        if ($pointerRoot -ne $window) {
+            $coverProcessId = [uint32]0
+            [MetaWorkChromeProbe]::GetWindowThreadProcessId($pointerRoot, [ref]$coverProcessId) | Out-Null
+            $coverClass = [System.Text.StringBuilder]::new(256)
+            [MetaWorkChromeProbe]::GetClassNameW($pointerRoot, $coverClass, 256) | Out-Null
+            throw "Another window covers the top-resize input point ($x,$($point.Y)); expected=$window actual=$pointerRoot process=$coverProcessId class=$coverClass"
+        }
+        $packed = ([long]($point.X -band 0xffff)) -bor ([long]($point.Y -band 0xffff) -shl 16)
+        $nativeHit = [MetaWorkChromeProbe]::SendMessageW($window, 0x0084, [UIntPtr]::Zero, [IntPtr]$packed)
+        $dpi = [MetaWorkChromeProbe]::GetDpiForWindow($window)
+        Write-Output "edge=$edge screen=$($point.X),$($point.Y) dpi=$dpi client=$($client.Right)x$($client.Bottom) nativeHit=$nativeHit"
+        [MetaWorkChromeProbe]::SetCursorPos($point.X, $point.Y) | Out-Null
+        Start-Sleep -Milliseconds 100
+        $cursor = New-Object MetaWorkChromeProbe+CursorInfo
+        $cursor.Size = [System.Runtime.InteropServices.Marshal]::SizeOf($cursor)
+        $cursorId = switch ($edge) { 'top' {32645} 'top-left' {32642} 'top-right' {32643} }
+        if (-not [MetaWorkChromeProbe]::GetCursorInfo([ref]$cursor) -or
+            $cursor.Cursor -ne [MetaWorkChromeProbe]::LoadCursorW([IntPtr]::Zero, [IntPtr]$cursorId)) {
+            throw "$edge did not expose the native resize cursor"
+        }
+        try {
+            Invoke-MetaWorkDrag $x ($origin.Y + 2) $dx $dy
+        }
+        finally {
+            [MetaWorkChromeProbe]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+        }
+        Start-Sleep -Milliseconds 250
+        $after = Get-MetaWorkRect $window
+        if ([Math]::Abs(($after.Top - $before.Top) - $dy) -gt 3 -or
+            [Math]::Abs($after.Bottom - $before.Bottom) -gt 2) {
+            [MetaWorkChromeProbe]::GetCursorInfo([ref]$cursor) | Out-Null
+            throw "$edge mouse resize failed: top $($before.Top)->$($after.Top), bottom $($before.Bottom)->$($after.Bottom); pointer=$($cursor.Position.X),$($cursor.Position.Y) expected=$($x + $dx),$($origin.Y + 2 + $dy)"
+        }
+        $expectedLeft = $before.Left + $(if ($edge -eq 'top-left') { 40 } else { 0 })
+        $expectedRight = $before.Right + $(if ($edge -eq 'top-right') { -40 } else { 0 })
+        if ([Math]::Abs($after.Left - $expectedLeft) -gt 3 -or
+            [Math]::Abs($after.Right - $expectedRight) -gt 3) {
+            throw "$edge mouse resize moved the wrong horizontal edge"
+        }
+        Write-Output "$edge=true direct=$Direct deltaY=$dy"
+    }
+    }
+    }
+    $userAfter = [MetaWorkChromeProbe]::GetGuiResources($process.Handle, 1)
+    $gdiAfter = [MetaWorkChromeProbe]::GetGuiResources($process.Handle, 0)
+    # The first input can lazily allocate native/WebView resources. The normal
+    # fixture and repeated drags below still enforce the steady-state bound.
+    if (-not $Direct -and ($userAfter -gt $userBefore + 4 -or $gdiAfter -gt $gdiBefore + 4)) {
+        throw "Resize resources grew: USER $userBefore->$userAfter; GDI $gdiBefore->$gdiAfter"
+    }
+    Write-Output "resizeResources=USER:$userBefore->$userAfter,GDI:$gdiBefore->$gdiAfter"
+    return
+}
+
+if ($Mode -eq 'paint' -or $Mode -eq 'paint-stationary') {
+    # The isolated WebView test injects a contrasting DOM strip. Read real
+    # desktop pixels, including the native child, both while stationary and
+    # after covering and resizing.
+    Add-Type -AssemblyName System.Drawing,System.Windows.Forms
+    if ($Mode -eq 'paint') {
+        if (-not [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr](-1), 100, 100, $ProbeWidth, 620, 0x0040)) {
+            throw 'Paint resize setup failed'
+        }
+        Start-Sleep -Milliseconds 180
+    }
+    $origin = New-Object MetaWorkChromeProbe+Point
+    $client = New-Object MetaWorkChromeProbe+Rect
+    if (-not [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$origin) -or
+        -not [MetaWorkChromeProbe]::GetClientRect($window, [ref]$client)) { throw 'Paint geometry unavailable' }
+    if ($Mode -eq 'paint') {
+        $cover = New-Object System.Windows.Forms.Form
+        try {
+            $cover.FormBorderStyle = 'None'; $cover.StartPosition = 'Manual'
+            $cover.SetBounds($origin.X, $origin.Y, $client.Right, 70)
+            $cover.BackColor = [System.Drawing.Color]::Black; $cover.TopMost = $true
+            $cover.Show(); [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 180
+        } finally { $cover.Close(); $cover.Dispose() }
+        Start-Sleep -Milliseconds 200
+    }
+    $bitmap = New-Object System.Drawing.Bitmap $client.Right,24
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $graphics.CopyFromScreen($origin.X, $origin.Y, 0, 0, $bitmap.Size)
+        if ($OutputPath) {
+            [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($OutputPath)) | Out-Null
+            $bitmap.Save($OutputPath)
+        }
+        $expected = [System.Drawing.ColorTranslator]::FromHtml($ColorHex).ToArgb()
+        foreach ($x in @(12, [int]($client.Right / 2), ($client.Right - 12))) {
+            foreach ($y in @(1, 4, 6, 12, 20)) {
+                if ($bitmap.GetPixel($x, $y).ToArgb() -ne $expected) {
+                    throw "Native input child occludes WebView pixels at $x,$y; expected $ColorHex"
+                }
+            }
+        }
+    } finally { $graphics.Dispose(); $bitmap.Dispose() }
+    Write-Output "paint=$ColorHex width=$($client.Right) stationary=$($Mode -eq 'paint-stationary') occlusionRecovery=$($Mode -eq 'paint')"
+    return
+}
+
+if ($Mode -eq 'top-lifecycle') {
+    [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
+    [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr]::Zero, 100, 100, 900, 620, 0x0014) | Out-Null
+    Start-Sleep -Milliseconds 250
+    $rect = Get-MetaWorkRect $window
+    $x = [int](($rect.Left + $rect.Right) / 2)
+    $origin = New-Object MetaWorkChromeProbe+Point
+    [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$origin) | Out-Null
+    $gap = [Math]::Max(20, [Math]::Min(60, [MetaWorkChromeProbe]::GetDoubleClickTime() / 8))
+    Invoke-MetaWorkTitleClick $x ($origin.Y + 25)
+    Start-Sleep -Milliseconds $gap
+    Invoke-MetaWorkTitleClick $x ($origin.Y + 2)
+    Start-Sleep -Milliseconds $gap
+    Invoke-MetaWorkTitleClick $x ($origin.Y + 25)
+    Start-Sleep -Milliseconds 100
+    if ([MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Native edge press failed to reset the titlebar sequence' }
+    Start-Sleep -Milliseconds ([MetaWorkChromeProbe]::GetDoubleClickTime() + 100)
+    Invoke-MetaWorkTitleDoubleClick $x ($origin.Y + 2) $gap
+    Start-Sleep -Milliseconds 250
+    $vertical = Get-MetaWorkRect $window
+    if (($vertical.Bottom - $vertical.Top) -le ($rect.Bottom - $rect.Top) + 50 -or
+        $vertical.Left -ne $rect.Left -or $vertical.Right -ne $rect.Right) {
+        throw 'Top-edge double click did not retain native vertical sizing behavior'
+    }
+    $inputChild = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkSystemWebViewTopResize', '')
+    if ($inputChild -eq [IntPtr]::Zero) { throw 'Input child unavailable' }
+    [MetaWorkChromeProbe]::ShowWindow($window, 3) | Out-Null
+    Start-Sleep -Milliseconds 200
+    if ([MetaWorkChromeProbe]::IsWindowVisible($inputChild)) { throw 'Maximized window retains the resize input layer' }
+    [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
+    [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr]::Zero, 100, 100, 900, 620, 0x0014) | Out-Null
+    Start-Sleep -Milliseconds 200
+    if (-not [MetaWorkChromeProbe]::IsWindowVisible($inputChild)) { throw 'Restored window lost the resize input layer' }
+    Write-Output 'edgeSequenceReset=true nativeEdgeDoubleClick=true maximizedLayerHidden=true restoredLayerVisible=true'
+    return
+}
 
 if ($Mode -eq 'doubleclick') {
     $doubleClickTime = [int][MetaWorkChromeProbe]::GetDoubleClickTime()
@@ -344,4 +655,9 @@ if ($Mode -eq 'drag') {
     }
     Write-Output 'drag=true maximizedRestore=true'
     return
+}
+} finally {
+    if (-not $wasTopmost -and -not $KeepTopmost -and [MetaWorkChromeProbe]::IsWindow($window)) {
+        [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr](-2), 0, 0, 0, 0, 0x0013) | Out-Null
+    }
 }

@@ -180,7 +180,7 @@ Workspace
 
 ### 4.3 一体化窗口栏
 
-主窗口使用 `hidden_inset_tall`：Renderer 命令栏承担自定义标题栏的产品视觉，不叠加独立的标准系统标题行。React 绘制产品 header、声明一个 drag candidate，并绘制带固定 `data-metawork-window-control` 语义的窗口按钮；browser-side Bridge 才能把这些声明转换为受限 Host command。Native SDK/OS 独占 native hit test、拖动循环、系统菜单、resize、close policy 与真实窗口状态。React component 不推断平台、不直接调用 transport，也不持有原生窗口 identity、handle 或执行权。
+主窗口使用 `hidden_inset_tall`：Renderer 命令栏承担自定义标题栏的产品视觉，不叠加独立的标准系统标题行。React 绘制产品 header、声明一个 drag candidate，并绘制带固定 `data-metawork-window-control` 语义的窗口按钮；browser-side Bridge 才能把这些声明转换为受限 Host command。Native SDK/OS 承担 native hit test、拖动循环、系统菜单、resize、close policy 与真实窗口状态；SDK 缺失的原生输入路径只按[已登记兼容能力](architecture.md#35-native-sdk)补齐。React component 不推断平台、不直接调用 transport，也不持有原生窗口 identity、handle 或执行权。
 
 - 命令栏是窗口交互层，不表现为独立横向标题栏：不使用贯穿全窗的底边或异色横带；左侧 Task rail 的背景与竖分隔线必须延伸到窗口顶部，中央命令区与 Task 工作面使用同一 surface；
 - macOS 保留系统交通灯；Windows 由 Renderer 绘制最小化、最大化/还原与关闭按钮。Host 只发布 `rendererControls` capability、`maximized` 真值和安全 inset，browser-side Bridge 将它们转换为 document dataset/CSS variables；React 不读取平台名或调用 transport，最大化与还原使用互斥的可访问按钮，由 Host 真值控制显隐；

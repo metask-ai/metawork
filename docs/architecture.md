@@ -130,11 +130,14 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 | Capability | 层级 | 允许边界 | 删除条件 |
 | --- | --- | --- | --- |
 | `system_webview_drag_region` | macOS 一级；Windows 二级 | 补齐 System WebView 的 live-pointer drag；Windows 同一 Host seam 依据 OS 阈值判定标题栏双击并请求既有 window-controls owner 切换最大化 | 官方发布版提供明确适用于 System WebView、可覆盖等价标题栏拖动与双击行为的 public API，并通过目标平台验收 |
+| `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize，Application 在边缘按下时清除标题栏 pointer sequence | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
 
 Window compatibility 共享的 startup window identity 只能由 Application 在窗口创建期建立一次并验证，再注入需要它的 seam；消费者不得复制捕获机制或把 identity 当成通用 system handle。`minimize` 等 Runtime API 已提供的能力必须保持正常路径，不能因相邻按钮使用 compatibility 而被吸入 seam。
+
+`system_webview_resize` 只拥有输入子窗口和同 UI 线程的宿主生命周期回调；仅在系统上沿窄带内让缩放命中优先于隐藏标题栏残留的 DWM caption-button 命中。窗口尺寸限制与 resize loop 仍由 SDK/OS 决定，不建立第二份主窗口状态或 Renderer resize 协议。输入层须保持 WebView 原有绘制，跟随客户区及 DPI 更新，最大化或不可缩放时不截获输入；安装失败回滚并使应用启动失败，避免在未完成窗口能力初始化时继续启动；运行更新失败则移除失效输入层并报告，保留已运行的应用。主窗口销毁与 Application cleanup 均释放资源。真实鼠标缩放和无损绘制必须同时验收，不以程序化 resize 代替。
 
 `app_single_instance` 必须同时满足：
 

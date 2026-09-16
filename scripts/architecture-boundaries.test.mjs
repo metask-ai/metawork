@@ -2485,6 +2485,9 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     "src/native_sdk_compat/system_webview_window_controls.zig";
   const controlsWindowsPath =
     "src/native_sdk_compat/system_webview_window_controls/windows.zig";
+  const resizePath = "src/native_sdk_compat/system_webview_resize.zig";
+  const resizeWindowsPath =
+    "src/native_sdk_compat/system_webview_resize/windows.zig";
   const startupWindowsPath =
     "src/native_sdk_compat/system_webview_startup_window/windows.zig";
   const instancePath = "src/native_sdk_compat/app_single_instance.zig";
@@ -2493,7 +2496,7 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   const instanceMacosPath =
     "src/native_sdk_compat/app_single_instance/macos.zig";
 
-  for (const seamPath of [dragPath, controlsPath]) {
+  for (const seamPath of [dragPath, controlsPath, resizePath]) {
     assert.deepEqual(
       zigFiles("src/").filter((file) =>
         read(file).includes(`native_sdk_compat/${seamPath.split("/").at(-1)}`),
@@ -2528,6 +2531,42 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     [dragPath, dragMacosPath, dragWindowsPath].sort(),
   );
 
+  assert.deepEqual(
+    externSymbols(read(resizeWindowsPath), ["user32", "kernel32", "comctl32"]),
+    [
+      "CreateWindowExW",
+      "DefSubclassProc",
+      "DefWindowProcW",
+      "DestroyWindow",
+      "GetClientRect",
+      "GetCurrentThreadId",
+      "GetDpiForWindow",
+      "GetModuleHandleW",
+      "GetSystemMetricsForDpi",
+      "GetWindow",
+      "GetWindowLongPtrW",
+      "GetWindowThreadProcessId",
+      "IsIconic",
+      "IsWindow",
+      "IsWindowEnabled",
+      "IsZoomed",
+      "LoadCursorW",
+      "PostMessageW",
+      "RegisterClassExW",
+      "RegisterWindowMessageW",
+      "ReleaseCapture",
+      "RemoveWindowSubclass",
+      "ScreenToClient",
+      "SetCursor",
+      "SetWindowLongPtrW",
+      "SetWindowPos",
+      "SetWindowSubclass",
+    ].sort(),
+  );
+  assert.doesNotMatch(
+    read(resizeWindowsPath),
+    /EnumChildWindows|SetWindowsHookEx|GetForegroundWindow|FindWindow|SetParent/,
+  );
   assert.deepEqual(
     externSymbols(read(dragWindowsPath), ["user32", "kernel32", "comctl32"]),
     [

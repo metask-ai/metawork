@@ -6,6 +6,7 @@ const control_ports = @import("metawork_product_control_ports");
 const drag_region = @import("../native_sdk_compat/system_webview_drag_region.zig");
 const startup_window = @import("../native_sdk_compat/system_webview_startup_window.zig");
 const window_controls = @import("../native_sdk_compat/system_webview_window_controls.zig");
+const resize = @import("../native_sdk_compat/system_webview_resize.zig");
 
 pub const main_window_id: native_sdk.platform.WindowId = 1;
 pub const tray_open_id: native_sdk.platform.TrayItemId = 1;
@@ -26,6 +27,7 @@ pub const State = struct {
     startup_window_capture: startup_window.Capture = .{},
     drag_region_capability: drag_region.Capability = drag_region.Capability.init(main_window_id),
     window_controls_capability: window_controls.Capability = window_controls.Capability.init(main_window_id),
+    resize_capability: resize.Capability = .{},
     tray_installed: bool = false,
 
     pub fn prepareStartup(self: *State) !void {
@@ -38,6 +40,7 @@ pub const State = struct {
         const startup_binding = try self.startup_window_capture.take(main_window_id);
         try self.drag_region_capability.captureStartupWindow(startup_binding);
         try self.window_controls_capability.captureStartupWindow(startup_binding);
+        try self.resize_capability.attach(startup_binding, self, resetTitlebarSequence);
     }
 
     pub fn bind(self: *State, services: native_sdk.platform.PlatformServices) !void {
@@ -46,9 +49,15 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
+        self.resize_capability.deinit();
         self.startup_window_capture.deinit();
         self.window_controls_capability.deinit();
         self.drag_region_capability.deinit();
+    }
+
+    fn resetTitlebarSequence(data: *anyopaque) void {
+        const self: *State = @ptrCast(@alignCast(data));
+        self.drag_region_capability.resetPointerSequence();
     }
 
     pub fn installTray(
@@ -281,6 +290,7 @@ test {
     _ = drag_region;
     _ = startup_window;
     _ = window_controls;
+    _ = resize;
 }
 
 test "Windows packaged tray icon resolves from the executable's package root" {
