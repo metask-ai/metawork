@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('doubleclick', 'drag', 'resize', 'controls', 'close', 'minimize', 'activated')]
+    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'controls', 'close', 'minimize', 'activated')]
     [string]$Mode = 'drag'
 )
 
@@ -13,6 +13,12 @@ using System.Runtime.InteropServices;
 
 public static class MetaWorkChromeProbe {
     [StructLayout(LayoutKind.Sequential)]
+    public struct Point {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct Rect {
         public int Left;
         public int Top;
@@ -22,6 +28,24 @@ public static class MetaWorkChromeProbe {
 
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr window, out Rect rect);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr window, out Rect rect);
+
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr window, ref Point point);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(Point point);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr window, uint flags);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessageW(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
 
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr window);
@@ -125,9 +149,61 @@ if ($process.MainWindowHandle -eq 0) {
 }
 
 $window = $process.MainWindowHandle
+[MetaWorkChromeProbe]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
 [MetaWorkChromeProbe]::SetForegroundWindow($window) | Out-Null
 Start-Sleep -Milliseconds 200
 $rect = Get-MetaWorkRect $window
+
+if ($Mode -eq 'top-resize') {
+    [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
+    foreach ($edge in @('top', 'top-left', 'top-right')) {
+        # SetWindowPos establishes a repeatable precondition only. All changes
+        # checked below must be caused by real OS mouse input.
+        if (-not [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr](-1), 100, 100, 900, 620, 0x0010)) {
+            throw 'Could not establish top-resize precondition'
+        }
+        Start-Sleep -Milliseconds 250
+        $before = Get-MetaWorkRect $window
+        $client = New-Object MetaWorkChromeProbe+Rect
+        $origin = New-Object MetaWorkChromeProbe+Point
+        if (-not [MetaWorkChromeProbe]::GetClientRect($window, [ref]$client) -or
+            -not [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$origin)) {
+            throw 'Could not read the physical client frame'
+        }
+        $x = $origin.X + [int]($client.Right / 2)
+        $dx = 0
+        if ($edge -eq 'top-left') { $x = $origin.X + 2; $dx = 40 }
+        if ($edge -eq 'top-right') { $x = $origin.X + $client.Right - 3; $dx = -40 }
+        $point = New-Object MetaWorkChromeProbe+Point
+        $point.X = $x
+        $point.Y = $origin.Y + 2
+        $pointerRoot = [MetaWorkChromeProbe]::GetAncestor([MetaWorkChromeProbe]::WindowFromPoint($point), 2)
+        if ($pointerRoot -ne $window) { throw "Another window covers the top-resize input point ($x,$($point.Y)); expected=$window actual=$pointerRoot" }
+        $packed = ([long]($point.X -band 0xffff)) -bor ([long]($point.Y -band 0xffff) -shl 16)
+        $nativeHit = [MetaWorkChromeProbe]::SendMessageW($window, 0x0084, [UIntPtr]::Zero, [IntPtr]$packed)
+        Write-Output "edge=$edge screen=$($point.X),$($point.Y) client=$($client.Right)x$($client.Bottom) nativeHit=$nativeHit"
+        try {
+            Invoke-MetaWorkDrag $x ($origin.Y + 2) $dx 40
+        }
+        finally {
+            [MetaWorkChromeProbe]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+        }
+        Start-Sleep -Milliseconds 250
+        $after = Get-MetaWorkRect $window
+        if ([Math]::Abs(($after.Top - $before.Top) - 40) -gt 3 -or
+            [Math]::Abs($after.Bottom - $before.Bottom) -gt 2) {
+            throw "$edge mouse resize failed: top $($before.Top)->$($after.Top), bottom $($before.Bottom)->$($after.Bottom)"
+        }
+        $expectedLeft = $before.Left + $(if ($edge -eq 'top-left') { 40 } else { 0 })
+        $expectedRight = $before.Right + $(if ($edge -eq 'top-right') { -40 } else { 0 })
+        if ([Math]::Abs($after.Left - $expectedLeft) -gt 3 -or
+            [Math]::Abs($after.Right - $expectedRight) -gt 3) {
+            throw "$edge mouse resize moved the wrong horizontal edge"
+        }
+        Write-Output "$edge=true"
+    }
+    return
+}
 
 if ($Mode -eq 'doubleclick') {
     $doubleClickTime = [int][MetaWorkChromeProbe]::GetDoubleClickTime()

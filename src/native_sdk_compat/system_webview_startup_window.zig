@@ -2,7 +2,7 @@
 //!
 //! This is lifecycle plumbing, not a window capability. It owns exactly one
 //! current-thread creation interval and hands one verified opaque binding to
-//! the independently removable drag-region and window-control seams.
+//! the independently removable window compatibility seams.
 
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");

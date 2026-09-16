@@ -33,6 +33,7 @@ const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
 const bridgeResponsePath = path.join(automationDir, "bridge-response.txt");
 const timeoutMs = 20_000;
 const resizeSessionOnly = process.argv.includes("--resize-session-only");
+const evidenceDir = process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR;
 
 // This harness owns the automation Debug artifact it drives; build before the
 // fixture directory exists so a build failure leaves nothing to clean up.
@@ -81,6 +82,43 @@ try {
   const rendererChromeReady = waitForRendererChromeReady();
   await waitForOutput(/metawork\.smoke\.event_ack sequence=1/);
   await rendererChromeReady;
+  const topResize = await execFileAsync(
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      hitTestProbe,
+      "-ProcessId",
+      String(app.pid),
+      "-Mode",
+      "top-resize",
+    ],
+    { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+  );
+  process.stdout.write(topResize.stdout);
+  if (evidenceDir) {
+    await execFileAsync(
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        path.join(root, "scripts", "capture-windows-window.ps1"),
+        "-ProcessId",
+        String(app.pid),
+        "-OutputPath",
+        path.join(evidenceDir, "top-resize.png"),
+        "-Width",
+        "900",
+        "-Height",
+        "620",
+      ],
+      { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+    );
+  }
   if (!resizeSessionOnly) {
     await execFileAsync(
       "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
