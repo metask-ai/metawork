@@ -68,7 +68,10 @@ pub const Configuration = struct {
         };
     }
 
-    pub fn root(self: *const Configuration, system_default: []const u8) []const u8 {
+    pub fn root(
+        self: *const Configuration,
+        system_default: ?[]const u8,
+    ) ?[]const u8 {
         return switch (self.mode) {
             .system_default => system_default,
             .custom => self.custom_root.?,
@@ -88,6 +91,7 @@ pub const Runtime = struct {
     configuration: ?Configuration,
     generation: u64 = 1,
     health: Health,
+    recovery_required: bool = false,
 
     pub fn bootstrap(
         allocator: std.mem.Allocator,
@@ -104,6 +108,7 @@ pub const Runtime = struct {
                 .allocator = allocator,
                 .configuration = null,
                 .health = .read_failed,
+                .recovery_required = true,
             },
         };
         if (loaded) |bytes| {
@@ -114,6 +119,7 @@ pub const Runtime = struct {
                     .allocator = allocator,
                     .configuration = null,
                     .health = .corrupt,
+                    .recovery_required = true,
                 },
             };
             return .{
@@ -135,6 +141,7 @@ pub const Runtime = struct {
                     error.PersistenceOutcomeUnknown => .outcome_unknown,
                     else => .write_failed,
                 },
+                .recovery_required = err == error.PersistenceOutcomeUnknown,
             };
         };
         return .{
@@ -151,13 +158,10 @@ pub const Runtime = struct {
 
     pub fn effectiveRoot(
         self: *const Runtime,
-        system_default: []const u8,
+        system_default: ?[]const u8,
     ) ?[]const u8 {
         return switch (self.health) {
-            .ready, .write_failed => if (self.configuration) |*configuration|
-                configuration.root(system_default)
-            else
-                null,
+            .ready, .write_failed => self.committedRoot(system_default),
             .path_unavailable,
             .persistence_unavailable,
             .read_failed,
@@ -165,6 +169,16 @@ pub const Runtime = struct {
             .outcome_unknown,
             => null,
         };
+    }
+
+    pub fn committedRoot(
+        self: *const Runtime,
+        system_default: ?[]const u8,
+    ) ?[]const u8 {
+        return if (self.configuration) |*configuration|
+            configuration.root(system_default)
+        else
+            null;
     }
 
     pub fn advanceGeneration(self: *Runtime) void {

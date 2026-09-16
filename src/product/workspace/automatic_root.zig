@@ -5,15 +5,66 @@ pub const key_bytes: usize = 8;
 pub const key_hex_bytes: usize = key_bytes * 2;
 pub const allocation_attempts: usize = 8;
 
+pub const PathSemantics = enum { posix, windows };
+
+pub fn nativePathSemantics() PathSemantics {
+    return if (builtin.os.tag == .windows) .windows else .posix;
+}
+
+pub fn pathEqualFor(
+    semantics: PathSemantics,
+    left: []const u8,
+    right: []const u8,
+) bool {
+    return switch (semantics) {
+        .windows => std.ascii.eqlIgnoreCase(left, right),
+        .posix => std.mem.eql(u8, left, right),
+    };
+}
+
+pub fn pathWithinFor(
+    semantics: PathSemantics,
+    parent: []const u8,
+    child: []const u8,
+) bool {
+    if (pathEqualFor(semantics, parent, child)) return true;
+    if (child.len <= parent.len or !pathPrefixFor(semantics, parent, child))
+        return false;
+    if (parent.len != 0 and isSeparatorFor(semantics, parent[parent.len - 1]))
+        return true;
+    return isSeparatorFor(semantics, child[parent.len]);
+}
+
+pub fn strictPathWithinFor(
+    semantics: PathSemantics,
+    parent: []const u8,
+    child: []const u8,
+) bool {
+    return !pathEqualFor(semantics, parent, child) and
+        pathWithinFor(semantics, parent, child);
+}
+
+pub fn pathEqual(left: []const u8, right: []const u8) bool {
+    return pathEqualFor(nativePathSemantics(), left, right);
+}
+
+pub fn pathWithin(parent: []const u8, child: []const u8) bool {
+    return pathWithinFor(nativePathSemantics(), parent, child);
+}
+
+pub fn strictPathWithin(parent: []const u8, child: []const u8) bool {
+    return strictPathWithinFor(nativePathSemantics(), parent, child);
+}
+
 pub const Error = std.mem.Allocator.Error || error{
     RootUnavailable,
     AllocationUnavailable,
     InvalidAutomaticRoot,
 };
 
-/// App-created, opened capability for the reserved automatic Workspace root.
+/// Product-created, opened capability for the reserved automatic Workspace root.
 /// `Allocator.init` consumes it even when the surrounding Product Control init later
-/// fails, so the App can unconditionally call `deinit` on its moved-from Root.
+/// fails, so the caller can unconditionally call `deinit` on its moved-from Root.
 pub const Root = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -26,18 +77,42 @@ pub const Root = struct {
         allocator: std.mem.Allocator,
         absolute_path: []const u8,
     ) Error!Root {
+        return openInternal(io, allocator, absolute_path, true);
+    }
+
+    pub fn openExisting(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        absolute_path: []const u8,
+    ) Error!Root {
+        return openInternal(io, allocator, absolute_path, false);
+    }
+
+    fn openInternal(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        absolute_path: []const u8,
+        create: bool,
+    ) Error!Root {
         if (absolute_path.len == 0 or
             !std.fs.path.isAbsolute(absolute_path) or
             !std.unicode.utf8ValidateSlice(absolute_path))
             return error.InvalidAutomaticRoot;
-        const dir = std.Io.Dir.cwd().createDirPathOpen(
-            io,
-            absolute_path,
-            .{
-                .open_options = .{ .follow_symlinks = false },
-                .permissions = directoryPermissions(),
-            },
-        ) catch return error.RootUnavailable;
+        const dir = if (create)
+            std.Io.Dir.cwd().createDirPathOpen(
+                io,
+                absolute_path,
+                .{
+                    .open_options = .{ .follow_symlinks = false },
+                    .permissions = directoryPermissions(),
+                },
+            ) catch return error.RootUnavailable
+        else
+            std.Io.Dir.cwd().openDir(
+                io,
+                absolute_path,
+                .{ .follow_symlinks = false },
+            ) catch return error.RootUnavailable;
         errdefer dir.close(io);
         var canonical_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const canonical_len = dir.realPath(io, &canonical_storage) catch
@@ -70,6 +145,10 @@ pub const Root = struct {
         self.dir.close(self.io);
         self.allocator.free(self.canonical_path);
         self.owned = false;
+    }
+
+    pub fn canonicalPath(self: *const Root) []const u8 {
+        return self.canonical_path;
     }
 };
 
@@ -181,31 +260,23 @@ pub const Allocator = struct {
     }
 };
 
-fn pathWithin(parent: []const u8, child: []const u8) bool {
-    if (pathEqual(parent, child)) return true;
-    if (child.len <= parent.len or !pathPrefix(parent, child)) return false;
-    if (parent.len != 0 and std.fs.path.isSep(parent[parent.len - 1]))
-        return true;
-    return std.fs.path.isSep(child[parent.len]);
-}
-
-fn strictPathWithin(parent: []const u8, child: []const u8) bool {
-    return !pathEqual(parent, child) and pathWithin(parent, child);
-}
-
-fn pathEqual(left: []const u8, right: []const u8) bool {
-    return if (builtin.os.tag == .windows)
-        std.ascii.eqlIgnoreCase(left, right)
-    else
-        std.mem.eql(u8, left, right);
-}
-
-fn pathPrefix(parent: []const u8, child: []const u8) bool {
+fn pathPrefixFor(
+    semantics: PathSemantics,
+    parent: []const u8,
+    child: []const u8,
+) bool {
     if (parent.len > child.len) return false;
-    return if (builtin.os.tag == .windows)
-        std.ascii.eqlIgnoreCase(parent, child[0..parent.len])
-    else
-        std.mem.startsWith(u8, child, parent);
+    return switch (semantics) {
+        .windows => std.ascii.eqlIgnoreCase(parent, child[0..parent.len]),
+        .posix => std.mem.startsWith(u8, child, parent),
+    };
+}
+
+fn isSeparatorFor(semantics: PathSemantics, byte: u8) bool {
+    return switch (semantics) {
+        .windows => byte == '\\' or byte == '/',
+        .posix => byte == '/',
+    };
 }
 
 fn directoryPermissions() std.Io.File.Permissions {
@@ -296,4 +367,23 @@ test "automatic root rejects relative input and path prefix confusion" {
     try std.testing.expect(!pathWithin(root, sibling));
     try std.testing.expect(pathWithin(root, child));
     try std.testing.expect(!strictPathWithin(root, root));
+}
+
+test "automatic root pure path semantics model Windows without a Windows runner" {
+    try std.testing.expect(pathEqualFor(
+        .windows,
+        "C:\\MetaWork\\workspaces",
+        "c:\\metawork\\WORKSPACES",
+    ));
+    try std.testing.expect(pathWithinFor(
+        .windows,
+        "C:\\MetaWork\\workspaces",
+        "c:\\metawork\\WORKSPACES\\0000000000000001",
+    ));
+    try std.testing.expect(!pathWithinFor(
+        .windows,
+        "C:\\MetaWork\\workspaces",
+        "C:\\MetaWork\\workspaces-old",
+    ));
+    try std.testing.expect(!pathEqualFor(.posix, "/MetaWork", "/metawork"));
 }

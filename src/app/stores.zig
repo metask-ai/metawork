@@ -11,7 +11,7 @@ const app_paths = @import("paths.zig");
 
 pub const Stores = struct {
     allocator: std.mem.Allocator = undefined,
-    automatic_workspace_root: ?product_control.AutomaticWorkspaceRoot = null,
+    automatic_workspace_configuration: ?product_control.AutomaticWorkspaceRootConfigurationFileStore = null,
     mcp_configuration: ?mcp_configuration.FileStore = null,
     task: ?product_task.history.FileStore = null,
     task_restore_failed: bool = true,
@@ -39,13 +39,11 @@ pub const Stores = struct {
     ) void {
         self.* = .{ .allocator = allocator };
 
-        if (paths.automaticWorkspaceDir()) |directory| {
-            self.automatic_workspace_root = product_control.AutomaticWorkspaceRoot.open(
+        self.automatic_workspace_configuration =
+            product_control.AutomaticWorkspaceRootConfigurationFileStore.init(
                 io,
-                allocator,
-                directory,
+                paths.workbenchDir(),
             ) catch null;
-        }
         self.mcp_configuration = mcp_configuration.FileStore.init(
             io,
             paths.mcpDir(),
@@ -133,7 +131,7 @@ pub const Stores = struct {
         if (self.checkpoint) |*store| store.deinit();
         if (self.task) |*store| store.deinit();
         if (self.mcp_configuration) |*store| store.deinit();
-        if (self.automatic_workspace_root) |*root| root.deinit();
+        if (self.automatic_workspace_configuration) |*store| store.deinit();
         self.* = .{ .allocator = allocator };
     }
 };

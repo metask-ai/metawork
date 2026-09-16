@@ -369,7 +369,7 @@ test "Skill source authorization keeps new and restored Automatic snapshots cata
                 .max_runs_per_task = 1,
                 .max_tools_per_run = 1,
             }, .{
-                .directories = .{ .canonical_user_home = home, .automatic_workspace_root = if (restore_workspace) null else &automatic_root },
+                .directories = .{ .canonical_user_home = home, .testing_automatic_workspace_root = if (restore_workspace) null else &automatic_root },
                 .task_persistence = if (restore_workspace) persistence.capabilityRestored(restored_bytes.?) else persistence.capability(),
                 .skill_sources = .{ .file_store = &store, .restored = if (recover_sources) .read_failed else .{ .loaded = .{ .ready = .{} } } },
             });
@@ -1592,7 +1592,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     };
     var first_configuration = productControlConfiguration();
     first_configuration.directories.canonical_user_home = home;
-    first_configuration.directories.automatic_workspace_root = &automatic_root;
+    first_configuration.directories.testing_automatic_workspace_root = &automatic_root;
     first_configuration.task_persistence = persistence.capability();
     first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
     var first = try product_control.Runtime.init(
@@ -1656,7 +1656,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     defer restored_automatic_root.deinit();
     var second_configuration = productControlConfiguration();
     second_configuration.directories.canonical_user_home = home;
-    second_configuration.directories.automatic_workspace_root = &restored_automatic_root;
+    second_configuration.directories.testing_automatic_workspace_root = &restored_automatic_root;
     second_configuration.task_persistence = persistence.capabilityRestored(restart_history);
     second_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
     var restored = try product_control.Runtime.init(
@@ -1724,7 +1724,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     defer continued_automatic_root.deinit();
     var third_configuration = productControlConfiguration();
     third_configuration.directories.canonical_user_home = home;
-    third_configuration.directories.automatic_workspace_root = &continued_automatic_root;
+    third_configuration.directories.testing_automatic_workspace_root = &continued_automatic_root;
     third_configuration.task_persistence = persistence.capabilityRestored(adopted_history);
     third_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
     var continued = try product_control.Runtime.init(
@@ -2684,7 +2684,7 @@ test "scheduled noninteractive permission request automatically stops the Produc
             .max_tools_per_run = 1,
         },
         .{
-            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .directories = .{ .testing_automatic_workspace_root = &automatic_root },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
             .schedule_notifier = schedule_support.notifier(),
@@ -2778,7 +2778,7 @@ test "scheduled admission rejects an unconfigured Task persistence capability" {
             .max_tools_per_run = 1,
         },
         .{
-            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .directories = .{ .testing_automatic_workspace_root = &automatic_root },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
         },
@@ -2850,7 +2850,7 @@ test "scheduled durable admission failure does not block an interactive Product 
             .max_tools_per_run = 1,
         },
         .{
-            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .directories = .{ .testing_automatic_workspace_root = &automatic_root },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
             .schedule_notifier = schedule_support.notifier(),
@@ -2946,7 +2946,7 @@ fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
             .max_tools_per_run = 1,
         },
         .{
-            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .directories = .{ .testing_automatic_workspace_root = &automatic_root },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
             .task_persistence = task_persistence.capability(),
@@ -3016,7 +3016,7 @@ fn expectScheduledAdmissionOutcomeUnknownRecovery(store_candidate: bool) !void {
     );
     defer restored_automatic_root.deinit();
     var restart_configuration = productControlConfiguration();
-    restart_configuration.directories.automatic_workspace_root = &restored_automatic_root;
+    restart_configuration.directories.testing_automatic_workspace_root = &restored_automatic_root;
     restart_configuration.task_persistence = if (store_candidate)
         task_persistence.capabilityRestored(landed_history.?)
     else
@@ -3096,7 +3096,7 @@ test "interactive Product Task remains accepted when history commit outcome is u
             .max_tools_per_run = 1,
         },
         .{
-            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .directories = .{ .testing_automatic_workspace_root = &automatic_root },
             .task_persistence = task_persistence.capability(),
         },
     );
@@ -3162,7 +3162,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
             .max_runs_per_task = 3,
             .max_tools_per_run = 1,
         },
-        .{ .directories = .{ .automatic_workspace_root = &automatic_root } },
+        .{ .directories = .{ .testing_automatic_workspace_root = &automatic_root } },
     );
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -3703,7 +3703,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
             .max_tools_per_run = 1,
         },
         .{
-            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .directories = .{ .testing_automatic_workspace_root = &automatic_root },
             .completion_factory = .{ .create_fn = fixture.createCompletion },
             .task_persistence = persistence.capability(),
             .checkpoint_store = .{ .file_store = &checkpoint_store },
@@ -3896,7 +3896,7 @@ test "automatic Workspace creation rolls back record and empty directory on Sess
             .max_runs_per_task = 1,
             .max_tools_per_run = 1,
         },
-        .{ .directories = .{ .automatic_workspace_root = &automatic_root } },
+        .{ .directories = .{ .testing_automatic_workspace_root = &automatic_root } },
     );
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -3932,14 +3932,32 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
     }
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+    try tmp.dir.createDir(std.testing.io, "automatic-a", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "automatic-b", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "configuration", .default_dir);
+    var root_a_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var root_b_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var configuration_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_a_len = try tmp.dir.realPathFile(
         std.testing.io,
-        std.testing.allocator,
-        root_storage[0..root_len],
+        "automatic-a",
+        &root_a_storage,
     );
-    defer automatic_root.deinit();
+    const root_b_len = try tmp.dir.realPathFile(
+        std.testing.io,
+        "automatic-b",
+        &root_b_storage,
+    );
+    const configuration_len = try tmp.dir.realPathFile(
+        std.testing.io,
+        "configuration",
+        &configuration_storage,
+    );
+    var automatic_configuration = try product_control.AutomaticWorkspaceRootConfigurationFileStore.init(
+        std.testing.io,
+        configuration_storage[0..configuration_len],
+    );
+    defer automatic_configuration.deinit();
     var schedule_support: TestScheduleSupport = .{};
     var task_persistence: TaskPersistenceProbe = .{};
     var workbench = try product_control.Runtime.init(
@@ -3956,7 +3974,10 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
             .max_tools_per_run = 1,
         },
         .{
-            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .directories = .{
+                .automatic_workspace_system_root = root_a_storage[0..root_a_len],
+                .automatic_workspace_configuration_store = &automatic_configuration,
+            },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
             .task_persistence = task_persistence.capability(),
@@ -3998,6 +4019,11 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
     try std.testing.expectEqual(
         product_control.PermissionProfile.full_access,
         try workbench.taskPermissionProfile(first_task),
+    );
+    const root_generation = workbench.automaticWorkspaceRootConfiguration().generation;
+    try workbench.chooseAutomaticWorkspaceRoot(
+        root_generation,
+        root_b_storage[0..root_b_len],
     );
 
     try workbench.updateScheduledTask(default_schedule, 1, .{
@@ -4069,9 +4095,27 @@ test "Text schedule updates preserve historical Task profiles and create fresh a
             workspace.kind,
         );
         try std.testing.expectEqual(@as(u64, 0), workspace.recent_order);
+        if (workspace.id == first_workspace) {
+            try std.testing.expect(std.mem.startsWith(
+                u8,
+                workspace.canonical_root,
+                root_a_storage[0..root_a_len],
+            ));
+        } else if (workspace.id == second_workspace) {
+            try std.testing.expect(std.mem.startsWith(
+                u8,
+                workspace.canonical_root,
+                root_b_storage[0..root_b_len],
+            ));
+        } else return error.TestUnexpectedResult;
     }
 
-    try std.testing.expectEqual(@as(usize, 2), try directoryEntryCount(tmp.dir));
+    const root_a = try tmp.dir.openDir(std.testing.io, "automatic-a", .{ .iterate = true });
+    defer root_a.close(std.testing.io);
+    const root_b = try tmp.dir.openDir(std.testing.io, "automatic-b", .{ .iterate = true });
+    defer root_b.close(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(root_a));
+    try std.testing.expectEqual(@as(usize, 1), try directoryEntryCount(root_b));
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"target\"") == null);
@@ -4118,7 +4162,7 @@ test "schedule rejection retains the automatic Task created before a full Run qu
             .max_tools_per_run = 1,
         },
         .{
-            .directories = .{ .automatic_workspace_root = &automatic_root },
+            .directories = .{ .testing_automatic_workspace_root = &automatic_root },
             .schedule_timer = schedule_support.timer(),
             .schedule_persistence = schedule_support.persistence(),
             .task_persistence = task_persistence.capability(),
