@@ -3384,7 +3384,7 @@ button.run-process-tool:hover {
 
 .app-window {
   --left-column: 0px;
-  --left-column-width: 248px;
+  --left-column-width: 320px;
   --right-column: 0px;
   --right-column-width: 400px;
   --right-panel-rendered-width: var(--right-column-width);
@@ -3427,7 +3427,10 @@ button.run-process-tool:hover {
 .app-window[data-left-open="true"] .workbench-commandbar::before {
   position: absolute;
   z-index: 0;
-  inset: 0 auto 0 0;
+  top: calc(0px - env(safe-area-inset-top, 0px));
+  right: auto;
+  bottom: 0;
+  left: 0;
   width: var(--left-column);
   border-right: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
@@ -3649,7 +3652,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .workspace-resize-handle {
   position: absolute;
-  z-index: 30;
+  z-index: 51;
   top: 0;
   bottom: 0;
   left: calc(var(--left-column) - 5px);
@@ -3696,18 +3699,20 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .workspace-resize-handle::after {
-  position: absolute;
+  position: fixed;
   top: 0;
   bottom: 0;
-  left: 4px;
+  left: calc(var(--left-column) - 1px);
   width: 2px;
   background: transparent;
   content: "";
+  pointer-events: none;
 }
 
 .workspace-resize-handle:hover::after,
 .workspace-resize-handle:focus-visible::after,
-.workspace-resize-handle:active::after {
+.workspace-resize-handle:active::after,
+.app-window[data-resizing-left="true"] .workspace-resize-handle::after {
   background: var(--ui-action-primary);
 }
 

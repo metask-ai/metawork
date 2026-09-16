@@ -124,12 +124,12 @@ test("resizable separator clamps pointer movement and supports keyboard control"
   const commits = [];
 
   function Harness() {
-    const [value, setValue] = useState(248);
+    const [value, setValue] = useState(320);
     return createElement(ResizableSeparator, {
       label: "Resize task sidebar",
       value,
-      minimum: 208,
-      maximum: 360,
+      minimum: 240,
+      maximum: 480,
       step: 16,
       onChange: setValue,
       onCommit(next) {
@@ -144,17 +144,40 @@ test("resizable separator clamps pointer movement and supports keyboard control"
   });
 
   fireEvent.keyDown(separator, { key: "ArrowRight" });
-  assert.equal(separator.getAttribute("aria-valuenow"), "264");
-  assert.deepEqual(commits, [264]);
+  assert.equal(separator.getAttribute("aria-valuenow"), "336");
+  assert.deepEqual(commits, [336]);
 
   fireEvent.keyDown(separator, { key: "Home" });
-  assert.equal(separator.getAttribute("aria-valuenow"), "208");
+  assert.equal(separator.getAttribute("aria-valuenow"), "240");
 
   fireEvent.pointerDown(separator, { pointerId: 7, clientX: 100 });
   fireEvent.pointerMove(separator, { pointerId: 7, clientX: 500 });
   fireEvent.pointerUp(separator, { pointerId: 7, clientX: 500 });
-  assert.equal(separator.getAttribute("aria-valuenow"), "360");
-  assert.equal(commits.at(-1), 360);
+  assert.equal(separator.getAttribute("aria-valuenow"), "480");
+  assert.equal(commits.at(-1), 480);
+});
+
+test("Task sidebar defaults to 320px with the 240–480px contract", () => {
+  const { root } = renderTaskPanelShell(1400);
+  const separator = screen.getByRole("separator", {
+    name: "Resize task sidebar",
+  });
+
+  assert.equal(root?.style.getPropertyValue("--left-column-width"), "320px");
+  assert.equal(separator.getAttribute("aria-valuenow"), "320");
+  assert.equal(separator.getAttribute("aria-valuemin"), "240");
+  assert.equal(separator.getAttribute("aria-valuemax"), "480");
+});
+
+test("Task sidebar clamps a legacy stored width to the new minimum", () => {
+  dom.window.localStorage.setItem("metawork.panel.workspaces.width", "208");
+  const { root } = renderTaskPanelShell(1400);
+  const separator = screen.getByRole("separator", {
+    name: "Resize task sidebar",
+  });
+
+  assert.equal(root?.style.getPropertyValue("--left-column-width"), "240px");
+  assert.equal(separator.getAttribute("aria-valuenow"), "240");
 });
 
 test("right-side separator reverses pointer and arrow direction", () => {
@@ -227,7 +250,7 @@ test("lost pointer capture commits and closes the active resize transaction", ()
 });
 
 test("an overlay Task Panel can resize back into the docked layout", () => {
-  const { root } = renderTaskPanelShell(1100);
+  const { root } = renderTaskPanelShell(1172);
   assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
 
   const separator = screen.getByRole("separator", {

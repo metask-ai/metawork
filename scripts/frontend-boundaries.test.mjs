@@ -446,6 +446,21 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.match(css, /\.window-controls/);
   assert.match(css, /--window-bar-height: 52px/);
   assert.match(
+    css,
+    /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before \{[\s\S]*?top: calc\(0px - env\(safe-area-inset-top, 0px\)\);/,
+    "the left rail surface and divider must cross the native safe-area inset",
+  );
+  assert.match(
+    css,
+    /\.workspace-resize-handle::after \{[\s\S]*?position: fixed;[\s\S]*?top: 0;[\s\S]*?bottom: 0;[\s\S]*?left: calc\(var\(--left-column\) - 1px\);/,
+    "left resize feedback must remain one continuous full-window divider",
+  );
+  assert.match(
+    css,
+    /\.app-window\[data-resizing-left="true"\] \.workspace-resize-handle::after/,
+    "captured pointer resizing must preserve the continuous divider feedback",
+  );
+  assert.match(
     chromeBridge,
     /const candidateSelector = "\[data-metawork-window-drag\]"/,
   );

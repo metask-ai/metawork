@@ -460,8 +460,8 @@ test("a closed Task Panel keeps its shell but unmounts its content", () => {
 });
 
 test("Task Panel docking preserves the 480px central task stage", () => {
-  assert.equal(shouldDockTaskPanel(1128, 248, 400), true);
-  assert.equal(shouldDockTaskPanel(1127, 248, 400), false);
+  assert.equal(shouldDockTaskPanel(1200, 320, 400), true);
+  assert.equal(shouldDockTaskPanel(1199, 320, 400), false);
   assert.equal(shouldDockTaskPanel(960, 0, 400), true);
   assert.equal(shouldDockTaskPanel(879, 0, 400), false);
 });

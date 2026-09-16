@@ -21,9 +21,9 @@ import {
 
 const leftPreference = "metawork.panel.workspaces";
 const leftWidthPreference = "metawork.panel.workspaces.width";
-const defaultLeftWidth = 248;
-const minimumLeftWidth = 208;
-const maximumLeftWidth = 360;
+const defaultLeftWidth = 320;
+const minimumLeftWidth = 240;
+const maximumLeftWidth = 480;
 const leftWidthStep = 16;
 const rightWidthPreference = "metawork.panel.task.width";
 const defaultRightWidth = 400;
