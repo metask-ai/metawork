@@ -342,6 +342,20 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
     shell,
     /className="commandbar-alert-slot"[\s\S]*?<\/div>\s*<WindowControls/,
   );
+  for (const group of [
+    "commandbar-leading-actions",
+    "commandbar-context",
+    "commandbar-alert-slot",
+  ]) {
+    assert.match(
+      shell,
+      new RegExp(
+        `className="${group}"[^>]*data-metawork-window-drag-exclude=\\{overlay \\? "" : undefined\\}[\\s\\S]*?className="commandbar-inert-content"[\\s\\S]*?inert=\\{overlay \\? true : undefined\\}`,
+      ),
+    );
+  }
+  assert.match(css, /\.commandbar-inert-content\s*\{\s*display: contents;/);
+
   assert.match(
     shell,
     /className="app-columns" inert=\{overlay \? true : undefined\}/,
