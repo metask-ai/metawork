@@ -56,6 +56,7 @@
 - 必须遵守对应架构真源定义的 owner 与依赖方向，不得通过反向 import、通用 facade、直接系统 effect 或平行协议绕过 owner。
 - credential 和 secret 默认只能存在于对应 Host owner 与执行所需的有界 owned copy。例外仅限用户在本地桌面客户端显式填写的 Custom Provider API Key 与 MCP static/client secret：它们可以在 Renderer password 表单和各自专用 typed Bridge command 中短暂存在，Bridge 不得记录、缓存或投影，对应 Host owner 必须交给系统 credential storage；输入生命周期由对应产品合同定义；任何 secret 仍不得进入日志、event、snapshot、产品历史或持久化 metadata。Account、OAuth 自动取得的 token/code/PKCE 与其他 secret 不得借此建立 Renderer/Bridge 数据路径。
 - 外部依赖只通过架构批准的 canonical 输入消费；不得使用源码复制、可变版本或静默 fallback 绕过依赖验证。
+- Native SDK 只按[高层架构](docs/architecture.md#35-native-sdk)的 upstream-only 政策消费官方发布版与 public API。除非用户明确改变该政策，不得把 patch、fork、vendor、修改 `node_modules`、维护私有 SDK 分支或向 Native SDK 提交 PR 作为 MetaWork 的交付方案；未被官方 public API 覆盖的能力只能按已登记 capability gap 及其允许边界处理。
 - machine guard、allowlist 与 fail-closed verifier 的拒绝是强制结果。除非用户明确请求对应政策变化，不得修改或弱化它们，也不得用等价重试、替代路径或跳过验证绕过拒绝；required evidence 或 dependency 缺失时必须明确失败。
 
 ## 验证规则

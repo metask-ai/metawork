@@ -93,6 +93,8 @@ AgentCore 拥有 provider 调用、agent loop、Conversation、Session、CoreEve
 
 Native SDK 是 MetaWork 消费的外部桌面依赖。Application 通过其 Runtime API 执行生命周期、窗口、System WebView、菜单、托盘、快捷键、dialog、notification、timer、credential 和其他系统 effect，并把 Product 所需能力收窄成 MetaWork-owned capability；Renderer 可以消费 manifest 已开放、SDK 明确面向 WebView 的 presentation/input API。Product owner 不依赖 Native SDK Runtime 类型，Renderer 使用这些 UI/input API 也不因此取得原生 effect 或 Product authority。
 
+Native SDK 虽然开源，对 MetaWork 仍是 upstream-only 外部依赖。唯一 canonical 输入是官方发布的固定版本 artifact 及其 public API；除非用户明确改变该政策，MetaWork 不 patch、fork、vendor 或直接修改 Native SDK，不维护私有 SDK 分支，也不把向 Native SDK 提交 PR 或等待 PR 合入作为产品交付路径。官方 public API 未覆盖的能力保持 unsupported 或已登记 capability gap，只在新的官方发布版出现后重新审计和验收。这项约束同样适用于方案和建议：不得把“修改 Native SDK”或“给 Native SDK 提 PR”当作解决 MetaWork 当前需求的默认建议。
+
 Native SDK Bridge API 是独立的正式 transport surface，不属于系统 effect 入口。Bridge 和 Application 只能消费完成 transport authority 所需的公开 contract、data-only DTO 与 opaque identifier；这些值不授予任意系统执行权，也不得传播到 Product owner。
 
 | Native SDK surface | 允许消费者 | 边界 |
@@ -125,7 +127,7 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 
 | Capability | 层级 | 允许边界 | 删除条件 |
 | --- | --- | --- | --- |
-| `system_webview_drag_region` | macOS 一级；Windows 二级 | 只补 System WebView drag region，不提供通用窗口 action | SDK 等价 drag-region Runtime API 通过目标平台验收 |
+| `system_webview_drag_region` | macOS 一级；Windows 二级 | 补齐 System WebView 的 live-pointer drag | 官方发布版提供明确适用于 System WebView 的等价 drag-region public API，并通过目标平台验收 |
 | `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
