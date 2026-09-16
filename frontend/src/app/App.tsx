@@ -1374,9 +1374,6 @@ export default function App() {
       return result.outcome;
     } catch {
       await refreshSnapshot().catch(() => undefined);
-      setStatus(
-        attentionStatus("execution.command_failed", { scope: "execution" }),
-      );
       return false;
     }
   }

@@ -97,6 +97,23 @@ test("Automatic Workspace root projection and mutation results are strict", () =
   };
   assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
 
+  const uncertain = clone(candidate);
+  uncertain.automaticWorkspaceRoot = {
+    ...uncertain.automaticWorkspaceRoot,
+    mode: null,
+    canonicalRoot: null,
+    health: "outcome_unknown",
+    canRetry: false,
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(uncertain), uncertain);
+
+  const inactiveWriteFailure = clone(uncertain);
+  inactiveWriteFailure.automaticWorkspaceRoot.health = "write_failed";
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(inactiveWriteFailure),
+    inactiveWriteFailure,
+  );
+
   for (const mutate of [
     (value) => delete value.automaticWorkspaceRoot.canRetry,
     (value) => (value.automaticWorkspaceRoot.generation = "0"),
@@ -105,6 +122,7 @@ test("Automatic Workspace root projection and mutation results are strict", () =
     (value) => (value.automaticWorkspaceRoot.path = "/tmp/leaked"),
     (value) => (value.automaticWorkspaceRoot.health = "ready"),
     (value) => (value.automaticWorkspaceRoot.mode = null),
+    (value) => (value.automaticWorkspaceRoot.canonicalRoot = null),
   ]) {
     const invalid = clone(candidate);
     mutate(invalid);

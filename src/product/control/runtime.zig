@@ -2081,14 +2081,15 @@ pub const Runtime = struct {
             .outcome_unknown,
             => null,
         };
+        const mode: ?product_workspace.AutomaticRootConfigurationMode = if (canonical_root != null)
+            if (configuration) |value| value.mode else null
+        else
+            null;
         const store_available = self.automatic_workspace_configuration_store != null and
             !self.shutting_down;
         return .{
             .generation = self.automatic_root_configuration.generation,
-            .mode = if (configuration) |value|
-                value.mode
-            else
-                null,
+            .mode = mode,
             .canonical_root = canonical_root,
             .health = self.automatic_root_configuration.health,
             .can_choose = store_available,
@@ -2245,9 +2246,20 @@ pub const Runtime = struct {
                 return error.AutomaticWorkspaceRootPersistenceOutcomeUnknown;
             },
             else => {
-                if (self.automatic_root_configuration.health != .write_failed) {
-                    self.automatic_root_configuration.health = .write_failed;
-                    self.bumpRevision();
+                if (!self.automatic_root_configuration.recovery_required) {
+                    switch (self.automatic_root_configuration.health) {
+                        .ready => {
+                            self.automatic_root_configuration.health = .write_failed;
+                            self.bumpRevision();
+                        },
+                        .write_failed,
+                        .path_unavailable,
+                        .persistence_unavailable,
+                        .read_failed,
+                        .corrupt,
+                        .outcome_unknown,
+                        => {},
+                    }
                 }
                 return error.AutomaticWorkspaceRootPersistenceFailed;
             },
@@ -9672,8 +9684,16 @@ test "automatic Workspace root configuration swaps only future allocations and f
         product_workspace.AutomaticRootConfigurationHealth.outcome_unknown,
         uncertain.health,
     );
+    try std.testing.expect(uncertain.mode == null);
     try std.testing.expect(uncertain.canonical_root == null);
     try std.testing.expect(!control.automaticWorkspacesAvailable());
+    var uncertain_snapshot_storage: [96 * 1024]u8 = undefined;
+    const uncertain_snapshot = try control.writeSnapshot(&uncertain_snapshot_storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        uncertain_snapshot,
+        "\"mode\":null,\"canonicalRoot\":null,\"health\":\"outcome_unknown\"",
+    ) != null);
 
     product_workspace.automatic_root_configuration.testing.setCommitFault(
         &store,
@@ -9688,9 +9708,11 @@ test "automatic Workspace root configuration swaps only future allocations and f
         control.resetAutomaticWorkspaceRoot(uncertain.generation),
     );
     try std.testing.expectEqual(
-        product_workspace.AutomaticRootConfigurationHealth.write_failed,
+        product_workspace.AutomaticRootConfigurationHealth.outcome_unknown,
         control.automaticWorkspaceRootConfiguration().health,
     );
+    try std.testing.expect(control.automaticWorkspaceRootConfiguration().mode == null);
+    try std.testing.expect(control.automaticWorkspaceRootConfiguration().canonical_root == null);
     product_workspace.automatic_root_configuration.testing.setRecoveryFault(
         &store,
         .none,
@@ -9706,6 +9728,31 @@ test "automatic Workspace root configuration swaps only future allocations and f
 
     control.workspace.disableAutomaticRoot();
     control.automatic_root_configuration.health = .path_unavailable;
+    product_workspace.automatic_root_configuration.testing.setCommitFault(
+        &store,
+        .write_failed,
+    );
+    try std.testing.expectError(
+        error.AutomaticWorkspaceRootPersistenceFailed,
+        control.chooseAutomaticWorkspaceRoot(recovered.generation, custom_root),
+    );
+    const unavailable_after_write_failure = control.automaticWorkspaceRootConfiguration();
+    try std.testing.expectEqual(
+        product_workspace.AutomaticRootConfigurationHealth.path_unavailable,
+        unavailable_after_write_failure.health,
+    );
+    try std.testing.expectEqual(
+        product_workspace.AutomaticRootConfigurationMode.system_default,
+        unavailable_after_write_failure.mode.?,
+    );
+    try std.testing.expectEqualStrings(
+        default_root,
+        unavailable_after_write_failure.canonical_root.?,
+    );
+    product_workspace.automatic_root_configuration.testing.setCommitFault(
+        &store,
+        .none,
+    );
     try control.retryAutomaticWorkspaceRoot(recovered.generation);
     const retried = control.automaticWorkspaceRootConfiguration();
     try std.testing.expectEqual(

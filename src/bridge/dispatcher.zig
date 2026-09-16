@@ -2299,11 +2299,14 @@ pub const Dispatcher = struct {
         const expected_generation = try parseAutomaticWorkspaceRootMutation(
             invocation.request.payload,
         );
+        const product_control_runtime = try self.requireProductControl();
+        const current_root = product_control_runtime.automaticWorkspaceRootConfiguration();
         var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
         const selected = try self.platform.show_open_dialog_fn(
             self.platform.context,
             .{
                 .title = "Choose the Automatic Workspace location",
+                .default_path = current_root.canonical_root orelse "",
                 .allow_directories = true,
                 .allow_multiple = false,
             },
@@ -2319,7 +2322,7 @@ pub const Dispatcher = struct {
             selected.paths,
             &canonical_storage,
         );
-        try (try self.requireProductControl()).chooseAutomaticWorkspaceRoot(
+        try product_control_runtime.chooseAutomaticWorkspaceRoot(
             expected_generation,
             canonical,
         );
@@ -5519,6 +5522,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
     const fixture = @import("lifecycle_fixture");
     const Harness = struct {
         selected_path: []const u8,
+        expected_default_path: []const u8,
         cancel_next: bool = false,
 
         fn wake(_: ?*anyopaque) anyerror!void {}
@@ -5533,6 +5537,10 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expect(options.allow_directories);
             try std.testing.expect(!options.allow_multiple);
+            try std.testing.expectEqualStrings(
+                self.expected_default_path,
+                options.default_path,
+            );
             if (self.cancel_next) {
                 self.cancel_next = false;
                 return .{ .paths = "", .count = 0 };
@@ -5585,7 +5593,10 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
         .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 },
         configuration,
     );
-    var harness: Harness = .{ .selected_path = custom_root };
+    var harness: Harness = .{
+        .selected_path = custom_root,
+        .expected_default_path = default_root,
+    };
     var dispatcher = try Dispatcher.init(
         std.testing.allocator,
         &workbench,
@@ -5655,6 +5666,21 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
     const custom_view = workbench.automaticWorkspaceRootConfiguration();
     try std.testing.expectEqualStrings(custom_root, custom_view.canonical_root.?);
     try std.testing.expectEqual(product_control.AutomaticWorkspaceRootConfigurationMode.custom, custom_view.mode.?);
+
+    harness.expected_default_path = custom_root;
+    harness.cancel_next = true;
+    var cancel_custom_request_storage: [256]u8 = undefined;
+    const cancel_custom_request = try std.fmt.bufPrint(
+        &cancel_custom_request_storage,
+        "{{\"id\":\"cancel-custom\",\"command\":\"metawork.workspaces.chooseAutomaticRoot\",\"payload\":{{\"expectedGeneration\":\"{d}\"}}}}",
+        .{custom_view.generation},
+    );
+    const cancelled_custom = native.dispatch(cancel_custom_request, source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, cancelled_custom, "\"outcome\":\"cancelled\"") != null);
+    try std.testing.expectEqual(
+        custom_view.generation,
+        workbench.automaticWorkspaceRootConfiguration().generation,
+    );
 
     var reset_request_storage: [256]u8 = undefined;
     const reset_request = try std.fmt.bufPrint(

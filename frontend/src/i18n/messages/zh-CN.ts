@@ -810,7 +810,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.automatic_workspace.title": "自动工作区位置",
   "settings.automatic_workspace.help":
     "新自动工作区会在此位置下继续创建随机目录；已有任务和会话不会移动。",
-  "settings.automatic_workspace.system_default": "系统默认位置",
+  "settings.automatic_workspace.system_default": "默认",
   "settings.automatic_workspace.location_unavailable": "位置不可用",
   "settings.automatic_workspace.choose": "选择文件夹…",
   "settings.automatic_workspace.choosing": "正在选择…",
@@ -830,6 +830,8 @@ export const zhCN: Record<MessageId, string> = {
     "已保存的位置设置无效。请选择文件夹或恢复系统默认位置。",
   "settings.automatic_workspace.health.write_failed":
     "无法保存新选择；之前已保存的位置仍然有效。",
+  "settings.automatic_workspace.health.write_failed_no_active":
+    "无法保存位置。选择文件夹或恢复系统默认位置前，新自动工作区将暂停创建。",
   "settings.automatic_workspace.health.outcome_unknown":
     "MetaWork 无法确认位置是否已保存。新自动工作区已暂停；请选择文件夹或恢复系统默认位置。",
   "settings.account_profile": "账户信息",

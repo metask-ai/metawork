@@ -1009,7 +1009,7 @@ Providers（capability-gated）
 
 Workspace 列表、打开、迁移、清理和重新授权不属于 Settings surface。New task 路径控件负责选择、添加和重新授权 Manual Workspace；Automatic Workspace 只随 owning Task 导航。Renderer 只在当前 draft 内保存 Manual Workspace identity，不维护 `activeWorkspaceId` 或其他全局活动 Workspace 镜像。
 
-`General / 常规` 中提供一行“Automatic Workspace 位置”，它只设置未来随机子目录的直接上级目录，不关闭随机目录、不改名、不迁移也不删除既有 Workspace。主行显示“系统默认”或用户选择的 canonical path，辅助文案明确“仅影响新建任务”；动作为“选择文件夹”与仅在非默认或需要显式恢复时出现的“恢复默认”。Choose 只打开 Host 原生 picker，取消后保持页面和焦点；命令完成前禁用该行动作，成功后等待 canonical Snapshot 刷新，不乐观替换路径。
+`General / 常规` 中提供一行“Automatic Workspace 位置”，它只设置未来随机子目录的直接上级目录，不关闭随机目录、不改名、不迁移也不删除既有 Workspace。主值始终显示 Host 发布的 effective canonical path；system default 只在路径旁显示为“默认”状态标签，不能用“系统默认位置”等抽象文案替代真实路径。辅助文案明确“仅影响新建任务”；动作为“选择文件夹”与仅在非默认或需要显式恢复时出现的“恢复默认”。Choose 只打开 Host 原生 picker，并在 Host 拥有 canonical path 时以当前路径作为初始目录；没有可信路径时不猜测目录。取消后保持页面和焦点；命令完成前禁用该行动作，成功后等待 canonical Snapshot 刷新，不乐观替换路径。
 
 `path_unavailable`、`persistence_unavailable`、`read_failed`、`corrupt`、`write_failed` 和 `outcome_unknown` 都使用该行下方的局部错误文案，只展示 Host 明确发布的 Choose/Reset/Retry 动作。不可用路径仍显示已保存值，不伪装成系统默认；不可信配置则不显示猜测路径。错误不离开 Settings、不触发 New task、不改变底层 draft；原生 picker 关闭后恢复到发起按钮。
 

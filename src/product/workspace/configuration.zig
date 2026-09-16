@@ -274,6 +274,7 @@ pub const CommitFault = enum {
 pub const RecoveryFault = enum {
     none,
     install_failed,
+    install_and_restore_failed,
     interrupted_after_quarantine,
     interrupted_after_install,
 };
@@ -452,8 +453,10 @@ pub const FileStore = struct {
             else => return error.WriteFailed,
         };
         if (quarantined and !self.syncPath(backup_name)) {
-            if (!self.restoreCanonical(backup_name))
+            if (!self.restoreCanonical(backup_name)) {
+                clean_pending = false;
                 return error.PersistenceOutcomeUnknown;
+            }
             return error.WriteFailed;
         }
         if (self.recovery_fault == .interrupted_after_quarantine) {
@@ -461,14 +464,20 @@ pub const FileStore = struct {
             clean_pending = false;
             return error.PersistenceOutcomeUnknown;
         }
-        if (self.recovery_fault == .install_failed) {
-            if (quarantined and !self.restoreCanonical(backup_name))
+        if (self.recovery_fault == .install_failed or
+            self.recovery_fault == .install_and_restore_failed)
+        {
+            if (quarantined and !self.restoreCanonical(backup_name)) {
+                clean_pending = false;
                 return error.PersistenceOutcomeUnknown;
+            }
             return error.WriteFailed;
         }
         self.dir.rename(temp_name, self.dir, file_name, self.io) catch {
-            if (quarantined and !self.restoreCanonical(backup_name))
+            if (quarantined and !self.restoreCanonical(backup_name)) {
+                clean_pending = false;
                 return error.PersistenceOutcomeUnknown;
+            }
             return error.WriteFailed;
         };
         temp_exists = false;
@@ -499,6 +508,7 @@ pub const FileStore = struct {
     }
 
     fn restoreCanonical(self: *FileStore, backup_name: []const u8) bool {
+        if (self.recovery_fault == .install_and_restore_failed) return false;
         self.dir.rename(backup_name, self.dir, file_name, self.io) catch
             return false;
         return self.syncPath(file_name);
@@ -582,7 +592,8 @@ pub const FileStore = struct {
         var iterator = iterable.iterate();
         while (iterator.next(self.io) catch return true) |entry| {
             if (entry.kind == .file and
-                recoveryTransactionId(entry.name, ".pending") != null)
+                (recoveryTransactionId(entry.name, ".pending") != null or
+                    recoveryTransactionId(entry.name, ".bak") != null))
                 return true;
         }
         return false;
@@ -860,6 +871,74 @@ test "definite automatic root recovery failure restores the prior canonical" {
     const restored = (try store.loadAlloc(std.testing.allocator)).?;
     defer std.testing.allocator.free(restored);
     try std.testing.expectEqualStrings(previous, restored);
+}
+
+test "failed automatic root restore remains fail closed without a pending marker" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store: FileStore = .{ .io = std.testing.io, .dir = tmp.dir };
+    const previous = "{\"schema_version\":2}";
+    const replacement = "{\"schema_version\":1,\"mode\":\"system_default\",\"custom_root\":null}";
+    try store.commit(previous);
+    testing.setRecoveryFault(&store, .install_and_restore_failed);
+    try std.testing.expectError(
+        error.PersistenceOutcomeUnknown,
+        store.recover(replacement),
+    );
+    try std.testing.expectError(
+        error.ReadFailed,
+        store.loadAlloc(std.testing.allocator),
+    );
+
+    var pending_storage: [120]u8 = undefined;
+    const pending_name = (try store.findRecoveryArtifact(
+        ".pending",
+        &pending_storage,
+    )).?;
+    try tmp.dir.deleteFile(std.testing.io, pending_name);
+    try std.testing.expectError(
+        error.ReadFailed,
+        store.loadAlloc(std.testing.allocator),
+    );
+
+    testing.setRecoveryFault(&store, .none);
+    try store.recover(replacement);
+    const restored = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(restored);
+    try std.testing.expectEqualStrings(replacement, restored);
+
+    var iterable = try tmp.dir.openDir(
+        std.testing.io,
+        ".",
+        .{ .iterate = true, .follow_symlinks = false },
+    );
+    defer iterable.close(std.testing.io);
+    var iterator = iterable.iterate();
+    var quarantine_name: ?[]u8 = null;
+    defer if (quarantine_name) |name| std.testing.allocator.free(name);
+    while (try iterator.next(std.testing.io)) |entry| {
+        if (entry.kind == .file and
+            std.mem.startsWith(u8, entry.name, recovery_prefix) and
+            std.mem.endsWith(u8, entry.name, ".quarantine"))
+        {
+            try std.testing.expect(quarantine_name == null);
+            quarantine_name = try std.testing.allocator.dupe(u8, entry.name);
+        }
+    }
+    const name = quarantine_name orelse return error.TestExpectedEqual;
+    var quarantine = try tmp.dir.openFile(
+        std.testing.io,
+        name,
+        .{ .follow_symlinks = false },
+    );
+    if (builtin.os.tag == .windows) quarantine.flags.nonblocking = true;
+    defer quarantine.close(std.testing.io);
+    var bytes: [previous.len]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, previous.len),
+        try quarantine.readPositionalAll(std.testing.io, &bytes, 0),
+    );
+    try std.testing.expectEqualStrings(previous, &bytes);
 }
 
 test "automatic root process generation never publishes zero" {

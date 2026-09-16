@@ -979,11 +979,19 @@ summary::-webkit-details-marker {
   min-width: 0;
 }
 
+.settings-automatic-root-value {
+  display: flex;
+  min-width: 0;
+  margin-top: 10px;
+  align-items: center;
+  gap: 7px;
+}
+
 .settings-automatic-root-location {
   display: block;
+  min-width: 0;
   width: fit-content;
   max-width: 100%;
-  margin-top: 10px;
   overflow: hidden;
   padding: 5px 8px;
   border: 1px solid var(--settings-line);
@@ -994,6 +1002,17 @@ summary::-webkit-details-marker {
   font-size: var(--text-label);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.settings-automatic-root-default {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border-radius: 5px;
+  color: var(--settings-muted);
+  background: var(--ui-surface-panel-2);
+  font-size: var(--text-label);
+  font-weight: 650;
+  line-height: 1.35;
 }
 
 .settings-automatic-root-actions {

@@ -479,6 +479,103 @@ function settingsElement(account, overrides = {}) {
   );
 }
 
+test("Automatic Workspace location shows the canonical system default path", () => {
+  render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: readyAutomaticWorkspaceRoot,
+    }),
+  );
+
+  assert.equal(
+    screen.getByText("/tmp/MetaWork/Automatic Workspaces").textContent,
+    "/tmp/MetaWork/Automatic Workspaces",
+  );
+  assert.equal(screen.getByText("Default").textContent, "Default");
+  assert.equal(screen.queryByText("System default"), null);
+});
+
+test("Automatic Workspace write failures distinguish active and unavailable locations", () => {
+  const active = render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        mode: "custom",
+        canonicalRoot: "/Volumes/Work/MetaWork",
+        health: "write_failed",
+      },
+    }),
+  );
+  assert.match(
+    screen.getByRole("status").textContent,
+    /previously saved location remains active/u,
+  );
+  active.unmount();
+
+  render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        mode: null,
+        canonicalRoot: null,
+        health: "write_failed",
+        canReset: true,
+      },
+    }),
+  );
+  assert.equal(
+    screen.getByText("Location unavailable").textContent,
+    "Location unavailable",
+  );
+  assert.match(
+    screen.getByRole("status").textContent,
+    /automatic workspaces are paused/u,
+  );
+});
+
+test("Automatic Workspace command errors stay local and do not duplicate Host health", async () => {
+  const ready = render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      onChooseAutomaticWorkspaceRoot: async () => false,
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+  await waitFor(() =>
+    assert.match(
+      screen.getByRole("alert").textContent,
+      /could not be changed/u,
+    ),
+  );
+  ready.unmount();
+
+  render(
+    settingsElement(readySettingsAccount, {
+      initialSection: "general",
+      automaticWorkspaceRoot: {
+        ...readyAutomaticWorkspaceRoot,
+        mode: "custom",
+        canonicalRoot: "/Volumes/Missing/MetaWork",
+        health: "path_unavailable",
+        canReset: true,
+        canRetry: true,
+      },
+      onRetryAutomaticWorkspaceRoot: async () => false,
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() =>
+    assert.equal(screen.getByRole("button", { name: "Retry" }).disabled, false),
+  );
+  assert.match(
+    screen.getByRole("status").textContent,
+    /folder is unavailable/u,
+  );
+  assert.equal(screen.queryByRole("alert"), null);
+});
+
 test("Automatic Workspace location waits for the canonical snapshot and restores focus", async () => {
   const calls = [];
   const choose = async (generation) => {

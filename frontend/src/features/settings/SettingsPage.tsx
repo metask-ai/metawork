@@ -14,7 +14,7 @@ import {
   SelectionMenu,
   type SelectionMenuOption,
 } from "../../components/ui/SelectionMenu.tsx";
-import { useI18n, type Locale } from "../../i18n/context.ts";
+import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
 import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
 
@@ -770,11 +770,14 @@ export function SettingsPage({
   }
 
   const automaticRootDisplay =
-    automaticWorkspaceRoot.mode === "system_default"
-      ? t("settings.automatic_workspace.system_default")
-      : (automaticWorkspaceRoot.canonicalRoot ??
-        t("settings.automatic_workspace.location_unavailable"));
+    automaticWorkspaceRoot.canonicalRoot ??
+    t("settings.automatic_workspace.location_unavailable");
   const automaticRootHasAttention = automaticWorkspaceRoot.health !== "ready";
+  const automaticRootHealthMessage: MessageId =
+    automaticWorkspaceRoot.health === "write_failed" &&
+    automaticWorkspaceRoot.canonicalRoot === null
+      ? "settings.automatic_workspace.health.write_failed_no_active"
+      : `settings.automatic_workspace.health.${automaticWorkspaceRoot.health}`;
 
   useEffect(() => {
     if (customProviderCapabilities.secretCapture) return;
@@ -1201,23 +1204,29 @@ export function SettingsPage({
                         {t("settings.automatic_workspace.title")}
                       </span>
                       <p>{t("settings.automatic_workspace.help")}</p>
-                      <code
-                        className="settings-automatic-root-location"
-                        title={automaticRootDisplay}
-                      >
-                        {automaticRootDisplay}
-                      </code>
+                      <div className="settings-automatic-root-value">
+                        <code
+                          className="settings-automatic-root-location"
+                          title={automaticRootDisplay}
+                        >
+                          {automaticRootDisplay}
+                        </code>
+                        {automaticWorkspaceRoot.mode === "system_default" ? (
+                          <span className="settings-automatic-root-default">
+                            {t("settings.automatic_workspace.system_default")}
+                          </span>
+                        ) : null}
+                      </div>
                       {automaticRootHasAttention ? (
                         <p
                           className="settings-automatic-root-health"
                           role="status"
                         >
-                          {t(
-                            `settings.automatic_workspace.health.${automaticWorkspaceRoot.health}`,
-                          )}
+                          {t(automaticRootHealthMessage)}
                         </p>
                       ) : null}
-                      {automaticRootMutationFailed ? (
+                      {automaticRootMutationFailed &&
+                      !automaticRootHasAttention ? (
                         <p
                           className="settings-automatic-root-error"
                           role="alert"
