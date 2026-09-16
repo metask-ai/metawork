@@ -13,7 +13,7 @@ const environment = {
   generation: "7",
   insets: { top: 52, left: 72, bottom: 0, right: 138 },
   buttons: { x: 0, y: 0, width: 138, height: 52 },
-  livePointerDrag: false,
+  livePointerDrag: true,
   rendererControls: true,
   maximized: false,
 };
@@ -163,6 +163,20 @@ test("Native SDK resize keeps one generation and latest-only sync preserves cont
         .metaworkRendererWindowControls,
       "true",
     );
+
+    dom.window.dispatchEvent(new dom.window.Event("blur"));
+    await settle();
+    const resets = calls.filter(
+      (call) =>
+        call.command === commands.windowChromePointer &&
+        call.payload.phase === "reset",
+    );
+    assert.deepEqual(resets, [
+      {
+        command: commands.windowChromePointer,
+        payload: { generation: "7", phase: "reset" },
+      },
+    ]);
 
     cleanup();
     await settle();

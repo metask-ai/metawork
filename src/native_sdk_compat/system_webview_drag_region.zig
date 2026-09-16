@@ -1,7 +1,8 @@
 //! Application-owned compatibility seam for System WebView drag regions.
 //!
-//! Native SDK 0.9.2 owns the window, chrome geometry, and platform drag loop.
-//! It does not yet expose drag regions for the startup System WebView, so
+//! Native SDK 0.10.1 owns the window, chrome geometry, and platform drag loop.
+//! Its Windows drag-region public API only covers GPU surfaces, not the startup
+//! System WebView, so
 //! MetaWork keeps this bounded seam until that Runtime API is available.
 //! Renderer input is constrained to one top-band candidate plus bounded
 //! exclusions; it never carries native window identity.
@@ -10,6 +11,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const startup_window = @import("system_webview_startup_window.zig");
+const types = @import("system_webview_drag_region/types.zig");
+pub const PointerOutcome = types.PointerOutcome;
 
 const Platform = switch (builtin.os.tag) {
     .windows => @import("system_webview_drag_region/windows.zig"),
@@ -35,9 +38,11 @@ const Platform = switch (builtin.os.tag) {
             return error.SystemWebViewChromeUnavailable;
         }
 
-        pub fn beginLivePointerDrag(_: *State, _: native_sdk.platform.PlatformServices, _: native_sdk.platform.WindowId) !void {
-            return error.UnsupportedWindowChromeGesture;
+        pub fn handlePointerDown(_: *State, _: native_sdk.platform.PlatformServices, _: native_sdk.platform.WindowId, _: f64, _: f64) !PointerOutcome {
+            return .ignored;
         }
+
+        pub fn resetPointerSequence(_: *State) void {}
 
         pub fn deinit(_: *State) void {}
     },
@@ -46,7 +51,7 @@ const Platform = switch (builtin.os.tag) {
 pub const max_regions: usize = 33;
 const max_coordinate: f64 = 65_536;
 const geometry_epsilon: f64 = 0.5;
-const PointIsDraggableFn = *const fn (*const anyopaque, f64, f64) bool;
+const PointIsDraggableFn = types.PointIsDraggableFn;
 
 pub const Region = struct {
     x: f64,
@@ -114,6 +119,7 @@ pub const Capability = struct {
         services: native_sdk.platform.PlatformServices,
     ) !Environment {
         try self.requirePlatform(services);
+        self.resetPointerSequence();
         self.clearRegions();
         self.document_attached = self.platform_ready;
         return self.environment(services);
@@ -126,6 +132,7 @@ pub const Capability = struct {
         viewport_height: f64,
         regions: []const Region,
     ) !Environment {
+        self.resetPointerSequence();
         if (!validExtent(viewport_width) or !validExtent(viewport_height))
             return error.InvalidWindowChromeGeometry;
         const chrome = services.windowChrome(self.window_id);
@@ -142,22 +149,27 @@ pub const Capability = struct {
         return self.environmentFromChrome(chrome);
     }
 
-    pub fn beginLivePointerDrag(
+    pub fn handlePointerDown(
         self: *Capability,
         services: native_sdk.platform.PlatformServices,
         x: f64,
         y: f64,
-    ) !Environment {
-        if (!self.document_attached or
-            !validCoordinate(x) or !validCoordinate(y) or
-            !self.pointIsDraggable(x, y))
+    ) !PointerOutcome {
+        if (!self.document_attached or !validCoordinate(x) or !validCoordinate(y)) {
+            self.resetPointerSequence();
             return error.InvalidWindowChromeGesture;
-        try Platform.beginLivePointerDrag(
+        }
+        return Platform.handlePointerDown(
             &self.platform,
             services,
             self.window_id,
+            x,
+            y,
         );
-        return self.environment(services);
+    }
+
+    pub fn resetPointerSequence(self: *Capability) void {
+        Platform.resetPointerSequence(&self.platform);
     }
 
     pub fn current(
@@ -168,6 +180,7 @@ pub const Capability = struct {
     }
 
     pub fn disconnect(self: *Capability) void {
+        self.resetPointerSequence();
         self.document_attached = false;
         self.clearRegions();
     }

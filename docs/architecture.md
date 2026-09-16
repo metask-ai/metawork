@@ -125,9 +125,11 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 
 当前登记的 compatibility capability 为：
 
+当前固定 Native SDK 0.10.1 已公开 Windows drag-region mirror，但 `set_window_drag_regions` 只接受 GPU surface，启动 System WebView 不在其覆盖范围；因此登记缺口是“System WebView 缺少等价 public API”，不是“SDK 完全没有 drag-region 能力”。
+
 | Capability | 层级 | 允许边界 | 删除条件 |
 | --- | --- | --- | --- |
-| `system_webview_drag_region` | macOS 一级；Windows 二级 | 补齐 System WebView 的 live-pointer drag | 官方发布版提供明确适用于 System WebView 的等价 drag-region public API，并通过目标平台验收 |
+| `system_webview_drag_region` | macOS 一级；Windows 二级 | 补齐 System WebView 的 live-pointer drag；Windows 同一 Host seam 依据 OS 阈值判定标题栏双击并请求既有 window-controls owner 切换最大化 | 官方发布版提供明确适用于 System WebView、可覆盖等价标题栏拖动与双击行为的 public API，并通过目标平台验收 |
 | `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
