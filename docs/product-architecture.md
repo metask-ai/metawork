@@ -120,7 +120,13 @@ Provider 删除先提交 credential cleanup tombstone，再删除系统 credenti
 
 Workspace 是 Product Control-owned 产品对象；产品语义和用户操作以[产品需求](requirements.md)为准，wire 以[Renderer Bridge 合同](renderer-bridge-contract.md)为准。本节只定义 Workspace、Task、ExecutionConfig 与 Agent Session 之间的 admission 和提交关系。
 
-Manual Workspace 与 Automatic Workspace 共用一个 registry 和 Task 引用关系，`kind` 在 record 生命周期内不可改变。Manual intent 必须重新校验 Workspace identity、epoch 与 authorization；Automatic intent 必须取得 Application 注入的 automatic-root capability。Renderer 不提交物理路径、automatic root 或目录授权 token。
+Manual Workspace 与 Automatic Workspace 共用一个 registry 和 Task 引用关系，`kind` 在 record 生命周期内不可改变。Manual intent 必须重新校验 Workspace identity、epoch 与 authorization；Automatic intent 必须取得 Workspace Runtime 当前已安装的 automatic-root capability。Renderer 不提交物理路径、automatic root 或目录授权 token。
+
+Workspace owner 以 `<MetaWork data dir>/workbench/automatic-workspace-root.store` 作为唯一 canonical 配置。文件只接受 schema 1 的 `{ mode: system_default, custom_root: null } | { mode: custom, custom_root: canonical absolute path }`，不持久 revision、effective root、Workspace identity 或 Task 引用，也不读取旧格式、不迁移、不静默 fallback。进程内非零 `generation` 只服务于 command CAS；Host 重启后由新 connection/snapshot 建立新的 freshness 边界，没有 durable object 引用该 generation。Application 只提供 Native SDK 解析的 system-default path、该文件 capability 和 Host 原生 picker；路径模式、健康、交易和是否可分配均由 Workspace owner 决定。
+
+启动时文件缺失才能原子初始化 system default；读失败、严格解码失败、unknown schema 和 incomplete recovery artifact 均保留 canonical 并发布 typed non-ready health。显式 reset/recovery 必须先将旧 canonical exact bytes 改名为唯一 quarantine artifact，再安装当前 schema；明确失败恢复旧 canonical，结果不确定保留 pending evidence 并禁止新 Automatic admission。普通 choose/reset 交易按 `expectedGeneration`校验，由 Host 取得候选路径并 canonicalize/stat，Workspace 再校验路径长度和 registry 冲突、打开候选 Root、原子提交配置，最后以不失败的内存交换安装新 allocator 并推进 generation/Product revision。明确写失败保留旧设置与 allocator；outcome unknown 禁止后续 automatic allocation；picker cancel 无副作用。
+
+custom root 必须为随机 child 预留路径容量，且不得等于 Manual record、不得等于或位于已存在的 Automatic record 内；它可以是既有 Automatic record 的祖先。路径比较在 Windows 语义下大小写不敏感，其他平台按 byte-exact canonical path。任一历史 Automatic record 的精确 root 始终拒绝 Manual open，不得因当前 allocator 已切换而把该 record 重解释为 Manual。
 
 Task 创建在产生外部 effect 前必须证明：
 
@@ -138,6 +144,8 @@ Product Task 还拥有绑定 Run identity 的 completion receipt。durable `comp
 PermissionProfile 与 ExecutionConfig 分别拥有自己的产品事实：Product Control 持有后续新 Task 的默认值，并在 Task create admission 时复制；成功提交交互式 Task 时，同一 canonical mutation 把其 effective profile 记为后续默认，并随 Task 历史进行同一次 best-effort projection commit，admission 拒绝、回滚和 noninteractive Scheduled occurrence 均不得改变。历史写入失败不回滚已发布的交互式 Task 或进程内默认值，后续完整 snapshot 按现有恢复规则重试持久化。Product Task 持有创建后不可变的 effective profile、interaction fact 与逐 Run provenance。当前开放 `approval_required | full_access`，两者分别映射 AgentCore `accept_edits | full_access`，ShellPolicy 均保持 `unrestricted`；该映射不创建 Sandbox、Workspace trust 或持久 permission rule。默认值变化不改写已有 Task，fresh create 与 checkpoint restore 必须提交同一 profile；当前 ABI 没有可消费的 idle mode mutation，不能用规则拼装、Renderer preference 或跨 profile restore 模拟。
 
 Automatic Workspace record 只有在 owning Task 已物理删除且相关 Run event、worker、Session 和 catalog lease 全部 quiescent 后才能释放。真实目录不因 Task 删除、shutdown 或重启被递归删除，也不能通过扫描遗留目录猜测或恢复 Product record。
+
+automatic-root 配置不进入 `workbench-history.store`、checkpoint 或 file-change blob，也不改变其 schema。A→B 切换后，既有 Task/Workspace 继续使用已记录的 A child，只有后续新 Task 从 B 分配；A 不可用时历史仍可读，但需要该路径的 restore/run 明确不可用。Scheduled occurrence 每次触发都通过同一当前 allocator admission，不在 definition 中固化 automatic root。
 
 ### 2.3 Scheduled Task
 

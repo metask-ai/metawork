@@ -25,6 +25,10 @@ Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的
 
 ## 3. Renderer Bridge wire contract
 
+根 snapshot 必须独立发布 `automaticWorkspaceRoot = { generation, mode, canonicalRoot, health, redacted, canChoose, canReset, canRetry }`。`generation` 是非零 canonical decimal wire integer；`mode = system_default | custom | null`，只有 Host 拥有可信配置时非空；`canonicalRoot` 是当前可信 effective canonical path 或 null；`health = ready | path_unavailable | persistence_unavailable | read_failed | corrupt | write_failed | outcome_unknown`。`redacted` 只表示 Host credential redaction 是否改写了可发布路径；不得用占位路径伪造可信 root。三个 action boolean 由 Workspace owner 根据当前 health 一次性计算，Renderer 不从 mode/health 反推。既有 `capabilities.automaticWorkspaces` 仍只表达当前能否分配新 Automatic Workspace，不承担配置诊断。
+
+Host-only command 精确为 `metawork.workspaces.chooseAutomaticRoot`、`metawork.workspaces.resetAutomaticRoot` 和 `metawork.workspaces.retryAutomaticRoot`，payload 都只接受 `{ expectedGeneration }`。Choose 在 Application 内打开原生目录选择器，Renderer 不得提交 path、bookmark、token 或 mode；取消不产生 mutation。Reset 恢复 Native SDK `.data` 解析的 system default，Retry 只重新校验并打开已提交 root，不改写配置。三者都必须在 Product/Workspace transaction 内重新校验 generation、health、path 和 registry 冲突，结果与 Snapshot revision 遵守既有 command/resync 语义；Renderer 不做乐观路径替换。
+
 Run 的 `elapsedMs` 是 nullable canonical decimal `u64` string：表示 Host 在本次 Snapshot 采样时，从本轮接纳起经过的单调时间，包含排队、批准等待和重试。正式 terminal 或没有可靠计时事实时必须为 null，不从历史补写。它不是事件活跃度、完成比例或剩余时间；时钟推进不发布 revision。Renderer 仅用本次 Snapshot 的本地接收时刻外推低频显示，reload 必须重新采样，不能从组件挂载时起算或将显示时间写回 Host。
 
 Run 的 `finishedAtUnixMs` 是 nullable canonical decimal `u64` string，表示 Product 在完整 terminal event-drain barrier 后首次把该 Run 收口为正式终态时观察到的 Unix epoch 毫秒。非 terminal Run 必须为 null；时钟不可用以及该字段引入前的历史记录继续为 null，不允许 Renderer 以 Snapshot 接收、reload、Run 顺序或 `elapsedMs` 反推。非空值必须大于零且不超过 ECMAScript Date 上界 `8640000000000000`，随 Run 历史持久化且写入后不可修改；Renderer 只进行本地化相对时间呈现，绝不把它解释为事件时间线或执行耗时。

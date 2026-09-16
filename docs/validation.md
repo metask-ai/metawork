@@ -76,6 +76,8 @@ Models 默认选择与新 Task admission 的回归必须覆盖：同一 source i
 
 选择能观察真实失败模式的最小充分验证层；文件位置不能反向决定 owner，也不因脚本名、lock 路径或构建文件变化机械扩大平台矩阵。
 
+Automatic Workspace root 设置的最小充分证据必须覆盖：schema 1 strict codec、缺失初始化、read/corrupt/write/outcome-unknown 分类、exact quarantine 与显式 recovery；choose/reset/retry 的 generation CAS、picker cancel、路径长度与 Manual/Automatic registry 冲突；A→B 后旧 Task 保持 A、新 Task 使用 B，restart/reset/retry 和 Scheduled occurrence 使用当前 root；旧 Automatic exact root 始终不能转为 Manual；`workbench-history.store`、checkpoint 与 file-change store schema/bytes 不因设置交易改写。Bridge 要证明 Renderer 无自由 path payload、Snapshot 严格解码且 `automaticWorkspaces` 不替代配置 health；Renderer 要覆盖常规设置行、原生 picker 等待、局部错误、重试和焦点恢复。当前完成 Gate 包含 macOS 原生 picker smoke；Windows 只在当前平台运行 table-driven 的大小写不敏感纯路径语义测试，真实 Windows picker、权限和文件系统运行证据是后续平台验证，不是本次完成标准，也不得用 macOS 结果声称 Windows 已验收。
+
 | 变更类型                                             | 最小充分证据                                                                                                                                                                                                                                          |
 | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 纯文档删除或改写                                     | 链接、锚点、残留引用和 `git diff --check`                                                                                                                                                                                                             |
