@@ -53,6 +53,19 @@ pub fn build(b: *std.Build) void {
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
+    const window_chrome_tests = b.addTest(.{
+        .name = "metawork-window-chrome",
+        .root_module = test_modules.app,
+        .filters = &.{ "window", "Window", "titlebar", "resize", "disconnect", "refresh" },
+    });
+    const window_chrome_step = b.step("test-window-chrome", "Run Application window-chrome, compatibility and Bridge tests");
+    window_chrome_step.dependOn(&b.addRunArtifact(window_chrome_tests).step);
+    const window_chrome_bridge_tests = b.addTest(.{
+        .name = "metawork-window-chrome-bridge",
+        .root_module = test_modules.bridge,
+        .filters = &.{ "window chrome", "Dispatcher validates authority" },
+    });
+    window_chrome_step.dependOn(&b.addRunArtifact(window_chrome_bridge_tests).step);
     addLifecycleTests(
         b,
         test_modules,

@@ -1,10 +1,19 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { release, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { probeWindowChromeInput } from "./window-chrome-input.mjs";
+import { probeWindowChromeControls } from "./window-chrome-controls.mjs";
 import { buildAutomationDebugArtifact } from "./build.mjs";
 import {
   allocateWebViewTestPort,
@@ -40,10 +49,55 @@ const timeoutMs = 20_000;
 const resizeSessionOnly = process.argv.includes("--resize-session-only");
 const evidenceDir = process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR;
 const inputSessionOnly = process.argv.includes("--input-session-only");
+const controlsSessionOnly = process.argv.includes("--controls-session-only");
 
 // This harness owns the automation Debug artifact it drives; build before the
 // fixture directory exists so a build failure leaves nothing to clean up.
 await buildAutomationDebugArtifact(root);
+if (evidenceDir) {
+  await mkdir(evidenceDir, { recursive: true });
+  const git = async (args) =>
+    (
+      await execFileAsync("git", args, {
+        cwd: root,
+        maxBuffer: 8 * 1024 * 1024,
+      })
+    ).stdout;
+  const patch = await git(["diff", "--binary", "HEAD"]);
+  const untracked = (
+    await git(["ls-files", "--others", "--exclude-standard", "-z"])
+  )
+    .split("\0")
+    .filter(Boolean);
+  const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+  const evidence = {
+    timestamp: new Date().toISOString(),
+    os: { platform: process.platform, release: release(), arch: process.arch },
+    sdk: JSON.parse(
+      await readFile(
+        path.join(root, "node_modules/@native-sdk/cli/package.json"),
+        "utf8",
+      ),
+    ).version,
+    revision: (await git(["rev-parse", "HEAD"])).trim(),
+    status: await git(["status", "--short"]),
+    diffSha256: sha256(patch),
+    untracked: await Promise.all(
+      untracked.map(async (file) => ({
+        file,
+        sha256: sha256(await readFile(path.join(root, file))),
+      })),
+    ),
+    artifact: binary,
+    artifactSha256: sha256(await readFile(binary)),
+    command: process.argv,
+  };
+  await writeFile(path.join(evidenceDir, "source.patch"), patch);
+  await writeFile(
+    path.join(evidenceDir, "window-chrome-artifact.json"),
+    JSON.stringify(evidence, null, 2),
+  );
+}
 
 const fixtureRoot = await mkdtemp(
   path.join(tmpdir(), "metawork-window-chrome-"),
@@ -91,7 +145,9 @@ try {
   const rendererChromeReady = waitForRendererChromeReady();
   await waitForOutput(/metawork\.smoke\.event_ack sequence=1/);
   await rendererChromeReady;
-  if (inputSessionOnly) {
+  if (controlsSessionOnly) {
+    await probeControls();
+  } else if (inputSessionOnly) {
     await probeWindowChromeInput({ port: debugPort, runProbe, evidenceDir });
   } else {
     // Keep this isolated window unobscured until the harness shuts it down.
@@ -137,6 +193,7 @@ try {
       await probeWindowChromeInput({ port: debugPort, runProbe, evidenceDir });
     }
     await runProbe("resize");
+    await probeControls();
     await runProbe("controls");
     await runProbe("close");
     await execFileAsync(
@@ -157,11 +214,13 @@ try {
   if (!/runtime\.event.*event="stop"/.test(output))
     throw new Error("normal Runtime stop was not observed");
   process.stdout.write(
-    inputSessionOnly
-      ? "Windows real input matrix and clean shutdown passed.\n"
-      : resizeSessionOnly
-        ? "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
-        : "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, titlebar drag/double click, controls, hide/reopen, and clean shutdown passed.\n",
+    controlsSessionOnly
+      ? "Windows window controls lifecycle and clean shutdown passed.\n"
+      : inputSessionOnly
+        ? "Windows real input matrix and clean shutdown passed.\n"
+        : resizeSessionOnly
+          ? "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
+          : "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, titlebar drag/double click, controls, hide/reopen, and clean shutdown passed.\n",
   );
 } catch (error) {
   process.stderr.write(output);
@@ -196,6 +255,30 @@ async function runProbe(mode, extraArgs = []) {
   );
   process.stdout.write(result.stdout);
   return result.stdout;
+}
+
+async function probeControls() {
+  await probeWindowChromeControls({
+    port: debugPort,
+    runProbe,
+    evidenceDir,
+    openTray: () =>
+      execFileAsync(
+        process.execPath,
+        [native, "automate", "tray-action", "1"],
+        {
+          cwd: appCwd,
+          timeout: timeoutMs,
+          maxBuffer: 1024 * 1024,
+        },
+      ),
+    reloadPage: () =>
+      execFileAsync(process.execPath, [native, "automate", "reload"], {
+        cwd: appCwd,
+        timeout: timeoutMs,
+        maxBuffer: 1024 * 1024,
+      }),
+  });
 }
 
 async function waitForRendererChromeReady() {

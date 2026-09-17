@@ -145,6 +145,71 @@ pub const State = struct {
         return services.showMessageDialog(options);
     }
 
+    pub fn connectWindows(
+        self: *State,
+        runtime: *native_sdk.Runtime,
+        services: native_sdk.platform.PlatformServices,
+        window_id: native_sdk.platform.WindowId,
+    ) !bridge_api.WindowChromePlatformEnvironment {
+        _ = try requireLiveMainWindow(runtime, window_id);
+        const controls = try self.window_controls_capability.windowsState();
+        return environment(try self.drag_region_capability.connect(services), controls);
+    }
+
+    pub fn refreshWindows(
+        self: *State,
+        runtime: *native_sdk.Runtime,
+        services: native_sdk.platform.PlatformServices,
+        window_id: native_sdk.platform.WindowId,
+    ) !bridge_api.WindowChromePlatformEnvironment {
+        _ = try requireLiveMainWindow(runtime, window_id);
+        return environment(
+            self.drag_region_capability.current(services),
+            try self.window_controls_capability.windowsState(),
+        );
+    }
+
+    pub fn handleWindowsPointer(
+        self: *State,
+        runtime: ?*native_sdk.Runtime,
+        services: ?native_sdk.platform.PlatformServices,
+        window_id: native_sdk.platform.WindowId,
+        pointer: bridge_api.WindowChromePointer,
+    ) !void {
+        try requireMainWindow(window_id);
+        const down = switch (pointer) {
+            .reset => {
+                self.drag_region_capability.resetPointerSequence();
+                return;
+            },
+            .down => |down| down,
+        };
+        // Only a valid document's down reaches this point. All newly fallible
+        // prerequisites must interrupt its sequence, including a missing Runtime.
+        errdefer self.drag_region_capability.resetPointerSequence();
+        const runtime_value = runtime orelse return error.RuntimeUnavailable;
+        try requireUnhiddenMainWindow(runtime_value, window_id);
+        _ = try self.window_controls_capability.isMaximized();
+        const outcome = try self.drag_region_capability.handlePointerDown(
+            services orelse return error.RuntimeUnavailable,
+            down.x,
+            down.y,
+        );
+        if (outcome == .toggle_maximize)
+            try self.toggleMainWindowMaximized(runtime_value, window_id);
+    }
+
+    fn toggleMainWindowMaximized(
+        self: *State,
+        runtime: *native_sdk.Runtime,
+        window_id: native_sdk.platform.WindowId,
+    ) !void {
+        try requireUnhiddenMainWindow(runtime, window_id);
+        const maximized = try self.window_controls_capability.isMaximized();
+        try self.window_controls_capability.setMaximized(!maximized);
+    }
+
+    // Existing SDK/disabled-controls path for non-Windows platforms.
     pub fn connect(
         self: *State,
         services: native_sdk.platform.PlatformServices,
@@ -200,6 +265,20 @@ pub const State = struct {
         action: bridge_api.WindowChromeControlAction,
     ) !void {
         try requireMainWindow(window_id);
+        if (comptime builtin.os.tag == .windows) {
+            switch (action) {
+                .minimize => {
+                    try requireUnhiddenMainWindow(runtime, window_id);
+                    try runtime.minimizeWindow(window_id);
+                },
+                .toggle_maximize => try self.toggleMainWindowMaximized(runtime, window_id),
+                .close => {
+                    try requireUnhiddenMainWindow(runtime, window_id);
+                    try self.window_controls_capability.requestUserClose();
+                },
+            }
+            return;
+        }
         switch (action) {
             .minimize => try runtime.minimizeWindow(main_window_id),
             .toggle_maximize => try self.window_controls_capability.toggleMaximize(),
@@ -235,6 +314,28 @@ fn windowsPackagedTrayIconPath(executable_path: []const u8, output: []u8) ?[]con
 
 fn requireMainWindow(window_id: native_sdk.platform.WindowId) !void {
     if (window_id != main_window_id) return error.WindowIdentityMismatch;
+}
+
+fn requireLiveMainWindow(
+    runtime: *const native_sdk.Runtime,
+    window_id: native_sdk.platform.WindowId,
+) !native_sdk.platform.WindowInfo {
+    try requireMainWindow(window_id);
+    var windows: [native_sdk.platform.max_windows]native_sdk.platform.WindowInfo = undefined;
+    for (runtime.listWindows(&windows)) |window| {
+        if (window.id != window_id) continue;
+        if (!window.open) return error.WindowUnavailable;
+        return window;
+    }
+    return error.WindowUnavailable;
+}
+
+fn requireUnhiddenMainWindow(
+    runtime: *const native_sdk.Runtime,
+    window_id: native_sdk.platform.WindowId,
+) !void {
+    if ((try requireLiveMainWindow(runtime, window_id)).hidden)
+        return error.WindowHidden;
 }
 
 fn environment(
@@ -273,4 +374,103 @@ test "Windows packaged tray icon resolves from the executable's package root" {
         "C:\\Users\\demo\\AppData\\Local\\Programs\\MetaWork\\assets\\icons\\tray-icon.ico",
         resolved,
     );
+}
+
+test "Windows window controls consume current SDK window facts after platform events" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "window-controls-test" };
+    _ = try harness.runtime.createWindow(.{
+        .id = 2,
+        .label = "other",
+        .source = .html(""),
+    });
+    const main = try harness.runtime.createWindow(.{
+        .id = main_window_id,
+        .label = "main",
+        .source = .html(""),
+    });
+    var windows: [native_sdk.platform.max_windows]native_sdk.platform.WindowInfo = undefined;
+    const initial = harness.runtime.listWindows(&windows);
+    try std.testing.expectEqual(@as(usize, 2), initial.len);
+    try std.testing.expectEqual(main_window_id, initial[1].id);
+    try std.testing.expect(initial[1].open and !initial[1].hidden);
+    try requireUnhiddenMainWindow(&harness.runtime, main_window_id);
+    try std.testing.expectError(error.WindowIdentityMismatch, requireLiveMainWindow(&harness.runtime, 2));
+
+    var state = main.state();
+    state.hidden = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = state });
+    const hidden = harness.runtime.listWindows(&windows);
+    try std.testing.expect(hidden[1].open and hidden[1].hidden);
+    try std.testing.expect((try requireLiveMainWindow(&harness.runtime, main_window_id)).hidden);
+    try std.testing.expectError(error.WindowHidden, requireUnhiddenMainWindow(&harness.runtime, main_window_id));
+
+    state.hidden = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = state });
+    const shown = harness.runtime.listWindows(&windows);
+    try std.testing.expect(shown[1].open and !shown[1].hidden);
+    try requireUnhiddenMainWindow(&harness.runtime, main_window_id);
+
+    state.open = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = state });
+    const closed = harness.runtime.listWindows(&windows);
+    try std.testing.expect(!closed[1].open);
+    try std.testing.expect(closed[0].open);
+    try std.testing.expectError(error.WindowUnavailable, requireLiveMainWindow(&harness.runtime, main_window_id));
+}
+
+test "Windows window actions reject missing closed and hidden SDK windows before effects" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var window: State = .{};
+    defer window.deinit();
+    const actions = [_]bridge_api.WindowChromeControlAction{ .minimize, .toggle_maximize, .close };
+    for (actions) |action|
+        try std.testing.expectError(error.WindowUnavailable, window.control(&harness.runtime, 1, action));
+    _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
+    try harness.runtime.hideWindow(1);
+    for (actions) |action|
+        try std.testing.expectError(error.WindowHidden, window.control(&harness.runtime, 1, action));
+    try std.testing.expectEqual(@as(u32, 0), harness.null_platform.minimizeCountForWindow(1));
+
+    // Tray reopen remains an SDK operation and removes the admission barrier.
+    window.showMainWindow(&harness.runtime);
+    try window.control(&harness.runtime, 1, .minimize);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.minimizeCountForWindow(1));
+    try requireUnhiddenMainWindow(&harness.runtime, 1);
+    try std.testing.expectError(error.WindowUnavailable, window.control(&harness.runtime, 1, .toggle_maximize));
+    try std.testing.expectError(error.WindowUnavailable, window.control(&harness.runtime, 1, .close));
+
+    try window.requestExplicitQuit(&harness.runtime);
+    for (actions) |action|
+        try std.testing.expectError(error.WindowUnavailable, window.control(&harness.runtime, 1, action));
+}
+
+test "Windows window query failure precedes attachment and preserves refresh session" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
+    var window: State = .{};
+    defer window.deinit();
+    window.drag_region_capability.platform_ready = true;
+    const services = harness.runtime.options.platform.services;
+    try std.testing.expectError(error.WindowUnavailable, window.connectWindows(&harness.runtime, services, 1));
+    try std.testing.expect(!window.drag_region_capability.document_attached);
+    window.drag_region_capability.document_attached = true;
+    window.drag_region_capability.platform.first_press = .{
+        .tick_ms = 100,
+        .screen_point = .{ .x = 400, .y = 20 },
+        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
+    };
+    const first = window.drag_region_capability.platform.first_press;
+    try harness.runtime.hideWindow(1);
+    // Hidden is allowed to query; an absent binding still fails explicitly.
+    try std.testing.expectError(error.WindowUnavailable, window.refreshWindows(&harness.runtime, services, 1));
+    try std.testing.expect(window.drag_region_capability.document_attached);
+    try std.testing.expect(std.meta.eql(first, window.drag_region_capability.platform.first_press));
 }

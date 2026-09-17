@@ -5694,6 +5694,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         chrome_pointer_calls: usize = 0,
         chrome_control_calls: usize = 0,
         chrome_disconnect_calls: usize = 0,
+        chrome_error: ?anyerror = null,
         on_main_thread: bool = true,
         account_result: account_contract.AccountCommandResult =
             .acceptedAttempt(41),
@@ -5749,6 +5750,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         ) anyerror!WindowChromePlatformEnvironment {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
+            if (self.chrome_error) |err| return err;
             self.chrome_connect_calls += 1;
             return chromeEnvironment();
         }
@@ -5759,6 +5761,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         ) anyerror!WindowChromePlatformEnvironment {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
+            if (self.chrome_error) |err| return err;
             self.chrome_refresh_calls += 1;
             return chromeEnvironment();
         }
@@ -6040,6 +6043,39 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expect(std.mem.indexOf(u8, stale_replacement_refresh, "\"handler_failed\"") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_refresh_calls);
+
+    const current_pointer = "{\"id\":\"current-pointer\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"2\",\"phase\":\"down\",\"x\":200,\"y\":20}}";
+    _ = native_dispatcher.dispatch(current_pointer, foreign_bootstrap_window, &response);
+    harness.on_main_thread = false;
+    _ = native_dispatcher.dispatch(current_pointer, source, &response);
+    harness.on_main_thread = true;
+    _ = native_dispatcher.dispatch(
+        "{\"id\":\"old-pointer\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"1\",\"phase\":\"reset\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expectEqual(@as(usize, 2), harness.chrome_pointer_calls);
+
+    const current_refresh = "{\"id\":\"current-refresh\",\"command\":\"metawork.host.windowChrome.refresh\",\"payload\":{\"generation\":\"2\"}}";
+    harness.chrome_error = error.WindowUnavailable;
+    const failed_refresh = native_dispatcher.dispatch(current_refresh, source, &response);
+    try std.testing.expect(std.mem.indexOf(u8, failed_refresh, "WindowUnavailable") != null);
+    try std.testing.expect(dispatcher.window_chrome_connected);
+    try std.testing.expectEqual(@as(u64, 2), dispatcher.window_chrome_generation);
+    harness.chrome_error = null;
+    const recovered_refresh = native_dispatcher.dispatch(current_refresh, source, &response);
+    try std.testing.expect(std.mem.indexOf(u8, recovered_refresh, "\"generation\":\"2\"") != null);
+
+    harness.chrome_error = error.WindowUnavailable;
+    const failed_connect = native_dispatcher.dispatch(
+        "{\"id\":\"failed-connect\",\"command\":\"metawork.host.windowChrome.connect\",\"payload\":{}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, failed_connect, "WindowUnavailable") != null);
+    try std.testing.expect(!dispatcher.window_chrome_connected);
+    try std.testing.expectEqual(@as(u64, 3), dispatcher.window_chrome_generation);
+    harness.chrome_error = null;
 
     const mismatch = native_dispatcher.dispatch(
         "{\"id\":\"mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",

@@ -35,22 +35,23 @@ pub fn captureStartupWindow(
     state.root = binding.root orelse return error.WindowUnavailable;
 }
 
-pub fn toggleMaximize(state: *State) !void {
+pub fn setMaximized(state: *State, maximized: bool) !void {
     const root = state.root orelse return error.WindowUnavailable;
     _ = ShowWindow(
         root,
-        if (IsZoomed(root) != 0) sw_restore else sw_maximize,
+        if (maximized) sw_maximize else sw_restore,
     );
 }
 
-pub fn userClose(state: *State) !void {
+pub fn requestUserClose(state: *State) !void {
     const root = state.root orelse return error.WindowUnavailable;
     if (PostMessageW(root, wm_close, 0, 0) == 0)
         return error.SystemWebViewUserCloseFailed;
 }
 
-pub fn maximized(state: *const State) bool {
-    return if (state.root) |root| IsZoomed(root) != 0 else false;
+pub fn isMaximized(state: *const State) !bool {
+    const root = state.root orelse return error.WindowUnavailable;
+    return IsZoomed(root) != 0;
 }
 
 pub fn deinit(state: *State) void {
