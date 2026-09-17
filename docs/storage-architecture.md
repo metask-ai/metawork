@@ -97,6 +97,8 @@ Storage 不开放 `RETURNING`、prepared statement、transaction handle、PRAGMA
 
 `Row`、column name、`TEXT` 和 `BLOB` 只在同步 `RowReceiver` callback 内有效；需要保留的数据由调用方深拷贝。callback 可以调用其他 `Database`，但不得直接或间接重入当前正在派发它的同一 instance，重入返回 `rejected`。
 
+列数、列名和值必须对应本次实际执行的结果，所有返回列都参与值校验和结果预算。其他 instance 对同一文件完成迁移后，查询不能继续使用执行前的旧结果形状；零行查询返回 `ok` 且不产生 callback。
+
 query 是有界 streaming，不承诺 all-or-nothing row delivery。receiver 必须把已收到的 row 当作 provisional candidate，只有 terminal outcome 为 `ok` 才能采纳；若达到 result limit、被取消或后续 step 失败，先前 callback 不会撤销。Storage 不以最多 8 MiB 的内部深拷贝伪造原子结果。
 
 ### 3.3 Outcomes
@@ -114,6 +116,8 @@ pub const MutationOutcome = enum {
 ```
 
 `busy` 只表示 SQLite/file contention，不能表示进程内 gate 等待。`unavailable` 表示 instance 正在停止、已经停止或已 poisoned。Storage 不自动重试；重试需要业务幂等性，因此属于未来 caller policy。
+
+query/mutation 的 `resource_exhausted` 包含内存不足、SQLite 内容长度超限、存储容量耗尽及 wrapper 结果预算超限；这些公开结果不进一步细分原因。migration 的打开错误采用第 5 节的分类。
 
 mutation 在 `COMMIT` 失败后结合 `sqlite3_get_autocommit` 和 rollback 结果分类：能够证明事务未提交时返回原始 definite outcome；无法证明 commit 或 rollback 最终状态时返回 `outcome_unknown`，poison 当前 instance，并拒绝后续 mutation。只有 SQLite backend 能观察这些事实，不能把该判断上移给 caller。
 
@@ -137,7 +141,7 @@ statement 失败时 SQLite 可能已自动回滚（例如 `OR ROLLBACK`、写入
 | --- | --- | --- |
 | query | main schema 的 SELECT/READ/FUNCTION/RECURSIVE | DML、DDL、transaction/savepoint、PRAGMA、ATTACH/DETACH、temp schema、Storage metadata |
 | mutation | main schema 的 INSERT/UPDATE/DELETE 及其读取表达式 | DDL、transaction/savepoint、PRAGMA、ATTACH/DETACH、temp schema、Storage metadata、row-producing statement |
-| migration | main schema 的 DDL 与 backfill DML | transaction/savepoint、PRAGMA、ATTACH/DETACH、temp schema、Storage metadata |
+| migration | main schema 中符合下述能力边界的 DDL 与 backfill DML | transaction/savepoint、PRAGMA、ATTACH/DETACH、temp schema、Storage metadata |
 | metadata | migration metadata 的建表、读取和追加 | public caller 不可获得该 authority |
 | internal transaction | Storage 自己准备的 BEGIN/COMMIT/ROLLBACK | 其他 SQL action |
 
@@ -167,6 +171,34 @@ migration version 从 1 严格连续。checksum 是 SHA-256，输入依次为 bi
 - 任一失败完整 rollback；无法确认 migration commit 结果时返回 `MigrationOutcomeUnknown`。
 
 普通 query/mutation 不能读取或修改 metadata table。当前没有多 Product owner schema registry；基础层只建立不可伪造的单一 migration 序列，未来 owner 组合必须另行决策。
+
+`schemaVersion()` 表示该 instance 打开时验证的迁移版本；其他 instance 随后迁移同一文件不会刷新此值。它不表示实时文件 schema 版本，也不能作为查询结果形状不会变化的保证。
+
+### 5.1 迁移能力边界
+
+迁移支持符合 authority 规则的建表、普通加列、索引、触发器、视图与数据回填，并支持 `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` 和 `DROP NOT NULL`。SET NOT NULL 必须校验已有数据，存在 NULL 时整批 pending migration 失败并回滚。
+
+当前迁移不承诺 SQLite 的全部 DDL。以下能力缺口由既定权限边界产生，必须明确拒绝并回滚：
+
+| 操作 | 限制原因 |
+| --- | --- |
+| `ALTER TABLE ... DROP COLUMN` | 引擎内部还会访问 temp 系统目录，受 temp 禁令限制 |
+| RENAME TABLE、RENAME COLUMN | 引擎内部更新 temp 系统目录，受 temp 禁令限制 |
+| 带 CHECK 的 ADD COLUMN、STRICT 表上的 ADD COLUMN、带 NOT NULL 的生成列 ADD COLUMN | 引擎内部执行 `pragma_quick_check`，受 PRAGMA 禁令限制 |
+
+ALTER 的 schema 与目标表必须按该 action 的参数语义验证；列名不能被解释成 schema。纠正参数解释不授予 temp、PRAGMA 或 metadata 豁免，也不向 query、mutation、metadata authority 开放 ALTER。官方重建表流程涉及 RENAME，不能作为当前已支持的通用替代方案；调用方不能绕过 Storage 执行这些操作。
+
+### 5.2 迁移资源错误
+
+SQLite 的错误原因在内部保留，到公开边界再按操作语义映射。迁移失败且能够确认事务未提交时，`sqlite.OpenError` 使用以下分类：
+
+| 原因 | 打开错误 |
+| --- | --- |
+| 内存分配失败，包括 `SQLITE_NOMEM` | `OutOfMemory` |
+| 迁移内容超过 SQLite 长度限制，即 `SQLITE_TOOBIG` | `MigrationFailed` |
+| SQLite 存储容量耗尽，即 `SQLITE_FULL` | `StorageFull` |
+
+`StorageFull` 表示引擎报告容量耗尽，也包括数据库页数上限；它不等同于路径不可用、内存不足，也不保证物理磁盘已经写满。wrapper 自身的预算/溢出错误不能冒充内存分配失败。上述分类不覆盖事务确定性判断：无法确认 commit 或 rollback 最终状态时仍返回 `MigrationOutcomeUnknown`。
 
 ## 6. Connection profile
 

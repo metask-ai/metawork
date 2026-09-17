@@ -134,9 +134,17 @@ fn checksum(migration: sql.Migration, output: *[32]u8) void {
 
 fn migrationFailure(err: backend.SqlError) backend.OpenError {
     return switch (err) {
-        error.ResourceExhausted => error.OutOfMemory,
+        error.OutOfMemory => error.OutOfMemory,
+        error.StorageFull => error.StorageFull,
         error.Busy => error.Busy,
         error.Corrupt => error.Corrupt,
         else => error.MigrationFailed,
     };
+}
+
+test "migration resource errors distinguish allocation capacity and content failures" {
+    try std.testing.expectEqual(error.OutOfMemory, migrationFailure(backend.sqlFailure(c.SQLITE_NOMEM)));
+    try std.testing.expectEqual(error.StorageFull, migrationFailure(backend.sqlFailure(c.SQLITE_FULL)));
+    try std.testing.expectEqual(error.MigrationFailed, migrationFailure(backend.sqlFailure(c.SQLITE_TOOBIG)));
+    try std.testing.expectEqual(error.MigrationFailed, migrationFailure(error.ResourceExhausted));
 }
