@@ -40,21 +40,25 @@ function normalizeRightShare(value: number) {
 }
 
 export function resolveWorkbenchColumns({
-  viewportWidth,
+  containerWidth,
   leftOpen,
   leftWidth,
   rightOpen,
   rightShare,
 }: {
-  viewportWidth: number;
+  containerWidth: number;
   leftOpen: boolean;
   leftWidth: number;
   rightOpen: boolean;
   rightShare: number;
 }) {
+  const resolvedContainerWidth =
+    Number.isFinite(containerWidth) && containerWidth > 0
+      ? Math.floor(containerWidth)
+      : 0;
   const dockedLeftWidth =
-    leftOpen && viewportWidth >= 820 ? clampLeftWidth(leftWidth) : 0;
-  const availableWidth = Math.max(0, viewportWidth - dockedLeftWidth);
+    leftOpen && resolvedContainerWidth >= 820 ? clampLeftWidth(leftWidth) : 0;
+  const availableWidth = Math.max(0, resolvedContainerWidth - dockedLeftWidth);
   const normalizedRightShare = normalizeRightShare(rightShare);
   const rightMinimum = minimumRightWidth;
   const rightMaximum = Math.max(
@@ -69,7 +73,10 @@ export function resolveWorkbenchColumns({
       docked,
       middleWidth: availableWidth,
       rightWidth: rightOpen
-        ? Math.min(defaultRightOverlayWidth, Math.max(0, viewportWidth - 44))
+        ? Math.min(
+            defaultRightOverlayWidth,
+            Math.max(0, resolvedContainerWidth - 44),
+          )
         : 0,
       rightMinimum,
       rightMaximum,
@@ -179,15 +186,15 @@ export function AppShell({
   const [rightShare, setRightShare] = useState(initialRightShare);
   const [resizingLeft, setResizingLeft] = useState(false);
   const [resizingRight, setResizingRight] = useState(false);
-  const [viewportWidth, setViewportWidth] = useState(() =>
+  const [workbenchWidth, setWorkbenchWidth] = useState(() =>
     typeof window === "undefined" ? 1440 : window.innerWidth,
   );
+  const workbenchElement = useRef<HTMLElement>(null);
   const leftAvailable = left !== null;
   const effectiveLeftOpen = leftAvailable && leftOpen;
-  const rightPanelAvailable = rightPanel !== null;
   const effectiveRightPanelOpen = rightPanelOpen;
   const columns = resolveWorkbenchColumns({
-    viewportWidth,
+    containerWidth: workbenchWidth,
     leftOpen: effectiveLeftOpen,
     leftWidth,
     rightOpen: effectiveRightPanelOpen,
@@ -195,7 +202,7 @@ export function AppShell({
   });
   const rightPanelDocked = columns.docked;
   const taskStageExposed = isTaskStageExposed({
-    viewportWidth,
+    viewportWidth: workbenchWidth,
     leftOpen: effectiveLeftOpen,
     rightPanelOpen: effectiveRightPanelOpen,
     rightPanelDocked,
@@ -218,15 +225,41 @@ export function AppShell({
     };
   }, []);
 
-  useEffect(() => {
-    const observeViewport = () => setViewportWidth(window.innerWidth);
-    window.addEventListener("resize", observeViewport);
-    return () => window.removeEventListener("resize", observeViewport);
+  useLayoutEffect(() => {
+    const element = workbenchElement.current;
+    if (!element) return;
+    const measure = (observedWidth?: number) => {
+      const measuredWidth =
+        observedWidth && observedWidth > 0
+          ? observedWidth
+          : element.getBoundingClientRect().width;
+      const nextWidth = measuredWidth > 0 ? measuredWidth : window.innerWidth;
+      setWorkbenchWidth((current) =>
+        current === nextWidth ? current : nextWidth,
+      );
+    };
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver((entries) =>
+            measure(
+              entries.find((entry) => entry.target === element)?.contentRect
+                .width,
+            ),
+          );
+    observer?.observe(element);
+    const observeWindowFallback = () => measure();
+    window.addEventListener("resize", observeWindowFallback);
+    measure();
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", observeWindowFallback);
+    };
   }, []);
 
   useEffect(() => {
-    if (effectiveRightPanelOpen && window.innerWidth < 820) setLeftOpen(false);
-  }, [effectiveRightPanelOpen]);
+    if (effectiveRightPanelOpen && workbenchWidth < 820) setLeftOpen(false);
+  }, [effectiveRightPanelOpen, workbenchWidth]);
 
   useEffect(() => {
     if (!resizingRight || (effectiveRightPanelOpen && rightPanelDocked)) return;
@@ -241,7 +274,7 @@ export function AppShell({
 
   function toggleLeft() {
     const next = !leftOpen;
-    if (next && window.innerWidth < 820) onDismissRightPanel(false);
+    if (next && workbenchWidth < 820) onDismissRightPanel(false);
     writeLocalPreference(leftPreference, next ? "open" : "closed");
     setLeftOpen(next);
   }
@@ -264,6 +297,7 @@ export function AppShell({
 
   return (
     <main
+      ref={workbenchElement}
       className="app-window"
       data-left-open={effectiveLeftOpen}
       data-right-panel-open={effectiveRightPanelOpen}
@@ -273,9 +307,7 @@ export function AppShell({
       style={
         {
           "--left-column-width": `${leftWidth}px`,
-          "--task-stage-share": 1 - columns.rightShare,
-          "--task-panel-share": columns.rightShare,
-          "--right-panel-overlay-width": `${columns.rightWidth}px`,
+          "--right-panel-width": `${columns.rightWidth}px`,
         } as CSSProperties
       }
       onKeyDown={(event) => {
@@ -335,11 +367,11 @@ export function AppShell({
           className="commandbar-alert-slot"
           inert={overlay ? true : undefined}
         >
-          {headerActions}
+          <div className="commandbar-context-actions">{headerActions}</div>
           <button
             type="button"
             ref={rightPanelToggleRef}
-            className="icon-button focus-ring"
+            className="icon-button commandbar-task-panel-toggle focus-ring"
             aria-controls="task-panel"
             aria-expanded={effectiveRightPanelOpen}
             aria-label={t(
@@ -424,19 +456,17 @@ export function AppShell({
             onResizeEnd={() => setResizingRight(false)}
           />
         )}
-        {(rightPanelAvailable || effectiveRightPanelOpen) && (
-          <aside
-            id="task-panel"
-            className="task-panel"
-            aria-labelledby={
-              effectiveRightPanelOpen ? "task-panel-title" : undefined
-            }
-            aria-hidden={!effectiveRightPanelOpen}
-            inert={!effectiveRightPanelOpen}
-          >
-            {effectiveRightPanelOpen ? rightPanel : null}
-          </aside>
-        )}
+        <aside
+          id="task-panel"
+          className="task-panel"
+          aria-labelledby={
+            effectiveRightPanelOpen ? "task-panel-title" : undefined
+          }
+          aria-hidden={!effectiveRightPanelOpen}
+          inert={!effectiveRightPanelOpen}
+        >
+          {effectiveRightPanelOpen ? rightPanel : null}
+        </aside>
       </div>
 
       {overlay && <div className="app-overlay-layer">{overlay}</div>}
@@ -446,7 +476,7 @@ export function AppShell({
           className="panel-scrim"
           aria-label={t("app.dismiss_panels")}
           onClick={() => {
-            if (window.innerWidth < 820) setLeftOpen(false);
+            if (workbenchWidth < 820) setLeftOpen(false);
           }}
         />
       )}

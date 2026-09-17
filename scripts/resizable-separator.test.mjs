@@ -36,7 +36,7 @@ HTMLElement.prototype.hasPointerCapture = () => false;
 HTMLElement.prototype.setPointerCapture = () => undefined;
 HTMLElement.prototype.releasePointerCapture = () => undefined;
 
-const { cleanup, fireEvent, render, screen } =
+const { act, cleanup, fireEvent, render, screen } =
   await import("@testing-library/react");
 const vite = await createServer({
   root: join(process.cwd(), "frontend"),
@@ -192,7 +192,7 @@ test("left resizing recomputes the middle and right allocation without changing 
   const leftSeparator = screen.getByRole("separator", {
     name: "Resize task sidebar",
   });
-  const initialShare = root?.style.getPropertyValue("--task-panel-share");
+  const initialWidth = root?.style.getPropertyValue("--right-panel-width");
 
   fireEvent.keyDown(leftSeparator, { key: "ArrowRight" });
 
@@ -203,9 +203,11 @@ test("left resizing recomputes the middle and right allocation without changing 
       .getAttribute("aria-valuenow"),
     "368",
   );
+  assert.equal(initialWidth, "374px");
+  assert.equal(root?.style.getPropertyValue("--right-panel-width"), "368px");
   assert.equal(
-    root?.style.getPropertyValue("--task-panel-share"),
-    initialShare,
+    dom.window.localStorage.getItem("metawork.panel.task.share"),
+    null,
   );
 });
 
@@ -223,10 +225,40 @@ test("left resizing moves the right panel to overlay when docked minimums no lon
     screen.queryByRole("separator", { name: "Resize side panel" }),
     null,
   );
-  assert.equal(
-    root?.style.getPropertyValue("--task-panel-share"),
-    String(1 / 3),
-  );
+  assert.equal(root?.style.getPropertyValue("--right-panel-width"), "400px");
+});
+
+test("the stable app window owns layout measurement", () => {
+  let callback;
+  let observedElement;
+  globalThis.ResizeObserver = class {
+    constructor(next) {
+      callback = next;
+    }
+    observe(element) {
+      observedElement = element;
+    }
+    disconnect() {}
+  };
+  try {
+    const { root } = renderTaskPanelShell(1400);
+    assert.equal(root?.getAttribute("data-right-panel-docked"), "true");
+    assert.equal(observedElement, root);
+
+    act(() =>
+      callback([
+        {
+          target: root,
+          contentRect: { width: 1000 },
+        },
+      ]),
+    );
+
+    assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
+    assert.equal(root?.style.getPropertyValue("--right-panel-width"), "400px");
+  } finally {
+    delete globalThis.ResizeObserver;
+  }
 });
 
 test("right-side separator reverses pointer and arrow direction", () => {
@@ -306,10 +338,7 @@ test("an overlay Task Panel is not resizable and restores its saved share", () =
     screen.queryByRole("separator", { name: "Resize side panel" }),
     null,
   );
-  assert.equal(
-    root?.style.getPropertyValue("--right-panel-overlay-width"),
-    "400px",
-  );
+  assert.equal(root?.style.getPropertyValue("--right-panel-width"), "400px");
 
   resizeViewport(1400);
   assert.equal(root?.getAttribute("data-right-panel-docked"), "true");
@@ -317,7 +346,7 @@ test("an overlay Task Panel is not resizable and restores its saved share", () =
     name: "Resize side panel",
   });
   assert.equal(separator.getAttribute("aria-valuenow"), "432");
-  assert.equal(root?.style.getPropertyValue("--task-panel-share"), "0.4");
+  assert.equal(root?.style.getPropertyValue("--right-panel-width"), "432px");
 });
 
 test("docked Task Panel resizing persists a proportional share", () => {
@@ -335,10 +364,7 @@ test("docked Task Panel resizing persists a proportional share", () => {
     Number(dom.window.localStorage.getItem("metawork.panel.task.share")),
     376 / 1080,
   );
-  assert.equal(
-    root?.style.getPropertyValue("--right-panel-overlay-width"),
-    "376px",
-  );
+  assert.equal(root?.style.getPropertyValue("--right-panel-width"), "376px");
 });
 
 test("docked Task Panel exposes dynamic keyboard bounds", () => {
@@ -352,9 +378,10 @@ test("docked Task Panel exposes dynamic keyboard bounds", () => {
   fireEvent.keyDown(separator, { key: "End" });
   assert.equal(separator.getAttribute("aria-valuenow"), "520");
   assert.equal(
-    root?.style.getPropertyValue("--task-panel-share"),
-    String(520 / 880),
+    Number(dom.window.localStorage.getItem("metawork.panel.task.share")),
+    520 / 880,
   );
+  assert.equal(root?.style.getPropertyValue("--right-panel-width"), "520px");
 });
 
 test("wide docked layouts have no fixed maximum or proportional range", () => {
@@ -367,10 +394,16 @@ test("wide docked layouts have no fixed maximum or proportional range", () => {
   assert.equal(separator.getAttribute("aria-valuemax"), "1240");
   fireEvent.keyDown(separator, { key: "End" });
   assert.equal(separator.getAttribute("aria-valuenow"), "1240");
-  assert.equal(root?.style.getPropertyValue("--task-panel-share"), "0.775");
+  assert.equal(
+    Number(dom.window.localStorage.getItem("metawork.panel.task.share")),
+    0.775,
+  );
   fireEvent.keyDown(separator, { key: "Home" });
   assert.equal(separator.getAttribute("aria-valuenow"), "360");
-  assert.equal(root?.style.getPropertyValue("--task-panel-share"), "0.225");
+  assert.equal(
+    Number(dom.window.localStorage.getItem("metawork.panel.task.share")),
+    0.225,
+  );
 });
 
 test("overlay width is independent from legacy absolute-width preferences", () => {
@@ -378,10 +411,7 @@ test("overlay width is independent from legacy absolute-width preferences", () =
   const { root } = renderTaskPanelShell(650);
 
   assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
-  assert.equal(
-    root?.style.getPropertyValue("--right-panel-overlay-width"),
-    "400px",
-  );
+  assert.equal(root?.style.getPropertyValue("--right-panel-width"), "400px");
   assert.equal(
     screen.queryByRole("separator", { name: "Resize side panel" }),
     null,

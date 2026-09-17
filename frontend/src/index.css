@@ -3385,11 +3385,10 @@ button.run-process-tool:hover {
 .app-window {
   --left-column: 0px;
   --left-column-width: 320px;
-  --task-stage-share: 0.6666667;
-  --task-panel-share: 0.3333333;
-  --right-panel-overlay-width: 400px;
+  --right-panel-width: 0px;
   --workbench-content-surface: var(--ui-surface-panel);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--window-bar-height) minmax(0, 1fr);
   width: 100%;
   height: 100dvh;
@@ -3580,11 +3579,23 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .commandbar-alert-slot {
   display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
   grid-column: 3;
+}
+
+.commandbar-context-actions {
+  display: flex;
   min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.commandbar-task-panel-toggle {
+  flex: 0 0 auto;
 }
 
 .commandbar-alert {
@@ -3641,7 +3652,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .app-columns {
   position: relative;
   display: flex;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .workspace-resize-handle {
@@ -3750,10 +3764,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-panel {
   min-width: 0;
   overflow: hidden auto;
-  transition:
-    flex-basis 160ms ease,
-    flex-grow 160ms ease,
-    min-width 160ms ease;
 }
 
 .workspace-sidebar {
@@ -3780,19 +3790,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   flex-direction: column;
   border-top: 1px solid var(--ui-border);
   background: var(--workbench-content-surface);
-  transition:
-    flex-grow 160ms ease,
-    min-width 160ms ease;
-}
-
-.app-window[data-right-panel-docked="true"] .task-stage {
-  flex-grow: var(--task-stage-share);
-  min-width: 360px;
+  transition: none;
 }
 
 .app-window[data-right-panel-docked="true"] .task-panel {
-  flex: var(--task-panel-share) 1 0;
-  min-width: 360px;
+  flex: 0 0 var(--right-panel-width);
 }
 
 .workbench-view {
@@ -8688,6 +8690,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   align-items: center;
   gap: 4px;
 }
+.task-panel-context-action-slot {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+}
 .task-panel-header-action,
 .task-panel-close {
   display: grid;
@@ -9356,7 +9365,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
   right: 0;
   bottom: 0;
-  width: var(--right-panel-overlay-width);
+  width: var(--right-panel-width);
   max-width: none;
   transform: translateX(100%);
   transition: transform 160ms ease;

@@ -188,7 +188,7 @@ export function TaskPanel({
         )}
         <div className="task-panel-header-actions">
           {attention}
-          {actions}
+          <span className="task-panel-context-action-slot">{actions}</span>
           <button
             type="button"
             className="task-panel-close focus-ring"

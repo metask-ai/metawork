@@ -434,7 +434,8 @@ test("Workbench keeps Search as an icon beside the sidebar control", () => {
 
 test("a closed empty side panel reserves no space but keeps its layout toggle", () => {
   const markup = renderShell(null);
-  assert.doesNotMatch(markup, /id="task-panel"/);
+  assert.match(markup, /id="task-panel"/);
+  assert.match(markup, /aria-hidden="true"/);
   assert.match(markup, /aria-controls="task-panel"/);
   assert.match(markup, /aria-label="Open side panel"/);
   const openEmpty = renderShell(null, true);
@@ -462,7 +463,7 @@ test("a closed Task Panel keeps its shell but unmounts its content", () => {
 test("bounded proportional columns preserve both docked minimums", () => {
   const resolve = (viewportWidth, leftOpen, leftWidth = 320) =>
     resolveWorkbenchColumns({
-      viewportWidth,
+      containerWidth: viewportWidth,
       leftOpen,
       leftWidth,
       rightOpen: true,

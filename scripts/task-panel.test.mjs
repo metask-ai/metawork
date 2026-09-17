@@ -3689,6 +3689,13 @@ function fileChangesOpener() {
     );
 }
 
+function assertTaskPanelShellHidden() {
+  const panel = document.querySelector("#task-panel");
+  assert.ok(panel !== null);
+  assert.equal(panel.getAttribute("aria-hidden"), "true");
+  assert.equal(panel.childElementCount, 0);
+}
+
 test("permanent panel toggle hides and restores the active Task Panel session", async (ctx) => {
   const { snapshot, previews, diffs, publish } = await renderAppFixture(ctx);
   await screen.findByRole("button", { name: /First task/ });
@@ -3721,11 +3728,30 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
   fireEvent.click(toggle);
   assert.ok(panel().getByText("stale body"));
   assert.equal(previews.length, 1);
+  const shell = document.querySelector(".app-window");
+  const previewWidth = shell.style.getPropertyValue("--right-panel-width");
+  const permanentToggle = document.querySelector(
+    'button[aria-controls="task-panel"]',
+  );
+  assert.equal(permanentToggle, toggle);
+  assert.equal(
+    document.querySelectorAll('button[aria-controls="task-panel"]').length,
+    1,
+  );
   const reviewOpener = fileChangesOpener();
   fireEvent.click(reviewOpener);
   assert.equal(diffs.length, 1);
   assert.deepEqual(diffs[0].ids, ["3", "7", "change-a"]);
   assert.ok(panel().getByRole("heading", { name: "Review changes" }));
+  assert.equal(
+    shell.style.getPropertyValue("--right-panel-width"),
+    previewWidth,
+  );
+  assert.equal(
+    document.querySelector('button[aria-controls="task-panel"]'),
+    permanentToggle,
+  );
+  assert.equal(permanentToggle.getAttribute("aria-expanded"), "true");
   assert.equal(panel().queryByText("Recorded changes"), null);
   assert.equal(panel().queryByRole("navigation"), null);
   assert.equal(panel().queryByText("Back to changes"), null);
@@ -3772,7 +3798,7 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
     async () => new Promise((resolve) => window.requestAnimationFrame(resolve)),
   );
   assert.equal(document.activeElement === reviewOpener, true);
-  assert.equal(document.querySelector("#task-panel"), null);
+  assertTaskPanelShellHidden();
   fireEvent.click(toggle);
   assert.ok(panel().getByText("+first a"));
   assert.equal(diffs.length, 3);
@@ -3804,8 +3830,10 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
   const shell = document.querySelector(".app-window");
   const resize = screen.getByRole("separator", { name: "Resize side panel" });
   fireEvent.keyDown(resize, { key: "ArrowLeft" });
-  const share = shell.style.getPropertyValue("--task-panel-share");
-  assert.notEqual(share, String(1 / 3));
+  const rightWidth = shell.style.getPropertyValue("--right-panel-width");
+  const share = dom.window.localStorage.getItem("metawork.panel.task.share");
+  assert.notEqual(share, null);
+  assert.notEqual(Number(share), 1 / 3);
   fireEvent.click(filePreviewOpener("a.txt"));
   snapshot.tasks[0].runs[0].tools = [];
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
@@ -3825,7 +3853,11 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
   fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
-  assert.equal(shell.style.getPropertyValue("--task-panel-share"), share);
+  assert.equal(shell.style.getPropertyValue("--right-panel-width"), rightWidth);
+  assert.equal(
+    dom.window.localStorage.getItem("metawork.panel.task.share"),
+    share,
+  );
   fireEvent.click(
     screen.getByRole("button", { name: "New task", exact: true }),
   );
@@ -3849,7 +3881,11 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
     "Open a file or review changes from the conversation.",
   );
   assert.equal(shell.getAttribute("data-right-panel-open"), "true");
-  assert.equal(shell.style.getPropertyValue("--task-panel-share"), share);
+  assert.equal(shell.style.getPropertyValue("--right-panel-width"), rightWidth);
+  assert.equal(
+    dom.window.localStorage.getItem("metawork.panel.task.share"),
+    share,
+  );
   fireEvent.click(
     within(document.querySelector("#task-panel")).getByRole("button", {
       name: "Hide side panel",
@@ -3857,7 +3893,10 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
   );
   fireEvent.click(screen.getByRole("button", { name: /First task/ }));
   assert.equal(shell.getAttribute("data-right-panel-open"), "false");
-  assert.equal(shell.style.getPropertyValue("--task-panel-share"), share);
+  assert.equal(
+    dom.window.localStorage.getItem("metawork.panel.task.share"),
+    share,
+  );
   cleanup();
 });
 
@@ -3888,7 +3927,7 @@ test("App keeps preview and Review resources independent and rejects stale respo
   );
   await act(async () => previews[0].resolve(ready("loaded while hidden")));
   assert.equal(screen.queryByText("loaded while hidden"), null);
-  assert.equal(document.querySelector("#task-panel"), null);
+  assertTaskPanelShellHidden();
   openPreview();
   assert.equal(previews.length, 1);
   assert.ok(screen.getByText("loaded while hidden"));
@@ -4065,7 +4104,7 @@ test("conversation file links preview directly without expanding tools and retur
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
   );
   assert.equal(document.activeElement, second);
-  assert.equal(document.querySelector("#task-panel"), null);
+  assertTaskPanelShellHidden();
   assert.equal(document.querySelector(".run-process-files"), null);
 });
 
@@ -4210,7 +4249,7 @@ test("App attention only locates the original approval in docked and overlay lay
     snapshot.revision = String(BigInt(snapshot.revision) + 1n);
     await act(async () => publish());
     await screen.findByRole("button", { name: "Needs your attention" });
-    assert.ok(document.querySelector("#task-panel") === null);
+    assertTaskPanelShellHidden();
     assert.ok(document.activeElement === info);
     fireEvent.click(filePreviewOpener("a.txt"));
     const panel = document.querySelector("#task-panel");
@@ -4246,8 +4285,8 @@ test("App attention only locates the original approval in docked and overlay lay
     const pending = document.querySelector("#ui-request-request-1");
     assert.ok(document.activeElement === pending);
     assert.equal(
-      document.querySelector("#task-panel") !== null,
-      width === 1440,
+      document.querySelector("#task-panel").getAttribute("aria-hidden"),
+      String(width !== 1440),
     );
     if (width === 1440)
       fireEvent.click(
@@ -4290,7 +4329,7 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
   await act(
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
   );
-  assert.ok(document.querySelector("#task-panel") === null);
+  assertTaskPanelShellHidden();
   assert.ok(document.activeElement === opener);
   fireEvent.click(opener);
   await act(

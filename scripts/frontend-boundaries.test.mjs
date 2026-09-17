@@ -403,7 +403,14 @@ test("workbench columns use bounded proportional Flex without an overlay resizer
   );
   const css = await readFile(resolve(sourceRoot, "index.css"), "utf8");
 
-  assert.match(css, /\.app-columns\s*\{[^}]*display: flex;[^}]*\}/);
+  assert.match(
+    css,
+    /\.app-window\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);[^}]*\}/,
+  );
+  assert.match(
+    css,
+    /\.app-columns\s*\{[^}]*display: flex;[^}]*width: 100%;[^}]*min-width: 0;[^}]*overflow: hidden;/,
+  );
   assert.doesNotMatch(css, /\.app-columns\s*\{[^}]*grid-template-columns:/);
   assert.match(
     css,
@@ -411,12 +418,10 @@ test("workbench columns use bounded proportional Flex without an overlay resizer
   );
   assert.match(
     css,
-    /data-right-panel-docked="true"\] \.task-stage\s*\{[\s\S]*?flex-grow: var\(--task-stage-share\);[\s\S]*?min-width: 360px;/,
+    /data-right-panel-docked="true"\] \.task-panel\s*\{[\s\S]*?flex: 0 0 var\(--right-panel-width\);/,
   );
-  assert.match(
-    css,
-    /data-right-panel-docked="true"\] \.task-panel\s*\{[\s\S]*?flex: var\(--task-panel-share\) 1 0;[\s\S]*?min-width: 360px;/,
-  );
+  assert.doesNotMatch(css, /--task-(?:stage|panel)-share/);
+  assert.doesNotMatch(css, /transition:[^;]*flex-basis/s);
   assert.doesNotMatch(
     css,
     /data-right-panel-docked="true"\] \.task-panel\s*\{[^}]*max-width:/,
@@ -431,6 +436,9 @@ test("workbench columns use bounded proportional Flex without an overlay resizer
   );
   assert.match(shell, /metawork\.panel\.task\.share/);
   assert.doesNotMatch(shell, /metawork\.panel\.task\.width/);
+  assert.match(shell, /new ResizeObserver/);
+  assert.match(shell, /ref=\{workbenchElement\}[\s\S]*?className="app-window"/);
+  assert.doesNotMatch(shell, /<div\s+ref=\{[^}]+\}\s+className="app-columns"/);
   assert.match(shell, /\{rightPanelDocked && \(/);
 });
 
