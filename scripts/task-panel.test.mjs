@@ -13,8 +13,15 @@ import {
   shouldDismissSidePanelForEscape,
 } from "../frontend/src/app/side-panel-interaction.ts";
 import {
+  closeTaskPanelTab,
+  createTaskPanelPreviewTab,
+  createTaskPanelReviewTab,
+  emptyTaskPanelSession,
   emptyTaskPanelTarget,
+  openTaskPanelTab,
+  reconcileTaskPanelSession,
   resolveTaskPanelTarget,
+  selectTaskPanelTab,
 } from "../frontend/src/features/task-panel/task-panel-state.ts";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -2843,6 +2850,143 @@ test("right-panel targets resolve exact document identities", () => {
       true,
     ).kind,
     "empty",
+  );
+});
+
+test("Task Panel sessions preserve creation order and exact preview identity", () => {
+  const firstReference = {
+    id: "ref-a",
+    title: "report.md",
+    displayPath: "one/report.md",
+  };
+  const secondReference = {
+    id: "ref-b",
+    title: "report.md",
+    displayPath: "two/report.md",
+  };
+  const value = task({
+    runs: [
+      run({
+        tools: [technicalTool({ fileRefs: [firstReference, secondReference] })],
+        fileChanges: {
+          observation: "complete",
+          changes: [{ id: "change-a" }],
+        },
+      }),
+    ],
+  });
+  const first = createTaskPanelPreviewTab("3", "9", firstReference);
+  const second = createTaskPanelPreviewTab("3", "9", secondReference);
+  const review = createTaskPanelReviewTab("3", "9");
+  let session = openTaskPanelTab(emptyTaskPanelSession, first, value, true);
+  session = openTaskPanelTab(session, second, value, true);
+  session = openTaskPanelTab(session, review, value, true);
+  assert.deepEqual(
+    session.tabs.map((tab) => tab.tabId),
+    [first.tabId, second.tabId, review.tabId],
+  );
+  assert.equal(session.activeTabId, review.tabId);
+
+  session = openTaskPanelTab(session, first, value, true);
+  assert.deepEqual(
+    session.tabs.map((tab) => tab.tabId),
+    [first.tabId, second.tabId, review.tabId],
+  );
+  assert.equal(session.activeTabId, first.tabId);
+  assert.notEqual(first.tabId, second.tabId);
+});
+
+test("Task Panel sessions replace the singleton review in place", () => {
+  const reference = {
+    id: "ref-a",
+    title: "a.txt",
+    displayPath: "a.txt",
+  };
+  const value = task({
+    runs: [
+      run({
+        id: "9",
+        tools: [technicalTool({ fileRefs: [reference] })],
+        fileChanges: {
+          observation: "complete",
+          changes: [{ id: "change-a" }],
+        },
+      }),
+      run({
+        id: "10",
+        fileChanges: {
+          observation: "complete",
+          changes: [{ id: "change-b" }],
+        },
+      }),
+    ],
+  });
+  const preview = createTaskPanelPreviewTab("3", "9", reference);
+  let session = openTaskPanelTab(emptyTaskPanelSession, preview, value, true);
+  session = openTaskPanelTab(
+    session,
+    createTaskPanelReviewTab("3", "9"),
+    value,
+    true,
+  );
+  const reviewId = session.activeTabId;
+  session = openTaskPanelTab(
+    session,
+    createTaskPanelReviewTab("3", "10"),
+    value,
+    true,
+  );
+  assert.deepEqual(
+    session.tabs.map((tab) => tab.tabId),
+    [preview.tabId, reviewId],
+  );
+  assert.equal(session.tabs[1].runId, "10");
+  assert.equal(session.activeTabId, reviewId);
+
+  const invalid = openTaskPanelTab(
+    session,
+    createTaskPanelReviewTab("3", "missing"),
+    value,
+    true,
+  );
+  assert.deepEqual(invalid, session);
+});
+
+test("Task Panel sessions choose a stable neighbor and reconcile only invalid tabs", () => {
+  const references = ["a", "b", "c"].map((id) => ({
+    id,
+    title: `${id}.txt`,
+    displayPath: `${id}.txt`,
+  }));
+  const value = task({
+    runs: [run({ tools: [technicalTool({ fileRefs: references })] })],
+  });
+  let session = emptyTaskPanelSession;
+  for (const reference of references)
+    session = openTaskPanelTab(
+      session,
+      createTaskPanelPreviewTab("3", "9", reference),
+      value,
+      true,
+    );
+  session = selectTaskPanelTab(session, session.tabs[1].tabId);
+  session = closeTaskPanelTab(session, session.tabs[1].tabId);
+  assert.equal(session.activeTabId, session.tabs[1].tabId);
+
+  const withoutLast = task({
+    runs: [
+      run({ tools: [technicalTool({ fileRefs: references.slice(0, 1) })] }),
+    ],
+  });
+  session = reconcileTaskPanelSession(session, withoutLast, true);
+  assert.deepEqual(
+    session.tabs.map((tab) => tab.referenceId),
+    ["a"],
+  );
+  assert.equal(session.activeTabId, session.tabs[0].tabId);
+  assert.deepEqual(
+    reconcileTaskPanelSession(session, task({ id: "4" }), true),
+    emptyTaskPanelSession,
   );
 });
 
