@@ -1,6 +1,14 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { release, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -46,6 +54,50 @@ const controlsSessionOnly = process.argv.includes("--controls-session-only");
 // This harness owns the automation Debug artifact it drives; build before the
 // fixture directory exists so a build failure leaves nothing to clean up.
 await buildAutomationDebugArtifact(root);
+if (evidenceDir) {
+  await mkdir(evidenceDir, { recursive: true });
+  const git = async (args) =>
+    (
+      await execFileAsync("git", args, {
+        cwd: root,
+        maxBuffer: 8 * 1024 * 1024,
+      })
+    ).stdout;
+  const patch = await git(["diff", "--binary", "HEAD"]);
+  const untracked = (
+    await git(["ls-files", "--others", "--exclude-standard", "-z"])
+  )
+    .split("\0")
+    .filter(Boolean);
+  const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+  const evidence = {
+    timestamp: new Date().toISOString(),
+    os: { platform: process.platform, release: release(), arch: process.arch },
+    sdk: JSON.parse(
+      await readFile(
+        path.join(root, "node_modules/@native-sdk/cli/package.json"),
+        "utf8",
+      ),
+    ).version,
+    revision: (await git(["rev-parse", "HEAD"])).trim(),
+    status: await git(["status", "--short"]),
+    diffSha256: sha256(patch),
+    untracked: await Promise.all(
+      untracked.map(async (file) => ({
+        file,
+        sha256: sha256(await readFile(path.join(root, file))),
+      })),
+    ),
+    artifact: binary,
+    artifactSha256: sha256(await readFile(binary)),
+    command: process.argv,
+  };
+  await writeFile(path.join(evidenceDir, "source.patch"), patch);
+  await writeFile(
+    path.join(evidenceDir, "window-chrome-artifact.json"),
+    JSON.stringify(evidence, null, 2),
+  );
+}
 
 const fixtureRoot = await mkdtemp(
   path.join(tmpdir(), "metawork-window-chrome-"),
@@ -220,6 +272,12 @@ async function probeControls() {
           maxBuffer: 1024 * 1024,
         },
       ),
+    reloadPage: () =>
+      execFileAsync(process.execPath, [native, "automate", "reload"], {
+        cwd: appCwd,
+        timeout: timeoutMs,
+        maxBuffer: 1024 * 1024,
+      }),
   });
 }
 

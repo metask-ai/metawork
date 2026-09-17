@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click')]
+    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-alt-f4', 'control-taskbar-restore')]
     [string]$Mode = 'drag',
     [string]$ColorHex,
     [string]$OutputPath,
@@ -109,6 +109,12 @@ public static class MetaWorkChromeProbe {
 
     [DllImport("user32.dll")]
     public static extern bool IsZoomed(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
 
     [DllImport("user32.dll")]
     public static extern uint GetDoubleClickTime();
@@ -242,6 +248,91 @@ if ($Mode -eq 'control-state') {
     } | ConvertTo-Json -Compress
     return
 }
+if ($Mode -eq 'control-taskbar-restore') {
+    if (-not [MetaWorkChromeProbe]::IsIconic($window)) { throw 'Taskbar restore requires a minimized window' }
+    # Locate the shell affordance, then click with real OS mouse input. Never
+    # call ShowWindow/SW_RESTORE or UI Automation Invoke for this acceptance.
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase
+    # The Windows 10 task-list HWND exposes its children through MSAA even
+    # when UI Automation sees only the containing native pane.
+    Add-Type -ReferencedAssemblies Accessibility -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Accessibility;
+public static class MetaWorkTaskbarAccessibility {
+    [DllImport("oleacc.dll")]
+    static extern int AccessibleObjectFromWindow(IntPtr hwnd, uint id, ref Guid iid,
+        [MarshalAs(UnmanagedType.Interface)] out IAccessible accessible);
+    [DllImport("oleacc.dll")]
+    static extern int AccessibleChildren(IAccessible parent, int start, int count,
+        [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex=2)] object[] children, out int obtained);
+    public sealed class Item { public string Name; public int Left, Top, Width, Height; }
+    public static Item[] Items(IntPtr window) {
+        Guid iid = new Guid("618736e0-3c3d-11cf-810c-00aa00389b71");
+        IAccessible root;
+        Marshal.ThrowExceptionForHR(AccessibleObjectFromWindow(window, 0xfffffffc, ref iid, out root));
+        var items = new List<Item>();
+        Walk(root, items, 0);
+        return items.ToArray();
+    }
+    static void Read(IAccessible owner, object child, List<Item> items) {
+        string name = owner.get_accName(child);
+        if (name == null || !name.StartsWith("MetaWork", StringComparison.OrdinalIgnoreCase)) return;
+        var item = new Item { Name = name };
+        owner.accLocation(out item.Left, out item.Top, out item.Width, out item.Height, child);
+        if (item.Width > 0 && item.Height > 0) items.Add(item);
+    }
+    static void Walk(IAccessible owner, List<Item> items, int depth) {
+        if (depth > 8) throw new InvalidOperationException("Taskbar accessibility depth exceeded");
+        int count = owner.accChildCount;
+        if (count > 256) throw new InvalidOperationException("Taskbar child bound exceeded");
+        Read(owner, 0, items);
+        if (count == 0) return;
+        var children = new object[count];
+        int obtained;
+        Marshal.ThrowExceptionForHR(AccessibleChildren(owner, 0, count, children, out obtained));
+        for (int i = 0; i < obtained; i++) {
+            var accessible = children[i] as IAccessible;
+            if (accessible != null) Walk(accessible, items, depth + 1);
+            else Read(owner, children[i], items);
+        }
+    }
+}
+'@
+    $primaryTrayCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Shell_TrayWnd')
+    $secondaryTrayCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Shell_SecondaryTrayWnd')
+    $trayCondition = New-Object System.Windows.Automation.OrCondition($primaryTrayCondition, $secondaryTrayCondition)
+    $trays = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+        [System.Windows.Automation.TreeScope]::Children, $trayCondition)
+    if ($trays.Count -eq 0) { throw 'Windows taskbar is unavailable' }
+    $elements = @($trays | ForEach-Object {
+        $_.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    })
+    $taskbarMatches = @($elements | Where-Object { $_.Current.ClassName -eq 'MSTaskListWClass' } | ForEach-Object {
+        [MetaWorkTaskbarAccessibility]::Items([IntPtr]$_.Current.NativeWindowHandle)
+    })
+    $ownedProcesses = @(Get-Process -Name metawork -ErrorAction SilentlyContinue)
+    if ($taskbarMatches.Count -eq 0 -or $ownedProcesses.Count -ne 1 -or $ownedProcesses[0].Id -ne $ProcessId) {
+        $diagnostics = @($elements | Where-Object { $_.Current.Name -like '*MetaWork*' } | ForEach-Object {
+            @{name=$_.Current.Name; type=$_.Current.ControlType.ProgrammaticName; offscreen=$_.Current.IsOffscreen; bounds=$_.Current.BoundingRectangle.ToString()}
+        }) | ConvertTo-Json -Compress
+        throw "Expected a taskbar affordance for the isolated MetaWork process; found $($trays.Count) taskbars, $($taskbarMatches.Count) elements and $($ownedProcesses.Count) processes; candidates=$diagnostics"
+    }
+    $bounds = $taskbarMatches[0]
+    if ($bounds.Width -le 0 -or $bounds.Height -le 0) { throw 'Taskbar button has no clickable bounds' }
+    $point = New-Object MetaWorkChromeProbe+Point
+    $point.X = [int]($bounds.Left + $bounds.Width / 2)
+    $point.Y = [int]($bounds.Top + $bounds.Height / 2)
+    $hitRoot = [MetaWorkChromeProbe]::GetAncestor([MetaWorkChromeProbe]::WindowFromPoint($point), 2)
+    $trayHandles = @($trays | ForEach-Object { [IntPtr]$_.Current.NativeWindowHandle })
+    if ($hitRoot -notin $trayHandles) { throw 'Taskbar input point is obscured' }
+    Invoke-MetaWorkClick $point.X $point.Y
+    Write-Output 'taskbarMouseClick=true'
+    return
+}
 $wasTopmost = ([MetaWorkChromeProbe]::GetWindowLongPtrW($window, -20).ToInt64() -band 8) -ne 0
 [MetaWorkChromeProbe]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
 if ($Direct -and (-not [MetaWorkChromeProbe]::IsWindowVisible($window) -or
@@ -260,6 +351,18 @@ if ($Mode -ne 'paint-stationary') {
     throw 'Stationary paint requires the harness to keep its window unobscured before changing the DOM'
 }
 $rect = Get-MetaWorkRect $window
+
+if ($Mode -eq 'control-alt-f4') {
+    if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $window) { throw 'Alt+F4 requires foreground ownership' }
+    try {
+        [MetaWorkChromeProbe]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+        [MetaWorkChromeProbe]::keybd_event(0x73, 0, 0, [UIntPtr]::Zero)
+    } finally {
+        [MetaWorkChromeProbe]::keybd_event(0x73, 0, 2, [UIntPtr]::Zero)
+        [MetaWorkChromeProbe]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    }
+    return
+}
 
 if ($Mode -eq 'control-click') {
     if (-not [MetaWorkChromeProbe]::IsWindowVisible($window) -or [MetaWorkChromeProbe]::IsIconic($window)) {
