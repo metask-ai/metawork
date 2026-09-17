@@ -440,7 +440,7 @@ test("a closed empty side panel reserves no space but keeps its layout toggle", 
   const openEmpty = renderShell(null, true);
   assert.match(openEmpty, /id="task-panel"/);
   assert.match(openEmpty, /data-right-panel-open="true"/);
-  assert.match(openEmpty, /aria-label="Close side panel"/);
+  assert.match(openEmpty, /aria-label="Hide side panel"/);
   assert.match(markup, /data-right-panel-open="false"/);
 });
 

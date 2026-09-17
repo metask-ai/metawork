@@ -829,7 +829,10 @@ export const enUS = {
   "conversation.context_observed":
     "Latest observation for this conversation, not a live usage meter.",
   "task_panel.title": "Side panel",
-  "task_panel.empty": "No content to display here.",
+  "task_panel.empty": "Open a file or review changes from the conversation.",
+  "task_panel.tabs": "Open items",
+  "task_panel.close_tab": "Close {title}",
+  "task_panel.hide": "Hide side panel",
   "task_panel.open": "Open side panel",
   "task_panel.close": "Close side panel",
   "approval.response_required": "Response required",

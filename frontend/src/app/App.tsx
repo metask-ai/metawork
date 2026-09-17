@@ -74,6 +74,7 @@ import { FileChangesView } from "../features/task-panel/FileChangesView.tsx";
 import { sidePanelFocusReturnTarget } from "./side-panel-interaction.ts";
 import { useTaskPanelTarget } from "../features/task-panel/useTaskPanelTarget.ts";
 import { useFilePreviewTabs } from "../features/task-panel/useFilePreviewTabs.ts";
+import { useTaskPanelViewStates } from "../features/task-panel/useTaskPanelViewStates.ts";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
 import { TaskContent } from "../features/tasks/TaskContent.tsx";
@@ -611,12 +612,17 @@ export default function App() {
       ),
     [taskPanel.session.tabs],
   );
+  const taskPanelTabIds = useMemo(
+    () => new Set(taskPanel.session.tabs.map((tab) => tab.tabId)),
+    [taskPanel.session.tabs],
+  );
   const filePreviewTabs = useFilePreviewTabs(
     panelTask?.id ?? null,
     previewTabIds,
     (taskId, runId, referenceId) =>
       client.previewFile(taskId, runId, referenceId),
   );
+  const taskPanelViews = useTaskPanelViewStates(taskPanelTabIds);
   const panelTarget = taskPanel.target;
   const reviewTab = taskPanel.session.tabs.find((tab) => tab.kind === "review");
   useEffect(() => {
@@ -1073,6 +1079,16 @@ export default function App() {
     taskPanel.clearTarget();
     if (restoreFocus && focusWasInside && focusTarget)
       window.requestAnimationFrame(() => focusTarget.focus());
+  }
+
+  function closeTaskPanelTab(tabId: string) {
+    const tab = taskPanel.session.tabs.find(
+      (candidate) => candidate.tabId === tabId,
+    );
+    if (!tab) return;
+    if (tab.kind === "preview") filePreviewTabs.close(tabId);
+    else clearFileChanges();
+    taskPanel.closeTab(tabId);
   }
 
   function focusPendingFromTaskPanel() {
@@ -2911,6 +2927,9 @@ export default function App() {
         preview:
           activePreview.kind === "loading" ? null : activePreview.preview,
       };
+  const activePanelView = taskPanel.activeTab
+    ? taskPanelViews.stateFor(taskPanel.activeTab.tabId)
+    : null;
   const previewMatchesTarget =
     panelTarget.kind === "preview" &&
     activePreview !== undefined &&
@@ -3163,8 +3182,9 @@ export default function App() {
         !settingsOpen && rightPanelOpen ? (
           <TaskPanel
             title={panelTitle}
+            tabs={taskPanel.session.tabs}
+            activeTabId={taskPanel.session.activeTabId}
             attention={pendingLocator}
-            fileTitle={panelTarget.kind === "preview"}
             actions={
               panelTarget.kind === "preview" &&
               previewMatchesTarget &&
@@ -3175,6 +3195,8 @@ export default function App() {
                 />
               ) : null
             }
+            onSelectTab={taskPanel.selectTab}
+            onCloseTab={closeTaskPanelTab}
             onClose={dismissTaskPanel}
           >
             {panelTarget.kind === "empty" ? (
@@ -3183,8 +3205,23 @@ export default function App() {
               previewMatchesTarget &&
               filePreviewViewState ? (
               <FilePreviewView
-                key={`${panelTarget.taskId}:${panelTarget.runId}:${panelTarget.referenceId}`}
                 state={filePreviewViewState}
+                mode={activePanelView?.previewMode ?? "preview"}
+                scrollTop={activePanelView?.scrollTop ?? 0}
+                onModeChange={(mode) => {
+                  if (taskPanel.activeTab)
+                    taskPanelViews.setPreviewMode(
+                      taskPanel.activeTab.tabId,
+                      mode,
+                    );
+                }}
+                onScrollTopChange={(scrollTop) => {
+                  if (taskPanel.activeTab)
+                    taskPanelViews.setScrollTop(
+                      taskPanel.activeTab.tabId,
+                      scrollTop,
+                    );
+                }}
                 onRetry={refreshFilePreview}
               />
             ) : panelTarget.kind === "review" && reviewMatchesTarget ? (
@@ -3192,6 +3229,23 @@ export default function App() {
                 observation={fileChanges.observation}
                 changes={fileChanges.changes}
                 diffs={fileChanges.diffs}
+                expandedFiles={activePanelView?.expandedFiles ?? {}}
+                scrollTop={activePanelView?.scrollTop ?? 0}
+                onFileExpandedChange={(displayPath, expanded) => {
+                  if (taskPanel.activeTab)
+                    taskPanelViews.setFileExpanded(
+                      taskPanel.activeTab.tabId,
+                      displayPath,
+                      expanded,
+                    );
+                }}
+                onScrollTopChange={(scrollTop) => {
+                  if (taskPanel.activeTab)
+                    taskPanelViews.setScrollTop(
+                      taskPanel.activeTab.tabId,
+                      scrollTop,
+                    );
+                }}
                 onLoad={loadFileChangeDiff}
               />
             ) : null}

@@ -343,10 +343,10 @@ export function AppShell({
             aria-controls="task-panel"
             aria-expanded={effectiveRightPanelOpen}
             aria-label={t(
-              effectiveRightPanelOpen ? "task_panel.close" : "task_panel.open",
+              effectiveRightPanelOpen ? "task_panel.hide" : "task_panel.open",
             )}
             title={t(
-              effectiveRightPanelOpen ? "task_panel.close" : "task_panel.open",
+              effectiveRightPanelOpen ? "task_panel.hide" : "task_panel.open",
             )}
             onClick={(event) => onToggleRightPanel(event.currentTarget)}
           >
