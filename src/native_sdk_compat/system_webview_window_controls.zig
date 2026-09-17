@@ -64,6 +64,27 @@ pub const Capability = struct {
         try Platform.captureStartupWindow(&self.platform, binding);
     }
 
+    // Windows primitives are consumed only by the Windows Application paths.
+    // Other platforms keep their existing disabled-controls entry points below.
+    pub fn isMaximized(self: *const Capability) !bool {
+        return Platform.isMaximized(&self.platform);
+    }
+
+    pub fn setMaximized(self: *Capability, maximized: bool) !void {
+        try Platform.setMaximized(&self.platform, maximized);
+    }
+
+    pub fn requestUserClose(self: *Capability) !void {
+        try Platform.requestUserClose(&self.platform);
+    }
+
+    pub fn windowsState(self: *const Capability) !State {
+        return .{
+            .renderer_controls = Platform.renderer_controls,
+            .maximized = try self.isMaximized(),
+        };
+    }
+
     pub fn toggleMaximize(self: *Capability) !void {
         try Platform.toggleMaximize(&self.platform);
     }

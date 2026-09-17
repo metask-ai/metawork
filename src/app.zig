@@ -731,6 +731,11 @@ test "Application remains a composition root with explicit platform limits" {
     try std.testing.expectEqual(@as(usize, 1), bridge_api.policy.origins(.release).len);
 }
 
+test "Windows window chrome Application test roots" {
+    _ = app_window;
+    _ = app_platform;
+}
+
 test "MCP Application composition imports the startup owner" {
     std.testing.refAllDecls(App);
     comptime _ = run;

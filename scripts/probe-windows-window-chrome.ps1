@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case')]
+    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click')]
     [string]$Mode = 'drag',
     [string]$ColorHex,
     [string]$OutputPath,
@@ -14,7 +14,8 @@ param(
     [string]$InputCase,
     [int]$DoubleClickMilliseconds = 0,
     [int]$PointX = 300,
-    [int]$PointY = 20
+    [int]$PointY = 20,
+    [long]$WindowHandle = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -215,16 +216,32 @@ function Invoke-MetaWorkDrag([int]$x, [int]$y, [int]$deltaX, [int]$deltaY) {
 }
 
 $process = Get-Process -Id $ProcessId
-$deadline = (Get-Date).AddSeconds(10)
-while ($process.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 100
-    $process.Refresh()
+$window = [IntPtr]$WindowHandle
+if ($WindowHandle -eq 0) {
+    $deadline = (Get-Date).AddSeconds(10)
+    while ($process.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+        $process.Refresh()
+    }
+    $window = $process.MainWindowHandle
 }
-if ($process.MainWindowHandle -eq 0) {
-    throw "MetaWork process $ProcessId has no main window"
+$windowProcessId = [uint32]0
+[MetaWorkChromeProbe]::GetWindowThreadProcessId($window, [ref]$windowProcessId) | Out-Null
+if (-not [MetaWorkChromeProbe]::IsWindow($window) -or $windowProcessId -ne $ProcessId) {
+    throw "Window does not belong to the test process $ProcessId"
 }
-
-$window = $process.MainWindowHandle
+[MetaWorkChromeProbe]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
+if ($Mode -eq 'control-state') {
+    @{
+        handle = $window.ToInt64().ToString()
+        visible = [MetaWorkChromeProbe]::IsWindowVisible($window)
+        minimized = [MetaWorkChromeProbe]::IsIconic($window)
+        maximized = [MetaWorkChromeProbe]::IsZoomed($window)
+        dpi = [MetaWorkChromeProbe]::GetDpiForWindow($window)
+        rect = Get-MetaWorkRect $window
+    } | ConvertTo-Json -Compress
+    return
+}
 $wasTopmost = ([MetaWorkChromeProbe]::GetWindowLongPtrW($window, -20).ToInt64() -band 8) -ne 0
 [MetaWorkChromeProbe]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
 if ($Direct -and (-not [MetaWorkChromeProbe]::IsWindowVisible($window) -or
@@ -243,6 +260,22 @@ if ($Mode -ne 'paint-stationary') {
     throw 'Stationary paint requires the harness to keep its window unobscured before changing the DOM'
 }
 $rect = Get-MetaWorkRect $window
+
+if ($Mode -eq 'control-click') {
+    if (-not [MetaWorkChromeProbe]::IsWindowVisible($window) -or [MetaWorkChromeProbe]::IsIconic($window)) {
+        throw 'Control input requires a visible, non-minimized test window'
+    }
+    $point = New-Object MetaWorkChromeProbe+Point
+    $scale = [MetaWorkChromeProbe]::GetDpiForWindow($window) / 96.0
+    $point.X = [int]($PointX * $scale)
+    $point.Y = [int]($PointY * $scale)
+    if (-not [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$point)) { throw 'ClientToScreen failed' }
+    if ([MetaWorkChromeProbe]::GetAncestor([MetaWorkChromeProbe]::WindowFromPoint($point), 2) -ne $window) {
+        throw 'Control input point is obscured'
+    }
+    Invoke-MetaWorkClick $point.X $point.Y
+    return
+}
 
 if ($Mode -eq 'top-resize') {
     if ($Direct -and ($AllMonitors -or $Repeat -ne 1)) { throw 'Direct resize must be the first input on the current window' }
