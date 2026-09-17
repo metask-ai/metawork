@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated')]
+    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case')]
     [string]$Mode = 'drag',
     [string]$ColorHex,
     [string]$OutputPath,
@@ -10,7 +10,11 @@ param(
     [int]$Repeat = 1,
     [switch]$AllMonitors,
     [switch]$Direct,
-    [switch]$KeepTopmost
+    [switch]$KeepTopmost,
+    [string]$InputCase,
+    [int]$DoubleClickMilliseconds = 0,
+    [int]$PointX = 300,
+    [int]$PointY = 20
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,6 +111,9 @@ public static class MetaWorkChromeProbe {
 
     [DllImport("user32.dll")]
     public static extern uint GetDoubleClickTime();
+
+    [DllImport("user32.dll")]
+    public static extern bool SetDoubleClickTime(uint milliseconds);
 
     [DllImport("user32.dll")]
     public static extern int GetSystemMetrics(int index);
@@ -437,6 +444,95 @@ if ($Mode -eq 'top-lifecycle') {
     Start-Sleep -Milliseconds 200
     if (-not [MetaWorkChromeProbe]::IsWindowVisible($inputChild)) { throw 'Restored window lost the resize input layer' }
     Write-Output 'edgeSequenceReset=true nativeEdgeDoubleClick=true maximizedLayerHidden=true restoredLayerVisible=true'
+    return
+}
+
+if ($Mode -eq 'input-case') {
+    $originalTime = [MetaWorkChromeProbe]::GetDoubleClickTime()
+    try {
+        if ($DoubleClickMilliseconds -ne 0 -and -not [MetaWorkChromeProbe]::SetDoubleClickTime($DoubleClickMilliseconds)) {
+            throw 'Could not establish the non-default double-click time'
+        }
+        $time = [int][MetaWorkChromeProbe]::GetDoubleClickTime()
+        $width = [MetaWorkChromeProbe]::GetSystemMetrics(36)
+        $height = [MetaWorkChromeProbe]::GetSystemMetrics(37)
+        [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
+        [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr]::Zero, 100, 100, 900, 620, 0x0014) | Out-Null
+        Start-Sleep -Milliseconds ([Math]::Max($time, $originalTime) + 100)
+        function Get-InputPoint([int]$x, [int]$y) {
+            $point = New-Object MetaWorkChromeProbe+Point
+            $scale = [MetaWorkChromeProbe]::GetDpiForWindow($window) / 96.0
+            $point.X = [int]($x * $scale)
+            $point.Y = [int]($y * $scale)
+            if (-not [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$point)) { throw 'ClientToScreen failed' }
+            return $point
+        }
+        if ($InputCase -eq 'blur-reset') { Add-Type -AssemblyName System.Windows.Forms }
+        $point = Get-InputPoint $PointX $PointY
+        $before = Get-MetaWorkRect $window
+        $gap = if ($DoubleClickMilliseconds -ge 800) { 550 } else { 60 }
+        $expectedMaximized = $false
+        switch ($InputCase) {
+            { $_ -in @('pair', 'timeout', 'distance-inside', 'distance-outside', 'quad', 'content-reset', 'control-reset', 'blur-reset') } {
+                Invoke-MetaWorkTitleClick $point.X $point.Y
+                if ($InputCase -eq 'timeout') { Start-Sleep -Milliseconds ($time + 100) }
+                elseif ($InputCase -eq 'content-reset') {
+                    $other = Get-InputPoint 300 100
+                    Invoke-MetaWorkTitleClick $other.X $other.Y
+                } elseif ($InputCase -eq 'control-reset') {
+                    $other = Get-InputPoint 400 20
+                    Invoke-MetaWorkTitleClick $other.X $other.Y
+                } elseif ($InputCase -eq 'blur-reset') {
+                    # A separate native window causes real WebView blur, then focus.
+                    $otherWindow = New-Object System.Windows.Forms.Form
+                    try {
+                        $otherWindow.Show()
+                        [MetaWorkChromeProbe]::SetForegroundWindow($otherWindow.Handle) | Out-Null
+                        [System.Windows.Forms.Application]::DoEvents()
+                        Start-Sleep -Milliseconds 60
+                        [MetaWorkChromeProbe]::SetForegroundWindow($window) | Out-Null
+                        Start-Sleep -Milliseconds 60
+                    } finally { $otherWindow.Dispose() }
+                } else { Start-Sleep -Milliseconds $gap }
+                $dx = if ($InputCase -eq 'distance-inside') { [Math]::Floor($width / 2) }
+                      elseif ($InputCase -eq 'distance-outside') { [Math]::Floor($width / 2) + 1 } else { 0 }
+                Invoke-MetaWorkTitleClick ($point.X + $dx) $point.Y
+                Start-Sleep -Milliseconds 160
+                $expectedMaximized = $InputCase -in @('pair', 'distance-inside', 'quad')
+                if ([MetaWorkChromeProbe]::IsZoomed($window) -ne $expectedMaximized) {
+                    throw "Input case $InputCase did not respect native double-click semantics"
+                }
+                if ($InputCase -eq 'quad') {
+                    $point = Get-InputPoint $PointX $PointY
+                    Invoke-MetaWorkTitleClick $point.X $point.Y
+                    Start-Sleep -Milliseconds 60
+                    if (-not [MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Third click toggled twice' }
+                    Invoke-MetaWorkTitleClick $point.X $point.Y
+                    Start-Sleep -Milliseconds 160
+                    if ([MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Fourth click did not restore' }
+                    $expectedMaximized = $false
+                }
+            }
+            'drag' {
+                Invoke-MetaWorkDrag $point.X $point.Y 80 48
+                Start-Sleep -Milliseconds 120
+                $after = Get-MetaWorkRect $window
+                if ([Math]::Abs($after.Left - $before.Left) -lt 12) { throw 'Draggable title did not move window' }
+            }
+            'no-drag' {
+                Invoke-MetaWorkDrag $point.X $point.Y 80 48
+                Start-Sleep -Milliseconds 120
+                $after = Get-MetaWorkRect $window
+                if ($after.Left -ne $before.Left -or $after.Top -ne $before.Top) { throw 'Excluded input moved window' }
+            }
+            default { throw "Unknown input case $InputCase" }
+        }
+        [ordered]@{ case=$InputCase; timeMs=$time; distanceWidth=$width; distanceHeight=$height; dpi=[MetaWorkChromeProbe]::GetDpiForWindow($window); passed=$true } | ConvertTo-Json -Compress
+    } finally {
+        if (-not [MetaWorkChromeProbe]::SetDoubleClickTime($originalTime) -or [MetaWorkChromeProbe]::GetDoubleClickTime() -ne $originalTime) {
+            throw 'Could not restore the original system double-click time'
+        }
+    }
     return
 }
 

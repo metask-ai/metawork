@@ -1,7 +1,7 @@
-import type { NativeBridge } from "./client.ts";
 import { commands } from "./commands.ts";
 import {
   assertDisconnected,
+  assertWindowChromeHandled,
   decodeWindowChromeEnvironment,
   type WindowChromeEnvironment,
 } from "./decode-contracts.ts";
@@ -9,32 +9,20 @@ import {
 const candidateSelector = "[data-metawork-window-drag]";
 const controlSelector = "[data-metawork-window-control]";
 const exclusionSelector =
-  "button, input, select, textarea, label, details, a, [contenteditable='true'], [data-metawork-window-drag-exclude]";
-const maxExclusions = 32;
+  "button, input, select, textarea, label, details, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='link'], [role='textbox'], [tabindex], [inert], [data-metawork-window-drag-exclude]";
 const controlActions = new Set(["minimize", "toggle_maximize", "close"]);
-
-type ChromeRegion = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  exclusion: boolean;
-};
 
 export function installWindowChromeBridge() {
   const bridge = window.zero;
   if (!bridge) return () => undefined;
-
+  let disposed = false;
   let generation: string | null = null;
   let environment: WindowChromeEnvironment | null = null;
-  let animationFrame: number | null = null;
-  let syncInFlight = false;
-  let syncDirty = false;
-  let dragSynchronized = false;
-  let observedCandidate: Element | null = null;
-
-  const resizeObserver = new ResizeObserver(() => scheduleSync());
-  const mutationObserver = new MutationObserver(() => scheduleSync());
+  let stateEpoch = 0;
+  let refreshInFlight = false;
+  let refreshDirty = false;
+  let controlInFlight = false;
+  const disabledControls = new Set<HTMLButtonElement>();
 
   function applyEnvironment(value: WindowChromeEnvironment) {
     environment = value;
@@ -46,26 +34,25 @@ export function installWindowChromeBridge() {
     root.dataset.metaworkWindowMaximized = String(value.maximized);
     root.style.setProperty(
       "--metawork-window-chrome-top",
-      `${value.insets.top}px`,
+      value.insets.top + "px",
     );
     root.style.setProperty(
       "--metawork-window-chrome-leading",
-      `${value.insets.left}px`,
+      value.insets.left + "px",
     );
     root.style.setProperty(
       "--metawork-window-chrome-trailing",
-      `${value.insets.right}px`,
+      value.insets.right + "px",
     );
     root.style.setProperty(
       "--metawork-window-chrome-buttons-x",
-      `${value.buttons.x}px`,
+      value.buttons.x + "px",
     );
     root.style.setProperty(
       "--metawork-window-chrome-buttons-width",
-      `${value.buttons.width}px`,
+      value.buttons.width + "px",
     );
   }
-
   function clearEnvironment() {
     environment = null;
     const root = document.documentElement;
@@ -81,254 +68,187 @@ export function installWindowChromeBridge() {
     ])
       root.style.removeProperty(name);
   }
-
-  function candidate() {
-    const candidates = document.querySelectorAll(candidateSelector);
-    return candidates.length === 1 ? candidates[0] : null;
-  }
-
-  function finiteRect(rect: DOMRect): ChromeRegion | null {
-    const values = [rect.x, rect.y, rect.width, rect.height];
-    if (
-      values.some((value) => !Number.isFinite(value) || value < 0) ||
-      rect.width <= 0 ||
-      rect.height <= 0
-    )
-      return null;
-    return {
-      x: rect.x,
-      y: rect.y,
-      width: rect.width,
-      height: rect.height,
-      exclusion: false,
-    };
-  }
-
-  function intersection(outer: DOMRect, inner: DOMRect): ChromeRegion | null {
-    const left = Math.max(outer.left, inner.left);
-    const top = Math.max(outer.top, inner.top);
-    const right = Math.min(outer.right, inner.right);
-    const bottom = Math.min(outer.bottom, inner.bottom);
-    if (right <= left || bottom <= top) return null;
-    return {
-      x: left,
-      y: top,
-      width: right - left,
-      height: bottom - top,
-      exclusion: true,
-    };
-  }
-
-  function regionsForCandidate(value: Element | null): ChromeRegion[] {
-    if (!value) return [];
-    const candidateRect = value.getBoundingClientRect();
-    const dragRegion = finiteRect(candidateRect);
-    if (!dragRegion) return [];
-    const exclusions = [...document.querySelectorAll(exclusionSelector)]
-      .map((element) =>
-        intersection(candidateRect, element.getBoundingClientRect()),
-      )
-      .filter((region): region is ChromeRegion => region !== null);
-    if (exclusions.length > maxExclusions) return [];
-    return [dragRegion, ...exclusions];
-  }
-
-  function observeCandidate(value: Element | null) {
-    if (value === observedCandidate) return;
-    if (observedCandidate) resizeObserver.unobserve(observedCandidate);
-    observedCandidate = value;
-    if (observedCandidate) resizeObserver.observe(observedCandidate);
-  }
-
-  async function sync() {
-    if (!generation || syncInFlight || !syncDirty) return;
-    syncDirty = false;
+  async function refresh() {
+    if (disposed || !generation || refreshInFlight || !refreshDirty) return;
+    refreshDirty = false;
+    refreshInFlight = true;
     const requestGeneration = generation;
-    syncInFlight = true;
+    const requestEpoch = stateEpoch;
     try {
-      const activeCandidate = candidate();
-      observeCandidate(activeCandidate);
       const value = decodeWindowChromeEnvironment(
-        await bridge.invoke(commands.windowChromeSync, {
+        await bridge.invoke(commands.windowChromeRefresh, {
           generation: requestGeneration,
-          viewportWidth: window.innerWidth,
-          viewportHeight: window.innerHeight,
-          regions: regionsForCandidate(activeCandidate),
         }),
       );
       if (
+        !disposed &&
         generation === requestGeneration &&
-        value.generation === requestGeneration
-      ) {
+        value.generation === requestGeneration &&
+        stateEpoch === requestEpoch
+      )
         applyEnvironment(value);
-        dragSynchronized = true;
-      }
     } catch {
-      if (generation === requestGeneration) dragSynchronized = false;
+      // Keep the last confirmed controls and session. A later event can refresh.
     } finally {
-      syncInFlight = false;
-      if (syncDirty) scheduleFrame();
+      refreshInFlight = false;
+      if (refreshDirty) void refresh();
     }
   }
-
-  function scheduleSync() {
-    if (!generation) return;
-    syncDirty = true;
-    if (syncInFlight || animationFrame !== null) return;
-    scheduleFrame();
+  function scheduleRefresh() {
+    if (disposed) return;
+    stateEpoch++;
+    refreshDirty = true;
+    void refresh();
   }
-
-  function scheduleFrame() {
-    if (animationFrame !== null) return;
-    animationFrame = window.requestAnimationFrame(() => {
-      animationFrame = null;
-      void sync();
-    });
-  }
-
-  async function disconnect(
-    nativeBridge: NativeBridge,
-    expectedGeneration: string | null = generation,
-  ) {
-    const current = expectedGeneration;
-    if (!current || generation !== current) return;
-    generation = null;
-    syncDirty = false;
-    dragSynchronized = false;
-    clearEnvironment();
+  async function disconnect(expectedGeneration: string) {
     try {
       assertDisconnected(
-        await nativeBridge.invoke(commands.windowChromeDisconnect, {
-          generation: current,
+        await bridge.invoke(commands.windowChromeDisconnect, {
+          generation: expectedGeneration,
         }),
-        current,
+        expectedGeneration,
       );
     } catch {
-      // The Host also clears on the next document connect and at teardown.
+      // A replacement document may already have revoked this exact generation.
     }
   }
-
+  function isDragTarget(event: PointerEvent) {
+    let candidate = false;
+    for (const entry of event.composedPath()) {
+      if (!(entry instanceof Element)) continue;
+      if (entry.matches(exclusionSelector)) return false;
+      if (entry.matches(candidateSelector)) candidate = true;
+    }
+    return candidate;
+  }
+  async function submitPointer(
+    pointer: { phase: "down"; x: number; y: number } | { phase: "reset" },
+  ) {
+    if (disposed || !generation || !environment?.livePointerDrag) return;
+    const requestGeneration = generation;
+    if (pointer.phase === "down") stateEpoch++;
+    try {
+      assertWindowChromeHandled(
+        await bridge.invoke(commands.windowChromePointer, {
+          generation: requestGeneration,
+          ...pointer,
+        }),
+        requestGeneration,
+      );
+    } catch {
+      // Never replay a pointer gesture or reconnect on a rejected action.
+    } finally {
+      if (
+        !disposed &&
+        generation === requestGeneration &&
+        pointer.phase === "down"
+      )
+        scheduleRefresh();
+    }
+  }
   function onPointerDown(event: PointerEvent) {
-    if (
-      !environment?.livePointerDrag ||
-      !dragSynchronized ||
-      !generation ||
-      !event.isTrusted ||
-      event.button !== 0 ||
-      !event.isPrimary
-    )
-      return;
-    const requestGeneration = generation;
-    void bridge
-      .invoke(commands.windowChromePointer, {
-        generation: requestGeneration,
-        phase: "down",
-        x: event.clientX,
-        y: event.clientY,
-      })
-      .then(decodeWindowChromeEnvironment)
-      .then((value) => {
-        if (
-          generation === requestGeneration &&
-          value.generation === requestGeneration
-        )
-          applyEnvironment(value);
-      })
-      .catch(() => undefined);
+    if (!event.isTrusted || event.button !== 0 || !event.isPrimary) return;
+    void submitPointer(
+      isDragTarget(event)
+        ? { phase: "down", x: event.clientX, y: event.clientY }
+        : { phase: "reset" },
+    );
   }
-
   function onWindowBlur() {
-    if (!environment?.livePointerDrag || !generation) return;
-    const requestGeneration = generation;
-    void bridge
-      .invoke(commands.windowChromePointer, {
-        generation: requestGeneration,
-        phase: "reset",
-      })
-      .then(decodeWindowChromeEnvironment)
-      .then((value) => {
-        if (
-          generation === requestGeneration &&
-          value.generation === requestGeneration
-        )
-          applyEnvironment(value);
-      })
-      .catch(() => undefined);
+    void submitPointer({ phase: "reset" });
   }
-
-  function onControlClick(event: MouseEvent) {
-    const target = event.target instanceof Element ? event.target : null;
-    const button = target?.closest<HTMLButtonElement>(controlSelector);
+  function releaseControls() {
+    for (const control of disabledControls) control.disabled = false;
+    disabledControls.clear();
+    controlInFlight = false;
+  }
+  async function onControlClick(event: MouseEvent) {
+    const button = event
+      .composedPath()
+      .find(
+        (entry): entry is HTMLButtonElement =>
+          entry instanceof Element && entry.matches("button" + controlSelector),
+      );
     const action = button?.dataset.metaworkWindowControl;
     if (
+      disposed ||
       !button ||
+      button.disabled ||
+      button.closest("[inert]") ||
       !action ||
       !controlActions.has(action) ||
       !environment?.rendererControls ||
-      !generation
+      !generation ||
+      controlInFlight
     )
       return;
     event.preventDefault();
     const requestGeneration = generation;
+    controlInFlight = true;
+    stateEpoch++;
     for (const control of document.querySelectorAll<HTMLButtonElement>(
-      controlSelector,
-    ))
-      control.disabled = true;
-    void bridge
-      .invoke(commands.windowChromeControl, {
-        generation: requestGeneration,
-        action,
-      })
-      .then(decodeWindowChromeEnvironment)
-      .then((value) => {
-        if (
-          generation === requestGeneration &&
-          value.generation === requestGeneration
-        )
-          applyEnvironment(value);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        for (const control of document.querySelectorAll<HTMLButtonElement>(
-          controlSelector,
-        ))
-          control.disabled = false;
-      });
+      "button" + controlSelector,
+    )) {
+      if (!control.disabled) {
+        disabledControls.add(control);
+        control.disabled = true;
+      }
+    }
+    try {
+      assertWindowChromeHandled(
+        await bridge.invoke(commands.windowChromeControl, {
+          generation: requestGeneration,
+          action,
+        }),
+        requestGeneration,
+      );
+    } catch {
+      // Preserve the current document session; never retry a window action.
+    } finally {
+      if (!disposed && generation === requestGeneration) {
+        releaseControls();
+        scheduleRefresh();
+      }
+    }
   }
-
   void bridge
     .invoke(commands.windowChromeConnect, {})
     .then(decodeWindowChromeEnvironment)
     .then((value) => {
+      if (disposed) {
+        void disconnect(value.generation);
+        return;
+      }
       generation = value.generation;
       applyEnvironment(value);
-      mutationObserver.observe(document.body, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-      });
-      scheduleSync();
+      // Observe native changes that occurred while connect was pending.
+      scheduleRefresh();
     })
-    .catch(clearEnvironment);
-
-  const unsubscribeResize = bridge.on("resize", scheduleSync);
-  const onPageHide = () => void disconnect(bridge);
-  window.addEventListener("pagehide", onPageHide, {
-    once: true,
-  });
+    .catch(() => {
+      if (!disposed) clearEnvironment();
+    });
+  const unsubscribeResize = bridge.on("resize", scheduleRefresh);
+  window.addEventListener("pagehide", dispose, { once: true });
   window.addEventListener("blur", onWindowBlur);
+  window.addEventListener("focus", scheduleRefresh);
   document.addEventListener("pointerdown", onPointerDown, true);
   document.addEventListener("click", onControlClick, true);
-
-  return () => {
-    if (animationFrame !== null) window.cancelAnimationFrame(animationFrame);
-    resizeObserver.disconnect();
-    mutationObserver.disconnect();
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    stateEpoch++;
+    refreshDirty = false;
     unsubscribeResize();
-    window.removeEventListener("pagehide", onPageHide);
+    window.removeEventListener("pagehide", dispose);
     window.removeEventListener("blur", onWindowBlur);
+    window.removeEventListener("focus", scheduleRefresh);
     document.removeEventListener("pointerdown", onPointerDown, true);
     document.removeEventListener("click", onControlClick, true);
-    void disconnect(bridge);
-  };
+    releaseControls();
+    const detachedGeneration = generation;
+    generation = null;
+    clearEnvironment();
+    if (detachedGeneration) void disconnect(detachedGeneration);
+  }
+  return dispose;
 }

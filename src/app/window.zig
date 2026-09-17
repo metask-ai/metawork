@@ -31,7 +31,6 @@ pub const State = struct {
     tray_installed: bool = false,
 
     pub fn prepareStartup(self: *State) !void {
-        try self.drag_region_capability.prepareStartup();
         try self.window_controls_capability.prepareStartup();
         try self.startup_window_capture.prepare();
     }
@@ -158,33 +157,13 @@ pub const State = struct {
         );
     }
 
-    pub fn sync(
+    pub fn refresh(
         self: *State,
         services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
-        viewport_width: f64,
-        viewport_height: f64,
-        regions: []const bridge_api.WindowChromeRegion,
     ) !bridge_api.WindowChromePlatformEnvironment {
-        if (window_id != main_window_id or regions.len > drag_region.max_regions)
-            return error.WindowIdentityMismatch;
-        var chrome_regions: [drag_region.max_regions]drag_region.Region = undefined;
-        for (regions, 0..) |region, index| chrome_regions[index] = .{
-            .x = region.x,
-            .y = region.y,
-            .width = region.width,
-            .height = region.height,
-            .exclusion = region.exclusion,
-        };
-        return environment(
-            try self.drag_region_capability.sync(
-                services,
-                viewport_width,
-                viewport_height,
-                chrome_regions[0..regions.len],
-            ),
-            self.window_controls_capability.state(),
-        );
+        try requireMainWindow(window_id);
+        return environment(self.drag_region_capability.current(services), self.window_controls_capability.state());
     }
 
     pub fn handlePointer(
@@ -192,7 +171,7 @@ pub const State = struct {
         services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
         pointer: bridge_api.WindowChromePointer,
-    ) !bridge_api.WindowChromePlatformEnvironment {
+    ) !void {
         try requireMainWindow(window_id);
         const outcome = switch (pointer) {
             .down => |down| try self.drag_region_capability.handlePointerDown(
@@ -207,10 +186,6 @@ pub const State = struct {
         };
         if (outcome == .toggle_maximize)
             try self.window_controls_capability.toggleMaximize();
-        return environment(
-            self.drag_region_capability.current(services),
-            self.window_controls_capability.state(),
-        );
     }
 
     pub fn disconnect(self: *State, window_id: native_sdk.platform.WindowId) !void {
@@ -221,20 +196,15 @@ pub const State = struct {
     pub fn control(
         self: *State,
         runtime: *native_sdk.Runtime,
-        services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
         action: bridge_api.WindowChromeControlAction,
-    ) !bridge_api.WindowChromePlatformEnvironment {
+    ) !void {
         try requireMainWindow(window_id);
         switch (action) {
             .minimize => try runtime.minimizeWindow(main_window_id),
             .toggle_maximize => try self.window_controls_capability.toggleMaximize(),
             .close => try self.window_controls_capability.userClose(),
         }
-        return environment(
-            self.drag_region_capability.current(services),
-            self.window_controls_capability.state(),
-        );
     }
 };
 

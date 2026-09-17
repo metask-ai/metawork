@@ -28,14 +28,6 @@ pub const attachment_chunk_bytes = 128 * 1024;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
 
-pub const WindowChromeRegion = struct {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    exclusion: bool,
-};
-
 pub const WindowChromePlatformEnvironment = struct {
     top: f64,
     left: f64,
@@ -88,23 +80,20 @@ pub const Platform = struct {
         ?*anyopaque,
         native_sdk.platform.WindowId,
     ) anyerror!WindowChromePlatformEnvironment,
-    window_chrome_sync_fn: *const fn (
+    window_chrome_refresh_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
-        f64,
-        f64,
-        []const WindowChromeRegion,
     ) anyerror!WindowChromePlatformEnvironment,
     window_chrome_pointer_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
         WindowChromePointer,
-    ) anyerror!WindowChromePlatformEnvironment,
+    ) anyerror!void,
     window_chrome_control_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
         WindowChromeControlAction,
-    ) anyerror!WindowChromePlatformEnvironment,
+    ) anyerror!void,
     window_chrome_disconnect_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
@@ -309,7 +298,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.connect, .function = connectEvents },
             .{ .name = commands.disconnect, .function = disconnectEvents },
             .{ .name = commands.window_chrome_connect, .function = connectWindowChrome },
-            .{ .name = commands.window_chrome_sync, .function = syncWindowChrome },
+            .{ .name = commands.window_chrome_refresh, .function = refreshWindowChrome },
             .{ .name = commands.window_chrome_pointer, .function = handleWindowChromePointer },
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
@@ -646,37 +635,20 @@ pub const Dispatcher = struct {
         );
     }
 
-    fn syncWindowChrome(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn refreshWindowChrome(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireBootstrapWindow(invocation.source.window_id);
         if (!self.platform.on_main_thread_fn(self.platform.context))
             return error.InvalidBridgeThread;
-        var parsed = try handlers.parsePayloadWithLimit(
-            handlers.WindowChromeSync,
-            invocation.request.payload,
-            16 * 1024,
-        );
+        var parsed = try handlers.parsePayload(handlers.WindowChromeRefresh, invocation.request.payload);
         defer parsed.deinit();
-        if (parsed.value.regions.len > 33)
-            return error.InvalidBridgePayload;
         const generation = try handlers.parseWireId(parsed.value.generation);
         try self.validateWindowChromeSession(invocation.source.window_id, generation);
-        var regions: [33]WindowChromeRegion = undefined;
-        for (parsed.value.regions, 0..) |region, index| regions[index] = .{
-            .x = region.x,
-            .y = region.y,
-            .width = region.width,
-            .height = region.height,
-            .exclusion = region.exclusion,
-        };
-        const environment = try self.platform.window_chrome_sync_fn(
+        const environment = try self.platform.window_chrome_refresh_fn(
             self.platform.context,
             invocation.source.window_id,
-            parsed.value.viewportWidth,
-            parsed.value.viewportHeight,
-            regions[0..parsed.value.regions.len],
         );
         return encodeWindowChromeEnvironment(output, generation, environment);
     }
@@ -701,12 +673,12 @@ pub const Dispatcher = struct {
                 return error.InvalidBridgePayload;
             break :reset .reset;
         } else return error.InvalidBridgePayload;
-        const environment = try self.platform.window_chrome_pointer_fn(
+        try self.platform.window_chrome_pointer_fn(
             self.platform.context,
             invocation.source.window_id,
             pointer,
         );
-        return encodeWindowChromeEnvironment(output, generation, environment);
+        return encodeWindowChromeHandled(output, generation);
     }
 
     fn disconnectWindowChrome(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
@@ -747,12 +719,12 @@ pub const Dispatcher = struct {
             return error.InvalidBridgePayload;
         const generation = try handlers.parseWireId(parsed.value.generation);
         try self.validateWindowChromeSession(invocation.source.window_id, generation);
-        const environment = try self.platform.window_chrome_control_fn(
+        try self.platform.window_chrome_control_fn(
             self.platform.context,
             invocation.source.window_id,
             action,
         );
-        return encodeWindowChromeEnvironment(output, generation, environment);
+        return encodeWindowChromeHandled(output, generation);
     }
 
     fn validateWindowChromeSession(
@@ -765,6 +737,10 @@ pub const Dispatcher = struct {
             generation == 0 or
             generation != self.window_chrome_generation)
             return error.StaleWindowChromeDocument;
+    }
+
+    fn encodeWindowChromeHandled(output: []u8, generation: u64) ![]const u8 {
+        return std.fmt.bufPrint(output, "{{\"generation\":\"{d}\",\"handled\":true}}", .{generation});
     }
 
     fn encodeWindowChromeEnvironment(
@@ -5474,7 +5450,7 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
         .show_open_dialog_fn = undefined,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
-        .window_chrome_sync_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
         .window_chrome_pointer_fn = undefined,
         .window_chrome_control_fn = undefined,
         .window_chrome_disconnect_fn = undefined,
@@ -5623,8 +5599,8 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
             .show_open_dialog_fn = Harness.open,
             .canonicalize_directory_fn = Harness.canonicalizeDirectory,
             .window_chrome_connect_fn = undefined,
-            .window_chrome_sync_fn = undefined,
-            .window_chrome_begin_drag_fn = undefined,
+            .window_chrome_refresh_fn = undefined,
+            .window_chrome_pointer_fn = undefined,
             .window_chrome_control_fn = undefined,
             .window_chrome_disconnect_fn = undefined,
             .now_fn = Harness.now,
@@ -5714,7 +5690,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         account_calls: usize = 0,
         models_calls: usize = 0,
         chrome_connect_calls: usize = 0,
-        chrome_sync_calls: usize = 0,
+        chrome_refresh_calls: usize = 0,
         chrome_pointer_calls: usize = 0,
         chrome_control_calls: usize = 0,
         chrome_disconnect_calls: usize = 0,
@@ -5777,21 +5753,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
             return chromeEnvironment();
         }
 
-        fn syncWindowChrome(
+        fn refreshWindowChrome(
             context: ?*anyopaque,
             window_id: native_sdk.platform.WindowId,
-            viewport_width: f64,
-            viewport_height: f64,
-            regions: []const WindowChromeRegion,
         ) anyerror!WindowChromePlatformEnvironment {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
-            try std.testing.expectEqual(@as(f64, 800), viewport_width);
-            try std.testing.expectEqual(@as(f64, 600), viewport_height);
-            try std.testing.expectEqual(@as(usize, 2), regions.len);
-            try std.testing.expect(!regions[0].exclusion);
-            try std.testing.expect(regions[1].exclusion);
-            self.chrome_sync_calls += 1;
+            self.chrome_refresh_calls += 1;
             return chromeEnvironment();
         }
 
@@ -5799,7 +5767,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             context: ?*anyopaque,
             window_id: native_sdk.platform.WindowId,
             pointer: WindowChromePointer,
-        ) anyerror!WindowChromePlatformEnvironment {
+        ) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
             switch (pointer) {
@@ -5810,21 +5778,17 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .reset => {},
             }
             self.chrome_pointer_calls += 1;
-            return chromeEnvironment();
         }
 
         fn controlWindowChrome(
             context: ?*anyopaque,
             window_id: native_sdk.platform.WindowId,
             action: WindowChromeControlAction,
-        ) anyerror!WindowChromePlatformEnvironment {
+        ) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
             try std.testing.expectEqual(WindowChromeControlAction.toggle_maximize, action);
             self.chrome_control_calls += 1;
-            var environment = chromeEnvironment();
-            environment.maximized = true;
-            return environment;
         }
 
         fn disconnectWindowChrome(
@@ -5928,7 +5892,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .show_open_dialog_fn = Harness.open,
             .canonicalize_directory_fn = Harness.canonicalizeDirectory,
             .window_chrome_connect_fn = Harness.connectWindowChrome,
-            .window_chrome_sync_fn = Harness.syncWindowChrome,
+            .window_chrome_refresh_fn = Harness.refreshWindowChrome,
             .window_chrome_pointer_fn = Harness.handleWindowChromePointer,
             .window_chrome_control_fn = Harness.controlWindowChrome,
             .window_chrome_disconnect_fn = Harness.disconnectWindowChrome,
@@ -5987,13 +5951,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(std.mem.indexOf(u8, chrome_connect, "\"generation\":\"1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, chrome_connect, "\"livePointerDrag\":true") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_connect_calls);
-    const chrome_sync = native_dispatcher.dispatch(
-        "{\"id\":\"chrome-sync\",\"command\":\"metawork.host.windowChrome.sync\",\"payload\":{\"generation\":\"1\",\"viewportWidth\":800,\"viewportHeight\":600,\"regions\":[{\"x\":0,\"y\":0,\"width\":500,\"height\":52,\"exclusion\":false},{\"x\":12,\"y\":8,\"width\":40,\"height\":36,\"exclusion\":true}]}}",
+    const chrome_refresh = native_dispatcher.dispatch(
+        "{\"id\":\"chrome-refresh\",\"command\":\"metawork.host.windowChrome.refresh\",\"payload\":{\"generation\":\"1\"}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, chrome_sync, "\"right\":138") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.chrome_sync_calls);
+    try std.testing.expect(std.mem.indexOf(u8, chrome_refresh, "\"right\":138") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_refresh_calls);
     const chrome_pointer = native_dispatcher.dispatch(
         "{\"id\":\"chrome-pointer\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"1\",\"phase\":\"down\",\"x\":200,\"y\":20}}",
         source,
@@ -6020,7 +5984,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, chrome_control, "\"maximized\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chrome_control, "\"handled\":true") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_control_calls);
     const foreign_bootstrap_window = native_sdk.bridge.Source{
         .origin = source.origin,
@@ -6034,21 +5998,21 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(std.mem.indexOf(u8, denied_bootstrap_connect, "\"handler_failed\"") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_connect_calls);
     harness.on_main_thread = false;
-    const off_thread_sync = native_dispatcher.dispatch(
-        "{\"id\":\"off-thread-sync\",\"command\":\"metawork.host.windowChrome.sync\",\"payload\":{\"generation\":\"1\",\"viewportWidth\":800,\"viewportHeight\":600,\"regions\":[{\"x\":0,\"y\":0,\"width\":500,\"height\":52,\"exclusion\":false}]}}",
+    const off_thread_refresh = native_dispatcher.dispatch(
+        "{\"id\":\"off-thread-sync\",\"command\":\"metawork.host.windowChrome.refresh\",\"payload\":{\"generation\":\"1\"}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, off_thread_sync, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.chrome_sync_calls);
+    try std.testing.expect(std.mem.indexOf(u8, off_thread_refresh, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_refresh_calls);
     harness.on_main_thread = true;
-    const invalid_sync = native_dispatcher.dispatch(
-        "{\"id\":\"invalid-window-chrome\",\"command\":\"metawork.host.windowChrome.sync\",\"payload\":{\"generation\":\"1\",\"viewportWidth\":800,\"viewportHeight\":600,\"regions\":[],\"extra\":true}}",
+    const invalid_refresh = native_dispatcher.dispatch(
+        "{\"id\":\"invalid-window-chrome\",\"command\":\"metawork.host.windowChrome.refresh\",\"payload\":{\"generation\":\"1\",\"regions\":[]}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, invalid_sync, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.chrome_sync_calls);
+    try std.testing.expect(std.mem.indexOf(u8, invalid_refresh, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_refresh_calls);
     const chrome_disconnect = native_dispatcher.dispatch(
         "{\"id\":\"chrome-disconnect\",\"command\":\"metawork.host.windowChrome.disconnect\",\"payload\":{\"generation\":\"1\"}}",
         source,
@@ -6057,25 +6021,25 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(std.mem.indexOf(u8, chrome_disconnect, "\"detached\":true") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_disconnect_calls);
     const stale_after_disconnect = native_dispatcher.dispatch(
-        "{\"id\":\"stale-after-disconnect\",\"command\":\"metawork.host.windowChrome.sync\",\"payload\":{\"generation\":\"1\",\"viewportWidth\":800,\"viewportHeight\":600,\"regions\":[]}}",
+        "{\"id\":\"stale-after-disconnect\",\"command\":\"metawork.host.windowChrome.refresh\",\"payload\":{\"generation\":\"1\"}}",
         source,
         &response,
     );
     try std.testing.expect(std.mem.indexOf(u8, stale_after_disconnect, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.chrome_sync_calls);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_refresh_calls);
     const replacement_connect = native_dispatcher.dispatch(
         "{\"id\":\"replacement-connect\",\"command\":\"metawork.host.windowChrome.connect\",\"payload\":{}}",
         source,
         &response,
     );
     try std.testing.expect(std.mem.indexOf(u8, replacement_connect, "\"generation\":\"2\"") != null);
-    const stale_replacement_sync = native_dispatcher.dispatch(
-        "{\"id\":\"stale-replacement-sync\",\"command\":\"metawork.host.windowChrome.sync\",\"payload\":{\"generation\":\"1\",\"viewportWidth\":800,\"viewportHeight\":600,\"regions\":[]}}",
+    const stale_replacement_refresh = native_dispatcher.dispatch(
+        "{\"id\":\"stale-replacement-sync\",\"command\":\"metawork.host.windowChrome.refresh\",\"payload\":{\"generation\":\"1\"}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, stale_replacement_sync, "\"handler_failed\"") != null);
-    try std.testing.expectEqual(@as(usize, 1), harness.chrome_sync_calls);
+    try std.testing.expect(std.mem.indexOf(u8, stale_replacement_refresh, "\"handler_failed\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), harness.chrome_refresh_calls);
 
     const mismatch = native_dispatcher.dispatch(
         "{\"id\":\"mismatch\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":2}}",
@@ -6444,4 +6408,29 @@ test "Dispatcher validates authority before domain calls and preserves committed
             &grant_output,
         ),
     );
+}
+
+test "window chrome environment and action ack match the shared Renderer wire fixture" {
+    var fixture = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("window_chrome.fixture"), .{});
+    defer fixture.deinit();
+    var output: [1024]u8 = undefined;
+    const environment = try Dispatcher.encodeWindowChromeEnvironment(&output, 7, .{
+        .top = 52,
+        .left = 72,
+        .bottom = 0,
+        .right = 138,
+        .buttons_x = 0,
+        .buttons_y = 0,
+        .buttons_width = 138,
+        .buttons_height = 52,
+        .live_pointer_drag = true,
+        .renderer_controls = true,
+        .maximized = false,
+    });
+    const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("environment").?, .{});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, environment);
+    const expected_ack = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("handled").?, .{});
+    defer std.testing.allocator.free(expected_ack);
+    try std.testing.expectEqualStrings(expected_ack, try Dispatcher.encodeWindowChromeHandled(&output, 7));
 }

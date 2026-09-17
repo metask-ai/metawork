@@ -16,7 +16,7 @@ export async function allocateWebViewTestPort() {
   return port;
 }
 
-export async function probeTopResizePaint({ port, runProbe, evidenceDir }) {
+export async function connectTestWebView(port) {
   let page;
   const deadline = Date.now() + 10_000;
   while (!page && Date.now() < deadline) {
@@ -79,6 +79,32 @@ export async function probeTopResizePaint({ port, runProbe, evidenceDir }) {
         { once: true },
       );
     });
+    return {
+      send,
+      async evaluate(expression) {
+        const result = await send("Runtime.evaluate", {
+          expression,
+          awaitPromise: true,
+          returnByValue: true,
+        });
+        if (result.exceptionDetails)
+          throw new Error(JSON.stringify(result.exceptionDetails));
+        return result.result.value;
+      },
+      close() {
+        socket.close();
+      },
+    };
+  } catch (error) {
+    socket.close();
+    throw error;
+  }
+}
+
+export async function probeTopResizePaint({ port, runProbe, evidenceDir }) {
+  const webview = await connectTestWebView(port);
+  const { send } = webview;
+  try {
     for (const [index, color] of [
       "#cc3366",
       "#2277aa",
@@ -131,6 +157,6 @@ export async function probeTopResizePaint({ port, runProbe, evidenceDir }) {
     });
     await send("Emulation.setEmulatedMedia", { features: [] });
   } finally {
-    socket.close();
+    webview.close();
   }
 }

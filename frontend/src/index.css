@@ -93,15 +93,6 @@ summary::-webkit-details-marker {
   user-select: none;
 }
 
-.window-drag-region {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: var(--metawork-window-chrome-top);
-  pointer-events: none;
-}
-
 .account-gate-toolbar-actions {
   display: flex;
   height: 100%;
@@ -3438,6 +3429,11 @@ button.run-process-tool:hover {
 .workbench-commandbar > * {
   position: relative;
   z-index: 1;
+}
+
+/* Keep a non-inert hit target around disabled commandbar content. */
+.commandbar-inert-content {
+  display: contents;
 }
 
 .commandbar-leading-actions {

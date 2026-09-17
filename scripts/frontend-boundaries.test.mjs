@@ -342,6 +342,20 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
     shell,
     /className="commandbar-alert-slot"[\s\S]*?<\/div>\s*<WindowControls/,
   );
+  for (const group of [
+    "commandbar-leading-actions",
+    "commandbar-context",
+    "commandbar-alert-slot",
+  ]) {
+    assert.match(
+      shell,
+      new RegExp(
+        `className="${group}"[^>]*data-metawork-window-drag-exclude=\\{overlay \\? "" : undefined\\}[\\s\\S]*?className="commandbar-inert-content"[\\s\\S]*?inert=\\{overlay \\? true : undefined\\}`,
+      ),
+    );
+  }
+  assert.match(css, /\.commandbar-inert-content\s*\{\s*display: contents;/);
+
   assert.match(
     shell,
     /className="app-columns" inert=\{overlay \? true : undefined\}/,
@@ -431,7 +445,8 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.match(gate, /account-gate-toolbar/);
   assert.match(gate, /WindowTitlebar/);
   assert.match(titlebar, /data-metawork-window-drag=""/);
-  assert.match(titlebar, /createPortal\(dragRegion, document\.body\)/);
+  assert.match(titlebar, /<header[^>]*data-metawork-window-drag=""/);
+  assert.doesNotMatch(titlebar, /createPortal|window-drag-region/);
   assert.doesNotMatch(titlebar, /onPointerDown|onDoubleClick|onContextMenu/);
   assert.doesNotMatch(`${shell}\n${gate}`, /onPointerMove|setPointerCapture/);
   assert.match(manifest, /\.titlebar = "hidden_inset_tall"/);
@@ -450,51 +465,42 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
     /const candidateSelector = "\[data-metawork-window-drag\]"/,
   );
   assert.match(chromeBridge, /commands\.windowChromeConnect/);
-  assert.match(chromeBridge, /commands\.windowChromeSync/);
+  assert.match(chromeBridge, /commands\.windowChromeRefresh/);
   assert.match(chromeBridge, /commands\.windowChromePointer/);
   assert.match(chromeBridge, /commands\.windowChromeControl/);
   assert.match(chromeBridge, /commands\.windowChromeDisconnect/);
   assert.match(chromeBridge, /decodeWindowChromeEnvironment/);
-  assert.match(chromeBridge, /document\.querySelectorAll\(exclusionSelector\)/);
-  assert.match(chromeBridge, /bridge\.on\("resize", scheduleSync\)/);
+  assert.doesNotMatch(
+    chromeBridge,
+    /MutationObserver|ResizeObserver|getBoundingClientRect|windowChromeSync|ChromeRegion/,
+  );
+  assert.match(chromeBridge, /bridge\.on\("resize", scheduleRefresh\)/);
   assert.match(
     chromeBridge,
     /window\.addEventListener\("blur", onWindowBlur\)/,
   );
-  const pointerHandler = chromeBridge.match(
-    /function onPointerDown\([\s\S]*?\n  \}/,
-  )?.[0];
-  assert.ok(pointerHandler);
-  assert.match(pointerHandler, /phase: "down"/);
-  assert.doesNotMatch(
-    pointerHandler,
-    /candidate\(|closest\(exclusionSelector\)/,
-  );
   assert.match(
     chromeBridge,
-    /async function sync\(\)[\s\S]*commands\.windowChromeSync[\s\S]*generation === requestGeneration[\s\S]*value\.generation === requestGeneration/,
+    /window\.addEventListener\("focus", scheduleRefresh\)/,
   );
+  assert.match(chromeBridge, /event\.composedPath\(\)/);
+  assert.match(chromeBridge, /entry\.matches\(exclusionSelector\)/);
   assert.match(
     chromeBridge,
-    /const requestGeneration = generation;[\s\S]*generation: requestGeneration[\s\S]*generation === requestGeneration[\s\S]*value\.generation === requestGeneration/,
+    /event\.isTrusted.*event\.button !== 0.*event\.isPrimary/,
   );
+  assert.match(chromeBridge, /phase: "down"/);
+  assert.match(chromeBridge, /phase: "reset"/);
+  assert.match(chromeBridge, /refreshInFlight/);
+  assert.match(chromeBridge, /stateEpoch === requestEpoch/);
+  assert.match(chromeBridge, /value\.generation === requestGeneration/);
+  assert.match(chromeBridge, /assertWindowChromeHandled/);
   assert.match(
     chromeBridge,
-    /commands\.windowChromeControl[\s\S]*\.catch\(\(\) => undefined\)/,
-    "a transient button action failure must preserve the current document session",
+    /if \(disposed\) \{\s*void disconnect\(value\.generation\)/,
   );
-  assert.match(
-    chromeBridge,
-    /async function disconnect\([\s\S]*expectedGeneration:[\s\S]*generation !== current\) return/,
-  );
-  assert.doesNotMatch(
-    chromeBridge,
-    /window\.addEventListener\("resize"|async function refresh\(/,
-  );
-  assert.match(
-    css,
-    /\.window-drag-region \{[\s\S]*position: fixed;[\s\S]*width: 100vw;[\s\S]*height: var\(--metawork-window-chrome-top\)/,
-  );
+  assert.doesNotMatch(chromeBridge, /window\.addEventListener\("resize"/);
+  assert.doesNotMatch(css, /\.window-drag-region/);
   assert.match(
     css,
     /top: calc\(var\(--window-bar-height\) \+ env\(safe-area-inset-top, 0px\)\)/,

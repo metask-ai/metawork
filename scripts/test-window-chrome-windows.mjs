@@ -1,12 +1,14 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { probeWindowChromeInput } from "./window-chrome-input.mjs";
 import { buildAutomationDebugArtifact } from "./build.mjs";
 import {
   allocateWebViewTestPort,
+  connectTestWebView,
   probeTopResizePaint,
 } from "./window-top-resize-paint.mjs";
 
@@ -34,10 +36,10 @@ const hitTestProbe = path.join(
   "probe-windows-window-chrome.ps1",
 );
 const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
-const bridgeResponsePath = path.join(automationDir, "bridge-response.txt");
 const timeoutMs = 20_000;
 const resizeSessionOnly = process.argv.includes("--resize-session-only");
 const evidenceDir = process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR;
+const inputSessionOnly = process.argv.includes("--input-session-only");
 
 // This harness owns the automation Debug artifact it drives; build before the
 // fixture directory exists so a build failure leaves nothing to clean up.
@@ -89,126 +91,61 @@ try {
   const rendererChromeReady = waitForRendererChromeReady();
   await waitForOutput(/metawork\.smoke\.event_ack sequence=1/);
   await rendererChromeReady;
-  // Keep this isolated window unobscured until the harness shuts it down.
-  // Stationary paint checks must not raise or activate it after a DOM update.
-  await runProbe("top-resize", ["-Direct", "-KeepTopmost"]);
-  await runProbe("top-resize");
-  await runProbe("top-lifecycle");
-  await runProbe("top-resize", ["-Repeat", "3"]);
-  await probeTopResizePaint({ port: debugPort, runProbe, evidenceDir });
-  await execFileAsync(process.execPath, [native, "automate", "reload"], {
-    cwd: appCwd,
-    timeout: timeoutMs,
-    maxBuffer: 1024 * 1024,
-  });
-  await waitForOutput(/metawork\.smoke\.event_ack sequence=2/);
-  await waitForRendererChromeReady();
-  await runProbe("top-resize", ["-Direct"]);
-  await runProbe("top-resize", ["-AllMonitors"]);
-  if (evidenceDir) {
+  if (inputSessionOnly) {
+    await probeWindowChromeInput({ port: debugPort, runProbe, evidenceDir });
+  } else {
+    // Keep this isolated window unobscured until the harness shuts it down.
+    // Stationary paint checks must not raise or activate it after a DOM update.
+    await runProbe("top-resize", ["-Direct", "-KeepTopmost"]);
+    await runProbe("top-resize");
+    await runProbe("top-lifecycle");
+    await runProbe("top-resize", ["-Repeat", "3"]);
+    await probeTopResizePaint({ port: debugPort, runProbe, evidenceDir });
+    await execFileAsync(process.execPath, [native, "automate", "reload"], {
+      cwd: appCwd,
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+    });
+    await waitForOutput(/metawork\.smoke\.event_ack sequence=2/);
+    await waitForRendererChromeReady();
+    await runProbe("top-resize", ["-Direct"]);
+    await runProbe("top-resize", ["-AllMonitors"]);
+    if (evidenceDir) {
+      await execFileAsync(
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          path.join(root, "scripts", "capture-windows-window.ps1"),
+          "-ProcessId",
+          String(app.pid),
+          "-OutputPath",
+          path.join(evidenceDir, "top-resize.png"),
+          "-Width",
+          "900",
+          "-Height",
+          "620",
+        ],
+        { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+      );
+    }
+    if (!resizeSessionOnly) {
+      await runProbe("doubleclick");
+      await runProbe("drag");
+      await probeWindowChromeInput({ port: debugPort, runProbe, evidenceDir });
+    }
+    await runProbe("resize");
+    await runProbe("controls");
+    await runProbe("close");
     await execFileAsync(
-      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        path.join(root, "scripts", "capture-windows-window.ps1"),
-        "-ProcessId",
-        String(app.pid),
-        "-OutputPath",
-        path.join(evidenceDir, "top-resize.png"),
-        "-Width",
-        "900",
-        "-Height",
-        "620",
-      ],
-      { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+      process.execPath,
+      [native, "automate", "tray-action", "1"],
+      { cwd: appCwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
     );
+    await runProbe("top-resize", ["-Direct"]);
   }
-  if (!resizeSessionOnly) {
-    await execFileAsync(
-      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        hitTestProbe,
-        "-ProcessId",
-        String(app.pid),
-        "-Mode",
-        "doubleclick",
-      ],
-      { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-    );
-    await execFileAsync(
-      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        hitTestProbe,
-        "-ProcessId",
-        String(app.pid),
-        "-Mode",
-        "drag",
-      ],
-      { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-    );
-  }
-  await execFileAsync(
-    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      hitTestProbe,
-      "-ProcessId",
-      String(app.pid),
-      "-Mode",
-      "resize",
-    ],
-    { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-  );
-  await execFileAsync(
-    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      hitTestProbe,
-      "-ProcessId",
-      String(app.pid),
-      "-Mode",
-      "controls",
-    ],
-    { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-  );
-  await execFileAsync(
-    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      hitTestProbe,
-      "-ProcessId",
-      String(app.pid),
-      "-Mode",
-      "close",
-    ],
-    { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-  );
-  await execFileAsync(
-    process.execPath,
-    [native, "automate", "tray-action", "1"],
-    { cwd: appCwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-  );
-  await runProbe("top-resize", ["-Direct"]);
   await execFileAsync(
     process.execPath,
     [native, "automate", "tray-action", "2"],
@@ -220,9 +157,11 @@ try {
   if (!/runtime\.event.*event="stop"/.test(output))
     throw new Error("normal Runtime stop was not observed");
   process.stdout.write(
-    resizeSessionOnly
-      ? "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
-      : "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, titlebar drag/double click, controls, hide/reopen, and clean shutdown passed.\n",
+    inputSessionOnly
+      ? "Windows real input matrix and clean shutdown passed.\n"
+      : resizeSessionOnly
+        ? "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
+        : "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, titlebar drag/double click, controls, hide/reopen, and clean shutdown passed.\n",
   );
 } catch (error) {
   process.stderr.write(output);
@@ -256,26 +195,26 @@ async function runProbe(mode, extraArgs = []) {
     { timeout: timeoutMs, maxBuffer: 1024 * 1024 },
   );
   process.stdout.write(result.stdout);
+  return result.stdout;
 }
 
 async function waitForRendererChromeReady() {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = JSON.parse(await readFile(bridgeResponsePath, "utf8"));
+  const webview = await connectTestWebView(debugPort);
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
       if (
-        response?.ok === true &&
-        /^[1-9][0-9]*$/.test(response.result?.generation) &&
-        Number.isFinite(response.result?.insets?.top)
+        await webview.evaluate(
+          `document.documentElement.dataset.metaworkWindowChrome === "ready"`,
+        )
       )
         return;
-    } catch (error) {
-      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError))
-        throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    throw new Error("Renderer window chrome did not become ready");
+  } finally {
+    webview.close();
   }
-  throw new Error("Renderer window chrome did not reach a synchronized state");
 }
 
 function waitForOutput(pattern) {

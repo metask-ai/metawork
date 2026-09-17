@@ -12,7 +12,6 @@ const types = @import("types.zig");
 
 pub const live_pointer_drag = true;
 pub const chrome_top_override: ?f64 = 40;
-pub const PointIsDraggableFn = types.PointIsDraggableFn;
 
 const HWND = ?*anyopaque;
 const BOOL = i32;
@@ -63,19 +62,8 @@ const DoubleClickLimits = struct {
 
 pub const State = struct {
     root: HWND = null,
-    drag_context: ?*const anyopaque = null,
-    point_is_draggable: ?PointIsDraggableFn = null,
     first_press: ?Press = null,
 };
-
-pub fn prepareStartup(
-    state: *State,
-    context: *const anyopaque,
-    point_is_draggable: PointIsDraggableFn,
-) !void {
-    state.drag_context = context;
-    state.point_is_draggable = point_is_draggable;
-}
 
 pub fn captureStartupWindow(
     state: *State,
@@ -103,7 +91,7 @@ pub fn handlePointerDown(
         return error.WindowUnavailable;
     }
 
-    const press = authorizePress(state, root) orelse {
+    const press = authorizePress(root) orelse {
         resetPointerSequence(state);
         return .ignored;
     };
@@ -136,7 +124,7 @@ pub fn deinit(state: *State) void {
     state.* = .{};
 }
 
-fn authorizePress(state: *const State, root: HWND) ?Press {
+fn authorizePress(root: HWND) ?Press {
     const primary_button = if (GetSystemMetrics(sm_swapbutton) != 0)
         vk_rbutton
     else
@@ -155,12 +143,10 @@ fn authorizePress(state: *const State, root: HWND) ?Press {
     if (ScreenToClient(root, &client_point) == 0) return null;
     const dpi = @max(GetDpiForWindow(root), 96);
     const scale = @as(f64, @floatFromInt(dpi)) / 96.0;
-    const context = state.drag_context orelse return null;
-    const point_is_draggable = state.point_is_draggable orelse return null;
-    if (!point_is_draggable(
-        context,
+    if (!types.pointInTopBand(
         @as(f64, @floatFromInt(client_point.x)) / scale,
         @as(f64, @floatFromInt(client_point.y)) / scale,
+        chrome_top_override.?,
     )) return null;
 
     var window_rect: Rect = undefined;

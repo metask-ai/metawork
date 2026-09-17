@@ -126,7 +126,7 @@ pub const Adapter = struct {
             .canonicalize_directory_fn = canonicalizeDirectory,
             .random_fn = random,
             .window_chrome_connect_fn = windowChromeConnect,
-            .window_chrome_sync_fn = windowChromeSync,
+            .window_chrome_refresh_fn = windowChromeRefresh,
             .window_chrome_pointer_fn = windowChromePointer,
             .window_chrome_control_fn = windowChromeControl,
             .window_chrome_disconnect_fn = windowChromeDisconnect,
@@ -407,20 +407,14 @@ pub const Adapter = struct {
         );
     }
 
-    fn windowChromeSync(
+    fn windowChromeRefresh(
         context: ?*anyopaque,
         window_id: native_sdk.platform.WindowId,
-        viewport_width: f64,
-        viewport_height: f64,
-        regions: []const bridge_api.WindowChromeRegion,
     ) anyerror!bridge_api.WindowChromePlatformEnvironment {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        return self.window.sync(
+        return self.window.refresh(
             self.platform_services orelse return error.RuntimeUnavailable,
             window_id,
-            viewport_width,
-            viewport_height,
-            regions,
         );
     }
 
@@ -428,7 +422,7 @@ pub const Adapter = struct {
         context: ?*anyopaque,
         window_id: native_sdk.platform.WindowId,
         pointer: bridge_api.WindowChromePointer,
-    ) anyerror!bridge_api.WindowChromePlatformEnvironment {
+    ) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
         return self.window.handlePointer(
             self.platform_services orelse return error.RuntimeUnavailable,
@@ -449,11 +443,10 @@ pub const Adapter = struct {
         context: ?*anyopaque,
         window_id: native_sdk.platform.WindowId,
         action: bridge_api.WindowChromeControlAction,
-    ) anyerror!bridge_api.WindowChromePlatformEnvironment {
+    ) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
         return self.window.control(
             self.native_runtime orelse return error.RuntimeUnavailable,
-            self.platform_services orelse return error.RuntimeUnavailable,
             window_id,
             action,
         );

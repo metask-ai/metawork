@@ -236,76 +236,95 @@ export function AppShell({
       <WindowTitlebar className="workbench-commandbar">
         <div
           className="commandbar-leading-actions"
-          inert={overlay ? true : undefined}
+          data-metawork-window-drag-exclude={overlay ? "" : undefined}
         >
-          {leftAvailable && (
+          <div
+            className="commandbar-inert-content"
+            inert={overlay ? true : undefined}
+          >
+            {leftAvailable && (
+              <button
+                className="icon-button focus-ring"
+                aria-controls="workspace-sidebar"
+                aria-expanded={leftOpen}
+                aria-label={t("app.toggle_sidebar")}
+                title={t("app.toggle_sidebar")}
+                onClick={toggleLeft}
+              >
+                <Icon name="sidebar" />
+              </button>
+            )}
             <button
               className="icon-button focus-ring"
-              aria-controls="workspace-sidebar"
-              aria-expanded={leftOpen}
-              aria-label={t("app.toggle_sidebar")}
-              title={t("app.toggle_sidebar")}
-              onClick={toggleLeft}
+              aria-label={t("search.open")}
+              onClick={onSearch}
             >
-              <Icon name="sidebar" />
+              <Icon name="search" />
             </button>
-          )}
-          <button
-            className="icon-button focus-ring"
-            aria-label={t("search.open")}
-            onClick={onSearch}
-          >
-            <Icon name="search" />
-          </button>
+          </div>
         </div>
         <div
           className="commandbar-context"
           data-visible={contextVisible}
-          inert={overlay ? true : undefined}
+          data-metawork-window-drag-exclude={overlay ? "" : undefined}
         >
-          {contextVisible &&
-            (contextContent ?? (
-              <span className="commandbar-task">{taskTitle}</span>
-            ))}
+          <div
+            className="commandbar-inert-content"
+            inert={overlay ? true : undefined}
+          >
+            {contextVisible &&
+              (contextContent ?? (
+                <span className="commandbar-task">{taskTitle}</span>
+              ))}
+          </div>
         </div>
         <div
           className="commandbar-alert-slot"
-          inert={overlay ? true : undefined}
+          data-metawork-window-drag-exclude={overlay ? "" : undefined}
         >
-          {headerActions}
-          <button
-            type="button"
-            ref={rightPanelToggleRef}
-            className="icon-button focus-ring"
-            aria-controls="task-panel"
-            aria-expanded={effectiveRightPanelOpen}
-            aria-label={t(
-              effectiveRightPanelOpen ? "task_panel.close" : "task_panel.open",
-            )}
-            title={t(
-              effectiveRightPanelOpen ? "task_panel.close" : "task_panel.open",
-            )}
-            onClick={(event) => onToggleRightPanel(event.currentTarget)}
+          <div
+            className="commandbar-inert-content"
+            inert={overlay ? true : undefined}
           >
-            <Icon name="sidebar-right" />
-          </button>
-          <span
-            className="sr-only"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-          >
-            {attentionNotice ?? ""}
-          </span>
-          {attentionNotice && (
-            <details ref={attentionDetails} className="commandbar-alert">
-              <summary aria-label={attentionNotice}>
-                <Icon name="warning" />
-                <span>{attentionNotice}</span>
-              </summary>
-              <p>{attentionNotice}</p>
-            </details>
-          )}
+            {headerActions}
+            <button
+              type="button"
+              ref={rightPanelToggleRef}
+              className="icon-button focus-ring"
+              aria-controls="task-panel"
+              aria-expanded={effectiveRightPanelOpen}
+              aria-label={t(
+                effectiveRightPanelOpen
+                  ? "task_panel.close"
+                  : "task_panel.open",
+              )}
+              title={t(
+                effectiveRightPanelOpen
+                  ? "task_panel.close"
+                  : "task_panel.open",
+              )}
+              onClick={(event) => onToggleRightPanel(event.currentTarget)}
+            >
+              <Icon name="sidebar-right" />
+            </button>
+            <span
+              className="sr-only"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              {attentionNotice ?? ""}
+            </span>
+            {attentionNotice && (
+              <details ref={attentionDetails} className="commandbar-alert">
+                <summary aria-label={attentionNotice}>
+                  <Icon name="warning" />
+                  <span>{attentionNotice}</span>
+                </summary>
+                <p>{attentionNotice}</p>
+              </details>
+            )}
+          </div>
         </div>
         <WindowControls
           labels={{

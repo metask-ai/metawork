@@ -1,212 +1,335 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-
 import {
   assertDisconnected,
+  assertWindowChromeHandled,
   decodeWindowChromeEnvironment,
 } from "../frontend/src/bridge/decode-contracts.ts";
 import { installWindowChromeBridge } from "../frontend/src/bridge/window-chrome.ts";
 import { commands } from "../frontend/src/bridge/commands.ts";
 
-const environment = {
-  generation: "7",
-  insets: { top: 52, left: 72, bottom: 0, right: 138 },
-  buttons: { x: 0, y: 0, width: 138, height: 52 },
-  livePointerDrag: true,
-  rendererControls: true,
-  maximized: false,
+const fixture = JSON.parse(
+  readFileSync(
+    new URL("../src/bridge/window_chrome.fixture", import.meta.url),
+    "utf8",
+  ),
+);
+const environment = fixture.environment;
+const ack = fixture.handled;
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
 };
+async function settle() {
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+}
 
-test("window chrome environment is runtime-decoded at the Bridge boundary", () => {
-  assert.deepEqual(decodeWindowChromeEnvironment(environment), environment);
-  const fractionalDpiEnvironment = {
-    ...environment,
-    insets: { top: 32.8, left: 0, bottom: 0, right: 138.4 },
-    buttons: { x: 1041.6, y: 0, width: 138.4, height: 32.8 },
-  };
-  assert.deepEqual(
-    decodeWindowChromeEnvironment(fractionalDpiEnvironment),
-    fractionalDpiEnvironment,
-  );
-  for (const malformed of [
-    { ...environment, generation: "0" },
-    { ...environment, insets: { ...environment.insets, top: -1 } },
-    { ...environment, buttons: { ...environment.buttons, width: Infinity } },
-    { ...environment, livePointerDrag: "false" },
-    { ...environment, rendererControls: "true" },
-    { ...environment, maximized: "false" },
-  ])
-    assert.throws(() => decodeWindowChromeEnvironment(malformed));
-});
-
-test("window chrome disconnect acknowledges the exact document generation", () => {
-  assert.doesNotThrow(() =>
-    assertDisconnected({ generation: "7", detached: true }, "7"),
-  );
-  assert.throws(() =>
-    assertDisconnected({ generation: "8", detached: true }, "7"),
-  );
-});
-
-test("Native SDK resize keeps one generation and latest-only sync preserves controls on failure", async () => {
+function setup(t, options = {}) {
   const dom = new JSDOM(
-    '<!doctype html><html><body><div data-metawork-window-drag><button data-metawork-window-control="minimize">minimize</button></div></body></html>',
+    '<!doctype html><html><body><header data-metawork-window-drag><span id="title">title</span><button data-metawork-window-control="toggle_maximize"><svg><path/></svg></button><button id="disabled" disabled>disabled</button></header><main>content</main><aside id="overlay">overlay</aside></body></html>',
     { pretendToBeVisual: true },
   );
-  const previous = {
-    window: globalThis.window,
-    document: globalThis.document,
-    Element: globalThis.Element,
-    ResizeObserver: globalThis.ResizeObserver,
-    MutationObserver: globalThis.MutationObserver,
+  const previous = Object.fromEntries(
+    ["window", "document", "Element"].map((k) => [k, globalThis[k]]),
+  );
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    Element: dom.window.Element,
+  });
+  const calls = [],
+    listeners = new Map(),
+    handlers = new Map();
+  const nativeAdd = dom.window.document.addEventListener.bind(
+    dom.window.document,
+  );
+  dom.window.document.addEventListener = (name, handler, ...args) => {
+    handlers.set(name, handler);
+    nativeAdd(name, handler, ...args);
   };
-  const frames = [];
-  let nextFrame = 1;
-  const listeners = new Map();
-  const calls = [];
-  const pendingSyncs = [];
-  let failNextSync = false;
-  let unsubscribed = false;
-
-  class ResizeObserverStub {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  }
-
+  let refreshReply = () => environment;
   const bridge = {
     invoke(command, payload) {
       calls.push({ command, payload });
       if (command === commands.windowChromeConnect)
-        return Promise.resolve(environment);
-      if (command === commands.windowChromeSync) {
-        if (failNextSync) {
-          failNextSync = false;
-          return Promise.reject(new Error("sync failed"));
-        }
-        if (pendingSyncs.length > 0)
-          return new Promise((resolve) => pendingSyncs.shift()(resolve));
-        return Promise.resolve(environment);
-      }
+        return options.connect?.promise ?? Promise.resolve(environment);
+      if (command === commands.windowChromeRefresh)
+        return Promise.resolve().then(() => refreshReply());
+      if (command === commands.windowChromeControl)
+        return options.control?.promise ?? Promise.resolve(ack);
+      if (command === commands.windowChromePointer)
+        return options.pointer?.promise ?? Promise.resolve(ack);
       if (command === commands.windowChromeDisconnect)
-        return Promise.resolve({ generation: "7", detached: true });
-      return Promise.resolve(environment);
+        return Promise.resolve({
+          generation: payload.generation,
+          detached: true,
+        });
+      throw new Error(command);
     },
     on(name, callback) {
       listeners.set(name, callback);
-      return () => {
-        listeners.delete(name);
-        unsubscribed = true;
-      };
+      return () => listeners.delete(name);
     },
   };
-
-  try {
-    globalThis.window = dom.window;
-    globalThis.document = dom.window.document;
-    globalThis.Element = dom.window.Element;
-    globalThis.ResizeObserver = ResizeObserverStub;
-    globalThis.MutationObserver = dom.window.MutationObserver;
-    Object.defineProperty(dom.window, "zero", {
-      configurable: true,
-      value: bridge,
+  dom.window.zero = bridge;
+  const dispose = installWindowChromeBridge();
+  const query = (selector) => dom.window.document.querySelector(selector);
+  const pointer = (target, extra = {}) => {
+    const path = [];
+    for (let node = target; node; node = node.parentNode ?? node.host)
+      path.push(node);
+    handlers.get("pointerdown")({
+      isTrusted: true,
+      isPrimary: true,
+      button: 0,
+      clientX: 200,
+      clientY: 20,
+      composedPath: () => path,
+      ...extra,
     });
-    dom.window.requestAnimationFrame = (callback) => {
-      frames.push(callback);
-      return nextFrame++;
-    };
-    dom.window.cancelAnimationFrame = () => {};
-    const candidate = dom.window.document.querySelector(
-      "[data-metawork-window-drag]",
-    );
-    const control = dom.window.document.querySelector("button");
-    candidate.getBoundingClientRect = () => domRect(dom.window, 0, 0, 500, 40);
-    control.getBoundingClientRect = () => domRect(dom.window, 450, 0, 46, 40);
-
-    const cleanup = installWindowChromeBridge();
+  };
+  const count = (command) =>
+    calls.filter((call) => call.command === command).length;
+  t.after(async () => {
+    dispose();
     await settle();
-    flushFrame(frames);
-    await settle();
-    assert.equal(countCalls(calls, commands.windowChromeConnect), 1);
-    assert.equal(countCalls(calls, commands.windowChromeSync), 1);
-    assert.equal(
-      dom.window.document.documentElement.dataset
-        .metaworkRendererWindowControls,
-      "true",
-    );
-
-    pendingSyncs.push((resolve) => {
-      pendingSyncs.resolve = resolve;
-    });
-    listeners.get("resize")({ width: 900, height: 600, scale: 1 });
-    flushFrame(frames);
-    await settle();
-    listeners.get("resize")({ width: 910, height: 610, scale: 1 });
-    listeners.get("resize")({ width: 920, height: 620, scale: 1 });
-    assert.equal(countCalls(calls, commands.windowChromeConnect), 1);
-    assert.equal(countCalls(calls, commands.windowChromeSync), 2);
-    pendingSyncs.resolve(environment);
-    await settle();
-    flushFrame(frames);
-    await settle();
-    assert.equal(countCalls(calls, commands.windowChromeSync), 3);
-
-    failNextSync = true;
-    listeners.get("resize")({ width: 930, height: 630, scale: 1 });
-    flushFrame(frames);
-    await settle();
-    assert.equal(countCalls(calls, commands.windowChromeConnect), 1);
-    assert.equal(countCalls(calls, commands.windowChromeDisconnect), 0);
-    assert.equal(
-      dom.window.document.documentElement.dataset
-        .metaworkRendererWindowControls,
-      "true",
-    );
-
-    dom.window.dispatchEvent(new dom.window.Event("blur"));
-    await settle();
-    const resets = calls.filter(
-      (call) =>
-        call.command === commands.windowChromePointer &&
-        call.payload.phase === "reset",
-    );
-    assert.deepEqual(resets, [
-      {
-        command: commands.windowChromePointer,
-        payload: { generation: "7", phase: "reset" },
-      },
-    ]);
-
-    cleanup();
-    await settle();
-    assert.equal(countCalls(calls, commands.windowChromeDisconnect), 1);
-    assert.equal(unsubscribed, true);
-  } finally {
     dom.window.close();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete globalThis[key];
       else globalThis[key] = value;
     }
-  }
+  });
+  return {
+    dom,
+    calls,
+    listeners,
+    handlers,
+    dispose,
+    query,
+    pointer,
+    count,
+    refreshReply(value) {
+      refreshReply = value;
+    },
+    get maximized() {
+      return dom.window.document.documentElement.dataset
+        .metaworkWindowMaximized;
+    },
+  };
+}
+
+test("shared Host wire fixture decodes strictly and action ack contains no state", () => {
+  assert.deepEqual(decodeWindowChromeEnvironment(environment), environment);
+  assertWindowChromeHandled(ack, "7");
+  assertDisconnected(fixture.disconnected, "7");
+  for (const malformed of [
+    { ...environment, generation: "0" },
+    { ...environment, insets: { ...environment.insets, top: -1 } },
+    { ...environment, maximized: "false" },
+  ])
+    assert.throws(() => decodeWindowChromeEnvironment(malformed));
+  for (const malformed of [
+    environment,
+    { ...ack, generation: "8" },
+    { ...ack, handled: false },
+    { ...ack, maximized: true },
+  ])
+    assert.throws(() => assertWindowChromeHandled(malformed, "7"));
 });
 
-function domRect(window, x, y, width, height) {
-  return new window.DOMRect(x, y, width, height);
-}
+test("trusted pointer routes actual event path including SVG, controls, portals and inert ancestors", async (t) => {
+  const h = setup(t);
+  await settle();
+  h.pointer(h.query("#title"));
+  for (const selector of ["path", "#disabled", "main", "#overlay"])
+    h.pointer(h.query(selector));
+  const title = h.query("#title");
+  for (const attrs of [
+    { contenteditable: "" },
+    { role: "button" },
+    { tabindex: "-1" },
+    { "data-metawork-window-drag-exclude": "" },
+  ]) {
+    for (const [key, value] of Object.entries(attrs))
+      title.setAttribute(key, value);
+    h.pointer(title);
+    for (const key of Object.keys(attrs)) title.removeAttribute(key);
+  }
+  h.query("header").setAttribute("inert", "");
+  h.pointer(title);
+  h.query("header").removeAttribute("inert");
+  // A shadow descendant still excludes its button through the composed path.
+  const host = h.dom.window.document.createElement("span");
+  h.query("header").append(host);
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML = "<button><span>shadow control</span></button>";
+  h.pointer(shadow.querySelector("span"));
+  h.pointer(title, { isTrusted: false });
+  h.pointer(title, { isPrimary: false });
+  h.pointer(title, { button: 2 });
+  await settle();
+  const pointers = h.calls.filter(
+    (c) => c.command === commands.windowChromePointer,
+  );
+  assert.deepEqual(pointers[0].payload, {
+    generation: "7",
+    phase: "down",
+    x: 200,
+    y: 20,
+  });
+  assert.equal(pointers.length, 11);
+  for (const call of pointers.slice(1))
+    assert.deepEqual(call.payload, { generation: "7", phase: "reset" });
+});
 
-function flushFrame(frames) {
-  const frame = frames.shift();
-  assert.ok(frame, "an animation frame should be scheduled");
-  frame(0);
-}
+test("DOM changes and pointer classification do not scan or measure the document", async (t) => {
+  const h = setup(t);
+  await settle();
+  const before = h.calls.length;
+  h.query("main").append(h.dom.window.document.createElement("button"));
+  await settle();
+  assert.equal(h.calls.length, before);
+  h.dom.window.document.querySelectorAll = () => {
+    throw new Error("document scan");
+  };
+  const title = h.query("#title");
+  title.getBoundingClientRect = () => {
+    throw new Error("layout read");
+  };
+  h.pointer(title);
+  await settle();
+  assert.equal(h.count(commands.windowChromePointer), 1);
+});
 
-async function settle() {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-}
+test("SDK resize coalesces in-flight refresh and rejects stale state without reconnecting", async (t) => {
+  const h = setup(t);
+  await settle();
+  const first = deferred(),
+    second = deferred();
+  let reads = 0;
+  h.refreshReply(() => (++reads === 1 ? first.promise : second.promise));
+  h.listeners.get("resize")({});
+  await settle();
+  h.listeners.get("resize")({});
+  h.listeners.get("resize")({});
+  first.resolve({ ...environment, maximized: true });
+  await settle();
+  assert.equal(h.maximized, "false");
+  assert.equal(reads, 2);
+  second.resolve(environment);
+  await settle();
+  assert.equal(h.count(commands.windowChromeConnect), 1);
+  assert.equal(h.count(commands.windowChromeRefresh), 3);
+});
 
-function countCalls(calls, command) {
-  return calls.filter((call) => call.command === command).length;
-}
+test("control invalidates an older read and refreshes state even without resize", async (t) => {
+  const control = deferred();
+  const h = setup(t, { control });
+  await settle();
+  const oldRead = deferred();
+  h.refreshReply(() => oldRead.promise);
+  h.listeners.get("resize")({});
+  await settle();
+  h.query("path").dispatchEvent(
+    new h.dom.window.MouseEvent("click", { bubbles: true }),
+  );
+  oldRead.resolve({ ...environment, maximized: true });
+  await settle();
+  assert.equal(h.maximized, "false");
+  h.refreshReply(() => ({ ...environment, maximized: true }));
+  control.resolve(ack);
+  await settle();
+  assert.equal(h.maximized, "true");
+  assert.equal(h.query("[data-metawork-window-control]").disabled, false);
+  assert.equal(h.query("#disabled").disabled, true);
+});
+
+test("refresh failure preserves controls and focus can refresh without reconnecting", async (t) => {
+  const h = setup(t);
+  await settle();
+  h.refreshReply(() => {
+    throw new Error("unavailable");
+  });
+  h.listeners.get("resize")({});
+  await settle();
+  assert.equal(h.maximized, "false");
+  h.dom.window.dispatchEvent(new h.dom.window.Event("blur"));
+  h.refreshReply(() => ({ ...environment, maximized: true }));
+  h.dom.window.dispatchEvent(new h.dom.window.Event("focus"));
+  await settle();
+  assert.equal(h.maximized, "true");
+  assert.equal(h.count(commands.windowChromeConnect), 1);
+  assert.deepEqual(
+    h.calls.find((c) => c.command === commands.windowChromePointer).payload,
+    { generation: "7", phase: "reset" },
+  );
+});
+
+test("pending pointer ack does not queue a second gesture or replay failed input", async (t) => {
+  const pending = deferred();
+  const h = setup(t, { pointer: pending });
+  await settle();
+  h.pointer(h.query("#title"));
+  h.pointer(h.query("main"));
+  h.pointer(h.query("#title"));
+  assert.equal(h.count(commands.windowChromePointer), 3);
+  pending.reject(new Error("rejected"));
+  await settle();
+  assert.equal(h.count(commands.windowChromePointer), 3);
+  assert.equal(h.count(commands.windowChromeConnect), 1);
+});
+
+test("late connect after dispose only revokes its generation and cannot revive UI", async (t) => {
+  const connect = deferred();
+  const h = setup(t, { connect });
+  h.dispose();
+  h.dom.window.document.documentElement.dataset.metaworkWindowChrome =
+    "replacement";
+  connect.resolve(environment);
+  await settle();
+  assert.equal(h.count(commands.windowChromeDisconnect), 1);
+  assert.equal(h.count(commands.windowChromeRefresh), 0);
+  assert.equal(
+    h.dom.window.document.documentElement.dataset.metaworkWindowChrome,
+    "replacement",
+  );
+  assert.equal(h.listeners.size, 0);
+});
+
+test("pagehide disposes listeners once and late refresh cannot overwrite replacement UI", async (t) => {
+  const h = setup(t);
+  await settle();
+  const pending = deferred();
+  h.refreshReply(() => pending.promise);
+  h.listeners.get("resize")({});
+  await settle();
+  h.dom.window.dispatchEvent(new h.dom.window.Event("pagehide"));
+  h.dispose();
+  h.dom.window.document.documentElement.dataset.metaworkWindowMaximized =
+    "replacement";
+  pending.resolve({ ...environment, maximized: true });
+  await settle();
+  assert.equal(h.maximized, "replacement");
+  assert.equal(h.count(commands.windowChromeDisconnect), 1);
+});
+
+test("late control completion cannot enable replacement controls after cleanup", async (t) => {
+  const control = deferred();
+  const h = setup(t, { control });
+  await settle();
+  const button = h.query("[data-metawork-window-control]");
+  button.click();
+  assert.equal(button.disabled, true);
+  h.dispose();
+  assert.equal(button.disabled, false);
+  button.disabled = true; // Owned by a replacement document installation.
+  control.resolve(ack);
+  await settle();
+  assert.equal(button.disabled, true);
+});
