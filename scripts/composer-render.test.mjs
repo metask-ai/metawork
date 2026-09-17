@@ -17,7 +17,7 @@ const vite = await createServer({
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
-const { AppShell, shouldDockTaskPanel } = await vite.ssrLoadModule(
+const { AppShell, resolveWorkbenchColumns } = await vite.ssrLoadModule(
   "/src/app/AppShell.tsx",
 );
 const { TaskContent } = await vite.ssrLoadModule(
@@ -434,13 +434,14 @@ test("Workbench keeps Search as an icon beside the sidebar control", () => {
 
 test("a closed empty side panel reserves no space but keeps its layout toggle", () => {
   const markup = renderShell(null);
-  assert.doesNotMatch(markup, /id="task-panel"/);
+  assert.match(markup, /id="task-panel"/);
+  assert.match(markup, /aria-hidden="true"/);
   assert.match(markup, /aria-controls="task-panel"/);
   assert.match(markup, /aria-label="Open side panel"/);
   const openEmpty = renderShell(null, true);
   assert.match(openEmpty, /id="task-panel"/);
   assert.match(openEmpty, /data-right-panel-open="true"/);
-  assert.match(openEmpty, /aria-label="Close side panel"/);
+  assert.match(openEmpty, /aria-label="Hide side panel"/);
   assert.match(markup, /data-right-panel-open="false"/);
 });
 
@@ -459,11 +460,56 @@ test("a closed Task Panel keeps its shell but unmounts its content", () => {
   assert.match(open, /aria-label="Resize side panel"/);
 });
 
-test("Task Panel docking preserves the 480px central task stage", () => {
-  assert.equal(shouldDockTaskPanel(1128, 248, 400), true);
-  assert.equal(shouldDockTaskPanel(1127, 248, 400), false);
-  assert.equal(shouldDockTaskPanel(960, 0, 400), true);
-  assert.equal(shouldDockTaskPanel(879, 0, 400), false);
+test("bounded proportional columns preserve both docked minimums", () => {
+  const resolve = (viewportWidth, leftOpen, leftWidth = 320) =>
+    resolveWorkbenchColumns({
+      containerWidth: viewportWidth,
+      leftOpen,
+      leftWidth,
+      rightOpen: true,
+      rightShare: 1 / 3,
+    });
+
+  assert.deepEqual(resolve(1440, true), {
+    availableWidth: 1120,
+    docked: true,
+    middleWidth: 746,
+    rightWidth: 374,
+    rightMinimum: 360,
+    rightMaximum: 760,
+    rightShare: 1 / 3,
+  });
+  assert.deepEqual(resolve(1200, true), {
+    availableWidth: 880,
+    docked: true,
+    middleWidth: 520,
+    rightWidth: 360,
+    rightMinimum: 360,
+    rightMaximum: 520,
+    rightShare: 1 / 3,
+  });
+  assert.deepEqual(
+    {
+      docked: resolve(1200, true, 480).docked,
+      middleWidth: resolve(1200, true, 480).middleWidth,
+      rightWidth: resolve(1200, true, 480).rightWidth,
+    },
+    { docked: true, middleWidth: 360, rightWidth: 360 },
+  );
+  assert.deepEqual(
+    {
+      docked: resolve(960, false).docked,
+      middleWidth: resolve(960, false).middleWidth,
+      rightWidth: resolve(960, false).rightWidth,
+    },
+    { docked: true, middleWidth: 600, rightWidth: 360 },
+  );
+  assert.equal(resolve(960, true).docked, false);
+
+  const ultrawide = resolve(2560, true);
+  assert.equal(ultrawide.docked, true);
+  assert.equal(ultrawide.rightWidth, 747);
+  assert.equal(ultrawide.middleWidth, 1493);
 });
 
 test("Settings uses the global stage without retaining the Task sidebar", () => {

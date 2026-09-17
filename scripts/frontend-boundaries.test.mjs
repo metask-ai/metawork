@@ -410,6 +410,52 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
   assert.doesNotMatch(settings, /settings-workspaces|WorkspaceSettings/);
 });
 
+test("workbench columns use bounded proportional Flex without an overlay resizer", async () => {
+  const shell = await readFile(
+    resolve(sourceRoot, "app", "AppShell.tsx"),
+    "utf8",
+  );
+  const css = await readFile(resolve(sourceRoot, "index.css"), "utf8");
+
+  assert.match(
+    css,
+    /\.app-window\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);[^}]*\}/,
+  );
+  assert.match(
+    css,
+    /\.app-columns\s*\{[^}]*display: flex;[^}]*width: 100%;[^}]*min-width: 0;[^}]*overflow: hidden;/,
+  );
+  assert.doesNotMatch(css, /\.app-columns\s*\{[^}]*grid-template-columns:/);
+  assert.match(
+    css,
+    /\.workspace-sidebar\s*\{[\s\S]*?flex: 0 0 var\(--left-column\);/,
+  );
+  assert.match(
+    css,
+    /data-right-panel-docked="true"\] \.task-panel\s*\{[\s\S]*?flex: 0 0 var\(--right-panel-width\);/,
+  );
+  assert.doesNotMatch(css, /--task-(?:stage|panel)-share/);
+  assert.doesNotMatch(css, /transition:[^;]*flex-basis/s);
+  assert.doesNotMatch(
+    css,
+    /data-right-panel-docked="true"\] \.task-panel\s*\{[^}]*max-width:/,
+  );
+  assert.match(
+    css,
+    /\.task-panel-resize-handle\s*\{[\s\S]*?position: relative;[\s\S]*?flex: 0 0 10px;[\s\S]*?margin-inline: -5px;/,
+  );
+  assert.doesNotMatch(
+    css,
+    /data-right-panel-docked="false"\] \.task-panel-resize-handle/,
+  );
+  assert.match(shell, /metawork\.panel\.task\.share/);
+  assert.doesNotMatch(shell, /metawork\.panel\.task\.width/);
+  assert.match(shell, /new ResizeObserver/);
+  assert.match(shell, /ref=\{workbenchElement\}[\s\S]*?className="app-window"/);
+  assert.doesNotMatch(shell, /<div\s+ref=\{[^}]+\}\s+className="app-columns"/);
+  assert.match(shell, /\{rightPanelDocked && \(/);
+});
+
 test("Renderer draws declarative titlebar controls while Bridge and Host own native behavior", async () => {
   const shell = await readFile(
     resolve(sourceRoot, "app", "AppShell.tsx"),
@@ -460,6 +506,21 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.doesNotMatch(css, /\[data-platform=/);
   assert.match(css, /\.window-controls/);
   assert.match(css, /--window-bar-height: 52px/);
+  assert.match(
+    css,
+    /\.app-window\[data-left-open="true"\] \.workbench-commandbar::before \{[\s\S]*?top: calc\(0px - env\(safe-area-inset-top, 0px\)\);/,
+    "the left rail surface and divider must cross the native safe-area inset",
+  );
+  assert.match(
+    css,
+    /\.workspace-resize-handle::after \{[\s\S]*?position: fixed;[\s\S]*?top: 0;[\s\S]*?bottom: 0;[\s\S]*?left: calc\(var\(--left-column\) - 1px\);/,
+    "left resize feedback must remain one continuous full-window divider",
+  );
+  assert.match(
+    css,
+    /\.app-window\[data-resizing-left="true"\] \.workspace-resize-handle::after/,
+    "captured pointer resizing must preserve the continuous divider feedback",
+  );
   assert.match(
     chromeBridge,
     /const candidateSelector = "\[data-metawork-window-drag\]"/,

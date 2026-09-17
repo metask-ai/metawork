@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 const MAX_CODE_UNITS = 65_536;
 const MAX_LINES = 1_500;
@@ -260,11 +267,16 @@ export function HighlightedSource({
   displayPath,
   content,
   loadHighlighter = loadDefaultHighlighter,
+  scrollTop,
+  onScrollTopChange,
 }: {
   displayPath: string;
   content: string;
   loadHighlighter?: LoadHighlighter;
+  scrollTop?: number;
+  onScrollTopChange?: (scrollTop: number) => void;
 }) {
+  const scrollContainer = useRef<HTMLDivElement | null>(null);
   const language = resolvePreviewLanguage(displayPath, content);
   const highlightIdentity = useMemo(
     () => Symbol("source-highlight"),
@@ -309,8 +321,18 @@ export function HighlightedSource({
     [content],
   );
 
+  useLayoutEffect(() => {
+    if (scrollTop === undefined || !scrollContainer.current) return;
+    scrollContainer.current.scrollTop = scrollTop;
+  }, [content, displayPath, scrollTop]);
+
   return (
-    <div className="task-panel-code focus-ring" tabIndex={0}>
+    <div
+      ref={scrollContainer}
+      className="task-panel-code focus-ring"
+      tabIndex={0}
+      onScroll={(event) => onScrollTopChange?.(event.currentTarget.scrollTop)}
+    >
       <div className="task-panel-code-layout">
         <pre className="task-panel-code-gutter" aria-hidden="true">
           {lineNumbers}

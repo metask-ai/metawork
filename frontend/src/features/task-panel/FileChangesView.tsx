@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 
 import type {
   FileChangeDiffResult,
@@ -177,15 +177,18 @@ function RecordedFileSection({
   group,
   index,
   diffs,
+  expanded,
+  onExpandedChange,
   onLoad,
 }: {
   group: FileChangeGroup;
   index: number;
   diffs: Record<string, FileChangeDiffViewState>;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
   onLoad: (change: FileChangeView) => void;
 }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(true);
   const records = group.changes.map((change) => ({
     change,
     state: diffs[change.id] ?? ({ phase: "idle", diff: null } as const),
@@ -255,7 +258,7 @@ function RecordedFileSection({
           aria-controls={diffId}
           aria-labelledby={headingId}
           aria-describedby={`${kindId}${partial ? ` ${partialId}` : ""}`}
-          onClick={() => setExpanded((current) => !current)}
+          onClick={() => onExpandedChange(!expanded)}
         >
           <span
             id={kindId}
@@ -372,20 +375,35 @@ export function FileChangesView({
   observation,
   changes,
   diffs,
+  expandedFiles,
+  scrollTop,
+  onFileExpandedChange,
+  onScrollTopChange,
   onLoad,
 }: {
   observation: RunFileChanges["observation"];
   changes: FileChangeView[];
   diffs: Record<string, FileChangeDiffViewState>;
+  expandedFiles: Record<string, boolean>;
+  scrollTop: number;
+  onFileExpandedChange: (displayPath: string, expanded: boolean) => void;
+  onScrollTopChange: (scrollTop: number) => void;
   onLoad: (change: FileChangeView) => void;
 }) {
   const { t } = useI18n();
   const groups = useMemo(() => groupFileChanges(changes), [changes]);
+  const review = useRef<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (review.current) review.current.scrollTop = scrollTop;
+  }, [scrollTop]);
 
   return (
     <section
+      ref={review}
       className="task-panel-review"
       aria-label={t("file_changes.review")}
+      onScroll={(event) => onScrollTopChange(event.currentTarget.scrollTop)}
     >
       {observation === "incomplete" && (
         <div className="task-panel-review-warning" role="status">
@@ -400,6 +418,10 @@ export function FileChangesView({
             group={group}
             index={index}
             diffs={diffs}
+            expanded={expandedFiles[group.displayPath] ?? true}
+            onExpandedChange={(expanded) =>
+              onFileExpandedChange(group.displayPath, expanded)
+            }
             onLoad={onLoad}
           />
         ))}

@@ -21,23 +21,84 @@ import {
 
 const leftPreference = "metawork.panel.workspaces";
 const leftWidthPreference = "metawork.panel.workspaces.width";
-const defaultLeftWidth = 248;
-const minimumLeftWidth = 208;
-const maximumLeftWidth = 360;
+const defaultLeftWidth = 320;
+const minimumLeftWidth = 240;
+const maximumLeftWidth = 480;
 const leftWidthStep = 16;
-const rightWidthPreference = "metawork.panel.task.width";
-const defaultRightWidth = 400;
-const minimumRightWidth = 320;
-const maximumRightWidth = 640;
-const minimumTaskStageWidth = 480;
+const rightSharePreference = "metawork.panel.task.share";
+const defaultRightShare = 1 / 3;
+const defaultRightOverlayWidth = 400;
+const minimumRightWidth = 360;
+const minimumTaskStageWidth = 360;
+const minimumDockedWorkAreaWidth = minimumTaskStageWidth + minimumRightWidth;
 const rightWidthStep = 16;
 
-export function shouldDockTaskPanel(
-  viewportWidth: number,
-  leftWidth: number,
-  rightWidth: number,
-) {
-  return viewportWidth - leftWidth - rightWidth >= minimumTaskStageWidth;
+function normalizeRightShare(value: number) {
+  return Number.isFinite(value) && value > 0 && value < 1
+    ? value
+    : defaultRightShare;
+}
+
+export function resolveWorkbenchColumns({
+  containerWidth,
+  leftOpen,
+  leftWidth,
+  rightOpen,
+  rightShare,
+}: {
+  containerWidth: number;
+  leftOpen: boolean;
+  leftWidth: number;
+  rightOpen: boolean;
+  rightShare: number;
+}) {
+  const resolvedContainerWidth =
+    Number.isFinite(containerWidth) && containerWidth > 0
+      ? Math.floor(containerWidth)
+      : 0;
+  const dockedLeftWidth =
+    leftOpen && resolvedContainerWidth >= 820 ? clampLeftWidth(leftWidth) : 0;
+  const availableWidth = Math.max(0, resolvedContainerWidth - dockedLeftWidth);
+  const normalizedRightShare = normalizeRightShare(rightShare);
+  const rightMinimum = minimumRightWidth;
+  const rightMaximum = Math.max(
+    minimumRightWidth,
+    availableWidth - minimumTaskStageWidth,
+  );
+  const docked = rightOpen && availableWidth >= minimumDockedWorkAreaWidth;
+
+  if (!docked) {
+    return {
+      availableWidth,
+      docked,
+      middleWidth: availableWidth,
+      rightWidth: rightOpen
+        ? Math.min(
+            defaultRightOverlayWidth,
+            Math.max(0, resolvedContainerWidth - 44),
+          )
+        : 0,
+      rightMinimum,
+      rightMaximum,
+      rightShare: normalizedRightShare,
+    };
+  }
+
+  const rightWidth = Math.ceil(
+    Math.min(
+      rightMaximum,
+      Math.max(rightMinimum, availableWidth * normalizedRightShare),
+    ),
+  );
+  return {
+    availableWidth,
+    docked,
+    middleWidth: availableWidth - rightWidth,
+    rightWidth,
+    rightMinimum: Math.ceil(rightMinimum),
+    rightMaximum: Math.ceil(rightMaximum),
+    rightShare: normalizedRightShare,
+  };
 }
 
 export function isTaskStageExposed({
@@ -71,15 +132,11 @@ function initialLeftWidth() {
   return Number.isFinite(parsed) ? clampLeftWidth(parsed) : defaultLeftWidth;
 }
 
-function clampRightWidth(value: number) {
-  return Math.min(maximumRightWidth, Math.max(minimumRightWidth, value));
-}
-
-function initialRightWidth() {
-  const stored = readLocalPreference(rightWidthPreference);
-  if (stored === null) return defaultRightWidth;
+function initialRightShare() {
+  const stored = readLocalPreference(rightSharePreference);
+  if (stored === null) return defaultRightShare;
   const parsed = Number(stored);
-  return Number.isFinite(parsed) ? clampRightWidth(parsed) : defaultRightWidth;
+  return normalizeRightShare(parsed);
 }
 
 function initialPanel(key: string, minimumWidth: number) {
@@ -126,30 +183,26 @@ export function AppShell({
     initialPanel(leftPreference, 820),
   );
   const [leftWidth, setLeftWidth] = useState(initialLeftWidth);
-  const [rightWidth, setRightWidth] = useState(initialRightWidth);
+  const [rightShare, setRightShare] = useState(initialRightShare);
   const [resizingLeft, setResizingLeft] = useState(false);
   const [resizingRight, setResizingRight] = useState(false);
-  const [viewportWidth, setViewportWidth] = useState(() =>
+  const [workbenchWidth, setWorkbenchWidth] = useState(() =>
     typeof window === "undefined" ? 1440 : window.innerWidth,
   );
+  const workbenchElement = useRef<HTMLElement>(null);
   const leftAvailable = left !== null;
   const effectiveLeftOpen = leftAvailable && leftOpen;
-  const rightPanelAvailable = rightPanel !== null;
   const effectiveRightPanelOpen = rightPanelOpen;
-  const rightResizeMaximum = Math.max(
-    minimumRightWidth,
-    Math.min(maximumRightWidth, viewportWidth - 44),
-  );
-  const renderedRightWidth = Math.min(rightWidth, rightResizeMaximum);
-  const rightPanelDocked =
-    effectiveRightPanelOpen &&
-    shouldDockTaskPanel(
-      viewportWidth,
-      effectiveLeftOpen ? leftWidth : 0,
-      rightWidth,
-    );
+  const columns = resolveWorkbenchColumns({
+    containerWidth: workbenchWidth,
+    leftOpen: effectiveLeftOpen,
+    leftWidth,
+    rightOpen: effectiveRightPanelOpen,
+    rightShare,
+  });
+  const rightPanelDocked = columns.docked;
   const taskStageExposed = isTaskStageExposed({
-    viewportWidth,
+    viewportWidth: workbenchWidth,
     leftOpen: effectiveLeftOpen,
     rightPanelOpen: effectiveRightPanelOpen,
     rightPanelDocked,
@@ -172,21 +225,47 @@ export function AppShell({
     };
   }, []);
 
-  useEffect(() => {
-    const observeViewport = () => setViewportWidth(window.innerWidth);
-    window.addEventListener("resize", observeViewport);
-    return () => window.removeEventListener("resize", observeViewport);
+  useLayoutEffect(() => {
+    const element = workbenchElement.current;
+    if (!element) return;
+    const measure = (observedWidth?: number) => {
+      const measuredWidth =
+        observedWidth && observedWidth > 0
+          ? observedWidth
+          : element.getBoundingClientRect().width;
+      const nextWidth = measuredWidth > 0 ? measuredWidth : window.innerWidth;
+      setWorkbenchWidth((current) =>
+        current === nextWidth ? current : nextWidth,
+      );
+    };
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver((entries) =>
+            measure(
+              entries.find((entry) => entry.target === element)?.contentRect
+                .width,
+            ),
+          );
+    observer?.observe(element);
+    const observeWindowFallback = () => measure();
+    window.addEventListener("resize", observeWindowFallback);
+    measure();
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", observeWindowFallback);
+    };
   }, []);
 
   useEffect(() => {
-    if (effectiveRightPanelOpen && window.innerWidth < 820) setLeftOpen(false);
-  }, [effectiveRightPanelOpen]);
+    if (effectiveRightPanelOpen && workbenchWidth < 820) setLeftOpen(false);
+  }, [effectiveRightPanelOpen, workbenchWidth]);
 
   useEffect(() => {
-    if (effectiveRightPanelOpen || !resizingRight) return;
-    writeLocalPreference(rightWidthPreference, String(rightWidth));
+    if (!resizingRight || (effectiveRightPanelOpen && rightPanelDocked)) return;
+    writeLocalPreference(rightSharePreference, String(rightShare));
     setResizingRight(false);
-  }, [effectiveRightPanelOpen, resizingRight, rightWidth]);
+  }, [effectiveRightPanelOpen, resizingRight, rightPanelDocked, rightShare]);
 
   useEffect(() => {
     if (overlay && attentionDetails.current)
@@ -195,13 +274,30 @@ export function AppShell({
 
   function toggleLeft() {
     const next = !leftOpen;
-    if (next && window.innerWidth < 820) onDismissRightPanel(false);
+    if (next && workbenchWidth < 820) onDismissRightPanel(false);
     writeLocalPreference(leftPreference, next ? "open" : "closed");
     setLeftOpen(next);
   }
 
+  function shareForRightWidth(width: number) {
+    if (columns.availableWidth <= 0) return defaultRightShare;
+    return normalizeRightShare(width / columns.availableWidth);
+  }
+
+  function changeRightWidth(width: number) {
+    setRightShare(shareForRightWidth(width));
+  }
+
+  function commitRightWidth(width: number) {
+    writeLocalPreference(
+      rightSharePreference,
+      String(shareForRightWidth(width)),
+    );
+  }
+
   return (
     <main
+      ref={workbenchElement}
       className="app-window"
       data-left-open={effectiveLeftOpen}
       data-right-panel-open={effectiveRightPanelOpen}
@@ -211,8 +307,7 @@ export function AppShell({
       style={
         {
           "--left-column-width": `${leftWidth}px`,
-          "--right-column-width": `${rightWidth}px`,
-          "--right-panel-rendered-width": `${renderedRightWidth}px`,
+          "--right-panel-width": `${columns.rightWidth}px`,
         } as CSSProperties
       }
       onKeyDown={(event) => {
@@ -286,22 +381,18 @@ export function AppShell({
             className="commandbar-inert-content"
             inert={overlay ? true : undefined}
           >
-            {headerActions}
+            <div className="commandbar-context-actions">{headerActions}</div>
             <button
               type="button"
               ref={rightPanelToggleRef}
-              className="icon-button focus-ring"
+              className="icon-button commandbar-task-panel-toggle focus-ring"
               aria-controls="task-panel"
               aria-expanded={effectiveRightPanelOpen}
               aria-label={t(
-                effectiveRightPanelOpen
-                  ? "task_panel.close"
-                  : "task_panel.open",
+                effectiveRightPanelOpen ? "task_panel.hide" : "task_panel.open",
               )}
               title={t(
-                effectiveRightPanelOpen
-                  ? "task_panel.close"
-                  : "task_panel.open",
+                effectiveRightPanelOpen ? "task_panel.hide" : "task_panel.open",
               )}
               onClick={(event) => onToggleRightPanel(event.currentTarget)}
             >
@@ -365,36 +456,32 @@ export function AppShell({
           />
         )}
         <section className="task-stage">{children}</section>
-        {(effectiveRightPanelOpen || resizingRight) && (
+        {rightPanelDocked && (
           <ResizableSeparator
             className="task-panel-resize-handle"
             label={t("app.resize_task_panel")}
-            value={renderedRightWidth}
-            minimum={minimumRightWidth}
-            maximum={rightResizeMaximum}
+            value={columns.rightWidth}
+            minimum={columns.rightMinimum}
+            maximum={columns.rightMaximum}
             step={rightWidthStep}
             reverse
-            onChange={setRightWidth}
-            onCommit={(width) =>
-              writeLocalPreference(rightWidthPreference, String(width))
-            }
+            onChange={changeRightWidth}
+            onCommit={commitRightWidth}
             onResizeStart={() => setResizingRight(true)}
             onResizeEnd={() => setResizingRight(false)}
           />
         )}
-        {(rightPanelAvailable || effectiveRightPanelOpen) && (
-          <aside
-            id="task-panel"
-            className="task-panel"
-            aria-labelledby={
-              effectiveRightPanelOpen ? "task-panel-title" : undefined
-            }
-            aria-hidden={!effectiveRightPanelOpen}
-            inert={!effectiveRightPanelOpen}
-          >
-            {effectiveRightPanelOpen ? rightPanel : null}
-          </aside>
-        )}
+        <aside
+          id="task-panel"
+          className="task-panel"
+          aria-labelledby={
+            effectiveRightPanelOpen ? "task-panel-title" : undefined
+          }
+          aria-hidden={!effectiveRightPanelOpen}
+          inert={!effectiveRightPanelOpen}
+        >
+          {effectiveRightPanelOpen ? rightPanel : null}
+        </aside>
       </div>
 
       {overlay && <div className="app-overlay-layer">{overlay}</div>}
@@ -404,7 +491,7 @@ export function AppShell({
           className="panel-scrim"
           aria-label={t("app.dismiss_panels")}
           onClick={() => {
-            if (window.innerWidth < 820) setLeftOpen(false);
+            if (workbenchWidth < 820) setLeftOpen(false);
           }}
         />
       )}

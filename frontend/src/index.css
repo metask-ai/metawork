@@ -3375,12 +3375,11 @@ button.run-process-tool:hover {
 
 .app-window {
   --left-column: 0px;
-  --left-column-width: 248px;
-  --right-column: 0px;
-  --right-column-width: 400px;
-  --right-panel-rendered-width: var(--right-column-width);
+  --left-column-width: 320px;
+  --right-panel-width: 0px;
   --workbench-content-surface: var(--ui-surface-panel);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--window-bar-height) minmax(0, 1fr);
   width: 100%;
   height: 100dvh;
@@ -3392,10 +3391,6 @@ button.run-process-tool:hover {
 
 .app-window[data-left-open="true"] {
   --left-column: var(--left-column-width);
-}
-
-.app-window[data-right-panel-docked="true"] {
-  --right-column: var(--right-column-width);
 }
 
 .workbench-commandbar {
@@ -3418,7 +3413,10 @@ button.run-process-tool:hover {
 .app-window[data-left-open="true"] .workbench-commandbar::before {
   position: absolute;
   z-index: 0;
-  inset: 0 auto 0 0;
+  top: calc(0px - env(safe-area-inset-top, 0px));
+  right: auto;
+  bottom: 0;
+  left: 0;
   width: var(--left-column);
   border-right: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
@@ -3577,11 +3575,23 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .commandbar-alert-slot {
   display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
   grid-column: 3;
+}
+
+.commandbar-context-actions {
+  display: flex;
   min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.commandbar-task-panel-toggle {
+  flex: 0 0 auto;
 }
 
 .commandbar-alert {
@@ -3637,15 +3647,16 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .app-columns {
   position: relative;
-  display: grid;
-  grid-template-columns: var(--left-column) minmax(0, 1fr) var(--right-column);
+  display: flex;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
-  transition: grid-template-columns 160ms ease;
+  overflow: hidden;
 }
 
 .workspace-resize-handle {
   position: absolute;
-  z-index: 30;
+  z-index: 51;
   top: 0;
   bottom: 0;
   left: calc(var(--left-column) - 5px);
@@ -3658,12 +3669,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-panel-resize-handle {
-  position: absolute;
+  position: relative;
   z-index: 30;
-  top: 0;
-  right: calc(var(--right-column-width) - 5px);
-  bottom: 0;
+  align-self: stretch;
+  flex: 0 0 10px;
   width: 10px;
+  margin-inline: -5px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -3692,18 +3703,20 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .workspace-resize-handle::after {
-  position: absolute;
+  position: fixed;
   top: 0;
   bottom: 0;
-  left: 4px;
+  left: calc(var(--left-column) - 1px);
   width: 2px;
   background: transparent;
   content: "";
+  pointer-events: none;
 }
 
 .workspace-resize-handle:hover::after,
 .workspace-resize-handle:focus-visible::after,
-.workspace-resize-handle:active::after {
+.workspace-resize-handle:active::after,
+.app-window[data-resizing-left="true"] .workspace-resize-handle::after {
   background: var(--ui-action-primary);
 }
 
@@ -3711,9 +3724,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   outline: none;
 }
 
+.app-window[data-resizing-left="true"] .workspace-sidebar,
+.app-window[data-resizing-left="true"] .task-stage,
+.app-window[data-resizing-left="true"] .task-panel,
+.app-window[data-resizing-right="true"] .workspace-sidebar,
+.app-window[data-resizing-right="true"] .task-stage,
+.app-window[data-resizing-right="true"] .task-panel {
+  transition: none;
+}
+
 .app-window[data-resizing-left="true"] .app-columns,
 .app-window[data-resizing-right="true"] .app-columns {
-  transition: none;
   cursor: col-resize;
   user-select: none;
 }
@@ -3742,7 +3763,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .workspace-sidebar {
-  grid-column: 1;
+  flex: 0 0 var(--left-column);
   padding: 0;
   border-right: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
@@ -3750,7 +3771,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-panel {
-  grid-column: 3;
+  flex: 0 0 0;
   overflow: hidden;
   border-left: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
@@ -3759,12 +3780,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-stage {
   position: relative;
   display: flex;
-  grid-column: 2;
+  flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
   border-top: 1px solid var(--ui-border);
   background: var(--workbench-content-surface);
+  transition: none;
+}
+
+.app-window[data-right-panel-docked="true"] .task-panel {
+  flex: 0 0 var(--right-panel-width);
 }
 
 .workbench-view {
@@ -8542,11 +8568,12 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .task-panel-header {
   display: flex;
-  min-height: 48px;
-  padding: 8px 12px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 8px 0 0;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
+  overflow: hidden;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
 }
@@ -8554,18 +8581,117 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   min-width: 0;
   flex: 1;
   margin: 0;
+  padding-left: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--text-label);
   font-weight: 650;
 }
-.task-panel-header .task-panel-file-title {
-  font-family: var(--font-mono);
-}
 .task-panel-header h2:focus-visible {
   outline: 2px solid var(--ui-action-primary);
   outline-offset: 3px;
+}
+.task-panel-tabs {
+  display: flex;
+  min-width: 0;
+  height: 44px;
+  flex: 1;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.task-panel-tabs::-webkit-scrollbar {
+  display: none;
+}
+.task-panel-tab-item {
+  position: relative;
+  display: flex;
+  min-width: 104px;
+  max-width: 220px;
+  flex: 0 1 172px;
+  align-items: stretch;
+  border-right: 1px solid color-mix(in srgb, var(--ui-border) 72%, transparent);
+}
+.task-panel-tab-item[data-active="true"] {
+  background: var(--ui-surface-canvas);
+}
+.task-panel-tab-item[data-active="true"]::after {
+  position: absolute;
+  right: 8px;
+  bottom: 0;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--ui-action-primary);
+  content: "";
+}
+.task-panel-tab {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 7px;
+  padding: 0 30px 0 10px;
+  border: 0;
+  color: var(--ui-content-muted);
+  background: transparent;
+  font: inherit;
+  font-size: var(--text-micro);
+  text-align: left;
+}
+.task-panel-tab > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-panel-tab-item[data-active="true"] .task-panel-tab {
+  color: var(--ui-content-primary);
+  font-weight: 620;
+}
+.task-panel-tab:hover {
+  background: var(--ui-action-hover-surface);
+}
+.task-panel-tab-close {
+  position: absolute;
+  z-index: 1;
+  top: 10px;
+  right: 4px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ui-content-muted);
+  background: color-mix(in srgb, var(--ui-surface-canvas) 88%, transparent);
+  opacity: 0;
+}
+.task-panel-tab-item:hover .task-panel-tab-close,
+.task-panel-tab-item[data-active="true"] .task-panel-tab-close,
+.task-panel-tab-close:focus-visible {
+  opacity: 1;
+}
+.task-panel-tab-close:hover {
+  color: var(--ui-content-primary);
+  background: var(--ui-action-hover-surface);
+}
+.task-panel-header-actions {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+.task-panel-context-action-slot {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
 }
 .task-panel-header-action,
 .task-panel-close {
@@ -9235,17 +9361,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
   right: 0;
   bottom: 0;
-  width: var(--right-panel-rendered-width);
+  width: var(--right-panel-width);
+  max-width: none;
   transform: translateX(100%);
   transition: transform 160ms ease;
-}
-
-.app-window[data-right-panel-docked="false"] .task-panel-resize-handle {
-  position: fixed;
-  z-index: 46;
-  top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
-  right: calc(var(--right-panel-rendered-width) - 5px);
-  bottom: 0;
 }
 
 .app-window[data-right-panel-open="true"][data-right-panel-docked="false"]
