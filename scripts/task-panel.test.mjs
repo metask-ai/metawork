@@ -74,6 +74,9 @@ const { ConversationContext } = await vite.ssrLoadModule(
 const { useTaskPanelTarget } = await vite.ssrLoadModule(
   "/src/features/task-panel/useTaskPanelTarget.ts",
 );
+const { useFilePreviewTabs } = await vite.ssrLoadModule(
+  "/src/features/task-panel/useFilePreviewTabs.ts",
+);
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
@@ -2988,6 +2991,77 @@ test("Task Panel sessions choose a stable neighbor and reconcile only invalid ta
     reconcileTaskPanelSession(session, task({ id: "4" }), true),
     emptyTaskPanelSession,
   );
+});
+
+test("file preview resources load independently and reject closed or switched Task responses", async () => {
+  const references = ["a", "b"].map((id) => ({
+    id,
+    title: `${id}.txt`,
+    displayPath: `${id}.txt`,
+  }));
+  const tabs = references.map((reference) =>
+    createTaskPanelPreviewTab("3", "9", reference),
+  );
+  const requests = [];
+  const load = (taskId, runId, referenceId) =>
+    new Promise((resolve, reject) =>
+      requests.push({ taskId, runId, referenceId, resolve, reject }),
+    );
+  let previewTabs;
+  function Harness({ activeTaskId }) {
+    previewTabs = useFilePreviewTabs(
+      activeTaskId,
+      new Set(tabs.map((tab) => tab.tabId)),
+      load,
+    );
+    return null;
+  }
+  const view = render(createElement(Harness, { activeTaskId: "3" }));
+  await act(async () => {
+    previewTabs.open("3", "9", references[0]);
+    previewTabs.open("3", "9", references[1]);
+  });
+  assert.deepEqual(
+    requests.map(({ referenceId }) => referenceId),
+    ["a", "b"],
+  );
+  await act(async () => {
+    requests[1].resolve({
+      state: "ready",
+      content: "second",
+      truncated: false,
+      redacted: false,
+    });
+    requests[0].resolve({
+      state: "ready",
+      content: "first",
+      truncated: false,
+      redacted: false,
+    });
+    await Promise.resolve();
+  });
+  assert.equal(previewTabs.resources[tabs[0].tabId].preview.content, "first");
+  assert.equal(previewTabs.resources[tabs[1].tabId].preview.content, "second");
+
+  await act(async () => previewTabs.open("3", "9", references[0]));
+  assert.equal(requests.length, 2);
+  await act(async () => previewTabs.refresh("3", "9", references[0]));
+  assert.equal(requests.length, 3);
+  await act(async () => previewTabs.close(tabs[0].tabId));
+  await act(async () => {
+    requests[2].resolve({
+      state: "ready",
+      content: "stale",
+      truncated: false,
+      redacted: false,
+    });
+    await Promise.resolve();
+  });
+  assert.equal(previewTabs.resources[tabs[0].tabId], undefined);
+  assert.equal(previewTabs.resources[tabs[1].tabId].preview.content, "second");
+
+  view.rerender(createElement(Harness, { activeTaskId: "4" }));
+  await waitFor(() => assert.deepEqual(previewTabs.resources, {}));
 });
 
 test("content targets clear on Task switch and never own layout visibility", () => {
