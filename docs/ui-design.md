@@ -1126,7 +1126,8 @@ MetaWork 采用“明亮工作台 + 紫色任务流”的桌面工具方向。�
 ### 16.2 品牌资产
 
 - `assets/brand/logo-mark.svg` 是唯一手工维护的 MetaWork 标志几何资产；不同用途不得直接修改该文件，而应在独立画布中处理安全区、背景、视觉居中和必要的小尺寸适配；
-- `assets/icons/app-icon.svg` 是应用图标用途母版，使用纯白背景；标志按画布中心缩放至约 88%，使可见主体约占画布宽度 70%。`assets/icons/app-icon.png`、`assets/icons/MetaWork.icon` 与 `assets/icons/app-icon.ico` 都从该视觉母版派生，不增加非设计渐变、shadow、specular 或 translucency；
+- `assets/icons/app-icon.svg` 是通用 PNG 与 macOS 应用图标用途母版，使用纯白背景；标志按画布中心缩放至约 88%，使可见主体约占画布宽度 70%。`assets/icons/app-icon.png` 与 `assets/icons/MetaWork.icon` 从该视觉母版派生，不增加非设计渐变、shadow、specular 或 translucency；
+- Windows 的 `assets/icons/app-icon.ico` 直接从品牌标志派生，使用透明背景，可见主体约占画布宽度 88%，各尺寸保留透明通道与平滑边缘；开发窗口、任务栏及安装快捷方式使用同一 ICO，不叠加白色底板；
 - `assets/icons/tray-icon.svg` 使用透明背景，主体约占画布宽度 88%；macOS 作为 template image 使用，Windows 保留品牌色；
 - favicon 或其他用途资产只有出现真实 consumer 时才新增。用途资产可以调整内容占比、视觉居中、背景和小尺寸细节，但不得重新设计基础几何；
 - 图标编译、平台资源 staging、PE/ICNS/Assets.car、签名与打包验证属于工程和分发合同，分别由工程结构、平台文档与验证规范定义，不在本文复制实现步骤。
