@@ -274,3 +274,43 @@ test "Windows packaged tray icon resolves from the executable's package root" {
         resolved,
     );
 }
+
+test "Windows window controls consume current SDK window facts after platform events" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "window-controls-test" };
+    _ = try harness.runtime.createWindow(.{
+        .id = 2,
+        .label = "other",
+        .source = .html(""),
+    });
+    const main = try harness.runtime.createWindow(.{
+        .id = main_window_id,
+        .label = "main",
+        .source = .html(""),
+    });
+    var windows: [native_sdk.platform.max_windows]native_sdk.platform.WindowInfo = undefined;
+    const initial = harness.runtime.listWindows(&windows);
+    try std.testing.expectEqual(@as(usize, 2), initial.len);
+    try std.testing.expectEqual(main_window_id, initial[1].id);
+    try std.testing.expect(initial[1].open and !initial[1].hidden);
+
+    var state = main.state();
+    state.hidden = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = state });
+    const hidden = harness.runtime.listWindows(&windows);
+    try std.testing.expect(hidden[1].open and hidden[1].hidden);
+
+    state.hidden = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = state });
+    const shown = harness.runtime.listWindows(&windows);
+    try std.testing.expect(shown[1].open and !shown[1].hidden);
+
+    state.open = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = state });
+    const closed = harness.runtime.listWindows(&windows);
+    try std.testing.expect(!closed[1].open);
+    try std.testing.expect(closed[0].open);
+}
