@@ -12058,8 +12058,23 @@ test "Run admission reserves a stable generation and rolls back every fallible a
     try std.testing.expectEqual(tracked_before, control.projection_bytes);
     try std.testing.expectEqual(generation_before, task.durable.next_run_generation);
 
+    const Clock = struct {
+        fn now(context: ?*anyopaque) ?u64 {
+            const value: *u64 = @ptrCast(@alignCast(context.?));
+            return value.*;
+        }
+    };
+    var submitted_at_unix_ms: u64 = 1_789_436_300_000;
+    control.run_clock = .{
+        .context = &submitted_at_unix_ms,
+        .now_unix_ms_fn = Clock.now,
+    };
     const slot = try control.reserveRunRecord(task, .{ .text = "reserved" });
     const first_generation = task.durable.runs[slot].?.generation;
+    try std.testing.expectEqual(
+        @as(?u64, submitted_at_unix_ms),
+        task.durable.runs[slot].?.submitted_at_unix_ms,
+    );
     try std.testing.expectEqual(
         task.durable.execution_generation,
         task.durable.runs[slot].?.execution_generation,

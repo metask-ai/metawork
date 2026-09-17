@@ -20,6 +20,7 @@ export const enUS = {
   "common.remove": "Remove",
   "common.cancel": "Cancel",
   "common.close": "Close",
+  "copy.input": "Copy input",
   "copy.response": "Copy response",
   "copy.code": "Copy code",
   "copy.copied": "Copied",

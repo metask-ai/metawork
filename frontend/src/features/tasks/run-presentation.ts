@@ -36,19 +36,19 @@ export function runElapsedSeconds(
   );
 }
 
-export type RunFinishedTime = {
+export type RunTimestamp = {
   absolute: string;
   dateTime: string;
   relative: string;
 };
 
-export function formatRunFinishedTime(
+export function formatRunTimestamp(
   locale: Locale,
-  finishedAtUnixMs: string | null,
+  unixMs: string | null,
   nowUnixMs: number,
-): RunFinishedTime | null {
-  if (finishedAtUnixMs === null) return null;
-  const timestamp = Number(finishedAtUnixMs);
+): RunTimestamp | null {
+  if (unixMs === null) return null;
+  const timestamp = Number(unixMs);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return null;
@@ -91,6 +91,8 @@ export function formatRunFinishedTime(
     }).format(relativeValue, unit),
   };
 }
+
+export const formatRunFinishedTime = formatRunTimestamp;
 
 function fallbackActivity(phase: RunPhase): RunActivity | null {
   switch (phase) {

@@ -2244,6 +2244,7 @@ function decodeBashPresentation(
 function decodeRun(value: unknown, path: string): RunView {
   const item = object(value, path, [
     "elapsedMs",
+    "submittedAtUnixMs",
     "finishedAtUnixMs",
     "id",
     "phase",
@@ -2356,6 +2357,21 @@ function decodeRun(value: unknown, path: string): RunView {
       (elapsedMs.length === 20 && elapsedMs > "18446744073709551615"))
   )
     fail(`${path}.elapsedMs`, "expected u64 elapsed milliseconds");
+  const submittedAtUnixMs =
+    item.submittedAtUnixMs === null
+      ? null
+      : wireId(item.submittedAtUnixMs, `${path}.submittedAtUnixMs`);
+  if (
+    submittedAtUnixMs !== null &&
+    (submittedAtUnixMs === "0" ||
+      submittedAtUnixMs.length > 16 ||
+      (submittedAtUnixMs.length === 16 &&
+        submittedAtUnixMs > "8640000000000000"))
+  )
+    fail(
+      `${path}.submittedAtUnixMs`,
+      "expected a displayable non-zero Unix millisecond timestamp",
+    );
   const finishedAtUnixMs =
     item.finishedAtUnixMs === null
       ? null
@@ -2412,6 +2428,7 @@ function decodeRun(value: unknown, path: string): RunView {
     output,
     activity,
     elapsedMs,
+    submittedAtUnixMs,
     finishedAtUnixMs,
     terminal,
     usage: {
