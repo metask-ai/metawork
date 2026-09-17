@@ -46,6 +46,14 @@ export function useTaskPanelViewStates(validTabIds: ReadonlySet<string>) {
 
   return {
     stateFor,
+    reset(tabId: string) {
+      setStates((current) => {
+        if (!(tabId in current)) return current;
+        const next = { ...current };
+        delete next[tabId];
+        return next;
+      });
+    },
     setPreviewMode(tabId: string, previewMode: FilePreviewMode) {
       update(tabId, (current) => ({ ...current, previewMode }));
     },

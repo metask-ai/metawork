@@ -524,6 +524,7 @@ export default function App() {
     const existingReview = taskPanel.session.tabs.find(
       (tab) => tab.kind === "review",
     );
+    if (existingReview?.runId !== runId) taskPanelViews.reset(tab.tabId);
     taskPanel.openReview(taskId, runId);
     if (
       existingReview?.runId === runId &&

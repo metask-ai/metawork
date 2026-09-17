@@ -3869,7 +3869,10 @@ test("App keeps preview and Review resources independent and rejects stale respo
   assert.ok(
     screen.getByRole("button", { name: "Open side panel" }).disabled === false,
   );
-  const openPreview = () => fireEvent.click(filePreviewOpener("a.txt"));
+  const openPreview = () =>
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Preview a.txt" })[0],
+    );
   const ready = (content) => ({
     state: "ready",
     content,
@@ -3950,6 +3953,44 @@ test("App keeps preview and Review resources independent and rejects stale respo
     "false",
   );
   assert.equal(diffs.length, 2);
+
+  const replacementRun = structuredClone(snapshot.tasks[0].runs[0]);
+  replacementRun.id = "8";
+  replacementRun.fileChanges = {
+    observation: "complete",
+    changes: [
+      {
+        ...replacementRun.fileChanges.changes[0],
+        id: "replacement-a",
+        order: "1",
+        displayPath: "a.txt",
+      },
+    ],
+  };
+  snapshot.tasks[0].runs.push(replacementRun);
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  let reviewOpeners = [];
+  await waitFor(() => {
+    reviewOpeners = screen
+      .getAllByRole("button")
+      .filter(
+        (button) =>
+          button.textContent.includes("File changes") &&
+          button.textContent.includes("Review changes"),
+      );
+    assert.equal(reviewOpeners.length, 2);
+  });
+  fireEvent.click(reviewOpeners.at(-1));
+  await waitFor(() => assert.equal(diffs.length, 3));
+  assert.deepEqual(diffs[2].ids, ["3", "8", "replacement-a"]);
+  assert.equal(
+    document
+      .querySelector('[data-file-path="a.txt"] .task-panel-change-toggle')
+      .getAttribute("aria-expanded"),
+    "true",
+  );
+
   openPreview();
   fireEvent.click(
     within(document.querySelector("#task-panel")).getByRole("button", {
