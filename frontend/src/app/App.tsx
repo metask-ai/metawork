@@ -75,6 +75,10 @@ import { sidePanelFocusReturnTarget } from "./side-panel-interaction.ts";
 import { useTaskPanelTarget } from "../features/task-panel/useTaskPanelTarget.ts";
 import { useFilePreviewTabs } from "../features/task-panel/useFilePreviewTabs.ts";
 import { useTaskPanelViewStates } from "../features/task-panel/useTaskPanelViewStates.ts";
+import {
+  createTaskPanelPreviewTab,
+  createTaskPanelReviewTab,
+} from "../features/task-panel/task-panel-state.ts";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
 import { TaskContent } from "../features/tasks/TaskContent.tsx";
@@ -325,7 +329,7 @@ export default function App() {
   const connectionBusyRef = useRef(false);
   const taskPanelToggle = useRef<HTMLButtonElement>(null);
   const taskInformationTrigger = useRef<HTMLButtonElement>(null);
-  const taskPanelOpener = useRef<HTMLButtonElement | null>(null);
+  const taskPanelOpeners = useRef(new Map<string, HTMLButtonElement>());
   const composer = useRef<HTMLTextAreaElement>(null);
   const conversationRecovery = useRef(new ConversationRecoveryCoordinator());
 
@@ -356,6 +360,17 @@ export default function App() {
   const activeTaskIdRef = useRef<string | null>(null);
   activeTaskIdRef.current = activeTask?.id ?? null;
 
+  function focusTaskPanelTab(tabId: string) {
+    window.requestAnimationFrame(() => {
+      const tab = [
+        ...document.querySelectorAll<HTMLButtonElement>(
+          "[data-task-panel-tab-id]",
+        ),
+      ].find((candidate) => candidate.dataset.taskPanelTabId === tabId);
+      (tab ?? document.getElementById("task-panel-title"))?.focus();
+    });
+  }
+
   function openFilePreview(
     taskId: string,
     runId: string,
@@ -367,13 +382,12 @@ export default function App() {
     if (!task || !run || activeTaskIdRef.current !== taskId) return;
     const selected = findRunFileReference(run, reference.id);
     if (!selected) return;
+    const tab = createTaskPanelPreviewTab(taskId, runId, selected);
     setRightPanelOpen(true);
-    taskPanelOpener.current = opener;
+    taskPanelOpeners.current.set(tab.tabId, opener);
     taskPanel.openPreview(taskId, runId, selected);
     filePreviewTabs.open(taskId, runId, selected);
-    window.requestAnimationFrame(() =>
-      document.getElementById("task-panel-title")?.focus(),
-    );
+    focusTaskPanelTab(tab.tabId);
   }
 
   function refreshFilePreview() {
@@ -504,8 +518,9 @@ export default function App() {
       activeTaskIdRef.current !== taskId
     )
       return;
+    const tab = createTaskPanelReviewTab(taskId, runId);
     setRightPanelOpen(true);
-    taskPanelOpener.current = opener;
+    taskPanelOpeners.current.set(tab.tabId, opener);
     const existingReview = taskPanel.session.tabs.find(
       (tab) => tab.kind === "review",
     );
@@ -516,9 +531,7 @@ export default function App() {
       fileChanges.taskId === taskId &&
       fileChanges.runId === runId
     ) {
-      window.requestAnimationFrame(() =>
-        document.getElementById("task-panel-title")?.focus(),
-      );
+      focusTaskPanelTab(tab.tabId);
       return;
     }
     const changes = orderedFileChanges(recorded.changes);
@@ -537,9 +550,7 @@ export default function App() {
       ),
     });
     requestFileChangeDiff(taskId, runId, changes[0]!, sessionGeneration);
-    window.requestAnimationFrame(() =>
-      document.getElementById("task-panel-title")?.focus(),
-    );
+    focusTaskPanelTab(tab.tabId);
   }
 
   function loadFileChangeDiff(change: FileChangeView) {
@@ -623,6 +634,10 @@ export default function App() {
       client.previewFile(taskId, runId, referenceId),
   );
   const taskPanelViews = useTaskPanelViewStates(taskPanelTabIds);
+  useEffect(() => {
+    for (const tabId of taskPanelOpeners.current.keys())
+      if (!taskPanelTabIds.has(tabId)) taskPanelOpeners.current.delete(tabId);
+  }, [taskPanelTabIds]);
   const panelTarget = taskPanel.target;
   const reviewTab = taskPanel.session.tabs.find((tab) => tab.kind === "review");
   useEffect(() => {
@@ -682,6 +697,10 @@ export default function App() {
     const previous = previousBridgeGeneration.current;
     previousBridgeGeneration.current = bridgeGeneration;
     if (previous === "0" || previous === bridgeGeneration) return;
+    taskPanel.clearTarget();
+    filePreviewTabs.clear();
+    clearFileChanges();
+    taskPanelOpeners.current.clear();
     taskDrafts.invalidateAttachments();
     newTaskDrafts.invalidateAttachments();
     setAttachmentError(null);
@@ -1039,7 +1058,7 @@ export default function App() {
   useEffect(() => {
     setEditingTitle(false);
     setConfirmDelete(false);
-    taskPanelOpener.current = null;
+    taskPanelOpeners.current.clear();
     conversationRecovery.current.cancelExceptTask(activeTask?.id ?? null);
   }, [activeTask?.id]);
 
@@ -1068,15 +1087,14 @@ export default function App() {
   function dismissTaskPanel(restoreFocus = true) {
     const panel = document.getElementById("task-panel");
     const focusWasInside = panel?.contains(document.activeElement) === true;
+    const activeOpener = taskPanel.activeTab
+      ? (taskPanelOpeners.current.get(taskPanel.activeTab.tabId) ?? null)
+      : null;
     const focusTarget = sidePanelFocusReturnTarget(
-      taskPanelOpener.current,
+      activeOpener,
       taskPanelToggle.current,
     );
-    taskPanelOpener.current = null;
-    filePreviewTabs.clear();
-    clearFileChanges();
     setRightPanelOpen(false);
-    taskPanel.clearTarget();
     if (restoreFocus && focusWasInside && focusTarget)
       window.requestAnimationFrame(() => focusTarget.focus());
   }
@@ -1086,9 +1104,16 @@ export default function App() {
       (candidate) => candidate.tabId === tabId,
     );
     if (!tab) return;
+    taskPanelOpeners.current.delete(tabId);
     if (tab.kind === "preview") filePreviewTabs.close(tabId);
     else clearFileChanges();
     taskPanel.closeTab(tabId);
+    window.requestAnimationFrame(() => {
+      const active = document.querySelector<HTMLButtonElement>(
+        '#task-panel [role="tab"][aria-selected="true"]',
+      );
+      (active ?? document.getElementById("task-panel-title"))?.focus();
+    });
   }
 
   function focusPendingFromTaskPanel() {
@@ -1098,16 +1123,17 @@ export default function App() {
     window.requestAnimationFrame(focusPendingRequest);
   }
 
-  function toggleRightPanel(opener: HTMLButtonElement) {
+  function toggleRightPanel(_opener: HTMLButtonElement) {
     if (rightPanelOpen) {
       dismissTaskPanel(false);
       return;
     }
-    taskPanelOpener.current = opener;
     setRightPanelOpen(true);
-    window.requestAnimationFrame(() =>
-      document.getElementById("task-panel-title")?.focus(),
-    );
+    if (taskPanel.activeTab) focusTaskPanelTab(taskPanel.activeTab.tabId);
+    else
+      window.requestAnimationFrame(() =>
+        document.getElementById("task-panel-title")?.focus(),
+      );
   }
 
   function closeDeleteConfirmation() {

@@ -2954,6 +2954,60 @@ test("Task Panel labels disambiguate duplicate file names without changing ident
   assert.equal(labels.get(tabs[2].tabId), "beta/report.md · 2");
 });
 
+test("Task Panel tabs use manual keyboard activation and one tab stop", async () => {
+  const tabs = ["a", "b", "c"].map((id) =>
+    createTaskPanelPreviewTab("3", "9", {
+      id,
+      title: `${id}.txt`,
+      displayPath: `${id}.txt`,
+    }),
+  );
+  function Fixture() {
+    const [activeTabId, setActiveTabId] = useState(tabs[0].tabId);
+    return localizedView(
+      createElement(
+        TaskPanel,
+        {
+          title: "Side panel",
+          tabs,
+          activeTabId,
+          attention: null,
+          onSelectTab: setActiveTabId,
+          onCloseTab() {},
+          onClose() {},
+        },
+        tabs.find((tab) => tab.tabId === activeTabId)?.title,
+      ),
+    );
+  }
+  const user = userEvent.setup();
+  render(createElement(Fixture));
+  const first = screen.getByRole("tab", { name: "a.txt" });
+  const second = screen.getByRole("tab", { name: "b.txt" });
+  const third = screen.getByRole("tab", { name: "c.txt" });
+  first.focus();
+
+  await user.keyboard("{ArrowRight}");
+  assert.equal(document.activeElement, second);
+  assert.equal(first.getAttribute("aria-selected"), "true");
+  assert.equal(second.getAttribute("aria-selected"), "false");
+  assert.equal(screen.getByRole("tabpanel").textContent, "a.txt");
+
+  await user.keyboard("{Enter}");
+  assert.equal(second.getAttribute("aria-selected"), "true");
+  assert.equal(screen.getByRole("tabpanel").textContent, "b.txt");
+  assert.deepEqual(
+    [first, second, third].map((tab) => tab.tabIndex),
+    [-1, 0, -1],
+  );
+
+  await user.keyboard("{End}");
+  assert.equal(document.activeElement, third);
+  assert.equal(second.getAttribute("aria-selected"), "true");
+  await user.keyboard("{Home}");
+  assert.equal(document.activeElement, first);
+});
+
 test("Task Panel sessions replace the singleton review in place", () => {
   const reference = {
     id: "ref-a",
@@ -3635,7 +3689,7 @@ function fileChangesOpener() {
     );
 }
 
-test("permanent panel toggle opens a continuous Review and clears it on close", async (ctx) => {
+test("permanent panel toggle hides and restores the active Task Panel session", async (ctx) => {
   const { snapshot, previews, diffs, publish } = await renderAppFixture(ctx);
   await screen.findByRole("button", { name: /First task/ });
   const toggle = screen.getByRole("button", { name: "Open side panel" });
@@ -3665,9 +3719,7 @@ test("permanent panel toggle opens a continuous Review and clears it on close", 
   );
   assert.equal(screen.queryByText("stale body"), null);
   fireEvent.click(toggle);
-  assert.ok(
-    panel().getByText("Open a file or review changes from the conversation."),
-  );
+  assert.ok(panel().getByText("stale body"));
   assert.equal(previews.length, 1);
   const reviewOpener = fileChangesOpener();
   fireEvent.click(reviewOpener);
@@ -3722,14 +3774,15 @@ test("permanent panel toggle opens a continuous Review and clears it on close", 
   assert.equal(document.activeElement === reviewOpener, true);
   assert.equal(document.querySelector("#task-panel"), null);
   fireEvent.click(toggle);
-  assert.ok(
-    panel().getByText("Open a file or review changes from the conversation."),
-  );
+  assert.ok(panel().getByText("+first a"));
+  assert.equal(diffs.length, 3);
   snapshot.tasks[0].runs = [];
   snapshot.revision = String(BigInt(snapshot.revision) + 1n);
   await act(async () => publish());
-  assert.ok(
-    panel().getByText("Open a file or review changes from the conversation."),
+  await waitFor(() =>
+    assert.ok(
+      panel().getByText("Open a file or review changes from the conversation."),
+    ),
   );
   assert.equal(toggle.disabled, false);
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
@@ -3830,25 +3883,17 @@ test("App keeps preview and Review resources independent and rejects stale respo
       name: "Hide side panel",
     }),
   );
-  await act(async () => previews[0].resolve(ready("late after close")));
-  assert.equal(screen.queryByText("late after close"), null);
+  await act(async () => previews[0].resolve(ready("loaded while hidden")));
+  assert.equal(screen.queryByText("loaded while hidden"), null);
   assert.equal(document.querySelector("#task-panel"), null);
   openPreview();
-  // Reopening starts a new read; even a failure from it must not reopen a closed pane.
-  fireEvent.click(
-    within(document.querySelector("#task-panel")).getByRole("button", {
-      name: "Hide side panel",
-    }),
-  );
-  await act(async () => previews[1].reject(new Error("late failure")));
-  assert.equal(document.querySelector("#task-panel"), null);
-  openPreview();
+  assert.equal(previews.length, 1);
+  assert.ok(screen.getByText("loaded while hidden"));
   fireEvent.click(fileChangesOpener());
   assert.equal(document.querySelector(".task-panel-code"), null);
   assert.equal(diffs.length, 1);
   assert.deepEqual(diffs[0].ids, ["3", "7", "change-a"]);
-  await act(async () => previews[2].resolve(ready("late after review")));
-  assert.equal(screen.queryByText("late after review"), null);
+  assert.equal(screen.queryByText("loaded while hidden"), null);
   fireEvent.click(
     within(document.querySelector('[data-change-id="change-b"]')).getByRole(
       "button",
@@ -3894,8 +3939,8 @@ test("App keeps preview and Review resources independent and rejects stale respo
   fireEvent.click(retainedFileToggle);
   assert.equal(retainedFileToggle.getAttribute("aria-expanded"), "false");
   openPreview();
-  assert.ok(screen.getByText("late after review"));
-  assert.equal(previews.length, 3);
+  assert.ok(screen.getByText("loaded while hidden"));
+  assert.equal(previews.length, 1);
   fireEvent.click(fileChangesOpener());
   assert.ok(screen.getByText("+late a"));
   assert.equal(
@@ -3911,9 +3956,9 @@ test("App keeps preview and Review resources independent and rejects stale respo
       name: "Refresh",
     }),
   );
-  assert.equal(previews.length, 4);
+  assert.equal(previews.length, 2);
   fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
-  await act(async () => previews[3].resolve(ready("late after switch")));
+  await act(async () => previews[1].resolve(ready("late after switch")));
   assert.equal(screen.queryByText("late after switch"), null);
   assert.ok(document.querySelector("#task-panel") !== null);
   assert.ok(
@@ -4041,6 +4086,13 @@ test("Markdown preview mode is isolated per tab and inactive content is unmounte
   );
   fireEvent.click(screen.getByRole("button", { name: "Close a.md" }));
   assert.ok(screen.getByRole("heading", { name: "Second document" }));
+  await act(
+    async () => new Promise((resolve) => requestAnimationFrame(resolve)),
+  );
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("tab", { name: "b.markdown" }),
+  );
 });
 
 test("App previews exact operation references, rejects superseded reads, and refreshes only the current file", async (ctx) => {
@@ -4074,6 +4126,14 @@ test("App previews exact operation references, rejects superseded reads, and ref
   await act(async () => previews[2].resolve(ready("refreshed reference")));
   assert.ok(screen.getByText("refreshed reference"));
   fireEvent.click(panel.getByRole("button", { name: "Hide side panel" }));
+  fireEvent.click(openers[1]);
+  assert.equal(previews.length, 3);
+  assert.ok(screen.getByText("refreshed reference"));
+  fireEvent.click(
+    within(document.querySelector("#task-panel")).getByRole("button", {
+      name: "Close b.txt",
+    }),
+  );
   fireEvent.click(openers[1]);
   assert.deepEqual(previews[3].ids, ["3", "7", "ref-b"]);
   assert.equal(screen.queryByText("refreshed reference"), null);
@@ -4177,15 +4237,15 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
   await act(
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
   );
-  const heading = screen.getByRole("heading", { name: "a.txt" });
-  assert.ok(document.activeElement === heading);
+  const tab = screen.getByRole("tab", { name: "a.txt" });
+  assert.ok(document.activeElement === tab);
   // Nested controls can consume Escape without closing the pane.
   const stopEscape = (event) => event.preventDefault();
-  heading.addEventListener("keydown", stopEscape);
-  fireEvent.keyDown(heading, { key: "Escape" });
+  tab.addEventListener("keydown", stopEscape);
+  fireEvent.keyDown(tab, { key: "Escape" });
   assert.ok(document.querySelector("#task-panel") !== null);
-  heading.removeEventListener("keydown", stopEscape);
-  fireEvent.keyDown(heading, { key: "Escape" });
+  tab.removeEventListener("keydown", stopEscape);
+  fireEvent.keyDown(tab, { key: "Escape" });
   await act(
     async () => new Promise((resolve) => requestAnimationFrame(resolve)),
   );
@@ -4197,7 +4257,7 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
   );
   opener.remove();
   assert.equal(opener.isConnected, false);
-  fireEvent.keyDown(screen.getByRole("heading", { name: "a.txt" }), {
+  fireEvent.keyDown(screen.getByRole("tab", { name: "a.txt" }), {
     key: "Escape",
   });
   await act(

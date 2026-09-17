@@ -146,10 +146,11 @@ export function TaskPanel({
                     }}
                     type="button"
                     id={tabDomId}
+                    data-task-panel-tab-id={tab.tabId}
                     className="task-panel-tab focus-ring"
                     role="tab"
                     aria-selected={active}
-                    aria-controls={active ? "task-panel-tabpanel" : undefined}
+                    aria-controls="task-panel-tabpanel"
                     tabIndex={
                       tab.tabId === (focusedTabId ?? activeTabId) ? 0 : -1
                     }
