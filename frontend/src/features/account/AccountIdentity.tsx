@@ -37,13 +37,13 @@ export function AccountIdentity({
     ? account.displayName || t("account.signed_in")
     : t("account.provider");
   const identityStatus =
-    account.state === "authenticated"
-      ? t("account.connected")
-      : account.state === "checking"
-        ? t("account.checking.title")
-        : account.state === "authorizing"
-          ? t("account.authorizing.title")
-          : t("account.signed_out");
+    account.state === "checking"
+      ? t("account.checking.title")
+      : account.state === "authorizing"
+        ? t("account.authorizing.title")
+        : account.state === "signed_out"
+          ? t("account.signed_out")
+          : null;
   const initial = [...identityName.trim()][0]?.toLocaleUpperCase() || "M";
 
   useEffect(() => {
@@ -112,10 +112,11 @@ export function AccountIdentity({
                   <>
                     <Menu.Separator />
                     <Menu.Item
-                      className="account-menu-item is-danger focus-ring"
+                      className="account-menu-item focus-ring"
                       disabled={disabled}
                       onClick={() => choose(() => setConfirmSignOut(true))}
                     >
+                      <Icon name="logout" />
                       {t("account.logout_short")}
                     </Menu.Item>
                   </>
@@ -134,7 +135,7 @@ export function AccountIdentity({
             </span>
             <span className="account-identity-copy">
               <strong title={identityName}>{identityName}</strong>
-              <small>{identityStatus}</small>
+              {identityStatus && <small>{identityStatus}</small>}
             </span>
             <Icon name="chevron" />
           </Menu.Trigger>

@@ -879,7 +879,6 @@ export const enUS = {
   "search.kind.task": "Task",
   "search.kind.instruction": "Instruction",
   "search.kind.completion": "Completion",
-  "account.connected": "Metask connected",
   "account.connection_attention": "Sign-in needs attention",
   "account.logout_short": "Sign out…",
   "account.api_fallback": "Metask API",

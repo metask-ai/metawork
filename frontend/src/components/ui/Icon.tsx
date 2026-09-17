@@ -14,6 +14,7 @@ import {
   FileDiff,
   Layers3,
   LoaderCircle,
+  LogOut,
   Minus,
   PanelLeft,
   PanelRight,
@@ -50,6 +51,7 @@ type IconName =
   | "archive"
   | "sidebar-right"
   | "loading"
+  | "logout"
   | "chevron"
   | "chevron-right"
   | "stop"
@@ -96,6 +98,7 @@ const icons: Record<IconName, LucideIcon> = {
   archive: Archive,
   "sidebar-right": PanelRight,
   loading: LoaderCircle,
+  logout: LogOut,
   chevron: ChevronDown,
   "chevron-right": ChevronRight,
   stop: Square,

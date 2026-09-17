@@ -947,6 +947,26 @@ test("Sidebar typography reserves bold weight for the product identity", async (
   );
 });
 
+test("Account identity and its menu stay compact without shrinking the hit target", async () => {
+  const stylesheet = await readFile(
+    new URL("../frontend/src/index.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    stylesheet,
+    /\.account-identity\s*\{[^}]*padding: 4px 8px calc\(4px \+ env\(safe-area-inset-bottom, 0px\)\);/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.account-identity-trigger\s*\{[^}]*min-height: 44px;/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.account-menu\s*\{[^}]*width: min\(224px, calc\(100vw - 24px\)\);/s,
+  );
+});
+
 test("Task list keeps compact row density without group-owned spacing", async () => {
   const stylesheet = await readFile(
     new URL("../frontend/src/index.css", import.meta.url),

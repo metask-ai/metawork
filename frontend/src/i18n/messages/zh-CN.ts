@@ -796,7 +796,6 @@ export const zhCN: Record<MessageId, string> = {
   "search.kind.task": "任务",
   "search.kind.instruction": "要求",
   "search.kind.completion": "完成内容",
-  "account.connected": "Metask 已连接",
   "account.connection_attention": "登录状态需要处理",
   "account.logout_short": "退出登录…",
   "account.api_fallback": "Metask API",

@@ -488,7 +488,7 @@ summary::-webkit-details-marker {
 
 .account-identity {
   position: relative;
-  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--ui-border);
   background: color-mix(in srgb, var(--ui-surface-panel) 96%, transparent);
 }
@@ -559,7 +559,7 @@ summary::-webkit-details-marker {
 
 .account-menu {
   display: grid;
-  width: min(280px, calc(100vw - 24px));
+  width: min(224px, calc(100vw - 24px));
   padding: 5px;
   border: 1px solid var(--ui-border);
   border-radius: 10px;
@@ -609,10 +609,6 @@ summary::-webkit-details-marker {
 
 .account-menu-item.is-attention {
   color: var(--ui-content-warning);
-}
-
-.account-menu-item.is-danger {
-  color: var(--metask-state-error);
 }
 
 .account-gate-about {
