@@ -3717,7 +3717,7 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
   cleanup();
 });
 
-test("App keeps per-record diffs independent and rejects stale review responses", async (ctx) => {
+test("App keeps preview and Review resources independent and rejects stale responses", async (ctx) => {
   const { snapshot, previews, diffs, publish } = await renderAppFixture(ctx);
   const firstButton = await screen.findByRole("button", { name: /First task/ });
   fireEvent.click(firstButton);
@@ -3798,6 +3798,18 @@ test("App keeps per-record diffs independent and rejects stale review responses"
     1,
   );
   openPreview();
+  assert.ok(screen.getByText("late after review"));
+  assert.equal(previews.length, 3);
+  fireEvent.click(screen.getByRole("button", { name: /Review changes/ }));
+  assert.ok(screen.getByText("+late a"));
+  assert.equal(diffs.length, 2);
+  openPreview();
+  fireEvent.click(
+    within(document.querySelector("#task-panel")).getByRole("button", {
+      name: "Refresh",
+    }),
+  );
+  assert.equal(previews.length, 4);
   fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
   await act(async () => previews[3].resolve(ready("late after switch")));
   assert.equal(screen.queryByText("late after switch"), null);

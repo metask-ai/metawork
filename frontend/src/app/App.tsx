@@ -368,7 +368,6 @@ export default function App() {
     if (!selected) return;
     setRightPanelOpen(true);
     taskPanelOpener.current = opener;
-    clearFileChanges();
     taskPanel.openPreview(taskId, runId, selected);
     filePreviewTabs.open(taskId, runId, selected);
     window.requestAnimationFrame(() =>
@@ -506,7 +505,21 @@ export default function App() {
       return;
     setRightPanelOpen(true);
     taskPanelOpener.current = opener;
-    filePreviewTabs.clear();
+    const existingReview = taskPanel.session.tabs.find(
+      (tab) => tab.kind === "review",
+    );
+    taskPanel.openReview(taskId, runId);
+    if (
+      existingReview?.runId === runId &&
+      fileChanges.kind === "open" &&
+      fileChanges.taskId === taskId &&
+      fileChanges.runId === runId
+    ) {
+      window.requestAnimationFrame(() =>
+        document.getElementById("task-panel-title")?.focus(),
+      );
+      return;
+    }
     const changes = orderedFileChanges(recorded.changes);
     const sessionGeneration = fileChangesGeneration.current + 1;
     fileChangesGeneration.current = sessionGeneration;
@@ -522,7 +535,6 @@ export default function App() {
         changes.map((change) => [change.id, { phase: "idle", diff: null }]),
       ),
     });
-    taskPanel.openReview(taskId, runId);
     requestFileChangeDiff(taskId, runId, changes[0]!, sessionGeneration);
     window.requestAnimationFrame(() =>
       document.getElementById("task-panel-title")?.focus(),
@@ -606,9 +618,16 @@ export default function App() {
       client.previewFile(taskId, runId, referenceId),
   );
   const panelTarget = taskPanel.target;
+  const reviewTab = taskPanel.session.tabs.find((tab) => tab.kind === "review");
   useEffect(() => {
-    if (panelTarget.kind !== "review") clearFileChanges();
-  }, [panelTarget]);
+    if (
+      !reviewTab ||
+      (fileChanges.kind === "open" &&
+        (fileChanges.taskId !== reviewTab.taskId ||
+          fileChanges.runId !== reviewTab.runId))
+    )
+      clearFileChanges();
+  }, [reviewTab?.taskId, reviewTab?.runId]);
   const manualWorkspaces = useMemo(
     () =>
       snapshot.workspaces.filter((workspace) => workspace.kind === "manual"),
