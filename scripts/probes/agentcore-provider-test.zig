@@ -43,6 +43,10 @@ fn expectInputLimit(api: agentcore.Api, session: *wire.SessionHandle, parts: []c
 }
 
 const ProviderTest = struct {
+    api: agentcore.Api,
+    session: ?*wire.SessionHandle = null,
+    active_model_mutation_attempted: bool = false,
+    active_model_mutation_status: ?agentcore.Status = null,
     event_count: usize = 0,
     max_event_bytes: usize = 0,
     callback_decode_failed: bool = false,
@@ -53,6 +57,15 @@ const ProviderTest = struct {
         event_json: wire.BytesViewV1,
     ) callconv(.c) u32 {
         const self: *ProviderTest = @ptrCast(@alignCast(context orelse return wire.EVENT_FATAL));
+        if (!self.active_model_mutation_attempted) {
+            self.active_model_mutation_attempted = true;
+            const status = self.api.sessionControl().setModel()(
+                self.session,
+                agentcore.bytesView("unknown-provider-test-model"),
+                null,
+            );
+            self.active_model_mutation_status = agentcore.Status.fromCode(status) catch null;
+        }
         const bytes = agentcore.borrowedBytes(event_json) catch {
             self.callback_decode_failed = true;
             return wire.EVENT_CONTINUE;
@@ -91,6 +104,27 @@ fn expectOk(_: agentcore.Api, operation: []const u8, raw: u32) !void {
     if (status != .ok) return error.AgentCoreCallFailed;
 }
 
+fn expectIdleModelMutation(api: agentcore.Api, session: *wire.SessionHandle) !void {
+    var before = std.mem.zeroes(wire.OwnedBytesV1);
+    defer releaseOwned(api, &before);
+    try expectOk(api, "describe_before_model_mutation", api.sessionControl().describe()(session, &before, null));
+    var original = try agentcore.decodeSessionDescription(std.heap.page_allocator, try agentcore.borrowedBytes(.{ .ptr = before.ptr, .len = before.len }));
+    defer original.deinit();
+    if (!std.mem.eql(u8, original.value.model, "__MODEL__")) return error.UnexpectedSessionModel;
+
+    for ([_][]const u8{ "unknown-provider-test-model", "__MODEL__" }) |model| {
+        try expectOk(api, "set_model_idle", api.sessionControl().setModel()(session, agentcore.bytesView(model), null));
+        var after = std.mem.zeroes(wire.OwnedBytesV1);
+        defer releaseOwned(api, &after);
+        try expectOk(api, "describe_after_model_mutation", api.sessionControl().describe()(session, &after, null));
+        var updated = try agentcore.decodeSessionDescription(std.heap.page_allocator, try agentcore.borrowedBytes(.{ .ptr = after.ptr, .len = after.len }));
+        defer updated.deinit();
+        if (!std.mem.eql(u8, updated.value.model, model) or
+            !std.mem.eql(u8, updated.value.session_id, original.value.session_id))
+            return error.ModelMutationNotApplied;
+    }
+}
+
 fn makeRuntime(api: agentcore.Api) !*wire.RuntimeHandle {
     const names = [_][]const u8{
         "Read",      "Write",           "Edit",      "Glob",     "Grep", "Bash", "BashOutput",
@@ -110,7 +144,7 @@ fn makeRuntime(api: agentcore.Api) !*wire.RuntimeHandle {
 
 pub fn main() !void {
     const api = try agentcore.Api.discover();
-    var provider_test = ProviderTest{};
+    var provider_test = ProviderTest{ .api = api };
 
     var callbacks = std.mem.zeroes(wire.SessionCallbacksV1);
     callbacks.struct_size = @sizeOf(wire.SessionCallbacksV1);
@@ -149,6 +183,8 @@ pub fn main() !void {
     defer if (session_live) {
         _ = api.session().destroy()(raw_session, null);
     };
+    provider_test.session = raw_session;
+    try expectIdleModelMutation(api, raw_session);
 
     var options = std.mem.zeroes(wire.RunOptionsV1);
     options.struct_size = @sizeOf(wire.RunOptionsV1);
@@ -175,6 +211,9 @@ pub fn main() !void {
         return error.InvalidRunResult;
     if (stop_reason != .end_turn or result.turns != 1 or result.tool_calls != 0)
         return error.ProviderRunFailed;
+    const active_mutation_status = provider_test.active_model_mutation_status orelse return error.ActiveModelMutationNotObserved;
+    if (active_mutation_status == .ok) return error.ActiveModelMutationAccepted;
+    try expectIdleModelMutation(api, raw_session);
     std.debug.print(
         "provider_test events={d} stop_reason={d} turns={d} tool_calls={d}\n",
         .{ provider_test.event_count, result.stop_reason_code, result.turns, result.tool_calls },
@@ -259,6 +298,8 @@ pub fn main() !void {
     var decoded = try agentcore.decodeRestoreReport(allocator, try agentcore.borrowedBytes(.{ .ptr = report.ptr, .len = report.len }));
     defer decoded.deinit();
     if (decoded.value.health != .complete) return error.DegradedRestore;
+    provider_test.session = restored;
+    try expectIdleModelMutation(api, restored orelse return error.MissingRestoredSession);
     releaseOwned(api, &diagnostic);
     const restored_run_id = large_run_id + 1;
     try expectOk(api, "restored_multimodal_history", api.session().runText(restored, restored_run_id, agentcore.bytesView("Continue after restore."), &options, &result, &diagnostic));
