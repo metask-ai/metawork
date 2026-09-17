@@ -231,6 +231,30 @@ test("plain code copy preserves only the supplied displayed value", async () => 
   assert.deepEqual(writes, ["const answer = 42;"]);
 });
 
+test("plain copy prefers a MIME clipboard item when the desktop WebView supports it", async () => {
+  const writes = [];
+  installClipboard(
+    {
+      async write(items) {
+        writes.push(items);
+      },
+      async writeText() {
+        assert.fail("the supported MIME clipboard path must be preferred");
+      },
+    },
+    MockClipboardItem,
+  );
+
+  await writePlainClipboard("copy me");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].length, 1);
+  assert.deepEqual(writes[0][0].types, ["text/plain"]);
+  assert.equal(
+    await (await writes[0][0].getType("text/plain")).text(),
+    "copy me",
+  );
+});
+
 test("input copy preserves text and projects structured inputs readably", async () => {
   assert.equal(
     runInputClipboardText({

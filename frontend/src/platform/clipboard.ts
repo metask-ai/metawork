@@ -16,6 +16,15 @@ function richClipboardUnavailable(clipboard: Clipboard): boolean {
   );
 }
 
+function plainClipboardItemUnavailable(clipboard: Clipboard): boolean {
+  if (typeof ClipboardItem !== "function") return true;
+  if (typeof clipboard.write !== "function") return true;
+  return (
+    typeof ClipboardItem.supports === "function" &&
+    !ClipboardItem.supports("text/plain")
+  );
+}
+
 export async function writeRichClipboard(
   markdown: string,
   renderHtml: () => string | Promise<string>,
@@ -40,6 +49,14 @@ export async function writeRichClipboard(
 
 export async function writePlainClipboard(text: string): Promise<void> {
   const clipboard = browserClipboard();
+  if (!plainClipboardItemUnavailable(clipboard)) {
+    await clipboard.write([
+      new ClipboardItem({
+        "text/plain": new Blob([text], { type: "text/plain" }),
+      }),
+    ]);
+    return;
+  }
   if (typeof clipboard.writeText !== "function")
     throw new Error("Clipboard text API is unavailable");
   await clipboard.writeText(text);
