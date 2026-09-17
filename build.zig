@@ -21,8 +21,11 @@ const ArtifactOption = enum {
 pub fn build(b: *std.Build) void {
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
     const artifact = selectedArtifact(b);
+    // Include the ICO in the generated resource path's cache identity.
+    const windows_resources = b.addWriteFiles();
+    _ = windows_resources.addCopyFile(b.path("assets/icons/app-icon.ico"), "app-icon.ico");
     artifacts.exe.root_module.addWin32ResourceFile(.{
-        .file = b.path("packaging/windows/metawork.rc"),
+        .file = windows_resources.addCopyFile(b.path("packaging/windows/metawork.rc"), "metawork.rc"),
         .include_paths = &.{b.path("assets/icons")},
     });
     const frontend_assets = b.addInstallDirectory(.{
