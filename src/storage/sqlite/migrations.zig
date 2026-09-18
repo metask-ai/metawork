@@ -1,7 +1,7 @@
 //! Storage-owned migration identity and atomic prefix application.
 
 const std = @import("std");
-const sql = @import("../sql.zig");
+const sql = @import("metawork_storage_sql");
 const backend = @import("connection.zig");
 
 const c = backend.c;

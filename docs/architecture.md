@@ -156,7 +156,11 @@ Compatibility 的 module root 与依赖方向由[工程结构与所有权](proje
 
 Storage 是 MetaWork-owned、无业务语义的基础设施边界，拥有 backend-neutral SQL value、statement、query/mutation outcome、limit 和 migration mechanism；concrete backend 独占 engine connection、transaction、engine profile 与错误映射。Product owner 始终独占自己的 schema、migration 内容、health、恢复、并发和所需 durability policy，Storage 不因承载数据取得业务 policy。
 
-Storage 当前不进入生产 Application/Product 运行图。直接 SQLite backend、conformance 和未来 backend 原位替换只由[Storage 架构](storage-architecture.md)定义；正式接入 Product 时必须显式改变本图和 owner composition，不能通过共享数据库或通用 repository 绕过 Product 边界。
+Product Control 的无状态 history schema 窄模块依赖 Storage SQL contract，与 backend 消费同一个合同模块；该依赖不授予开库、查询或运行时 policy。具体数据库仍未接入生产 Application/Product Runtime，后续由 Application 组合并向 Product 注入借用 capability。直接 SQLite backend、conformance 和未来 backend 原位替换由[Storage 架构](storage-architecture.md)定义；生产接入仍须显式完成 owner composition，不能通过共享数据库或通用 repository 绕过 Product 边界。
+
+```text
+Product Control history schema -> Storage SQL contract <- Storage backend -> SQLite
+```
 
 ### 3.7 持久化权威与故障语义
 

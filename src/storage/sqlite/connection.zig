@@ -2,7 +2,7 @@
 //! authorizers, limits, and raw error classification.
 
 const std = @import("std");
-const sql = @import("../sql.zig");
+const sql = @import("metawork_storage_sql");
 
 pub const c = @cImport({
     @cInclude("sqlite3.h");

@@ -83,6 +83,7 @@ models, account credential boundary -> product identity through Application adap
 agent -> Metask AgentCore bundle SDK
 automation -> bridge policy, account contract, Native SDK policy types
 storage backend -> SQLite amalgamation
+product control history schema, storage backend -> one Storage SQL contract module
 ```
 
 Application 只做 composition、capability 注入、资源生命周期和跨 owner 调用顺序，不读取领域内部状态形成 policy。`app/`、`product/`、`agent/` 与 `bridge/` 的下层 owner 都不得反向导入 Application 实现。
@@ -94,6 +95,8 @@ OAuth shared leaf 不发布统一 OAuth flow 或业务 policy。Account 与 Appl
 `src/native_sdk_compat/` 中每项 seam 必须由 Application 显式组装，只暴露对应缺口所需的窄 capability。它不得成为 Native SDK adapter、Desktop Interface、通用 facade 或下层 owner 的反向依赖入口；SDK 提供等价正式能力并完成验收后，应删除对应 seam、allowlist 和专用验证。
 
 精确 module imports 由 `build.zig` 强制，本文不复制内部 leaf graph。跨 owner import 必须符合上述方向，并只消费发布者显式暴露且由 build graph 具名注入的 root、contract、port 或窄 leaf；具名 leaf 不因此取得新的 owner 身份。
+
+Product Control 的 history schema 位于其 persistence 子模块，只提供静态迁移清单与编译期校验，不拥有连接、health 或恢复方法。它消费具名的纯 SQL contract；测试负责组合真实 backend。生产 Application/Runtime 接入与业务 adapter 另行完成，不能把 schema 的具名导入扩展为任意 Product 模块直接消费 backend 的许可。历史结构与接入条件由 [Product 架构](product-architecture.md#431-history-schema) 唯一承载。
 
 ## 4. 文件放置与封装规则
 

@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const sql = @import("sql.zig");
+const sql = @import("metawork_storage_sql");
 const conformance = @import("conformance.zig");
 const backend = @import("sqlite/connection.zig");
 const migration_engine = @import("sqlite/migrations.zig");
