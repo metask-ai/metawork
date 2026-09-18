@@ -2907,6 +2907,24 @@ button.run-process-tool:hover {
   white-space: nowrap;
 }
 
+.run-process-tool-audit-link {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 2px;
+  color: var(--ui-action-primary);
+  background: transparent;
+  font: inherit;
+  font-size: var(--text-micro);
+  text-align: left;
+  text-decoration: underline;
+  text-overflow: ellipsis;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .tool-unparsed-details > summary {
   min-height: 44px;
   padding-block: 12px;

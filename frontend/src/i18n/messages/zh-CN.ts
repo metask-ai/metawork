@@ -691,6 +691,7 @@ export const zhCN: Record<MessageId, string> = {
   "file_changes.incomplete_label": "记录可能不完整",
   "file_changes.incomplete_empty": "文件修改记录可能不完整",
   "file_changes.review": "审查更改",
+  "file_changes.review_file": "审查 {path} 的更改",
   "file_changes.incomplete_notice":
     "部分文件修改记录可能缺失，以下已记录内容仍可审查。",
   "file_changes.load_diff": "加载已记录差异",

@@ -765,6 +765,7 @@ export const enUS = {
   "file_changes.incomplete_label": "Record may be incomplete",
   "file_changes.incomplete_empty": "The file change record may be incomplete",
   "file_changes.review": "Review changes",
+  "file_changes.review_file": "Review changes to {path}",
   "file_changes.incomplete_notice":
     "Some file change records may be missing. The changes shown below are still available for review.",
   "file_changes.load_diff": "Load recorded diff",

@@ -594,7 +594,7 @@ terminal Run:
   response copy action + optional finished time
 ```
 
-active→terminal 时，live activity 与持续外推必须消失；没有 Tool 的 process surface 同步卸载，存在 Tool 时则在最终结果之后保留标题为“执行详情”的默认折叠稳定摘要。Host 最终 `elapsedMs` 非空时在标题右侧弱化显示“本轮用时 {duration}”，不可得时不占位，也不改变入口名称。展开该摘要后，用户可以独立展开多条 Tool 行；完整 input/progress/result 在所属行下方挂载，长代码面有界滚动，安全 raw details 继续二次折叠。折叠 process surface 不清除逐 Tool disclosure；Renderer reload 后这些本地状态可以重置。存在非空 final/partial response 时，复制元数据仍是整个 Run 的最后一行：它位于文件更改、历史 process surface 和必要 terminal notice 之后，复制图标在左，Product 提供完成时间时在其右侧显示弱化的本地相对时间。
+active→terminal 时，live activity 与持续外推必须消失；没有 Tool 的 process surface 同步卸载，存在 Tool 时则在最终结果之后保留标题为“执行详情”的默认折叠稳定摘要。Host 最终 `elapsedMs` 非空时在标题右侧弱化显示“本轮用时 {duration}”，不可得时不占位，也不改变入口名称。展开该摘要后，用户可以独立展开具有内联详情的 Tool 行；完整 input/progress/result 在所属行下方挂载，长代码面有界滚动，安全 raw details 继续二次折叠。已有专用 Product 审计面的 Edit 与 Write 不重复挂载原始 input/result。折叠 process surface 不清除逐 Tool disclosure；Renderer reload 后这些本地状态可以重置。存在非空 final/partial response 时，复制元数据仍是整个 Run 的最后一行：它位于文件更改、历史 process surface 和必要 terminal notice 之后，复制图标在左，Product 提供完成时间时在其右侧显示弱化的本地相对时间。
 
 #### Output projection 与可见迁移
 
@@ -657,7 +657,7 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 ### 7.5 当前状态、请求与结果
 
 - active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。`executing_tools` 且恰有一个 typed running Tool 时，Renderer 可以依据固定 Tool identifier 映射为“检查工作区”“更新内容”“运行操作”等宽泛但真实的用户文案；不满足条件时回退到 canonical activity，不在主状态中暴露原始 Tool 名称、参数或命令；
-- Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。Run terminal 后 live status 消失；没有 Tool 时整个 surface 卸载，存在 Tool 时保留默认折叠的“执行详情”摘要，并在 Host 最终耗时可用时于右侧显示“本轮用时 {duration}”，允许在所属 Tool 行下方查看完整 input/result。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
+- Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。Run terminal 后 live status 消失；没有 Tool 时整个 surface 卸载，存在 Tool 时保留默认折叠的“执行详情”摘要，并在 Host 最终耗时可用时于右侧显示“本轮用时 {duration}”。普通 Tool 可以在所属行下方查看完整 input/result；Edit 与 Write 不显示协议 JSON、不提供 disclosure，当其唯一 `fileRefs.displayPath` 与同 Run typed File Changes 的一个文件分组精确相等时，路径显示为审计链接并打开该 Run Review、展开且聚焦对应文件，否则保持只读摘要。该匹配只建立导航，不生成或补造 File Change。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - terminal cause 使用最具体的稳定本地化文案：`provider_failure` 显示“模型服务请求失败”，并在同一 notice 中说明本次 Run 未生成可用回复或只生成了可能不完整的部分回复；`tool_failure` 说明工具失败且 Agent 未能恢复，`image_input_unsupported` 明确要求更换支持图片的模型并重新选择图片；不得把三者统一写成“检查模型或网络”，也不得直接展示 provider raw body；
@@ -890,7 +890,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 > Capability：File Changes **当前**；typed Output **未来**。File Changes 只消费 AgentCore typed `file_changes` observation，不能从 Tool 文本、Bash 输出、Git、文件后缀或 File Preview reference 推断。它是已记录副作用的审查视图，不承诺 Workspace 当前净状态。
 
 - 每个 Run 在 Assistant response 后、必要 terminal notice 和末行复制动作之前显示紧凑的单行“文件更改”入口。至少一条记录时，整行使用一个原生按钮，只显示中性 diff 图标、“文件更改 · 唯一文件数”和“审查更改”动作；不使用卡片、图标底板、过程竖线或第二行状态，也不暴露内部修改记录次数。`incomplete` 在同一行明确提示记录可能不完整；`incomplete` 且零记录时只显示非交互警告，不提供空 Review 动作；其他零记录状态不占位；
-- “审查更改”在既有右侧 Task Panel 打开为 singleton 对象标签，不建立独立 route 或占用整个工作区。Review 绑定一个明确 Task + Run，标签使用“审查更改”，活动正文立即进入按文件首次出现顺序排列的连续差异文档；不重复显示类型、标题或常规说明区。打开即请求并展示首个文件的首条 diff，同文件后续记录在该文件区块接近可见区域时按稳定 `order` 逐条接入，后续文件纵向衔接，不经过列表页、单条详情页或返回动作。打开时显式展开右栏；切换其他标签保留已读 diff、折叠与滚动状态，关闭 Review 标签才释放这些内容；
+- “审查更改”在既有右侧 Task Panel 打开为 singleton 对象标签，不建立独立 route 或占用整个工作区。Review 绑定一个明确 Task + Run，标签使用“审查更改”，活动正文立即进入按文件首次出现顺序排列的连续差异文档；不重复显示类型、标题或常规说明区。Run 级入口打开即请求并展示首个文件的首条 diff；Edit/Write 的已验证路径入口则展开、滚动并聚焦对应文件头，优先请求该文件的首条 diff。同文件后续记录在该文件区块接近可见区域时按稳定 `order` 逐条接入，后续文件纵向衔接，不经过列表页、单条详情页或返回动作。打开时显式展开右栏；切换其他标签保留已读 diff、折叠与滚动状态，关闭 Review 标签才释放这些内容；
 - 每个文件使用一个克制文件头区分身份和边界：文件名前以 Git 惯例的 `A/M/D/R` 等宽字母和对应语义色表示聚合后的 created/modified/deleted/moved，不再重复状态文字；partial 是正交的异常事实，只在文件名后显示 warning 图标，并以“更改可能未完整应用”的可访问说明解释。文件头继续显示完整可取得的 `displayPath`、moved 的 `from → to` 与增删摘要，不显示同路径记录序号。文件默认展开，整个文件头是带 `aria-expanded` 的原生按钮，点击、Enter 或 Space 只折叠/展开所属文件的 diff、加载状态和错误说明，文件身份及增删摘要保持可见；折叠状态只属于当前挂载的 Review，不持久化，也不触发尚未开始的按需读取。ready 后可从已经汇入该文件区块的 recorded diff 派生增删行数，但不得据此宣称 Workspace、Git 或 Run 的当前净变化。区块使用分隔线形成连续文档，不包装成可导航卡片；底层多条记录、稳定顺序、独立读取失败与 stale identity 不得因呈现聚合而丢失。停靠、左栏互斥和窄窗全宽 overlay 仅沿用 Task Panel 的统一响应式规则；
 - diff 只通过 `metawork.files.diff` 读取 Product 已记录的 credential-safe unified diff。首条立即读取；其余区块仅在进入或接近 Review 可见区域时各自按需读取，不因打开而批量预取。已读取正文只在当前 Task 的 Review 标签内并存，不形成跨 Task、跨关闭或持久化的 Renderer cache。每条请求绑定精确 `taskId + runId + changeId + request generation`；关闭 Review 标签、替换其 Run、切换 Task、目标 Run/记录消失或同记录后续请求开始，都必须使对应旧 Promise stale，不能覆盖其他记录或新 Review；
 - ready diff 使用等宽 unified-diff 视图，显示新旧双行号与整行增删背景；Renderer 使用 hunk header 计算行号和可证明的未修改行缺口，但不重复显示原始 `@@ … @@` 文本。长行在正文区域横向滚动，路径可截断但必须能取得完整值。malformed 或未识别行安全降级为原文，不执行正文或依赖颜色表达唯一语义；

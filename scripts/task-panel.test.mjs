@@ -402,6 +402,96 @@ function fileChange(overrides = {}) {
   };
 }
 
+test("Edit and Write replace raw protocol details with matching file audit links", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const opened = [];
+  const value = run({
+    tools: [
+      technicalTool({
+        name: "Edit",
+        input: '{"file_path":"/workspace/index.html","old_string":"before"}',
+        content: '{"success":true,"gitDiff":"-before\\n+after"}',
+        fileRefs: [
+          { id: "file-1", title: "index.html", displayPath: "index.html" },
+        ],
+      }),
+      technicalTool({
+        id: "tool-2",
+        order: "2",
+        name: "Write",
+        input: '{"file_path":"/workspace/app.js","content":"saved"}',
+        content: '{"success":true}',
+        fileRefs: [{ id: "file-2", title: "app.js", displayPath: "app.js" }],
+      }),
+    ],
+    fileChanges: {
+      observation: "complete",
+      changes: [
+        fileChange({ displayPath: "index.html" }),
+        fileChange({ id: "change-2", order: "2", displayPath: "app.js" }),
+      ],
+    },
+  });
+  render(
+    runProcessElement(value, {
+      onReviewFileChanges: (...args) => opened.push(args),
+    }),
+  );
+
+  assert.equal(
+    screen.queryByRole("button", { name: "Show or hide details for Edit" }),
+    null,
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Show or hide details for Write" }),
+    null,
+  );
+  assert.doesNotMatch(
+    document.body.textContent,
+    /old_string|gitDiff|file_path|success/,
+  );
+  const editAudit = screen.getByRole("button", {
+    name: "Review changes to index.html",
+  });
+  const writeAudit = screen.getByRole("button", {
+    name: "Review changes to app.js",
+  });
+  await user.click(editAudit);
+  await user.click(writeAudit);
+  assert.equal(opened.length, 2);
+  assert.equal(opened[0][0], "index.html");
+  assert.equal(opened[0][1], editAudit);
+  assert.equal(opened[1][0], "app.js");
+  assert.equal(opened[1][1], writeAudit);
+
+  cleanup();
+  render(
+    runProcessElement(
+      {
+        ...value,
+        fileChanges: {
+          ...value.fileChanges,
+          changes: [
+            fileChange({ displayPath: "other.html" }),
+            fileChange({ id: "change-2", order: "2", displayPath: "app.js" }),
+          ],
+        },
+      },
+      { onReviewFileChanges: (...args) => opened.push(args) },
+    ),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Review changes to index.html" }),
+    null,
+  );
+  assert.ok(screen.getByText("index.html"));
+  assert.ok(screen.getByRole("button", { name: "Review changes to app.js" }));
+  assert.doesNotMatch(
+    document.body.textContent,
+    /old_string|gitDiff|file_path|success/,
+  );
+});
+
 function task(overrides = {}) {
   return {
     id: "3",
@@ -492,15 +582,17 @@ function taskContentElement(value, revision = "1", overrides = {}) {
 
 function runProcessElement(
   value,
-  { expanded = true, onExpandedChange = () => {} } = {},
+  { expanded = true, onExpandedChange = () => {}, onReviewFileChanges } = {},
 ) {
   function Harness() {
     const [expandedToolIds, setExpandedToolIds] = useState(new Set());
     return createElement(RunProcess, {
       presentation: deriveRunPresentation(value),
+      fileChanges: value.fileChanges ?? null,
       elapsedMs: value.elapsedMs,
       expanded,
       onExpandedChange,
+      onReviewFileChanges,
       expandedToolIds,
       onToolExpandedChange(toolId, nextExpanded) {
         setExpandedToolIds((current) => {
@@ -2126,10 +2218,12 @@ function StatefulFileChangesView(props) {
   return createElement(FileChangesView, {
     ...props,
     expandedFiles,
+    focus: props.focus ?? null,
     scrollTop,
     onFileExpandedChange(displayPath, expanded) {
       setExpandedFiles((current) => ({ ...current, [displayPath]: expanded }));
     },
+    onFocusHandled: props.onFocusHandled ?? (() => {}),
     onScrollTopChange: setScrollTop,
   });
 }
@@ -2368,6 +2462,51 @@ test("file headers independently collapse their diff with pointer and keyboard",
   assert.equal(
     screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
     3,
+  );
+});
+
+test("Task Panel review focuses the file requested by an Edit audit link", () => {
+  const changes = [
+    fileChange({ id: "change-a", displayPath: "src/a.ts" }),
+    fileChange({ id: "change-b", order: "2", displayPath: "src/b.ts" }),
+  ];
+  const props = {
+    observation: "complete",
+    changes,
+    diffs: {
+      "change-a": { phase: "idle", diff: null },
+      "change-b": { phase: "idle", diff: null },
+    },
+    onLoad() {},
+  };
+  const view = render(
+    localizedView(
+      createElement(StatefulFileChangesView, {
+        ...props,
+        focus: { displayPath: "src/b.ts", requestId: 1 },
+      }),
+    ),
+  );
+  assert.equal(
+    document.activeElement,
+    document
+      .querySelector('[data-file-path="src/b.ts"]')
+      .querySelector(".task-panel-change-toggle"),
+  );
+
+  view.rerender(
+    localizedView(
+      createElement(StatefulFileChangesView, {
+        ...props,
+        focus: { displayPath: "src/a.ts", requestId: 2 },
+      }),
+    ),
+  );
+  assert.equal(
+    document.activeElement,
+    document
+      .querySelector('[data-file-path="src/a.ts"]')
+      .querySelector(".task-panel-change-toggle"),
   );
 });
 

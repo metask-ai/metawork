@@ -240,6 +240,7 @@ export function TaskContent({
     taskId: string,
     runId: string,
     opener: HTMLButtonElement,
+    displayPath?: string,
   ) => void;
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
@@ -471,6 +472,7 @@ export function TaskContent({
             {presentation.active && (
               <RunProcess
                 presentation={presentation}
+                fileChanges={fileChangesEnabled ? run.fileChanges : null}
                 elapsedMs={run.elapsedMs}
                 snapshotReceivedAt={snapshotReceivedAt}
                 synchronized={synchronized}
@@ -479,6 +481,9 @@ export function TaskContent({
                 onExpandedChange={setProcessExpanded}
                 expandedToolIds={expandedToolIds}
                 onToolExpandedChange={setToolExpanded}
+                onReviewFileChanges={(displayPath, opener) =>
+                  onReviewFileChanges(task.id, run.id, opener, displayPath)
+                }
               />
             )}
             {isCurrent && task.pendingUi && (
@@ -502,12 +507,16 @@ export function TaskContent({
             {!presentation.active && presentation.processVisible && (
               <RunProcess
                 presentation={presentation}
+                fileChanges={fileChangesEnabled ? run.fileChanges : null}
                 elapsedMs={run.elapsedMs}
                 synchronized={synchronized}
                 expanded={disclosure.expanded}
                 onExpandedChange={setProcessExpanded}
                 expandedToolIds={expandedToolIds}
                 onToolExpandedChange={setToolExpanded}
+                onReviewFileChanges={(displayPath, opener) =>
+                  onReviewFileChanges(task.id, run.id, opener, displayPath)
+                }
               />
             )}
             {presentation.showTerminalNotice && terminal && (

@@ -70,7 +70,10 @@ import {
   FilePreviewView,
   type FilePreviewViewState,
 } from "../features/task-panel/FilePreviewView.tsx";
-import { FileChangesView } from "../features/task-panel/FileChangesView.tsx";
+import {
+  FileChangesView,
+  type FileChangeFocus,
+} from "../features/task-panel/FileChangesView.tsx";
 import { sidePanelFocusReturnTarget } from "./side-panel-interaction.ts";
 import { useTaskPanelTarget } from "../features/task-panel/useTaskPanelTarget.ts";
 import { useFilePreviewTabs } from "../features/task-panel/useFilePreviewTabs.ts";
@@ -214,6 +217,7 @@ type FileChangesIdentity = {
   changes: FileChangeView[];
   sessionGeneration: number;
   diffs: Record<string, FileChangeDiffUiState>;
+  focus: FileChangeFocus | null;
 };
 
 type FileChangesUiState =
@@ -261,6 +265,7 @@ export default function App() {
   });
   const fileChangesGeneration = useRef(0);
   const fileChangeRequestGeneration = useRef(0);
+  const fileChangeFocusRequest = useRef(0);
   const fileChangeRequestsInFlight = useRef(new Set<string>());
   const [statuses, setStatuses] = useState<ShellStatusState>(() =>
     publishStatus(
@@ -505,6 +510,7 @@ export default function App() {
     taskId: string,
     runId: string,
     opener: HTMLButtonElement,
+    displayPath?: string,
   ) {
     if (!snapshot.capabilities.typedFileChanges) return;
     const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
@@ -518,6 +524,15 @@ export default function App() {
       activeTaskIdRef.current !== taskId
     )
       return;
+    const focus =
+      displayPath &&
+      recorded.changes.some((change) => change.displayPath === displayPath)
+        ? {
+            displayPath,
+            requestId: ++fileChangeFocusRequest.current,
+          }
+        : null;
+    const changes = orderedFileChanges(recorded.changes);
     const tab = createTaskPanelReviewTab(taskId, runId);
     setRightPanelOpen(true);
     taskPanelOpeners.current.set(tab.tabId, opener);
@@ -526,16 +541,30 @@ export default function App() {
     );
     if (existingReview?.runId !== runId) taskPanelViews.reset(tab.tabId);
     taskPanel.openReview(taskId, runId);
+    if (focus)
+      taskPanelViews.setFileExpanded(tab.tabId, focus.displayPath, true);
     if (
       existingReview?.runId === runId &&
       fileChanges.kind === "open" &&
       fileChanges.taskId === taskId &&
       fileChanges.runId === runId
     ) {
-      focusTaskPanelTab(tab.tabId);
+      setFileChanges((current) =>
+        current.kind === "open" &&
+        current.taskId === taskId &&
+        current.runId === runId
+          ? { ...current, focus }
+          : current,
+      );
+      if (focus) {
+        const focusedChange = changes.find(
+          (change) => change.displayPath === focus.displayPath,
+        );
+        if (focusedChange) loadFileChangeDiff(focusedChange);
+      }
+      if (!focus) focusTaskPanelTab(tab.tabId);
       return;
     }
-    const changes = orderedFileChanges(recorded.changes);
     const sessionGeneration = fileChangesGeneration.current + 1;
     fileChangesGeneration.current = sessionGeneration;
     fileChangeRequestsInFlight.current.clear();
@@ -546,12 +575,20 @@ export default function App() {
       observation: recorded.observation,
       changes,
       sessionGeneration,
+      focus,
       diffs: Object.fromEntries(
         changes.map((change) => [change.id, { phase: "idle", diff: null }]),
       ),
     });
-    requestFileChangeDiff(taskId, runId, changes[0]!, sessionGeneration);
-    focusTaskPanelTab(tab.tabId);
+    requestFileChangeDiff(
+      taskId,
+      runId,
+      (focus
+        ? changes.find((change) => change.displayPath === focus.displayPath)
+        : null) ?? changes[0]!,
+      sessionGeneration,
+    );
+    if (!focus) focusTaskPanelTab(tab.tabId);
   }
 
   function loadFileChangeDiff(change: FileChangeView) {
@@ -3257,6 +3294,7 @@ export default function App() {
                 changes={fileChanges.changes}
                 diffs={fileChanges.diffs}
                 expandedFiles={activePanelView?.expandedFiles ?? {}}
+                focus={fileChanges.focus}
                 scrollTop={activePanelView?.scrollTop ?? 0}
                 onFileExpandedChange={(displayPath, expanded) => {
                   if (taskPanel.activeTab)
@@ -3266,6 +3304,14 @@ export default function App() {
                       expanded,
                     );
                 }}
+                onFocusHandled={(requestId) =>
+                  setFileChanges((current) =>
+                    current.kind === "open" &&
+                    current.focus?.requestId === requestId
+                      ? { ...current, focus: null }
+                      : current,
+                  )
+                }
                 onScrollTopChange={(scrollTop) => {
                   if (taskPanel.activeTab)
                     taskPanelViews.setScrollTop(

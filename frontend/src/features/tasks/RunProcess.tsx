@@ -1,6 +1,10 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 
-import type { RunActivity, ToolView } from "../../bridge/contracts.ts";
+import type {
+  RunActivity,
+  RunFileChanges,
+  ToolView,
+} from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
@@ -97,6 +101,7 @@ function toolStateMessage(tool: ToolView): MessageId {
 }
 
 function toolDetailAvailable(tool: ToolView): boolean {
+  if (tool.name === "Edit" || tool.name === "Write") return false;
   return Boolean(
     tool.bash?.command != null ||
     tool.bash?.result != null ||
@@ -108,6 +113,24 @@ function toolDetailAvailable(tool: ToolView): boolean {
     tool.contentTruncated ||
     tool.redacted,
   );
+}
+
+function fileMutationAuditPath(
+  tool: ToolView,
+  fileChanges: RunFileChanges | null,
+): string | null {
+  if ((tool.name !== "Edit" && tool.name !== "Write") || !fileChanges)
+    return null;
+  const referencePaths = new Set(
+    tool.fileRefs.map((reference) => reference.displayPath),
+  );
+  if (referencePaths.size !== 1) return null;
+  const matchingPaths = new Set(
+    fileChanges.changes
+      .map((change) => change.displayPath)
+      .filter((path) => referencePaths.has(path)),
+  );
+  return matchingPaths.size === 1 ? [...matchingPaths][0]! : null;
 }
 
 function toolSummary(tool: ToolView): string | null {
@@ -212,28 +235,47 @@ function formatElapsedDuration(
 
 function ProcessTool({
   tool,
+  fileChanges,
   expanded,
   onExpandedChange,
+  onReviewFileChanges,
 }: {
   tool: ToolView;
+  fileChanges: RunFileChanges | null;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
+  onReviewFileChanges?: (
+    displayPath: string,
+    opener: HTMLButtonElement,
+  ) => void;
 }) {
   const { locale, t } = useI18n();
   const detailId = useId();
   const elapsed = BigInt(tool.elapsedMs);
   const hasDetails = toolDetailAvailable(tool);
+  const auditPath = fileMutationAuditPath(tool, fileChanges);
   const summary = toolSummary(tool);
   const content = (
     <>
       <span className="run-process-tool-mark" aria-hidden="true" />
       <span className="run-process-tool-label">
         <span className="run-process-tool-name">{tool.name}</span>
-        {summary && (
+        {auditPath && onReviewFileChanges ? (
+          <button
+            type="button"
+            className="run-process-tool-audit-link focus-ring"
+            aria-label={t("file_changes.review_file", { path: auditPath })}
+            onClick={(event) =>
+              onReviewFileChanges(auditPath, event.currentTarget)
+            }
+          >
+            {auditPath}
+          </button>
+        ) : summary ? (
           <span className="run-process-tool-description" title={summary}>
             {summary}
           </span>
-        )}
+        ) : null}
       </span>
       <span className="run-process-tool-meta">
         <span>{t(toolStateMessage(tool))}</span>
@@ -276,6 +318,7 @@ function ProcessTool({
 
 export function RunProcess({
   presentation,
+  fileChanges = null,
   elapsedMs = null,
   snapshotReceivedAt = null,
   synchronized = true,
@@ -284,8 +327,10 @@ export function RunProcess({
   onExpandedChange,
   expandedToolIds = emptyExpandedToolIds,
   onToolExpandedChange = () => {},
+  onReviewFileChanges,
 }: {
   presentation: RunPresentation;
+  fileChanges?: RunFileChanges | null;
   elapsedMs?: string | null;
   snapshotReceivedAt?: number | null;
   synchronized?: boolean;
@@ -294,6 +339,10 @@ export function RunProcess({
   onExpandedChange: (expanded: boolean) => void;
   expandedToolIds?: ReadonlySet<string>;
   onToolExpandedChange?: (toolId: string, expanded: boolean) => void;
+  onReviewFileChanges?: (
+    displayPath: string,
+    opener: HTMLButtonElement,
+  ) => void;
 }) {
   const { locale, t } = useI18n();
   const bodyId = useId();
@@ -361,10 +410,12 @@ export function RunProcess({
                 <ProcessTool
                   key={tool.id}
                   tool={tool}
+                  fileChanges={fileChanges}
                   expanded={expandedToolIds.has(tool.id)}
                   onExpandedChange={(nextExpanded) =>
                     onToolExpandedChange(tool.id, nextExpanded)
                   }
+                  onReviewFileChanges={onReviewFileChanges}
                 />
               ))}
             </ul>

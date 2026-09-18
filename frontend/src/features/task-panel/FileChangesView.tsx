@@ -16,6 +16,11 @@ export type FileChangeDiffViewState =
   | { phase: "settled"; diff: FileChangeDiffResult }
   | { phase: "failed"; diff: null };
 
+export type FileChangeFocus = {
+  displayPath: string;
+  requestId: number;
+};
+
 function kindMessage(kind: FileChangeView["kind"]): MessageId {
   return `file_changes.kind.${kind}`;
 }
@@ -376,8 +381,10 @@ export function FileChangesView({
   changes,
   diffs,
   expandedFiles,
+  focus,
   scrollTop,
   onFileExpandedChange,
+  onFocusHandled,
   onScrollTopChange,
   onLoad,
 }: {
@@ -385,8 +392,10 @@ export function FileChangesView({
   changes: FileChangeView[];
   diffs: Record<string, FileChangeDiffViewState>;
   expandedFiles: Record<string, boolean>;
+  focus: FileChangeFocus | null;
   scrollTop: number;
   onFileExpandedChange: (displayPath: string, expanded: boolean) => void;
+  onFocusHandled: (requestId: number) => void;
   onScrollTopChange: (scrollTop: number) => void;
   onLoad: (change: FileChangeView) => void;
 }) {
@@ -397,6 +406,19 @@ export function FileChangesView({
   useLayoutEffect(() => {
     if (review.current) review.current.scrollTop = scrollTop;
   }, [scrollTop]);
+
+  useLayoutEffect(() => {
+    if (!focus || !review.current) return;
+    const target = [
+      ...review.current.querySelectorAll<HTMLElement>("[data-file-path]"),
+    ].find((candidate) => candidate.dataset.filePath === focus.displayPath);
+    if (!target) return;
+    target.scrollIntoView({ block: "center" });
+    target
+      .querySelector<HTMLButtonElement>(".task-panel-change-toggle")
+      ?.focus();
+    onFocusHandled(focus.requestId);
+  }, [focus, onFocusHandled]);
 
   return (
     <section
