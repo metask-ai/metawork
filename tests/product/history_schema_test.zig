@@ -173,6 +173,14 @@ test "history schema rejects structural counterexamples and rolls back the prece
         "UPDATE runs SET generation=13",
         "UPDATE runs SET ordinal=0.5",
         "UPDATE tasks SET archived=2",
+        "UPDATE tasks SET checkpoint_anchor='unknown'",
+        "UPDATE tasks SET checkpoint_attempt='unknown'",
+        "UPDATE tasks SET checkpoint_digest=NULL",
+        "UPDATE tasks SET checkpoint_byte_size=X'0000000000000000'",
+        "UPDATE tasks SET checkpoint_terminal_kind='unknown'",
+        "UPDATE tasks SET ui_history_json=NULL",
+        "UPDATE tasks SET compacts_json=X'5b5d'",
+        "UPDATE history_state SET failures_json=NULL",
         "UPDATE tasks SET active_operation_id=X'000000000000000b'",
         "UPDATE runs SET assistant_output_start=NULL",
         "UPDATE run_file_changes SET artifact_digest=NULL",
@@ -199,6 +207,12 @@ test "history loader refuses invalid domain data instead of silently producing e
         "UPDATE runs SET file_change_observation=NULL",
         "UPDATE runs SET input_json='{}'",
         "UPDATE runs SET submitted_at_unix_ms=8640000000000001",
+        "UPDATE tasks SET checkpoint_binding_epoch=X'0000000000000014'",
+        "UPDATE tasks SET checkpoint_terminal_id=X'00000000000000ff'",
+        "UPDATE tasks SET checkpoint_anchor='none'",
+        "UPDATE tasks SET ui_history_json='null'",
+        "UPDATE tasks SET compacts_json='{}'",
+        "UPDATE history_state SET failures_json='['",
         "DELETE FROM history_state",
     }) |invalid| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -213,6 +227,86 @@ test "history loader refuses invalid domain data instead of silently producing e
         if (history.load(allocator, database.capability())) |_| {
             return error.InvalidHistoryAccepted;
         } else |_| {}
+    }
+}
+
+test "merged history payloads retain Product validation after removing child constraints" {
+    const Case = enum {
+        compact_run,
+        compact_duplicate,
+        compact_count,
+        compact_phase,
+        compact_diagnostic,
+        ui_run,
+        ui_duplicate,
+        ui_count,
+        ui_order,
+        ui_state,
+        ui_detail,
+        ui_permission,
+        failure_id,
+        failure_order,
+        failure_reason,
+        failure_count,
+    };
+    inline for (std.meta.tags(Case)) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var state = try history.fixture(allocator);
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        defer database.destroy() catch unreachable;
+        _ = try save(allocator, database.capability(), state);
+        const task = &state.tasks[0];
+        switch (case) {
+            .compact_run => task.compacts[0].after_run_id = 999,
+            .compact_duplicate => task.compacts = try allocator.dupe(history.wire.CompactWire, &.{ task.compacts[0], task.compacts[0] }),
+            .compact_count => {
+                const template = task.compacts[0];
+                task.compacts = try allocator.alloc(history.wire.CompactWire, history.limits.max_compacts_per_task + 1);
+                for (task.compacts, 0..) |*compact, index| {
+                    compact.* = template;
+                    compact.id = index + 100;
+                }
+            },
+            .compact_phase => task.compacts[0].phase = "unknown",
+            .compact_diagnostic => task.compacts[0].diagnostic = "x" ** (history.limits.max_terminal_diagnostic_bytes + 1),
+            .ui_run => task.ui_history[0].run_id = 999,
+            .ui_duplicate => task.ui_history = try allocator.dupe(history.wire.UiRecordWire, &.{ task.ui_history[0], task.ui_history[0] }),
+            .ui_count => {
+                const template = task.ui_history[0];
+                task.ui_history = try allocator.alloc(history.wire.UiRecordWire, history.limits.max_ui_history_per_task + 1);
+                for (task.ui_history, 0..) |*ui, index| {
+                    ui.* = template;
+                    ui.request_id = index + 100;
+                    ui.order = index + 100;
+                }
+                task.runs[0].next_activity_order = 200;
+            },
+            .ui_order => task.ui_history[0].order = task.runs[0].tools[0].order,
+            .ui_state => task.ui_history[0].state = "unknown",
+            .ui_detail => task.ui_history[0].detail = "x" ** 513,
+            .ui_permission => task.ui_history[0].permission.?.request_id = "different-request",
+            .failure_id => state.failures[0].task_id = 0,
+            .failure_order => state.failures[0].recent_order = 0,
+            .failure_reason => state.failures[0].reason = "x" ** (history.wire.max_failure_reason_bytes + 1),
+            .failure_count => {
+                const template = state.failures[0];
+                state.failures = try allocator.alloc(history.wire.TaskFailureWire, history.wire.max_failure_records + 1);
+                @memset(state.failures, template);
+            },
+        }
+        const statement, const payload = switch (case) {
+            .compact_run, .compact_duplicate, .compact_count, .compact_phase, .compact_diagnostic => .{ "UPDATE tasks SET compacts_json=?1", try std.json.Stringify.valueAlloc(allocator, task.compacts, .{}) },
+            .ui_run, .ui_duplicate, .ui_count, .ui_order, .ui_state, .ui_detail, .ui_permission => .{ "UPDATE tasks SET ui_history_json=?1", try std.json.Stringify.valueAlloc(allocator, task.ui_history, .{}) },
+            .failure_id, .failure_order, .failure_reason, .failure_count => .{ "UPDATE history_state SET failures_json=?1", try std.json.Stringify.valueAlloc(allocator, state.failures, .{}) },
+        };
+        // JSON shape and cross-record rules belong to Product, not SQLite CHECKs.
+        try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{
+            .sql = statement,
+            .params = &.{.{ .text = payload }},
+        } }}));
+        if (history.load(allocator, database.capability())) |_| return error.InvalidHistoryAccepted else |_| {}
     }
 }
 
@@ -445,7 +539,7 @@ test "history schema accepts one complete relational set atomically" {
     // separately checked against the original codec in the round-trip tests.
     const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
     defer database.destroy() catch unreachable;
-    var mutations: [10]sql.Mutation = undefined;
+    var mutations: [6]sql.Mutation = undefined;
     var statements = std.mem.splitScalar(u8, @embedFile("history_schema_minimal.sql"), ';');
     var len: usize = 0;
     while (statements.next()) |raw| {
@@ -454,11 +548,11 @@ test "history schema accepts one complete relational set atomically" {
         mutations[len] = .{ .statement = .{ .sql = statement }, .expected_changes = .{ .exactly = 1 } };
         len += 1;
     }
-    try std.testing.expectEqual(@as(usize, 10), len);
+    try std.testing.expectEqual(@as(usize, 6), len);
     try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&mutations));
     var count: Count = .{};
     try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query(
-        "SELECT COUNT(*) FROM tasks t JOIN runs r ON r.task_id=t.id JOIN run_tools tool ON tool.task_id=r.task_id AND tool.run_id=r.id JOIN run_file_changes f ON f.task_id=r.task_id AND f.run_id=r.id JOIN task_compacts c ON c.task_id=r.task_id AND c.after_run_id=r.id JOIN task_ui_history ui ON ui.task_id=r.task_id AND ui.run_id=r.id JOIN task_checkpoints cp ON cp.task_id=t.id JOIN workspaces w ON w.id=t.workspace_id",
+        "SELECT COUNT(*) FROM tasks t JOIN runs r ON r.task_id=t.id JOIN run_tools tool ON tool.task_id=r.task_id AND tool.run_id=r.id JOIN run_file_changes f ON f.task_id=r.task_id AND f.run_id=r.id JOIN workspaces w ON w.id=t.workspace_id",
         &.{},
         count.receiver(),
     ));
@@ -476,14 +570,19 @@ test "history schema creates every business table without bootstrapping business
     defer database.destroy() catch unreachable;
     try std.testing.expectEqual(schema.migrations.len, database.schemaVersion());
     for ([_][]const u8{
-        "history_state", "history_failures", "workspaces",    "tasks",           "runs",
-        "run_tools",     "run_file_changes", "task_compacts", "task_ui_history", "task_checkpoints",
+        "history_state", "workspaces", "tasks", "runs", "run_tools", "run_file_changes",
     }) |name| {
         const query = try std.fmt.allocPrint(std.testing.allocator, "SELECT COUNT(*) FROM {s}", .{name});
         defer std.testing.allocator.free(query);
         var count: Count = .{};
         try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query(query, &.{}, count.receiver()));
         try std.testing.expectEqual(@as(?i64, 0), count.value);
+    }
+    for ([_][]const u8{ "history_failures", "task_compacts", "task_ui_history", "task_checkpoints" }) |name| {
+        const query = try std.fmt.allocPrint(std.testing.allocator, "SELECT COUNT(*) FROM {s}", .{name});
+        defer std.testing.allocator.free(query);
+        var count: Count = .{};
+        try std.testing.expectEqual(sql.QueryOutcome.rejected, database.capability().query(query, &.{}, count.receiver()));
     }
 }
 

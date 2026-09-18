@@ -8,14 +8,8 @@ CREATE TABLE history_state (
     next_workspace_recent_order BLOB NOT NULL CHECK(typeof(next_workspace_recent_order)='blob' AND length(next_workspace_recent_order)=8 AND next_workspace_recent_order<>X'0000000000000000'),
     next_task_id BLOB NOT NULL CHECK(typeof(next_task_id)='blob' AND length(next_task_id)=8 AND next_task_id<>X'0000000000000000'),
     next_task_recent_order BLOB NOT NULL CHECK(typeof(next_task_recent_order)='blob' AND length(next_task_recent_order)=8 AND next_task_recent_order<>X'0000000000000000'),
+    failures_json TEXT NOT NULL CHECK(typeof(failures_json)='text'),
     PRIMARY KEY(singleton)
-);
-CREATE TABLE history_failures (
-    ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0 AND ordinal<=4294967295),
-    task_id BLOB NOT NULL CHECK(typeof(task_id)='blob' AND length(task_id)=8 AND task_id<>X'0000000000000000'),
-    recent_order BLOB NOT NULL CHECK(typeof(recent_order)='blob' AND length(recent_order)=8 AND recent_order<>X'0000000000000000'),
-    reason BLOB NOT NULL CHECK(typeof(reason)='blob' AND length(reason)>0),
-    PRIMARY KEY(ordinal)
 );
 CREATE TABLE workspaces (
     ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0 AND ordinal<=4294967295),
@@ -50,12 +44,25 @@ CREATE TABLE tasks (
     next_run_generation BLOB NOT NULL CHECK(typeof(next_run_generation)='blob' AND length(next_run_generation)=8),
     active_operation_kind TEXT CHECK(active_operation_kind IS NULL OR (typeof(active_operation_kind)='text' AND active_operation_kind IN ('run','compact'))),
     active_operation_id BLOB CHECK(active_operation_id IS NULL OR (typeof(active_operation_id)='blob' AND length(active_operation_id)=8 AND active_operation_id<>X'0000000000000000')),
-    checkpoint_anchor TEXT NOT NULL CHECK(typeof(checkpoint_anchor)='text'),
-    checkpoint_attempt TEXT NOT NULL CHECK(typeof(checkpoint_attempt)='text'),
+    checkpoint_anchor TEXT NOT NULL CHECK(typeof(checkpoint_anchor)='text' AND checkpoint_anchor IN ('none','available','blob_missing','blob_mismatch')),
+    checkpoint_attempt TEXT NOT NULL CHECK(typeof(checkpoint_attempt)='text' AND checkpoint_attempt IN ('none','export_failed','describe_failed','cancelled','resource_limit','io_failed','outcome_unknown','dependency_contract')),
+    checkpoint_generation BLOB CHECK(checkpoint_generation IS NULL OR (typeof(checkpoint_generation)='blob' AND length(checkpoint_generation)=8)),
+    checkpoint_byte_size BLOB CHECK(checkpoint_byte_size IS NULL OR (typeof(checkpoint_byte_size)='blob' AND length(checkpoint_byte_size)=8 AND checkpoint_byte_size<>X'0000000000000000')),
+    checkpoint_digest BLOB CHECK(checkpoint_digest IS NULL OR (typeof(checkpoint_digest)='blob' AND length(checkpoint_digest)=32)),
+    checkpoint_logical_session_id BLOB CHECK(checkpoint_logical_session_id IS NULL OR (typeof(checkpoint_logical_session_id)='blob' AND length(checkpoint_logical_session_id)>0)),
+    checkpoint_last_run_id BLOB CHECK(checkpoint_last_run_id IS NULL OR (typeof(checkpoint_last_run_id)='blob' AND length(checkpoint_last_run_id)=8)),
+    checkpoint_last_compact_id BLOB CHECK(checkpoint_last_compact_id IS NULL OR (typeof(checkpoint_last_compact_id)='blob' AND length(checkpoint_last_compact_id)=8)),
+    checkpoint_model BLOB CHECK(checkpoint_model IS NULL OR (typeof(checkpoint_model)='blob' AND length(checkpoint_model)>0)),
+    checkpoint_terminal_kind TEXT CHECK(checkpoint_terminal_kind IS NULL OR (typeof(checkpoint_terminal_kind)='text' AND checkpoint_terminal_kind IN ('run','compact'))),
+    checkpoint_terminal_id BLOB CHECK(checkpoint_terminal_id IS NULL OR (typeof(checkpoint_terminal_id)='blob' AND length(checkpoint_terminal_id)=8 AND checkpoint_terminal_id<>X'0000000000000000')),
+    checkpoint_binding_epoch BLOB CHECK(checkpoint_binding_epoch IS NULL OR (typeof(checkpoint_binding_epoch)='blob' AND length(checkpoint_binding_epoch)=8 AND checkpoint_binding_epoch<>X'0000000000000000')),
+    ui_history_json TEXT NOT NULL CHECK(typeof(ui_history_json)='text'),
+    compacts_json TEXT NOT NULL CHECK(typeof(compacts_json)='text'),
     PRIMARY KEY(id),
     UNIQUE(ordinal),
     FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
-    CHECK((active_operation_kind IS NULL AND active_operation_id IS NULL) OR (active_operation_kind IS NOT NULL AND active_operation_id IS NOT NULL))
+    CHECK((active_operation_kind IS NULL AND active_operation_id IS NULL) OR (active_operation_kind IS NOT NULL AND active_operation_id IS NOT NULL)),
+    CHECK((checkpoint_generation IS NULL AND checkpoint_byte_size IS NULL AND checkpoint_digest IS NULL AND checkpoint_logical_session_id IS NULL AND checkpoint_last_run_id IS NULL AND checkpoint_last_compact_id IS NULL AND checkpoint_model IS NULL AND checkpoint_terminal_kind IS NULL AND checkpoint_terminal_id IS NULL AND checkpoint_binding_epoch IS NULL) OR (checkpoint_generation IS NOT NULL AND checkpoint_byte_size IS NOT NULL AND checkpoint_digest IS NOT NULL AND checkpoint_logical_session_id IS NOT NULL AND checkpoint_last_run_id IS NOT NULL AND checkpoint_last_compact_id IS NOT NULL AND checkpoint_model IS NOT NULL AND checkpoint_terminal_kind IS NOT NULL AND checkpoint_terminal_id IS NOT NULL AND checkpoint_binding_epoch IS NOT NULL))
 );
 CREATE TABLE runs (
     task_id BLOB NOT NULL CHECK(typeof(task_id)='blob' AND length(task_id)=8 AND task_id<>X'0000000000000000'),
@@ -142,60 +149,6 @@ CREATE TABLE run_file_changes (
     FOREIGN KEY(task_id,run_id) REFERENCES runs(task_id,id),
     CHECK((artifact_run_generation IS NULL AND artifact_change_order IS NULL AND artifact_digest IS NULL AND artifact_byte_size IS NULL) OR (artifact_run_generation IS NOT NULL AND artifact_change_order IS NOT NULL AND artifact_digest IS NOT NULL AND artifact_byte_size IS NOT NULL)),
     CHECK((kind='moved')=(from_display_path IS NOT NULL))
-);
-CREATE TABLE task_compacts (
-    task_id BLOB NOT NULL CHECK(typeof(task_id)='blob' AND length(task_id)=8 AND task_id<>X'0000000000000000'),
-    id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=8 AND id<>X'0000000000000000'),
-    ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0 AND ordinal<=4294967295),
-    after_run_id BLOB NOT NULL CHECK(typeof(after_run_id)='blob' AND length(after_run_id)=8 AND after_run_id<>X'0000000000000000'),
-    phase TEXT NOT NULL CHECK(typeof(phase)='text' AND phase IN ('queued','compacting','stopping','compacted','no_change','degraded','aborted','interrupted','failed')),
-    cause TEXT CHECK(cause IS NULL OR (typeof(cause)='text')),
-    before_context_tokens BLOB NOT NULL CHECK(typeof(before_context_tokens)='blob' AND length(before_context_tokens)=8),
-    after_context_tokens BLOB NOT NULL CHECK(typeof(after_context_tokens)='blob' AND length(after_context_tokens)=8),
-    input_tokens BLOB NOT NULL CHECK(typeof(input_tokens)='blob' AND length(input_tokens)=8),
-    output_tokens BLOB NOT NULL CHECK(typeof(output_tokens)='blob' AND length(output_tokens)=8),
-    cache_read_input_tokens BLOB NOT NULL CHECK(typeof(cache_read_input_tokens)='blob' AND length(cache_read_input_tokens)=8),
-    cache_creation_input_tokens BLOB NOT NULL CHECK(typeof(cache_creation_input_tokens)='blob' AND length(cache_creation_input_tokens)=8),
-    diagnostic BLOB NOT NULL CHECK(typeof(diagnostic)='blob'),
-    diagnostic_truncated INTEGER NOT NULL CHECK(typeof(diagnostic_truncated)='integer' AND diagnostic_truncated IN (0,1)),
-    diagnostic_redacted INTEGER NOT NULL CHECK(typeof(diagnostic_redacted)='integer' AND diagnostic_redacted IN (0,1)),
-    PRIMARY KEY(task_id,id),
-    UNIQUE(task_id,ordinal),
-    FOREIGN KEY(task_id,after_run_id) REFERENCES runs(task_id,id)
-);
-CREATE TABLE task_ui_history (
-    task_id BLOB NOT NULL CHECK(typeof(task_id)='blob' AND length(task_id)=8 AND task_id<>X'0000000000000000'),
-    request_id BLOB NOT NULL CHECK(typeof(request_id)='blob' AND length(request_id)=8 AND request_id<>X'0000000000000000'),
-    ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0 AND ordinal<=4294967295),
-    run_id BLOB NOT NULL CHECK(typeof(run_id)='blob' AND length(run_id)=8 AND run_id<>X'0000000000000000'),
-    activity_order BLOB NOT NULL CHECK(typeof(activity_order)='blob' AND length(activity_order)=8 AND activity_order<>X'0000000000000000'),
-    kind TEXT NOT NULL CHECK(typeof(kind)='text' AND kind IN ('permission')),
-    state TEXT NOT NULL CHECK(typeof(state)='text' AND state IN ('allowed_once','allowed_always','denied','denied_session','cancelled')),
-    detail BLOB NOT NULL CHECK(typeof(detail)='blob'),
-    item_count INTEGER NOT NULL CHECK(typeof(item_count)='integer' AND item_count>=0 AND item_count<=4294967295),
-    detail_truncated INTEGER NOT NULL CHECK(typeof(detail_truncated)='integer' AND detail_truncated IN (0,1)),
-    redacted INTEGER NOT NULL CHECK(typeof(redacted)='integer' AND redacted IN (0,1)),
-    agent_request_id BLOB NOT NULL CHECK(typeof(agent_request_id)='blob'),
-    permission_json TEXT CHECK(permission_json IS NULL OR (typeof(permission_json)='text')),
-    PRIMARY KEY(task_id,request_id),
-    UNIQUE(task_id,ordinal),
-    UNIQUE(task_id,run_id,activity_order),
-    FOREIGN KEY(task_id,run_id) REFERENCES runs(task_id,id)
-);
-CREATE TABLE task_checkpoints (
-    task_id BLOB NOT NULL CHECK(typeof(task_id)='blob' AND length(task_id)=8 AND task_id<>X'0000000000000000'),
-    generation BLOB NOT NULL CHECK(typeof(generation)='blob' AND length(generation)=8),
-    byte_size BLOB NOT NULL CHECK(typeof(byte_size)='blob' AND length(byte_size)=8 AND byte_size<>X'0000000000000000'),
-    digest BLOB NOT NULL CHECK(typeof(digest)='blob' AND length(digest)=32),
-    logical_session_id BLOB NOT NULL CHECK(typeof(logical_session_id)='blob' AND length(logical_session_id)>0),
-    last_run_id BLOB NOT NULL CHECK(typeof(last_run_id)='blob' AND length(last_run_id)=8),
-    last_compact_id BLOB NOT NULL CHECK(typeof(last_compact_id)='blob' AND length(last_compact_id)=8),
-    model BLOB NOT NULL CHECK(typeof(model)='blob' AND length(model)>0),
-    terminal_kind TEXT NOT NULL CHECK(typeof(terminal_kind)='text' AND terminal_kind IN ('run','compact')),
-    terminal_id BLOB NOT NULL CHECK(typeof(terminal_id)='blob' AND length(terminal_id)=8 AND terminal_id<>X'0000000000000000'),
-    binding_epoch BLOB NOT NULL CHECK(typeof(binding_epoch)='blob' AND length(binding_epoch)=8 AND binding_epoch<>X'0000000000000000'),
-    PRIMARY KEY(task_id),
-    FOREIGN KEY(task_id) REFERENCES tasks(id)
 );
 
 CREATE INDEX tasks_recent ON tasks(recent_order,id);

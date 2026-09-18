@@ -29,6 +29,58 @@ pub fn fixture(allocator: std.mem.Allocator) !wire.StateWire {
     return state;
 }
 
+fn validateState(allocator: std.mem.Allocator, state: wire.StateWire) !void {
+    // validateCandidate alone omits failure-record bounds and checkpoint
+    // restoration rules. Reuse both real Product paths rather than copy them.
+    const buffer = try allocator.alloc(u8, wire.max_store_bytes);
+    defer allocator.free(buffer);
+    _ = try wire.encode(buffer, state, limits);
+    for (state.tasks) |task| {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        var restore = Restore{ .allocator = arena.allocator() };
+        // Validation only: do not replace persisted nonterminal facts with the
+        // interrupted records produced by restoration. This test projection
+        // enforces field bounds, not the live Runtime's global admission budget.
+        _ = try wire.restoreTask(.{
+            .context = &restore,
+            .allocator = restore.allocator,
+            .limits = limits,
+            .copy_fn = Restore.copy,
+            .alloc_fn = Restore.alloc,
+            .append_text_fn = Restore.append,
+            .free_fn = Restore.free,
+            .free_text_fn = Restore.freeText,
+        }, task);
+    }
+}
+
+const Restore = struct {
+    allocator: std.mem.Allocator,
+
+    fn from(context: *anyopaque) *@This() {
+        return @ptrCast(@alignCast(context));
+    }
+    fn copy(context: *anyopaque, value: []const u8, max: usize) wire.ProjectionError![]u8 {
+        if (value.len > max) return error.ProjectionCapacity;
+        return from(context).allocator.dupe(u8, value);
+    }
+    fn alloc(context: *anyopaque, capacity: usize) wire.ProjectionError![]u8 {
+        return from(context).allocator.alloc(u8, capacity);
+    }
+    fn append(context: *anyopaque, target: *wire.RestoreText, suffix: []const u8, max: usize) wire.ProjectionError!void {
+        if (target.list.items.len > max or suffix.len > max - target.list.items.len) return error.ProjectionCapacity;
+        try target.list.appendSlice(from(context).allocator, suffix);
+    }
+    fn free(context: *anyopaque, value: []u8) void {
+        from(context).allocator.free(value);
+    }
+    fn freeText(context: *anyopaque, target: *wire.RestoreText) void {
+        target.list.deinit(from(context).allocator);
+        target.* = .{};
+    }
+};
+
 pub const Batch = struct {
     allocator: std.mem.Allocator,
     mutations: std.ArrayList(sql.Mutation) = .empty,
@@ -226,10 +278,9 @@ fn query(allocator: std.mem.Allocator, database: sql.Database, statement: []cons
 }
 
 pub fn batchFor(allocator: std.mem.Allocator, state: wire.StateWire) !Batch {
-    if (wire.validateCandidate(&state, limits) != null) return error.Invalid;
+    try validateState(allocator, state);
     var batch = Batch{ .allocator = allocator };
     try writeState(&batch, state);
-    for (state.failures, 0..) |value, ordinal| try writeFailure(&batch, value, ordinal);
     for (state.workspaces, 0..) |value, ordinal| try writeWorkspace(&batch, value, ordinal);
     for (state.tasks, 0..) |task, ordinal| try writeTask(&batch, task, ordinal);
     for (state.tasks) |task| for (task.runs, 0..) |run, ordinal| {
@@ -241,15 +292,6 @@ pub fn batchFor(allocator: std.mem.Allocator, state: wire.StateWire) !Batch {
     for (state.tasks) |task| for (task.runs) |run| if (run.file_changes) |changes| {
         for (changes, 0..) |change, ordinal| try writeChange(&batch, change, task.id, run.id, ordinal);
     };
-    for (state.tasks) |task| for (task.compacts, 0..) |value, ordinal| {
-        try writeCompact(&batch, value, task.id, ordinal);
-    };
-    for (state.tasks) |task| for (task.ui_history, 0..) |value, ordinal| {
-        try writeUi(&batch, value, task.id, ordinal);
-    };
-    for (state.tasks) |task| if (task.checkpoint) |value| {
-        try writeCheckpoint(&batch, value, task.id);
-    };
     try batch.flush();
     return batch;
 }
@@ -259,7 +301,7 @@ pub fn batchFor(allocator: std.mem.Allocator, state: wire.StateWire) !Batch {
 pub fn load(allocator: std.mem.Allocator, database: sql.Database) !wire.StateWire {
     const roots = try query(allocator, database, "SELECT * FROM history_state", &.{});
     if (roots.values.items.len == 0) {
-        const existing = try query(allocator, database, "SELECT (SELECT COUNT(*) FROM history_failures)+(SELECT COUNT(*) FROM workspaces)+(SELECT COUNT(*) FROM tasks)+(SELECT COUNT(*) FROM runs)+(SELECT COUNT(*) FROM run_tools)+(SELECT COUNT(*) FROM run_file_changes)+(SELECT COUNT(*) FROM task_compacts)+(SELECT COUNT(*) FROM task_ui_history)+(SELECT COUNT(*) FROM task_checkpoints) AS total", &.{});
+        const existing = try query(allocator, database, "SELECT (SELECT COUNT(*) FROM workspaces)+(SELECT COUNT(*) FROM tasks)+(SELECT COUNT(*) FROM runs)+(SELECT COUNT(*) FROM run_tools)+(SELECT COUNT(*) FROM run_file_changes) AS total", &.{});
         if (try existing.row(0).i("total") != 0) return error.MissingState;
         return error.EmptyHistory;
     }
@@ -268,9 +310,6 @@ pub fn load(allocator: std.mem.Allocator, database: sql.Database) !wire.StateWir
     const workspaces = try query(allocator, database, "SELECT * FROM workspaces ORDER BY ordinal", &.{});
     state.workspaces = try allocator.alloc(wire.WorkspaceWire, workspaces.values.items.len);
     for (state.workspaces, 0..) |*value, index| value.* = try readWorkspace(workspaces.row(index));
-    const failures = try query(allocator, database, "SELECT * FROM history_failures ORDER BY ordinal", &.{});
-    state.failures = try allocator.alloc(wire.TaskFailureWire, failures.values.items.len);
-    for (state.failures, 0..) |*value, index| value.* = try readFailure(failures.row(index));
     const tasks = try query(allocator, database, "SELECT * FROM tasks ORDER BY ordinal", &.{});
     state.tasks = try allocator.alloc(wire.TaskWire, tasks.values.items.len);
     var bindings = Batch{ .allocator = allocator };
@@ -292,17 +331,8 @@ pub fn load(allocator: std.mem.Allocator, database: sql.Database) !wire.StateWir
                 run.file_changes = values;
             } else if (changes.values.items.len != 0) return error.Invalid;
         }
-        const compacts = try query(allocator, database, "SELECT * FROM task_compacts WHERE task_id=?1 ORDER BY ordinal", task_params);
-        task.compacts = try allocator.alloc(wire.CompactWire, compacts.values.items.len);
-        for (task.compacts, 0..) |*value, child| value.* = try readCompact(compacts.row(child));
-        const ui = try query(allocator, database, "SELECT * FROM task_ui_history WHERE task_id=?1 ORDER BY ordinal", task_params);
-        task.ui_history = try allocator.alloc(wire.UiRecordWire, ui.values.items.len);
-        for (task.ui_history, 0..) |*value, child| value.* = try readUi(ui.row(child));
-        const checkpoints = try query(allocator, database, "SELECT * FROM task_checkpoints WHERE task_id=?1", task_params);
-        if (checkpoints.values.items.len > 1) return error.Invalid;
-        if (checkpoints.values.items.len == 1) task.checkpoint = try readCheckpoint(checkpoints.row(0));
     }
-    if (wire.validateCandidate(&state, limits) != null) return error.Invalid;
+    try validateState(allocator, state);
     return state;
 }
 
@@ -314,6 +344,7 @@ fn writeState(batch: *Batch, v: wire.StateWire) !void {
         .next_workspace_recent_order = try batch.u(v.next_workspace_recent_order),
         .next_task_id = try batch.u(v.next_task_id),
         .next_task_recent_order = try batch.u(v.next_task_recent_order),
+        .failures_json = try batch.json(v.failures),
     });
 }
 
@@ -326,24 +357,7 @@ fn readState(row: Record) !wire.StateWire {
     v.next_task_recent_order = try row.u("next_task_recent_order");
     v.workspaces = &.{};
     v.tasks = &.{};
-    v.failures = &.{};
-    return v;
-}
-
-fn writeFailure(batch: *Batch, v: wire.TaskFailureWire, ordinal: usize) !void {
-    try batch.add("history_failures", .{
-        .ordinal = try integer(ordinal),
-        .task_id = try batch.u(v.task_id),
-        .recent_order = try batch.u(v.recent_order),
-        .reason = b(v.reason),
-    });
-}
-
-fn readFailure(row: Record) !wire.TaskFailureWire {
-    var v: wire.TaskFailureWire = undefined;
-    v.task_id = try row.u("task_id");
-    v.recent_order = try row.u("recent_order");
-    v.reason = try row.b("reason");
+    v.failures = try row.json([]wire.TaskFailureWire, "failures_json");
     return v;
 }
 
@@ -395,6 +409,18 @@ fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
         .checkpoint_attempt = t(v.checkpoint_attempt),
         .active_operation_kind = ot(if (v.active_operation) |op| op.kind else null),
         .active_operation_id = try batch.ou(if (v.active_operation) |op| op.id else null),
+        .checkpoint_generation = try batch.ou(if (v.checkpoint) |cp| cp.blob.generation else null),
+        .checkpoint_byte_size = try batch.ou(if (v.checkpoint) |cp| cp.blob.byte_size else null),
+        .checkpoint_digest = try batch.odigest(if (v.checkpoint) |cp| cp.blob.digest else null),
+        .checkpoint_logical_session_id = ob(if (v.checkpoint) |cp| cp.session.logical_session_id else null),
+        .checkpoint_last_run_id = try batch.ou(if (v.checkpoint) |cp| cp.session.last_run_id else null),
+        .checkpoint_last_compact_id = try batch.ou(if (v.checkpoint) |cp| cp.session.last_compact_id else null),
+        .checkpoint_model = ob(if (v.checkpoint) |cp| cp.session.model else null),
+        .checkpoint_terminal_kind = ot(if (v.checkpoint) |cp| cp.anchor.terminal.kind else null),
+        .checkpoint_terminal_id = try batch.ou(if (v.checkpoint) |cp| cp.anchor.terminal.id else null),
+        .checkpoint_binding_epoch = try batch.ou(if (v.checkpoint) |cp| cp.anchor.binding_epoch else null),
+        .ui_history_json = try batch.json(v.ui_history),
+        .compacts_json = try batch.json(v.compacts),
     });
 }
 
@@ -421,9 +447,9 @@ fn readTask(row: Record) !wire.TaskWire {
     v.checkpoint_attempt = try row.t("checkpoint_attempt");
     v.active_operation = if (try row.ot("active_operation_kind")) |kind| .{ .kind = kind, .id = try row.u("active_operation_id") } else null;
     v.runs = &.{};
-    v.compacts = &.{};
-    v.ui_history = &.{};
-    v.checkpoint = null;
+    v.compacts = try row.json([]wire.CompactWire, "compacts_json");
+    v.ui_history = try row.json([]wire.UiRecordWire, "ui_history_json");
+    v.checkpoint = try readCheckpoint(row);
     return v;
 }
 
@@ -582,106 +608,20 @@ fn readChange(row: Record) !wire.FileChangeWire {
     return v;
 }
 
-fn writeCompact(batch: *Batch, v: wire.CompactWire, task_id: u64, ordinal: usize) !void {
-    try batch.add("task_compacts", .{
-        .task_id = try batch.u(task_id),
-        .ordinal = try integer(ordinal),
-        .id = try batch.u(v.id),
-        .after_run_id = try batch.u(v.after_run_id),
-        .phase = t(v.phase),
-        .cause = ot(v.cause),
-        .before_context_tokens = try batch.u(v.before_context_tokens),
-        .after_context_tokens = try batch.u(v.after_context_tokens),
-        .diagnostic = b(v.diagnostic),
-        .diagnostic_truncated = boolean(v.diagnostic_truncated),
-        .diagnostic_redacted = boolean(v.diagnostic_redacted),
-        .input_tokens = try batch.u(v.usage.input_tokens),
-        .output_tokens = try batch.u(v.usage.output_tokens),
-        .cache_read_input_tokens = try batch.u(v.usage.cache_read_input_tokens),
-        .cache_creation_input_tokens = try batch.u(v.usage.cache_creation_input_tokens),
-    });
-}
-
-fn readCompact(row: Record) !wire.CompactWire {
-    var v: wire.CompactWire = undefined;
-    v.id = try row.u("id");
-    v.after_run_id = try row.u("after_run_id");
-    v.phase = try row.t("phase");
-    v.cause = try row.ot("cause");
-    v.before_context_tokens = try row.u("before_context_tokens");
-    v.after_context_tokens = try row.u("after_context_tokens");
-    v.diagnostic = try row.b("diagnostic");
-    v.diagnostic_truncated = try row.boolean("diagnostic_truncated");
-    v.diagnostic_redacted = try row.boolean("diagnostic_redacted");
-    v.usage.input_tokens = try row.u("input_tokens");
-    v.usage.output_tokens = try row.u("output_tokens");
-    v.usage.cache_read_input_tokens = try row.u("cache_read_input_tokens");
-    v.usage.cache_creation_input_tokens = try row.u("cache_creation_input_tokens");
-    return v;
-}
-
-fn writeUi(batch: *Batch, v: wire.UiRecordWire, task_id: u64, ordinal: usize) !void {
-    try batch.add("task_ui_history", .{
-        .task_id = try batch.u(task_id),
-        .ordinal = try integer(ordinal),
-        .activity_order = try batch.u(v.order),
-        .request_id = try batch.u(v.request_id),
-        .run_id = try batch.u(v.run_id),
-        .kind = t(v.kind),
-        .state = t(v.state),
-        .detail = b(v.detail),
-        .item_count = try integer(v.item_count),
-        .detail_truncated = boolean(v.detail_truncated),
-        .redacted = boolean(v.redacted),
-        .agent_request_id = b(v.agent_request_id),
-        .permission_json = try batch.ojson(v.permission),
-    });
-}
-
-fn readUi(row: Record) !wire.UiRecordWire {
-    var v: wire.UiRecordWire = undefined;
-    v.order = try row.u("activity_order");
-    v.request_id = try row.u("request_id");
-    v.run_id = try row.u("run_id");
-    v.kind = try row.t("kind");
-    v.state = try row.t("state");
-    v.detail = try row.b("detail");
-    v.item_count = std.math.cast(u32, try row.i("item_count")) orelse return error.Invalid;
-    v.detail_truncated = try row.boolean("detail_truncated");
-    v.redacted = try row.boolean("redacted");
-    v.agent_request_id = try row.b("agent_request_id");
-    v.permission = try row.ojson(wire.PermissionSummaryWire, "permission_json");
-    return v;
-}
-
-fn writeCheckpoint(batch: *Batch, v: wire.CheckpointWire, task_id: u64) !void {
-    try batch.add("task_checkpoints", .{
-        .task_id = try batch.u(task_id),
-        .generation = try batch.u(v.blob.generation),
-        .byte_size = try batch.u(v.blob.byte_size),
-        .digest = try batch.digest(v.blob.digest),
-        .logical_session_id = b(v.session.logical_session_id),
-        .last_run_id = try batch.u(v.session.last_run_id),
-        .last_compact_id = try batch.u(v.session.last_compact_id),
-        .model = b(v.session.model),
-        .terminal_kind = t(v.anchor.terminal.kind),
-        .terminal_id = try batch.u(v.anchor.terminal.id),
-        .binding_epoch = try batch.u(v.anchor.binding_epoch),
-    });
-}
-
-fn readCheckpoint(row: Record) !wire.CheckpointWire {
+fn readCheckpoint(row: Record) !?wire.CheckpointWire {
+    try row.optionalGroup(.{ "checkpoint_generation", "checkpoint_byte_size", "checkpoint_digest", "checkpoint_logical_session_id", "checkpoint_last_run_id", "checkpoint_last_compact_id", "checkpoint_model", "checkpoint_terminal_kind", "checkpoint_terminal_id", "checkpoint_binding_epoch" });
+    if (try row.isNull("checkpoint_generation")) return null;
     var v: wire.CheckpointWire = undefined;
-    v.blob.generation = try row.u("generation");
-    v.blob.byte_size = try row.u("byte_size");
-    v.blob.digest = try row.digest("digest");
-    v.session.logical_session_id = try row.b("logical_session_id");
-    v.session.last_run_id = try row.u("last_run_id");
-    v.session.last_compact_id = try row.u("last_compact_id");
-    v.session.model = try row.b("model");
-    v.anchor.terminal.kind = try row.t("terminal_kind");
-    v.anchor.terminal.id = try row.u("terminal_id");
-    v.anchor.binding_epoch = try row.u("binding_epoch");
+    v.blob.generation = try row.u("checkpoint_generation");
+    v.blob.byte_size = try row.u("checkpoint_byte_size");
+    v.blob.digest = try row.digest("checkpoint_digest");
+    v.session.logical_session_id = try row.b("checkpoint_logical_session_id");
+    v.session.last_run_id = try row.u("checkpoint_last_run_id");
+    v.session.last_compact_id = try row.u("checkpoint_last_compact_id");
+    v.session.model = try row.b("checkpoint_model");
+    v.anchor.terminal.kind = try row.t("checkpoint_terminal_kind");
+    v.anchor.terminal.id = try row.u("checkpoint_terminal_id");
+    v.anchor.binding_epoch = try row.u("checkpoint_binding_epoch");
     return v;
 }
 
