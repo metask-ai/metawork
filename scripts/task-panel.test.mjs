@@ -200,6 +200,10 @@ test("Bash detail shows semantic evidence without duplicate protocol data or cop
   assert.equal(screen.queryByText("raw envelope"), null);
   assert.equal(view.container.querySelector("details"), null);
   assert.equal(screen.queryByRole("button", { name: "Copy code" }), null);
+  assert.equal(
+    view.container.querySelectorAll(".tool-evidence-surface").length,
+    2,
+  );
 });
 
 test("partially parsed Bash detail discloses only unparsed evidence", () => {
@@ -243,14 +247,15 @@ test("unparsed Bash detail presents safe original evidence directly", () => {
   assert.equal(screen.queryByRole("button", { name: "Copy code" }), null);
 });
 
-test("generic Tool detail keeps the existing raw copy affordance", () => {
+test("generic Tool detail uses selectable evidence without copy actions", () => {
   const tool = technicalTool({
     input: '{"file_path":"README.md"}',
     content: "raw result",
   });
   const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.equal(view.container.querySelectorAll("button").length, 0);
   assert.equal(
-    view.container.querySelectorAll('button[aria-label="Copy code"]').length,
+    view.container.querySelectorAll(".tool-evidence-surface").length,
     2,
   );
   assert.ok(screen.getByText('{"file_path":"README.md"}'));

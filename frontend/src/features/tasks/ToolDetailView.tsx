@@ -2,32 +2,18 @@ import type { ToolView } from "../../bridge/contracts.ts";
 import { CodeBlock } from "../../components/ai/index.ts";
 import { useI18n } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
-import { copyCodeText } from "./response-copy.ts";
 
 type RawFieldName = "input" | "content";
 
-function ToolField({
-  label,
-  value,
-  copyable = false,
-}: {
-  label: string;
-  value: string;
-  copyable?: boolean;
-}) {
-  const { t } = useI18n();
-  const copy = copyable
-    ? {
-        label: t("copy.code"),
-        copiedLabel: t("copy.copied"),
-        failedLabel: t("copy.failed"),
-        onCopy: copyCodeText,
-      }
-    : undefined;
+function ToolField({ label, value }: { label: string; value: string }) {
   return (
     <div className="detail-field">
       <p className="detail-field-label">{label}</p>
-      <CodeBlock aria-label={label} value={value} copy={copy} />
+      <CodeBlock
+        className="tool-evidence-surface"
+        aria-label={label}
+        value={value}
+      />
     </div>
   );
 }
@@ -35,11 +21,9 @@ function ToolField({
 function RawToolFields({
   tool,
   names,
-  copyable,
 }: {
   tool: ToolView;
   names: readonly RawFieldName[];
-  copyable: boolean;
 }) {
   const { t } = useI18n();
   return names.map((name) =>
@@ -48,7 +32,6 @@ function RawToolFields({
         key={name}
         label={t(`inspector.tool.${name === "content" ? "result" : name}`)}
         value={tool[name]}
-        copyable={copyable}
       />
     ) : null,
   );
@@ -122,11 +105,7 @@ function BashToolDetails({ tool }: { tool: ToolView }) {
               <summary className="focus-ring">
                 {t("inspector.tool.unparsed_data")}
               </summary>
-              <RawToolFields
-                tool={tool}
-                names={unparsedFields}
-                copyable={false}
-              />
+              <RawToolFields tool={tool} names={unparsedFields} />
             </details>
           )}
         </>
@@ -134,7 +113,7 @@ function BashToolDetails({ tool }: { tool: ToolView }) {
       {hasUnparsedDetails && !hasReadableDetails && (
         <>
           <p className="projection-note">{t("inspector.tool.bash_unparsed")}</p>
-          <RawToolFields tool={tool} names={unparsedFields} copyable={false} />
+          <RawToolFields tool={tool} names={unparsedFields} />
         </>
       )}
     </>
@@ -146,13 +125,9 @@ function GenericToolDetails({ tool }: { tool: ToolView }) {
   return (
     <>
       {tool.progress && (
-        <ToolField
-          label={t("inspector.tool.progress")}
-          value={tool.progress}
-          copyable
-        />
+        <ToolField label={t("inspector.tool.progress")} value={tool.progress} />
       )}
-      <RawToolFields tool={tool} names={["input", "content"]} copyable />
+      <RawToolFields tool={tool} names={["input", "content"]} />
     </>
   );
 }
