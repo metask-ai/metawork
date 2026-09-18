@@ -2,7 +2,7 @@
 //! fixtures here without changing Product-facing types.
 
 const std = @import("std");
-const sql = @import("sql.zig");
+const sql = @import("metawork_storage_sql");
 
 /// Exercise behavior that every concrete backend must preserve. The fixture
 /// migration must create the table used below before this function runs.

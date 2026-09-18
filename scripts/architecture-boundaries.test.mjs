@@ -2258,7 +2258,7 @@ test("OAuth mechanics are neutral while callers own policy and Application owns 
   assert.match(build, /mcp_oauth\.addImport\("oauth_loopback"/);
 });
 
-test("Storage owns SQLite without entering the Product or Application graph", () => {
+test("Product history schema consumes only the unique Storage SQL contract", () => {
   const storageFiles = ["src/storage.zig", ...zigFiles("src/storage/")];
   const storageContract = read("src/storage/sql.zig");
   const build = read("build.zig");
@@ -2293,6 +2293,90 @@ test("Storage owns SQLite without entering the Product or Application graph", ()
       `${file} bypasses the Storage SQL contract`,
     );
   }
+  const schemaFile = "src/product/control/persistence/schema.zig";
+  assert.deepEqual(
+    nonStorageFiles.filter((file) =>
+      /@import\("metawork_storage_sql"\)/.test(read(file)),
+    ),
+    [schemaFile],
+  );
+  assertNoImports(
+    [schemaFile],
+    [
+      "storage",
+      "metawork_storage",
+      "metawork_app",
+      "metawork_agent",
+      "metawork_product_control",
+      "native_sdk",
+    ],
+  );
+  assert.doesNotMatch(
+    read(schemaFile),
+    /@cImport|sqlite3|Database\.create|\.mutate\(|\.query\(/,
+  );
+  assert.match(read(schemaFile), /sql\.validMigrations\(migrations\)/);
+  assert.match(
+    read(schemaFile),
+    /@embedFile\("migrations\/0001_task_history\.sql"\)/,
+  );
+  const contractTargets = [
+    ...build.matchAll(
+      /\b([A-Za-z_]\w*)\.addImport\("([^"]+)",\s*(?:test_modules\.)?storage_sql\)/g,
+    ),
+  ];
+  assert.deepEqual(
+    contractTargets.map((match) => [match[1], match[2]]).sort(),
+    [
+      ["history_schema_fixture_module", "metawork_storage_sql"],
+      ["history_schema_tests_module", "metawork_storage_sql"],
+      ["product_control_history_schema", "metawork_storage_sql"],
+      ["storage", "metawork_storage_sql"],
+    ],
+  );
+  const contractReceivers = [
+    ...build.matchAll(
+      /\b([A-Za-z_]\w*)\.addImport\("metawork_storage_sql",\s*([^)]*)\)/g,
+    ),
+  ];
+  assert.deepEqual(contractReceivers.map((match) => match[1]).sort(), [
+    "history_schema_fixture_module",
+    "history_schema_tests_module",
+    "product_control_history_schema",
+    "storage",
+  ]);
+  assert.ok(
+    contractReceivers.every((match) =>
+      /^(?:test_modules\.)?storage_sql$/.test(match[2].trim()),
+    ),
+  );
+  assert.equal(
+    (
+      build.match(
+        /\.root_source_file = b\.path\("src\/storage\/sql\.zig"\)/g,
+      ) ?? []
+    ).length,
+    1,
+  );
+  for (const file of storageFiles) {
+    assert.doesNotMatch(
+      read(file),
+      /@import\("(?:storage\/|\.\.\/)?sql\.zig"\)/,
+    );
+  }
+  assert.deepEqual(
+    [
+      ...build.matchAll(
+        /\b([A-Za-z_]\w*)\.addImport\("product_control_history_schema",/g,
+      ),
+    ].map((match) => match[1]),
+    ["history_schema_tests_module"],
+  );
+  assert.match(build, /"test-product-history-schema"/);
+  assert.match(
+    build,
+    /artifacts\.tests\.step\.dependOn\(&history_schema_tests_run\.step\)/,
+  );
 
   assert.match(build, /const sqlite = b\.dependency\("sqlite", \.\{\}\);/);
   assert.match(build, /storage\.addIncludePath\(sqlite\.path\("\."\)\);/);

@@ -28,7 +28,7 @@
 | Zig inline test             | 单模块纯状态转换、codec、容量与资源所有权不变量                                                                                      |
 | Storage conformance         | backend-independent SQL contract 与 concrete backend 的事务、profile、limits、lifecycle、故障分类及 child-process WAL/crash recovery |
 | `tests/agent/`              | Agent Runtime、Session、callback、ABI 消费、生命周期与并发                                                                           |
-| `tests/product/`            | Product aggregate、事务、持久化、恢复与产品并发                                                                                      |
+| `tests/product/`            | Product aggregate、事务、持久化、恢复与产品并发；history schema 以公开 Storage API 验证字段表达、结构约束、迁移和容量边界              |
 | `tests/integration/`        | 必须跨两个以上 owner 才能出现的组合失败                                                                                              |
 | Renderer / Node             | 通过函数、DOM、SSR 或跨语言 fixture 观察的 Renderer、Bridge client 与工程脚本行为                                                    |
 | architecture guard          | owner 依赖方向、禁止依赖、module graph、稳定 allowlist、catalog 一致性和 test graph 接线                                             |
@@ -130,7 +130,7 @@ File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固
 - busy、constraint、cancel、resource、corrupt 和 outcome-unknown 分类；故障注入不能替代能稳定触发的真实引擎失败；
 - blocking no-spin concurrency、排队 caller、callback 重入拒绝、并发 shutdown 与 interrupt 收敛，以及 destroy 前 caller quiescence；
 - child-process crash 后 reopen/hot-WAL recovery；
-- architecture guard 证明 Storage 没有进入 Application/Product graph。
+- architecture guard 证明 Product schema 只消费唯一 SQL contract，具体 Storage backend 不进入 Application/Product 运行图。
 
 专用入口分别运行默认 Debug、`-Doptimize=ReleaseSafe` 与 `-Doptimize=ReleaseFast`。正式 Native graph 和 `test-storage` 必须复用同一 Storage runner 与 crash fixture；fixture 缺失必须失败，不得静默跳过。共享 owner 或 module graph 变化仍须运行正式 Native graph，专用入口不替代仓库级依赖验证。
 

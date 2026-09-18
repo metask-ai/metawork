@@ -1,0 +1,221 @@
+{
+  "default_permission_profile": "full_access",
+  "next_workspace_id": 4,
+  "next_workspace_recent_order": 10,
+  "next_task_id": 8,
+  "next_task_recent_order": 42,
+  "workspaces": [
+    {
+      "id": 3,
+      "epoch": 3,
+      "kind": "manual",
+      "canonical_root": "/history",
+      "display_name": "Workspace\u0000世",
+      "visible": true,
+      "recent_order": 9
+    }
+  ],
+  "tasks": [
+    {
+      "id": 7,
+      "recent_order": 41,
+      "completion_seen_run_id": 11,
+      "workspace_id": 3,
+      "workspace_epoch": 2,
+      "workspace_root": "/history",
+      "title": "task\u0000title 世",
+      "title_redacted": true,
+      "archived": true,
+      "permission_profile": "full_access",
+      "permission_interaction": "interactive",
+      "binding": {
+        "epoch": 19,
+        "execution_generation": 17,
+        "protocol": "openai_responses",
+        "model": "model-世"
+      },
+      "next_run_generation": 14,
+      "active_operation": null,
+      "runs": [
+        {
+          "id": 11,
+          "generation": 13,
+          "execution_generation": 17,
+          "execution_protocol": "openai_responses",
+          "execution_model": "model-世",
+          "permission_profile": "full_access",
+          "permission_interaction": "interactive",
+          "input": {
+            "kind": "skill",
+            "text": null,
+            "skill_id": "skill-a",
+            "catalog_revision": "catalog-r",
+            "invocation_name": "inspect",
+            "display_name": "Inspect",
+            "argument_values": [
+              "arg\u0000one",
+              "arg-two 世"
+            ],
+            "attachments": null,
+            "redacted": true
+          },
+          "assistant": "note\nanswer\u0000世",
+          "assistant_redacted": true,
+          "commentary_ends": [
+            5
+          ],
+          "assistant_output_kind": "final",
+          "assistant_output_start": 5,
+          "submitted_at_unix_ms": 1789700000123,
+          "finished_at_unix_ms": 1789700000456,
+          "phase": "completed",
+          "outcome": "completed",
+          "cause": null,
+          "usage": {
+            "input_tokens": 9223372036854775808,
+            "output_tokens": 18446744073709551615,
+            "cache_read_input_tokens": 23,
+            "cache_creation_input_tokens": 29
+          },
+          "tools": [
+            {
+              "id": "tool-five",
+              "order": 5,
+              "name": "Read",
+              "input": "input\u0000one",
+              "progress": "progress 世",
+              "content": "content\u0000two",
+              "state": "completed",
+              "is_error": false,
+              "elapsed_ms": 123456789,
+              "input_truncated": true,
+              "progress_truncated": false,
+              "content_truncated": true,
+              "redacted": true,
+              "file_refs": [
+                {
+                  "id": "ref-one",
+                  "title": "Source\u0000 title",
+                  "display_path": "src/a.zig",
+                  "kind": "code",
+                  "locator_kind": "workspace_path",
+                  "locator": "src/a.zig",
+                  "range": {
+                    "start": {
+                      "line": 2,
+                      "column": 3
+                    },
+                    "end": {
+                      "line": 8,
+                      "column": 11
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "file_change_observation": "incomplete",
+          "file_changes": [
+            {
+              "id": "change-7-13-7",
+              "order": 7,
+              "kind": "moved",
+              "status": "partial",
+              "display_path": "src/new.zig",
+              "from_display_path": "src/old.zig",
+              "before_bytes": 9223372036854775813,
+              "after_bytes": 18446744073709551615,
+              "artifact": {
+                "run_generation": 13,
+                "change_order": 7,
+                "digest": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                "byte_size": 1234
+              },
+              "diff_complete": false,
+              "redacted": true
+            }
+          ],
+          "diagnostic": "diagnostic\u0000text",
+          "diagnostic_truncated": true,
+          "diagnostic_redacted": true,
+          "event_projection_failure": null,
+          "next_activity_order": 8
+        }
+      ],
+      "compacts": [
+        {
+          "id": 23,
+          "after_run_id": 11,
+          "phase": "compacted",
+          "cause": null,
+          "before_context_tokens": 999,
+          "after_context_tokens": 333,
+          "usage": {
+            "input_tokens": 31,
+            "output_tokens": 37,
+            "cache_read_input_tokens": 41,
+            "cache_creation_input_tokens": 43
+          },
+          "diagnostic": "compact note",
+          "diagnostic_truncated": false,
+          "diagnostic_redacted": true
+        }
+      ],
+      "ui_history": [
+        {
+          "request_id": 9223372036854775818,
+          "run_id": 11,
+          "order": 6,
+          "kind": "permission",
+          "state": "allowed_once",
+          "detail": "allow\u0000details",
+          "item_count": 3,
+          "detail_truncated": true,
+          "redacted": true,
+          "agent_request_id": "agent-request",
+          "permission": {
+            "request_id": "agent-request",
+            "matched_rule_id": "rule-1",
+            "tool_namespace": "builtin",
+            "tool_name": "Read",
+            "tool_binding": "read-route",
+            "decision": "allow",
+            "source": "explicit_allow",
+            "policy_generation": 9223372036854775817,
+            "used_session_rule": true,
+            "callback_outcome": "answered"
+          }
+        }
+      ],
+      "checkpoint": {
+        "blob": {
+          "generation": 13,
+          "byte_size": 8765,
+          "digest": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+        },
+        "session": {
+          "logical_session_id": "logical-session",
+          "last_run_id": 11,
+          "last_compact_id": 23,
+          "model": "model-世"
+        },
+        "anchor": {
+          "terminal": {
+            "kind": "compact",
+            "id": 23
+          },
+          "binding_epoch": 19
+        }
+      },
+      "checkpoint_anchor": "available",
+      "checkpoint_attempt": "io_failed"
+    }
+  ],
+  "failures": [
+    {
+      "task_id": 99,
+      "recent_order": 101,
+      "reason": "quarantined\u0000record"
+    }
+  ]
+}

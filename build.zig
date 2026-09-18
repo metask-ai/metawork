@@ -280,6 +280,29 @@ pub fn build(b: *std.Build) void {
         "test-storage",
         "Run the backend-independent Storage contract and SQLite backend tests",
     ).dependOn(&storage_tests_run.step);
+    const history_schema_fixture_module = b.createModule(.{
+        .root_source_file = b.path("tests/support/history_schema.zig"),
+        .target = test_modules.storage.resolved_target,
+        .optimize = test_modules.storage.optimize,
+    });
+    history_schema_fixture_module.addImport("metawork_storage_sql", test_modules.storage_sql);
+    history_schema_fixture_module.addImport("product_task_persistence", test_modules.product_task_persistence);
+    const history_schema_tests_module = b.createModule(.{
+        .root_source_file = b.path("tests/product/history_schema_test.zig"),
+        .target = test_modules.storage.resolved_target,
+        .optimize = test_modules.storage.optimize,
+    });
+    history_schema_tests_module.addImport("product_control_history_schema", test_modules.product_control_history_schema);
+    history_schema_tests_module.addImport("metawork_storage_sql", test_modules.storage_sql);
+    history_schema_tests_module.addImport("storage", test_modules.storage);
+    history_schema_tests_module.addImport("history_schema_fixture", history_schema_fixture_module);
+    const history_schema_tests = b.addTest(.{
+        .name = "metawork-product-history-schema",
+        .root_module = history_schema_tests_module,
+    });
+    const history_schema_tests_run = b.addRunArtifact(history_schema_tests);
+    artifacts.tests.step.dependOn(&history_schema_tests_run.step);
+    b.step("test-product-history-schema", "Run Product history schema and real Storage persistence tests").dependOn(&history_schema_tests_run.step);
     const single_instance_tests = b.addTest(.{
         .name = "metawork-app-single-instance",
         .root_module = test_modules.app,
@@ -359,6 +382,8 @@ fn addLifecycleTests(
 
 const WiredModules = struct {
     storage: *std.Build.Module,
+    storage_sql: *std.Build.Module,
+    product_control_history_schema: *std.Build.Module,
     oauth_mechanics: *std.Build.Module,
     oauth_loopback: *std.Build.Module,
     models_contract: *std.Build.Module,
@@ -805,11 +830,23 @@ fn wireAgentCore(
     });
     if (target.result.os.tag == .macos)
         app_single_instance_compat.linkFramework("CoreFoundation", .{});
+    const storage_sql = b.createModule(.{
+        .root_source_file = b.path("src/storage/sql.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    const product_control_history_schema = b.createModule(.{
+        .root_source_file = b.path("src/product/control/persistence/schema.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_control_history_schema.addImport("metawork_storage_sql", storage_sql);
     const storage = b.createModule(.{
         .root_source_file = b.path("src/storage.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
+    storage.addImport("metawork_storage_sql", storage_sql);
     const sqlite = b.dependency("sqlite", .{});
     storage.addIncludePath(sqlite.path("."));
     storage.addCSourceFile(.{
@@ -1811,6 +1848,8 @@ fn wireAgentCore(
     root_module.link_libc = bundle.link_libc;
     return .{
         .storage = storage,
+        .storage_sql = storage_sql,
+        .product_control_history_schema = product_control_history_schema,
         .oauth_mechanics = oauth_mechanics,
         .oauth_loopback = oauth_loopback,
         .models_contract = models_contract,

@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const sql = @import("sql.zig");
+const sql = @import("metawork_storage_sql");
 const conformance = @import("conformance.zig");
 const backend = @import("sqlite/connection.zig");
 const migration_engine = @import("sqlite/migrations.zig");
@@ -191,20 +191,24 @@ pub const Database = struct {
             return .rejected;
         bindAll(statement, params) catch |err| return queryFailure(err);
 
-        const column_count: usize = @intCast(c.sqlite3_column_count(statement));
+        var column_count: usize = 0;
         var total_bytes: usize = 0;
-        for (0..column_count) |index| {
-            const name = columnName(statement, index);
-            if (!std.unicode.utf8ValidateSlice(name)) return .rejected;
-            total_bytes = std.math.add(usize, total_bytes, name.len) catch
-                return .resource_exhausted;
-            if (total_bytes > sql.Limits.result_bytes) return .resource_exhausted;
-        }
-
         var row_count: usize = 0;
         while (true) switch (c.sqlite3_step(statement)) {
             c.SQLITE_DONE => return .ok,
             c.SQLITE_ROW => {
+                // The first step may recompile against another connection's
+                // schema change. Only the executing statement owns the shape.
+                if (row_count == 0) {
+                    column_count = @intCast(c.sqlite3_column_count(statement));
+                    for (0..column_count) |index| {
+                        const name = columnName(statement, index);
+                        if (!std.unicode.utf8ValidateSlice(name)) return .rejected;
+                        total_bytes = std.math.add(usize, total_bytes, name.len) catch
+                            return .resource_exhausted;
+                        if (total_bytes > sql.Limits.result_bytes) return .resource_exhausted;
+                    }
+                }
                 if (row_count == sql.Limits.result_rows) return .resource_exhausted;
                 total_bytes = rowBytes(statement, column_count, total_bytes) catch |err|
                     return queryFailure(err);
@@ -449,7 +453,7 @@ fn queryFailure(err: SqlError) sql.QueryOutcome {
         error.Busy => .busy,
         error.Cancelled => .cancelled,
         error.Corrupt => .corrupt,
-        error.ResourceExhausted => .resource_exhausted,
+        error.OutOfMemory, error.TooBig, error.StorageFull, error.ResourceExhausted => .resource_exhausted,
         error.IoFailed => .definite_io_failure,
         error.Constraint, error.Rejected => .rejected,
     };
@@ -461,7 +465,7 @@ fn mutationFailure(err: SqlError) sql.MutationOutcome {
         error.Busy => .busy,
         error.Cancelled => .cancelled,
         error.Corrupt => .corrupt,
-        error.ResourceExhausted => .resource_exhausted,
+        error.OutOfMemory, error.TooBig, error.StorageFull, error.ResourceExhausted => .resource_exhausted,
         error.IoFailed => .definite_io_failure,
         error.Rejected => .rejected,
     };
@@ -560,6 +564,10 @@ test "query and mutation authorities reject transaction and schema escape" {
     defer database.destroy() catch unreachable;
     const capability = database.capability();
     const ignored: sql.RowReceiver = .{ .context = database, .receive_fn = ignoreRow };
+
+    const alter = "ALTER TABLE storage_conformance ALTER COLUMN text_value SET NOT NULL";
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, capability.query(alter, &.{}, ignored));
+    try std.testing.expectEqual(sql.MutationOutcome.rejected, capability.mutate(&.{.{ .statement = .{ .sql = alter } }}));
 
     try std.testing.expectEqual(
         sql.QueryOutcome.rejected,
@@ -931,6 +939,7 @@ test "migration authority rejects metadata through associated schema objects" {
         "CREATE TRIGGER suppress_identity BEFORE INSERT ON _metawork_storage_migrations BEGIN SELECT RAISE(IGNORE); END;",
         "CREATE INDEX identity_index ON _metawork_storage_migrations(name);",
         "ALTER TABLE _metawork_storage_migrations ADD COLUMN injected TEXT;",
+        "ALTER TABLE _metawork_storage_migrations ALTER COLUMN name DROP NOT NULL;",
         "CREATE VIEW identity_view AS SELECT * FROM _metawork_storage_migrations; SELECT * FROM identity_view;",
     };
     for (forbidden) |text| {
@@ -970,6 +979,177 @@ test "migration permits application DDL and persists exact identity after reopen
         try database.connection.setAuthorizer(null); // Test-only observation, not metadata authority.
         try expectIntegerPragma(&database.connection, "SELECT count(*) FROM _metawork_storage_migrations", 2);
     }
+}
+
+test "migration SET NOT NULL persists and rejects NULL after reopen" {
+    try expectMigratedNullConstraint("TEXT", "SET NOT NULL", .constraint);
+}
+
+test "migration DROP NOT NULL persists and accepts NULL after reopen" {
+    try expectMigratedNullConstraint("TEXT NOT NULL", "DROP NOT NULL", .committed);
+}
+
+fn expectMigratedNullConstraint(column_type: []const u8, alteration: []const u8, expected: sql.MutationOutcome) !void {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "not-null.db" });
+    defer std.testing.allocator.free(path);
+    const initial_sql = try std.fmt.allocPrint(std.testing.allocator, "CREATE TABLE items(label {s}); INSERT INTO items VALUES('original');", .{column_type});
+    defer std.testing.allocator.free(initial_sql);
+    const alter_sql = try std.fmt.allocPrint(std.testing.allocator, "ALTER TABLE items ALTER COLUMN label {s};", .{alteration});
+    defer std.testing.allocator.free(alter_sql);
+    const migrations = [_]sql.Migration{
+        .{ .version = 1, .name = "create", .sql = initial_sql },
+        .{ .version = 2, .name = "alter constraint", .sql = alter_sql },
+    };
+    const migrated = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    try migrated.destroy();
+    const reopened = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    defer reopened.destroy() catch unreachable;
+    try std.testing.expectEqual(@as(u32, 2), reopened.schemaVersion());
+    try std.testing.expectEqual(expected, reopened.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO items VALUES(NULL)" } }}));
+    var observed: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM items WHERE label='original'", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(i64, 1), observed.value);
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM items WHERE label IS NULL", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(i64, if (expected == .committed) 1 else 0), observed.value);
+}
+
+test "SET NOT NULL with existing NULL rolls back all pending migrations" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "null-rollback.db" });
+    defer std.testing.allocator.free(path);
+    const migrations = [_]sql.Migration{
+        .{ .version = 1, .name = "create", .sql = "CREATE TABLE items(label TEXT); INSERT INTO items VALUES(NULL),('original');" },
+        .{ .version = 2, .name = "pending changes", .sql = "CREATE TABLE must_rollback(id INTEGER); INSERT INTO items VALUES('pending');" },
+        .{ .version = 3, .name = "invalid constraint", .sql = "ALTER TABLE items ALTER COLUMN label SET NOT NULL;" },
+    };
+    const initial = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, migrations[0..1]);
+    try initial.destroy();
+    try std.testing.expectError(error.MigrationFailed, Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations));
+    // Opening the original prefix also verifies that no pending identity survived.
+    const reopened = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, migrations[0..1]);
+    defer reopened.destroy() catch unreachable;
+    try std.testing.expectEqual(@as(u32, 1), reopened.schemaVersion());
+    var observed: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, reopened.capability().query("SELECT id FROM must_rollback", &.{}, observed.receiver()));
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM items", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(i64, 2), observed.value);
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM items WHERE label='original' OR label IS NULL", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(i64, 2), observed.value);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, reopened.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO items VALUES(NULL)" } }}));
+}
+
+test "oversized migration data is a migration failure and rolls back the pending prefix" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "too-big.db" });
+    defer std.testing.allocator.free(path);
+    const migrations = [_]sql.Migration{
+        .{ .version = 1, .name = "create", .sql = "CREATE TABLE items(id INTEGER PRIMARY KEY, payload BLOB); INSERT INTO items VALUES(1,X'1234');" },
+        .{ .version = 2, .name = "pending changes", .sql = "CREATE TABLE must_rollback(id INTEGER); INSERT INTO items VALUES(2,X'abcd');" },
+        .{ .version = 3, .name = "oversized value", .sql = std.fmt.comptimePrint("INSERT INTO items VALUES(3,zeroblob({d}));", .{sql.Limits.result_bytes + 1}) },
+    };
+    const initial = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, migrations[0..1]);
+    try initial.destroy();
+    try std.testing.expectError(error.MigrationFailed, Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations));
+    const reopened = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, migrations[0..1]);
+    defer reopened.destroy() catch unreachable;
+    try std.testing.expectEqual(@as(u32, 1), reopened.schemaVersion());
+    var observed: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, reopened.capability().query("SELECT id FROM must_rollback", &.{}, observed.receiver()));
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM items", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(i64, 1), observed.value);
+    try std.testing.expectEqual(sql.QueryOutcome.ok, reopened.capability().query("SELECT count(*) FROM items WHERE id=1 AND payload=X'1234'", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(i64, 1), observed.value);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, reopened.capability().mutate(&.{.{ .statement = .{ .sql = "INSERT INTO items VALUES(2,NULL)" } }}));
+}
+
+test "page capacity exhaustion is StorageFull and rolls back the pending prefix" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "full.db" });
+    defer std.testing.allocator.free(path);
+    const terminated_path = try std.testing.allocator.dupeZ(u8, path);
+    defer std.testing.allocator.free(terminated_path);
+    var connection = try Connection.open(terminated_path);
+    defer connection.close();
+    try initializeConnection(&connection, true);
+    // Configure the fixture before any production authorizer is installed.
+    // Sixteen pages leave room for the baseline and one complete pending
+    // migration, while a value this large must exceed the remaining pages.
+    try expectIntegerPragma(&connection, "PRAGMA max_page_count=16", 16);
+    const page_size = size: {
+        const statement = try prepareOne(&connection, "PRAGMA page_size");
+        defer _ = c.sqlite3_finalize(statement);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+        const value = c.sqlite3_column_int64(statement, 0);
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
+        break :size value;
+    };
+    const blob_bytes = page_size * 16;
+    try std.testing.expect(blob_bytes > 0 and blob_bytes + 64 < sql.Limits.result_bytes);
+    const full_sql = try std.fmt.allocPrint(std.testing.allocator, "INSERT INTO items VALUES(3,zeroblob({d}));", .{blob_bytes});
+    defer std.testing.allocator.free(full_sql);
+    const migrations = [_]sql.Migration{
+        .{ .version = 1, .name = "create", .sql = "CREATE TABLE items(id INTEGER PRIMARY KEY, payload BLOB); INSERT INTO items VALUES(1,X'1234');" },
+        .{ .version = 2, .name = "pending changes", .sql = "CREATE TABLE must_rollback(id INTEGER); INSERT INTO items VALUES(2,X'abcd');" },
+        .{ .version = 3, .name = "exceed page capacity", .sql = full_sql },
+    };
+    try std.testing.expect(sql.validMigrations(&migrations));
+    try std.testing.expectEqual(@as(u32, 1), try applyMigrations(std.testing.allocator, &connection, migrations[0..1]));
+    const result = applyMigrations(std.testing.allocator, &connection, &migrations);
+    try std.testing.expectEqual(c.SQLITE_FULL, c.sqlite3_errcode(connection.handle));
+    try std.testing.expectError(error.StorageFull, result);
+    try std.testing.expect(c.sqlite3_get_autocommit(connection.handle) != 0);
+    // SQLite counts even rolled-back changes: the data and identity inserts
+    // of both the baseline and the first pending migration actually ran.
+    try std.testing.expectEqual(@as(i64, 4), c.sqlite3_total_changes64(connection.handle));
+    try std.testing.expectEqual(@as(u32, 1), try applyMigrations(std.testing.allocator, &connection, migrations[0..1]));
+    try connection.setAuthorizer(backend.metadataAuthorizer);
+    try expectIntegerPragma(&connection, "SELECT version FROM _metawork_storage_migrations", 1);
+    try connection.setAuthorizer(backend.migrationAuthorizer);
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM sqlite_schema WHERE name='must_rollback'", 0);
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM items", 1);
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM items WHERE id=1 AND payload=X'1234'", 1);
+    try connection.execRaw("INSERT INTO items VALUES(2,NULL)");
+    try expectIntegerPragma(&connection, "SELECT count(*) FROM items", 2);
+}
+
+test "resource errors retain their causes and preserve ordinary operation outcomes" {
+    const cases = [_]struct { code: c_int, cause: anyerror, initialization: anyerror }{
+        .{ .code = c.SQLITE_NOMEM, .cause = error.OutOfMemory, .initialization = error.OutOfMemory },
+        .{ .code = c.SQLITE_TOOBIG, .cause = error.TooBig, .initialization = error.ProfileMismatch },
+        .{ .code = c.SQLITE_FULL, .cause = error.StorageFull, .initialization = error.StorageFull },
+    };
+    for (cases) |case| {
+        const cause = sqlFailure(case.code);
+        try std.testing.expectEqual(case.cause, cause);
+        try std.testing.expectEqual(case.initialization, initializeFailure(cause));
+        try std.testing.expectEqual(sql.QueryOutcome.resource_exhausted, queryFailure(cause));
+        try std.testing.expectEqual(sql.MutationOutcome.resource_exhausted, mutationFailure(cause));
+    }
+    try std.testing.expectEqual(sql.QueryOutcome.resource_exhausted, queryFailure(error.ResourceExhausted));
+    try std.testing.expectEqual(sql.MutationOutcome.resource_exhausted, mutationFailure(error.ResourceExhausted));
+    try std.testing.expectEqual(@as(anyerror, error.ProfileMismatch), initializeFailure(error.ResourceExhausted));
+}
+
+test "metadata authority cannot alter application tables" {
+    var connection = try Connection.open(":memory:");
+    defer connection.close();
+    try initializeConnection(&connection, false);
+    _ = try applyMigrations(std.testing.allocator, &connection, &test_migrations);
+    try connection.setAuthorizer(backend.metadataAuthorizer);
+    try std.testing.expectError(error.Rejected, connection.execRaw("ALTER TABLE storage_conformance ALTER COLUMN text_value SET NOT NULL"));
 }
 
 test "metadata authority rejects persisted trigger side effects" {
@@ -1445,6 +1625,97 @@ test "streaming query exposes provisional rows before terminal failure" {
         , &.{}, observed.receiver()),
     );
     try std.testing.expectEqual(sql.Limits.result_rows, observed.rows);
+}
+
+test "query observes the result shape after another instance migrates the file" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "shape.db" });
+    defer std.testing.allocator.free(path);
+    const migrations = [_]sql.Migration{
+        .{ .version = 1, .name = "create", .sql = "CREATE TABLE items(id INTEGER); INSERT INTO items VALUES(1),(2);" },
+        .{ .version = 2, .name = "add label", .sql = "ALTER TABLE items ADD COLUMN label TEXT; UPDATE items SET label='new';" },
+    };
+    const first = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, migrations[0..1]);
+    defer first.destroy() catch unreachable;
+    const second = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    defer second.destroy() catch unreachable;
+
+    const Rows = struct {
+        count: usize = 0,
+        valid: bool = true,
+
+        fn receive(context: *anyopaque, row: sql.Row) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.count += 1;
+            if (row.columnCount() != 2) {
+                self.valid = false;
+                return;
+            }
+            self.valid = self.valid and
+                std.mem.eql(u8, row.columnName(0), "id") and
+                std.mem.eql(u8, row.columnName(1), "label") and
+                row.value(0) == .integer and row.value(0).integer == self.count and
+                row.value(1) == .text and std.mem.eql(u8, row.value(1).text, "new");
+        }
+    };
+    var rows: Rows = .{};
+    const receiver: sql.RowReceiver = .{ .context = &rows, .receive_fn = Rows.receive };
+    try std.testing.expectEqual(sql.QueryOutcome.ok, first.capability().query("SELECT * FROM items ORDER BY id", &.{}, receiver));
+    try std.testing.expect(rows.valid);
+    try std.testing.expectEqual(@as(usize, 2), rows.count);
+    try std.testing.expectEqual(@as(u32, 1), first.schemaVersion());
+    try std.testing.expectEqual(@as(u32, 2), second.schemaVersion());
+    rows = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, first.capability().query("SELECT * FROM items WHERE id=1", &.{}, receiver));
+    try std.testing.expect(rows.valid);
+    try std.testing.expectEqual(@as(usize, 1), rows.count);
+    rows = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, first.capability().query("SELECT * FROM items WHERE 0", &.{}, receiver));
+    try std.testing.expectEqual(@as(usize, 0), rows.count);
+}
+
+test "query validates new columns after another instance migrates the file" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "new-text.db" });
+    defer std.testing.allocator.free(path);
+    const migrations = [_]sql.Migration{
+        .{ .version = 1, .name = "create", .sql = "CREATE TABLE items(id INTEGER); INSERT INTO items VALUES(1);" },
+        .{ .version = 2, .name = "add invalid text", .sql = "ALTER TABLE items ADD COLUMN label TEXT; UPDATE items SET label=char(0);" },
+    };
+    const first = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, migrations[0..1]);
+    defer first.destroy() catch unreachable;
+    const second = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    defer second.destroy() catch unreachable;
+    var observed: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.rejected, first.capability().query("SELECT * FROM items", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(usize, 0), observed.rows);
+}
+
+test "query budgets new columns after another instance migrates the file" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = try temporary.dir.realPath(std.testing.io, &path_buffer);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ path_buffer[0..length], "new-blob.db" });
+    defer std.testing.allocator.free(path);
+    const migrations = [_]sql.Migration{
+        .{ .version = 1, .name = "create", .sql = "CREATE TABLE items(id INTEGER); INSERT INTO items VALUES(1),(2);" },
+        .{ .version = 2, .name = "add blob", .sql = "ALTER TABLE items ADD COLUMN payload BLOB;" ++
+            std.fmt.comptimePrint("UPDATE items SET payload=zeroblob({d});", .{sql.Limits.result_bytes / 2}) },
+    };
+    const first = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, migrations[0..1]);
+    defer first.destroy() catch unreachable;
+    const second = try Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
+    defer second.destroy() catch unreachable;
+    var observed: IntegerObservation = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.resource_exhausted, first.capability().query("SELECT * FROM items", &.{}, observed.receiver()));
+    try std.testing.expectEqual(@as(usize, 1), observed.rows);
 }
 
 test "TEXT NUL rejection covers parameters and rows without restricting BLOB" {

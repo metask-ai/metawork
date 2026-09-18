@@ -2,7 +2,7 @@
 //! authorizers, limits, and raw error classification.
 
 const std = @import("std");
-const sql = @import("../sql.zig");
+const sql = @import("metawork_storage_sql");
 
 pub const c = @cImport({
     @cInclude("sqlite3.h");
@@ -21,6 +21,7 @@ pub const migration_table = "_metawork_storage_migrations";
 
 pub const OpenError = error{
     OutOfMemory,
+    StorageFull,
     InvalidTarget,
     InvalidMigrations,
     PathUnavailable,
@@ -35,6 +36,9 @@ pub const OpenError = error{
 };
 
 pub const SqlError = error{
+    OutOfMemory,
+    TooBig,
+    StorageFull,
     ResourceExhausted,
     Busy,
     Constraint,
@@ -345,7 +349,9 @@ fn authorize(authority: Authority, action: c_int, first: [*c]const u8, second: [
     if (action == c.SQLITE_TRANSACTION)
         return if (authority == .transaction) c.SQLITE_OK else c.SQLITE_DENY;
     if (authority == .transaction) return c.SQLITE_DENY;
-    if (database != null) {
+    // ALTER_TABLE supplies its schema in first; database may instead name
+    // the altered column. Its target is checked by the migration rule below.
+    if (action != c.SQLITE_ALTER_TABLE and database != null) {
         const name = std.mem.span(database);
         if (name.len != 0 and !std.ascii.eqlIgnoreCase(name, "main"))
             return c.SQLITE_DENY;
@@ -362,7 +368,8 @@ fn authorize(authority: Authority, action: c_int, first: [*c]const u8, second: [
             c.SQLITE_CREATE_TRIGGER,
             c.SQLITE_DROP_TRIGGER,
             => !isMetadata(object) and !isMetadata(related),
-            c.SQLITE_ALTER_TABLE => std.ascii.eqlIgnoreCase(object, "main") and !isMetadata(related),
+            c.SQLITE_ALTER_TABLE => std.ascii.eqlIgnoreCase(object, "main") and
+                related.len != 0 and !isMetadata(related),
             c.SQLITE_READ,
             c.SQLITE_INSERT,
             c.SQLITE_UPDATE,
@@ -435,7 +442,9 @@ fn temporarySchemaOperation(action: c_int) bool {
 
 pub fn sqlFailure(result: c_int) SqlError {
     return switch (result & 0xff) {
-        c.SQLITE_NOMEM, c.SQLITE_TOOBIG, c.SQLITE_FULL => error.ResourceExhausted,
+        c.SQLITE_NOMEM => error.OutOfMemory,
+        c.SQLITE_TOOBIG => error.TooBig,
+        c.SQLITE_FULL => error.StorageFull,
         c.SQLITE_BUSY, c.SQLITE_LOCKED => error.Busy,
         c.SQLITE_CONSTRAINT => error.Constraint,
         c.SQLITE_CORRUPT, c.SQLITE_NOTADB => error.Corrupt,
@@ -457,7 +466,8 @@ fn openFailure(result: c_int) OpenError {
 
 pub fn initializeFailure(err: SqlError) OpenError {
     return switch (err) {
-        error.ResourceExhausted => error.OutOfMemory,
+        error.OutOfMemory => error.OutOfMemory,
+        error.StorageFull => error.StorageFull,
         error.Busy => error.Busy,
         error.Corrupt => error.Corrupt,
         error.IoFailed => error.PathUnavailable,
