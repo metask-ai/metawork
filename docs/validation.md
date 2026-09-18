@@ -130,7 +130,7 @@ File Changes 的最小充分证据必须跨越实际 owner：Agent lifecycle 固
 - busy、constraint、cancel、resource、corrupt 和 outcome-unknown 分类；故障注入不能替代能稳定触发的真实引擎失败；
 - blocking no-spin concurrency、排队 caller、callback 重入拒绝、并发 shutdown 与 interrupt 收敛，以及 destroy 前 caller quiescence；
 - child-process crash 后 reopen/hot-WAL recovery；
-- architecture guard 证明 Storage 没有进入 Application/Product graph。
+- architecture guard 证明 Product schema 只消费唯一 SQL contract，具体 Storage backend 不进入 Application/Product 运行图。
 
 专用入口分别运行默认 Debug、`-Doptimize=ReleaseSafe` 与 `-Doptimize=ReleaseFast`。正式 Native graph 和 `test-storage` 必须复用同一 Storage runner 与 crash fixture；fixture 缺失必须失败，不得静默跳过。共享 owner 或 module graph 变化仍须运行正式 Native graph，专用入口不替代仓库级依赖验证。
 

@@ -412,6 +412,101 @@ test "history populated round fits one real mutation and survives full field rec
     try expectSame(allocator, database.capability(), state);
 }
 
+test "merged history arrays preserve maximum counts escaped bytes order and unsigned values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var state = try populated(allocator, 32, 32, history.limits.max_ui_history_per_task);
+    const task = &state.tasks[0];
+    const compact_template = task.compacts[0];
+    task.compacts = try allocator.alloc(history.wire.CompactWire, history.limits.max_compacts_per_task);
+    for (task.compacts, 0..) |*compact, index| {
+        compact.* = compact_template;
+        compact.id = std.math.maxInt(u64) - index;
+        compact.before_context_tokens = std.math.maxInt(u64);
+        compact.after_context_tokens = std.math.maxInt(u64) - 1;
+        compact.usage.output_tokens = std.math.maxInt(u64);
+        compact.diagnostic = "\x00" ** history.limits.max_terminal_diagnostic_bytes;
+    }
+    task.checkpoint.?.session.last_compact_id = task.compacts[0].id;
+    task.checkpoint.?.anchor.terminal.id = task.compacts[0].id;
+    for (task.ui_history, 0..) |*record, index| {
+        record.request_id = std.math.maxInt(u64) - index;
+        record.item_count = std.math.maxInt(u32);
+        record.detail = "\x00" ** 512;
+        record.agent_request_id = "\x00" ** 128;
+        record.permission.?.request_id = record.agent_request_id;
+        record.permission.?.matched_rule_id = "\x00" ** 128;
+        record.permission.?.tool_name = "\x00" ** 128;
+        record.permission.?.tool_binding = "\x00" ** 128;
+        record.permission.?.policy_generation = std.math.maxInt(u64);
+    }
+    state.failures = try allocator.alloc(history.wire.TaskFailureWire, history.wire.max_failure_records);
+    for (state.failures, 0..) |*failure, index| failure.* = .{
+        .task_id = std.math.maxInt(u64) - index,
+        .recent_order = std.math.maxInt(u64) - index,
+        .reason = "\x00" ** history.wire.max_failure_reason_bytes,
+    };
+    // Escaping can multiply JSON byte size. This checks one Task's bounded
+    // arrays plus the entire failure list, not a full live Runtime snapshot.
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    const batch = try save(allocator, database.capability(), state);
+    try std.testing.expect(sql.validMutations(batch.mutations.items));
+    try std.testing.expect(parameterBytes(batch) <= sql.Limits.exec_parameter_bytes);
+    try expectSame(allocator, database.capability(), state);
+}
+
+test "merged history updates only parent payloads and rolls back an incomplete checkpoint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const original = try history.fixture(allocator);
+    var expected = try history.fixture(allocator);
+    expected.tasks[0].ui_history = &.{};
+    expected.tasks[0].compacts[0].phase = "no_change";
+    expected.tasks[0].compacts[0].diagnostic = "new compact result\x00世";
+    expected.failures = &.{};
+    var task_id: [8]u8 = undefined;
+    std.mem.writeInt(u64, &task_id, expected.tasks[0].id, .big);
+    const updates = [_]sql.Mutation{
+        .{ .statement = .{
+            .sql = "UPDATE tasks SET ui_history_json=?1,compacts_json=?2 WHERE id=?3",
+            .params = &.{
+                .{ .text = try std.json.Stringify.valueAlloc(allocator, expected.tasks[0].ui_history, .{}) },
+                .{ .text = try std.json.Stringify.valueAlloc(allocator, expected.tasks[0].compacts, .{}) },
+                .{ .blob = &task_id },
+            },
+        }, .expected_changes = .{ .exactly = 1 } },
+        .{ .statement = .{
+            .sql = "UPDATE history_state SET failures_json=?1 WHERE singleton=1",
+            .params = &.{.{ .text = try std.json.Stringify.valueAlloc(allocator, expected.failures, .{}) }},
+        }, .expected_changes = .{ .exactly = 1 } },
+    };
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    _ = try save(allocator, database.capability(), original);
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&(updates ++ [_]sql.Mutation{.{ .statement = .{
+        .sql = "UPDATE tasks SET checkpoint_digest=NULL",
+    } }})));
+    try expectSame(allocator, database.capability(), original);
+    try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&updates));
+    try expectSame(allocator, database.capability(), expected);
+}
+
+test "merged recovery failures survive without a surviving Task" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var state = try history.fixture(allocator);
+    state.tasks = &.{};
+    state.workspaces = &.{};
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    _ = try save(allocator, database.capability(), state);
+    try expectSame(allocator, database.capability(), state);
+}
+
 test "history binding rejects oversized statement and byte batches without partial history" {
     for (0..2) |variant| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

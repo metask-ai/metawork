@@ -312,7 +312,9 @@ Host 重启从通过校验的 store 重建 durable history 和 detached attachme
 
 Product Control 统一拥有同一个 history 数据库的结构和有序迁移清单，业务 aggregate 不独立执行迁移。schema 是无状态模块，直接产出 Storage 的 `sql.Migration`；版本从清单推导，新建与升级共用同一条迁移链。清单在编译期校验连续版本和有效 UTF-8/LF 字节，已成为需保留数据库身份的历史迁移不得原地改写。唯一建表 SQL 拥有精确列、约束与索引定义，文档不维护第二份字段表。
 
-历史 SQL 表达保留原有完整 u64、可空状态、数组顺序与已有身份关系。u64 用等长 big-endian BLOB 表达；自由字符串用 UTF-8 字节 BLOB 保留现有 codec 接受的 NUL，有限 tag 与有界嵌套 JSON 使用 TEXT。SHA-256 引用以 32 字节 BLOB 存储并与原有小写 hex 精确转换。DDL 负责非空、存储类型、局部唯一性与父子关系；Product 继续校验跨记录语义、字节预算和历史权限的非权威性，加载不得因使用 BLOB 而跳过 UTF-8 与领域校验。
+历史 SQL 表达保留原有完整 u64、可空状态、数组顺序与已有身份关系。独立表须有当前查询、更新或容量收益；随所属记录整体读写的有界附属集合使用 typed JSON，单个可选附属记录可以使用全空或全有的字段组。关系列中的 u64 用等长 big-endian BLOB 表达，自由字符串用 UTF-8 字节 BLOB 保留现有 codec 接受的 NUL，有限 tag 与有界嵌套 JSON 使用 TEXT。JSON 直接按 Product wire 类型编码和解码，u64 不经浮点中转，数组顺序与转义字符串必须无损。SHA-256 引用以 32 字节 BLOB 存储并与原有小写 hex 精确转换。
+
+DDL 负责关系列的非空、存储类型、局部唯一性与父子关系；JSON 内的数量、字段、唯一性、引用以及跨记录语义由 Product 校验，不能把 SQL 写入成功视作历史有效。Product 继续校验 UTF-8 与字节预算，加载还须覆盖原编码器的恢复失败记录限制和实际 Task 恢复中的 checkpoint 校验，不能仅凭局部 candidate 校验或字段往返宣称可恢复。合并或移除物理表不能丢失恢复诊断，历史权限仍不具有当前授权效力。
 
 schema 迁移仅建立空业务表，不建立默认 Runtime 状态。迁移完成不等于 history ready；未来 loader 必须验证业务状态和完整关系，不能把已有业务记录但缺少根状态的库当作空新库。`MigrationMismatch`、`VersionUnknown` 与恢复资格归 Product Control，Application 只转交开库结果和执行被授权的文件 effect；不能自动清空、重建或把一次主文件 rename 当作完整 WAL 恢复。
 
