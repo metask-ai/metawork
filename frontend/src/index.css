@@ -488,7 +488,7 @@ summary::-webkit-details-marker {
 
 .account-identity {
   position: relative;
-  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--ui-border);
   background: color-mix(in srgb, var(--ui-surface-panel) 96%, transparent);
 }
@@ -559,7 +559,7 @@ summary::-webkit-details-marker {
 
 .account-menu {
   display: grid;
-  width: min(280px, calc(100vw - 24px));
+  width: min(224px, calc(100vw - 24px));
   padding: 5px;
   border: 1px solid var(--ui-border);
   border-radius: 10px;
@@ -609,10 +609,6 @@ summary::-webkit-details-marker {
 
 .account-menu-item.is-attention {
   color: var(--ui-content-warning);
-}
-
-.account-menu-item.is-danger {
-  color: var(--metask-state-error);
 }
 
 .account-gate-about {
@@ -2609,6 +2605,16 @@ summary::-webkit-details-marker {
   margin-top: 8px;
 }
 
+.input-copy-actions {
+  display: flex;
+  width: fit-content;
+  min-height: 32px;
+  margin: 4px 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.input-submitted-time,
 .response-finished-time {
   color: var(--ui-content-muted);
   font-size: 12px;
@@ -2618,6 +2624,7 @@ summary::-webkit-details-marker {
   white-space: nowrap;
 }
 
+.input-copy-action,
 .response-copy-action {
   width: 32px;
   height: 32px;
@@ -2629,6 +2636,12 @@ summary::-webkit-details-marker {
   transition: opacity 120ms ease;
 }
 
+.input-copy-action[data-latest="true"],
+.input-copy-action[data-copy-state="copying"],
+.input-copy-action[data-copy-state="copied"],
+.input-copy-action[data-copy-state="failed"],
+.ai-exchange:hover .input-copy-action,
+.ai-exchange:focus-within .input-copy-action,
 .response-copy-action[data-latest="true"],
 .response-copy-action[data-copy-state="copying"],
 .response-copy-action[data-copy-state="copied"],
@@ -2639,6 +2652,7 @@ summary::-webkit-details-marker {
   pointer-events: auto;
 }
 
+.input-copy-action[data-copy-state="failed"],
 .response-copy-action[data-copy-state="failed"] {
   color: var(--ui-content-error);
 }
@@ -7408,6 +7422,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (any-pointer: coarse) {
+  .input-copy-action,
   .response-copy-action,
   .code-block-copy-action {
     opacity: 1;

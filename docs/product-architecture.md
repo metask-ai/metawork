@@ -288,6 +288,8 @@ Durable Task record 与 runtime attachment 必须分离。durable record 不保�
 
 Run/compact 的 terminal result 由 Agent 以自包含事实返回，Product 在预留 record 中 no-fail、write-once 提交后才能通知、释放 worker reference 或推进后续事务。queued-before-execute 由 Product 生成独立的 pre-execution terminal fact；Agent Session snapshot 只描述 live lifecycle，不承担历史 terminal truth。
 
+Run durable record 在 Product 接纳输入时至多一次记录 nullable wall-clock 提交时间。时钟不可用或旧 canonical record 缺少该字段时保持 null；恢复不得迁移、推断或用完成时间与加载时间补写。该事实只描述输入接纳，不承担 Agent 开始执行、排队耗时或事件时间线语义。
+
 Task 删除是跨持久化、checkpoint、event、Session 和 worker reference 的独立 Product 生命周期用例，不占用 active-operation 槽；其 `idle | deleting | failed` 状态只存在于当前 Runtime，不进入 durable Task record。删除意图可以先进入 `deleting`，但只有相关 active operation、checkpoint、terminal event、Session access 和 worker reference 全部收口且 durable history commit 成功后才能物理移除 record。明确失败或结果不确定只使本次删除进入可诊断失败；用户可以重试删除，Task 的其他可用操作与整个 Workbench 不得因此冻结。
 
 ### 4.3 `workbench-history.store`
@@ -304,7 +306,7 @@ completion receipt 是上述 best-effort Task projection 的低频视图事实�
 
 store 读取上限为 16 MiB。commit 必须在同一目录完成 durable atomic replace，并区分 `committed | failed | outcome_unknown`；临时文件命名、frame header、checksum 算法和 codec 内部布局由唯一实现与测试拥有，不在本文镜像。
 
-Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；其 File Changes `collecting` 若存在必须收口为 `incomplete` 并保留已记录项。旧历史缺少 File Changes 字段时恢复为 `null`，不能伪造空观测。未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
+Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；其 File Changes `collecting` 若存在必须收口为 `incomplete` 并保留已记录项。旧历史缺少 Run 提交时间或 File Changes 字段时恢复为 `null`，不能伪造时间或空观测。未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
 
 ### 4.4 File Changes artifact transaction
 

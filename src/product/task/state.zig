@@ -20,7 +20,7 @@ pub const tool_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 pub const tool_product_id_capacity = "tool-".len + 20;
 pub const file_change_route_digest_bytes = std.crypto.hash.sha2.Sha256.digest_length;
 pub const file_change_product_id_capacity = "change-".len + (20 * 3) + 2;
-pub const max_finished_at_unix_ms: u64 = 8_640_000_000_000_000;
+pub const max_displayable_unix_ms: u64 = 8_640_000_000_000_000;
 
 pub const Protocol = models_contract.Protocol;
 
@@ -478,6 +478,10 @@ pub const CheckpointPostprocess = struct {
 pub const RunRecord = struct {
     /// Runtime-only monotonic admission time. Never restored from history.
     admitted_at_ms: ?u64 = null,
+    /// Durable wall-clock observation captured when Product accepts the Run
+    /// input. Older history and unavailable clocks stay null rather than
+    /// receiving a reconstructed time.
+    submitted_at_unix_ms: ?u64 = null,
     /// Durable wall-clock observation captured exactly once when Product
     /// exposes the Run as terminal. Older history and unavailable clocks stay
     /// null rather than receiving a reconstructed time.
@@ -852,7 +856,7 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         run.event_stream_finalized = true;
         if (run.finished_at_unix_ms == null)
             run.finished_at_unix_ms = if (finished_at_unix_ms) |value|
-                if (value > 0 and value <= max_finished_at_unix_ms) value else null
+                if (value > 0 and value <= max_displayable_unix_ms) value else null
             else
                 null;
         run.assistant.committed_len = run.assistant.list.items.len;

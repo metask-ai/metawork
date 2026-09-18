@@ -238,6 +238,8 @@ function renderCompletedSurface(
           provisionalRedacted: false,
         },
         activity: pendingUi ? { kind: "waiting_user" } : null,
+        submittedAtUnixMs: null,
+        finishedAtUnixMs: null,
         terminal: pendingUi
           ? null
           : {
@@ -327,10 +329,11 @@ test("terminal responses expose response and code copy without copying process U
     "Answer\n\n```ts\nconst answer = 42;\n```",
   );
   assert.match(markup, /data-latest="true"/);
+  assert.match(markup, /aria-label="Copy input"/);
   assert.match(markup, /aria-label="Copy response"/);
   assert.match(markup, /aria-label="Copy code"/);
-  assert.equal((markup.match(/class="sr-only"/g) ?? []).length, 2);
-  assert.equal((markup.match(/data-copy-state="idle"/g) ?? []).length, 2);
+  assert.equal((markup.match(/class="sr-only"/g) ?? []).length, 3);
+  assert.equal((markup.match(/data-copy-state="idle"/g) ?? []).length, 3);
 });
 
 function renderTaskList(tasks, props = {}) {
@@ -944,6 +947,26 @@ test("Sidebar typography reserves bold weight for the product identity", async (
   assert.match(
     stylesheet,
     /\.account-identity-copy strong\s*\{[^}]*font-weight: 500/s,
+  );
+});
+
+test("Account identity and its menu stay compact without shrinking the hit target", async () => {
+  const stylesheet = await readFile(
+    new URL("../frontend/src/index.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    stylesheet,
+    /\.account-identity\s*\{[^}]*padding: 4px 8px calc\(4px \+ env\(safe-area-inset-bottom, 0px\)\);/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.account-identity-trigger\s*\{[^}]*min-height: 44px;/s,
+  );
+  assert.match(
+    stylesheet,
+    /\.account-menu\s*\{[^}]*width: min\(224px, calc\(100vw - 24px\)\);/s,
   );
 });
 

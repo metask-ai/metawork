@@ -13,8 +13,12 @@ const vite = await createServer({
 const { writePlainClipboard, writeRichClipboard } = await vite.ssrLoadModule(
   "/src/platform/clipboard.ts",
 );
-const { latestCopyableResponseId, responseCopyEligible } =
-  await vite.ssrLoadModule("/src/features/tasks/response-copy.ts");
+const {
+  copyRunInput,
+  latestCopyableResponseId,
+  responseCopyEligible,
+  runInputClipboardText,
+} = await vite.ssrLoadModule("/src/features/tasks/response-copy.ts");
 
 test.after(async () => {
   await vite.close();
@@ -225,6 +229,85 @@ test("plain code copy preserves only the supplied displayed value", async () => 
 
   await writePlainClipboard("const answer = 42;");
   assert.deepEqual(writes, ["const answer = 42;"]);
+});
+
+test("plain copy prefers a MIME clipboard item when the desktop WebView supports it", async () => {
+  const writes = [];
+  installClipboard(
+    {
+      async write(items) {
+        writes.push(items);
+      },
+      async writeText() {
+        assert.fail("the supported MIME clipboard path must be preferred");
+      },
+    },
+    MockClipboardItem,
+  );
+
+  await writePlainClipboard("copy me");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].length, 1);
+  assert.deepEqual(writes[0][0].types, ["text/plain"]);
+  assert.equal(
+    await (await writes[0][0].getType("text/plain")).text(),
+    "copy me",
+  );
+});
+
+test("input copy preserves text and projects structured inputs readably", async () => {
+  assert.equal(
+    runInputClipboardText({
+      kind: "text",
+      text: "  inspect this\n",
+      redacted: false,
+    }),
+    "  inspect this\n",
+  );
+  assert.equal(
+    runInputClipboardText({
+      kind: "skill",
+      skillId: "builtin.review",
+      catalogRevision: "8",
+      invocationName: "review",
+      displayName: "Review",
+      argumentValues: ["src/app.ts", "strict"],
+      redacted: false,
+    }),
+    "/review src/app.ts strict",
+  );
+  assert.equal(
+    runInputClipboardText({
+      kind: "multimodal",
+      text: "Compare these",
+      attachments: [
+        {
+          kind: "image",
+          format: "png",
+          displayName: "before.png",
+          sizeBytes: "12",
+          redacted: false,
+        },
+        {
+          kind: "file",
+          displayName: "notes.md",
+          sizeBytes: "24",
+          redacted: false,
+        },
+      ],
+      redacted: false,
+    }),
+    "Compare these\nbefore.png\nnotes.md",
+  );
+
+  const writes = [];
+  installClipboard({
+    async writeText(value) {
+      writes.push(value);
+    },
+  });
+  await copyRunInput({ kind: "text", text: "copy me", redacted: false });
+  assert.deepEqual(writes, ["copy me"]);
 });
 
 function run(

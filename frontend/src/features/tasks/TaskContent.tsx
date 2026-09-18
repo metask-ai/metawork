@@ -33,14 +33,16 @@ import { RunFileChangesSummary } from "./RunFileChanges.tsx";
 import { deriveAssistantOutputParts } from "./assistant-output.ts";
 import {
   deriveRunPresentation,
-  formatRunFinishedTime,
+  formatRunTimestamp,
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
   type RunProcessDisclosure,
+  type RunTimestamp,
 } from "./run-presentation.ts";
 import {
   copyCodeText,
   copyResponseMarkdown,
+  copyRunInput,
   latestCopyableResponseId,
   responseCopyEligible,
 } from "./response-copy.ts";
@@ -172,6 +174,36 @@ function TaskInput({ input }: { input: RunInputView }) {
   );
 }
 
+function MessageTime({
+  className,
+  time,
+}: {
+  className: string;
+  time: RunTimestamp;
+}) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger
+        render={
+          <time
+            className={className}
+            dateTime={time.dateTime}
+            aria-label={time.absolute}
+            tabIndex={0}
+          />
+        }
+      >
+        {time.relative}
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Positioner side="top">
+          <Tooltip.Popup>{time.absolute}</Tooltip.Popup>
+        </Tooltip.Positioner>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  );
+}
+
 export function TaskContent({
   task,
   snapshotReceivedAt,
@@ -226,21 +258,24 @@ export function TaskContent({
   const previousTaskId = useRef<string | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
   const [nowUnixMs, setNowUnixMs] = useState(() => Date.now());
-  const hasFinishedTimes =
-    task?.runs.some((run) => run.finishedAtUnixMs !== null) ?? false;
+  const hasRunTimes =
+    task?.runs.some(
+      (run) => run.submittedAtUnixMs !== null || run.finishedAtUnixMs !== null,
+    ) ?? false;
   const currentRun = task
     ? (task.runs.find((run) => run.id === task.currentRunId) ??
       task.runs.at(-1) ??
       null)
     : null;
   const latestCopyableId = latestCopyableResponseId(task?.runs ?? []);
+  const latestInputId = task?.runs.at(-1)?.id ?? null;
 
   useEffect(() => {
-    if (!hasFinishedTimes) return;
+    if (!hasRunTimes) return;
     setNowUnixMs(Date.now());
     const interval = window.setInterval(() => setNowUnixMs(Date.now()), 60_000);
     return () => window.clearInterval(interval);
-  }, [hasFinishedTimes, task?.id]);
+  }, [hasRunTimes, task?.id]);
 
   useLayoutEffect(() => {
     const node = viewport.current;
@@ -325,7 +360,12 @@ export function TaskContent({
         const outputParts = deriveAssistantOutputParts(run.id, run.output);
         const visibleOutputParts = outputParts.filter((part) => part.content);
         const responseCopyable = responseCopyEligible(run);
-        const finishedTime = formatRunFinishedTime(
+        const submittedTime = formatRunTimestamp(
+          locale,
+          run.submittedAtUnixMs,
+          nowUnixMs,
+        );
+        const finishedTime = formatRunTimestamp(
           locale,
           run.finishedAtUnixMs,
           nowUnixMs,
@@ -369,6 +409,22 @@ export function TaskContent({
             <Message role="user">
               <TaskInput input={run.input} />
             </Message>
+            <div className="input-copy-actions">
+              {submittedTime && (
+                <MessageTime
+                  className="input-submitted-time"
+                  time={submittedTime}
+                />
+              )}
+              <CopyButton
+                className="input-copy-action"
+                data-latest={run.id === latestInputId}
+                copyLabel={t("copy.input")}
+                copiedLabel={t("copy.copied")}
+                failedLabel={t("copy.failed")}
+                onCopy={() => copyRunInput(run.input)}
+              />
+            </div>
             {(visibleOutputParts.length > 0 ||
               run.output.provisionalRedacted ||
               run.output.redacted) && (
@@ -533,25 +589,10 @@ export function TaskContent({
                   onCopy={() => copyResponseMarkdown(run.output.response)}
                 />
                 {finishedTime && (
-                  <Tooltip.Root>
-                    <Tooltip.Trigger
-                      render={
-                        <time
-                          className="response-finished-time"
-                          dateTime={finishedTime.dateTime}
-                          aria-label={finishedTime.absolute}
-                          tabIndex={0}
-                        />
-                      }
-                    >
-                      {finishedTime.relative}
-                    </Tooltip.Trigger>
-                    <Tooltip.Portal>
-                      <Tooltip.Positioner side="top">
-                        <Tooltip.Popup>{finishedTime.absolute}</Tooltip.Popup>
-                      </Tooltip.Positioner>
-                    </Tooltip.Portal>
-                  </Tooltip.Root>
+                  <MessageTime
+                    className="response-finished-time"
+                    time={finishedTime}
+                  />
                 )}
               </div>
             )}

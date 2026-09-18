@@ -442,13 +442,12 @@ Tasks
 
 ### 5.8 左下角账号入口
 
-Workbench 左栏底部固定显示 Metask identity：头像或首字母、显示名和简短连接状态。它同时是账户与应用轻量菜单的触发器，不显示完整 API Key，也不承担模型快速选择。
+Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显示头像或首字母与显示名，不重复展示“Metask 已连接”或成功状态点，也不为已删除的第二行保留空白高度；入口仍保持至少 44 px 命中高度。未登录、检查中或授权中仍使用第二行简短状态说明当前需要。它同时是账户与应用轻量菜单的触发器，不显示完整 API Key，也不承担模型快速选择。
 
-点击后打开轻量菜单：
+点击后打开最宽 224 px 的轻量菜单，窄窗口下继续受视口宽度约束：
 
 ```text
 张三
-Metask 已连接
 
 设置
 关于
@@ -458,7 +457,7 @@ Metask 已连接
 
 - “关于”是本地产品级动作，位于设置之后、退出登录之前；菜单项不重复展示产品名或版本，也不新增常驻侧栏行、Workbench 一级导航或设置分区。点击后打开紧凑模态窗，只展示 canonical Logo、产品名、Metask 开发者归属和从 `app.zon` 构建注入的版本；只有已有真实、安全 consumer 的官网、隐私、许可或更新能力才显示对应入口，不渲染宣传文案、占位动作或死链接；
 - About 不依赖 Account、Models、Bridge snapshot 或登录状态。没有 durable Task 而停留在独立登录/连接恢复表面时，使用同一弱化入口打开同一弹窗；菜单与触发器的无障碍名称必须表达“账户与应用”，不能继续声称只包含账号动作；
-- 账号菜单中的退出登录在当前 Workbench 上直接打开危险操作确认框，不先导航到设置；确认文案说明本机 Account 凭据会被清除、本地 Task 与历史记录会保留。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
+- 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前 Workbench 上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认文案说明本机 Account 凭据会被清除、本地 Task 与历史记录会保留。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
 - 账号菜单只负责身份和导航；Metask API/model目录与用户管理的服务都进入 Models设置，不成为 Account字段；
 - 未登录时保留本地 Workbench 历史，并把左栏账号入口切换成登录动作。
 
@@ -543,7 +542,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 7.1 内容模型
 
-Task 按稳定 Run 顺序显示 `Run exchange`：用户指令之后依次是 `Assistant output → Live status / Technical work evidence → Intervention → File Changes → Terminal notice → Response metadata`，不存在的部分不占位。Assistant output 是单一 message，按 Host 保存的 closed commentary group 顺序承载多个 Markdown part，并以相同 part 槽位承载尾部未定性的可回滚 provisional 或已定性的 final/partial；part 只用正文留白区分，不增加卡片、时间戳、Tool 标签或阶段标题。live status 是位于当前输出底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 承载按 Host order 排列的 Tool 摘要并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
+Task 按稳定 Run 顺序显示 `Run exchange`：用户指令及其元信息之后依次是 `Assistant output → Live status / Technical work evidence → Intervention → File Changes → Terminal notice → Response metadata`，不存在的部分不占位。Assistant output 是单一 message，按 Host 保存的 closed commentary group 顺序承载多个 Markdown part，并以相同 part 槽位承载尾部未定性的可回滚 provisional 或已定性的 final/partial；part 只用正文留白区分，不增加卡片、时间戳、Tool 标签或阶段标题。live status 是位于当前输出底部、随唯一 Current activity 原位更新的一行状态；technical work evidence 承载按 Host order 排列的 Tool 摘要并默认折叠。它们属于同一 Run，不是不同说话者，也不构成 raw 事件时间线。Renderer 只做纯 presentation derivation 和会话内 disclosure，不复制 Product 状态机。
 
 ### 7.2 Agent 对话渲染机制
 
@@ -570,7 +569,7 @@ AgentCore typed CoreEvent
 
 | 槽位              | 出现条件                                                                  | 更新方式                                                           |
 | ----------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| User instruction  | Run 存在                                                                  | 历史稳定，不随 activity 更新                                       |
+| User instruction  | Run 存在                                                                  | 历史稳定；正文下方始终有复制动作，可用时带弱化提交时间             |
 | Assistant output  | 至少一个非空 commentary、provisional、final/partial 或必要 redaction note | closed commentary 只追加稳定 part；尾部 part 原位增长、定性或回滚  |
 | Process surface   | Run active，或 terminal Run 存在 Tool                                     | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开 |
 | Intervention      | 当前 Run 存在 pending UI                                                  | 只显示唯一可操作控件，不伪装成 Assistant 文本                      |
@@ -581,11 +580,13 @@ AgentCore typed CoreEvent
 
 ```text
 active Run:
+  User instruction + optional submitted time + input copy action
   Assistant output
   RunProcess = live status header + optional collapsed Tool body
   intervention
 
 terminal Run:
+  User instruction + optional submitted time + input copy action
   Assistant output
   optional File Changes
   optional collapsed RunProcess when Tools exist
@@ -636,6 +637,8 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 - 使用浅紫色“任务指令”区块，最大宽度约为正文的 72%，靠右但不使用聊天尾巴、头像或左右双方气泡布局，也不重复显示“你”等归属标签；在窄窗口下可以放宽到约 88%；
 - 首条指令建立 Task 目标，后续指令作为明确的补充或重试节点；普通界面不显示 Run ID；
 - 附件以文件/目录 chip 展示名称、数量和大小；
+- 每条指令正文下方靠右提供纯图标“复制输入”：最新一条始终可见，历史条目在所属 Run hover 或 focus-within 时显示，coarse pointer 设备始终显示；普通文本保持 Host 投影原文，Skill 输入复制为 `/调用名 参数…`，多模态输入复制已投影文本与附件显示名，不读取附件内容、内部 locator 或本地路径，也不从 DOM 反向提取；
+- Product 提供 Run 提交时间时，在复制图标左侧使用 12px muted 本地化相对时间，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name；时间缺失时不占位，禁止使用完成时间、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造。相对文案与回复完成时间共用每分钟低频更新，不发布 Snapshot、不自动滚动、不改变历史；
 - 已发送内容不能静默编辑历史；
 - 未来的“编辑并重新运行”必须显式创建新的执行分支或新 Task。
 

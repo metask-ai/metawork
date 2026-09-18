@@ -401,6 +401,18 @@ test("Run finished time is terminal-only, bounded, and lossless", () => {
   );
 });
 
+test("Run submitted time is nullable, bounded, and valid before completion", () => {
+  const candidate = clone(fixture);
+  candidate.tasks[0].runs[0].submittedAtUnixMs = "1789436300000";
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+
+  for (const value of ["0", "01", "8640000000000001", -1, undefined]) {
+    const invalid = clone(candidate);
+    invalid.tasks[0].runs[0].submittedAtUnixMs = value;
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+});
+
 function terminal(outcome, cause = null, diagnosticDisposition = "absent") {
   return { outcome, cause, diagnosticDisposition };
 }

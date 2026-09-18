@@ -100,6 +100,17 @@ function renderIdentity(callbacks, accountView = account) {
   );
 }
 
+test("authenticated account identity does not repeat a healthy connection status", () => {
+  renderIdentity({});
+
+  const trigger = screen.getByRole("button", {
+    name: "Account and application menu",
+  });
+  assert.match(trigger.textContent, /Metask User/);
+  assert.doesNotMatch(trigger.textContent, /Metask connected/);
+  assert.equal(trigger.querySelector("small"), null);
+});
+
 test("signed-out account identity separates account, status, and login action", async () => {
   let loginCalls = 0;
   const user = userEvent.setup({ document: dom.window.document });
@@ -152,7 +163,12 @@ test("account-menu sign out confirms in place without opening settings", async (
   await user.click(
     screen.getByRole("button", { name: "Account and application menu" }),
   );
-  await user.click(await screen.findByRole("menuitem", { name: "Sign out…" }));
+  const signOutItem = await screen.findByRole("menuitem", {
+    name: "Sign out…",
+  });
+  assert.notEqual(signOutItem.querySelector("svg"), null);
+  assert.equal(signOutItem.classList.contains("is-danger"), false);
+  await user.click(signOutItem);
 
   const confirmation = await screen.findByRole("alertdialog");
   assert.match(

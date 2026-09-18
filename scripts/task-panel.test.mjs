@@ -145,6 +145,7 @@ function run(overrides = {}) {
       provisionalRedacted: false,
     },
     activity: null,
+    submittedAtUnixMs: null,
     finishedAtUnixMs: null,
     terminal: terminal(),
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
@@ -1372,6 +1373,31 @@ test("reply footer uses the product tooltip for the finished time", async (conte
   assert.equal(time.tabIndex, 0);
   assert.ok(time.getAttribute("aria-label").includes("2026"));
 
+  await user.hover(time);
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector("[data-base-ui-portal]")?.textContent,
+      time.getAttribute("aria-label"),
+    ),
+  );
+});
+
+test("input metadata places the nullable submitted time before copy", async (context) => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const submittedAt = new Date(2026, 8, 11, 10, 25).getTime();
+  context.mock.method(Date, "now", () => submittedAt + 4 * 24 * 60 * 60 * 1000);
+  const view = render(
+    taskContentElement(
+      task({ runs: [run({ submittedAtUnixMs: String(submittedAt) })] }),
+    ),
+  );
+  const metadata = view.container.querySelector(".input-copy-actions");
+  assert.equal(metadata.children[0].tagName, "TIME");
+  assert.equal(metadata.children[1].tagName, "BUTTON");
+  assert.equal(metadata.querySelector("time").textContent, "4 days ago");
+  assert.ok(screen.getByRole("button", { name: "Copy input" }));
+
+  const time = metadata.querySelector("time");
   await user.hover(time);
   await waitFor(() =>
     assert.equal(

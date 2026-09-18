@@ -321,7 +321,7 @@ pub const RunClock = struct {
             now_fn(self.context) orelse return null
         else
             return null;
-        return if (value > 0 and value <= task_state.max_finished_at_unix_ms)
+        return if (value > 0 and value <= task_state.max_displayable_unix_ms)
             value
         else
             null;
@@ -4983,6 +4983,7 @@ fn reserveRun(
     if (task.durable.next_run_generation == 1 and task.durable.title.len == 0)
         title.state.store(.pending, .release);
     task.durable.runs[slot] = .{
+        .submitted_at_unix_ms = effects.run_clock.nowUnixMs(),
         .id = 0,
         .generation = task.durable.next_run_generation,
         .execution_generation = task.durable.execution_generation,

@@ -565,6 +565,7 @@ pub const RunWire = struct {
     commentary_ends: []const u64,
     assistant_output_kind: ?[]const u8,
     assistant_output_start: ?u64,
+    submitted_at_unix_ms: ?u64 = null,
     finished_at_unix_ms: ?u64 = null,
     phase: []const u8,
     outcome: ?[]const u8,
@@ -1095,6 +1096,7 @@ fn projectRun(
         .commentary_ends = run.commentary_ends[0..run.commentary_count],
         .assistant_output_kind = if (run.assistant_output_kind) |kind| @tagName(kind) else null,
         .assistant_output_start = if (run.assistant_output_start) |start| @intCast(start) else null,
+        .submitted_at_unix_ms = run.submitted_at_unix_ms,
         .finished_at_unix_ms = run.finished_at_unix_ms,
         .phase = @tagName(projection.phase),
         .outcome = if (terminal) |value| @tagName(value.outcome) else null,
@@ -1523,6 +1525,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .commentary_count = wire.commentary_ends.len,
         .assistant_output_kind = assistant_output_kind,
         .assistant_output_start = assistant_output_start,
+        .submitted_at_unix_ms = wire.submitted_at_unix_ms,
         .finished_at_unix_ms = wire.finished_at_unix_ms,
         .active_phase = .queued,
         .tools = tools,
@@ -2614,9 +2617,13 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             return error.Invalid;
         if ((run.assistant_output_kind == null) != (run.assistant_output_start == null))
             return error.Invalid;
+        if (run.submitted_at_unix_ms) |submitted_at|
+            if (submitted_at == 0 or
+                submitted_at > task_state.max_displayable_unix_ms)
+                return error.Invalid;
         if (run.finished_at_unix_ms) |finished_at|
             if (finished_at == 0 or
-                finished_at > task_state.max_finished_at_unix_ms or
+                finished_at > task_state.max_displayable_unix_ms or
                 !persistedTerminalRunPhase(run.phase))
                 return error.Invalid;
         if (run.assistant_output_kind) |kind|
@@ -3551,6 +3558,7 @@ test "task store round-trips per-run execution generations across binding adopti
         .commentary_ends = &.{5},
         .assistant_output_kind = "final",
         .assistant_output_start = 5,
+        .submitted_at_unix_ms = 1_789_436_300_000,
         .finished_at_unix_ms = 1_789_436_313_000,
         .phase = "completed",
         .outcome = "completed",
@@ -3573,6 +3581,7 @@ test "task store round-trips per-run execution generations across binding adopti
     runs[1].generation = 2;
     runs[1].execution_generation = 17;
     runs[1].input.text = "after adoption";
+    runs[1].submitted_at_unix_ms = null;
     runs[1].event_projection_failure = "dependency_contract_failure";
     var tasks = [_]TaskWire{.{
         .id = 1,
@@ -3637,6 +3646,14 @@ test "task store round-trips per-run execution generations across binding adopti
         decoded.value.tasks[0].runs[0].assistant_output_kind.?,
     );
     try std.testing.expectEqual(@as(?u64, 5), decoded.value.tasks[0].runs[0].assistant_output_start);
+    try std.testing.expectEqual(
+        @as(?u64, 1_789_436_300_000),
+        decoded.value.tasks[0].runs[0].submitted_at_unix_ms,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        decoded.value.tasks[0].runs[1].submitted_at_unix_ms,
+    );
     try std.testing.expectEqual(
         @as(?u64, 1_789_436_313_000),
         decoded.value.tasks[0].runs[0].finished_at_unix_ms,

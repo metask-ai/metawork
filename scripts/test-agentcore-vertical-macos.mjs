@@ -538,6 +538,7 @@ try {
     commandTimeoutMs,
     "disabled compatibility source with pinned Task",
   );
+  const runSubmittedAfterUnixMs = Date.now() - 1_000;
   const runResult = await invokeBridge("metawork.tasks.run", {
     taskId,
     expectedBindingEpoch,
@@ -691,7 +692,19 @@ try {
     throw new Error("completed Task did not remain available for continuation");
   if (run.phase !== "completed" || run.terminal?.outcome !== "completed")
     throw new Error(`run did not complete truthfully: ${JSON.stringify(run)}`);
+  const submittedAtUnixMs = Number(run.submittedAtUnixMs);
   const finishedAtUnixMs = Number(run.finishedAtUnixMs);
+  if (
+    typeof run.submittedAtUnixMs !== "string" ||
+    !Number.isSafeInteger(submittedAtUnixMs) ||
+    submittedAtUnixMs <= 0 ||
+    submittedAtUnixMs < runSubmittedAfterUnixMs ||
+    submittedAtUnixMs > finishedAtUnixMs ||
+    submittedAtUnixMs > Date.now() + 1_000
+  )
+    throw new Error(
+      `run did not publish a credible submitted time: ${JSON.stringify(run.submittedAtUnixMs)}`,
+    );
   if (
     typeof run.finishedAtUnixMs !== "string" ||
     !Number.isSafeInteger(finishedAtUnixMs) ||
