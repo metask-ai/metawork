@@ -18,6 +18,7 @@ CREATE TABLE history_failures (
     PRIMARY KEY(ordinal)
 );
 CREATE TABLE workspaces (
+    ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0 AND ordinal<=4294967295),
     id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=8 AND id<>X'0000000000000000'),
     epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8 AND epoch<>X'0000000000000000'),
     kind TEXT NOT NULL CHECK(typeof(kind)='text' AND kind IN ('manual','automatic')),
@@ -26,9 +27,11 @@ CREATE TABLE workspaces (
     visible INTEGER NOT NULL CHECK(typeof(visible)='integer' AND visible IN (0,1)),
     recent_order BLOB NOT NULL CHECK(typeof(recent_order)='blob' AND length(recent_order)=8),
     PRIMARY KEY(id),
+    UNIQUE(ordinal),
     UNIQUE(canonical_root)
 );
 CREATE TABLE tasks (
+    ordinal INTEGER NOT NULL CHECK(typeof(ordinal)='integer' AND ordinal>=0 AND ordinal<=4294967295),
     id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=8 AND id<>X'0000000000000000'),
     recent_order BLOB NOT NULL CHECK(typeof(recent_order)='blob' AND length(recent_order)=8 AND recent_order<>X'0000000000000000'),
     completion_seen_run_id BLOB CHECK(completion_seen_run_id IS NULL OR (typeof(completion_seen_run_id)='blob' AND length(completion_seen_run_id)=8)),
@@ -50,6 +53,7 @@ CREATE TABLE tasks (
     checkpoint_anchor TEXT NOT NULL CHECK(typeof(checkpoint_anchor)='text'),
     checkpoint_attempt TEXT NOT NULL CHECK(typeof(checkpoint_attempt)='text'),
     PRIMARY KEY(id),
+    UNIQUE(ordinal),
     FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
     CHECK((active_operation_kind IS NULL AND active_operation_id IS NULL) OR (active_operation_kind IS NOT NULL AND active_operation_id IS NOT NULL))
 );

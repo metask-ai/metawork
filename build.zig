@@ -280,6 +280,13 @@ pub fn build(b: *std.Build) void {
         "test-storage",
         "Run the backend-independent Storage contract and SQLite backend tests",
     ).dependOn(&storage_tests_run.step);
+    const history_schema_fixture_module = b.createModule(.{
+        .root_source_file = b.path("tests/support/history_schema.zig"),
+        .target = test_modules.storage.resolved_target,
+        .optimize = test_modules.storage.optimize,
+    });
+    history_schema_fixture_module.addImport("metawork_storage_sql", test_modules.storage_sql);
+    history_schema_fixture_module.addImport("product_task_persistence", test_modules.product_task_persistence);
     const history_schema_tests_module = b.createModule(.{
         .root_source_file = b.path("tests/product/history_schema_test.zig"),
         .target = test_modules.storage.resolved_target,
@@ -288,7 +295,7 @@ pub fn build(b: *std.Build) void {
     history_schema_tests_module.addImport("product_control_history_schema", test_modules.product_control_history_schema);
     history_schema_tests_module.addImport("metawork_storage_sql", test_modules.storage_sql);
     history_schema_tests_module.addImport("storage", test_modules.storage);
-    history_schema_tests_module.addImport("product_task_persistence", test_modules.product_task_persistence);
+    history_schema_tests_module.addImport("history_schema_fixture", history_schema_fixture_module);
     const history_schema_tests = b.addTest(.{
         .name = "metawork-product-history-schema",
         .root_module = history_schema_tests_module,

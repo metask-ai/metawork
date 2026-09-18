@@ -2320,12 +2320,27 @@ test("Product history schema consumes only the unique Storage SQL contract", () 
     read(schemaFile),
     /@embedFile\("migrations\/0001_task_history\.sql"\)/,
   );
+  const contractTargets = [
+    ...build.matchAll(
+      /\b([A-Za-z_]\w*)\.addImport\("([^"]+)",\s*(?:test_modules\.)?storage_sql\)/g,
+    ),
+  ];
+  assert.deepEqual(
+    contractTargets.map((match) => [match[1], match[2]]).sort(),
+    [
+      ["history_schema_fixture_module", "metawork_storage_sql"],
+      ["history_schema_tests_module", "metawork_storage_sql"],
+      ["product_control_history_schema", "metawork_storage_sql"],
+      ["storage", "metawork_storage_sql"],
+    ],
+  );
   const contractReceivers = [
     ...build.matchAll(
       /\b([A-Za-z_]\w*)\.addImport\("metawork_storage_sql",\s*([^)]*)\)/g,
     ),
   ];
   assert.deepEqual(contractReceivers.map((match) => match[1]).sort(), [
+    "history_schema_fixture_module",
     "history_schema_tests_module",
     "product_control_history_schema",
     "storage",
