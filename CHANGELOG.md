@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-09-18
+
+### Added
+
+- 新增 Automatic Workspace 根目录设置，支持选择、恢复默认和重试；仅影响后续新建 Task，不迁移既有 Workspace。
+- Task Panel 新增对象标签会话，可并行保留多个文件预览和一个 File Changes Review，以及各自的加载结果、模式与滚动位置。
+- 新增已发送用户输入的复制操作和 Product 记录的提交时间显示。
+- Windows 标题栏支持原生双击最大化与还原。
+
+### Changed
+
+- Workbench 改用比例列布局，优化侧栏密度并压缩账号菜单。
+- 收口 System WebView 标题栏手势路由：Renderer 仅声明 DOM 候选，Host 依据原生窗口事实授权。
+- 明确 Native SDK upstream-only 策略：仅消费官方固定版本与 public API，未覆盖能力按已登记 capability gap 管理。
+
+### Fixed
+
+- 修复 Windows System WebView 顶边无法原生缩放及相关绘制、输入生命周期问题。
+- 修复 Task Panel 隐藏或切换时对象会话丢失、Review 替换后状态残留及意外宽度上限。
+- 修复纯文本复制缺少显式 `text/plain` MIME 写入路径的问题。
+- 修复 Windows 应用图标白底，改用透明 ICO 资源。
+
 ## [0.1.10] - 2026-09-15
 
 ### Added
@@ -248,7 +270,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.10...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/metask-ai/metawork/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/metask-ai/metawork/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/metask-ai/metawork/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/metask-ai/metawork/compare/v0.1.7...v0.1.8
