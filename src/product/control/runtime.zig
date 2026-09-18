@@ -5032,8 +5032,11 @@ pub const Runtime = struct {
     /// Agent event pump following `markTerminalRunsBeforeEventDrain`.
     /// Any later event for the Run is rejected by `applyEvent`.
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Runtime) void {
+        const finished_at_ms = self.run_clock.now();
+        const finished_at_unix_ms = self.run_clock.nowUnixMs();
         const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain(
-            self.run_clock.nowUnixMs(),
+            finished_at_ms,
+            finished_at_unix_ms,
         );
         if (changed) {
             self.commitTaskStateNoFail();
@@ -13649,10 +13652,13 @@ test "Run elapsed projection samples an injected clock without publishing revisi
     run.terminal_publication.store(.published, .release);
     try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
     run.terminal_observed = true;
+    task_test_state.freezeRunElapsedMs(run, now);
     run.event_stream_finalized = true;
-    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, now));
+    try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
+    now = 200000;
+    try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
     run.admitted_at_ms = null;
-    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, now));
+    try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
 }
 
 test "thinking and assistant chunks update distinct safe projections" {
@@ -15838,17 +15844,30 @@ test "completed terminal drain closes collecting file change observation" {
     var control = try testRuntime();
     defer control.deinit();
     const Clock = struct {
+        monotonic_ms: u64,
+        unix_ms: u64,
+
         fn now(context: ?*anyopaque) ?u64 {
-            const value: *u64 = @ptrCast(@alignCast(context.?));
-            return value.*;
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.monotonic_ms;
+        }
+
+        fn nowUnix(context: ?*anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.unix_ms;
         }
     };
-    var now_unix_ms: u64 = 1_789_436_313_000;
+    var clock = Clock{
+        .monotonic_ms = 13_000,
+        .unix_ms = 1_789_436_313_000,
+    };
     control.run_clock = .{
-        .context = &now_unix_ms,
-        .now_unix_ms_fn = Clock.now,
+        .context = &clock,
+        .now_ms_fn = Clock.now,
+        .now_unix_ms_fn = Clock.nowUnix,
     };
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    run.admitted_at_ms = 1_000;
     try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
     try std.testing.expect(commitTerminal(
         run,
@@ -15862,9 +15881,15 @@ test "completed terminal drain closes collecting file change observation" {
     control.markTerminalRunsBeforeEventDrain();
     control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expectEqual(task_test_state.FileChangeObservation.complete, run.file_change_observation.?);
-    try std.testing.expectEqual(@as(?u64, now_unix_ms), run.finished_at_unix_ms);
+    try std.testing.expectEqual(@as(?u64, 12_000), run.elapsed_ms);
+    try std.testing.expectEqual(@as(?u64, clock.unix_ms), run.finished_at_unix_ms);
     var storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"elapsedMs\":\"12000\"",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,

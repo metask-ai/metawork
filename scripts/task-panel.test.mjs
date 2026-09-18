@@ -147,6 +147,7 @@ function run(overrides = {}) {
     activity: null,
     submittedAtUnixMs: null,
     finishedAtUnixMs: null,
+    elapsedMs: "12000",
     terminal: terminal(),
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
     tools: [],
@@ -497,6 +498,7 @@ function runProcessElement(
     const [expandedToolIds, setExpandedToolIds] = useState(new Set());
     return createElement(RunProcess, {
       presentation: deriveRunPresentation(value),
+      elapsedMs: value.elapsedMs,
       expanded,
       onExpandedChange,
       expandedToolIds,
@@ -1273,8 +1275,15 @@ test("terminal Run keeps Tool process evidence behind a collapsed summary", () =
   const markup = renderToStaticMarkup(
     runProcessElement(value, { expanded: false }),
   );
-  assert.match(markup, /Work process/);
+  assert.match(markup, /Execution details/);
+  assert.match(markup, /Turn time 0:12/);
   assert.doesNotMatch(markup, /run-process-tools/);
+
+  const untimedMarkup = renderToStaticMarkup(
+    runProcessElement({ ...value, elapsedMs: null }, { expanded: false }),
+  );
+  assert.match(untimedMarkup, /Execution details/);
+  assert.doesNotMatch(untimedMarkup, /Turn time/);
 });
 
 test("technical process disclosure remains user-controlled across revisions and Task switches", async () => {
@@ -1379,7 +1388,7 @@ test("successful terminal keeps commentary and collapsed technical process visib
   view.rerender(taskContentElement(completed, "2"));
   assert.equal(
     screen
-      .getByRole("button", { name: /^Work process/ })
+      .getByRole("button", { name: /^Execution details/ })
       .getAttribute("aria-expanded"),
     "false",
   );
@@ -1553,7 +1562,7 @@ test("terminal transition preserves reading position and collapses technical det
   );
   assert.equal(
     screen
-      .getByRole("button", { name: /^Work process/ })
+      .getByRole("button", { name: /^Execution details/ })
       .getAttribute("aria-expanded"),
     "false",
   );
@@ -2088,10 +2097,12 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     visible.indexOf(">File changes<") <
       visible.indexOf('class="response-copy-actions"'),
   );
-  assert.match(visible, />Work process</);
+  assert.match(visible, />Execution details</);
+  assert.match(visible, />Turn time 0:12</);
   assert.ok(
-    visible.indexOf(">File changes<") < visible.indexOf(">Work process<") &&
-      visible.indexOf(">Work process<") <
+    visible.indexOf(">File changes<") <
+      visible.indexOf(">Execution details<") &&
+      visible.indexOf(">Execution details<") <
         visible.indexOf('class="response-copy-actions"'),
   );
 

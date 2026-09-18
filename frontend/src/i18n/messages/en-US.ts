@@ -679,7 +679,8 @@ export const enUS = {
   "run.terminal.partial_interrupted":
     "Work was interrupted before the response was complete",
   "run.terminal.partial_failed": "Work failed before the response was complete",
-  "run.process.title": "Work process",
+  "run.process.title": "Execution details",
+  "run.process.elapsed": "Turn time {duration}",
   "run.process.toggle_tool": "Show or hide details for {name}",
   "run.process.tool_detail": "Details for {name}",
   "run.prepare_retry": "Copy instruction to Composer",

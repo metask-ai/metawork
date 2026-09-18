@@ -478,6 +478,11 @@ pub const CheckpointPostprocess = struct {
 pub const RunRecord = struct {
     /// Runtime-only monotonic admission time. Never restored from history.
     admitted_at_ms: ?u64 = null,
+    /// Durable elapsed time frozen from the monotonic Run clock when Product
+    /// first exposes the Run as terminal. Active Runs derive their current
+    /// elapsed time from `admitted_at_ms`; older history and unavailable
+    /// clocks stay null rather than receiving a reconstructed duration.
+    elapsed_ms: ?u64 = null,
     /// Durable wall-clock observation captured when Product accepts the Run
     /// input. Older history and unavailable clocks stay null rather than
     /// receiving a reconstructed time.
@@ -658,7 +663,16 @@ pub const RunProjectionFacts = struct {
 };
 
 pub fn runElapsedMs(run: *const RunRecord, now_ms: ?u64) ?u64 {
-    if (runProjectionFacts(run).terminal != null) return null;
+    if (runProjectionFacts(run).terminal != null) return run.elapsed_ms;
+    return sampledRunElapsedMs(run, now_ms);
+}
+
+pub fn freezeRunElapsedMs(run: *RunRecord, now_ms: ?u64) void {
+    if (run.elapsed_ms != null) return;
+    run.elapsed_ms = sampledRunElapsedMs(run, now_ms);
+}
+
+fn sampledRunElapsedMs(run: *const RunRecord, now_ms: ?u64) ?u64 {
     const started = run.admitted_at_ms orelse return null;
     const now = now_ms orelse return null;
     if (now < started) return null;
@@ -829,6 +843,7 @@ pub fn markTerminalRunsBeforeEventDrain(task: *Task) bool {
 
 pub fn finalizeMarkedTerminalRunsAfterEventDrain(
     task: *Task,
+    finished_at_ms: ?u64,
     finished_at_unix_ms: ?u64,
 ) bool {
     var changed = false;
@@ -853,6 +868,7 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
             run.output_continued_redacted = false;
         }
         run.output_retry_group = null;
+        freezeRunElapsedMs(run, finished_at_ms);
         run.event_stream_finalized = true;
         if (run.finished_at_unix_ms == null)
             run.finished_at_unix_ms = if (finished_at_unix_ms) |value|
@@ -1635,6 +1651,7 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
         .runtime = .{},
     };
     const run = &task.durable.runs[0].?;
+    run.admitted_at_ms = 200;
     run.assistant.list = .empty;
     try run.assistant.list.appendSlice(std.testing.allocator, "suffix");
     defer run.assistant.list.deinit(std.testing.allocator);
@@ -1654,7 +1671,13 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
         try std.testing.expect(projection.terminal == null);
     }
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
-    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task, 1_000));
+    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(
+        &task,
+        900,
+        1_000,
+    ));
+    try std.testing.expectEqual(@as(?u64, 700), run.elapsed_ms);
+    try std.testing.expectEqual(@as(?u64, 700), runElapsedMs(run, 5_000));
     try std.testing.expectEqual(@as(?u64, 1_000), run.finished_at_unix_ms);
     try std.testing.expectEqual(@as(usize, 6), run.assistant.committed_len);
     const terminal_projection = runProjectionFacts(run);
@@ -1735,7 +1758,11 @@ test "event drain advances the final commentary boundary with the committed suff
     run.terminal_publication.store(.published, .release);
 
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
-    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task, null));
+    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(
+        &task,
+        null,
+        null,
+    ));
     try std.testing.expectEqual(@as(usize, "prefix-tail".len), run.assistant.committed_len);
     try std.testing.expectEqual(
         @as(u64, "prefix-tail".len),
@@ -1792,7 +1819,11 @@ test "event drain fails closed when an output segment remains unresolved" {
     run.terminal_publication.store(.published, .release);
 
     try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
-    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task, null));
+    try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(
+        &task,
+        null,
+        null,
+    ));
     try std.testing.expectEqual(
         EventProjectionFailure.dependency_contract_failure,
         run.event_projection_failure.?,

@@ -345,7 +345,7 @@ test("Skill source results use bounded typed rejections and lossless u64 revisio
     assert.throws(() => decodeSkillSourceSettingsResult(result));
 });
 
-test("Run elapsed time is nullable, bounded, and unavailable for terminal history", () => {
+test("Run elapsed time is nullable, bounded, and frozen for terminal history", () => {
   for (const value of [null, "0", "134000"]) {
     const candidate = clone(fixture);
     const run = candidate.tasks[0].runs[0];
@@ -361,16 +361,17 @@ test("Run elapsed time is nullable, bounded, and unavailable for terminal histor
     assert.throws(() => decodeWorkbenchSnapshot(candidate));
   }
   const candidate = clone(fixture);
+  const task = candidate.tasks[0];
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.activeOperation = null;
   const run = candidate.tasks[0].runs[0];
   run.phase = "completed";
   run.activity = null;
   run.output.provisional = "";
   run.terminal = terminal("completed");
   run.elapsedMs = "1200";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(candidate),
-    /terminal Run cannot expose active elapsed/,
-  );
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
 });
 
 test("Run finished time is terminal-only, bounded, and lossless", () => {

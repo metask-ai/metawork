@@ -565,6 +565,7 @@ pub const RunWire = struct {
     commentary_ends: []const u64,
     assistant_output_kind: ?[]const u8,
     assistant_output_start: ?u64,
+    elapsed_ms: ?u64 = null,
     submitted_at_unix_ms: ?u64 = null,
     finished_at_unix_ms: ?u64 = null,
     phase: []const u8,
@@ -1096,6 +1097,7 @@ fn projectRun(
         .commentary_ends = run.commentary_ends[0..run.commentary_count],
         .assistant_output_kind = if (run.assistant_output_kind) |kind| @tagName(kind) else null,
         .assistant_output_start = if (run.assistant_output_start) |start| @intCast(start) else null,
+        .elapsed_ms = run.elapsed_ms,
         .submitted_at_unix_ms = run.submitted_at_unix_ms,
         .finished_at_unix_ms = run.finished_at_unix_ms,
         .phase = @tagName(projection.phase),
@@ -1525,6 +1527,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .commentary_count = wire.commentary_ends.len,
         .assistant_output_kind = assistant_output_kind,
         .assistant_output_start = assistant_output_start,
+        .elapsed_ms = wire.elapsed_ms,
         .submitted_at_unix_ms = wire.submitted_at_unix_ms,
         .finished_at_unix_ms = wire.finished_at_unix_ms,
         .active_phase = .queued,
@@ -2626,6 +2629,8 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 finished_at > task_state.max_displayable_unix_ms or
                 !persistedTerminalRunPhase(run.phase))
                 return error.Invalid;
+        if (run.elapsed_ms != null and !persistedTerminalRunPhase(run.phase))
+            return error.Invalid;
         if (run.assistant_output_kind) |kind|
             if (!oneOf(kind, &.{ "final", "partial" })) return error.Invalid;
         if (run.assistant_output_start) |start_wire| {
@@ -3558,6 +3563,7 @@ test "task store round-trips per-run execution generations across binding adopti
         .commentary_ends = &.{5},
         .assistant_output_kind = "final",
         .assistant_output_start = 5,
+        .elapsed_ms = 13_000,
         .submitted_at_unix_ms = 1_789_436_300_000,
         .finished_at_unix_ms = 1_789_436_313_000,
         .phase = "completed",
@@ -3581,6 +3587,7 @@ test "task store round-trips per-run execution generations across binding adopti
     runs[1].generation = 2;
     runs[1].execution_generation = 17;
     runs[1].input.text = "after adoption";
+    runs[1].elapsed_ms = null;
     runs[1].submitted_at_unix_ms = null;
     runs[1].event_projection_failure = "dependency_contract_failure";
     var tasks = [_]TaskWire{.{
@@ -3646,6 +3653,14 @@ test "task store round-trips per-run execution generations across binding adopti
         decoded.value.tasks[0].runs[0].assistant_output_kind.?,
     );
     try std.testing.expectEqual(@as(?u64, 5), decoded.value.tasks[0].runs[0].assistant_output_start);
+    try std.testing.expectEqual(
+        @as(?u64, 13_000),
+        decoded.value.tasks[0].runs[0].elapsed_ms,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        decoded.value.tasks[0].runs[1].elapsed_ms,
+    );
     try std.testing.expectEqual(
         @as(?u64, 1_789_436_300_000),
         decoded.value.tasks[0].runs[0].submitted_at_unix_ms,

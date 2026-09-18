@@ -35,7 +35,7 @@ Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的
 
 Host-only command 精确为 `metawork.workspaces.chooseAutomaticRoot`、`metawork.workspaces.resetAutomaticRoot` 和 `metawork.workspaces.retryAutomaticRoot`，payload 都只接受 `{ expectedGeneration }`。Choose 在 Application 内打开原生目录选择器，Renderer 不得提交 path、bookmark、token 或 mode；取消不产生 mutation。Reset 恢复 Native SDK `.data` 解析的 system default，Retry 只重新校验并打开已提交 root，不改写配置。三者都必须在 Product/Workspace transaction 内重新校验 generation、health、path 和 registry 冲突，结果与 Snapshot revision 遵守既有 command/resync 语义；Renderer 不做乐观路径替换。
 
-Run 的 `elapsedMs` 是 nullable canonical decimal `u64` string：表示 Host 在本次 Snapshot 采样时，从本轮接纳起经过的单调时间，包含排队、批准等待和重试。正式 terminal 或没有可靠计时事实时必须为 null，不从历史补写。它不是事件活跃度、完成比例或剩余时间；时钟推进不发布 revision。Renderer 仅用本次 Snapshot 的本地接收时刻外推低频显示，reload 必须重新采样，不能从组件挂载时起算或将显示时间写回 Host。
+Run 的 `elapsedMs` 是 nullable canonical decimal `u64` string，表示从本轮接纳起经过的单调时间，包含排队、批准等待和重试。active Run 发布 Host 在本次 Snapshot 的采样值，时钟推进不发布 revision；Renderer 只从本次 Snapshot 的本地接收时刻低频外推，reload 必须重新采样，不能从组件挂载时起算或将显示时间写回 Host。Product 在完整 terminal event-drain barrier 首次形成正式终态时用同一单调时钟冻结最终值，随 Run 历史持久化且写入后不可修改；terminal Run 的 Renderer 不再外推。时钟不可用以及字段引入前的历史记录保持 null，不用 wall-clock 时间、Snapshot 接收时间或 Tool elapsed 迁移、反推或补写。该字段不是事件活跃度、完成比例或剩余时间。
 
 Run 的 `submittedAtUnixMs` 是 nullable canonical decimal `u64` string，表示 Product 接纳该 Run 输入时观察到的 Unix epoch 毫秒。该字段适用于 active 与 terminal Run，并随 Run 历史持久化；时钟不可用以及字段引入前的历史记录保持 null，不做迁移，不允许 Renderer 以完成时间、Snapshot 接收时间、Run 顺序、Run ID 或 `elapsedMs` 反推。非空值必须大于零且不超过 ECMAScript Date 上界 `8640000000000000`，写入后不可修改；Renderer 只进行本地化相对时间呈现，不把它解释为 Agent 开始执行、事件时间线或执行耗时。
 

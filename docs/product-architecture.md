@@ -290,6 +290,8 @@ Run/compact 的 terminal result 由 Agent 以自包含事实返回，Product 在
 
 Run durable record 在 Product 接纳输入时至多一次记录 nullable wall-clock 提交时间。时钟不可用或旧 canonical record 缺少该字段时保持 null；恢复不得迁移、推断或用完成时间与加载时间补写。该事实只描述输入接纳，不承担 Agent 开始执行、排队耗时或事件时间线语义。
 
+Run 接纳执行时可以保留 runtime-only 单调起点；Product 在完整 terminal event-drain barrier 首次形成正式终态时用同一单调时钟冻结 nullable 最终耗时，并随 Run durable history 持久化。该值包含排队、批准等待和重试，写入后不可修改；时钟不可用、回拨或旧 canonical record 缺少该字段时保持 null，恢复不得用提交/完成 wall-clock、Tool elapsed、加载时间或 Run 顺序推断补写。active Run 的当前耗时只从 runtime-only 起点采样，不进入 durable record。
+
 Task 删除是跨持久化、checkpoint、event、Session 和 worker reference 的独立 Product 生命周期用例，不占用 active-operation 槽；其 `idle | deleting | failed` 状态只存在于当前 Runtime，不进入 durable Task record。删除意图可以先进入 `deleting`，但只有相关 active operation、checkpoint、terminal event、Session access 和 worker reference 全部收口且 durable history commit 成功后才能物理移除 record。明确失败或结果不确定只使本次删除进入可诊断失败；用户可以重试删除，Task 的其他可用操作与整个 Workbench 不得因此冻结。
 
 ### 4.3 `workbench-history.store`

@@ -502,6 +502,7 @@ export function TaskContent({
             {!presentation.active && presentation.processVisible && (
               <RunProcess
                 presentation={presentation}
+                elapsedMs={run.elapsedMs}
                 synchronized={synchronized}
                 expanded={disclosure.expanded}
                 onExpandedChange={setProcessExpanded}

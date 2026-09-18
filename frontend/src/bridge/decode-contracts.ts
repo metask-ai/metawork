@@ -2387,8 +2387,6 @@ function decodeRun(value: unknown, path: string): RunView {
       "expected a displayable non-zero Unix millisecond timestamp",
     );
   const isTerminal = terminal !== null;
-  if (isTerminal && elapsedMs !== null)
-    fail(path, "terminal Run cannot expose active elapsed time");
   if (!isTerminal && finishedAtUnixMs !== null)
     fail(path, "active Run cannot expose a finished time");
   if (isTerminal !== (activity === null))

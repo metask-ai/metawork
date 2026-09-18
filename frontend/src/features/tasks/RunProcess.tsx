@@ -191,14 +191,23 @@ function RunElapsed({
     const interval = window.setInterval(() => setNow(performance.now()), 1000);
     return () => window.clearInterval(interval);
   }, [synchronized]);
-  const seconds = runElapsedSeconds(elapsedMs, receivedAt, now);
-  const duration = `${formatInteger(locale, seconds / 60n)}:${String(seconds % 60n).padStart(2, "0")}`;
+  const duration = formatElapsedDuration(
+    locale,
+    runElapsedSeconds(elapsedMs, receivedAt, now),
+  );
   // Outside the live region: elapsed seconds are not progress.
   return (
     <small className="run-process-elapsed" aria-live="off">
       {t("run.elapsed", { duration })}
     </small>
   );
+}
+
+function formatElapsedDuration(
+  locale: I18nValue["locale"],
+  seconds: bigint,
+): string {
+  return `${formatInteger(locale, seconds / 60n)}:${String(seconds % 60n).padStart(2, "0")}`;
 }
 
 function ProcessTool({
@@ -328,6 +337,15 @@ export function RunProcess({
               receivedAt={snapshotReceivedAt}
               synchronized={synchronized}
             />
+          ) : !presentation.active && elapsedMs !== null ? (
+            <small className="run-process-elapsed" aria-live="off">
+              {t("run.process.elapsed", {
+                duration: formatElapsedDuration(
+                  locale,
+                  BigInt(elapsedMs) / 1000n,
+                ),
+              })}
+            </small>
           ) : null
         }
         collapsible={presentation.processCanCollapse}

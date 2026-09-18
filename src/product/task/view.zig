@@ -347,7 +347,7 @@ fn writeRun(
     }) catch return error.SnapshotTooLarge;
     try text_projection.writeJson(writer, run.execution_model);
     writer.writeAll("},\"elapsedMs\":") catch return error.SnapshotTooLarge;
-    if (if (terminal == null) task_state.runElapsedMs(run, now_ms) else null) |elapsed|
+    if (task_state.runElapsedMs(run, now_ms)) |elapsed|
         writer.print("\"{d}\"", .{elapsed}) catch return error.SnapshotTooLarge
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;

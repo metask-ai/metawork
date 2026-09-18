@@ -594,7 +594,7 @@ terminal Run:
   response copy action + optional finished time
 ```
 
-active→terminal 时，live activity 与持续计时必须消失；没有 Tool 的 process surface 同步卸载，存在 Tool 时则在最终结果之后保留默认折叠的稳定摘要。展开 Work process 后，用户可以独立展开多条 Tool 行；完整 input/progress/result 在所属行下方挂载，长代码面有界滚动，安全 raw details 继续二次折叠。折叠 Work process 不清除逐 Tool disclosure；Renderer reload 后这些本地状态可以重置。存在非空 final/partial response 时，复制元数据仍是整个 Run 的最后一行：它位于文件更改、历史 Work process 和必要 terminal notice 之后，复制图标在左，Product 提供完成时间时在其右侧显示弱化的本地相对时间。
+active→terminal 时，live activity 与持续外推必须消失；没有 Tool 的 process surface 同步卸载，存在 Tool 时则在最终结果之后保留标题为“执行详情”的默认折叠稳定摘要。Host 最终 `elapsedMs` 非空时在标题右侧弱化显示“本轮用时 {duration}”，不可得时不占位，也不改变入口名称。展开该摘要后，用户可以独立展开多条 Tool 行；完整 input/progress/result 在所属行下方挂载，长代码面有界滚动，安全 raw details 继续二次折叠。折叠 process surface 不清除逐 Tool disclosure；Renderer reload 后这些本地状态可以重置。存在非空 final/partial response 时，复制元数据仍是整个 Run 的最后一行：它位于文件更改、历史 process surface 和必要 terminal notice 之后，复制图标在左，Product 提供完成时间时在其右侧显示弱化的本地相对时间。
 
 #### Output projection 与可见迁移
 
@@ -630,7 +630,7 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 
 #### 本轮耗时
 
-活动状态旁可以弱化显示 Host 采样的“本轮已用时”，包含排队、等待批准和重试；仅表示经过时间，不表示进展或健康。Renderer 从完整 Snapshot 的本地接收时刻低频外推，切换 Task 不重新起算，reload 后使用新 Host 样本；terminal 后移除，不新增历史耗时展示。计时必须位于状态读屏 live region 之外，不触发逐秒播报、自动滚动或逐秒 Snapshot；计时变化不能用来生成叙事、推进状态或判断超时。排队与启动使用不同文案。
+活动状态旁可以弱化显示 Host 采样的“本轮已用时”，包含排队、等待批准和重试；仅表示经过时间，不表示进展或健康。Renderer 从完整 Snapshot 的本地接收时刻低频外推，切换 Task 不重新起算，reload 后使用新 Host 样本；terminal 后停止外推，存在 Tool 且 Host 最终 `elapsedMs` 非空时，在“执行详情”入口右侧固化显示“本轮用时 {duration}”，耗时不可得时不占位，没有 Tool 时不为耗时单独保留 surface。计时必须位于状态读屏 live region 之外，不触发逐秒播报、自动滚动或逐秒 Snapshot；计时变化不能用来生成叙事、推进状态或判断超时。排队与启动使用不同文案。
 
 ### 7.3 用户指令
 
@@ -657,7 +657,7 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 ### 7.5 当前状态、请求与结果
 
 - active Run 只显示一个来自 canonical phase/activity 的紧凑 live status，并固定在当前过程底部原位更新；它不为 Tool start/progress/result 追加时间线记录。`executing_tools` 且恰有一个 typed running Tool 时，Renderer 可以依据固定 Tool identifier 映射为“检查工作区”“更新内容”“运行操作”等宽泛但真实的用户文案；不满足条件时回退到 canonical activity，不在主状态中暴露原始 Tool 名称、参数或命令；
-- Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。Run terminal 后 live status 消失；没有 Tool 时整个 surface 卸载，存在 Tool 时保留默认折叠的操作数量摘要，并允许在所属 Tool 行下方查看完整 input/result。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
+- Tool 摘要属于次要 technical work evidence，active Run 内与唯一 live status 共用默认折叠的 process surface；展开内容遵守本节 Tool 证据规则，不带入 usage 或 Run ID。Run terminal 后 live status 消失；没有 Tool 时整个 surface 卸载，存在 Tool 时保留默认折叠的“执行详情”摘要，并在 Host 最终耗时可用时于右侧显示“本轮用时 {duration}”，允许在所属 Tool 行下方查看完整 input/result。Work 与逐 Tool disclosure choice 仅存于当前 Renderer 会话，不写入 Bridge 或持久化；late terminal observation 不得重新打开 live 状态；
 - pending UI 位于当前 Assistant 回复之后、Composer 之前，并提供唯一可操作控件；
 - `completed` 且已有 final response 时不追加重复的完成条；空 final response、停止、失败、中断或 dependency failure 只显示准确状态、原因与真实可用的恢复动作；partial response 与 terminal outcome 必须合并为唯一 notice，同时表达“回复未完整生成”和真实终止原因，不能再追加第二条 partial 警告；
 - terminal cause 使用最具体的稳定本地化文案：`provider_failure` 显示“模型服务请求失败”，并在同一 notice 中说明本次 Run 未生成可用回复或只生成了可能不完整的部分回复；`tool_failure` 说明工具失败且 Agent 未能恢复，`image_input_unsupported` 明确要求更换支持图片的模型并重新选择图片；不得把三者统一写成“检查模型或网络”，也不得直接展示 provider raw body；
