@@ -2907,7 +2907,7 @@ button.run-process-tool:hover {
   white-space: nowrap;
 }
 
-.tool-raw-details > summary {
+.tool-unparsed-details > summary {
   min-height: 44px;
   padding-block: 12px;
   cursor: pointer;
@@ -8823,6 +8823,25 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .run-process-tool-detail .code-block-preview {
   max-height: min(360px, 45vh);
   overflow: auto;
+}
+
+.bash-exit-status {
+  margin: 12px 0 0;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.bash-exit-status[data-status="failed"] {
+  color: var(--metask-state-error);
+}
+
+.bash-exit-status + .detail-field {
+  margin-top: 12px;
+}
+
+.tool-unparsed-details .detail-field + .detail-field {
+  margin-top: 12px;
 }
 
 .run-process-tool-detail .detail-field + .detail-field,

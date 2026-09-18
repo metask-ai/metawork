@@ -848,7 +848,7 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的两�
 
 > Capability：**当前**。右侧栏是应用三栏布局的辅助容器，Task Panel 是其中承载任务内容的视图；布局开关不属于该视图或任一具体功能，不提供概览根页、日志时间线、任意文件浏览、文件编辑或 Git 操作。
 
-主阅读流拥有叙事、唯一 live status、审批、失败恢复与所属 Work process。默认折叠规则见 §7.2；用户展开 Work process 后，可以在精确 `taskId + runId + toolId` 的 Tool 行下方独立展开详情，详情随 Snapshot 原位更新，不打开或替换右栏内容。不复制整份 Tool 列表，不从 Tool 内容推断 Agent 发言、File Changes 或 Output。完整 input/progress/result 只在对应 disclosure 中以纯文本/代码面挂载，不进入全局搜索或 live announcement；每个代码面最大高度为 `min(360px, 45vh)`，超出后内部滚动。Host 提供可读 Bash 字段时，详情优先呈现 command、exit code、stdout/stderr，并明确空输出及不完整捕获；安全原始详情置于第二层 disclosure。不可解释的结果直接保留安全原始详情，不从空输出推断目录为空或任务完成。
+主阅读流拥有叙事、唯一 live status、审批、失败恢复与所属 Work process。默认折叠规则见 §7.2；用户展开 Work process 后，可以在精确 `taskId + runId + toolId` 的 Tool 行下方独立展开详情，详情随 Snapshot 原位更新，不打开或替换右栏内容。不复制整份 Tool 列表，不从 Tool 内容推断 Agent 发言、File Changes 或 Output。通用 Tool 的完整 input/progress/result 只在对应 disclosure 中以纯文本/代码面挂载，不进入全局搜索或 live announcement；每个代码面最大高度为 `min(360px, 45vh)`，超出后内部滚动。Host 提供可读 Bash 字段时，详情只呈现 command、exit status、非空 stdout/stderr 与不完整捕获说明，不重复已经解释的原始 input/result，不为 Bash 代码面提供专用复制动作，用户仍可使用平台原生文本选择与复制。只有部分 Bash 字段无法解释时，未解释的安全原始字段才进入第二层“未解析数据” disclosure；全部无法解释时直接说明并呈现安全原始字段。空 stdout/stderr 不占位；Renderer 仍不得从空输出推断目录为空或任务完成。
 
 信息按事实的生命周期放置：
 

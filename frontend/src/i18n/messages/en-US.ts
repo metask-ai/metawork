@@ -807,16 +807,19 @@ export const enUS = {
   "inspector.tool.elapsed": "{duration} ms",
   "inspector.tool.input": "Input",
   "inspector.tool.command": "Command",
-  "inspector.tool.exit_code": "Exit code: {code}",
+  "inspector.tool.command_succeeded": "Command completed · exit code {code}",
+  "inspector.tool.command_failed": "Command failed · exit code {code}",
   "inspector.tool.stdout": "Standard output",
   "inspector.tool.stderr": "Standard error",
-  "inspector.tool.stdout_empty": "No standard output captured.",
-  "inspector.tool.stderr_empty": "No standard error captured.",
   "inspector.tool.stdout_incomplete":
     "Standard output is incomplete or truncated.",
   "inspector.tool.stderr_incomplete":
     "Standard error is incomplete or truncated.",
-  "inspector.tool.raw_details": "Raw details",
+  "inspector.tool.bash_partially_unparsed":
+    "Some Bash data could not be interpreted.",
+  "inspector.tool.bash_unparsed":
+    "This Bash call could not be interpreted. The safe original data is shown below.",
+  "inspector.tool.unparsed_data": "Unparsed data",
   "inspector.tool.progress": "Progress",
   "inspector.tool.result": "Result",
   "inspector.tool.truncated": "Some tool details were shortened.",

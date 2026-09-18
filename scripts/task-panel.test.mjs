@@ -175,7 +175,7 @@ function technicalTool(overrides = {}) {
   };
 }
 
-test("Bash detail shows known fields with collapsed raw evidence and explicit empty streams", () => {
+test("Bash detail shows semantic evidence without duplicate protocol data or copy actions", () => {
   const tool = technicalTool({
     name: "Bash",
     input: '{"command":"pwd"}',
@@ -194,14 +194,103 @@ test("Bash detail shows known fields with collapsed raw evidence and explicit em
   });
   const view = render(localizedView(createElement(ToolDetailView, { tool })));
   assert.ok(screen.getByText("pwd"));
-  assert.ok(screen.getByText("No standard output captured."));
+  assert.ok(screen.getByText("Command completed · exit code 0"));
   assert.ok(screen.getByText("partial warning"));
+  assert.equal(screen.queryByText("No standard output captured."), null);
+  assert.equal(screen.queryByText("raw envelope"), null);
+  assert.equal(view.container.querySelector("details"), null);
+  assert.equal(screen.queryByRole("button", { name: "Copy code" }), null);
+});
+
+test("partially parsed Bash detail discloses only unparsed evidence", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "raw envelope",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: null,
+    },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.ok(screen.getByText("pwd"));
+  assert.ok(screen.getByText("Some Bash data could not be interpreted."));
   assert.equal(view.container.querySelector("details").open, false);
   assert.ok(
     view.container
       .querySelector("details")
       .textContent.includes("raw envelope"),
   );
+  assert.equal(
+    view.container.querySelector("details").textContent.includes("command"),
+    false,
+  );
+});
+
+test("unparsed Bash detail presents safe original evidence directly", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "raw envelope",
+    bash: { command: null, description: null, result: null },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.ok(screen.getByText(/^This Bash call could not be interpreted\./));
+  assert.ok(screen.getByText('{"command":"pwd"}'));
+  assert.ok(screen.getByText("raw envelope"));
+  assert.equal(view.container.querySelector("details"), null);
+  assert.equal(screen.queryByRole("button", { name: "Copy code" }), null);
+});
+
+test("generic Tool detail keeps the existing raw copy affordance", () => {
+  const tool = technicalTool({
+    input: '{"file_path":"README.md"}',
+    content: "raw result",
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.equal(
+    view.container.querySelectorAll('button[aria-label="Copy code"]').length,
+    2,
+  );
+  assert.ok(screen.getByText('{"file_path":"README.md"}'));
+  assert.ok(screen.getByText("raw result"));
+});
+
+test("terminal Bash detail reports an unparsed empty result", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: null,
+    },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.ok(screen.getByText("Some Bash data could not be interpreted."));
+  assert.equal(view.container.querySelector("details"), null);
+});
+
+test("Bash detail updates when readable projection becomes unavailable", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "raw envelope",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        stdoutIncomplete: false,
+        stderrIncomplete: false,
+      },
+    },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
   view.rerender(
     localizedView(
       createElement(ToolDetailView, { tool: { ...tool, bash: null } }),
