@@ -2590,7 +2590,7 @@ summary::-webkit-details-marker {
 .ai-conversation-content {
   width: min(100%, 840px);
   margin: 0 auto;
-  padding: 32px 34px 52px;
+  padding: 32px 32px 52px;
 }
 
 .ai-exchange + .ai-exchange {
@@ -2742,11 +2742,34 @@ summary::-webkit-details-marker {
 }
 
 .assistant-output-part {
-  line-height: 1.72;
+  line-height: 1.62;
 }
 
 .assistant-output-part + .assistant-output-part {
   margin-top: 14px;
+}
+
+.run-assistant-output .ai-markdown p,
+.run-assistant-output .ai-markdown ul,
+.run-assistant-output .ai-markdown ol,
+.run-assistant-output .ai-markdown blockquote,
+.run-assistant-output .ai-markdown table {
+  margin-bottom: 8px;
+}
+
+.run-assistant-output .ai-markdown h1,
+.run-assistant-output .ai-markdown h2,
+.run-assistant-output .ai-markdown h3,
+.run-assistant-output .ai-markdown h4 {
+  margin: 16px 0 6px;
+}
+
+.run-assistant-output .ai-markdown > :first-child {
+  margin-top: 0;
+}
+
+.run-assistant-output .ai-markdown > :last-child {
+  margin-bottom: 0;
 }
 
 .run-process {
