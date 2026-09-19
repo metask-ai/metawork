@@ -200,7 +200,16 @@ export function AppShell({
     rightOpen: effectiveRightPanelOpen,
     rightShare,
   });
-  const rightPanelDocked = columns.docked;
+  const rightPanelPlacement = effectiveRightPanelOpen
+    ? columns
+    : resolveWorkbenchColumns({
+        containerWidth: workbenchWidth,
+        leftOpen: effectiveLeftOpen,
+        leftWidth,
+        rightOpen: true,
+        rightShare,
+      });
+  const rightPanelDocked = rightPanelPlacement.docked;
   const taskStageExposed = isTaskStageExposed({
     viewportWidth: workbenchWidth,
     leftOpen: effectiveLeftOpen,
@@ -307,7 +316,7 @@ export function AppShell({
       style={
         {
           "--left-column-width": `${leftWidth}px`,
-          "--right-panel-width": `${columns.rightWidth}px`,
+          "--right-panel-width": `${rightPanelPlacement.rightWidth}px`,
         } as CSSProperties
       }
       onKeyDown={(event) => {
@@ -456,7 +465,7 @@ export function AppShell({
           />
         )}
         <section className="task-stage">{children}</section>
-        {rightPanelDocked && (
+        {effectiveRightPanelOpen && rightPanelDocked && (
           <ResizableSeparator
             className="task-panel-resize-handle"
             label={t("app.resize_task_panel")}

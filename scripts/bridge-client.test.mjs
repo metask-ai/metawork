@@ -148,6 +148,33 @@ test("Account recharge opens through one fixed empty-payload command", async () 
   ]);
 });
 
+test("External links use one typed Host command and decode its closed outcome set", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      return { outcome: "opened" };
+    }),
+  });
+
+  assert.deepEqual(await client.openExternalLink("https://example.com/a?q=1"), {
+    outcome: "opened",
+  });
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.host.links.openExternal",
+      payload: { url: "https://example.com/a?q=1" },
+    },
+  ]);
+});
+
+test("External link outcomes fail closed when the Host changes shape", async () => {
+  const client = new BridgeClient({
+    bridge: bridgeWith(async () => ({ outcome: "maybe" })),
+  });
+  await assert.rejects(client.openExternalLink("https://example.com"));
+});
+
 test("Product store recovery uses revision-bound typed commands", async () => {
   const calls = [];
   const client = new BridgeClient({

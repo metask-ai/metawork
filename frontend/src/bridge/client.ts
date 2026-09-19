@@ -70,6 +70,7 @@ import {
   decodeAttachmentReceiveResult,
   decodeAttachmentReceiveAcceptance,
   decodeAutomaticWorkspaceRootMutationResult,
+  decodeExternalLinkOpenResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
@@ -231,6 +232,12 @@ export class BridgeClient {
   fetchSnapshot() {
     return fetchWorkbenchSnapshot((command, payload) =>
       this.invoke(command, payload),
+    );
+  }
+
+  async openExternalLink(url: string) {
+    return decodeExternalLinkOpenResult(
+      await this.invoke(commands.openExternalLink, { url }),
     );
   }
 

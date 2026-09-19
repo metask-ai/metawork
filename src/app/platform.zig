@@ -177,6 +177,7 @@ pub const Adapter = struct {
             .window_chrome_pointer_fn = windowChromePointer,
             .window_chrome_control_fn = windowChromeControl,
             .window_chrome_disconnect_fn = windowChromeDisconnect,
+            .open_external_url_fn = openExternalUrl,
             .now_fn = now,
             .on_main_thread_fn = onMainThread,
         };
@@ -307,6 +308,14 @@ pub const Adapter = struct {
         const runtime = self.native_runtime orelse return false;
         runtime.openExternalUrl(url) catch return false;
         return true;
+    }
+
+    fn openExternalUrl(context: ?*anyopaque, url: []const u8) !void {
+        const self: *Adapter = @ptrCast(@alignCast(context orelse
+            return error.RuntimeUnavailable));
+        const services_value = self.platform_services orelse
+            return error.RuntimeUnavailable;
+        try services_value.openExternalUrl(url);
     }
 
     pub fn armScheduledTaskTimer(

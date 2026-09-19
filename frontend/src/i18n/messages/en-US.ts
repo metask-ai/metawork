@@ -26,6 +26,7 @@ export const enUS = {
   "copy.code": "Copy code",
   "copy.copied": "Copied",
   "copy.failed": "Copy failed",
+  "link.open_failed": "Couldn’t open this link.",
   "about.menu_item": "About",
   "about.developer": "Developer",
   "about.developer_name": "Metask",

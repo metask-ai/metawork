@@ -80,6 +80,17 @@ import {
 
 type JsonObject = Record<string, unknown>;
 
+export function decodeExternalLinkOpenResult(value: unknown) {
+  const item = object(value, "$", ["outcome"]);
+  return {
+    outcome: enumValue(item.outcome, "$.outcome", [
+      "opened",
+      "rejected",
+      "unavailable",
+    ] as const),
+  };
+}
+
 const taskLifecycles = ["open", "closing"] as const;
 const runPhases = [
   "queued",

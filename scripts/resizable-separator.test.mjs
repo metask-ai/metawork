@@ -443,3 +443,20 @@ test("closing the Task Panel finalizes an active proportional resize", () => {
     null,
   );
 });
+
+test("a closed Task Panel preserves its target placement for exit motion", () => {
+  const { root, rerenderOpen, resizeViewport } = renderTaskPanelShell(1400);
+  const openWidth = root?.style.getPropertyValue("--right-panel-width");
+
+  rerenderOpen(false);
+  assert.equal(root?.getAttribute("data-right-panel-docked"), "true");
+  assert.equal(root?.style.getPropertyValue("--right-panel-width"), openWidth);
+  assert.equal(
+    screen.queryByRole("separator", { name: "Resize side panel" }),
+    null,
+  );
+
+  resizeViewport(1039);
+  assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
+  assert.equal(root?.style.getPropertyValue("--right-panel-width"), "400px");
+});

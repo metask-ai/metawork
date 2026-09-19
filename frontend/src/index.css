@@ -2590,7 +2590,7 @@ summary::-webkit-details-marker {
 .ai-conversation-content {
   width: min(100%, 840px);
   margin: 0 auto;
-  padding: 32px 34px 52px;
+  padding: 32px 32px 52px;
 }
 
 .ai-exchange + .ai-exchange {
@@ -2742,11 +2742,34 @@ summary::-webkit-details-marker {
 }
 
 .assistant-output-part {
-  line-height: 1.72;
+  line-height: 1.62;
 }
 
 .assistant-output-part + .assistant-output-part {
   margin-top: 14px;
+}
+
+.run-assistant-output .ai-markdown p,
+.run-assistant-output .ai-markdown ul,
+.run-assistant-output .ai-markdown ol,
+.run-assistant-output .ai-markdown blockquote,
+.run-assistant-output .ai-markdown table {
+  margin-bottom: 8px;
+}
+
+.run-assistant-output .ai-markdown h1,
+.run-assistant-output .ai-markdown h2,
+.run-assistant-output .ai-markdown h3,
+.run-assistant-output .ai-markdown h4 {
+  margin: 16px 0 6px;
+}
+
+.run-assistant-output .ai-markdown > :first-child {
+  margin-top: 0;
+}
+
+.run-assistant-output .ai-markdown > :last-child {
+  margin-bottom: 0;
 }
 
 .run-process {
@@ -3792,6 +3815,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .task-panel {
   min-width: 0;
   overflow: hidden auto;
+  transition: flex-basis 170ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 .workspace-sidebar {
@@ -3821,7 +3845,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   transition: none;
 }
 
-.app-window[data-right-panel-docked="true"] .task-panel {
+.app-window[data-right-panel-open="true"][data-right-panel-docked="true"]
+  .task-panel {
   flex: 0 0 var(--right-panel-width);
 }
 
@@ -7533,6 +7558,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   text-underline-offset: 2px;
 }
 
+.ai-markdown-web-link {
+  display: inline;
+}
+
+.ai-markdown-link-error {
+  margin-left: 6px;
+  color: var(--ui-status-danger);
+  font-size: var(--text-micro);
+  text-decoration: none;
+}
+
 .ai-markdown .ai-markdown-reference {
   display: inline;
   height: auto;
@@ -8609,21 +8645,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   overflow: hidden;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
-}
-.task-panel-header h2 {
-  min-width: 0;
-  flex: 1;
-  margin: 0;
-  padding-left: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-label);
-  font-weight: 650;
-}
-.task-panel-header h2:focus-visible {
-  outline: 2px solid var(--ui-action-primary);
-  outline-offset: 3px;
 }
 .task-panel-tabs {
   display: flex;

@@ -22,6 +22,7 @@ import {
   Activity,
   Conversation,
   Markdown,
+  type MarkdownWebLink,
   Message,
 } from "../../components/ai/index.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
@@ -214,6 +215,7 @@ export function TaskContent({
   retryAvailable,
   responseDisabled,
   fileChangesEnabled,
+  webLink,
   onPrepareRetry,
   onPreviewFile,
   onReviewFileChanges,
@@ -229,6 +231,7 @@ export function TaskContent({
   retryAvailable: boolean;
   responseDisabled: boolean;
   fileChangesEnabled: boolean;
+  webLink: MarkdownWebLink;
   onPrepareRetry: (input: RunInputView) => void;
   onPreviewFile: (
     taskId: string,
@@ -445,6 +448,7 @@ export function TaskContent({
                       key={part.identity}
                       references={streaming ? undefined : references}
                       interactive={!streaming}
+                      webLink={streaming ? undefined : webLink}
                       streaming={streaming}
                       onStreamingCommit={followDeferredOutput}
                       codeCopy={

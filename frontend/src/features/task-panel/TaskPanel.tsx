@@ -139,15 +139,11 @@ export function TaskPanel({
 
   return (
     <div className="task-panel-frame">
-      <header className="task-panel-header">
-        <h2
-          id="task-panel-title"
-          className={tabs.length > 0 ? "sr-only" : undefined}
-          tabIndex={-1}
-        >
-          {title}
-        </h2>
-        {tabs.length > 0 && (
+      {tabs.length > 0 ? (
+        <header className="task-panel-header">
+          <h2 id="task-panel-title" className="sr-only">
+            {title}
+          </h2>
           <div
             ref={tabList}
             className="task-panel-tabs"
@@ -210,20 +206,24 @@ export function TaskPanel({
               );
             })}
           </div>
-        )}
-        <div className="task-panel-header-actions">
-          {attention}
-          <span className="task-panel-context-action-slot">{actions}</span>
-          <button
-            type="button"
-            className="task-panel-close focus-ring"
-            aria-label={t("task_panel.hide")}
-            onClick={onClose}
-          >
-            <Icon name="close" />
-          </button>
-        </div>
-      </header>
+          <div className="task-panel-header-actions">
+            {attention}
+            <span className="task-panel-context-action-slot">{actions}</span>
+            <button
+              type="button"
+              className="task-panel-close focus-ring"
+              aria-label={t("task_panel.hide")}
+              onClick={onClose}
+            >
+              <Icon name="close" />
+            </button>
+          </div>
+        </header>
+      ) : (
+        <h2 id="task-panel-title" className="sr-only">
+          {title}
+        </h2>
+      )}
       {activeTabId ? (
         <div
           id="task-panel-tabpanel"

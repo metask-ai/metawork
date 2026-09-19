@@ -31,6 +31,7 @@ pub const WindowChromeControl = struct {
     action: []const u8,
 };
 pub const WindowChromeDisconnect = struct { generation: []const u8 };
+pub const ExternalLinkOpen = struct { url: []const u8 };
 pub const ModelDefaultSelection = struct {
     sourceId: []const u8,
     modelId: []const u8,

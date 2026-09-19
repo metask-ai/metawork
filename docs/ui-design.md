@@ -161,7 +161,7 @@ Workspace
 - 左栏：默认 320 px；常规桌面可通过分界线在 240–480 px 内调整并保存偏好，键盘聚焦分界线后可用方向键调整；窄窗 overlay 保持固定宽度；
 - 左栏品牌区使用紧凑单行，只显示 `MetaWork` 字样，不把品牌区表现成第二层标题栏，也不重复使用首字母图标、产品说明或宣传副标题；
 - 横向工作区：`app-window` 继续用 Grid 管理命令栏与工作区两行，并作为可用宽度的唯一 owner；工作区内部使用受父级约束的 Flex，子栏及其内容不得反向撑宽父级或成为自身宽度计算的测量源。左栏占固定的偏好宽度；扣除左栏后的空间默认按中央 Task stage 2 份、Task Panel 1 份分配。中央 Task stage 与 Task Panel 都只设置 360 px 硬下限，不设置固定最大宽度或固定比例范围；最小宽度约束优先于保存比例，保存比例优先于默认 2:1；
-- Task Panel：停靠态保存其在剩余工作区中的比例，默认 `1/3`；分界线仅在停靠态出现，拖拽和键盘调整以 16 px 为步进显示实际宽度，再换算为比例保存。其动态可调范围为 360 px 至“剩余工作区减去中央 360 px”，不另设上限。停靠栏开合与宽度分配必须在一次布局提交中完成，不对 `width`、`flex-basis` 等布局属性做过渡；扣除左栏后的空间少于 720 px 时改用右侧非模态 overlay，默认 400 px 且不允许拉伸，overlay 可使用不参与工作区布局的 `transform` 过渡。空间恢复后沿用保存比例。入口、显隐和比例属于应用布局，用户可独立开合或通过具体对象入口展开；无 Task、无内容时也允许打开空栏，不触发普通 Run 或审批状态驱动的自动开合；
+- Task Panel：停靠态保存其在剩余工作区中的比例，默认 `1/3`；分界线仅在停靠态出现，拖拽和键盘调整以 16 px 为步进显示实际宽度，再换算为比例保存。其动态可调范围为 360 px 至“剩余工作区减去中央 360 px”，不另设上限。停靠栏开合使用约 160–180 ms 的 `flex-basis` 过渡，拖拽调整直接跟手且不使用过渡；扣除左栏后的空间少于 720 px 时改用右侧非模态 overlay，默认 400 px 且不允许拉伸，overlay 使用不参与工作区布局的 `transform` 过渡。空间恢复后沿用保存比例。入口、显隐和比例属于应用布局，用户可独立开合或通过具体对象入口展开；无 Task、无内容时也允许打开空栏，不触发普通 Run 或审批状态驱动的自动开合；
 - 已有 Task 不额外占用独立内容标题区；Task 名称只在顶部命令栏显示；
 - 中间正文推荐最大宽度：760 px；
 - 表格、diff、日志和文件预览可以使用中间区域的可用宽度；
@@ -648,6 +648,7 @@ ProductDelivery 可以合并短窗口 revision，但跨窗口更新必须以新�
 - 支持 Markdown、表格、代码、引用和链接；
 - commentary 作为 Assistant 过程叙事按 Host 提供的有序 group array 渲染为同一 Assistant message 内的独立 Markdown block；Renderer 不自行按换行切组，也不按 chunk 或 Tool 穿插伪造顺序。Host 发布新的 closed commentary group 后，主阅读流随 Snapshot revision 追加一个稳定 block；
 - `commentary | provisional | final | partial` 共用安全 Markdown 排版；尚未收到 output-segment 定性的 provisional 不称为草稿，保持惰性交互并在 discard 后随下一 Snapshot 立即消失；流式生成不增加光标、骨架或第二个活动指示；
+- 已闭合 commentary 与 final/partial 中的 `http`、`https`、`mailto` 链接保留链接色、下划线、键盘可达性和可复制 `href`，但点击必须同步阻止 WebView 默认导航并交给 Host；请求期间同一链接不重复提交，打开失败在原链接后以紧凑 danger 文案就地提示并允许再次点击，不使用与目标脱节的全局 Toast。非法协议、相对网页地址和 provisional 链接只显示文字；
 - 已 terminal 且非空的 `final | partial` response 在整个 Run 的最后一行提供纯图标“复制回复”：最新一条始终可见，历史条目在所属 Run hover 或 focus-within 时显示，coarse pointer 设备始终显示；active、commentary、provisional、Tool 与 terminal notice 不提供整条复制。点击后用同一份原始 Markdown 生成纯文本与安全语义 HTML；真实写入完成前不得显示成功，成功约 1.2 秒切换为勾选，失败约 1.5 秒切换为 warning，重复操作重置反馈周期，动态 accessible name、tooltip 和读屏状态分别使用“复制回复 / 已复制 / 复制失败”。代码块右上角提供独立的纯图标“复制代码”，只复制当前显示的代码正文；两类按钮都具备可见键盘焦点、明确 accessible name、tooltip 和至少 32px 点击区，不把语言名、围栏、行号或 UI 文案带入剪贴板；
 - 回复末行在复制图标右侧显示 Product 提供的 Run 完成时间，使用 12px muted 文本和本地化相对表达，一分钟内使用“刚刚”，完整本地日期时间由统一产品 tooltip 展示并作为 accessible name，不使用浏览器原生 `title` 提示；时间始终可见而复制图标仍遵守最新/历史显隐规则。Renderer 每分钟低频更新相对文案，不发布 Snapshot、不自动滚动、不改变历史；时间缺失或超出可信范围时整项隐藏，禁止使用 `Date.now()`、Snapshot 接收时间、Run ID 或 `elapsedMs` 补造；
 - 不展示原始 chain-of-thought；`thinking_chunk` 只显示“正在思考”的安全状态，`text_chunk` 开始后显示“正在撰写回复”；Renderer 还必须把 Host 已投影的 Starting、Waiting model、Executing tools、Retrying、Compacting 与 Finishing 显示为本地化 Current activity，并在 Host 提供时显示 retry attempt/max/delay；不同 activity 必须保持可理解的差异，不能把整个 active Run 统一退化成一个不变的“正在工作”；
@@ -859,13 +860,13 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的两�
 
 右栏显隐不属于内容目标。内容是当前 Task 内的对象标签会话：可以同时保留多个精确文件预览，File Changes Review 最多保留一个；未打开对象时呈现通用空态。文件预览只从对话内联引用进入，工作过程不重复文件入口；记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；不建立记录列表、单条详情页、返回层级、文件树或旧概览兼容开关。
 
-每个顶层标签代表一个具体对象，不代表“预览/审查”功能模式。文件标签以精确 `taskId + runId + referenceId` 去重；标题和 `displayPath` 只用于呈现，不能推断对象相同。Review 标签在当前 Task 内是 singleton：重开同一 Run 只激活已有标签，打开另一有效 Run 时在原位置原子替换其目标；验证失败不得先清空既有 Review。标签按首次创建顺序保持稳定，重新激活不重排；关闭活动标签后优先选择其右邻，否则选择左邻，关闭最后一个标签后右栏保持空态。
+每个顶层标签代表一个具体对象，不代表“预览/审查”功能模式。文件标签以精确 `taskId + runId + referenceId` 去重；标题和 `displayPath` 只用于呈现，不能推断对象相同。Review 标签在当前 Task 内是 singleton：重开同一 Run 只激活已有标签，打开另一有效 Run 时在原位置原子替换其目标；验证失败不得先清空既有 Review。标签按首次创建顺序保持稳定，重新激活不重排；关闭活动标签后优先选择其右邻，否则选择左邻，用户关闭最后一个标签时同步隐藏右栏并把焦点返回该标签的真实 opener，opener 失效时回到稳定的 Task Panel 开关。对象因 Task 切换或身份失效而被清空时不自动改变右栏显隐。
 
 隐藏右栏只改变布局显隐，保留当前 Task 会话内的标签、已读取内容、活动标签和各标签视图状态；关闭单个标签才释放对应正文并使未完成请求 stale。切换 Task、删除当前 Task、离开可承载 Task 内容的页面或连接身份整体失效时清空全部对象内容，但保留用户选择的右栏显隐与宽度；无 Task 时呈现空态。普通 Run 开始、终态和 Snapshot revision 不关闭仍有效的对象。Review 中单条记录失效只移除该记录及正文；所属 Run 或全部记录失效只关闭 Review 标签，不连带清除文件标签；文件引用失效也只关闭对应文件标签。
 
 身份有效性必须在渲染前判定，不能仅依赖 effect 清理。文件读取与 diff 请求继续使用精确身份和每对象独立的递增 request generation；标签关闭、Review 目标替换、Task 切换与目标失效后，晚到成功或失败都不能覆盖新内容。只挂载活动标签的正文，非活动标签保留会话内资源和视图状态但不得保留隐藏 DOM 或进入辅助技术树；不声称已取消 Host IO。显式刷新重新请求，激活已有成功文件标签不得无故重读。
 
-保留右栏宽度偏好及第 4 节的停靠/覆盖规则。面板头部提供单行对象标签条、活动对象动作和隐藏按钮；标签关闭与隐藏右栏必须是两个独立动作。每个标签记录最近一次真实 opener；从面板隐藏时焦点返回活动标签 opener，opener 已消失或 disabled 时回到稳定的 Task Panel 开关，从全局开关隐藏则焦点留在该开关。标签使用标准 tablist/tab/tabpanel 语义和手动键盘激活，嵌套 menu/dialog/popover 优先处理 Escape，面板尊重 defaultPrevented。隐藏右栏不改变 Task、审批或运行状态。
+保留右栏宽度偏好及第 4 节的停靠/覆盖规则。有对象标签时，面板头部提供单行对象标签条、活动对象动作和隐藏按钮；标签关闭与隐藏右栏必须是两个独立动作。未打开对象的空栏不显示通用容器标题条或重复隐藏按钮，仍保留可访问名称，并由命令栏常驻开关控制显隐。每个标签记录最近一次真实 opener；从面板隐藏时焦点返回活动标签 opener，opener 已消失或 disabled 时回到稳定的 Task Panel 开关，从全局开关隐藏则焦点留在该开关。标签使用标准 tablist/tab/tabpanel 语义和手动键盘激活，嵌套 menu/dialog/popover 优先处理 Escape，面板尊重 defaultPrevented。隐藏右栏不改变 Task、审批或运行状态。
 
 Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
@@ -879,7 +880,7 @@ Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 - 匹配只使用 Host `displayPath`、其显式相对写法及无歧义文件名，区分大小写，不查询文件系统、不从 Tool 参数拼装 authority。同一路径的重复引用为正文入口选择最后一条有序引用以读取当前内容，不宣称它是该句的历史版本或新文件身份；不同目录的同名文件不得仅按文件名选中，未匹配的本地 Markdown 路径不作为网页导航。引用晚到或失效随 Snapshot 更新可点击状态，不触发自动读取；
 - 工作过程不提供 fileRefs 预览入口，只允许在 Tool 单行摘要缺少 description/progress 时显示只读 `displayPath`，也不把引用聚合到回复 footer 或右栏列表；正文内联入口按精确引用身份在 Task Panel 打开或激活对应对象标签，只显示用户已经显式打开的文件，不提供全部引用选择器；
 - 文件预览使用 Task Panel 顶部对象标签表达当前路径，活动标签右侧只提供刷新和标签关闭/面板隐藏动作，正文不追加资源副标题、状态标签、常驻说明或信息入口。`.md`、`.markdown`（后缀不区分大小写）默认安全渲染文档，支持标题、列表、表格、引用与代码块，并在正文上方提供更弱层级的“预览 / 源码”切换；切换只使用已读取正文、不重新请求文件。刷新保持当前模式，切换标签后恢复各文件自己的模式和滚动位置，关闭后重开恢复默认模式；非活动视图不保留隐藏正文；
-- Markdown 复用安全 Markdown 呈现边界，不执行内嵌 HTML 或脚本；图片只显示替代文字，不请求本地或远程资源；相对资源链接不作为应用导航，HTTP(S) 链接的显式点击仍服从 Host 导航策略，不新增资源读取或网络权限。文档主体纵向滚动，宽表格与代码块各自横向滚动；
+- Markdown 复用安全 Markdown 呈现边界，不执行内嵌 HTML 或脚本；图片只显示替代文字，不请求本地或远程资源；相对资源链接不作为应用导航，只有 HTTP(S) 链接可按主阅读流相同的 Host handoff 与就地失败反馈打开，不接受 `mailto` 或新增资源读取、网络权限。文档主体纵向滚动，宽表格与代码块各自横向滚动；
 - 普通文本、代码文件及其他已支持的文本格式显示中性等宽源码，保留空白并允许自身横向滚动，不增加模式切换。源码左侧显示从 1 开始的单列行号；行号与正文共用滚动容器，横向滚动时固定在左侧，不进入文本选择、复制内容或辅助技术朗读，只编号当前实际显示的文件前缀且不推断截断后的未读取行数。已识别且处于 Renderer 高亮预算内的代码文件自动渐进增强为主题适配的语法颜色，Markdown 的“源码”模式同样适用；未知格式、超出预算、模块加载失败、grammar 异常或高亮结果校验失败时静默保留完整纯文本，不自动猜测语言、不增加状态、重试、开关或语言选择。HTML、SVG 与 XML 即使显示 markup 语法颜色也始终只渲染惰性源码，不形成真实元素、执行脚本或加载资源，界面不为这一限制增加常驻提示或说明入口。只有具备经验证的独立隔离容器和受控资源读取能力后才能开放页面渲染，不能复用应用主页面执行 HTML 或放宽安全策略作为临时方案。文件预览不做 diff、range 高亮、自动刷新或文件 watcher；
 - UI-only `loading` 不进入 Host wire；Host 状态精确映射为 `ready | missing | restricted | unsupported | changing | error`。`changing` 与 `error` 可以显式重试，其他非 ready 状态只解释原因且正文必须为空；`truncated` 和 `redacted` 以文字说明，不只依赖颜色；
 - Renderer 为每个文件标签独立维护 request generation。首次打开和刷新推进该标签 generation；关闭标签、切换 Task、reference 从新 snapshot 消失或该标签后续请求开始后，旧 Promise 即使完成也不得覆盖当前内容。切换到其他标签只卸载当前文件 DOM，不清除仍打开标签的已读取 bytes；重新激活 ready 标签不请求，关闭后显式重开才重新请求；
@@ -1352,7 +1353,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 长英文、中文和 pseudo-locale 不溢出；
 - `queued / running / waiting_user` 的可见 Stop 只出现在 Composer 发送位置；顶部命令栏不重复出现，`stopping` 阻止重复请求并等待真实 terminal；
 - 右侧栏常驻开关可由键盘操作，无 Task 时也能独立开合；Task 切换、删除、目标失效不改变布局显隐或保存比例；任务信息纯图标、上下文压力提醒与审批定位入口可由键盘操作，缺少 pressure 时不显示上下文入口；Run 用量和历史 auto compact 不独立展示；
-- 右侧只挂载活动对象标签的文件详情或同 Run File Changes Review；标签切换卸载非活动 DOM，关闭标签后聚焦相邻标签，隐藏面板回到活动对象的真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 隐藏右栏并回到真实对话入口；
+- 右侧只挂载活动对象标签的文件详情或同 Run File Changes Review；标签切换卸载非活动 DOM，关闭标签后聚焦相邻标签，关闭最后一个标签同步隐藏面板并回到该标签的真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 隐藏右栏并回到真实对话入口；
 - 普通 Run start/terminal、新 pendingUi 和 usage revision 不自动开合右栏、不抢焦点；切换 Task、关闭标签或对象失效不泄漏旧详情和已读取 bytes，晚到 Promise 不覆盖新对象；隐藏右栏保留当前 Task 会话，切换 Task 清空会话；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Task Panel 关闭或 overlay 显示后功能不丢失；停靠态始终为中央工作面与 Task Panel 各保留至少 360 px，两者都不设置固定最大宽度；扣除左栏后的空间少于 720 px 时切换 overlay，低于 820 px 与左栏互斥，低于 620 px 使用全宽 overlay。验证样本至少覆盖 1440/左栏 320 的约 746+374、1200/左栏 320 的 520+360、1200/左栏 480 的 360+360、960/左栏关闭的 600+360、960/左栏打开的 overlay，以及超宽窗口右栏仍可继续扩大。
 - Windows Renderer 窗口按钮在登录页与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；

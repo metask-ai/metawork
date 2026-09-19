@@ -28,6 +28,7 @@ export const zhCN: Record<MessageId, string> = {
   "copy.code": "复制代码",
   "copy.copied": "已复制",
   "copy.failed": "复制失败",
+  "link.open_failed": "无法打开此链接。",
   "about.menu_item": "关于",
   "about.developer": "开发者",
   "about.developer_name": "Metask",

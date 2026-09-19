@@ -7,7 +7,7 @@
 
 ## 1. Bridge 定位
 
-Bridge 是 Renderer 与 Host 之间唯一的产品命令和 Product projection 边界，承运两类 surface。产品命令面：验证调用来源与启动窗口 identity、严格解码 payload、把合法输入转换为产品命令、dispatch 给 Product 中对应 owner、编码 typed result，并通过 Snapshot/Event 运输发布产品投影；Bridge 不决定 Task 是否可以运行、Workspace 是否有效、Agent 是否应取消、credential 是否可以替换或历史如何持久化，这些判断必须由 Product 内对应 owner 完成。受限平台 capability 面：只承运 window-chrome bootstrap capability，当前封闭枚举为 `metawork.host.windowChrome.connect / refresh / pointer / control / disconnect` 五个 command，dispatch 给 Application 执行，原生窗口行为与真实状态由 Native SDK/OS 拥有。两面共用同一 transport、origin policy 与 source/window authority，不共用数据面；新增平台面 command 必须与 capability seam 同级登记（identity、SDK 缺口、删除条件），不因该面已存在而豁免。
+Bridge 是 Renderer 与 Host 之间唯一的产品命令和 Product projection 边界，承运两类 surface。产品命令面：验证调用来源与启动窗口 identity、严格解码 payload、把合法输入转换为产品命令、dispatch 给 Product 中对应 owner、编码 typed result，并通过 Snapshot/Event 运输发布产品投影；Bridge 不决定 Task 是否可以运行、Workspace 是否有效、Agent 是否应取消、credential 是否可以替换或历史如何持久化，这些判断必须由 Product 内对应 owner 完成。受限平台 capability 面只承运已登记的 window-chrome bootstrap 与 external-link handoff capability，dispatch 给 Application 执行，原生行为与真实状态由 Native SDK/OS 拥有。两面共用同一 transport、origin policy 与 source/window authority，不共用数据面；新增平台面 command 必须与 capability seam 同级登记（identity、SDK 缺口、删除条件），不因该面已存在而豁免。
 
 Renderer 的可信定位与 Native SDK WebView UI/input 边界以[高层架构](architecture.md#31-renderer)为准。Bridge 的严格 command catalog、runtime decode、source/window 校验、CAS 与 Product admission 用于维护 owner、处理陈旧 UI 状态、隔离实现错误并拒绝畸形输入。本地路径等输入只有在具体领域合同明确登记时才能通过容量有界的 typed command 转交，Host 仍独立校验文件类型、范围、当前 authority 与生命周期；这不形成 generic file、process 或 OS action command。
 
@@ -24,6 +24,8 @@ Renderer 判断 DOM candidate 与交互排除，Host 不镜像区域。Windows �
 minimize 使用 Native SDK Runtime API；尚未正式覆盖的 maximize/restore、user-close 和 maximized fact 由独立登记的 window-controls seam 补齐，user-close 必须进入 `close_policy = hide`。该 capability 不接受 HWND、任意 window id、platform、任意 action 或脱离会话的查询，不形成通用窗口 facade、第二窗口 owner 或第二产品数据面。原生机制、真实状态与生命周期仍由 SDK/OS 拥有；官方等价能力经平台验收后在 revision 1 原位替换，并删除失去职责的 seam、命令、allowlist、DTO 和测试。automation 只驱动真实产品路径，不注册测试专用协议。
 
 Windows 的窗口动作在 Application 执行前读取 SDK 当前窗口事实：connect/refresh 要求主窗口仍打开，允许已隐藏；minimize、toggle、user-close 与 pointer down 还要求未被 SDK 隐藏。最大化按钮与标题栏双击共用同一检查和动作选择入口。Runtime、窗口或 binding 不可用时返回错误，不投影虚假的 `maximized = false`。有效会话 down 被新执行前提拒绝时清除双击序列；旧 generation、错误 identity 等请求仍在 Bridge 拒绝，不影响当前会话。reset/disconnect 不新增 Runtime 或窗口可见性要求；托盘 Open/Quit 保留各自 SDK 流程。Windows connect 的只读检查先于本次手势 attachment，refresh 失败保留会话。close 的 ACK 只表示请求已投递；已被 SDK 隐藏后受理的标题栏动作必须拒绝，不据此承诺撤销此前已受理的 OS 请求。以上新增条件不适用于 macOS 原有路径。
+
+外部链接只通过 `metawork.host.links.openExternal` 打开。payload 精确为 `{ url }`，URL 的 UTF-8 长度上限为 4096 bytes；Host 在已连接的启动窗口与主线程上重新校验，只接受不含空白、控制字符、反斜杠或 userinfo 的绝对 `http`/`https` URL，以及非空且不含 CR/LF 注入的 `mailto` URL。结果精确为 `{ outcome: "opened" | "rejected" | "unavailable" }`：`opened` 只表示系统 handler 已接收请求，`rejected` 表示目标不满足闭合策略，`unavailable` 表示平台能力或系统 handler 失败。结构错误、额外字段、不可信 origin、未连接或错误 window 仍是 Bridge error。该命令不允许 `file`、自定义 scheme、相对地址、任意导航、URL 日志、重试或 fallback；Renderer 必须在点击时同步阻止 WebView 默认导航，严格解码结果，并把非 `opened` 与 transport failure 就地呈现。
 
 ## 2. ProductDelivery 与 Snapshot transport
 
