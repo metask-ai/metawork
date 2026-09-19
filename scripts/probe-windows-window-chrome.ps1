@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-alt-f4', 'control-taskbar-restore', 'probe-quit', 'probe-layout', 'probe-animation', 'probe-resources')]
+    [ValidateSet('drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-layout', 'control-zoom-in', 'control-zoom-reset', 'control-alt-f4', 'control-taskbar-restore', 'probe-quit', 'probe-layout', 'probe-animation', 'probe-resources')]
     [string]$Mode = 'drag',
     [string]$ColorHex,
     [string]$OutputPath,
@@ -355,6 +355,31 @@ if ($Mode -notin @('paint-stationary', 'probe-animation')) {
     throw 'Stationary paint requires the harness to keep its window unobscured before changing the DOM'
 }
 $rect = Get-MetaWorkRect $window
+
+if ($Mode -eq 'control-layout') {
+    [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
+    $limits = Get-MetaWorkSizeLimits $window
+    $width = [Math]::Max($ProbeWidth, $limits.MinTrackSize.X)
+    if (-not [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr]::Zero, 100, 100, $width, 620, 0x0014)) {
+        throw 'Product UI layout precondition failed'
+    }
+    Start-Sleep -Milliseconds 200
+    return
+}
+
+if ($Mode -in @('control-zoom-in', 'control-zoom-reset')) {
+    if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $window) { throw 'Zoom input requires foreground ownership' }
+    $zoomKey = if ($Mode -eq 'control-zoom-in') { 0xBB } else { 0x30 }
+    try {
+        [MetaWorkChromeProbe]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+        [MetaWorkChromeProbe]::keybd_event($zoomKey, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 80
+    } finally {
+        [MetaWorkChromeProbe]::keybd_event($zoomKey, 0, 2, [UIntPtr]::Zero)
+        [MetaWorkChromeProbe]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
+    }
+    return
+}
 
 if ($Mode -eq 'control-alt-f4') {
     if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $window) { throw 'Alt+F4 requires foreground ownership' }
@@ -721,7 +746,7 @@ if ($Mode -eq 'top-lifecycle') {
     [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr]::Zero, 100, 100, 900, 620, 0x0014) | Out-Null
     Start-Sleep -Milliseconds 200
     if (-not [MetaWorkChromeProbe]::IsWindowVisible($inputChild)) { throw 'Restored window lost the resize input layer' }
-    Write-Output 'edgeSequenceReset=true nativeEdgeDoubleClick=true maximizedLayerHidden=true restoredLayerVisible=true'
+    Write-Output 'nativeEdgeDoubleClick=true maximizedLayerHidden=true restoredLayerVisible=true'
     return
 }
 
