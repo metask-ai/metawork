@@ -1,5 +1,5 @@
-// A-stage manual harness. Builds the isolated public-SDK entry, records exact
-// inputs/artifact identity, and launches it without injecting desktop input.
+// A-stage harness. Default launch is manual; --input-matrix explicitly drives
+// the isolated entry with the repository's scoped Win32 input probe.
 // Completion of this process is NOT a gesture/paint acceptance verdict.
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -11,13 +11,15 @@ import { promisify } from "node:util";
 import { runChild } from "./run-child-process.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import { allocateWebViewTestPort } from "./window-top-resize-paint.mjs";
+import { probeFixedDragInput } from "./window-drag-probe-input.mjs";
 
 if (process.platform !== "win32")
   throw new Error("Windows-only native input probe");
 const buildOnly = process.argv[2] === "--build-only";
-if (process.argv.length !== (buildOnly ? 3 : 2))
+const inputMatrix = process.argv[2] === "--input-matrix";
+if (process.argv.length !== (buildOnly || inputMatrix ? 3 : 2))
   throw new Error(
-    "usage: node scripts/run-window-drag-probe.mjs [--build-only]",
+    "usage: node scripts/run-window-drag-probe.mjs [--build-only|--input-matrix]",
   );
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -146,9 +148,10 @@ if (buildOnly) {
     process.stderr.write(chunk);
   });
   console.log(
-    `Evidence: ${evidence}\nProcess: ${child.pid}\nManual input only. Ctrl+Shift+Q exits; the probe has a 15-minute watchdog.`,
+    `Evidence: ${evidence}\nProcess: ${child.pid}\n${inputMatrix ? "Running scoped Win32 input matrix." : "Manual input only."} Ctrl+Shift+Q exits; the probe has a 15-minute watchdog.`,
   );
   let outcome;
+  let inputError;
   try {
     // Reading the isolated endpoint records the actual runtime, not an installed
     // browser version guessed from a different process. No DOM/input injection.
@@ -166,6 +169,60 @@ if (buildOnly) {
       if (!child.pid || child.exitCode !== null) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    if (inputMatrix) {
+      const results = [];
+      const runProbe = async (mode, extra = []) => {
+        const result = await execFileAsync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-File",
+            path.join(root, "scripts/probe-windows-window-chrome.ps1"),
+            "-ProcessId",
+            String(child.pid),
+            "-Mode",
+            mode,
+            ...extra,
+          ],
+          {
+            cwd: root,
+            windowsHide: true,
+            timeout: 30_000,
+            maxBuffer: 1024 * 1024,
+          },
+        );
+        return result.stdout.trim();
+      };
+      try {
+        await probeFixedDragInput({
+          port,
+          runProbe,
+          nativeLog: () => stderr,
+          async record(result) {
+            results.push(result);
+            await writeFile(
+              path.join(evidence, "input-matrix.json"),
+              JSON.stringify(results, null, 2),
+            );
+            console.log(
+              `Input case ${result.name}: ${result.passed ? "passed" : "FAILED"}`,
+            );
+          },
+        });
+      } catch (error) {
+        inputError = error;
+        console.error(`Input matrix failed: ${error.message}`);
+      } finally {
+        try {
+          await runProbe("probe-quit");
+        } catch (error) {
+          inputError ??= error;
+          console.error(
+            `Probe quit refused/failed: ${error.message}; awaiting the existing watchdog, no input retry.`,
+          );
+        }
+      }
+    }
     outcome = await completion;
   } finally {
     await writeFile(path.join(evidence, "stdout.log"), stdout);
@@ -177,4 +234,5 @@ if (buildOnly) {
   }
   if (outcome.code !== 0)
     throw new Error(`Probe exited abnormally: ${JSON.stringify(outcome)}`);
+  if (inputError) throw inputError;
 }

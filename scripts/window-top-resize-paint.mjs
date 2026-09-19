@@ -16,7 +16,7 @@ export async function allocateWebViewTestPort() {
   return port;
 }
 
-export async function connectTestWebView(port) {
+export async function connectTestWebView(port, { htmlTitle } = {}) {
   let page;
   const deadline = Date.now() + 10_000;
   while (!page && Date.now() < deadline) {
@@ -27,7 +27,11 @@ export async function connectTestWebView(port) {
       page = (await response.json()).find(
         (candidate) =>
           candidate.type === "page" &&
-          new URL(candidate.url).origin === "https://native-sdk-app.localhost",
+          (htmlTitle
+            ? candidate.title === htmlTitle &&
+              candidate.url.startsWith("data:text/html")
+            : new URL(candidate.url).origin ===
+              "https://native-sdk-app.localhost"),
       );
     }
     if (!page) await new Promise((resolve) => setTimeout(resolve, 50));
