@@ -101,18 +101,72 @@ function toolStateMessage(tool: ToolView): MessageId {
 }
 
 function toolDetailAvailable(tool: ToolView): boolean {
+  if (tool.errorDetail || tool.isError)
+    return Boolean(
+      tool.errorDetail ||
+      tool.content ||
+      tool.contentTruncated ||
+      tool.redacted,
+    );
+  switch (tool.presentation?.kind) {
+    case "write":
+    case "edit":
+    case "kill_shell":
+    case "web_search":
+      return false;
+    case "read":
+    case "glob":
+    case "grep":
+      return Boolean(
+        tool.content ||
+        tool.contentTruncated ||
+        tool.redacted ||
+        (tool.presentation.kind === "read" &&
+          (tool.presentation.offset || tool.presentation.limit)),
+      );
+    case "bash_output":
+      return Boolean(
+        tool.presentation.result || tool.contentTruncated || tool.redacted,
+      );
+    case "web_fetch":
+      return Boolean(
+        tool.presentation.result ||
+        tool.presentation.prompt ||
+        tool.contentTruncated ||
+        tool.redacted,
+      );
+  }
   if (tool.name === "Edit" || tool.name === "Write") return false;
   return Boolean(
     tool.bash?.command != null ||
     tool.bash?.result != null ||
     tool.input ||
-    tool.progress ||
     tool.content ||
     tool.inputTruncated ||
-    tool.progressTruncated ||
     tool.contentTruncated ||
     tool.redacted,
   );
+}
+
+function toolPresentationSummary(tool: ToolView): string | null {
+  const presentation = tool.presentation;
+  if (!presentation) return null;
+  switch (presentation.kind) {
+    case "read":
+    case "write":
+    case "edit":
+      return presentation.target;
+    case "glob":
+    case "grep":
+      return presentation.pattern;
+    case "bash_output":
+    case "kill_shell":
+      return presentation.jobId;
+    case "web_search":
+      return presentation.query;
+    case "web_fetch":
+      return presentation.url;
+  }
 }
 
 function fileMutationAuditPath(
@@ -137,7 +191,11 @@ function toolSummary(tool: ToolView): string | null {
   const fileNames = tool.fileRefs
     .map((reference) => reference.displayPath)
     .join(", ");
-  const summary = tool.bash?.description || tool.progress || fileNames;
+  const summary =
+    tool.bash?.description ||
+    fileNames ||
+    toolPresentationSummary(tool) ||
+    tool.progress;
   if (!summary) return null;
   return summary.length > 160 ? `${summary.slice(0, 160)}…` : summary;
 }

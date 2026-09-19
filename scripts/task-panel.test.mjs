@@ -161,6 +161,8 @@ function technicalTool(overrides = {}) {
     order: "1",
     name: "Read",
     bash: null,
+    presentation: null,
+    errorDetail: null,
     input: "",
     progress: "",
     content: "",
@@ -490,6 +492,149 @@ test("Edit and Write replace raw protocol details with matching file audit links
     document.body.textContent,
     /old_string|gitDiff|file_path|success/,
   );
+});
+
+test("WebSearch keeps its useful summary without exposing provider protocol details", () => {
+  const value = run({
+    tools: [
+      technicalTool({
+        name: "WebSearch",
+        presentation: {
+          kind: "web_search",
+          query: "Hangzhou weather forecast",
+        },
+        progress: "Searching: Hangzhou weather forecast",
+        input: '{"query":"Hangzhou weather forecast"}',
+        content:
+          "**Z.ai Built-in Tool: web_search_prime**\n**Input:** raw provider protocol",
+        elapsedMs: "13127",
+      }),
+    ],
+  });
+  render(runProcessElement(value));
+
+  assert.ok(screen.getByText("Hangzhou weather forecast"));
+  assert.ok(screen.getByText("Completed"));
+  assert.ok(screen.getByText("13,127 ms"));
+  assert.equal(
+    screen.queryByRole("button", {
+      name: "Show or hide details for WebSearch",
+    }),
+    null,
+  );
+  assert.doesNotMatch(
+    document.body.textContent,
+    /web_search_prime|raw provider protocol|\{"query"/,
+  );
+});
+
+test("built-in Tool details present semantic evidence instead of input envelopes", () => {
+  const cases = [
+    {
+      tool: technicalTool({
+        name: "Read",
+        presentation: {
+          kind: "read",
+          target: "/workspace/src/main.ts",
+          offset: "12",
+          limit: "3",
+        },
+        input: '{"file_path":"/workspace/src/main.ts","offset":12,"limit":3}',
+        content: "12\tconst value = true;",
+      }),
+      visible: ["Start line", "12", "Line limit", "3", "const value"],
+      hidden: ["file_path"],
+    },
+    {
+      tool: technicalTool({
+        name: "Grep",
+        presentation: {
+          kind: "grep",
+          pattern: "TODO",
+          scope: "/workspace/src",
+          include: "*.ts",
+        },
+        input: '{"pattern":"TODO","path":"/workspace/src","glob":"*.ts"}',
+        content: "src/main.ts:12:// TODO",
+      }),
+      visible: ["Scope", "/workspace/src", "File filter", "*.ts", "TODO"],
+      hidden: ['{"pattern"'],
+    },
+    {
+      tool: technicalTool({
+        name: "WebFetch",
+        presentation: {
+          kind: "web_fetch",
+          url: "https://example.com/docs",
+          prompt: "Find the API limits",
+          result: {
+            url: "https://example.com/docs",
+            bytes: "2048",
+            content: "API limit: 100 requests",
+          },
+        },
+        input: '{"url":"https://example.com/docs"}',
+        content: '{"bytes":2048,"content":"internal wrapper"}',
+      }),
+      visible: ["Purpose", "Find the API limits", "2,048", "100 requests"],
+      hidden: ["internal wrapper"],
+    },
+    {
+      tool: technicalTool({
+        name: "BashOutput",
+        presentation: {
+          kind: "bash_output",
+          jobId: "job-1",
+          result: {
+            status: "exited",
+            stdout: "server ready",
+            stderr: "",
+            stdoutIncomplete: false,
+            stderrIncomplete: false,
+          },
+        },
+        input: '{"job_id":"job-1"}',
+        content: '{"status":"exited","stdout":"internal wrapper"}',
+      }),
+      visible: ["Process status", "Exited", "server ready"],
+      hidden: ["internal wrapper", "job_id"],
+    },
+  ];
+
+  for (const { tool, visible, hidden } of cases) {
+    const view = render(localizedView(createElement(ToolDetailView, { tool })));
+    for (const text of visible)
+      assert.equal(view.container.textContent.includes(text), true);
+    for (const text of hidden)
+      assert.equal(view.container.textContent.includes(text), false);
+    cleanup();
+  }
+});
+
+test("failed summary-only Tools disclose a readable failure reason", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const value = run({
+    tools: [
+      technicalTool({
+        name: "Edit",
+        presentation: { kind: "edit", target: "/workspace/index.html" },
+        errorDetail: "The original text was not found.",
+        input: '{"file_path":"/workspace/index.html","old_string":"before"}',
+        content: '{"error":{"detail":"internal wrapper"}}',
+        state: "failed",
+        isError: true,
+      }),
+    ],
+  });
+  render(runProcessElement(value));
+
+  const toggle = screen.getByRole("button", {
+    name: "Show or hide details for Edit",
+  });
+  await user.click(toggle);
+  assert.ok(screen.getByText("The original text was not found."));
+  assert.equal(document.body.textContent.includes("internal wrapper"), false);
+  assert.equal(document.body.textContent.includes("old_string"), false);
 });
 
 function task(overrides = {}) {
@@ -3655,12 +3800,19 @@ test("inline Tool detail follows live props without unsafe markup", () => {
   view.rerender(
     localizedView(
       createElement(ToolDetailView, {
-        tool: { ...value, progress: "progress two", state: "running" },
+        tool: {
+          ...value,
+          progress: "progress two",
+          content: "result two",
+          state: "running",
+        },
       }),
     ),
   );
   assert.equal(screen.queryByText("progress one"), null);
-  assert.ok(screen.getByText("progress two"));
+  assert.equal(screen.queryByText("progress two"), null);
+  assert.equal(screen.queryByText("result one"), null);
+  assert.ok(screen.getByText("result two"));
   view.unmount();
   assert.equal(screen.queryByText("result one"), null);
 });

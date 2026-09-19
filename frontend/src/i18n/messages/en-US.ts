@@ -818,6 +818,20 @@ export const enUS = {
     "Standard output is incomplete or truncated.",
   "inspector.tool.stderr_incomplete":
     "Standard error is incomplete or truncated.",
+  "inspector.tool.start_line": "Start line",
+  "inspector.tool.line_limit": "Line limit",
+  "inspector.tool.read_content": "Read content",
+  "inspector.tool.scope": "Scope",
+  "inspector.tool.file_filter": "File filter",
+  "inspector.tool.matches": "Matches",
+  "inspector.tool.process_status": "Process status",
+  "inspector.tool.process_running": "Running",
+  "inspector.tool.process_exited": "Exited",
+  "inspector.tool.process_killed": "Stopped",
+  "inspector.tool.purpose": "Purpose",
+  "inspector.tool.bytes": "Bytes",
+  "inspector.tool.web_content": "Page content",
+  "inspector.tool.error_detail": "Failure reason",
   "inspector.tool.bash_partially_unparsed":
     "Some Bash data could not be interpreted.",
   "inspector.tool.bash_unparsed":

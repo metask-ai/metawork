@@ -8855,6 +8855,28 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   outline-offset: -2px;
 }
 
+.tool-detail-facts {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.tool-detail-fact {
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+}
+
+.tool-detail-fact code {
+  min-width: 0;
+  color: var(--ui-content-primary);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
 .bash-exit-status {
   margin: 12px 0 0;
   color: var(--ui-content-muted);

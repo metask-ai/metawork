@@ -18,6 +18,15 @@ function ToolField({ label, value }: { label: string; value: string }) {
   );
 }
 
+function ToolFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="tool-detail-fact">
+      <span>{label}</span>
+      <code>{value}</code>
+    </div>
+  );
+}
+
 function RawToolFields({
   tool,
   names,
@@ -54,9 +63,6 @@ function BashToolDetails({ tool }: { tool: ToolView }) {
     <>
       {bash?.command != null && (
         <ToolField label={t("inspector.tool.command")} value={bash.command} />
-      )}
-      {tool.progress && (
-        <ToolField label={t("inspector.tool.progress")} value={tool.progress} />
       )}
       {bash?.result && (
         <>
@@ -120,16 +126,140 @@ function BashToolDetails({ tool }: { tool: ToolView }) {
   );
 }
 
+function SemanticToolDetails({ tool }: { tool: ToolView }) {
+  const { locale, t } = useI18n();
+  const presentation = tool.presentation;
+  if (!presentation) return null;
+  switch (presentation.kind) {
+    case "read":
+      return (
+        <>
+          {(presentation.offset || presentation.limit) && (
+            <div className="tool-detail-facts">
+              {presentation.offset && (
+                <ToolFact
+                  label={t("inspector.tool.start_line")}
+                  value={formatInteger(locale, BigInt(presentation.offset))}
+                />
+              )}
+              {presentation.limit && (
+                <ToolFact
+                  label={t("inspector.tool.line_limit")}
+                  value={formatInteger(locale, BigInt(presentation.limit))}
+                />
+              )}
+            </div>
+          )}
+          {tool.content && (
+            <ToolField
+              label={t("inspector.tool.read_content")}
+              value={tool.content}
+            />
+          )}
+        </>
+      );
+    case "glob":
+    case "grep":
+      return (
+        <>
+          {(presentation.scope ||
+            (presentation.kind === "grep" && presentation.include)) && (
+            <div className="tool-detail-facts">
+              {presentation.scope && (
+                <ToolFact
+                  label={t("inspector.tool.scope")}
+                  value={presentation.scope}
+                />
+              )}
+              {presentation.kind === "grep" && presentation.include && (
+                <ToolFact
+                  label={t("inspector.tool.file_filter")}
+                  value={presentation.include}
+                />
+              )}
+            </div>
+          )}
+          {tool.content && (
+            <ToolField
+              label={t("inspector.tool.matches")}
+              value={tool.content}
+            />
+          )}
+        </>
+      );
+    case "bash_output":
+      return presentation.result ? (
+        <>
+          <div className="tool-detail-facts">
+            <ToolFact
+              label={t("inspector.tool.process_status")}
+              value={t(`inspector.tool.process_${presentation.result.status}`)}
+            />
+          </div>
+          {presentation.result.stdout && (
+            <ToolField
+              label={t("inspector.tool.stdout")}
+              value={presentation.result.stdout}
+            />
+          )}
+          {presentation.result.stdoutIncomplete && (
+            <p className="projection-note">
+              {t("inspector.tool.stdout_incomplete")}
+            </p>
+          )}
+          {presentation.result.stderr && (
+            <ToolField
+              label={t("inspector.tool.stderr")}
+              value={presentation.result.stderr}
+            />
+          )}
+          {presentation.result.stderrIncomplete && (
+            <p className="projection-note">
+              {t("inspector.tool.stderr_incomplete")}
+            </p>
+          )}
+        </>
+      ) : null;
+    case "web_fetch":
+      return (
+        <>
+          {(presentation.prompt || presentation.result?.bytes) && (
+            <div className="tool-detail-facts">
+              {presentation.prompt && (
+                <ToolFact
+                  label={t("inspector.tool.purpose")}
+                  value={presentation.prompt}
+                />
+              )}
+              {presentation.result?.bytes && (
+                <ToolFact
+                  label={t("inspector.tool.bytes")}
+                  value={formatInteger(
+                    locale,
+                    BigInt(presentation.result.bytes),
+                  )}
+                />
+              )}
+            </div>
+          )}
+          {presentation.result?.content && (
+            <ToolField
+              label={t("inspector.tool.web_content")}
+              value={presentation.result.content}
+            />
+          )}
+        </>
+      );
+    case "write":
+    case "edit":
+    case "kill_shell":
+    case "web_search":
+      return null;
+  }
+}
+
 function GenericToolDetails({ tool }: { tool: ToolView }) {
-  const { t } = useI18n();
-  return (
-    <>
-      {tool.progress && (
-        <ToolField label={t("inspector.tool.progress")} value={tool.progress} />
-      )}
-      <RawToolFields tool={tool} names={["input", "content"]} />
-    </>
-  );
+  return <RawToolFields tool={tool} names={["input", "content"]} />;
 }
 
 export function ToolDetailView({ tool, id }: { tool: ToolView; id?: string }) {
@@ -143,8 +273,17 @@ export function ToolDetailView({ tool, id }: { tool: ToolView; id?: string }) {
       role="region"
       aria-label={t("run.process.tool_detail", { name: tool.name })}
     >
-      {isBash ? (
+      {tool.errorDetail ? (
+        <ToolField
+          label={t("inspector.tool.error_detail")}
+          value={tool.errorDetail}
+        />
+      ) : tool.isError ? (
+        <RawToolFields tool={tool} names={["content"]} />
+      ) : isBash ? (
         <BashToolDetails tool={tool} />
+      ) : tool.presentation ? (
+        <SemanticToolDetails tool={tool} />
       ) : (
         <GenericToolDetails tool={tool} />
       )}
