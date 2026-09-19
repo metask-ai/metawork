@@ -432,13 +432,20 @@ test("workbench columns use bounded proportional Flex without an overlay resizer
   );
   assert.match(
     css,
-    /data-right-panel-docked="true"\] \.task-panel\s*\{[\s\S]*?flex: 0 0 var\(--right-panel-width\);/,
+    /data-right-panel-open="true"\]\[data-right-panel-docked="true"\][\s\S]*?\.task-panel\s*\{[\s\S]*?flex: 0 0 var\(--right-panel-width\);/,
   );
   assert.doesNotMatch(css, /--task-(?:stage|panel)-share/);
-  assert.doesNotMatch(css, /transition:[^;]*flex-basis/s);
+  assert.match(
+    css,
+    /\.workspace-sidebar,\s*\.task-panel\s*\{[\s\S]*?transition: flex-basis 170ms cubic-bezier\(0\.2, 0, 0, 1\);/,
+  );
+  assert.match(
+    css,
+    /data-resizing-left="true"[\s\S]*?data-resizing-right="true"[\s\S]*?\.task-panel\s*\{\s*transition: none;/,
+  );
   assert.doesNotMatch(
     css,
-    /data-right-panel-docked="true"\] \.task-panel\s*\{[^}]*max-width:/,
+    /data-right-panel-open="true"\]\[data-right-panel-docked="true"\]\s*\.task-panel\s*\{[^}]*max-width:/,
   );
   assert.match(
     css,
@@ -453,7 +460,7 @@ test("workbench columns use bounded proportional Flex without an overlay resizer
   assert.match(shell, /new ResizeObserver/);
   assert.match(shell, /ref=\{workbenchElement\}[\s\S]*?className="app-window"/);
   assert.doesNotMatch(shell, /<div\s+ref=\{[^}]+\}\s+className="app-columns"/);
-  assert.match(shell, /\{rightPanelDocked && \(/);
+  assert.match(shell, /\{effectiveRightPanelOpen && rightPanelDocked && \(/);
 });
 
 test("Renderer draws declarative titlebar controls while Bridge and Host own native behavior", async () => {
