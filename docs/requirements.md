@@ -1,6 +1,6 @@
 # MetaWork 产品需求
 
-> 状态：v0.5，确立登录优先的成熟 Workbench、Task 执行配置与设置边界
+> 状态：v0.5，确立持续可达的成熟 Workbench、Task 执行配置与设置边界
 > 日期：2026-07-22
 
 ## 1. 产品定义
@@ -18,7 +18,7 @@ MetaWork 的核心不是模拟终端或展示 Agent 执行流水，而是让用�
 - 以结构化 UI 展示 Agent 文本、工具调用、进度、审批和结果；
 - 允许多个 Task 独立运行和切换；
 - 在取消、刷新、关闭和异常后给出明确且可信的状态；
-- 首次启动先完成 Metask 登录与可执行配置准备，再进入真实可用的 Workbench；
+- 首次启动直接进入 Workbench shell；可信 Snapshot 建立前不开放 mutation；
 - 让用户在创建 Task 前清楚确认 Workspace 与模型，并把低频 API 管理收口到设置；
 - 为未来的后台任务、持久化恢复、通知和多 Agent 协作保留合理产品边界。
 
@@ -110,7 +110,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 普通用户通过 Metask OAuth 登录，不需要手工填写 protocol、model、base URL 或 API Key；
 - Metask managed Provider 继续遵循 OAuth、API Key catalog 和 fixed protocol/base URL 合同；用户管理的 Custom Provider 不要求 Metask 登录，但必须先显式创建、为其配置并验证模型，再安装到 Host-owned execution registry；
 - `AccountView` 只发布 `state`、`canCancel`、经过验证的 `accountId/displayName`、由 Account Host 生成的登录邮箱脱敏提示、非负整数并发额度（`0` 表示不限）、Account-owned稳定错误和无 secret 的 Metask账户摘要；完整邮箱不得越过 Bridge。摘要按 wallet/usage/history 三个独立子状态发布余额、今日 Token 分项与实际费用、累计 Token与实际费用、按 `Asia/Shanghai` 日历日对齐的最近 53 个周列的每日 Token历史、同步时间和安全错误，不得包含 catalog、model、selection、source、execution、Task admission、Custom Provider、API Key、请求/RPM/TPM/响应时间、标准费用、订阅额度或模型分布。`ModelsView` 独立发布 Metask/custom source目录、Provider-local/global desired selection、Models revisions、persistence health与脱敏 Custom Provider；`NewTaskAdmissionView` 只发布 Product Control active binding、replacement、安装状态、新 Task admission与 active generation。三者不得互相伪装；
-- `checking` 与 `authorizing` 可以暂时占用登录表面；零 Task 且 Metask 是默认来源时，`signed_out` 显示独立登录表面和唯一登录动作。有 durable Task 时始终保留 Workbench、Workspace 与历史记录；没有 ready user-managed Custom Provider 时只禁止新 Task admission。Custom Provider 设置入口在 management、API Key 写入系统 credential storage、模型测试等产品能力形成完整 gate 前整体隐藏；已有 live Task 仍必须可查看和停止；
+- Account 的 `checking | signed_out | authorizing | authenticated` 状态都不得替换 Workbench；登录、等待和取消动作只通过 Workbench 的账号入口与 Account 设置表达。可信根 Snapshot 建立前 Workbench 保持不可操作，确认根连接失败后才切换到独立连接恢复表面；已有 live Task 始终可查看和停止；
 - 登录无效即进入 `signed_out`。Renderer 对建立 identity 只提供统一的 `beginLogin`，每次都开始新的 OAuth，不保留“重新认证”“重新打开登录页”“匹配上次账号”或重用 retained refresh token 的分支；retained refresh 只供一次冷启动 restore。已验证会话出现 `refresh_schedule_failed` 时提供独立的 `retryRefresh`，它只恢复 Host refresh 调度，不建立第二条登录路径；
 - authenticated且`usageEligibility`非disabled时，账户信息中的余额旁提供唯一“充值”动作。Renderer 只发送空 payload 的 typed command；Account Host 只在执行时构造并通过系统浏览器打开固定 Metask充值页，不接受 Renderer 提交 URL、token、account id或query，且该动作不改变 Account/Product状态；
 - OAuth 浏览器授权、identity 提交和执行目录准备不得暴露内部 C1/C2、operation、generation 或凭据存储步骤；
@@ -140,7 +140,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 ### 5.3 Task
 
 - Host 为每个 Task 发布模型选择可用状态，精确区分可用、目录加载、目录不可用、执行替换中、运行时分离、不支持的来源和 authority 已变化；Renderer 只按该状态显示可编辑菜单、暂时禁用菜单或带原因的只读模型，不跨根 projection 猜测权限。
-- New task 草稿始终属于 Workbench，但只有登录和执行准备完成后才能发送；Renderer 按 Workspace intent 隔离并可恢复。默认 intent 为 Automatic，界面显示“默认”，首次发送时才由 Host 创建 Automatic Workspace。用户可以在发送前切换到已授权或新选择的 Manual Workspace；
+- New task 草稿始终属于 Workbench，但只有 Product Control 发布 ready execution admission 后才能发送；Renderer 按 Workspace intent 隔离并可恢复。默认 Workspace intent 为 Automatic，界面显示“默认”，首次发送时才由 Host 创建 Automatic Workspace。用户可以在发送前切换到已授权或新选择的 Manual Workspace；
 - New task 首次发送依次创建真实 Task 并启动第一个 Run，两步不能在界面中伪装成一个不可分失败状态：Task 创建失败或拒绝时留在 New task 并恢复原草稿；Task 已创建但 Run 启动失败或拒绝时进入该真实 Task、把输入恢复为 Task 草稿且不伪造已提交指令或 Running；命令 timeout 必须先刷新 canonical snapshot 决定实际页面和草稿 scope，不能自动重放可能有副作用的提交；
 - 用户可以在 Workspace 中创建、切换、继续、归档和删除 Task；不存在独立的 Task `closed` 产品终态；
 - 多个 Task 可以同时存在；
@@ -233,7 +233,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.9 Workbench 界面与任务组织
 
-- 未登录只禁止创建和发送新 Task；Workbench 仍展示 Workspace、durable Task 与执行历史，并允许查看和停止真实 live Run；默认执行配置 ready 后才开放 Composer admission；
+- Account 未登录只使 Metask provider 无法建立新的目录或解析；是否允许创建和发送新 Task仍只取决于 Product Control 的 ready execution admission。Workbench 持续展示 Workspace、durable Task 与执行历史，并允许查看和停止真实 live Run；
 - Workbench 左栏承担稳定 New task、已接通的全局能力入口、全局 Task 列表与左下角账号入口；`新建任务`、`技能`、`MCP` 与 `定时任务` 使用同一紧凑一级菜单的相同行高、缩进和 active 语义，不用额外留白或独立大按钮制造虚假层级；只有真实接通的 capability 才显示对应入口。所有可见 Task 在同一连续列表中只出现一次，不按需要处理、运行、排队、最近或归档状态拆分栏目；状态由行内语义图标表达，排序由单一规则独立决定；
 - New task 中央区域始终以 Composer 为主，当前模型和 Workspace 在发送前可见；API 管理不进入 Composer，模型与 Workspace 也不得混成不透明的单一“模式”；
 - Task 启动后中央区域显示该 Task 的 Run exchanges，Composer 固定在底部。叙事、唯一 live status、审批和必要结果提示留在主阅读流；Work process 默认折叠，展开后可以在所属 Tool 行下方独立展开精确 Tool 详情。存在 Tool 的 terminal Run 保留折叠的 Work process 作为历史检查入口；完整详情使用有界代码面，不打开或替换右栏内容。Run 用量不进入对话或右栏展示。Composer 附近只按 Host pressure 显示当前 Conversation 的上下文提醒，pressure 消失后隐藏，历史自动压缩记录不单独展示。pendingUi 只派生“需要处理”定位入口，不自动开面板、滚动或抢焦点；用户点击时定位主区唯一原始请求，覆盖式右栏先关闭；

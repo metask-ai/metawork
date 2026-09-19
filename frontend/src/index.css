@@ -70,7 +70,7 @@ summary::-webkit-details-marker {
   outline-offset: 2px;
 }
 
-.account-gate {
+.connection-failure-screen {
   display: grid;
   grid-template-rows: var(--window-bar-height) minmax(0, 1fr);
   width: 100%;
@@ -80,7 +80,7 @@ summary::-webkit-details-marker {
   background: var(--ui-surface-canvas);
 }
 
-.account-gate-toolbar {
+.connection-failure-toolbar {
   position: relative;
   display: flex;
   align-items: center;
@@ -93,14 +93,14 @@ summary::-webkit-details-marker {
   user-select: none;
 }
 
-.account-gate-toolbar-actions {
+.connection-failure-toolbar-actions {
   display: flex;
   height: 100%;
   align-items: center;
   gap: 8px;
 }
 
-.account-gate-toolbar .locale-control .account-gate-locale-trigger {
+.connection-failure-toolbar .locale-control .connection-failure-locale-trigger {
   width: auto;
   max-width: 116px;
   height: 32px;
@@ -112,22 +112,22 @@ summary::-webkit-details-marker {
   font-size: var(--text-control);
 }
 
-.account-gate-toolbar
+.connection-failure-toolbar
   .locale-control
-  .account-gate-locale-trigger:hover:not(:disabled),
-.account-gate-toolbar
+  .connection-failure-locale-trigger:hover:not(:disabled),
+.connection-failure-toolbar
   .locale-control
-  .account-gate-locale-trigger[data-popup-open] {
+  .connection-failure-locale-trigger[data-popup-open] {
   border-color: var(--ui-border);
   color: var(--ui-content-primary);
   background: var(--ui-surface-panel-2);
 }
 
-.account-gate-locale-menu {
+.connection-failure-locale-menu {
   min-width: 160px;
 }
 
-.account-gate-brand {
+.connection-failure-brand {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -136,12 +136,12 @@ summary::-webkit-details-marker {
   letter-spacing: -0.01em;
 }
 
-.account-gate-brand .brand-mark {
+.connection-failure-brand .brand-mark {
   width: 28px;
   height: 28px;
 }
 
-.account-gate-stage {
+.connection-failure-stage {
   display: grid;
   width: 100%;
   min-height: 0;
@@ -149,7 +149,7 @@ summary::-webkit-details-marker {
   place-items: center;
 }
 
-.account-gate-content {
+.connection-failure-content {
   width: min(460px, 100%);
   min-width: 0;
   padding: 38px 40px 36px;
@@ -161,31 +161,19 @@ summary::-webkit-details-marker {
     0 2px 8px rgba(37, 34, 45, 0.04);
 }
 
-.account-gate-symbol {
+.connection-failure-symbol {
   display: grid;
   width: 44px;
   height: 44px;
-  margin-bottom: 24px;
+  margin-bottom: 22px;
   place-items: center;
   border-radius: 13px;
-  color: var(--ui-content-on-primary);
-  background: var(--ui-action-primary);
-  box-shadow: 0 8px 22px
-    color-mix(in srgb, var(--ui-action-primary) 20%, transparent);
-  font-size: var(--text-title);
-  font-weight: 760;
+  color: var(--ui-content-warning);
+  background: color-mix(in srgb, var(--ui-content-warning) 10%, transparent);
+  font-size: var(--text-lead);
 }
 
-.account-gate-eyebrow {
-  margin: 0 0 10px;
-  color: var(--ui-action-primary);
-  font-size: var(--text-label);
-  font-weight: 750;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
-}
-
-.account-gate h1 {
+.connection-failure-content h1 {
   max-width: 380px;
   margin: 0;
   font-family: var(--font-sans);
@@ -195,7 +183,7 @@ summary::-webkit-details-marker {
   line-height: 1.16;
 }
 
-.account-gate-body {
+.connection-failure-body {
   max-width: 390px;
   min-height: 0;
   margin: 14px 0 0;
@@ -204,88 +192,11 @@ summary::-webkit-details-marker {
   line-height: 1.6;
 }
 
-.account-gate-identity {
-  display: flex;
-  max-width: 390px;
-  margin: 20px 0 0;
-  padding: 12px 14px;
-  justify-content: space-between;
-  gap: 18px;
-  border: 1px solid var(--ui-border);
-  border-radius: 9px;
-  background: var(--metask-primary-soft);
-  color: var(--ui-content-muted);
-  font-size: var(--text-control);
-}
-
-.account-gate-identity strong {
-  overflow: hidden;
-  color: var(--ui-content-primary);
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-gate-choice {
-  display: grid;
-  max-width: 390px;
-  margin-top: 20px;
-  gap: 7px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-label);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.account-gate-choice select {
-  width: 100%;
-  height: 44px;
-  padding: 0 34px 0 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 9px;
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-canvas);
-  font-size: var(--text-body);
-  text-transform: none;
-}
-
-.account-gate-actions {
-  display: flex;
-  min-height: 44px;
+.connection-failure-content > button {
   margin-top: 24px;
-  align-items: center;
-  gap: 12px;
 }
 
-.account-gate-actions > button {
-  width: auto;
-  min-width: 168px;
-  min-height: 42px;
-  margin: 0;
-  padding: 0 18px;
-}
-
-.account-gate-signout-confirmation {
-  max-width: 390px;
-  margin-top: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--ui-action-danger-border);
-  border-radius: 10px;
-  background: var(--ui-surface-canvas);
-  color: var(--ui-content-muted);
-  font-size: var(--text-control);
-  line-height: 1.5;
-}
-
-.account-gate-signout-confirmation span {
-  display: flex;
-  margin-top: 10px;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.account-gate-details {
+.connection-failure-details {
   max-width: 390px;
   margin-top: 16px;
   color: var(--ui-content-muted);
@@ -294,51 +205,23 @@ summary::-webkit-details-marker {
   line-height: 1.55;
 }
 
-.account-gate-details summary {
+.connection-failure-details summary {
   cursor: pointer;
   font-family: var(--font-sans);
   font-weight: 650;
 }
 
-.account-gate-details p {
+.connection-failure-details p {
   overflow-wrap: anywhere;
 }
 
-.account-gate-meta {
-  display: flex;
-  margin-top: 24px;
-  padding-top: 16px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  border-top: 1px solid var(--ui-border);
-  color: var(--ui-content-muted);
-  font-size: var(--text-label);
-}
-
-.account-gate-meta span:last-child {
-  overflow: hidden;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-gate-meta span:empty {
-  display: none;
-}
-
 @media (max-width: 640px) {
-  .account-gate-stage {
+  .connection-failure-stage {
     padding: 24px 16px;
   }
 
-  .account-gate-content {
+  .connection-failure-content {
     padding: 30px 24px 28px;
-  }
-
-  .account-gate-meta {
-    align-items: flex-start;
-    flex-direction: column;
   }
 }
 
@@ -609,26 +492,6 @@ summary::-webkit-details-marker {
 
 .account-menu-item.is-attention {
   color: var(--ui-content-warning);
-}
-
-.account-gate-about {
-  display: flex;
-  width: fit-content;
-  min-height: 32px;
-  margin: 18px auto -12px;
-  padding: 0 8px;
-  align-items: center;
-  gap: 7px;
-  border: 0;
-  border-radius: 7px;
-  color: var(--ui-content-muted);
-  background: transparent;
-  font-size: var(--text-label);
-}
-
-.account-gate-about:hover {
-  color: var(--ui-content-primary);
-  background: var(--ui-surface-panel-2);
 }
 
 .about-dialog {
@@ -2187,7 +2050,7 @@ summary::-webkit-details-marker {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--settings-brand);
-  animation: account-gate-pulse 1.6s ease-in-out infinite;
+  animation: ai-activity-pulse 1.6s ease-in-out infinite;
 }
 
 .settings-operation .text-button {
@@ -3525,17 +3388,18 @@ html[data-metawork-renderer-window-controls="true"]
   margin-bottom: 0;
 }
 
-html[data-metawork-renderer-window-controls="true"] .account-gate-toolbar {
+html[data-metawork-renderer-window-controls="true"]
+  .connection-failure-toolbar {
   padding-right: 0;
 }
 
 html[data-metawork-renderer-window-controls="true"]
-  .account-gate-toolbar
+  .connection-failure-toolbar
   .window-controls {
   margin-right: 0;
 }
 
-.account-gate-toolbar .window-controls {
+.connection-failure-toolbar .window-controls {
   margin-right: calc(-16px - var(--metawork-window-chrome-trailing));
 }
 
@@ -9481,7 +9345,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 @media (max-width: 819px) {
-  .account-gate-toolbar .locale-control .account-gate-locale-trigger {
+  .connection-failure-toolbar
+    .locale-control
+    .connection-failure-locale-trigger {
     max-width: 94px;
   }
 
@@ -9595,7 +9461,9 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     display: none;
   }
 
-  .account-gate-toolbar .locale-control .account-gate-locale-trigger {
+  .connection-failure-toolbar
+    .locale-control
+    .connection-failure-locale-trigger {
     max-width: 76px;
     padding-inline: 7px 18px;
   }

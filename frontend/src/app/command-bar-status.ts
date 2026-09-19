@@ -96,10 +96,6 @@ export function statusVisibleInCommandBar(
   );
 }
 
-export function statusVisibleInAccountGate(status: ShellStatus): boolean {
-  return status.tone === "attention" && status.audience.scope === "account";
-}
-
 export function selectCommandBarStatus(
   state: ShellStatusState,
   context: ShellStatusContext,
@@ -124,13 +120,4 @@ export function selectCommandBarStatus(
         status !== undefined && statusVisibleInCommandBar(status, context),
     ) ?? null
   );
-}
-
-export function selectAccountGateStatus(
-  state: ShellStatusState,
-): ShellStatus | null {
-  const status = state.account;
-  return status !== undefined && statusVisibleInAccountGate(status)
-    ? status
-    : null;
 }

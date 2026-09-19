@@ -56,9 +56,6 @@ export const enUS = {
   "account.signed_in": "Signed in",
   "account.signed_out": "Not signed in",
   "account.ready": "Ready",
-  "account.gate.path": "Metask\nLocal workbench",
-  "account.gate.eyebrow": "Metask access",
-  "account.gate.privacy": "Your API credentials are kept off this screen.",
   "account.checking.title": "Checking sign-in",
   "account.checking.body":
     "MetaWork is checking whether this device can sign in.",

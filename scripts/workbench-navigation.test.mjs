@@ -5,9 +5,7 @@ import {
   attentionStatus,
   publishStatus,
   quietStatus,
-  selectAccountGateStatus,
   selectCommandBarStatus,
-  statusVisibleInAccountGate,
   statusVisibleInCommandBar,
 } from "../frontend/src/app/command-bar-status.ts";
 
@@ -322,19 +320,6 @@ test("command bar attention is explicit and cannot leak across product identity"
     ),
     true,
   );
-  assert.equal(
-    statusVisibleInAccountGate(
-      attentionStatus("account.options_updated", { scope: "account" }),
-    ),
-    true,
-  );
-  assert.equal(
-    statusVisibleInAccountGate(
-      quietStatus("account.cancel_rejected", { scope: "account" }),
-    ),
-    false,
-  );
-
   const workspaceFailure = attentionStatus("mutation.transport_failed", {
     scope: "workspace",
     workspaceId: "ws-1",
@@ -345,16 +330,12 @@ test("command bar attention is explicit and cannot leak across product identity"
     false,
   );
   assert.equal(statusVisibleInCommandBar(workspaceFailure, settings), false);
-  assert.equal(statusVisibleInAccountGate(workspaceFailure), false);
-
   const taskFailure = attentionStatus("task.rename_failed", {
     scope: "task",
     taskId: "task-a",
   });
   assert.equal(statusVisibleInCommandBar(taskFailure, taskA), true);
   assert.equal(statusVisibleInCommandBar(taskFailure, taskB), false);
-  assert.equal(statusVisibleInAccountGate(taskFailure), false);
-
   const concurrent = [
     attentionStatus("task.rename_failed", {
       scope: "task",
@@ -367,8 +348,6 @@ test("command bar attention is explicit and cannot leak across product identity"
     "task.rename_failed",
   );
   assert.equal(selectCommandBarStatus(concurrent, taskB), null);
-  assert.equal(selectAccountGateStatus(concurrent), null);
-
   const recoveredWorkspace = publishStatus(
     publishStatus(
       {},

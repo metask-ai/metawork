@@ -55,9 +55,6 @@ const vite = await createServer({
 const { AccountIdentity } = await vite.ssrLoadModule(
   "/src/features/account/AccountIdentity.tsx",
 );
-const { AccountGate } = await vite.ssrLoadModule(
-  "/src/features/account/AccountGate.tsx",
-);
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
 const { translate } = await vite.ssrLoadModule("/src/i18n/runtime.ts");
 
@@ -245,44 +242,4 @@ test("authorization without cancellation keeps app actions available without an 
     await screen.findByRole("dialog", { name: "MetaWork" }),
     null,
   );
-});
-
-test("standalone sign-in surface keeps About available without Workbench state", async () => {
-  const user = userEvent.setup({ document: dom.window.document });
-  render(
-    createElement(
-      I18nContext.Provider,
-      {
-        value: {
-          locale: "en-US",
-          setLocale() {},
-          t: (id, values) => translate("en-US", id, values),
-        },
-      },
-      createElement(AccountGate, {
-        account: { state: "signed_out", displayName: "" },
-        beginLoginDisabled: false,
-        cancelDisabled: false,
-        connectionFailed: false,
-        connectionRetryable: false,
-        connectionTitleId: "connection.failed",
-        connectionHelpId: "connection.failed_help",
-        reconnecting: false,
-        notice: "",
-        onReconnect() {},
-        onBeginLogin() {},
-        onCancel() {},
-      }),
-    ),
-  );
-
-  await user.click(screen.getByRole("button", { name: "About" }));
-  const dialog = await screen.findByRole("dialog", {
-    name: "MetaWork",
-  });
-  assert.match(
-    dialog.textContent,
-    new RegExp(productVersion.replaceAll(".", "\\."), "u"),
-  );
-  assert.match(dialog.textContent, /DeveloperMetask/u);
 });
