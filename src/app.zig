@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const runWindowChromeProbe = @import("app/window_chrome_probe.zig").run;
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");

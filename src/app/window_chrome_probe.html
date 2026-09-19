@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <title>Fixed native drag input probe</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      font: 16px system-ui;
+      background: #fafafa;
+      color: #172126;
+    }
+    header {
+      height: 40px;
+      background: #ddd;
+    }
+    #drag {
+      position: absolute;
+      left: 200px;
+      top: 0;
+      width: 160px;
+      height: 40px;
+      background: #a8e6cf;
+      text-align: center;
+      line-height: 40px;
+    }
+    #adjacent {
+      position: absolute;
+      left: 360px;
+      top: 0;
+      width: 120px;
+      height: 40px;
+      border: 0;
+      border-radius: 0;
+      background: #ffc898;
+    }
+    #paint {
+      position: absolute;
+      left: 200px;
+      top: 34px;
+      width: 160px;
+      height: 6px;
+      background: repeating-linear-gradient(
+        90deg,
+        #116466 0 12px,
+        #fff 12px 24px
+      );
+      animation: paint 1s linear infinite;
+    }
+    @keyframes paint {
+      to {
+        background-position-x: 24px;
+      }
+    }
+    main {
+      padding: 24px;
+    }
+    button {
+      padding: 8px 12px;
+      margin-right: 8px;
+    }
+    pre {
+      white-space: pre-wrap;
+    }
+  </style>
+  <header>
+    <div id="drag">Native input: 200–360</div>
+    <div id="paint"></div>
+    <button id="adjacent">Adjacent control</button>
+  </header>
+  <main>
+    <h1>A: fixed System WebView input</h1>
+    <p>
+      Native strip: x 200–360, y 0–40 CSS px, clipped by the OS resize band.
+      Zoom must remain 100% for this fixed-fixture experiment.
+    </p>
+    <p>
+      No Renderer window gestures, reset commands, or global input recorder.
+      Ctrl+Shift+Q exits; watchdog exits after 15 minutes.
+    </p>
+    <button id="ordinary">Ordinary control</button>
+    <button id="disable">Toggle adjacent disabled</button>
+    <button id="cancel">Toggle adjacent pointerdown cancellation</button>
+    <button id="stop">Toggle adjacent propagation stop</button>
+    <p id="mode"></p>
+    <pre id="log"></pre>
+  </main>
+  <script>
+    const adjacent = document.getElementById("adjacent");
+    const output = document.getElementById("log");
+    const mode = document.getElementById("mode");
+    const records = [];
+    let cancelPointer = false;
+    let stopPropagation = false;
+    function record(event) {
+      records.push(
+        `${event.type}: ${event.currentTarget.id}; trusted=${event.isTrusted}; detail=${event.detail}; screen=${event.screenX},${event.screenY}; epochMs=${performance.timeOrigin + event.timeStamp}`,
+      );
+      if (records.length > 200) records.shift();
+      output.textContent = records.slice(-20).join("\n");
+    }
+    function modes() {
+      mode.textContent = `disabled=${adjacent.disabled}; cancel pointer=${cancelPointer}; stop propagation=${stopPropagation}`;
+    }
+    // Only fixture controls are instrumented; none sends a window command.
+    for (const type of ["pointerdown", "mousedown", "click"]) {
+      adjacent.addEventListener(type, (event) => {
+        record(event);
+        if (type === "pointerdown" && cancelPointer) event.preventDefault();
+        if (stopPropagation) event.stopPropagation();
+      });
+    }
+    document.getElementById("ordinary").onclick = record;
+    document.getElementById("disable").onclick = () => {
+      adjacent.disabled = !adjacent.disabled;
+      modes();
+    };
+    document.getElementById("cancel").onclick = () => {
+      cancelPointer = !cancelPointer;
+      modes();
+    };
+    document.getElementById("stop").onclick = () => {
+      stopPropagation = !stopPropagation;
+      modes();
+    };
+    modes();
+  </script>
+</html>

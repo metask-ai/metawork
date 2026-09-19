@@ -168,6 +168,8 @@ Account credential outcome-certainty 由 `scripts/native-sdk-credential-contract
 
 System WebView window chrome 的区域授权变更须覆盖真实事件路径的控件、可编辑内容、弹层/遮罩和 inert 排除，以及 Host top-band 越界拒绝；Bridge 测试覆盖 generation、严格 payload、只读刷新与动作确认的跨语言 fixture，Renderer 测试覆盖迟到 connect、失效 refresh 和卸载后的动作响应。Windows 双击替代必须在目标 WebView2 用真实 OS 鼠标验证首击进入 caption move loop 后的第二击、默认及非默认系统双击时间、系统距离阈值内外、三击/四击、内容/控件/失焦/原生边缘插入后的序列中断，以及普通拖动和最大化拖动恢复。原生边缘只按下而不改变尺寸也必须中断。既定行为不能保持或证据不足时保留 Host 状态机，不以 JS 合成输入或上游通用源码代替平台证据。新证据须绑定 revision/artifact、OS、Native SDK 与 WebView2 版本；历史证据只覆盖当时 artifact，不自动证明改造后的实现。
 
+Windows 双击替代的距离边界以系统原生 caption 行为为准，不要求复制旧 Host 自定义闭区间多包含的右/下边界像素；这是距离等价要求的明确更正，不放宽其它行为。真实输入须分别覆盖 x/y 正负方向的内点、边界和外点，并用当前系统指标校准；矩形包含左/上边界、不包含右/下边界，不能把 `abs(delta) <= size/2` 当作等价公式。标准原生 caption 对照可以校验探针的边界预期，不能代替实际 System WebView 候选的验收；历史 artifact 的旧判定证据保持原意。
+
 Windows 窗口控制生命周期变更须覆盖 SDK 公共窗口事实更新、执行前拒绝、错误与清理顺序、connect 失败和 refresh 恢复；真实桌面矩阵覆盖普通/最大化关闭与 Alt+F4、最大化后最小化并从任务栏恢复、隐藏后既有 Bridge 请求、托盘重开、关闭与 toggle 交错及 reload。真实键鼠、直接 Bridge 请求与 SDK 托盘 automation 分别记录，不互相冒充；恢复后的按钮可操作性与实际图标须一并验证。以有界状态条件观察结果，不把固定等待或关闭 ACK 当作隐藏完成屏障；探针只能被动取得当前 generation，不额外 connect 改变待测会话。测试脏工作树时须绑定 diff 与 artifact，提交后的相同证据须核对源码一致性。
 
 macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebView 可访问性与分发 artifact 是独立证据项。Windows development baseline 不证明安装、更新、完整安全矩阵或其他平台；程序化 resize 不证明真实 pointer resize、系统 snap 或焦点行为。签名成功只证明被测二进制和签名 policy，不证明安装启动、交互、更新、回滚或迁移。

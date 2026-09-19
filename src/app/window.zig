@@ -9,6 +9,57 @@ const window_controls = @import("../native_sdk_compat/system_webview_window_cont
 const resize = @import("../native_sdk_compat/system_webview_resize.zig");
 
 pub const main_window_id: native_sdk.platform.WindowId = 1;
+
+/// A-stage composition only. The ordinary product State never creates this.
+/// The probe keeps this storage alive until process exit even if teardown fails.
+pub const InputPrototype = struct {
+    capture: startup_window.Capture = .{},
+    controls: window_controls.Capability = window_controls.Capability.init(main_window_id),
+    top_resize: resize.Capability = .{},
+    input: drag_region.InputPrototype = .{},
+    runtime: ?*native_sdk.Runtime = null,
+
+    pub fn prepare(self: *InputPrototype) !void {
+        if (builtin.os.tag != .windows) return error.WindowsOnlyProbe;
+        try self.controls.prepareStartup();
+        try self.capture.prepare();
+    }
+
+    pub fn start(self: *InputPrototype, runtime: *native_sdk.Runtime) !void {
+        self.runtime = runtime;
+        const binding = try self.capture.take(main_window_id);
+        try self.controls.captureStartupWindow(binding);
+        try self.top_resize.attach(binding, self, resizePress);
+        try self.input.attach(binding, self, refresh, toggle);
+        try refresh(self);
+    }
+
+    fn refresh(data: *anyopaque) !void {
+        const self: *InputPrototype = @ptrCast(@alignCast(data));
+        const band = try self.top_resize.inputBand();
+        try self.input.syncFixed(band.anchor, band.width, band.height);
+    }
+
+    fn toggle(data: *anyopaque) !void {
+        const self: *InputPrototype = @ptrCast(@alignCast(data));
+        try requireUnhiddenMainWindow(self.runtime orelse return error.RuntimeUnavailable, main_window_id);
+        const maximized = try self.controls.isMaximized();
+        try self.controls.setMaximized(!maximized);
+        std.debug.print("DRAG_PROBE toggle maximized={}\n", .{!maximized});
+    }
+
+    fn resizePress(_: *anyopaque) void {
+        std.debug.print("DRAG_PROBE resize-press (no gesture reset)\n", .{});
+    }
+
+    pub fn deinit(self: *InputPrototype) !void {
+        try self.input.deinit();
+        self.top_resize.deinit();
+        self.controls.deinit();
+        self.capture.deinit();
+        self.runtime = null;
+    }
+};
 pub const tray_open_id: native_sdk.platform.TrayItemId = 1;
 pub const tray_quit_id: native_sdk.platform.TrayItemId = 2;
 

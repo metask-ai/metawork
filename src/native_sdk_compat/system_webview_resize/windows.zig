@@ -166,6 +166,14 @@ pub const State = struct {
         self.refresh_pending = true;
     }
 
+    /// Application composes input children using this owner's effective OS band.
+    /// The handle is only an insert-after anchor, not authority over the child.
+    pub fn inputBand(self: *State) !struct { anchor: HWND, width: i32, height: i32 } {
+        if (self.stopping or self.child == null) return error.TopResizeUnavailable;
+        try self.sync();
+        return .{ .anchor = self.child, .width = self.width, .height = self.height };
+    }
+
     fn sync(self: *State) !void {
         if (self.stopping or self.updating) return;
         const root = self.root orelse return;

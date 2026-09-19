@@ -13,6 +13,8 @@ const native_sdk = @import("native_sdk");
 const startup_window = @import("system_webview_startup_window.zig");
 const types = @import("system_webview_drag_region/types.zig");
 pub const PointerOutcome = types.PointerOutcome;
+// Only the isolated build entry may instantiate this unproven input primitive.
+pub const InputPrototype = if (builtin.os.tag == .windows) Platform.InputPrototype else void;
 
 const Platform = switch (builtin.os.tag) {
     .windows => @import("system_webview_drag_region/windows.zig"),

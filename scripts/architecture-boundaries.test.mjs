@@ -2652,23 +2652,75 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     /EnumChildWindows|SetWindowsHookEx|GetForegroundWindow|FindWindow|SetParent/,
   );
   assert.deepEqual(
-    externSymbols(read(dragWindowsPath), ["user32", "kernel32", "comctl32"]),
+    externSymbols(read(dragWindowsPath), [
+      "user32",
+      "kernel32",
+      "comctl32",
+      "gdi32",
+    ]),
     [
+      "CreateRectRgn",
+      "CreateWindowExW",
+      "DefSubclassProc",
+      "DefWindowProcW",
+      "DeleteObject",
+      "DestroyWindow",
       "GetAncestor",
       "GetAsyncKeyState",
+      "GetCapture",
+      "GetClientRect",
+      "GetCurrentThreadId",
       "GetCursorPos",
       "GetDoubleClickTime",
       "GetDpiForWindow",
+      "GetModuleHandleW",
       "GetSystemMetrics",
       "GetTickCount64",
+      "GetWindow",
+      "GetWindowLongPtrW",
       "GetWindowRect",
+      "GetWindowThreadProcessId",
+      "IsIconic",
       "IsWindow",
+      "IsWindowEnabled",
+      "IsWindowVisible",
+      "IsZoomed",
       "PostMessageW",
+      "RegisterClassExW",
+      "RegisterWindowMessageW",
       "ReleaseCapture",
+      "RemoveWindowSubclass",
       "ScreenToClient",
       "SendMessageW",
+      "SetWindowLongPtrW",
+      "SetWindowPos",
+      "SetWindowRgn",
+      "SetWindowSubclass",
       "WindowFromPoint",
     ].sort(),
+  );
+  assert.deepEqual(externSymbols(read(dragWindowsPath), ["gdi32"]), [
+    "CreateRectRgn",
+    "DeleteObject",
+  ]);
+  assert.deepEqual(externSymbols(read(dragWindowsPath), ["kernel32"]), [
+    "GetCurrentThreadId",
+    "GetModuleHandleW",
+    "GetTickCount64",
+  ]);
+  assert.deepEqual(externSymbols(read(dragWindowsPath), ["comctl32"]), [
+    "DefSubclassProc",
+    "RemoveWindowSubclass",
+    "SetWindowSubclass",
+  ]);
+  assert.match(
+    read("build.zig"),
+    /\.main = if \(chrome_probe\) "src\/window_chrome_probe\.zig" else "src\/main\.zig"/,
+  );
+  assert.doesNotMatch(read("src/main.zig"), /runWindowChromeProbe/);
+  assert.doesNotMatch(
+    read("src/app/window_chrome_probe.html"),
+    /document\.addEventListener|window\.addEventListener|window\.zero|windowChrome/,
   );
   assert.deepEqual(
     externSymbols(read(controlsWindowsPath), [
