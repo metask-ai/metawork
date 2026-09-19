@@ -219,7 +219,6 @@ export async function probeWindowChromeUi({
         "workbench-title-drag",
         () =>
           runProbe("input-case", [
-            "-BrowserGesture",
             "-InputCase",
             "drag",
             "-PointX",
@@ -290,7 +289,6 @@ export async function probeWindowChromeUi({
         "account-title-text-drag",
         () =>
           runProbe("input-case", [
-            "-BrowserGesture",
             "-InputCase",
             "drag",
             "-PointX",
@@ -312,7 +310,6 @@ export async function probeWindowChromeUi({
         "account-title-text-double-click",
         () =>
           runProbe("input-case", [
-            "-BrowserGesture",
             "-InputCase",
             "pair",
             "-PointX",

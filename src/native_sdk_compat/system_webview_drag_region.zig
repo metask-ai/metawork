@@ -14,9 +14,6 @@ const startup_window = @import("system_webview_startup_window.zig");
 const types = @import("system_webview_drag_region/types.zig");
 pub const GestureOutcome = types.GestureOutcome;
 pub const GestureAction = types.GestureAction;
-// Only the isolated build entry may instantiate this unproven input primitive.
-pub const InputPrototype = if (builtin.os.tag == .windows) Platform.InputPrototype else void;
-
 const Platform = switch (builtin.os.tag) {
     .windows => @import("system_webview_drag_region/windows.zig"),
     .macos => @import("system_webview_drag_region/macos.zig"),

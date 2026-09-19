@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-layout', 'control-zoom-in', 'control-zoom-reset', 'control-paste-select', 'control-clear-selection', 'control-alt-f4', 'control-taskbar-restore', 'probe-quit', 'probe-layout', 'probe-animation', 'probe-resources')]
+    [ValidateSet('drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-layout', 'control-zoom-in', 'control-zoom-reset', 'control-paste-select', 'control-clear-selection', 'control-alt-f4', 'control-taskbar-restore')]
     [string]$Mode = 'drag',
     [string]$ColorHex,
     [string]$OutputPath,
@@ -11,8 +11,6 @@ param(
     [switch]$AllMonitors,
     [switch]$Direct,
     [switch]$KeepTopmost,
-    [switch]$FixedDragPaint,
-    [switch]$BrowserGesture,
     [string]$InputCase,
     [int]$DoubleClickMilliseconds = 0,
     [int]$PointX = 300,
@@ -367,7 +365,7 @@ if ($Direct -and (-not [MetaWorkChromeProbe]::IsWindowVisible($window) -or
     throw 'Direct resize requires an already visible, restored window'
 }
 try {
-if ($Mode -notin @('paint-stationary', 'probe-animation')) {
+if ($Mode -ne 'paint-stationary') {
     # Keep real mouse input on this test-owned window, even if Codex takes focus.
     if (-not [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr](-1), 0, 0, 0, 0, 0x0013)) {
         throw 'Could not establish unobscured pointer input'
@@ -437,22 +435,6 @@ if ($Mode -eq 'control-alt-f4') {
     } finally {
         [MetaWorkChromeProbe]::keybd_event(0x73, 0, 2, [UIntPtr]::Zero)
         [MetaWorkChromeProbe]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
-    }
-    return
-}
-
-if ($Mode -eq 'probe-quit') {
-    if ($process.ProcessName -ne 'metawork-drag-probe' -or [MetaWorkChromeProbe]::GetForegroundWindow() -ne $window) {
-        throw 'Probe quit requires foreground ownership of the isolated probe executable'
-    }
-    try {
-        [MetaWorkChromeProbe]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
-        [MetaWorkChromeProbe]::keybd_event(0x10, 0, 0, [UIntPtr]::Zero)
-        [MetaWorkChromeProbe]::keybd_event(0x51, 0, 0, [UIntPtr]::Zero)
-    } finally {
-        [MetaWorkChromeProbe]::keybd_event(0x51, 0, 2, [UIntPtr]::Zero)
-        [MetaWorkChromeProbe]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero)
-        [MetaWorkChromeProbe]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
     }
     return
 }
@@ -592,129 +574,6 @@ if ($Mode -eq 'top-resize') {
     return
 }
 
-if ($Mode -eq 'probe-layout') {
-    if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Layout probe requires isolated native fixture' }
-    $drag = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-    $resize = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkSystemWebViewTopResize', '')
-    if ($drag -eq [IntPtr]::Zero -or $resize -eq [IntPtr]::Zero) { throw 'Both native input children are required' }
-    $dragRect = Get-MetaWorkRect $drag
-    $resizeRect = Get-MetaWorkRect $resize
-    if ($dragRect.Top -lt $resizeRect.Bottom) { throw 'Drag shape overlaps the resize band' }
-    $point = New-Object MetaWorkChromeProbe+Point
-    $point.X = [int](($dragRect.Left + $dragRect.Right) / 2)
-    $point.Y = $resizeRect.Top + 1
-    if ([MetaWorkChromeProbe]::WindowFromPoint($point) -ne $resize) { throw 'Resize pixel is not owned by resize' }
-    $point.Y = $dragRect.Top + 1
-    if ([MetaWorkChromeProbe]::WindowFromPoint($point) -ne $drag) { throw 'Drag pixel is not owned by drag' }
-    $point.X = $dragRect.Right
-    $other = [MetaWorkChromeProbe]::WindowFromPoint($point)
-    if ($other -eq $drag -or $other -eq $resize -or [MetaWorkChromeProbe]::GetAncestor($other, 2) -ne $window) { throw 'Business pixel is not outside the native input regions' }
-    [ordered]@{ resize=$resize.ToInt64().ToString(); drag=$drag.ToInt64().ToString(); content=$other.ToInt64().ToString(); dragTop=$dragRect.Top; resizeBottom=$resizeRect.Bottom; passed=$true } | ConvertTo-Json -Compress
-    return
-}
-
-if ($Mode -eq 'probe-animation') {
-    if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Animation probe requires isolated native fixture' }
-    Add-Type -AssemblyName System.Drawing
-    $scale = [MetaWorkChromeProbe]::GetDpiForWindow($window) / 96.0
-    $origin = New-Object MetaWorkChromeProbe+Point
-    $client = New-Object MetaWorkChromeProbe+Rect
-    if (-not [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$origin) -or -not [MetaWorkChromeProbe]::GetClientRect($window, [ref]$client)) { throw 'Animation geometry unavailable' }
-    $drag = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-    $point = New-Object MetaWorkChromeProbe+Point
-    $point.X = $origin.X + [int](216 * $scale); $point.Y = $origin.Y + [int](36 * $scale)
-    if ($drag -eq [IntPtr]::Zero -or [MetaWorkChromeProbe]::WindowFromPoint($point) -ne $drag) { throw 'Animated pixels do not lie beneath the native drag child' }
-    $patterns = @()
-    $bitmap = New-Object System.Drawing.Bitmap $client.Right,([int](40 * $scale))
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    try {
-        for ($frame = 0; $frame -lt 10; $frame++) {
-            $graphics.CopyFromScreen($origin.X, $origin.Y, 0, 0, $bitmap.Size)
-            if ($OutputPath) { $bitmap.Save(($OutputPath -replace '\.png$', "-$frame.png")) }
-            $row = @()
-            for ($x = 0; $x -lt [int](120 * $scale); $x++) {
-                $actual = $bitmap.GetPixel([int](216 * $scale) + $x, [int](36 * $scale)).ToArgb()
-                $reference = $bitmap.GetPixel([int](408 * $scale) + $x, [int](36 * $scale)).ToArgb()
-                if ($actual -ne $reference) { throw "Animation under native child differs from same-frame WebView reference at frame=$frame x=$x" }
-                $row += $actual
-            }
-            $patterns += ($row -join ',')
-            Start-Sleep -Milliseconds 75
-        }
-    } finally { $graphics.Dispose(); $bitmap.Dispose() }
-    $distinct = @($patterns | Select-Object -Unique).Count
-    if ($distinct -lt 3) { throw 'Animation did not visibly advance under the native child' }
-    [ordered]@{ frames=10; distinct=$distinct; sameFrameReference=$true; passed=$true } | ConvertTo-Json -Compress
-    return
-}
-
-if ($Mode -eq 'probe-resources') {
-    if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Resource probe requires isolated native fixture' }
-    Add-Type -AssemblyName System.Windows.Forms
-    $otherWindow = New-Object System.Windows.Forms.Form
-    $otherWindow.FormBorderStyle = 'None'
-    $otherWindow.StartPosition = 'Manual'
-    $otherWindow.SetBounds(20, 20, 140, 80)
-    $otherWindow.TopMost = $true
-    $samples = @()
-    try {
-        # Foreground permission is not persistent after returning focus to the
-        # other process. Exercise real, test-owned clicks instead of repeatedly
-        # asking SetForegroundWindow to override the OS activation rules.
-        $otherWindow.Show(); [System.Windows.Forms.Application]::DoEvents()
-        $fixturePoint = New-Object MetaWorkChromeProbe+Point
-        $fixturePoint.X = 40; $fixturePoint.Y = 40
-        if (-not [MetaWorkChromeProbe]::ClientToScreen($otherWindow.Handle, [ref]$fixturePoint)) { throw 'Resource fixture geometry unavailable' }
-        $contentPoint = New-Object MetaWorkChromeProbe+Point
-        $contentPoint.X = 400; $contentPoint.Y = 100
-        if (-not [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$contentPoint)) { throw 'Resource content geometry unavailable' }
-        if ([MetaWorkChromeProbe]::GetAncestor([MetaWorkChromeProbe]::WindowFromPoint($contentPoint), 2) -ne $window) { throw 'Resource setup click is obscured' }
-        Invoke-MetaWorkClick $contentPoint.X $contentPoint.Y
-        [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 60
-        if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $window) { throw 'Resource setup click did not activate root' }
-        for ($iteration = 0; $iteration -lt 35; $iteration++) {
-            $old = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-            $fixtureHit = [MetaWorkChromeProbe]::WindowFromPoint($fixturePoint)
-            if ($fixtureHit -ne $otherWindow.Handle) { throw "Resource fixture click is obscured: point=$($fixturePoint.X),$($fixturePoint.Y) hit=$fixtureHit expected=$($otherWindow.Handle) bounds=$($otherWindow.Bounds)" }
-            Invoke-MetaWorkClick $fixturePoint.X $fixturePoint.Y
-            [System.Windows.Forms.Application]::DoEvents()
-            Start-Sleep -Milliseconds 60
-            [System.Windows.Forms.Application]::DoEvents()
-            $foreground = [MetaWorkChromeProbe]::GetForegroundWindow()
-            if ($foreground -ne $otherWindow.Handle) { throw "Resource cycle $iteration did not deactivate root: actual=$foreground expected=$($otherWindow.Handle)" }
-            $current = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-            if ($current -eq [IntPtr]::Zero -or $current -eq $old -or [MetaWorkChromeProbe]::IsWindow($old) -or
-                [MetaWorkChromeProbe]::FindWindowExW($window, $current, 'MetaWorkFixedDragInputProbe', '') -ne [IntPtr]::Zero) { throw 'Resource replacement did not retire exactly one old child' }
-            $contentHit = [MetaWorkChromeProbe]::WindowFromPoint($contentPoint)
-            if ([MetaWorkChromeProbe]::GetAncestor($contentHit, 2) -ne $window -or $contentHit -eq $current) { throw 'Resource content click is obscured or hits drag input' }
-            Invoke-MetaWorkClick $contentPoint.X $contentPoint.Y
-            [System.Windows.Forms.Application]::DoEvents()
-            Start-Sleep -Milliseconds 60
-            $foreground = [MetaWorkChromeProbe]::GetForegroundWindow()
-            if ($foreground -ne $window) { throw "Resource cycle $iteration did not reactivate root: actual=$foreground expected=$window" }
-            if ($iteration -ge 4) {
-                $samples += [ordered]@{ iteration=$iteration; user=[MetaWorkChromeProbe]::GetGuiResources($process.Handle, 1); gdi=[MetaWorkChromeProbe]::GetGuiResources($process.Handle, 0) }
-            }
-        }
-        $first = $samples[0]; $last = $samples[-1]
-        if ($samples.Where({ $_.user -le 0 -or $_.gdi -le 0 }).Count -ne 0) { throw 'Resource counters unavailable' }
-        if ($last.user -gt $first.user + 4 -or $last.gdi -gt $first.gdi + 4) { throw 'Repeated activation exceeded the existing USER/GDI growth bound' }
-        [ordered]@{ cycles=35; warmup=5; samples=$samples; activationPassed=$true } | ConvertTo-Json -Depth 4 -Compress
-        foreach ($state in @(0, 6)) {
-            [MetaWorkChromeProbe]::ShowWindow($window, $state) | Out-Null
-            Start-Sleep -Milliseconds 120
-            $current = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-            if ([MetaWorkChromeProbe]::IsWindowVisible($current)) { throw 'Hidden/minimized root retains a visible drag input child' }
-            [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
-            Start-Sleep -Milliseconds 120
-            $current = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-            if (-not [MetaWorkChromeProbe]::IsWindowVisible($current)) { throw 'Restored root did not restore native drag input' }
-        }
-        [ordered]@{ hiddenMinimizedRestore=$true; passed=$true } | ConvertTo-Json -Compress
-    } finally { $otherWindow.Dispose() }
-    return
-}
-
 if ($Mode -eq 'paint' -or $Mode -eq 'paint-stationary') {
     # The isolated WebView test injects a contrasting DOM strip. Read real
     # desktop pixels, including the native child, both while stationary and
@@ -741,10 +600,7 @@ if ($Mode -eq 'paint' -or $Mode -eq 'paint-stationary') {
         } finally { $cover.Close(); $cover.Dispose() }
         Start-Sleep -Milliseconds 200
     }
-    if ($FixedDragPaint -and $process.ProcessName -ne 'metawork-drag-probe') { throw 'Fixed drag paint requires isolated native fixture' }
-    $scale = [MetaWorkChromeProbe]::GetDpiForWindow($window) / 96.0
-    $paintHeight = if ($FixedDragPaint) { [int](40 * $scale) } else { 24 }
-    $bitmap = New-Object System.Drawing.Bitmap $client.Right,$paintHeight
+    $bitmap = New-Object System.Drawing.Bitmap $client.Right,24
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
         $graphics.CopyFromScreen($origin.X, $origin.Y, 0, 0, $bitmap.Size)
@@ -753,8 +609,8 @@ if ($Mode -eq 'paint' -or $Mode -eq 'paint-stationary') {
             $bitmap.Save($OutputPath)
         }
         $expected = [System.Drawing.ColorTranslator]::FromHtml($ColorHex).ToArgb()
-        $sampleXs = if ($FixedDragPaint) { @(12, 201, 280, 359, 400) | ForEach-Object { [int]($_ * $scale) } } else { @(12, [int]($client.Right / 2), ($client.Right - 12)) }
-        $sampleYs = if ($FixedDragPaint) { @(1, 6, 12, 20, 39) | ForEach-Object { [int]($_ * $scale) } } else { @(1, 4, 6, 12, 20) }
+        $sampleXs = @(12, [int]($client.Right / 2), ($client.Right - 12))
+        $sampleYs = @(1, 4, 6, 12, 20)
         foreach ($x in $sampleXs) {
             foreach ($y in $sampleYs) {
                 if ($bitmap.GetPixel($x, $y).ToArgb() -ne $expected) {
@@ -822,217 +678,9 @@ if ($Mode -eq 'input-case') {
         $point = Get-InputPoint $PointX $PointY
         $before = Get-MetaWorkRect $window
         $gap = if ($DoubleClickMilliseconds -ge 800) { 550 } else { 60 }
-        $expectedMaximized = $false
-        $interruption = $null
         $clickStates = @()
-        if ($InputCase -in @('adjacent-reset', 'edge-reset')) {
-            if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Adjacent native case requires the isolated probe' }
-            $dragChild = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-            if ($dragChild -eq [IntPtr]::Zero) { throw 'Fixed native input child unavailable' }
-            $dragRect = Get-MetaWorkRect $dragChild
-            # One physical pixel across the actual HWND boundary, not a guessed
-            # CSS gap. Both outer presses remain at exactly the same point.
-            $other = Get-InputPoint $PointX $PointY
-            if ($InputCase -eq 'adjacent-reset') {
-                $point.X = $dragRect.Right - 1
-                $other.X = $dragRect.Right
-            } else {
-                $point.Y = $dragRect.Top
-                $other.Y = $dragRect.Top - 1
-                if ($height -lt 2) { throw 'OS vertical interval is too narrow for the edge case' }
-            }
-            if ($width -lt 2 -or [MetaWorkChromeProbe]::WindowFromPoint($point) -ne $dragChild) {
-                throw 'Adjacent title point is not within the native child / OS distance threshold'
-            }
-            $otherChild = [MetaWorkChromeProbe]::WindowFromPoint($other)
-            if ($otherChild -eq $dragChild -or [MetaWorkChromeProbe]::GetAncestor($otherChild, 2) -ne $window) {
-                throw 'Adjacent control point does not reach a different child of the isolated window'
-            }
-            $otherPid = [uint32]0
-            $otherThread = [MetaWorkChromeProbe]::GetWindowThreadProcessId($otherChild, [ref]$otherPid)
-            $otherClass = New-Object System.Text.StringBuilder 256
-            [MetaWorkChromeProbe]::GetClassNameW($otherChild, $otherClass, $otherClass.Capacity) | Out-Null
-            if ($InputCase -eq 'edge-reset' -and $otherClass.ToString() -ne 'MetaWorkSystemWebViewTopResize') {
-                throw 'Intervening edge press does not hit the resize child'
-            }
-            $interruption = [ordered]@{ titleX=$point.X; controlX=$other.X; titleY=$point.Y; controlY=$other.Y; dragHandle=$dragChild.ToInt64().ToString(); controlHandle=$otherChild.ToInt64().ToString(); controlClass=$otherClass.ToString(); controlThread=$otherThread; controlPid=$otherPid }
-        }
         switch ($InputCase) {
-            'native-distance-matrix' {
-                if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Native distance matrix requires the isolated probe' }
-                $samples = @()
-                foreach ($axis in @('x', 'y')) {
-                    $half = [Math]::Floor($(if ($axis -eq 'x') { $width } else { $height }) / 2)
-                    if ($half -lt 1) { throw 'Native distance matrix has no testable inner pixel' }
-                    foreach ($offset in @((-$half-1), (-$half), (-$half+1), ($half-1), $half, ($half+1))) {
-                        [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
-                        [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr]::Zero, 100, 100, 900, 620, 0x0014) | Out-Null
-                        Start-Sleep -Milliseconds ($time + 100)
-                        $first = Get-InputPoint $PointX $PointY
-                        $second = Get-InputPoint $PointX $PointY
-                        if ($axis -eq 'x') { $second.X += $offset } else { $second.Y += $offset }
-                        $child = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-                        if ($child -eq [IntPtr]::Zero -or [MetaWorkChromeProbe]::GetForegroundWindow() -ne $window -or
-                            [MetaWorkChromeProbe]::WindowFromPoint($first) -ne $child -or [MetaWorkChromeProbe]::WindowFromPoint($second) -ne $child) {
-                            throw 'Distance pair does not hit the foreground native input child'
-                        }
-                        $pairBefore = Get-MetaWorkRect $window
-                        $watch = [System.Diagnostics.Stopwatch]::StartNew()
-                        Invoke-MetaWorkTitleClick $first.X $first.Y
-                        Start-Sleep -Milliseconds 60
-                        $afterFirst = Get-MetaWorkRect $window
-                        if ($afterFirst.Left -ne $pairBefore.Left -or $afterFirst.Top -ne $pairBefore.Top -or
-                            [MetaWorkChromeProbe]::WindowFromPoint($second) -ne $child -or $watch.ElapsedMilliseconds -ge $time) {
-                            throw 'Distance pair lost its geometry, hit, or time precondition'
-                        }
-                        $elapsed = $watch.ElapsedMilliseconds
-                        Invoke-MetaWorkTitleClick $second.X $second.Y
-                        Start-Sleep -Milliseconds 160
-                        $expected = $offset -ge -$half -and $offset -lt $half
-                        $actual = [MetaWorkChromeProbe]::IsZoomed($window)
-                        if ($actual -ne $expected) { throw "Native distance $axis offset ${offset}: maximized=$actual expected=$expected" }
-                        $after = Get-MetaWorkRect $window
-                        if (-not $expected -and ($after.Left -ne $pairBefore.Left -or $after.Top -ne $pairBefore.Top -or
-                            $after.Right -ne $pairBefore.Right -or $after.Bottom -ne $pairBefore.Bottom)) {
-                            throw 'Non-double distance pair moved/resized the window'
-                        }
-                        $samples += [ordered]@{ axis=$axis; offset=$offset; firstX=$first.X; firstY=$first.Y; secondX=$second.X; secondY=$second.Y; beforeSecondMs=$elapsed; maximized=$actual }
-                    }
-                }
-                $interruption = [ordered]@{ boundary='native left/top inclusive, right/bottom exclusive'; samples=$samples }
-            }
-            'native-distance-reference' {
-                if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Native reference requires the isolated probe session' }
-                # Independent OS reference, not another product input path. The
-                # standard Form delegates every message unchanged to its base.
-                Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @'
-using System;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-using System.Windows.Forms;
-public sealed class MetaWorkCaptionReference : Form {
-    [DllImport("user32.dll")] private static extern int GetMessageTime();
-    public readonly List<string> Presses = new List<string>();
-    protected override void WndProc(ref Message message) {
-        if (message.Msg == 0xA1 || message.Msg == 0xA3) {
-            long point = message.LParam.ToInt64();
-            Presses.Add(String.Format("msg=0x{0:x};tick={1};x={2};y={3};hit={4}",
-                message.Msg, unchecked((uint)GetMessageTime()), (short)point,
-                (short)(point >> 16), message.WParam.ToInt64()));
-        }
-        base.WndProc(ref message);
-    }
-}
-'@
-                $reference = New-Object MetaWorkCaptionReference
-                try {
-                    $reference.Text = 'MetaWork isolated Windows caption reference'
-                    $reference.StartPosition = 'Manual'
-                    $reference.Left = 220
-                    $reference.Top = 220
-                    $reference.Width = 620
-                    $reference.Height = 360
-                    $reference.TopMost = $true
-                    $reference.Show()
-                    [System.Windows.Forms.Application]::DoEvents()
-                    $samples = @()
-                    foreach ($offset in @(0, 1, 2, -2, -3, 3)) {
-                        $reference.WindowState = 'Normal'
-                        $reference.Left = 220
-                        $reference.Top = 220
-                        [System.Windows.Forms.Application]::DoEvents()
-                        Start-Sleep -Milliseconds ($time + 100)
-                        if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $reference.Handle) {
-                            throw 'Native reference lost foreground ownership'
-                        }
-                        $reference.Presses.Clear()
-                        $referenceBefore = Get-MetaWorkRect $reference.Handle
-                        $referencePoint = New-Object MetaWorkChromeProbe+Point
-                        $referencePoint.X = $referenceBefore.Left + 240
-                        $referencePoint.Y = $referenceBefore.Top + 18
-                        foreach ($delta in @(0, $offset)) {
-                            $referencePoint.X = $referenceBefore.Left + 240 + $delta
-                            $packed = (($referencePoint.Y -band 0xffff) -shl 16) -bor ($referencePoint.X -band 0xffff)
-                            if ([MetaWorkChromeProbe]::WindowFromPoint($referencePoint) -ne $reference.Handle -or
-                                [MetaWorkChromeProbe]::SendMessageW($reference.Handle, 0x84, [UIntPtr]::Zero, [IntPtr]$packed).ToInt64() -ne 2) {
-                                throw 'Native reference point is not its real HTCAPTION'
-                            }
-                            Invoke-MetaWorkTitleClick $referencePoint.X $referencePoint.Y
-                            [System.Windows.Forms.Application]::DoEvents()
-                            Start-Sleep -Milliseconds 60
-                        }
-                        [System.Windows.Forms.Application]::DoEvents()
-                        if ($reference.Presses.Count -ne 2) { throw 'Native reference did not receive both real presses' }
-                        $ticks = @($reference.Presses | ForEach-Object { [long]([regex]::Match($_, 'tick=(\d+)').Groups[1].Value) })
-                        if ($ticks[1] -lt $ticks[0] -or $ticks[1] - $ticks[0] -ge $time) { throw 'Native reference pair exceeded the OS interval' }
-                        if ($offset -eq 0 -and -not [MetaWorkChromeProbe]::IsZoomed($reference.Handle)) { throw 'Native reference positive control did not maximize' }
-                        $samples += [ordered]@{ offsetX=$offset; intervalMs=($ticks[1] - $ticks[0]); messages=@($reference.Presses.ToArray()); maximized=[MetaWorkChromeProbe]::IsZoomed($reference.Handle) }
-                    }
-                    $interruption = [ordered]@{ reference='standard WinForms caption; unchanged base WndProc'; samples=$samples }
-                } finally { $reference.Dispose() }
-            }
-            { $_ -in @('probe-blur-repair', 'probe-blur-drag') } {
-                if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Native focus diagnostic requires the isolated probe' }
-                Add-Type -AssemblyName System.Windows.Forms
-                $otherWindow = New-Object System.Windows.Forms.Form
-                try {
-                    $otherWindow.StartPosition = 'Manual'
-                    $otherWindow.Left = 20
-                    $otherWindow.Top = 20
-                    $otherWindow.Width = 140
-                    $otherWindow.Height = 80
-                    $oldChild = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-                    if ($oldChild -eq [IntPtr]::Zero -or [MetaWorkChromeProbe]::WindowFromPoint($point) -ne $oldChild) {
-                        throw 'First title point does not hit the native input child'
-                    }
-                    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-                    Invoke-MetaWorkTitleClick $point.X $point.Y
-                    $otherWindow.Show()
-                    [MetaWorkChromeProbe]::SetForegroundWindow($otherWindow.Handle) | Out-Null
-                    [System.Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 60
-                    if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $otherWindow.Handle) {
-                        throw 'Focus fixture did not actually deactivate the probe'
-                    }
-                    $newChild = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-                    if ($newChild -eq [IntPtr]::Zero -or $newChild -eq $oldChild -or
-                        [MetaWorkChromeProbe]::IsWindow($oldChild) -or [MetaWorkChromeProbe]::WindowFromPoint($point) -ne $newChild) {
-                        throw 'Inactive input child replacement / native hit was not observed'
-                    }
-                    if ($InputCase -eq 'probe-blur-repair') {
-                        [MetaWorkChromeProbe]::SetForegroundWindow($window) | Out-Null
-                        Start-Sleep -Milliseconds 60
-                        if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $window) { throw 'Probe did not regain focus' }
-                    }
-                    $elapsed = $watch.ElapsedMilliseconds
-                    if ($elapsed -ge $time) { throw 'Focus interruption exceeded the double-click interval' }
-                    if ($InputCase -eq 'probe-blur-drag') {
-                        # No programmatic reactivation: the first returning press
-                        # must activate and drag, without a preliminary click.
-                        Invoke-MetaWorkDrag $point.X $point.Y 80 48
-                        Start-Sleep -Milliseconds 120
-                        $after = Get-MetaWorkRect $window
-                        if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $window -or [MetaWorkChromeProbe]::IsZoomed($window) -or
-                            [Math]::Abs(($after.Left - $before.Left) - 80) -gt 2 -or [Math]::Abs(($after.Top - $before.Top) - 48) -gt 2) {
-                            throw 'First returning press did not activate and drag the probe exactly once'
-                        }
-                    } else {
-                        Invoke-MetaWorkTitleClick $point.X $point.Y
-                        Start-Sleep -Milliseconds 60
-                        $after = Get-MetaWorkRect $window
-                        if ([MetaWorkChromeProbe]::IsZoomed($window) -or $after.Left -ne $before.Left -or
-                            $after.Top -ne $before.Top -or $after.Right -ne $before.Right -or $after.Bottom -ne $before.Bottom) {
-                            throw 'First post-focus click reused the old sequence or changed geometry'
-                        }
-                        Invoke-MetaWorkTitleClick $point.X $point.Y
-                        Start-Sleep -Milliseconds 160
-                        if (-not [MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Fresh post-focus double click was lost' }
-                    }
-                    $interruption = [ordered]@{ oldChild=$oldChild.ToInt64().ToString(); newChild=$newChild.ToInt64().ToString(); beforeReturnMs=$elapsed; clickToActivate=($InputCase -eq 'probe-blur-drag') }
-                } finally { $otherWindow.Dispose() }
-            }
-            { $_ -in @('pair', 'timeout', 'distance-inside', 'distance-outside', 'offset-pair', 'quad', 'content-reset', 'control-reset', 'blur-reset', 'browser-adjacent', 'browser-edge', 'adjacent-reset', 'edge-reset') } {
-                $sequenceWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            { $_ -in @('pair', 'timeout', 'distance-inside', 'distance-outside', 'offset-pair', 'quad', 'content-reset', 'control-reset', 'blur-reset', 'browser-adjacent', 'browser-edge') } {
                 Invoke-MetaWorkTitleClick $point.X $point.Y
                 $clickStates += [bool][MetaWorkChromeProbe]::IsZoomed($window)
                 if ($InputCase -eq 'timeout') { Start-Sleep -Milliseconds ($time + 100) }
@@ -1043,19 +691,10 @@ public sealed class MetaWorkCaptionReference : Form {
                     $other = Get-InputPoint 400 20
                     Invoke-MetaWorkTitleClick $other.X $other.Y
                 } elseif ($InputCase -eq 'browser-adjacent') {
-                    if (-not $BrowserGesture) { throw 'Browser adjacent case requires browser observation' }
                     $other = Get-InputPoint ($PointX + 1) $PointY
                     Invoke-MetaWorkTitleClick $other.X $other.Y
                 } elseif ($InputCase -eq 'browser-edge') {
-                    if (-not $BrowserGesture) { throw 'Browser edge case requires browser observation' }
                     $other = Get-InputPoint $PointX 1
-                    Invoke-MetaWorkTitleClick $other.X $other.Y
-                } elseif ($InputCase -in @('adjacent-reset', 'edge-reset')) {
-                    $afterFirst = Get-MetaWorkRect $window
-                    if ($afterFirst.Left -ne $before.Left -or $afterFirst.Top -ne $before.Top -or
-                        [MetaWorkChromeProbe]::WindowFromPoint($other) -ne $otherChild) {
-                        throw 'Adjacent sequence lost its control hit before the intervening press'
-                    }
                     Invoke-MetaWorkTitleClick $other.X $other.Y
                 } elseif ($InputCase -eq 'blur-reset') {
                     # A separate native window causes real WebView blur, then focus.
@@ -1073,52 +712,18 @@ public sealed class MetaWorkCaptionReference : Form {
                       elseif ($InputCase -eq 'distance-outside') { [Math]::Floor($width / 2) + 1 }
                       elseif ($InputCase -eq 'offset-pair') { $OffsetX } else { 0 }
                 $dy = if ($InputCase -eq 'offset-pair') { $OffsetY } else { 0 }
-                if ($InputCase -in @('adjacent-reset', 'edge-reset') -and $sequenceWatch.ElapsedMilliseconds -ge $time) {
-                    throw 'Adjacent case exceeded the OS interval before its second title press'
-                }
-                if ($InputCase -in @('adjacent-reset', 'edge-reset') -and [MetaWorkChromeProbe]::WindowFromPoint($point) -ne $dragChild) {
-                    throw 'Adjacent sequence lost its native title hit before the final press'
-                }
                 Invoke-MetaWorkTitleClick ($point.X + $dx) ($point.Y + $dy)
                 Start-Sleep -Milliseconds 160
                 $clickStates += [bool][MetaWorkChromeProbe]::IsZoomed($window)
-                if ($InputCase -in @('adjacent-reset', 'edge-reset')) {
-                    $afterAdjacent = Get-MetaWorkRect $window
-                    if ($afterAdjacent.Left -ne $before.Left -or $afterAdjacent.Top -ne $before.Top -or
-                        $afterAdjacent.Right -ne $before.Right -or $afterAdjacent.Bottom -ne $before.Bottom) {
-                        throw 'Adjacent sequence moved/resized the window; absence of toggle is not a pass'
-                    }
-                }
-                $expectedMaximized = $InputCase -in @('pair', 'distance-inside', 'quad')
-                if (-not $BrowserGesture -and [MetaWorkChromeProbe]::IsZoomed($window) -ne $expectedMaximized) {
-                    throw "Input case $InputCase did not respect native double-click semantics"
-                }
                 if ($InputCase -eq 'quad') {
                     $point = Get-InputPoint $PointX $PointY
                     Invoke-MetaWorkTitleClick $point.X $point.Y
                     Start-Sleep -Milliseconds 60
                     $clickStates += [bool][MetaWorkChromeProbe]::IsZoomed($window)
-                    if (-not $BrowserGesture -and -not [MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Third click toggled twice' }
                     Invoke-MetaWorkTitleClick $point.X $point.Y
                     Start-Sleep -Milliseconds 160
                     $clickStates += [bool][MetaWorkChromeProbe]::IsZoomed($window)
-                    if (-not $BrowserGesture -and [MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Fourth click did not restore' }
-                    $expectedMaximized = $false
                 }
-            }
-            'maximized-drag' {
-                if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Native maximized drag requires the isolated probe' }
-                Invoke-MetaWorkTitleDoubleClick $point.X $point.Y 60
-                Start-Sleep -Milliseconds 160
-                if (-not [MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Could not establish maximized precondition' }
-                $point = Get-InputPoint $PointX $PointY
-                $child = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
-                if ([MetaWorkChromeProbe]::WindowFromPoint($point) -ne $child) { throw 'Maximized title point does not hit drag input' }
-                Invoke-MetaWorkDrag $point.X $point.Y 80 48
-                Start-Sleep -Milliseconds 160
-                $after = Get-MetaWorkRect $window
-                if ([MetaWorkChromeProbe]::IsZoomed($window) -or $after.Right - $after.Left -ne $before.Right - $before.Left -or
-                    $after.Bottom - $after.Top -ne $before.Bottom - $before.Top) { throw 'Maximized title drag did not restore normal dimensions' }
             }
             'drag' {
                 Invoke-MetaWorkDrag $point.X $point.Y 80 48
@@ -1134,9 +739,9 @@ public sealed class MetaWorkCaptionReference : Form {
             }
             default { throw "Unknown input case $InputCase" }
         }
-        # Browser mode only supplies native observations; JS must compare each
+        # This driver supplies native observations; JS must compare each
         # actual DOM count/intent with the native outcome before calling it a pass.
-        [ordered]@{ case=$InputCase; timeMs=$time; distanceWidth=$width; distanceHeight=$height; dpi=[MetaWorkChromeProbe]::GetDpiForWindow($window); interruption=$interruption; clickStates=$clickStates; maximized=[bool][MetaWorkChromeProbe]::IsZoomed($window); before=$before; after=(Get-MetaWorkRect $window); passed=$(if ($BrowserGesture) { $null } else { $true }) } | ConvertTo-Json -Depth 8 -Compress
+        [ordered]@{ case=$InputCase; timeMs=$time; distanceWidth=$width; distanceHeight=$height; dpi=[MetaWorkChromeProbe]::GetDpiForWindow($window); clickStates=$clickStates; maximized=[bool][MetaWorkChromeProbe]::IsZoomed($window); before=$before; after=(Get-MetaWorkRect $window); passed=$null } | ConvertTo-Json -Depth 8 -Compress
     } finally {
         if (-not [MetaWorkChromeProbe]::SetDoubleClickTime($originalTime) -or [MetaWorkChromeProbe]::GetDoubleClickTime() -ne $originalTime) {
             throw 'Could not restore the original system double-click time'

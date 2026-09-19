@@ -16,7 +16,7 @@ export async function allocateWebViewTestPort() {
   return port;
 }
 
-export async function connectTestWebView(port, { htmlTitle } = {}) {
+export async function connectTestWebView(port) {
   let page;
   const deadline = Date.now() + 10_000;
   while (!page && Date.now() < deadline) {
@@ -27,11 +27,7 @@ export async function connectTestWebView(port, { htmlTitle } = {}) {
       page = (await response.json()).find(
         (candidate) =>
           candidate.type === "page" &&
-          (htmlTitle
-            ? candidate.title === htmlTitle &&
-              candidate.url.startsWith("data:text/html")
-            : new URL(candidate.url).origin ===
-              "https://native-sdk-app.localhost"),
+          new URL(candidate.url).origin === "https://native-sdk-app.localhost",
       );
     }
     if (!page) await new Promise((resolve) => setTimeout(resolve, 50));
@@ -105,16 +101,8 @@ export async function connectTestWebView(port, { htmlTitle } = {}) {
   }
 }
 
-export async function probeTopResizePaint({
-  port,
-  runProbe,
-  evidenceDir,
-  fixedDrag = false,
-}) {
-  const webview = await connectTestWebView(
-    port,
-    fixedDrag ? { htmlTitle: "Fixed native drag input probe" } : {},
-  );
+export async function probeTopResizePaint({ port, runProbe, evidenceDir }) {
+  const webview = await connectTestWebView(port);
   const { send } = webview;
   try {
     for (const [index, color] of [
@@ -135,7 +123,7 @@ export async function probeTopResizePaint({
           if (!strip) {
             strip = document.createElement('div');
             strip.id = 'metawork-resize-paint-probe';
-            strip.style.cssText = 'position:fixed;inset:0 0 auto;height:${fixedDrag ? 40 : 24}px;z-index:2147483647;pointer-events:none';
+            strip.style.cssText = 'position:fixed;inset:0 0 auto;height:24px;z-index:2147483647;pointer-events:none';
             document.body.append(strip);
           }
           for (let frame = 0; frame < 12; frame++) {
@@ -150,7 +138,6 @@ export async function probeTopResizePaint({
       // Observe the new pixels before any resize, activation, or occlusion can
       // repair stale content underneath the input child.
       const stationaryArgs = ["-ColorHex", color];
-      if (fixedDrag) stationaryArgs.push("-FixedDragPaint");
       if (evidenceDir)
         stationaryArgs.push(
           "-OutputPath",
@@ -163,7 +150,6 @@ export async function probeTopResizePaint({
         "-ProbeWidth",
         String(900 + index * 30),
       ];
-      if (fixedDrag) args.push("-FixedDragPaint");
       if (evidenceDir)
         args.push(
           "-OutputPath",

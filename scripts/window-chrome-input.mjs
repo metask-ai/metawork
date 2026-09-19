@@ -134,7 +134,6 @@ export async function probeWindowChromeInput({ port, runProbe, evidenceDir }) {
               String(y),
               "-DoubleClickMilliseconds",
               String(time),
-              "-BrowserGesture",
               "-OffsetX",
               String(dx),
               "-OffsetY",

@@ -19,11 +19,7 @@ const ArtifactOption = enum {
 };
 
 pub fn build(b: *std.Build) void {
-    const chrome_probe = b.option(bool, "window-chrome-probe", "Build the isolated Windows native-input proof, not the product") orelse false;
-    const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{
-        .name = if (chrome_probe) "metawork-drag-probe" else "metawork",
-        .main = if (chrome_probe) "src/window_chrome_probe.zig" else "src/main.zig",
-    });
+    const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
     const artifact = selectedArtifact(b);
     // Include the ICO in the generated resource path's cache identity.
     const windows_resources = b.addWriteFiles();

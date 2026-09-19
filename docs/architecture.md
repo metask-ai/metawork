@@ -137,8 +137,6 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 
 Window compatibility 共享的 startup window identity 只能由 Application 在窗口创建期建立一次并验证，再注入需要它的 seam；消费者不得复制捕获机制或把 identity 当成通用 system handle。`minimize` 等 Runtime API 已提供的能力必须保持正常路径，不能因相邻按钮使用 compatibility 而被吸入 seam。
 
-`system_webview_drag_region` 的 Windows 二级边界亦允许同 UI 线程的自有、初始隐藏输入子窗口：区域必须由其 owner 同步拥有，不接受未经证明与可见内容一致的 DOM 镜像；只能在 native top band 内，经 `system_webview_resize` 提供的实际有效占用裁剪。Application 组合 `resize > drag > WebView` 层级，seam 不互相依赖，drag 不独立置顶。该扩展只有隔离验证入口可用，不能据此激活生产路径。自己的 child userdata、形状和生命周期由 drag owner 管理；SDK root 只接入同线程资源生命周期回调，不读私有对象或替换其命中处理。失败必须实际撤销输入资源，shutdown 必须先解除回调再释放其数据；不能以布尔禁用代替资源撤销。原生双击和绘制、系统移动循环、中断、清理及与 resize 的组合由真实 System WebView 验证负责。其删除条件包含官方 SDK 公开启动 System WebView 的 `ICoreWebView2Settings9::IsNonClientRegionSupportEnabled` / CSS `app-region` 等价能力并通过验收，而非仅暴露 GPU surface 区域。
-
 `system_webview_resize` 只拥有输入子窗口和同 UI 线程的宿主生命周期回调；仅在系统上沿窄带内让缩放命中优先于隐藏标题栏残留的 DWM caption-button 命中。窗口尺寸限制与 resize loop 仍由 SDK/OS 决定，不建立第二份主窗口状态或 Renderer resize 协议。输入层须保持 WebView 原有绘制，跟随客户区及 DPI 更新，最大化或不可缩放时不截获输入；安装失败回滚并使应用启动失败，避免在未完成窗口能力初始化时继续启动；运行更新失败则移除失效输入层并报告，保留已运行的应用。主窗口销毁与 Application cleanup 均释放资源。真实鼠标缩放和无损绘制必须同时验收，不以程序化 resize 代替。
 
 `app_single_instance` 必须同时满足：
