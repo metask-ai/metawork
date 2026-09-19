@@ -634,6 +634,7 @@ pub const PreparedRun = struct {
                 false,
             );
             run_record.terminal_observed = true;
+            task_state.freezeRunElapsedMs(run_record, self.effects.run_clock.now());
             run_record.event_stream_finalized = true;
             run_record.finished_at_unix_ms = self.effects.run_clock.nowUnixMs();
             self.task.runtime.active_operation = .none;
@@ -2380,6 +2381,7 @@ pub const Runtime = struct {
 
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         self: *Runtime,
+        finished_at_ms: ?u64,
         finished_at_unix_ms: ?u64,
     ) bool {
         var changed = false;
@@ -2387,6 +2389,7 @@ pub const Runtime = struct {
             const task = &(entry.* orelse continue);
             if (!task_state.finalizeMarkedTerminalRunsAfterEventDrain(
                 task,
+                finished_at_ms,
                 finished_at_unix_ms,
             )) continue;
             _ = settleActiveRunTerminal(task);

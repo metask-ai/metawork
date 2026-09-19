@@ -2907,7 +2907,25 @@ button.run-process-tool:hover {
   white-space: nowrap;
 }
 
-.tool-raw-details > summary {
+.run-process-tool-audit-link {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 2px;
+  color: var(--ui-action-primary);
+  background: transparent;
+  font: inherit;
+  font-size: var(--text-micro);
+  text-align: left;
+  text-decoration: underline;
+  text-overflow: ellipsis;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tool-unparsed-details > summary {
   min-height: 44px;
   padding-block: 12px;
   cursor: pointer;
@@ -8820,9 +8838,62 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--ui-surface-panel-2);
 }
 
-.run-process-tool-detail .code-block-preview {
+.run-process-tool-detail .tool-evidence-surface {
   max-height: min(360px, 45vh);
+  padding: 9px 10px;
   overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--ui-border) 88%, transparent);
+  border-radius: 6px;
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel);
+  font-size: var(--text-label);
+  line-height: 1.5;
+}
+
+.run-process-tool-detail .tool-evidence-surface:focus-visible {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: -2px;
+}
+
+.tool-detail-facts {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.tool-detail-fact {
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+}
+
+.tool-detail-fact code {
+  min-width: 0;
+  color: var(--ui-content-primary);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.bash-exit-status {
+  margin: 12px 0 0;
+  color: var(--ui-content-muted);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.bash-exit-status[data-status="failed"] {
+  color: var(--metask-state-error);
+}
+
+.bash-exit-status + .detail-field {
+  margin-top: 12px;
+}
+
+.tool-unparsed-details .detail-field + .detail-field {
+  margin-top: 12px;
 }
 
 .run-process-tool-detail .detail-field + .detail-field,

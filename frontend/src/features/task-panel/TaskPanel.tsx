@@ -1,10 +1,25 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import type { TaskPanelTab } from "./task-panel-state.ts";
 
 function pathSegments(path: string): string[] {
   return path.split(/[\\/]/).filter(Boolean);
+}
+
+function revealTaskPanelTab(list: HTMLElement, tab: HTMLElement): void {
+  const listRect = list.getBoundingClientRect();
+  const tabRect = tab.getBoundingClientRect();
+  if (tabRect.left < listRect.left)
+    list.scrollLeft -= listRect.left - tabRect.left;
+  else if (tabRect.right > listRect.right)
+    list.scrollLeft += tabRect.right - listRect.right;
 }
 
 export function taskPanelTabLabels(tabs: TaskPanelTab[]): Map<string, string> {
@@ -72,7 +87,15 @@ export function TaskPanel({
   const { t } = useI18n();
   const labels = taskPanelTabLabels(tabs);
   const [focusedTabId, setFocusedTabId] = useState(activeTabId);
+  const tabList = useRef<HTMLDivElement | null>(null);
   const tabButtons = useRef(new Map<string, HTMLButtonElement>());
+
+  function revealTab(tabId: string) {
+    const list = tabList.current;
+    const tab = tabButtons.current.get(tabId)?.parentElement;
+    if (!list || !tab) return;
+    revealTaskPanelTab(list, tab);
+  }
 
   useEffect(() => {
     if (
@@ -83,9 +106,9 @@ export function TaskPanel({
     setFocusedTabId(activeTabId ?? tabs[0]?.tabId ?? null);
   }, [activeTabId, focusedTabId, tabs]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!activeTabId) return;
-    tabButtons.current.get(activeTabId)?.scrollIntoView({ inline: "nearest" });
+    revealTab(activeTabId);
   }, [activeTabId]);
 
   function labelFor(tab: TaskPanelTab): string {
@@ -110,7 +133,8 @@ export function TaskPanel({
     const next = tabs[nextIndex];
     if (!next || next.tabId === currentTabId) return;
     setFocusedTabId(next.tabId);
-    tabButtons.current.get(next.tabId)?.focus();
+    revealTab(next.tabId);
+    tabButtons.current.get(next.tabId)?.focus({ preventScroll: true });
   }
 
   return (
@@ -125,6 +149,7 @@ export function TaskPanel({
         </h2>
         {tabs.length > 0 && (
           <div
+            ref={tabList}
             className="task-panel-tabs"
             role="tablist"
             aria-label={t("task_panel.tabs")}

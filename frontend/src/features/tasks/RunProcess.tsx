@@ -1,6 +1,10 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 
-import type { RunActivity, ToolView } from "../../bridge/contracts.ts";
+import type {
+  RunActivity,
+  RunFileChanges,
+  ToolView,
+} from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n, type I18nValue, type MessageId } from "../../i18n/context.ts";
 import { formatInteger } from "../../i18n/formatters.ts";
@@ -97,24 +101,101 @@ function toolStateMessage(tool: ToolView): MessageId {
 }
 
 function toolDetailAvailable(tool: ToolView): boolean {
+  if (tool.errorDetail || tool.isError)
+    return Boolean(
+      tool.errorDetail ||
+      tool.content ||
+      tool.contentTruncated ||
+      tool.redacted,
+    );
+  switch (tool.presentation?.kind) {
+    case "write":
+    case "edit":
+    case "kill_shell":
+    case "web_search":
+      return false;
+    case "read":
+    case "glob":
+    case "grep":
+      return Boolean(
+        tool.content ||
+        tool.contentTruncated ||
+        tool.redacted ||
+        (tool.presentation.kind === "read" &&
+          (tool.presentation.offset || tool.presentation.limit)),
+      );
+    case "bash_output":
+      return Boolean(
+        tool.presentation.result || tool.contentTruncated || tool.redacted,
+      );
+    case "web_fetch":
+      return Boolean(
+        tool.presentation.result ||
+        tool.presentation.prompt ||
+        tool.contentTruncated ||
+        tool.redacted,
+      );
+  }
+  if (tool.name === "Edit" || tool.name === "Write") return false;
   return Boolean(
     tool.bash?.command != null ||
     tool.bash?.result != null ||
     tool.input ||
-    tool.progress ||
     tool.content ||
     tool.inputTruncated ||
-    tool.progressTruncated ||
     tool.contentTruncated ||
     tool.redacted,
   );
+}
+
+function toolPresentationSummary(tool: ToolView): string | null {
+  const presentation = tool.presentation;
+  if (!presentation) return null;
+  switch (presentation.kind) {
+    case "read":
+    case "write":
+    case "edit":
+      return presentation.target;
+    case "glob":
+    case "grep":
+      return presentation.pattern;
+    case "bash_output":
+    case "kill_shell":
+      return presentation.jobId;
+    case "web_search":
+      return presentation.query;
+    case "web_fetch":
+      return presentation.url;
+  }
+}
+
+function fileMutationAuditPath(
+  tool: ToolView,
+  fileChanges: RunFileChanges | null,
+): string | null {
+  if ((tool.name !== "Edit" && tool.name !== "Write") || !fileChanges)
+    return null;
+  const referencePaths = new Set(
+    tool.fileRefs.map((reference) => reference.displayPath),
+  );
+  if (referencePaths.size !== 1) return null;
+  const matchingPaths = new Set(
+    fileChanges.changes
+      .map((change) => change.displayPath)
+      .filter((path) => referencePaths.has(path)),
+  );
+  return matchingPaths.size === 1 ? [...matchingPaths][0]! : null;
 }
 
 function toolSummary(tool: ToolView): string | null {
   const fileNames = tool.fileRefs
     .map((reference) => reference.displayPath)
     .join(", ");
-  const summary = tool.bash?.description || tool.progress || fileNames;
+  const summary =
+    tool.bash?.description ||
+    fileNames ||
+    toolPresentationSummary(tool) ||
+    tool.progress;
   if (!summary) return null;
   return summary.length > 160 ? `${summary.slice(0, 160)}…` : summary;
 }
@@ -191,8 +272,10 @@ function RunElapsed({
     const interval = window.setInterval(() => setNow(performance.now()), 1000);
     return () => window.clearInterval(interval);
   }, [synchronized]);
-  const seconds = runElapsedSeconds(elapsedMs, receivedAt, now);
-  const duration = `${formatInteger(locale, seconds / 60n)}:${String(seconds % 60n).padStart(2, "0")}`;
+  const duration = formatElapsedDuration(
+    locale,
+    runElapsedSeconds(elapsedMs, receivedAt, now),
+  );
   // Outside the live region: elapsed seconds are not progress.
   return (
     <small className="run-process-elapsed" aria-live="off">
@@ -201,30 +284,56 @@ function RunElapsed({
   );
 }
 
+function formatElapsedDuration(
+  locale: I18nValue["locale"],
+  seconds: bigint,
+): string {
+  return `${formatInteger(locale, seconds / 60n)}:${String(seconds % 60n).padStart(2, "0")}`;
+}
+
 function ProcessTool({
   tool,
+  fileChanges,
   expanded,
   onExpandedChange,
+  onReviewFileChanges,
 }: {
   tool: ToolView;
+  fileChanges: RunFileChanges | null;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
+  onReviewFileChanges?: (
+    displayPath: string,
+    opener: HTMLButtonElement,
+  ) => void;
 }) {
   const { locale, t } = useI18n();
   const detailId = useId();
   const elapsed = BigInt(tool.elapsedMs);
   const hasDetails = toolDetailAvailable(tool);
+  const auditPath = fileMutationAuditPath(tool, fileChanges);
   const summary = toolSummary(tool);
   const content = (
     <>
       <span className="run-process-tool-mark" aria-hidden="true" />
       <span className="run-process-tool-label">
         <span className="run-process-tool-name">{tool.name}</span>
-        {summary && (
+        {auditPath && onReviewFileChanges ? (
+          <button
+            type="button"
+            className="run-process-tool-audit-link focus-ring"
+            aria-label={t("file_changes.review_file", { path: auditPath })}
+            onClick={(event) =>
+              onReviewFileChanges(auditPath, event.currentTarget)
+            }
+          >
+            {auditPath}
+          </button>
+        ) : summary ? (
           <span className="run-process-tool-description" title={summary}>
             {summary}
           </span>
-        )}
+        ) : null}
       </span>
       <span className="run-process-tool-meta">
         <span>{t(toolStateMessage(tool))}</span>
@@ -267,6 +376,7 @@ function ProcessTool({
 
 export function RunProcess({
   presentation,
+  fileChanges = null,
   elapsedMs = null,
   snapshotReceivedAt = null,
   synchronized = true,
@@ -275,8 +385,10 @@ export function RunProcess({
   onExpandedChange,
   expandedToolIds = emptyExpandedToolIds,
   onToolExpandedChange = () => {},
+  onReviewFileChanges,
 }: {
   presentation: RunPresentation;
+  fileChanges?: RunFileChanges | null;
   elapsedMs?: string | null;
   snapshotReceivedAt?: number | null;
   synchronized?: boolean;
@@ -285,6 +397,10 @@ export function RunProcess({
   onExpandedChange: (expanded: boolean) => void;
   expandedToolIds?: ReadonlySet<string>;
   onToolExpandedChange?: (toolId: string, expanded: boolean) => void;
+  onReviewFileChanges?: (
+    displayPath: string,
+    opener: HTMLButtonElement,
+  ) => void;
 }) {
   const { locale, t } = useI18n();
   const bodyId = useId();
@@ -328,6 +444,15 @@ export function RunProcess({
               receivedAt={snapshotReceivedAt}
               synchronized={synchronized}
             />
+          ) : !presentation.active && elapsedMs !== null ? (
+            <small className="run-process-elapsed" aria-live="off">
+              {t("run.process.elapsed", {
+                duration: formatElapsedDuration(
+                  locale,
+                  BigInt(elapsedMs) / 1000n,
+                ),
+              })}
+            </small>
           ) : null
         }
         collapsible={presentation.processCanCollapse}
@@ -343,10 +468,12 @@ export function RunProcess({
                 <ProcessTool
                   key={tool.id}
                   tool={tool}
+                  fileChanges={fileChanges}
                   expanded={expandedToolIds.has(tool.id)}
                   onExpandedChange={(nextExpanded) =>
                     onToolExpandedChange(tool.id, nextExpanded)
                   }
+                  onReviewFileChanges={onReviewFileChanges}
                 />
               ))}
             </ul>

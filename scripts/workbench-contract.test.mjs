@@ -345,7 +345,7 @@ test("Skill source results use bounded typed rejections and lossless u64 revisio
     assert.throws(() => decodeSkillSourceSettingsResult(result));
 });
 
-test("Run elapsed time is nullable, bounded, and unavailable for terminal history", () => {
+test("Run elapsed time is nullable, bounded, and frozen for terminal history", () => {
   for (const value of [null, "0", "134000"]) {
     const candidate = clone(fixture);
     const run = candidate.tasks[0].runs[0];
@@ -361,16 +361,17 @@ test("Run elapsed time is nullable, bounded, and unavailable for terminal histor
     assert.throws(() => decodeWorkbenchSnapshot(candidate));
   }
   const candidate = clone(fixture);
+  const task = candidate.tasks[0];
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.activeOperation = null;
   const run = candidate.tasks[0].runs[0];
   run.phase = "completed";
   run.activity = null;
   run.output.provisional = "";
   run.terminal = terminal("completed");
   run.elapsedMs = "1200";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(candidate),
-    /terminal Run cannot expose active elapsed/,
-  );
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
 });
 
 test("Run finished time is terminal-only, bounded, and lossless", () => {
@@ -434,6 +435,8 @@ test("typed Bash presentation rejects contradictory or malformed detail", () => 
         stderrIncomplete: false,
       },
     },
+    presentation: null,
+    errorDetail: null,
     input: "{}",
     progress: "",
     content: "raw",
@@ -463,6 +466,116 @@ test("typed Bash presentation rejects contradictory or malformed detail", () => 
     mutate(invalid.tasks[0].runs[0].tools[0]);
     assert.throws(() => decodeWorkbenchSnapshot(invalid));
   }
+});
+
+test("typed built-in Tool presentations remain identity-bound and terminal-safe", () => {
+  const presentations = [
+    [
+      "Read",
+      { kind: "read", target: "/workspace/main.ts", offset: "1", limit: "20" },
+    ],
+    ["Write", { kind: "write", target: "/workspace/main.ts" }],
+    ["Edit", { kind: "edit", target: "/workspace/main.ts" }],
+    ["Glob", { kind: "glob", pattern: "**/*.ts", scope: "/workspace" }],
+    [
+      "Grep",
+      {
+        kind: "grep",
+        pattern: "TODO",
+        scope: "/workspace",
+        include: "*.ts",
+      },
+    ],
+    [
+      "BashOutput",
+      {
+        kind: "bash_output",
+        jobId: "job-1",
+        result: {
+          status: "exited",
+          stdout: "done",
+          stderr: "",
+          stdoutIncomplete: false,
+          stderrIncomplete: false,
+        },
+      },
+    ],
+    ["KillShell", { kind: "kill_shell", jobId: "job-1" }],
+    ["WebSearch", { kind: "web_search", query: "release notes" }],
+    [
+      "WebFetch",
+      {
+        kind: "web_fetch",
+        url: "https://example.com",
+        prompt: null,
+        result: {
+          url: "https://example.com",
+          bytes: "12",
+          content: "hello world",
+        },
+      },
+    ],
+  ];
+  for (const [name, presentation] of presentations) {
+    const candidate = clone(fixture);
+    candidate.tasks[0].runs[0].tools = [
+      {
+        id: "tool-1",
+        order: "1",
+        name,
+        bash: null,
+        presentation,
+        errorDetail: null,
+        input: "{}",
+        progress: "",
+        content: "result",
+        state: "completed",
+        isError: false,
+        elapsedMs: "1",
+        inputTruncated: false,
+        progressTruncated: false,
+        contentTruncated: false,
+        redacted: false,
+        fileRefs: [],
+      },
+    ];
+    assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
+  }
+
+  const mismatch = clone(fixture);
+  mismatch.tasks[0].runs[0].tools = [
+    {
+      id: "tool-1",
+      order: "1",
+      name: "Read",
+      bash: null,
+      presentation: { kind: "web_search", query: "wrong identity" },
+      errorDetail: null,
+      input: "{}",
+      progress: "",
+      content: "",
+      state: "completed",
+      isError: false,
+      elapsedMs: "1",
+      inputTruncated: false,
+      progressTruncated: false,
+      contentTruncated: false,
+      redacted: false,
+      fileRefs: [],
+    },
+  ];
+  assert.throws(
+    () => decodeWorkbenchSnapshot(mismatch),
+    /presentation does not match tool identity/,
+  );
+
+  const invalidError = clone(mismatch);
+  invalidError.tasks[0].runs[0].tools[0].presentation = null;
+  invalidError.tasks[0].runs[0].tools[0].errorDetail = "failed";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(invalidError),
+    /error detail requires a failed tool/,
+  );
 });
 
 test("the canonical Workbench fixture decodes without normalization", () => {
@@ -820,6 +933,8 @@ test("file references expose only preview identity and presentation", () => {
       order: "1",
       name: "Read",
       bash: null,
+      presentation: null,
+      errorDetail: null,
       input: "{}",
       progress: "",
       content: "ok",
@@ -2315,6 +2430,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     order: "1",
     name: "Bash",
     bash: null,
+    presentation: null,
+    errorDetail: null,
     input: "false",
     progress: "",
     content: "exit 1",
@@ -2450,6 +2567,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     order: "1",
     name: "Read",
     bash: null,
+    presentation: null,
+    errorDetail: null,
     input: "",
     progress: "",
     content: "done",
@@ -2519,6 +2638,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     order: "1",
     name: "Read",
     bash: null,
+    presentation: null,
+    errorDetail: null,
     input: "",
     progress: "",
     content: "done",

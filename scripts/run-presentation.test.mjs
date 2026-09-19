@@ -35,6 +35,16 @@ test("finished time uses a locale-aware relative label with an absolute value", 
     formatRunFinishedTime("zh-CN", String(finishedAt), now).relative,
     "4天前",
   );
+  assert.equal(
+    formatRunFinishedTime("en-US", String(finishedAt), finishedAt + 30000)
+      .relative,
+    "Just now",
+  );
+  assert.equal(
+    formatRunFinishedTime("zh-CN", String(finishedAt), finishedAt + 30000)
+      .relative,
+    "刚刚",
+  );
   assert.equal(formatRunFinishedTime("en-US", null, now), null);
 });
 

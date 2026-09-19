@@ -5032,8 +5032,11 @@ pub const Runtime = struct {
     /// Agent event pump following `markTerminalRunsBeforeEventDrain`.
     /// Any later event for the Run is rejected by `applyEvent`.
     pub fn finalizeMarkedTerminalRunsAfterEventDrain(self: *Runtime) void {
+        const finished_at_ms = self.run_clock.now();
+        const finished_at_unix_ms = self.run_clock.nowUnixMs();
         const changed = self.task_runtime.finalizeMarkedTerminalRunsAfterEventDrain(
-            self.run_clock.nowUnixMs(),
+            finished_at_ms,
+            finished_at_unix_ms,
         );
         if (changed) {
             self.commitTaskStateNoFail();
@@ -13649,10 +13652,13 @@ test "Run elapsed projection samples an injected clock without publishing revisi
     run.terminal_publication.store(.published, .release);
     try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
     run.terminal_observed = true;
+    task_test_state.freezeRunElapsedMs(run, now);
     run.event_stream_finalized = true;
-    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, now));
+    try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
+    now = 200000;
+    try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
     run.admitted_at_ms = null;
-    try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, now));
+    try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
 }
 
 test "thinking and assistant chunks update distinct safe projections" {
@@ -15097,6 +15103,42 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
     }
 }
 
+test "built-in Tool presentation projects readable parameters and failures" {
+    var limits = testLimits();
+    limits.max_tools_per_run = 4;
+    limits.max_projection_bytes = 128 * 1024;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+
+    const events = [_][]const u8{
+        "{\"tool_result\":{\"id\":\"read-1\",\"name\":\"Read\",\"input\":\"{\\\"file_path\\\":\\\"/workspace/main.ts\\\",\\\"offset\\\":12,\\\"limit\\\":3}\",\"content\":\"12\\tconst value = true;\",\"is_error\":false,\"elapsed_ms\":1}}",
+        "{\"tool_result\":{\"id\":\"search-1\",\"name\":\"WebSearch\",\"input\":\"{\\\"query\\\":\\\"release notes\\\"}\",\"content\":\"provider wrapper\",\"is_error\":false,\"elapsed_ms\":3}}",
+        "{\"tool_result\":{\"id\":\"fetch-1\",\"name\":\"WebFetch\",\"input\":\"{\\\"url\\\":\\\"https://example.com\\\",\\\"prompt\\\":\\\"Find limits\\\"}\",\"content\":\"{\\\"url\\\":\\\"https://example.com\\\",\\\"bytes\\\":12,\\\"content\\\":\\\"hello world\\\"}\",\"is_error\":false,\"elapsed_ms\":4}}",
+        "{\"tool_result\":{\"id\":\"edit-1\",\"name\":\"Edit\",\"input\":\"{\\\"file_path\\\":\\\"/workspace/main.ts\\\"}\",\"content\":\"{\\\"error\\\":{\\\"detail\\\":\\\"Original text not found\\\"}}\",\"is_error\":true,\"elapsed_ms\":5}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+
+    var storage: [128 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&storage);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer parsed.deinit();
+    const tools = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items;
+    try std.testing.expectEqual(@as(usize, events.len), tools.len);
+    try std.testing.expectEqualStrings("read", tools[0].object.get("presentation").?.object.get("kind").?.string);
+    try std.testing.expectEqualStrings("12", tools[0].object.get("presentation").?.object.get("offset").?.string);
+    try std.testing.expectEqualStrings("web_search", tools[1].object.get("presentation").?.object.get("kind").?.string);
+    try std.testing.expectEqualStrings("release notes", tools[1].object.get("presentation").?.object.get("query").?.string);
+    const fetch = tools[2].object.get("presentation").?.object;
+    try std.testing.expectEqualStrings("web_fetch", fetch.get("kind").?.string);
+    try std.testing.expectEqualStrings("hello world", fetch.get("result").?.object.get("content").?.string);
+    try std.testing.expectEqualStrings("edit", tools[3].object.get("presentation").?.object.get("kind").?.string);
+    try std.testing.expectEqualStrings("Original text not found", tools[3].object.get("errorDetail").?.string);
+}
+
 test "Runtime projects tools and full-width usage without parsing protocol in Renderer" {
     var control = try testRuntime();
     defer control.deinit();
@@ -15838,17 +15880,30 @@ test "completed terminal drain closes collecting file change observation" {
     var control = try testRuntime();
     defer control.deinit();
     const Clock = struct {
+        monotonic_ms: u64,
+        unix_ms: u64,
+
         fn now(context: ?*anyopaque) ?u64 {
-            const value: *u64 = @ptrCast(@alignCast(context.?));
-            return value.*;
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.monotonic_ms;
+        }
+
+        fn nowUnix(context: ?*anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.unix_ms;
         }
     };
-    var now_unix_ms: u64 = 1_789_436_313_000;
+    var clock = Clock{
+        .monotonic_ms = 13_000,
+        .unix_ms = 1_789_436_313_000,
+    };
     control.run_clock = .{
-        .context = &now_unix_ms,
-        .now_unix_ms_fn = Clock.now,
+        .context = &clock,
+        .now_ms_fn = Clock.now,
+        .now_unix_ms_fn = Clock.nowUnix,
     };
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    run.admitted_at_ms = 1_000;
     try std.testing.expectEqual(task_test_state.FileChangeObservation.collecting, run.file_change_observation.?);
     try std.testing.expect(commitTerminal(
         run,
@@ -15862,9 +15917,15 @@ test "completed terminal drain closes collecting file change observation" {
     control.markTerminalRunsBeforeEventDrain();
     control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expectEqual(task_test_state.FileChangeObservation.complete, run.file_change_observation.?);
-    try std.testing.expectEqual(@as(?u64, now_unix_ms), run.finished_at_unix_ms);
+    try std.testing.expectEqual(@as(?u64, 12_000), run.elapsed_ms);
+    try std.testing.expectEqual(@as(?u64, clock.unix_ms), run.finished_at_unix_ms);
     var storage: [96 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&storage);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        snapshot,
+        "\"elapsedMs\":\"12000\"",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,

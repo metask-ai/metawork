@@ -145,7 +145,7 @@ if ($OpenBashDetail) {
         }
         throw "MetaWork visual target not found: $pattern"
     }
-    Invoke-MetaWorkNamedButton '\u5de5\u4f5c\u8fc7\u7a0b|Work process'
+    Invoke-MetaWorkNamedButton '\u6267\u884c\u8be6\u60c5|Execution details'
     Invoke-MetaWorkNamedButton '\u5c55\u5f00\u6216\u6536\u8d77 Bash \u7684\u8be6\u60c5|Show or hide details for Bash'
 }
 

@@ -147,6 +147,7 @@ function run(overrides = {}) {
     activity: null,
     submittedAtUnixMs: null,
     finishedAtUnixMs: null,
+    elapsedMs: "12000",
     terminal: terminal(),
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
     tools: [],
@@ -160,6 +161,8 @@ function technicalTool(overrides = {}) {
     order: "1",
     name: "Read",
     bash: null,
+    presentation: null,
+    errorDetail: null,
     input: "",
     progress: "",
     content: "",
@@ -175,7 +178,7 @@ function technicalTool(overrides = {}) {
   };
 }
 
-test("Bash detail shows known fields with collapsed raw evidence and explicit empty streams", () => {
+test("Bash detail shows semantic evidence without duplicate protocol data or copy actions", () => {
   const tool = technicalTool({
     name: "Bash",
     input: '{"command":"pwd"}',
@@ -194,14 +197,108 @@ test("Bash detail shows known fields with collapsed raw evidence and explicit em
   });
   const view = render(localizedView(createElement(ToolDetailView, { tool })));
   assert.ok(screen.getByText("pwd"));
-  assert.ok(screen.getByText("No standard output captured."));
+  assert.ok(screen.getByText("Command completed · exit code 0"));
   assert.ok(screen.getByText("partial warning"));
+  assert.equal(screen.queryByText("No standard output captured."), null);
+  assert.equal(screen.queryByText("raw envelope"), null);
+  assert.equal(view.container.querySelector("details"), null);
+  assert.equal(screen.queryByRole("button", { name: "Copy code" }), null);
+  assert.equal(
+    view.container.querySelectorAll(".tool-evidence-surface").length,
+    2,
+  );
+});
+
+test("partially parsed Bash detail discloses only unparsed evidence", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "raw envelope",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: null,
+    },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.ok(screen.getByText("pwd"));
+  assert.ok(screen.getByText("Some Bash data could not be interpreted."));
   assert.equal(view.container.querySelector("details").open, false);
   assert.ok(
     view.container
       .querySelector("details")
       .textContent.includes("raw envelope"),
   );
+  assert.equal(
+    view.container.querySelector("details").textContent.includes("command"),
+    false,
+  );
+});
+
+test("unparsed Bash detail presents safe original evidence directly", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "raw envelope",
+    bash: { command: null, description: null, result: null },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.ok(screen.getByText(/^This Bash call could not be interpreted\./));
+  assert.ok(screen.getByText('{"command":"pwd"}'));
+  assert.ok(screen.getByText("raw envelope"));
+  assert.equal(view.container.querySelector("details"), null);
+  assert.equal(screen.queryByRole("button", { name: "Copy code" }), null);
+});
+
+test("generic Tool detail uses selectable evidence without copy actions", () => {
+  const tool = technicalTool({
+    input: '{"file_path":"README.md"}',
+    content: "raw result",
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.equal(view.container.querySelectorAll("button").length, 0);
+  assert.equal(
+    view.container.querySelectorAll(".tool-evidence-surface").length,
+    2,
+  );
+  assert.ok(screen.getByText('{"file_path":"README.md"}'));
+  assert.ok(screen.getByText("raw result"));
+});
+
+test("terminal Bash detail reports an unparsed empty result", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: null,
+    },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
+  assert.ok(screen.getByText("Some Bash data could not be interpreted."));
+  assert.equal(view.container.querySelector("details"), null);
+});
+
+test("Bash detail updates when readable projection becomes unavailable", () => {
+  const tool = technicalTool({
+    name: "Bash",
+    input: '{"command":"pwd"}',
+    content: "raw envelope",
+    bash: {
+      command: "pwd",
+      description: "Inspect workspace",
+      result: {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        stdoutIncomplete: false,
+        stderrIncomplete: false,
+      },
+    },
+  });
+  const view = render(localizedView(createElement(ToolDetailView, { tool })));
   view.rerender(
     localizedView(
       createElement(ToolDetailView, { tool: { ...tool, bash: null } }),
@@ -307,6 +404,239 @@ function fileChange(overrides = {}) {
   };
 }
 
+test("Edit and Write replace raw protocol details with matching file audit links", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const opened = [];
+  const value = run({
+    tools: [
+      technicalTool({
+        name: "Edit",
+        input: '{"file_path":"/workspace/index.html","old_string":"before"}',
+        content: '{"success":true,"gitDiff":"-before\\n+after"}',
+        fileRefs: [
+          { id: "file-1", title: "index.html", displayPath: "index.html" },
+        ],
+      }),
+      technicalTool({
+        id: "tool-2",
+        order: "2",
+        name: "Write",
+        input: '{"file_path":"/workspace/app.js","content":"saved"}',
+        content: '{"success":true}',
+        fileRefs: [{ id: "file-2", title: "app.js", displayPath: "app.js" }],
+      }),
+    ],
+    fileChanges: {
+      observation: "complete",
+      changes: [
+        fileChange({ displayPath: "index.html" }),
+        fileChange({ id: "change-2", order: "2", displayPath: "app.js" }),
+      ],
+    },
+  });
+  render(
+    runProcessElement(value, {
+      onReviewFileChanges: (...args) => opened.push(args),
+    }),
+  );
+
+  assert.equal(
+    screen.queryByRole("button", { name: "Show or hide details for Edit" }),
+    null,
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Show or hide details for Write" }),
+    null,
+  );
+  assert.doesNotMatch(
+    document.body.textContent,
+    /old_string|gitDiff|file_path|success/,
+  );
+  const editAudit = screen.getByRole("button", {
+    name: "Review changes to index.html",
+  });
+  const writeAudit = screen.getByRole("button", {
+    name: "Review changes to app.js",
+  });
+  await user.click(editAudit);
+  await user.click(writeAudit);
+  assert.equal(opened.length, 2);
+  assert.equal(opened[0][0], "index.html");
+  assert.equal(opened[0][1], editAudit);
+  assert.equal(opened[1][0], "app.js");
+  assert.equal(opened[1][1], writeAudit);
+
+  cleanup();
+  render(
+    runProcessElement(
+      {
+        ...value,
+        fileChanges: {
+          ...value.fileChanges,
+          changes: [
+            fileChange({ displayPath: "other.html" }),
+            fileChange({ id: "change-2", order: "2", displayPath: "app.js" }),
+          ],
+        },
+      },
+      { onReviewFileChanges: (...args) => opened.push(args) },
+    ),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Review changes to index.html" }),
+    null,
+  );
+  assert.ok(screen.getByText("index.html"));
+  assert.ok(screen.getByRole("button", { name: "Review changes to app.js" }));
+  assert.doesNotMatch(
+    document.body.textContent,
+    /old_string|gitDiff|file_path|success/,
+  );
+});
+
+test("WebSearch keeps its useful summary without exposing provider protocol details", () => {
+  const value = run({
+    tools: [
+      technicalTool({
+        name: "WebSearch",
+        presentation: {
+          kind: "web_search",
+          query: "Hangzhou weather forecast",
+        },
+        progress: "Searching: Hangzhou weather forecast",
+        input: '{"query":"Hangzhou weather forecast"}',
+        content:
+          "**Z.ai Built-in Tool: web_search_prime**\n**Input:** raw provider protocol",
+        elapsedMs: "13127",
+      }),
+    ],
+  });
+  render(runProcessElement(value));
+
+  assert.ok(screen.getByText("Hangzhou weather forecast"));
+  assert.ok(screen.getByText("Completed"));
+  assert.ok(screen.getByText("13,127 ms"));
+  assert.equal(
+    screen.queryByRole("button", {
+      name: "Show or hide details for WebSearch",
+    }),
+    null,
+  );
+  assert.doesNotMatch(
+    document.body.textContent,
+    /web_search_prime|raw provider protocol|\{"query"/,
+  );
+});
+
+test("built-in Tool details present semantic evidence instead of input envelopes", () => {
+  const cases = [
+    {
+      tool: technicalTool({
+        name: "Read",
+        presentation: {
+          kind: "read",
+          target: "/workspace/src/main.ts",
+          offset: "12",
+          limit: "3",
+        },
+        input: '{"file_path":"/workspace/src/main.ts","offset":12,"limit":3}',
+        content: "12\tconst value = true;",
+      }),
+      visible: ["Start line", "12", "Line limit", "3", "const value"],
+      hidden: ["file_path"],
+    },
+    {
+      tool: technicalTool({
+        name: "Grep",
+        presentation: {
+          kind: "grep",
+          pattern: "TODO",
+          scope: "/workspace/src",
+          include: "*.ts",
+        },
+        input: '{"pattern":"TODO","path":"/workspace/src","glob":"*.ts"}',
+        content: "src/main.ts:12:// TODO",
+      }),
+      visible: ["Scope", "/workspace/src", "File filter", "*.ts", "TODO"],
+      hidden: ['{"pattern"'],
+    },
+    {
+      tool: technicalTool({
+        name: "WebFetch",
+        presentation: {
+          kind: "web_fetch",
+          url: "https://example.com/docs",
+          prompt: "Find the API limits",
+          result: {
+            url: "https://example.com/docs",
+            bytes: "2048",
+            content: "API limit: 100 requests",
+          },
+        },
+        input: '{"url":"https://example.com/docs"}',
+        content: '{"bytes":2048,"content":"internal wrapper"}',
+      }),
+      visible: ["Purpose", "Find the API limits", "2,048", "100 requests"],
+      hidden: ["internal wrapper"],
+    },
+    {
+      tool: technicalTool({
+        name: "BashOutput",
+        presentation: {
+          kind: "bash_output",
+          jobId: "job-1",
+          result: {
+            status: "exited",
+            stdout: "server ready",
+            stderr: "",
+            stdoutIncomplete: false,
+            stderrIncomplete: false,
+          },
+        },
+        input: '{"job_id":"job-1"}',
+        content: '{"status":"exited","stdout":"internal wrapper"}',
+      }),
+      visible: ["Process status", "Exited", "server ready"],
+      hidden: ["internal wrapper", "job_id"],
+    },
+  ];
+
+  for (const { tool, visible, hidden } of cases) {
+    const view = render(localizedView(createElement(ToolDetailView, { tool })));
+    for (const text of visible)
+      assert.equal(view.container.textContent.includes(text), true);
+    for (const text of hidden)
+      assert.equal(view.container.textContent.includes(text), false);
+    cleanup();
+  }
+});
+
+test("failed summary-only Tools disclose a readable failure reason", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const value = run({
+    tools: [
+      technicalTool({
+        name: "Edit",
+        presentation: { kind: "edit", target: "/workspace/index.html" },
+        errorDetail: "The original text was not found.",
+        input: '{"file_path":"/workspace/index.html","old_string":"before"}',
+        content: '{"error":{"detail":"internal wrapper"}}',
+        state: "failed",
+        isError: true,
+      }),
+    ],
+  });
+  render(runProcessElement(value));
+
+  const toggle = screen.getByRole("button", {
+    name: "Show or hide details for Edit",
+  });
+  await user.click(toggle);
+  assert.ok(screen.getByText("The original text was not found."));
+  assert.equal(document.body.textContent.includes("internal wrapper"), false);
+  assert.equal(document.body.textContent.includes("old_string"), false);
+});
+
 function task(overrides = {}) {
   return {
     id: "3",
@@ -397,14 +727,17 @@ function taskContentElement(value, revision = "1", overrides = {}) {
 
 function runProcessElement(
   value,
-  { expanded = true, onExpandedChange = () => {} } = {},
+  { expanded = true, onExpandedChange = () => {}, onReviewFileChanges } = {},
 ) {
   function Harness() {
     const [expandedToolIds, setExpandedToolIds] = useState(new Set());
     return createElement(RunProcess, {
       presentation: deriveRunPresentation(value),
+      fileChanges: value.fileChanges ?? null,
+      elapsedMs: value.elapsedMs,
       expanded,
       onExpandedChange,
+      onReviewFileChanges,
       expandedToolIds,
       onToolExpandedChange(toolId, nextExpanded) {
         setExpandedToolIds((current) => {
@@ -1179,8 +1512,15 @@ test("terminal Run keeps Tool process evidence behind a collapsed summary", () =
   const markup = renderToStaticMarkup(
     runProcessElement(value, { expanded: false }),
   );
-  assert.match(markup, /Work process/);
+  assert.match(markup, /Execution details/);
+  assert.match(markup, /Turn time 0:12/);
   assert.doesNotMatch(markup, /run-process-tools/);
+
+  const untimedMarkup = renderToStaticMarkup(
+    runProcessElement({ ...value, elapsedMs: null }, { expanded: false }),
+  );
+  assert.match(untimedMarkup, /Execution details/);
+  assert.doesNotMatch(untimedMarkup, /Turn time/);
 });
 
 test("technical process disclosure remains user-controlled across revisions and Task switches", async () => {
@@ -1285,7 +1625,7 @@ test("successful terminal keeps commentary and collapsed technical process visib
   view.rerender(taskContentElement(completed, "2"));
   assert.equal(
     screen
-      .getByRole("button", { name: /^Work process/ })
+      .getByRole("button", { name: /^Execution details/ })
       .getAttribute("aria-expanded"),
     "false",
   );
@@ -1459,7 +1799,7 @@ test("terminal transition preserves reading position and collapses technical det
   );
   assert.equal(
     screen
-      .getByRole("button", { name: /^Work process/ })
+      .getByRole("button", { name: /^Execution details/ })
       .getAttribute("aria-expanded"),
     "false",
   );
@@ -1994,10 +2334,12 @@ test("Run File Changes summary is capability-gated and preserves incomplete zero
     visible.indexOf(">File changes<") <
       visible.indexOf('class="response-copy-actions"'),
   );
-  assert.match(visible, />Work process</);
+  assert.match(visible, />Execution details</);
+  assert.match(visible, />Turn time 0:12</);
   assert.ok(
-    visible.indexOf(">File changes<") < visible.indexOf(">Work process<") &&
-      visible.indexOf(">Work process<") <
+    visible.indexOf(">File changes<") <
+      visible.indexOf(">Execution details<") &&
+      visible.indexOf(">Execution details<") <
         visible.indexOf('class="response-copy-actions"'),
   );
 
@@ -2021,10 +2363,12 @@ function StatefulFileChangesView(props) {
   return createElement(FileChangesView, {
     ...props,
     expandedFiles,
+    focus: props.focus ?? null,
     scrollTop,
     onFileExpandedChange(displayPath, expanded) {
       setExpandedFiles((current) => ({ ...current, [displayPath]: expanded }));
     },
+    onFocusHandled: props.onFocusHandled ?? (() => {}),
     onScrollTopChange: setScrollTop,
   });
 }
@@ -2264,6 +2608,122 @@ test("file headers independently collapse their diff with pointer and keyboard",
     screen.getAllByRole("table", { name: "Recorded unified diff" }).length,
     3,
   );
+});
+
+test("Task Panel review locally positions and focuses an audited file", () => {
+  const changes = [
+    fileChange({ id: "change-a", displayPath: "src/a.ts" }),
+    fileChange({ id: "change-b", order: "2", displayPath: "src/b.ts" }),
+  ];
+  const props = {
+    observation: "complete",
+    changes,
+    diffs: {
+      "change-a": { phase: "idle", diff: null },
+      "change-b": { phase: "idle", diff: null },
+    },
+    onLoad() {},
+  };
+  const handled = [];
+  const view = render(
+    localizedView(
+      createElement(
+        "div",
+        { className: "review-scroll-boundary" },
+        createElement(StatefulFileChangesView, {
+          ...props,
+          focus: null,
+          onFocusHandled: (requestId) => handled.push(requestId),
+        }),
+      ),
+    ),
+  );
+  const boundary = document.querySelector(".review-scroll-boundary");
+  const review = document.querySelector(".task-panel-review");
+  const firstSection = document.querySelector('[data-file-path="src/a.ts"]');
+  const secondSection = document.querySelector('[data-file-path="src/b.ts"]');
+  boundary.scrollTop = 17;
+  boundary.scrollLeft = 23;
+  review.scrollTop = 100;
+  review.scrollLeft = 31;
+  Object.defineProperties(review, {
+    clientHeight: { configurable: true, value: 200 },
+    scrollHeight: { configurable: true, value: 800 },
+  });
+  review.getBoundingClientRect = () => new dom.window.DOMRect(0, 50, 300, 200);
+  firstSection.getBoundingClientRect = () =>
+    new dom.window.DOMRect(0, -350, 300, 100);
+  secondSection.getBoundingClientRect = () =>
+    new dom.window.DOMRect(0, 350, 300, 400);
+
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+  const originalFocus = HTMLElement.prototype.focus;
+  let scrollIntoViewCalls = 0;
+  const focusOptions = [];
+  HTMLElement.prototype.scrollIntoView = () => scrollIntoViewCalls++;
+  Object.defineProperty(HTMLElement.prototype, "focus", {
+    configurable: true,
+    writable: true,
+    value(options) {
+      if (this.classList.contains("task-panel-change-toggle"))
+        focusOptions.push(options);
+      return originalFocus.call(this, options);
+    },
+  });
+
+  try {
+    view.rerender(
+      localizedView(
+        createElement(
+          "div",
+          { className: "review-scroll-boundary" },
+          createElement(StatefulFileChangesView, {
+            ...props,
+            focus: { displayPath: "src/b.ts", requestId: 1 },
+            onFocusHandled: (requestId) => handled.push(requestId),
+          }),
+        ),
+      ),
+    );
+    assert.equal(review.scrollTop, 400);
+    assert.equal(review.scrollLeft, 31);
+    assert.equal(boundary.scrollTop, 17);
+    assert.equal(boundary.scrollLeft, 23);
+    assert.equal(document.activeElement, secondSection.querySelector("button"));
+
+    view.rerender(
+      localizedView(
+        createElement(
+          "div",
+          { className: "review-scroll-boundary" },
+          createElement(StatefulFileChangesView, {
+            ...props,
+            focus: { displayPath: "src/a.ts", requestId: 2 },
+            onFocusHandled: (requestId) => handled.push(requestId),
+          }),
+        ),
+      ),
+    );
+    assert.equal(review.scrollTop, 0);
+    assert.equal(review.scrollLeft, 31);
+    assert.equal(boundary.scrollTop, 17);
+    assert.equal(boundary.scrollLeft, 23);
+    assert.equal(document.activeElement, firstSection.querySelector("button"));
+  } finally {
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+    Object.defineProperty(HTMLElement.prototype, "focus", {
+      configurable: true,
+      writable: true,
+      value: originalFocus,
+    });
+  }
+
+  assert.equal(scrollIntoViewCalls, 0);
+  assert.deepEqual(focusOptions, [
+    { preventScroll: true },
+    { preventScroll: true },
+  ]);
+  assert.deepEqual(handled, [1, 2]);
 });
 
 test("continuous Review requests an idle record when its section nears the viewport", async () => {
@@ -2992,17 +3452,21 @@ test("Task Panel tabs use manual keyboard activation and one tab stop", async ()
     const [activeTabId, setActiveTabId] = useState(tabs[0].tabId);
     return localizedView(
       createElement(
-        TaskPanel,
-        {
-          title: "Side panel",
-          tabs,
-          activeTabId,
-          attention: null,
-          onSelectTab: setActiveTabId,
-          onCloseTab() {},
-          onClose() {},
-        },
-        tabs.find((tab) => tab.tabId === activeTabId)?.title,
+        "div",
+        { className: "tabs-scroll-boundary" },
+        createElement(
+          TaskPanel,
+          {
+            title: "Side panel",
+            tabs,
+            activeTabId,
+            attention: null,
+            onSelectTab: setActiveTabId,
+            onCloseTab() {},
+            onClose() {},
+          },
+          tabs.find((tab) => tab.tabId === activeTabId)?.title,
+        ),
       ),
     );
   }
@@ -3011,27 +3475,76 @@ test("Task Panel tabs use manual keyboard activation and one tab stop", async ()
   const first = screen.getByRole("tab", { name: "a.txt" });
   const second = screen.getByRole("tab", { name: "b.txt" });
   const third = screen.getByRole("tab", { name: "c.txt" });
+  const boundary = document.querySelector(".tabs-scroll-boundary");
+  const tabList = screen.getByRole("tablist");
+  tabList.scrollLeft = 0;
+  tabList.getBoundingClientRect = () => new dom.window.DOMRect(0, 0, 100, 44);
+  [first, second, third].forEach((tab, index) => {
+    tab.parentElement.getBoundingClientRect = () =>
+      new dom.window.DOMRect(index * 80 - tabList.scrollLeft, 0, 80, 44);
+  });
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+  const originalFocus = HTMLElement.prototype.focus;
+  let scrollIntoViewCalls = 0;
+  const focusOptions = [];
+  HTMLElement.prototype.scrollIntoView = () => scrollIntoViewCalls++;
   first.focus();
+  boundary.scrollTop = 17;
+  boundary.scrollLeft = 23;
+  tabList.scrollLeft = 0;
+  Object.defineProperty(HTMLElement.prototype, "focus", {
+    configurable: true,
+    writable: true,
+    value(options) {
+      const scrollLeft = tabList.scrollLeft;
+      const boundaryScrollTop = boundary.scrollTop;
+      const boundaryScrollLeft = boundary.scrollLeft;
+      const result = originalFocus.call(this, options);
+      tabList.scrollLeft = scrollLeft;
+      boundary.scrollTop = boundaryScrollTop;
+      boundary.scrollLeft = boundaryScrollLeft;
+      if (this.classList.contains("task-panel-tab")) focusOptions.push(options);
+      return result;
+    },
+  });
 
-  await user.keyboard("{ArrowRight}");
-  assert.equal(document.activeElement, second);
-  assert.equal(first.getAttribute("aria-selected"), "true");
-  assert.equal(second.getAttribute("aria-selected"), "false");
-  assert.equal(screen.getByRole("tabpanel").textContent, "a.txt");
+  try {
+    await user.keyboard("{ArrowRight}");
+    assert.equal(document.activeElement, second);
+    assert.ok(tabList.scrollLeft > 0);
+    assert.equal(first.getAttribute("aria-selected"), "true");
+    assert.equal(second.getAttribute("aria-selected"), "false");
+    assert.equal(screen.getByRole("tabpanel").textContent, "a.txt");
 
-  await user.keyboard("{Enter}");
-  assert.equal(second.getAttribute("aria-selected"), "true");
-  assert.equal(screen.getByRole("tabpanel").textContent, "b.txt");
-  assert.deepEqual(
-    [first, second, third].map((tab) => tab.tabIndex),
-    [-1, 0, -1],
-  );
+    await user.keyboard("{Enter}");
+    assert.equal(second.getAttribute("aria-selected"), "true");
+    assert.equal(screen.getByRole("tabpanel").textContent, "b.txt");
+    assert.deepEqual(
+      [first, second, third].map((tab) => tab.tabIndex),
+      [-1, 0, -1],
+    );
 
-  await user.keyboard("{End}");
-  assert.equal(document.activeElement, third);
-  assert.equal(second.getAttribute("aria-selected"), "true");
-  await user.keyboard("{Home}");
-  assert.equal(document.activeElement, first);
+    await user.keyboard("{End}");
+    assert.equal(document.activeElement, third);
+    assert.equal(second.getAttribute("aria-selected"), "true");
+    await user.keyboard("{Home}");
+    assert.equal(document.activeElement, first);
+  } finally {
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+    Object.defineProperty(HTMLElement.prototype, "focus", {
+      configurable: true,
+      writable: true,
+      value: originalFocus,
+    });
+  }
+  assert.equal(scrollIntoViewCalls, 0);
+  assert.equal(boundary.scrollTop, 17);
+  assert.equal(boundary.scrollLeft, 23);
+  assert.deepEqual(focusOptions, [
+    { preventScroll: true },
+    { preventScroll: true },
+    { preventScroll: true },
+  ]);
 });
 
 test("Task Panel sessions replace the singleton review in place", () => {
@@ -3287,12 +3800,19 @@ test("inline Tool detail follows live props without unsafe markup", () => {
   view.rerender(
     localizedView(
       createElement(ToolDetailView, {
-        tool: { ...value, progress: "progress two", state: "running" },
+        tool: {
+          ...value,
+          progress: "progress two",
+          content: "result two",
+          state: "running",
+        },
       }),
     ),
   );
   assert.equal(screen.queryByText("progress one"), null);
-  assert.ok(screen.getByText("progress two"));
+  assert.equal(screen.queryByText("progress two"), null);
+  assert.equal(screen.queryByText("result one"), null);
+  assert.ok(screen.getByText("result two"));
   view.unmount();
   assert.equal(screen.queryByText("result one"), null);
 });

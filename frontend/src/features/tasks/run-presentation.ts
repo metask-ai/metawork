@@ -4,7 +4,7 @@ import type {
   RunView,
   ToolView,
 } from "../../bridge/contracts.ts";
-import type { Locale } from "../../i18n/runtime.ts";
+import { translate, type Locale } from "../../i18n/runtime.ts";
 
 const nonTerminalPhases = new Set<RunPhase>([
   "queued",
@@ -85,10 +85,13 @@ export function formatRunTimestamp(
       timeStyle: "short",
     }).format(date),
     dateTime: date.toISOString(),
-    relative: new Intl.RelativeTimeFormat(formatterLocale, {
-      numeric: "auto",
-      style: "long",
-    }).format(relativeValue, unit),
+    relative:
+      absoluteDelta < 60 * 1000
+        ? translate(locale, "time.just_now")
+        : new Intl.RelativeTimeFormat(formatterLocale, {
+            numeric: "auto",
+            style: "long",
+          }).format(relativeValue, unit),
   };
 }
 
