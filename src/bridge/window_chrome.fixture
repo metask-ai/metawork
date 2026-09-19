@@ -3,7 +3,7 @@
     "generation": "7",
     "insets": { "top": 52, "left": 72, "bottom": 0, "right": 138 },
     "buttons": { "x": 0, "y": 0, "width": 138, "height": 52 },
-    "livePointerDrag": true,
+    "gestureMode": "browser_mouse",
     "rendererControls": true,
     "maximized": false
   },

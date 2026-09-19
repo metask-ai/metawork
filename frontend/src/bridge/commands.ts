@@ -8,7 +8,7 @@ export const commands = {
   disconnect: "metawork.events.disconnect",
   windowChromeConnect: "metawork.host.windowChrome.connect",
   windowChromeRefresh: "metawork.host.windowChrome.refresh",
-  windowChromePointer: "metawork.host.windowChrome.pointer",
+  windowChromeGesture: "metawork.host.windowChrome.gesture",
   windowChromeControl: "metawork.host.windowChrome.control",
   windowChromeDisconnect: "metawork.host.windowChrome.disconnect",
   openExternalLink: "metawork.host.links.openExternal",

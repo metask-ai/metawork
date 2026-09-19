@@ -38,7 +38,7 @@ pub const WindowChromePlatformEnvironment = struct {
     buttons_y: f64,
     buttons_width: f64,
     buttons_height: f64,
-    live_pointer_drag: bool,
+    gesture_mode: enum { browser_mouse, native_press, disabled },
     renderer_controls: bool,
     maximized: bool,
 };
@@ -49,9 +49,10 @@ pub const WindowChromeControlAction = enum {
     close,
 };
 
-pub const WindowChromePointer = union(enum) {
-    down: struct { x: f64, y: f64 },
-    reset,
+pub const WindowChromeGesture = struct {
+    action: enum { start_drag, toggle_maximize },
+    x: f64,
+    y: f64,
 };
 
 pub const Platform = struct {
@@ -85,10 +86,10 @@ pub const Platform = struct {
         ?*anyopaque,
         native_sdk.platform.WindowId,
     ) anyerror!WindowChromePlatformEnvironment,
-    window_chrome_pointer_fn: *const fn (
+    window_chrome_gesture_fn: *const fn (
         ?*anyopaque,
         native_sdk.platform.WindowId,
-        WindowChromePointer,
+        WindowChromeGesture,
     ) anyerror!void,
     window_chrome_control_fn: *const fn (
         ?*anyopaque,
@@ -304,7 +305,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.disconnect, .function = disconnectEvents },
             .{ .name = commands.window_chrome_connect, .function = connectWindowChrome },
             .{ .name = commands.window_chrome_refresh, .function = refreshWindowChrome },
-            .{ .name = commands.window_chrome_pointer, .function = handleWindowChromePointer },
+            .{ .name = commands.window_chrome_gesture, .function = handleWindowChromeGesture },
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
             .{ .name = commands.open_external_link, .function = openExternalLink },
@@ -659,30 +660,33 @@ pub const Dispatcher = struct {
         return encodeWindowChromeEnvironment(output, generation, environment);
     }
 
-    fn handleWindowChromePointer(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+    fn handleWindowChromeGesture(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
         try self.requireBootstrapWindow(invocation.source.window_id);
         if (!self.platform.on_main_thread_fn(self.platform.context))
             return error.InvalidBridgeThread;
-        var parsed = try handlers.parsePayload(handlers.WindowChromePointer, invocation.request.payload);
+        var parsed = try handlers.parsePayload(handlers.WindowChromeGesture, invocation.request.payload);
         defer parsed.deinit();
         const generation = try handlers.parseWireId(parsed.value.generation);
         try self.validateWindowChromeSession(invocation.source.window_id, generation);
-        const pointer: WindowChromePointer = if (std.mem.eql(u8, parsed.value.phase, "down")) down: {
-            const x = parsed.value.x orelse return error.InvalidBridgePayload;
-            const y = parsed.value.y orelse return error.InvalidBridgePayload;
-            break :down .{ .down = .{ .x = x, .y = y } };
-        } else if (std.mem.eql(u8, parsed.value.phase, "reset")) reset: {
-            if (parsed.value.x != null or parsed.value.y != null)
-                return error.InvalidBridgePayload;
-            break :reset .reset;
-        } else return error.InvalidBridgePayload;
-        try self.platform.window_chrome_pointer_fn(
+        const x = parsed.value.x;
+        const y = parsed.value.y;
+        if (!std.math.isFinite(x) or !std.math.isFinite(y) or x < 0 or y < 0 or x > 65_536 or y > 65_536)
+            return error.InvalidBridgePayload;
+        const gesture: WindowChromeGesture = .{
+            .action = switch (parsed.value.action) {
+                .start_drag => .start_drag,
+                .toggle_maximize => .toggle_maximize,
+            },
+            .x = x,
+            .y = y,
+        };
+        try self.platform.window_chrome_gesture_fn(
             self.platform.context,
             invocation.source.window_id,
-            pointer,
+            gesture,
         );
         return encodeWindowChromeHandled(output, generation);
     }
@@ -784,7 +788,7 @@ pub const Dispatcher = struct {
     ) ![]const u8 {
         return std.fmt.bufPrint(
             output,
-            "{{\"generation\":\"{d}\",\"insets\":{{\"top\":{d},\"left\":{d},\"bottom\":{d},\"right\":{d}}},\"buttons\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}},\"livePointerDrag\":{},\"rendererControls\":{},\"maximized\":{}}}",
+            "{{\"generation\":\"{d}\",\"insets\":{{\"top\":{d},\"left\":{d},\"bottom\":{d},\"right\":{d}}},\"buttons\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d}}},\"gestureMode\":\"{s}\",\"rendererControls\":{},\"maximized\":{}}}",
             .{
                 generation,
                 value.top,
@@ -795,7 +799,7 @@ pub const Dispatcher = struct {
                 value.buttons_y,
                 value.buttons_width,
                 value.buttons_height,
-                value.live_pointer_drag,
+                @tagName(value.gesture_mode),
                 value.renderer_controls,
                 value.maximized,
             },
@@ -5534,7 +5538,7 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
-        .window_chrome_pointer_fn = undefined,
+        .window_chrome_gesture_fn = undefined,
         .window_chrome_control_fn = undefined,
         .window_chrome_disconnect_fn = undefined,
     }, .{}, 3);
@@ -5683,7 +5687,7 @@ test "Automatic Workspace root Bridge keeps paths Host-only and mutates by gener
             .canonicalize_directory_fn = Harness.canonicalizeDirectory,
             .window_chrome_connect_fn = undefined,
             .window_chrome_refresh_fn = undefined,
-            .window_chrome_pointer_fn = undefined,
+            .window_chrome_gesture_fn = undefined,
             .window_chrome_control_fn = undefined,
             .window_chrome_disconnect_fn = undefined,
             .now_fn = Harness.now,
@@ -5774,7 +5778,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         models_calls: usize = 0,
         chrome_connect_calls: usize = 0,
         chrome_refresh_calls: usize = 0,
-        chrome_pointer_calls: usize = 0,
+        chrome_gesture_calls: usize = 0,
         chrome_control_calls: usize = 0,
         chrome_disconnect_calls: usize = 0,
         external_link_calls: usize = 0,
@@ -5823,7 +5827,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
                 .buttons_y = 0,
                 .buttons_width = 138,
                 .buttons_height = 52,
-                .live_pointer_drag = true,
+                .gesture_mode = .browser_mouse,
                 .renderer_controls = true,
                 .maximized = false,
             };
@@ -5851,21 +5855,16 @@ test "Dispatcher validates authority before domain calls and preserves committed
             return chromeEnvironment();
         }
 
-        fn handleWindowChromePointer(
+        fn handleWindowChromeGesture(
             context: ?*anyopaque,
             window_id: native_sdk.platform.WindowId,
-            pointer: WindowChromePointer,
+            gesture: WindowChromeGesture,
         ) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try std.testing.expectEqual(@as(native_sdk.platform.WindowId, 3), window_id);
-            switch (pointer) {
-                .down => |down| {
-                    try std.testing.expectEqual(@as(f64, 200), down.x);
-                    try std.testing.expectEqual(@as(f64, 20), down.y);
-                },
-                .reset => {},
-            }
-            self.chrome_pointer_calls += 1;
+            try std.testing.expectEqual(@as(f64, 200), gesture.x);
+            try std.testing.expectEqual(@as(f64, 20), gesture.y);
+            self.chrome_gesture_calls += 1;
         }
 
         fn controlWindowChrome(
@@ -5988,7 +5987,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .canonicalize_directory_fn = Harness.canonicalizeDirectory,
             .window_chrome_connect_fn = Harness.connectWindowChrome,
             .window_chrome_refresh_fn = Harness.refreshWindowChrome,
-            .window_chrome_pointer_fn = Harness.handleWindowChromePointer,
+            .window_chrome_gesture_fn = Harness.handleWindowChromeGesture,
             .window_chrome_control_fn = Harness.controlWindowChrome,
             .window_chrome_disconnect_fn = Harness.disconnectWindowChrome,
             .open_external_url_fn = Harness.openExternalUrl,
@@ -6047,7 +6046,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
         &response,
     );
     try std.testing.expect(std.mem.indexOf(u8, chrome_connect, "\"generation\":\"1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, chrome_connect, "\"livePointerDrag\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chrome_connect, "\"gestureMode\":\"browser_mouse\"") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_connect_calls);
     const chrome_refresh = native_dispatcher.dispatch(
         "{\"id\":\"chrome-refresh\",\"command\":\"metawork.host.windowChrome.refresh\",\"payload\":{\"generation\":\"1\"}}",
@@ -6056,27 +6055,39 @@ test "Dispatcher validates authority before domain calls and preserves committed
     );
     try std.testing.expect(std.mem.indexOf(u8, chrome_refresh, "\"right\":138") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_refresh_calls);
-    const chrome_pointer = native_dispatcher.dispatch(
-        "{\"id\":\"chrome-pointer\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"1\",\"phase\":\"down\",\"x\":200,\"y\":20}}",
+    const chrome_gesture = native_dispatcher.dispatch(
+        "{\"id\":\"chrome-pointer\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"action\":\"start_drag\",\"x\":200,\"y\":20}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, chrome_pointer, "\"generation\":\"1\"") != null);
-    const chrome_pointer_reset = native_dispatcher.dispatch(
-        "{\"id\":\"chrome-pointer-reset\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"1\",\"phase\":\"reset\"}}",
+    try std.testing.expect(std.mem.indexOf(u8, chrome_gesture, "\"generation\":\"1\"") != null);
+    const chrome_gesture_reset = native_dispatcher.dispatch(
+        "{\"id\":\"chrome-toggle\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"action\":\"toggle_maximize\",\"x\":200,\"y\":20}}",
         source,
         &response,
     );
-    try std.testing.expect(std.mem.indexOf(u8, chrome_pointer_reset, "\"generation\":\"1\"") != null);
-    try std.testing.expectEqual(@as(usize, 2), harness.chrome_pointer_calls);
+    try std.testing.expect(std.mem.indexOf(u8, chrome_gesture_reset, "\"generation\":\"1\"") != null);
+    try std.testing.expectEqual(@as(usize, 2), harness.chrome_gesture_calls);
     for ([_][]const u8{
-        "{\"id\":\"invalid-pointer-reset\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"1\",\"phase\":\"reset\",\"x\":200}}",
-        "{\"id\":\"invalid-pointer-down\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"1\",\"phase\":\"down\",\"x\":200}}",
+        "{\"id\":\"invalid-pointer-reset\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"phase\":\"reset\",\"x\":200}}",
+        "{\"id\":\"invalid-pointer-down\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"action\":\"start_drag\",\"x\":200}}",
+        "{\"id\":\"unknown-action\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"action\":\"close\",\"x\":200,\"y\":20}}",
+        "{\"id\":\"extra-field\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"action\":\"start_drag\",\"x\":200,\"y\":20,\"detail\":2}}",
+        "{\"id\":\"negative\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"action\":\"toggle_maximize\",\"x\":-1,\"y\":20}}",
+        "{\"id\":\"unbounded\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"action\":\"start_drag\",\"x\":200,\"y\":65537}}",
+        "{\"id\":\"nonfinite\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"action\":\"toggle_maximize\",\"x\":1e999,\"y\":20}}",
     }) |request| {
         const invalid_pointer = native_dispatcher.dispatch(request, source, &response);
         try std.testing.expect(std.mem.indexOf(u8, invalid_pointer, "\"handler_failed\"") != null);
     }
-    try std.testing.expectEqual(@as(usize, 2), harness.chrome_pointer_calls);
+    try std.testing.expectEqual(@as(usize, 2), harness.chrome_gesture_calls);
+    const retired_pointer = native_dispatcher.dispatch(
+        "{\"id\":\"retired\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"1\",\"phase\":\"reset\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, retired_pointer, "\"handled\":true") == null);
+    try std.testing.expectEqual(@as(usize, 2), harness.chrome_gesture_calls);
     const chrome_control = native_dispatcher.dispatch(
         "{\"id\":\"chrome-control\",\"command\":\"metawork.host.windowChrome.control\",\"payload\":{\"generation\":\"1\",\"action\":\"toggle_maximize\"}}",
         source,
@@ -6139,17 +6150,20 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(std.mem.indexOf(u8, stale_replacement_refresh, "\"handler_failed\"") != null);
     try std.testing.expectEqual(@as(usize, 1), harness.chrome_refresh_calls);
 
-    const current_pointer = "{\"id\":\"current-pointer\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"2\",\"phase\":\"down\",\"x\":200,\"y\":20}}";
-    _ = native_dispatcher.dispatch(current_pointer, foreign_bootstrap_window, &response);
-    harness.on_main_thread = false;
-    _ = native_dispatcher.dispatch(current_pointer, source, &response);
-    harness.on_main_thread = true;
+    const current_pointer = "{\"id\":\"current-pointer\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"2\",\"action\":\"start_drag\",\"x\":200,\"y\":20}}";
+    const current_toggle = "{\"id\":\"current-toggle\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"2\",\"action\":\"toggle_maximize\",\"x\":200,\"y\":20}}";
+    for ([_][]const u8{ current_pointer, current_toggle }) |request| {
+        _ = native_dispatcher.dispatch(request, foreign_bootstrap_window, &response);
+        harness.on_main_thread = false;
+        _ = native_dispatcher.dispatch(request, source, &response);
+        harness.on_main_thread = true;
+    }
     _ = native_dispatcher.dispatch(
-        "{\"id\":\"old-pointer\",\"command\":\"metawork.host.windowChrome.pointer\",\"payload\":{\"generation\":\"1\",\"phase\":\"reset\"}}",
+        "{\"id\":\"old-gesture\",\"command\":\"metawork.host.windowChrome.gesture\",\"payload\":{\"generation\":\"1\",\"action\":\"toggle_maximize\",\"x\":200,\"y\":20}}",
         source,
         &response,
     );
-    try std.testing.expectEqual(@as(usize, 2), harness.chrome_pointer_calls);
+    try std.testing.expectEqual(@as(usize, 2), harness.chrome_gesture_calls);
 
     const current_refresh = "{\"id\":\"current-refresh\",\"command\":\"metawork.host.windowChrome.refresh\",\"payload\":{\"generation\":\"2\"}}";
     harness.chrome_error = error.WindowUnavailable;
@@ -6582,7 +6596,7 @@ test "window chrome environment and action ack match the shared Renderer wire fi
         .buttons_y = 0,
         .buttons_width = 138,
         .buttons_height = 52,
-        .live_pointer_drag = true,
+        .gesture_mode = .browser_mouse,
         .renderer_controls = true,
         .maximized = false,
     });

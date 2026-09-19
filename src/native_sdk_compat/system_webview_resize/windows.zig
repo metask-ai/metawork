@@ -98,10 +98,7 @@ pub const State = struct {
     stopping: bool = false,
     width: i32 = -1,
     height: i32 = -1,
-    press_data: ?*anyopaque = null,
-    on_press: ?*const fn (*anyopaque) void = null,
-
-    pub fn attach(self: *State, binding: startup_window.Binding, data: *anyopaque, on_press: *const fn (*anyopaque) void) !void {
+    pub fn attach(self: *State, binding: startup_window.Binding) !void {
         if (self.root != null) return error.TopResizeAlreadyAttached;
         const root = binding.root orelse return error.WindowUnavailable;
         const thread_id = GetCurrentThreadId();
@@ -116,7 +113,7 @@ pub const State = struct {
             refresh_message = RegisterWindowMessageW(refresh_name);
             if (refresh_message == 0) return error.TopResizeMessageRegistrationFailed;
         }
-        self.* = .{ .root = root, .thread_id = thread_id, .press_data = data, .on_press = on_press };
+        self.* = .{ .root = root, .thread_id = thread_id };
         errdefer self.deinit();
         if (SetWindowSubclass(root, parentProc, @intFromPtr(self), @intFromPtr(self)) == 0)
             return error.TopResizeSubclassFailed;
@@ -286,7 +283,6 @@ fn childProc(child: HWND, message: UINT, wparam: WPARAM, lparam: LPARAM) callcon
             const root = self.root;
             const hit = self.hitTest(lparam);
             if (isTopResize(hit)) {
-                if (self.on_press) |on_press| on_press(self.press_data.?);
                 _ = ReleaseCapture();
                 if (PostMessageW(root, message, @intCast(hit), lparam) == 0)
                     self.fail(error.TopResizeInputPostFailed);
@@ -328,11 +324,6 @@ fn testWindow() !HWND {
         error.TestHostCreationFailed;
 }
 
-fn testReset(data: *anyopaque) void {
-    const count: *usize = @ptrCast(@alignCast(data));
-    count.* += 1;
-}
-
 fn testScreenPoint(root: HWND, x: i32, y: i32) LPARAM {
     var offset = Point{ .x = 0, .y = 0 };
     std.debug.assert(ScreenToClient(root, &offset) != 0);
@@ -343,9 +334,8 @@ fn testScreenPoint(root: HWND, x: i32, y: i32) LPARAM {
 
 test "top resize rejects an unavailable binding without installing resources" {
     var state: State = .{};
-    var presses: usize = 0;
-    try std.testing.expectError(error.WindowUnavailable, state.attach(.{ .root = null }, &presses, testReset));
-    try std.testing.expectError(error.WindowIdentityMismatch, state.attach(.{ .root = @ptrFromInt(1) }, &presses, testReset));
+    try std.testing.expectError(error.WindowUnavailable, state.attach(.{ .root = null }));
+    try std.testing.expectError(error.WindowIdentityMismatch, state.attach(.{ .root = @ptrFromInt(1) }));
     try std.testing.expect(state.root == null and state.child == null and !state.subclass_installed);
     state.deinit();
 }
@@ -357,10 +347,9 @@ test "top resize rolls back if the host is destroyed during child installation" 
     }
     var state: State = .{};
     defer state.deinit();
-    var presses: usize = 0;
     test_destroy_during_install = true;
     defer test_destroy_during_install = false;
-    if (state.attach(.{ .root = root }, &presses, testReset)) |_| {
+    if (state.attach(.{ .root = root })) |_| {
         return error.DestroyedHostWasAccepted;
     } else |err| {
         try std.testing.expect(err == error.TopResizeChildCreationFailed or err == error.WindowUnavailable);
@@ -373,8 +362,7 @@ test "top resize uses live geometry, signed screen coordinates and resizable sty
     const root = try testWindow();
     defer _ = DestroyWindow(root);
     var state: State = .{};
-    var presses: usize = 0;
-    try state.attach(.{ .root = root }, &presses, testReset);
+    try state.attach(.{ .root = root });
     defer state.deinit();
     try std.testing.expect(state.height > 0);
     try std.testing.expectEqual(@as(isize, ht_top_left), state.hitTest(testScreenPoint(root, 0, 1)));
@@ -390,7 +378,7 @@ test "top resize uses live geometry, signed screen coordinates and resizable sty
     _ = SetWindowLongPtrW(root, -16, style);
     try std.testing.expect(state.height > 0);
     const child = state.child;
-    try std.testing.expectError(error.TopResizeAlreadyAttached, state.attach(.{ .root = root }, &presses, testReset));
+    try std.testing.expectError(error.TopResizeAlreadyAttached, state.attach(.{ .root = root }));
     try std.testing.expectEqual(child, state.child);
     // Coalescing changes neither geometry nor resources.
     for (0..100) |_| {
@@ -405,9 +393,8 @@ test "top resize cleanup removes callbacks and children on repeated attach and d
     const root = try testWindow();
     defer _ = DestroyWindow(root);
     var state: State = .{};
-    var presses: usize = 0;
     for (0..100) |_| {
-        try state.attach(.{ .root = root }, &presses, testReset);
+        try state.attach(.{ .root = root });
         const child = state.child;
         state.deinit();
         state.deinit();
@@ -418,17 +405,16 @@ test "top resize cleanup removes callbacks and children on repeated attach and d
 }
 
 test "top resize tolerates root-first and child-first destruction" {
-    var presses: usize = 0;
     var state: State = .{};
     const root = try testWindow();
-    try state.attach(.{ .root = root }, &presses, testReset);
+    try state.attach(.{ .root = root });
     try std.testing.expect(DestroyWindow(root) != 0);
     try std.testing.expect(state.root == null and state.child == null and !state.subclass_installed);
     state.deinit();
     // Reuse the owner after the old HWND and its pending refresh are gone.
     const next = try testWindow();
     defer _ = DestroyWindow(next);
-    try state.attach(.{ .root = next }, &presses, testReset);
+    try state.attach(.{ .root = next });
     try std.testing.expect(DestroyWindow(state.child) != 0);
     try std.testing.expect(state.child == null);
     state.deinit();

@@ -13,7 +13,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { release, tmpdir } from "node:os";
 import path from "node:path";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,8 @@ import { promisify } from "node:util";
 import { buildAutomationDebugArtifact } from "./build.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import { verifyAgentCoreRuntimeAssets } from "./agentcore-runtime-assets.mjs";
+import { allocateWebViewTestPort } from "./window-top-resize-paint.mjs";
+import { probeWindowChromeUi } from "./window-chrome-ui.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -290,6 +292,11 @@ const provider = createProvider(responses, {
   frameDelayMs: 80,
 });
 const baseUrl = await provider.listen();
+const chromeProbePort =
+  process.platform === "win32" &&
+  process.env.METAWORK_WINDOW_CHROME_WORKBENCH === "1"
+    ? await allocateWebViewTestPort()
+    : null;
 
 let output = "";
 let exitState = null;
@@ -508,6 +515,61 @@ try {
       `Task snapshot disagrees with the accepted binding epoch: ${JSON.stringify(createdTask.binding)}`,
     );
   const deliveryCountBeforeRun = productDeliveryEmitCount();
+  if (chromeProbePort !== null) {
+    const evidenceDir = process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR;
+    if (!evidenceDir)
+      throw new Error("Workbench chrome probe requires an evidence directory");
+    await mkdir(evidenceDir, { recursive: true });
+    const git = async (...args) =>
+      (
+        await execFileAsync("git", args, {
+          cwd: root,
+          maxBuffer: 8 * 1024 * 1024,
+        })
+      ).stdout;
+    const patch = await git("diff", "--binary", "HEAD");
+    const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    const untracked = (
+      await git("ls-files", "--others", "--exclude-standard", "-z")
+    )
+      .split("\0")
+      .filter(Boolean);
+    await writeFile(path.join(evidenceDir, "source.patch"), patch);
+    await writeFile(
+      path.join(evidenceDir, "window-chrome-artifact.json"),
+      JSON.stringify(
+        {
+          timestamp: new Date().toISOString(),
+          revision: (await git("rev-parse", "HEAD")).trim(),
+          status: await git("status", "--short"),
+          diffSha256: sha256(patch),
+          untracked: await Promise.all(
+            untracked.map(async (file) => ({
+              file,
+              sha256: sha256(await readFile(path.join(root, file))),
+            })),
+          ),
+          artifact: binary,
+          artifactSha256: sha256(await readFile(binary)),
+          os: {
+            platform: process.platform,
+            release: release(),
+            arch: process.arch,
+          },
+          sdk: JSON.parse(
+            await readFile(
+              path.join(root, "node_modules/@native-sdk/cli/package.json"),
+              "utf8",
+            ),
+          ).version,
+          command: process.argv,
+        },
+        null,
+        2,
+      ),
+    );
+    await probeWindowsChromeUi();
+  }
   // Disabling the source invalidates the Workspace current authority, but the
   // already-created Task must still execute its pinned Skill below.
   const sourceOff = await invokeBridge("metawork.skills.setSourceEnabled", {
@@ -730,11 +792,10 @@ try {
     throw new Error(
       `typed File Changes diff was not served truthfully: ${JSON.stringify(fileChangeDiff)}`,
     );
-  assertLiveRunRevisions(
-    observedRunRevisions,
-    run,
-    productDeliveryEmitCount() - deliveryCountBeforeRun,
-  );
+  const runDeliveryEvents = productDeliveryEmitCount() - deliveryCountBeforeRun;
+  if (chromeProbePort !== null)
+    await probeWindowsChromeUi({ conversation: true });
+  assertLiveRunRevisions(observedRunRevisions, run, runDeliveryEvents);
   await captureVisual("terminal", 1320, 812);
   await captureVisual("terminal-narrow", 390, 812);
   await captureVisual("bash-detail", 1320, 812, false, false, false, true);
@@ -1428,6 +1489,12 @@ function startApplication() {
         attachmentJpegPath,
       ].join("\n"),
       METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL: baseUrl,
+      ...(chromeProbePort === null
+        ? {}
+        : {
+            WEBVIEW2_USER_DATA_FOLDER: join(platformHome, "chrome-webview"),
+            WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${chromeProbePort} --remote-debugging-address=127.0.0.1`,
+          }),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -2016,6 +2083,33 @@ async function automate(...args) {
     cwd: appCwd,
     timeout: commandTimeoutMs,
     maxBuffer: 1024 * 1024,
+  });
+}
+
+async function probeWindowsChromeUi({ conversation = false } = {}) {
+  await probeWindowChromeUi({
+    port: chromeProbePort,
+    hasTask: true,
+    conversation,
+    evidenceDir: process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR,
+    runProbe: async (mode, args = []) => {
+      const result = await execFileAsync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-File",
+          path.join(root, "scripts/probe-windows-window-chrome.ps1"),
+          "-ProcessId",
+          String(app.pid),
+          "-Mode",
+          mode,
+          ...args,
+        ],
+        { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
+      );
+      process.stdout.write(result.stdout);
+      return result.stdout;
+    },
   });
 }
 

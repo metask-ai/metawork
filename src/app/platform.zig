@@ -6,50 +6,40 @@ const control_ports = @import("metawork_product_control_ports");
 const automation_api = @import("metawork_automation");
 const app_window = @import("window.zig");
 
-test "Windows window Adapter clears rejected presses but allows detached cleanup" {
+test "Windows Adapter rejects both gestures before effects and allows detached cleanup" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
     var adapter = Adapter.init(std.testing.io, std.Thread.getCurrentId());
     defer adapter.deinit();
     const port = adapter.dispatcherPlatform();
-    const down: bridge_api.WindowChromePointer = .{ .down = .{ .x = 300, .y = 20 } };
-    const first: @TypeOf(adapter.window.drag_region_capability.platform.first_press.?) = .{
-        .tick_ms = 100,
-        .screen_point = .{ .x = 400, .y = 20 },
-        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
+    const gestures = [_]bridge_api.WindowChromeGesture{
+        .{ .action = .start_drag, .x = 300, .y = 20 },
+        .{ .action = .toggle_maximize, .x = 300, .y = 20 },
     };
-    adapter.window.drag_region_capability.platform.first_press = first;
-    try std.testing.expectError(error.WindowIdentityMismatch, port.window_chrome_pointer_fn(port.context, 2, down));
-    try std.testing.expect(adapter.window.drag_region_capability.platform.first_press != null);
-    try std.testing.expectError(error.RuntimeUnavailable, port.window_chrome_pointer_fn(port.context, 1, down));
-    try std.testing.expect(adapter.window.drag_region_capability.platform.first_press == null);
+    for (gestures) |gesture| {
+        try std.testing.expectError(error.WindowIdentityMismatch, port.window_chrome_gesture_fn(port.context, 2, gesture));
+        try std.testing.expectError(error.RuntimeUnavailable, port.window_chrome_gesture_fn(port.context, 1, gesture));
+    }
     try std.testing.expectError(error.RuntimeUnavailable, port.window_chrome_connect_fn(port.context, 1));
     try std.testing.expectError(error.RuntimeUnavailable, port.window_chrome_refresh_fn(port.context, 1));
 
     adapter.native_runtime = &harness.runtime;
     adapter.platform_services = harness.runtime.options.platform.services;
     _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
-    adapter.window.drag_region_capability.platform.first_press = first;
-    try std.testing.expectError(error.WindowUnavailable, port.window_chrome_pointer_fn(port.context, 1, down));
-    try std.testing.expect(adapter.window.drag_region_capability.platform.first_press == null);
+    for (gestures) |gesture|
+        try std.testing.expectError(error.WindowUnavailable, port.window_chrome_gesture_fn(port.context, 1, gesture));
     try harness.runtime.hideWindow(1);
-    adapter.window.drag_region_capability.platform.first_press = first;
-    try std.testing.expectError(error.WindowHidden, port.window_chrome_pointer_fn(port.context, 1, down));
-    try std.testing.expect(adapter.window.drag_region_capability.platform.first_press == null);
+    for (gestures) |gesture|
+        try std.testing.expectError(error.WindowHidden, port.window_chrome_gesture_fn(port.context, 1, gesture));
     for ([_]bridge_api.WindowChromeControlAction{ .minimize, .toggle_maximize, .close }) |action|
         try std.testing.expectError(error.WindowHidden, port.window_chrome_control_fn(port.context, 1, action));
 
     adapter.native_runtime = null;
     adapter.platform_services = null;
-    adapter.window.drag_region_capability.platform.first_press = first;
-    try port.window_chrome_pointer_fn(port.context, 1, .reset);
-    try std.testing.expect(adapter.window.drag_region_capability.platform.first_press == null);
     adapter.window.drag_region_capability.document_attached = true;
-    adapter.window.drag_region_capability.platform.first_press = first;
     try port.window_chrome_disconnect_fn(port.context, 1);
     try std.testing.expect(!adapter.window.drag_region_capability.document_attached);
-    try std.testing.expect(adapter.window.drag_region_capability.platform.first_press == null);
 }
 
 pub const TrayCommandResult = enum {
@@ -174,7 +164,7 @@ pub const Adapter = struct {
             .random_fn = random,
             .window_chrome_connect_fn = windowChromeConnect,
             .window_chrome_refresh_fn = windowChromeRefresh,
-            .window_chrome_pointer_fn = windowChromePointer,
+            .window_chrome_gesture_fn = windowChromeGesture,
             .window_chrome_control_fn = windowChromeControl,
             .window_chrome_disconnect_fn = windowChromeDisconnect,
             .open_external_url_fn = openExternalUrl,
@@ -484,22 +474,22 @@ pub const Adapter = struct {
         );
     }
 
-    fn windowChromePointer(
+    fn windowChromeGesture(
         context: ?*anyopaque,
         window_id: native_sdk.platform.WindowId,
-        pointer: bridge_api.WindowChromePointer,
+        gesture: bridge_api.WindowChromeGesture,
     ) anyerror!void {
         const self: *Adapter = @ptrCast(@alignCast(context.?));
-        if (comptime builtin.os.tag == .windows) return self.window.handleWindowsPointer(
+        if (comptime builtin.os.tag == .windows) return self.window.handleWindowsGesture(
             self.native_runtime,
             self.platform_services,
             window_id,
-            pointer,
+            gesture,
         );
-        return self.window.handlePointer(
+        return self.window.handleGesture(
             self.platform_services orelse return error.RuntimeUnavailable,
             window_id,
-            pointer,
+            gesture,
         );
     }
 

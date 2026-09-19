@@ -145,8 +145,8 @@ child-process 非正常退出证明进程终止后的 WAL 恢复，不是机器�
 
 | capability                                                           | Windows 状态                                                                                            | macOS 状态                                                                                                           | 证据定位                                                   | 未闭合验证                                                  |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------- |
-| `system_webview_drag_region`                                         | 已验证：事件路径排除、Host top-band、拖动、系统双击阈值和序列中断；人工验收待完成：edge snap、系统菜单、touch/pen | 人工验收待完成：真实窗口行为                                                                                         | `E-WIN-CHROME-EVENTS-20260916`           | 两平台分别取得 Native SDK 正式能力的等价行为证据            |
-| `system_webview_resize`                                              | 已验证：上沿与两上角真实鼠标缩放、光标、原生边缘双击、标题栏序列重置、绘制、重载及隐藏重开 | 不适用于已登记兼容 seam | `E-WIN-TOP-RESIZE-20260916` | 混合 DPI 跨屏、负坐标实屏、高对比模式及其他 Windows 版本；SDK 正式能力需等价验收 |
+| `system_webview_drag_region` | 已验证：局部标题栏、浏览器计数、原生授权、真实 AccountGate/Workbench 与窗口生命周期；未覆盖范围见新证据 | 继续使用 SDK/AppKit，无新增原生兼容；本次局部入口/wire 接线未实机回归 | `E-WIN-CHROME-GESTURES-20260919`；旧 Host 配对证据仅作历史 | macOS 接线回归、混合 DPI、其他 Windows/WebView 版本；SDK 正式能力需独立验收 |
+| `system_webview_resize`                                              | 已验证：上沿与两上角真实鼠标缩放、光标、原生边缘双击、绘制、重载及隐藏重开；不再承担标题栏序列重置 | 不适用于已登记兼容 seam | `E-WIN-TOP-RESIZE-20260916`（历史）、`E-WIN-CHROME-GESTURES-20260919` | 混合 DPI 跨屏、负坐标实屏、高对比模式及其他 Windows 版本；SDK 正式能力需等价验收 |
 | `system_webview_maximize_restore` / `maximized_state` / `user_close` | 已验证：窗口生命周期受理、按钮与双击、任务栏恢复、关闭交错、hide/reopen、reload 与 clean shutdown | 不适用于已登记兼容 seam | `E-WIN-CONTROLS-20260917` | Native SDK 正式能力在 Windows 通过等价验收 |
 | `app_single_instance`                                                | 已验证：多进程仲裁、activation 转交、restart 与 crash 后 lease 恢复；人工验收待完成：交互失败与安装升级 | 已验证（历史）：交叉语义编译；人工验收待完成：socket 权限、peer identity、并发转交、提示、shutdown 和 crash recovery | `E-WIN-SINGLE-20260828`、`E-MACOS-SINGLE-COMPILE-20260828` | 两平台分别取得完整实例仲裁与 activation 验收                |
 | `macos_icon_composer_package`                                        | 不适用                                                                                                  | 自动化已覆盖：源结构与编译输入输出；已验证：历史本机 `actool` compile；人工验收待完成：签名、公证和视觉              | `E-MACOS-ICON-20260825`                                    | Developer ID、DMG、公证、macOS 26 明暗视觉和旧系统 fallback |
@@ -167,7 +167,9 @@ Account credential outcome-certainty 由 `scripts/native-sdk-credential-contract
 | Windows arm64 GNU  | revision 15 bundle 与交叉链接已验证（`E-AGENTCORE-R15-20260907`）                        | ARM64 真机运行与安装                           |
 | Linux              | 尚未实现                                                                                 | 构建、运行、分发和平台验收均未开始             |
 
-System WebView window chrome 的区域授权变更须覆盖真实事件路径的控件、可编辑内容、弹层/遮罩和 inert 排除，以及 Host top-band 越界拒绝；Bridge 测试覆盖 generation、严格 payload、只读刷新与动作确认的跨语言 fixture，Renderer 测试覆盖迟到 connect、失效 refresh 和卸载后的动作响应。Windows 双击替代必须在目标 WebView2 用真实 OS 鼠标验证首击进入 caption move loop 后的第二击、默认及非默认系统双击时间、系统距离阈值内外、三击/四击、内容/控件/失焦/原生边缘插入后的序列中断，以及普通拖动和最大化拖动恢复。原生边缘只按下而不改变尺寸也必须中断。既定行为不能保持或证据不足时保留 Host 状态机，不以 JS 合成输入或上游通用源码代替平台证据。新证据须绑定 revision/artifact、OS、Native SDK 与 WebView2 版本；历史证据只覆盖当时 artifact，不自动证明改造后的实现。
+System WebView window chrome 输入变更须覆盖真实控件、可编辑内容、弹层/portal、inert/no-drag 排除及两种 gesture 的 Host top-band/实时指针拒绝。Bridge 测试覆盖严格新 wire、旧命令拒绝、generation、刷新与动作 ACK fixture；Renderer 覆盖首次挂载、节点替换、StrictMode/重复清理、迟到 connect/refresh/卸载响应。Windows 按 [UI 合同](ui-design.md#43-一体化窗口栏) 的浏览器计数验收，不再要求任意插入事件中断或保留旧 Host 配对。真实 WebView2 OS 鼠标须覆盖首击 caption move loop 后第二击、默认/非默认双击时间、正负距离边界、三/四击、内容/相邻 normal/disabled/停止传播/取消 pointerdown 控件、失焦及原生边缘无尺寸变化的插入；记录实际 detail、局部命中、意图和执行结果，按当前合同判断。业务事件自身零手势 IPC、无取消及两种动作原生授权仍是硬要求。还须验证普通/最大化拖动恢复、真实 AccountGate/Workbench/动态 actions/弹层/窄窗/缩放。未解释的机制差异停止合入，不临时补状态或改断言。合成 DOM/上游源码不代替平台证据；新证据绑定 revision/diff/artifact、OS、SDK 和 WebView2，历史仅证明当时 artifact。
+
+Windows 当前时间/距离边界由目标 WebView 浏览器计数决定，不复制旧 Host 闭区间，也不要求与隔离 native-child 原型逐像素等价。真实输入覆盖 x/y 正负方向的内点、边界、外点，记录系统指标与实际计数。系统 caption 对照可用于诊断，不能替代实际 System WebView 产品路径验收；历史原型与旧 Host 证据保持原意。
 
 Windows 窗口控制生命周期变更须覆盖 SDK 公共窗口事实更新、执行前拒绝、错误与清理顺序、connect 失败和 refresh 恢复；真实桌面矩阵覆盖普通/最大化关闭与 Alt+F4、最大化后最小化并从任务栏恢复、隐藏后既有 Bridge 请求、托盘重开、关闭与 toggle 交错及 reload。真实键鼠、直接 Bridge 请求与 SDK 托盘 automation 分别记录，不互相冒充；恢复后的按钮可操作性与实际图标须一并验证。以有界状态条件观察结果，不把固定等待或关闭 ACK 当作隐藏完成屏障；探针只能被动取得当前 generation，不额外 connect 改变待测会话。测试脏工作树时须绑定 diff 与 artifact，提交后的相同证据须核对源码一致性。
 
@@ -198,6 +200,34 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 `E-ATTACHMENT-MACOS-20260902` 的 arm64 真实交互证据为：系统 picker 选择 `0b0a714cdf0e9cfb99830d2fd58afd78eedf655080c0ff09fbcb3dd3d5576e26`、逐项移除 `cb012ce2f8541d6b49921e74e403755b387235deeb98571322da9359bba49cb9`、取消 `ef8b8c08c528c997cc08115c72122511aedec78290fd5c47e90b898dc2474c17`、最终焦点 `f1b7121669516a2bc33a3e58cd934d3ae09a8edd4d6779b4d2981f553e00a695`、窄窗 `961c0eb23d274100bfcfa17967b113a4732982c9bcaccb2be8d7dffb030f0776`（均为截图 SHA-256）。窄窗附件由 automation 经正式 choose/staging 后续链路注入；其他四项使用真实 `NSOpenPanel` 和 Renderer 交互。
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
+
+### E-WIN-CHROME-GESTURES-20260919
+
+2026-09-19，Windows 10 x64 `10.0.19045`、双屏 96 DPI、Native SDK `0.10.1`、WebView2 `Edg/153.0.4234.32`。干净实现 revision `47d407b2fcb7ff33118426664cde9edfd4c90b50` 的完整 `node scripts/test-window-chrome-windows.mjs` exit 0；automation Debug exe SHA-256 `485fdac746efcdeac491970c3cee8ba7e23e773f4e12ead2601f0a756053e7a0`。本地 `.zig-cache/tauri-gesture-full-20260919-1/` 保留 artifact identity、输入/controls JSON 与实屏绘制截图。
+
+35 项真实 OS 输入按浏览器实际计数核对意图和原生结果：默认 500 ms / 非默认 900 ms、超时、x/y 正负距离边界、三四击、普通/最大化拖动、内容/相邻 normal/disabled/停止传播/取消 pointerdown 控件、失焦和原生边缘插入。相邻 normal/停止传播实测 mousedown `[1,2,3]`；disabled/取消 pointerdown 只有 `[1,3]`，均仅首击发 drag。失焦和原生边缘插入后实测 `[1,2]` 并 toggle，符合本次已批准的浏览器语义，不能写成旧 reset 等价。两种 gesture 的隐藏窗口拒绝、8 项 controls 生命周期、上沿/上角输入、原生边缘双击、五色静止/遮挡绘制、重载、隐藏重开、资源稳定和 clean shutdown 均通过。
+
+相同产品 artifact 的真实 UI 补充证据：`--ui-session-only` 的 AccountGate 标题文字、语言 portal、About modal 7 项及 clean shutdown 通过，`.zig-cache/tauri-gesture-ui-20260919-5/` 绑定上述 revision 加 diff `d21963cce152628cc9cd9a39647c71fbda3991ee3ec94f49ee51ccbab41cd9b8`、新增探针 SHA-256 `f22e0af616d5d5fc3ae12faab9a2a4277111216ad5e6aee13d872370d1a28016`。Workbench/设置通过既有隔离 AgentCore fixture 接入，用 `METAWORK_WINDOW_CHROME_WORKBENCH=1` 和 `METAWORK_WINDOW_CHROME_EVIDENCE_DIR` 启用 `node scripts/run-agentcore-vertical-windows.mjs` 内的具名窗口检查；`.zig-cache/tauri-gesture-workbench-20260919-2/` 绑定 diff `5e5623bf5f4bcf5a83e29785da515fd28a07c9a4aff9f6280b42e6e874d4ed00`、探针 SHA-256 `fe5129089bec450d27a159ca0708bf1febbf367a63ac5964b7134621524fce8b`。10 项窗口检查通过，含任务选择、实际标题栏拖动、任务面板按钮、账号菜单、设置 inert/no-drag 外层，以及 584 CSS px 窄窗。CDP 只读取实际 DOM、观察事件/transport，不替换这些产品组件；受测输入来自 Win32 脚本。
+
+后续完整复验 `.zig-cache/tauri-gesture-full-20260919-2/` 增加了真实浏览器 110% 缩放（devicePixelRatio `1.100000023841858`，最后恢复 `1`）下语言菜单零 gesture；35 项输入和 9 项 AccountGate 检查通过。此轮绑定相同产品 binary、上述 revision 加 diff `ba18c04ba8d5d205adeb628d2966bfdf8c42965c655a195fac3b7a35df28877f` 和 UI 探针 SHA-256 `955fe5823c826d072118aad406d8055ea702b19345d7f90398e8e82d0789b898`。**这轮整体失败**：controls 的任务栏恢复阶段，真实鼠标点击后窗口仍为 minimized，等待超时；相同源码/artifact 的独立 `--controls-session-only`（`.zig-cache/tauri-gesture-controls-20260919-1/`）重复同一失败。不将之前整轮通过覆盖后续失败，也不归因于新的 UI 探针或 SDK；当时尚未定位实际命中，后续驱动诊断与复验见 [E-WIN-CHROME-TASKBAR-20260919](#e-win-chrome-taskbar-20260919)。
+
+这不证明完整 AgentCore vertical：带窗口探针的一轮在后续 Run 的 snapshot chunk `null` 超时；不启用该探针的对照在 preterminal presentation facts 断言失败。两者失败不同，不能据此声称共同根因已定位，也未到达复制验证。全量 Node `620 passed / 2 skipped`、窗口/Bridge 定向 Zig `33/33` 和 automation 构建 `11/11` 通过；正式 Native graph 被未修改的 history SQL `RunWire` 字段数 Gate（期望 27、实际 28）拒绝，不计通过。本证据不证明剪贴板、macOS 接线实机、Windows 11、混合 DPI、负坐标实屏、全部动态 action、touch/pen、snap、系统菜单或安装包。macOS 原生能力继续由 SDK/AppKit 提供，不因缺少本次接线回归而新增兼容实现。
+
+### E-WIN-CHROME-TASKBAR-20260919
+
+2026-09-19，在上述 Windows 10 / SDK / WebView2 环境诊断旧任务栏选择器：它以大小写不敏感的 `MetaWork` 前缀收集候选并取第一个，实际读到的首项为 `metawork-site - 5 个运行窗口`，不是隔离产品的 `MetaWork - 1 个运行窗口`。只读诊断未发送点击；该可复现误选说明旧恢复超时不能用来证明产品恢复失败。
+
+修正后的驱动要求当前窗口完整标题或其单窗口组名、可点击 MSAA button 和唯一候选，保留目标 PID 与任务栏命中校验；歧义直接失败，不调用程序化 restore 或重放点击。独立 controls 复验 `.zig-cache/tauri-taskbar-fixed-20260919-1/` 与完整入口 `.zig-cache/tauri-gesture-full-20260919-3/` 均 exit 0，记录明确选中 `MetaWork - 1 个运行窗口`，一次真实鼠标点击后 `minimized=false,maximized=true`。后者完整通过 35 项输入、9 项 AccountGate（含 110% 缩放）、8 项 controls，以及边缘缩放、绘制、重载、隐藏重开和 clean shutdown。
+
+两轮绑定 revision `bea3f767d7557d37cd574ca869554dd662f108da` 加 diff SHA-256 `03793254fa4b08e3507c735eeba5ed67b74a0e0b277390dedf4773be0855963a`；新增选择器回归文件 SHA-256 `5e2092911563a6319c4c137f797733d0d7152e27e7598de7402151ac847aec3d`。产品二进制仍为 `485fdac746efcdeac491970c3cee8ba7e23e773f4e12ead2601f0a756053e7a0`，未为此修改产品代码或降低原验收断言。原始 identity、diff、候选/原生状态和实屏截图保留在对应目录。这关闭任务栏测试驱动问题，不补齐上一项明确未通过的 Native/AgentCore graph、真实回复复制/编辑/选区或未验证平台。
+
+### E-WIN-CHROME-CONVERSATION-20260919
+
+2026-09-19，同上 Windows 10 / SDK / WebView2 环境与产品二进制，`METAWORK_WINDOW_CHROME_WORKBENCH=1 node scripts/run-agentcore-vertical-windows.mjs` 在真实 AgentCore 首次回复完成后检查实际回复按钮及 Composer。`.zig-cache/tauri-gesture-conversation-20260919-1/` 绑定 revision `a2193b14dd29e85ce521a0ea45cd63de203f2f87` 加 diff `a3b6e2ff7613ce2dd5e8320cf3acdfc286a99527a4b95104f2b3d51d347844fa`，保存 identity、源 diff 和两项检查的完整 DOM 事件/窗口调用/原生状态。
+
+真实鼠标点击复制后产品报告 `copied`；再点击空 Composer，用真实 Ctrl+V 粘贴得到完整 36 字符 fixture 回复，Ctrl+A 形成 `[0,36]` 选区，Backspace 清空。两次业务点击均产生可信 pointerdown/mousedown/click，事件分发后 `defaultPrevented=false`、窗口 Bridge 调用数为 0，原生窗口矩形不变。Workbench 的 10 项实际 UI 检查也通过。这证明本次窗口路径不吞掉该真实回复复制和键盘编辑/选择，不证明鼠标拖选、大文本或 HTML 格式完整性。
+
+**整轮 vertical 仍失败。**该轮通过首个 Run 的 live revision 和 checkpoint 检查，随后在原有 70 KiB 复制探针选按钮时触发 `AddHashTableToNonHashTable`，尚未验证该大文本写入：脚本将 PowerShell 自动变量 `$Matches` 用作数组，正则匹配将其覆盖为哈希表。只修正变量名并补纯选择器回归，没有降低复制断言。后续 `.zig-cache/tauri-gesture-conversation-20260919-2/` 绑定同一 revision 加 diff `b6582b629a7f559d122173d395ade425cd6091d79b8f299bf580b3be95c2d669`，Workbench 10 项通过，但首次 Run 快照读取再次报 `invalid snapshot chunk: null`，未到达复制复验。不能以这次早期失败认定变量修复无效，也不能以首轮普通复制通过宣称完整 vertical 或 70 KiB / 256 KiB 剪贴板验收通过。
 
 ## 未闭合验证缺口
 

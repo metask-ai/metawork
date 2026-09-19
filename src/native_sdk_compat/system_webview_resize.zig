@@ -6,7 +6,7 @@ pub const Capability = if (builtin.os.tag == .windows)
     @import("system_webview_resize/windows.zig").State
 else
     struct {
-        pub fn attach(_: *@This(), _: startup_window.Binding, _: *anyopaque, _: *const fn (*anyopaque) void) !void {}
+        pub fn attach(_: *@This(), _: startup_window.Binding) !void {}
         pub fn deinit(_: *@This()) void {}
     };
 

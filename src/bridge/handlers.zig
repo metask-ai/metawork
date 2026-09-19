@@ -20,11 +20,11 @@ pub const ModelsResetStore = struct { expectedRevision: []const u8 };
 pub const ProductSnapshotChunk = struct { snapshotId: []const u8, offset: []const u8 };
 pub const Empty = struct {};
 pub const WindowChromeRefresh = struct { generation: []const u8 };
-pub const WindowChromePointer = struct {
+pub const WindowChromeGesture = struct {
     generation: []const u8,
-    phase: []const u8,
-    x: ?f64 = null,
-    y: ?f64 = null,
+    action: enum { start_drag, toggle_maximize },
+    x: f64,
+    y: f64,
 };
 pub const WindowChromeControl = struct {
     generation: []const u8,

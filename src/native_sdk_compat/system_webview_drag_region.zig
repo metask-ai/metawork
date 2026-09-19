@@ -12,13 +12,13 @@ const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const startup_window = @import("system_webview_startup_window.zig");
 const types = @import("system_webview_drag_region/types.zig");
-pub const PointerOutcome = types.PointerOutcome;
-
+pub const GestureOutcome = types.GestureOutcome;
+pub const GestureAction = types.GestureAction;
 const Platform = switch (builtin.os.tag) {
     .windows => @import("system_webview_drag_region/windows.zig"),
     .macos => @import("system_webview_drag_region/macos.zig"),
     else => struct {
-        pub const live_pointer_drag = false;
+        pub const gesture_mode: types.GestureMode = .disabled;
         pub const chrome_top_override: ?f64 = null;
         pub const State = struct {};
 
@@ -34,11 +34,9 @@ const Platform = switch (builtin.os.tag) {
             return error.SystemWebViewChromeUnavailable;
         }
 
-        pub fn handlePointerDown(_: *State, _: native_sdk.platform.PlatformServices, _: native_sdk.platform.WindowId, _: f64, _: f64) !PointerOutcome {
+        pub fn handleGesture(_: *State, _: native_sdk.platform.PlatformServices, _: native_sdk.platform.WindowId, _: GestureAction, _: f64, _: f64) !GestureOutcome {
             return .ignored;
         }
-
-        pub fn resetPointerSequence(_: *State) void {}
 
         pub fn deinit(_: *State) void {}
     },
@@ -53,7 +51,7 @@ pub const Environment = struct {
     buttons_y: f64,
     buttons_width: f64,
     buttons_height: f64,
-    live_pointer_drag: bool,
+    gesture_mode: types.GestureMode,
 };
 
 pub const Capability = struct {
@@ -96,32 +94,28 @@ pub const Capability = struct {
         services: native_sdk.platform.PlatformServices,
     ) !Environment {
         try self.requirePlatform(services);
-        self.resetPointerSequence();
         self.document_attached = self.platform_ready;
         return self.environment(services);
     }
 
-    pub fn handlePointerDown(
+    pub fn handleGesture(
         self: *Capability,
         services: native_sdk.platform.PlatformServices,
+        action: GestureAction,
         x: f64,
         y: f64,
-    ) !PointerOutcome {
+    ) !GestureOutcome {
         if (!self.document_attached or !types.validCoordinate(x) or !types.validCoordinate(y)) {
-            self.resetPointerSequence();
             return error.InvalidWindowChromeGesture;
         }
-        return Platform.handlePointerDown(
+        return Platform.handleGesture(
             &self.platform,
             services,
             self.window_id,
+            action,
             x,
             y,
         );
-    }
-
-    pub fn resetPointerSequence(self: *Capability) void {
-        Platform.resetPointerSequence(&self.platform);
     }
 
     pub fn current(
@@ -132,7 +126,6 @@ pub const Capability = struct {
     }
 
     pub fn disconnect(self: *Capability) void {
-        self.resetPointerSequence();
         self.document_attached = false;
     }
 
@@ -162,7 +155,7 @@ pub const Capability = struct {
             .buttons_y = chrome.buttons.y,
             .buttons_width = chrome.buttons.width,
             .buttons_height = chrome.buttons.height,
-            .live_pointer_drag = Platform.live_pointer_drag and self.document_attached,
+            .gesture_mode = if (self.document_attached) Platform.gesture_mode else .disabled,
         };
     }
 
@@ -174,28 +167,25 @@ pub const Capability = struct {
     }
 };
 
-test "disconnect revokes gestures and clears the Windows press" {
+test "disconnect revokes both gestures and disables input mode" {
     var capability = Capability.init(1);
     capability.document_attached = true;
     capability.disconnect();
     try std.testing.expect(!capability.document_attached);
-    try std.testing.expectError(error.InvalidWindowChromeGesture, capability.handlePointerDown(.{}, 20, 20));
+    for ([_]GestureAction{ .start_drag, .toggle_maximize }) |action|
+        try std.testing.expectError(error.InvalidWindowChromeGesture, capability.handleGesture(.{}, action, 20, 20));
+    try std.testing.expectEqual(types.GestureMode.disabled, capability.current(.{}).gesture_mode);
 }
 
-test "refresh does not interrupt the Windows double-click sequence" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+test "refresh preserves attachment and both gestures reject invalid coordinates" {
     var capability = Capability.init(1);
     capability.document_attached = true;
-    capability.platform.first_press = .{
-        .tick_ms = 100,
-        .screen_point = .{ .x = 400, .y = 20 },
-        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
-    };
-    const first = capability.platform.first_press.?;
     _ = capability.current(.{});
-    try std.testing.expect(std.meta.eql(first, capability.platform.first_press.?));
-    try std.testing.expectError(error.InvalidWindowChromeGesture, capability.handlePointerDown(.{}, -1, 20));
-    try std.testing.expect(capability.platform.first_press == null);
+    try std.testing.expect(capability.document_attached);
+    for ([_]GestureAction{ .start_drag, .toggle_maximize }) |action| {
+        try std.testing.expectError(error.InvalidWindowChromeGesture, capability.handleGesture(.{}, action, -1, 20));
+        try std.testing.expectError(error.InvalidWindowChromeGesture, capability.handleGesture(.{}, action, 20, std.math.nan(f64)));
+    }
 }
 
 test "macOS authorizes event coordinates against SDK top band before dragging" {
@@ -213,10 +203,11 @@ test "macOS authorizes event coordinates against SDK top band before dragging" {
     const services: native_sdk.platform.PlatformServices = .{ .window_chrome_fn = Harness.chrome, .start_window_drag_fn = Harness.drag };
     var state: macos.State = .{};
     for ([_]f64{ -1, 52, 100, std.math.nan(f64) }) |y| {
-        try std.testing.expectEqual(PointerOutcome.ignored, try macos.handlePointerDown(&state, services, 1, 20, y));
+        try std.testing.expectEqual(GestureOutcome.ignored, try macos.handleGesture(&state, services, 1, .start_drag, 20, y));
     }
     try std.testing.expectEqual(@as(usize, 0), Harness.calls);
-    try std.testing.expectEqual(PointerOutcome.drag_started, try macos.handlePointerDown(&state, services, 1, 20, 20));
+    try std.testing.expectError(error.InvalidWindowChromeGesture, macos.handleGesture(&state, services, 1, .toggle_maximize, 20, 20));
+    try std.testing.expectEqual(GestureOutcome.drag_started, try macos.handleGesture(&state, services, 1, .start_drag, 20, 20));
     try std.testing.expectEqual(@as(usize, 1), Harness.calls);
-    try std.testing.expectEqual(PointerOutcome.ignored, try macos.handlePointerDown(&state, .{}, 1, 20, 20));
+    try std.testing.expectEqual(GestureOutcome.ignored, try macos.handleGesture(&state, .{}, 1, .start_drag, 20, 20));
 }

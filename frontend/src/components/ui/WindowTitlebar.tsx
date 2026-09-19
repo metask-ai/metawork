@@ -1,14 +1,16 @@
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 
 export function WindowTitlebar({
   className,
   children,
+  ref,
 }: {
   className: string;
   children: ReactNode;
+  ref: Ref<HTMLElement>;
 }) {
   return (
-    <header className={className} data-metawork-window-drag="">
+    <header ref={ref} className={className} data-metawork-window-drag="deep">
       {children}
     </header>
   );

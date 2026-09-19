@@ -22,7 +22,7 @@
             .{ .name = "metawork.events.disconnect", .origins = .{"zero://app"} },
             .{ .name = "metawork.host.windowChrome.connect", .origins = .{"zero://app"} },
             .{ .name = "metawork.host.windowChrome.refresh", .origins = .{"zero://app"} },
-            .{ .name = "metawork.host.windowChrome.pointer", .origins = .{"zero://app"} },
+            .{ .name = "metawork.host.windowChrome.gesture", .origins = .{"zero://app"} },
             .{ .name = "metawork.host.windowChrome.control", .origins = .{"zero://app"} },
             .{ .name = "metawork.host.windowChrome.disconnect", .origins = .{"zero://app"} },
             .{ .name = "metawork.host.links.openExternal", .origins = .{"zero://app"} },

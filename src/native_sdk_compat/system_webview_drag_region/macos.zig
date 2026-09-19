@@ -4,7 +4,7 @@ const native_sdk = @import("native_sdk");
 const startup_window = @import("../system_webview_startup_window.zig");
 const types = @import("types.zig");
 
-pub const live_pointer_drag = true;
+pub const gesture_mode: types.GestureMode = .native_press;
 pub const chrome_top_override: ?f64 = null;
 pub const State = struct {};
 
@@ -17,19 +17,19 @@ pub fn requirePlatform(services: native_sdk.platform.PlatformServices) !void {
 
 pub fn bindRoot(_: *State) !void {}
 
-pub fn handlePointerDown(
+pub fn handleGesture(
     _: *State,
     services: native_sdk.platform.PlatformServices,
     window_id: native_sdk.platform.WindowId,
+    action: types.GestureAction,
     x: f64,
     y: f64,
-) !types.PointerOutcome {
+) !types.GestureOutcome {
+    if (action != .start_drag) return error.InvalidWindowChromeGesture;
     if (!types.pointInTopBand(x, y, services.windowChrome(window_id).insets.top)) return .ignored;
     try services.startWindowDrag(window_id);
     return .drag_started;
 }
-
-pub fn resetPointerSequence(_: *State) void {}
 
 pub fn deinit(state: *State) void {
     state.* = .{};

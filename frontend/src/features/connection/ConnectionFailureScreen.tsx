@@ -3,6 +3,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { WindowControls } from "../../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../../components/ui/WindowTitlebar.tsx";
+import { bindWindowTitlebar } from "../../bridge/window-chrome.ts";
 import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 
 export function ConnectionFailureScreen({
@@ -26,7 +27,10 @@ export function ConnectionFailureScreen({
 
   return (
     <main className="connection-failure-screen">
-      <WindowTitlebar className="connection-failure-toolbar">
+      <WindowTitlebar
+        ref={bindWindowTitlebar}
+        className="connection-failure-toolbar"
+      >
         <div className="connection-failure-brand" aria-label={t("app.name")}>
           <span className="brand-mark" aria-hidden="true">
             M

@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { probeWindowChromeInput } from "./window-chrome-input.mjs";
 import { probeWindowChromeControls } from "./window-chrome-controls.mjs";
+import { probeWindowChromeUi } from "./window-chrome-ui.mjs";
 import { buildAutomationDebugArtifact } from "./build.mjs";
 import {
   allocateWebViewTestPort,
@@ -50,6 +51,7 @@ const resizeSessionOnly = process.argv.includes("--resize-session-only");
 const evidenceDir = process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR;
 const inputSessionOnly = process.argv.includes("--input-session-only");
 const controlsSessionOnly = process.argv.includes("--controls-session-only");
+const uiSessionOnly = process.argv.includes("--ui-session-only");
 
 // This harness owns the automation Debug artifact it drives; build before the
 // fixture directory exists so a build failure leaves nothing to clean up.
@@ -145,7 +147,9 @@ try {
   const rendererChromeReady = waitForRendererChromeReady();
   await waitForOutput(/metawork\.smoke\.event_ack sequence=1/);
   await rendererChromeReady;
-  if (controlsSessionOnly) {
+  if (uiSessionOnly) {
+    await probeWindowChromeUi({ port: debugPort, runProbe, evidenceDir });
+  } else if (controlsSessionOnly) {
     await probeControls();
   } else if (inputSessionOnly) {
     await probeWindowChromeInput({ port: debugPort, runProbe, evidenceDir });
@@ -188,9 +192,9 @@ try {
       );
     }
     if (!resizeSessionOnly) {
-      await runProbe("doubleclick");
       await runProbe("drag");
       await probeWindowChromeInput({ port: debugPort, runProbe, evidenceDir });
+      await probeWindowChromeUi({ port: debugPort, runProbe, evidenceDir });
     }
     await runProbe("resize");
     await probeControls();
@@ -214,13 +218,15 @@ try {
   if (!/runtime\.event.*event="stop"/.test(output))
     throw new Error("normal Runtime stop was not observed");
   process.stdout.write(
-    controlsSessionOnly
-      ? "Windows window controls lifecycle and clean shutdown passed.\n"
-      : inputSessionOnly
-        ? "Windows real input matrix and clean shutdown passed.\n"
-        : resizeSessionOnly
-          ? "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
-          : "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, titlebar drag/double click, controls, hide/reopen, and clean shutdown passed.\n",
+    uiSessionOnly
+      ? "Windows mounted Workbench input and clean shutdown passed.\n"
+      : controlsSessionOnly
+        ? "Windows window controls lifecycle and clean shutdown passed.\n"
+        : inputSessionOnly
+          ? "Windows real input matrix and clean shutdown passed.\n"
+          : resizeSessionOnly
+            ? "Windows top-edge resize/cursors, native edge double click, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
+            : "Windows top-edge resize/cursors, native edge double click, paint/reload, browser-count titlebar gestures, controls, hide/reopen, and clean shutdown passed.\n",
   );
 } catch (error) {
   process.stderr.write(output);

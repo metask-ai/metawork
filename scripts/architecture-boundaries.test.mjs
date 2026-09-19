@@ -2652,16 +2652,18 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     /EnumChildWindows|SetWindowsHookEx|GetForegroundWindow|FindWindow|SetParent/,
   );
   assert.deepEqual(
-    externSymbols(read(dragWindowsPath), ["user32", "kernel32", "comctl32"]),
+    externSymbols(read(dragWindowsPath), [
+      "user32",
+      "kernel32",
+      "comctl32",
+      "gdi32",
+    ]),
     [
       "GetAncestor",
       "GetAsyncKeyState",
       "GetCursorPos",
-      "GetDoubleClickTime",
       "GetDpiForWindow",
       "GetSystemMetrics",
-      "GetTickCount64",
-      "GetWindowRect",
       "IsWindow",
       "PostMessageW",
       "ReleaseCapture",
@@ -2670,6 +2672,15 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
       "WindowFromPoint",
     ].sort(),
   );
+  assert.deepEqual(
+    externSymbols(read(dragWindowsPath), ["gdi32", "kernel32", "comctl32"]),
+    [],
+  );
+  assert.doesNotMatch(
+    read("build.zig"),
+    /window-chrome-probe|window_chrome_probe/,
+  );
+  assert.doesNotMatch(read("src/app.zig"), /runWindowChromeProbe/);
   assert.deepEqual(
     externSymbols(read(controlsWindowsPath), [
       "user32",

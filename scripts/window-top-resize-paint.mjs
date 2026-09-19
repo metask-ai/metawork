@@ -137,7 +137,13 @@ export async function probeTopResizePaint({ port, runProbe, evidenceDir }) {
         throw new Error(JSON.stringify(result.exceptionDetails));
       // Observe the new pixels before any resize, activation, or occlusion can
       // repair stale content underneath the input child.
-      await runProbe("paint-stationary", ["-ColorHex", color]);
+      const stationaryArgs = ["-ColorHex", color];
+      if (evidenceDir)
+        stationaryArgs.push(
+          "-OutputPath",
+          path.join(evidenceDir, `top-stationary-${index}.png`),
+        );
+      await runProbe("paint-stationary", stationaryArgs);
       const args = [
         "-ColorHex",
         color,

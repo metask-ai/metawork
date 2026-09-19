@@ -157,7 +157,8 @@ export async function probeWindowChromeControls({
         "control",
         { action },
       ]),
-      ["pointer", { phase: "down", x: 300, y: 20 }],
+      ["gesture", { action: "start_drag", x: 300, y: 20 }],
+      ["gesture", { action: "toggle_maximize", x: 300, y: 20 }],
     ]) {
       const result = await invoke(command, payload);
       assert.equal(result.ok, false, `Hidden ${command} must be rejected`);
@@ -168,8 +169,6 @@ export async function probeWindowChromeControls({
     const refresh = await invoke("refresh");
     assert.equal(refresh.ok, true, "A hidden window may refresh");
     assert.equal(refresh.value.maximized, hidden.maximized);
-    const reset = await invoke("pointer", { phase: "reset" });
-    assert.equal(reset.ok, true, "A hidden window may reset its sequence");
     const reopened = await reopen();
     assert.equal(reopened.maximized, expectedMaximized);
     await setMaximized(!expectedMaximized);
@@ -179,7 +178,6 @@ export async function probeWindowChromeControls({
       reopened,
       rejected,
       refresh,
-      reset,
       passed: true,
     });
   }
@@ -226,7 +224,11 @@ export async function probeWindowChromeControls({
       (value) => value.minimized,
       "Renderer minimize",
     );
-    await runProbe("control-taskbar-restore", ["-WindowHandle", handle]);
+    const taskbarInput = await runProbe("control-taskbar-restore", [
+      "-WindowHandle",
+      handle,
+    ]);
+    evidence.taskbarInput = taskbarInput;
     const restored = await until(
       nativeState,
       (value) => value.visible && !value.minimized,
@@ -324,6 +326,9 @@ export async function probeWindowChromeControls({
     process.stdout.write(
       "Windows controls lifecycle matrix passed: close/Alt+F4, hidden admission, taskbar restore, interleaving, reload and real button recovery.\n",
     );
+  } catch (error) {
+    evidence.failure = String(error?.stack ?? error);
+    throw error;
   } finally {
     await archiveDocument();
     webview.close();
