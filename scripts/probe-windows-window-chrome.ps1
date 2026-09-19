@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-alt-f4', 'control-taskbar-restore', 'probe-quit', 'probe-layout', 'probe-animation', 'probe-resources')]
+    [ValidateSet('drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-alt-f4', 'control-taskbar-restore', 'probe-quit', 'probe-layout', 'probe-animation', 'probe-resources')]
     [string]$Mode = 'drag',
     [string]$ColorHex,
     [string]$OutputPath,
@@ -12,10 +12,13 @@ param(
     [switch]$Direct,
     [switch]$KeepTopmost,
     [switch]$FixedDragPaint,
+    [switch]$BrowserGesture,
     [string]$InputCase,
     [int]$DoubleClickMilliseconds = 0,
     [int]$PointX = 300,
     [int]$PointY = 20,
+    [int]$OffsetX = 0,
+    [int]$OffsetY = 0,
     [long]$WindowHandle = 0
 )
 
@@ -700,13 +703,7 @@ if ($Mode -eq 'top-lifecycle') {
     $origin = New-Object MetaWorkChromeProbe+Point
     [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$origin) | Out-Null
     $gap = [Math]::Max(20, [Math]::Min(60, [MetaWorkChromeProbe]::GetDoubleClickTime() / 8))
-    Invoke-MetaWorkTitleClick $x ($origin.Y + 25)
-    Start-Sleep -Milliseconds $gap
-    Invoke-MetaWorkTitleClick $x ($origin.Y + 2)
-    Start-Sleep -Milliseconds $gap
-    Invoke-MetaWorkTitleClick $x ($origin.Y + 25)
-    Start-Sleep -Milliseconds 100
-    if ([MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Native edge press failed to reset the titlebar sequence' }
+    # Title/edge/title is checked with recorded browser detail by the input matrix.
     Start-Sleep -Milliseconds ([MetaWorkChromeProbe]::GetDoubleClickTime() + 100)
     Invoke-MetaWorkTitleDoubleClick $x ($origin.Y + 2) $gap
     Start-Sleep -Milliseconds 250
@@ -754,6 +751,7 @@ if ($Mode -eq 'input-case') {
         $gap = if ($DoubleClickMilliseconds -ge 800) { 550 } else { 60 }
         $expectedMaximized = $false
         $interruption = $null
+        $clickStates = @()
         if ($InputCase -in @('adjacent-reset', 'edge-reset')) {
             if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Adjacent native case requires the isolated probe' }
             $dragChild = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
@@ -960,15 +958,24 @@ public sealed class MetaWorkCaptionReference : Form {
                     $interruption = [ordered]@{ oldChild=$oldChild.ToInt64().ToString(); newChild=$newChild.ToInt64().ToString(); beforeReturnMs=$elapsed; clickToActivate=($InputCase -eq 'probe-blur-drag') }
                 } finally { $otherWindow.Dispose() }
             }
-            { $_ -in @('pair', 'timeout', 'distance-inside', 'distance-outside', 'quad', 'content-reset', 'control-reset', 'blur-reset', 'adjacent-reset', 'edge-reset') } {
+            { $_ -in @('pair', 'timeout', 'distance-inside', 'distance-outside', 'offset-pair', 'quad', 'content-reset', 'control-reset', 'blur-reset', 'browser-adjacent', 'browser-edge', 'adjacent-reset', 'edge-reset') } {
                 $sequenceWatch = [System.Diagnostics.Stopwatch]::StartNew()
                 Invoke-MetaWorkTitleClick $point.X $point.Y
+                $clickStates += [bool][MetaWorkChromeProbe]::IsZoomed($window)
                 if ($InputCase -eq 'timeout') { Start-Sleep -Milliseconds ($time + 100) }
                 elseif ($InputCase -eq 'content-reset') {
                     $other = Get-InputPoint 300 100
                     Invoke-MetaWorkTitleClick $other.X $other.Y
                 } elseif ($InputCase -eq 'control-reset') {
                     $other = Get-InputPoint 400 20
+                    Invoke-MetaWorkTitleClick $other.X $other.Y
+                } elseif ($InputCase -eq 'browser-adjacent') {
+                    if (-not $BrowserGesture) { throw 'Browser adjacent case requires browser observation' }
+                    $other = Get-InputPoint ($PointX + 1) $PointY
+                    Invoke-MetaWorkTitleClick $other.X $other.Y
+                } elseif ($InputCase -eq 'browser-edge') {
+                    if (-not $BrowserGesture) { throw 'Browser edge case requires browser observation' }
+                    $other = Get-InputPoint $PointX 1
                     Invoke-MetaWorkTitleClick $other.X $other.Y
                 } elseif ($InputCase -in @('adjacent-reset', 'edge-reset')) {
                     $afterFirst = Get-MetaWorkRect $window
@@ -990,15 +997,18 @@ public sealed class MetaWorkCaptionReference : Form {
                     } finally { $otherWindow.Dispose() }
                 } else { Start-Sleep -Milliseconds $gap }
                 $dx = if ($InputCase -eq 'distance-inside') { [Math]::Floor($width / 2) }
-                      elseif ($InputCase -eq 'distance-outside') { [Math]::Floor($width / 2) + 1 } else { 0 }
+                      elseif ($InputCase -eq 'distance-outside') { [Math]::Floor($width / 2) + 1 }
+                      elseif ($InputCase -eq 'offset-pair') { $OffsetX } else { 0 }
+                $dy = if ($InputCase -eq 'offset-pair') { $OffsetY } else { 0 }
                 if ($InputCase -in @('adjacent-reset', 'edge-reset') -and $sequenceWatch.ElapsedMilliseconds -ge $time) {
                     throw 'Adjacent case exceeded the OS interval before its second title press'
                 }
                 if ($InputCase -in @('adjacent-reset', 'edge-reset') -and [MetaWorkChromeProbe]::WindowFromPoint($point) -ne $dragChild) {
                     throw 'Adjacent sequence lost its native title hit before the final press'
                 }
-                Invoke-MetaWorkTitleClick ($point.X + $dx) $point.Y
+                Invoke-MetaWorkTitleClick ($point.X + $dx) ($point.Y + $dy)
                 Start-Sleep -Milliseconds 160
+                $clickStates += [bool][MetaWorkChromeProbe]::IsZoomed($window)
                 if ($InputCase -in @('adjacent-reset', 'edge-reset')) {
                     $afterAdjacent = Get-MetaWorkRect $window
                     if ($afterAdjacent.Left -ne $before.Left -or $afterAdjacent.Top -ne $before.Top -or
@@ -1007,17 +1017,19 @@ public sealed class MetaWorkCaptionReference : Form {
                     }
                 }
                 $expectedMaximized = $InputCase -in @('pair', 'distance-inside', 'quad')
-                if ([MetaWorkChromeProbe]::IsZoomed($window) -ne $expectedMaximized) {
+                if (-not $BrowserGesture -and [MetaWorkChromeProbe]::IsZoomed($window) -ne $expectedMaximized) {
                     throw "Input case $InputCase did not respect native double-click semantics"
                 }
                 if ($InputCase -eq 'quad') {
                     $point = Get-InputPoint $PointX $PointY
                     Invoke-MetaWorkTitleClick $point.X $point.Y
                     Start-Sleep -Milliseconds 60
-                    if (-not [MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Third click toggled twice' }
+                    $clickStates += [bool][MetaWorkChromeProbe]::IsZoomed($window)
+                    if (-not $BrowserGesture -and -not [MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Third click toggled twice' }
                     Invoke-MetaWorkTitleClick $point.X $point.Y
                     Start-Sleep -Milliseconds 160
-                    if ([MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Fourth click did not restore' }
+                    $clickStates += [bool][MetaWorkChromeProbe]::IsZoomed($window)
+                    if (-not $BrowserGesture -and [MetaWorkChromeProbe]::IsZoomed($window)) { throw 'Fourth click did not restore' }
                     $expectedMaximized = $false
                 }
             }
@@ -1049,7 +1061,9 @@ public sealed class MetaWorkCaptionReference : Form {
             }
             default { throw "Unknown input case $InputCase" }
         }
-        [ordered]@{ case=$InputCase; timeMs=$time; distanceWidth=$width; distanceHeight=$height; dpi=[MetaWorkChromeProbe]::GetDpiForWindow($window); interruption=$interruption; passed=$true } | ConvertTo-Json -Depth 8 -Compress
+        # Browser mode only supplies native observations; JS must compare each
+        # actual DOM count/intent with the native outcome before calling it a pass.
+        [ordered]@{ case=$InputCase; timeMs=$time; distanceWidth=$width; distanceHeight=$height; dpi=[MetaWorkChromeProbe]::GetDpiForWindow($window); interruption=$interruption; clickStates=$clickStates; maximized=[bool][MetaWorkChromeProbe]::IsZoomed($window); before=$before; after=(Get-MetaWorkRect $window); passed=$(if ($BrowserGesture) { $null } else { $true }) } | ConvertTo-Json -Depth 8 -Compress
     } finally {
         if (-not [MetaWorkChromeProbe]::SetDoubleClickTime($originalTime) -or [MetaWorkChromeProbe]::GetDoubleClickTime() -ne $originalTime) {
             throw 'Could not restore the original system double-click time'
@@ -1058,69 +1072,6 @@ public sealed class MetaWorkCaptionReference : Form {
     return
 }
 
-if ($Mode -eq 'doubleclick') {
-    $doubleClickTime = [int][MetaWorkChromeProbe]::GetDoubleClickTime()
-    $gap = [Math]::Max(30, [Math]::Min(100, [Math]::Floor($doubleClickTime / 4)))
-    $titleX = $rect.Left + [Math]::Min(600, ($rect.Right - $rect.Left) / 2)
-    $titleY = $rect.Top + 25
-    $contentY = $rect.Top + 100
-
-    Invoke-MetaWorkTitleClick $titleX $titleY
-    Start-Sleep -Milliseconds ($doubleClickTime + 100)
-    Invoke-MetaWorkTitleClick $titleX $titleY
-    Start-Sleep -Milliseconds 150
-    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
-        throw 'Titlebar presses outside GetDoubleClickTime were classified as a double click'
-    }
-    Invoke-MetaWorkTitleClick $titleX $contentY
-
-    $distance = [Math]::Max(
-        [MetaWorkChromeProbe]::GetSystemMetrics(36),
-        [MetaWorkChromeProbe]::GetSystemMetrics(37)
-    ) + 8
-    Invoke-MetaWorkTitleClick $titleX $titleY
-    Start-Sleep -Milliseconds $gap
-    Invoke-MetaWorkTitleClick ($titleX + $distance) $titleY
-    Start-Sleep -Milliseconds 150
-    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
-        throw 'Titlebar presses outside the system double-click rectangle were classified as a double click'
-    }
-    Invoke-MetaWorkTitleClick $titleX $contentY
-
-    Invoke-MetaWorkTitleClick $titleX $titleY
-    Start-Sleep -Milliseconds $gap
-    Invoke-MetaWorkTitleClick $titleX $contentY
-    Start-Sleep -Milliseconds $gap
-    Invoke-MetaWorkTitleClick $titleX $titleY
-    Start-Sleep -Milliseconds 120
-    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
-        throw 'A content-area pointer press did not reset the titlebar double-click sequence'
-    }
-    Start-Sleep -Milliseconds $gap
-    Invoke-MetaWorkTitleClick $titleX $titleY
-    Start-Sleep -Milliseconds 350
-    if (-not [MetaWorkChromeProbe]::IsZoomed($window)) {
-        throw 'Renderer titlebar double click did not maximize the Native window'
-    }
-
-    $rect = Get-MetaWorkRect $window
-    $titleX = $rect.Left + (($rect.Right - $rect.Left) / 2)
-    $titleY = $rect.Top + 25
-    Invoke-MetaWorkTitleClick $titleX $titleY
-    Start-Sleep -Milliseconds 120
-    if (-not [MetaWorkChromeProbe]::IsZoomed($window)) {
-        throw 'A third titlebar click toggled the Native window again'
-    }
-    Invoke-MetaWorkTitleClick $titleX ($rect.Top + 100)
-    Invoke-MetaWorkTitleDoubleClick $titleX $titleY $gap
-    Start-Sleep -Milliseconds 350
-    if ([MetaWorkChromeProbe]::IsZoomed($window)) {
-        throw 'Renderer titlebar double click did not restore the Native window'
-    }
-
-    Write-Output 'doubleClickMaximize=true doubleClickRestore=true timeoutRejected=true distanceRejected=true contentReset=true tripleClickStable=true'
-    return
-}
 
 if ($Mode -eq 'resize') {
     $originalWidth = $rect.Right - $rect.Left

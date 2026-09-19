@@ -9,7 +9,7 @@ pub const connect = "metawork.events.connect";
 pub const disconnect = "metawork.events.disconnect";
 pub const window_chrome_connect = "metawork.host.windowChrome.connect";
 pub const window_chrome_refresh = "metawork.host.windowChrome.refresh";
-pub const window_chrome_pointer = "metawork.host.windowChrome.pointer";
+pub const window_chrome_gesture = "metawork.host.windowChrome.gesture";
 pub const window_chrome_control = "metawork.host.windowChrome.control";
 pub const window_chrome_disconnect = "metawork.host.windowChrome.disconnect";
 pub const choose_workspace = "metawork.workspaces.choose";
@@ -103,7 +103,7 @@ pub const product = [_][]const u8{
     disconnect,
     window_chrome_connect,
     window_chrome_refresh,
-    window_chrome_pointer,
+    window_chrome_gesture,
     window_chrome_control,
     window_chrome_disconnect,
     choose_workspace,

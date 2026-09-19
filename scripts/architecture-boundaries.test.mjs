@@ -2671,7 +2671,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
       "GetClientRect",
       "GetCurrentThreadId",
       "GetCursorPos",
-      "GetDoubleClickTime",
       "GetDpiForWindow",
       "GetModuleHandleW",
       "GetSystemMetrics",

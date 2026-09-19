@@ -129,8 +129,8 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 
 | Capability | 层级 | 允许边界 | 删除条件 |
 | --- | --- | --- | --- |
-| `system_webview_drag_region` | macOS 一级；Windows 二级 | 补齐 System WebView 的 live-pointer drag，Host 限制原生 top band，DOM 交互排除由 Renderer 事件路径决定；Windows 独立复核 OS 指针并依据系统阈值判定双击，macOS 校验手势坐标范围后交给 SDK/AppKit；最大化复用既有 window-controls owner | 官方发布版提供明确适用于 System WebView、可覆盖等价标题栏拖动与双击行为的 public API，并通过目标平台验收 |
-| `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize，Application 在边缘按下时清除标题栏 pointer sequence | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
+| `system_webview_drag_region` | macOS 一级；Windows 二级 | Renderer 仅绑定真实标题栏并排除交互路径；Windows 按浏览器计数选择 drag/toggle，Host 不保存首击历史，对两种意图都复核当前 OS 指针与原生 top-band；macOS 校验范围后交给 SDK/AppKit；最大化复用 window-controls owner | 官方发布版提供适用于 System WebView 的等价 public API 并通过平台验收；包括 `ICoreWebView2Settings9::IsNonClientRegionSupportEnabled` / CSS `app-region` 的正式等价入口，而非仅 GPU surface 区域 |
+| `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize；不观察或维护标题栏点击历史 | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |

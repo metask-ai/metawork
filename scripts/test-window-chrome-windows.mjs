@@ -188,7 +188,6 @@ try {
       );
     }
     if (!resizeSessionOnly) {
-      await runProbe("doubleclick");
       await runProbe("drag");
       await probeWindowChromeInput({ port: debugPort, runProbe, evidenceDir });
     }
@@ -219,8 +218,8 @@ try {
       : inputSessionOnly
         ? "Windows real input matrix and clean shutdown passed.\n"
         : resizeSessionOnly
-          ? "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
-          : "Windows top-edge resize/cursors, native double click, sequence reset, paint/reload, titlebar drag/double click, controls, hide/reopen, and clean shutdown passed.\n",
+          ? "Windows top-edge resize/cursors, native edge double click, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
+          : "Windows top-edge resize/cursors, native edge double click, paint/reload, browser-count titlebar gestures, controls, hide/reopen, and clean shutdown passed.\n",
   );
 } catch (error) {
   process.stderr.write(output);

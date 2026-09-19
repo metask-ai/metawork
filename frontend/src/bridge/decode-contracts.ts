@@ -4877,7 +4877,7 @@ export type WindowChromeEnvironment = {
   generation: string;
   insets: { top: number; left: number; bottom: number; right: number };
   buttons: { x: number; y: number; width: number; height: number };
-  livePointerDrag: boolean;
+  gestureMode: "browser_mouse" | "native_press" | "disabled";
   rendererControls: boolean;
   maximized: boolean;
 };
@@ -4889,7 +4889,7 @@ export function decodeWindowChromeEnvironment(
     "generation",
     "insets",
     "buttons",
-    "livePointerDrag",
+    "gestureMode",
     "rendererControls",
     "maximized",
   ]);
@@ -4919,7 +4919,11 @@ export function decodeWindowChromeEnvironment(
       width: nonNegativeFiniteNumber(buttons.width, "$.buttons.width"),
       height: nonNegativeFiniteNumber(buttons.height, "$.buttons.height"),
     },
-    livePointerDrag: booleanValue(item.livePointerDrag, "$.livePointerDrag"),
+    gestureMode: enumValue(item.gestureMode, "$.gestureMode", [
+      "browser_mouse",
+      "native_press",
+      "disabled",
+    ]),
     rendererControls: booleanValue(item.rendererControls, "$.rendererControls"),
     maximized: booleanValue(item.maximized, "$.maximized"),
   };

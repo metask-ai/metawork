@@ -490,8 +490,10 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.match(shell, /WindowTitlebar/);
   assert.match(gate, /account-gate-toolbar/);
   assert.match(gate, /WindowTitlebar/);
-  assert.match(titlebar, /data-metawork-window-drag=""/);
-  assert.match(titlebar, /<header[^>]*data-metawork-window-drag=""/);
+  assert.match(titlebar, /data-metawork-window-drag="deep"/);
+  assert.match(titlebar, /ref=\{ref\}/);
+  assert.match(shell, /<WindowTitlebar ref=\{bindWindowTitlebar\}/);
+  assert.match(gate, /<WindowTitlebar ref=\{bindWindowTitlebar\}/);
   assert.doesNotMatch(titlebar, /createPortal|window-drag-region/);
   assert.doesNotMatch(titlebar, /onPointerDown|onDoubleClick|onContextMenu/);
   assert.doesNotMatch(`${shell}\n${gate}`, /onPointerMove|setPointerCapture/);
@@ -523,11 +525,19 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   );
   assert.match(
     chromeBridge,
-    /const candidateSelector = "\[data-metawork-window-drag\]"/,
+    /element\.addEventListener\("mousedown", onMouseDown\)/,
+  );
+  assert.match(
+    chromeBridge,
+    /element\.addEventListener\("pointerdown", onPointerDown\)/,
+  );
+  assert.doesNotMatch(
+    chromeBridge,
+    /(?:document|window)\.addEventListener\("(?:pointerdown|mousedown|click|blur)"/,
   );
   assert.match(chromeBridge, /commands\.windowChromeConnect/);
   assert.match(chromeBridge, /commands\.windowChromeRefresh/);
-  assert.match(chromeBridge, /commands\.windowChromePointer/);
+  assert.match(chromeBridge, /commands\.windowChromeGesture/);
   assert.match(chromeBridge, /commands\.windowChromeControl/);
   assert.match(chromeBridge, /commands\.windowChromeDisconnect/);
   assert.match(chromeBridge, /decodeWindowChromeEnvironment/);
@@ -538,20 +548,16 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.match(chromeBridge, /bridge\.on\("resize", scheduleRefresh\)/);
   assert.match(
     chromeBridge,
-    /window\.addEventListener\("blur", onWindowBlur\)/,
-  );
-  assert.match(
-    chromeBridge,
     /window\.addEventListener\("focus", scheduleRefresh\)/,
   );
   assert.match(chromeBridge, /event\.composedPath\(\)/);
   assert.match(chromeBridge, /entry\.matches\(exclusionSelector\)/);
   assert.match(
     chromeBridge,
-    /event\.isTrusted.*event\.button !== 0.*event\.isPrimary/,
+    /event\.isTrusted[\s\S]*event\.button !== 0[\s\S]*event\.isPrimary/,
   );
-  assert.match(chromeBridge, /phase: "down"/);
-  assert.match(chromeBridge, /phase: "reset"/);
+  assert.match(chromeBridge, /event\.detail !== 1 && event\.detail !== 2/);
+  assert.doesNotMatch(chromeBridge, /phase:|submitPointer|first_press/);
   assert.match(chromeBridge, /refreshInFlight/);
   assert.match(chromeBridge, /stateEpoch === requestEpoch/);
   assert.match(chromeBridge, /value\.generation === requestGeneration/);

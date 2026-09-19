@@ -29,7 +29,7 @@ pub const InputPrototype = struct {
         self.runtime = runtime;
         const binding = try self.capture.take(main_window_id);
         try self.controls.captureStartupWindow(binding);
-        try self.top_resize.attach(binding, self, resizePress);
+        try self.top_resize.attach(binding);
         try self.input.attach(binding, self, refresh, toggle);
         try refresh(self);
     }
@@ -46,10 +46,6 @@ pub const InputPrototype = struct {
         const maximized = try self.controls.isMaximized();
         try self.controls.setMaximized(!maximized);
         std.debug.print("DRAG_PROBE toggle maximized={}\n", .{!maximized});
-    }
-
-    fn resizePress(_: *anyopaque) void {
-        std.debug.print("DRAG_PROBE resize-press (no gesture reset)\n", .{});
     }
 
     pub fn deinit(self: *InputPrototype) !void {
@@ -90,7 +86,7 @@ pub const State = struct {
         const startup_binding = try self.startup_window_capture.take(main_window_id);
         try self.drag_region_capability.captureStartupWindow(startup_binding);
         try self.window_controls_capability.captureStartupWindow(startup_binding);
-        try self.resize_capability.attach(startup_binding, self, resetTitlebarSequence);
+        try self.resize_capability.attach(startup_binding);
     }
 
     pub fn bind(self: *State, services: native_sdk.platform.PlatformServices) !void {
@@ -103,11 +99,6 @@ pub const State = struct {
         self.startup_window_capture.deinit();
         self.window_controls_capability.deinit();
         self.drag_region_capability.deinit();
-    }
-
-    fn resetTitlebarSequence(data: *anyopaque) void {
-        const self: *State = @ptrCast(@alignCast(data));
-        self.drag_region_capability.resetPointerSequence();
     }
 
     pub fn installTray(
@@ -220,31 +211,22 @@ pub const State = struct {
         );
     }
 
-    pub fn handleWindowsPointer(
+    pub fn handleWindowsGesture(
         self: *State,
         runtime: ?*native_sdk.Runtime,
         services: ?native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
-        pointer: bridge_api.WindowChromePointer,
+        gesture: bridge_api.WindowChromeGesture,
     ) !void {
         try requireMainWindow(window_id);
-        const down = switch (pointer) {
-            .reset => {
-                self.drag_region_capability.resetPointerSequence();
-                return;
-            },
-            .down => |down| down,
-        };
-        // Only a valid document's down reaches this point. All newly fallible
-        // prerequisites must interrupt its sequence, including a missing Runtime.
-        errdefer self.drag_region_capability.resetPointerSequence();
         const runtime_value = runtime orelse return error.RuntimeUnavailable;
         try requireUnhiddenMainWindow(runtime_value, window_id);
         _ = try self.window_controls_capability.isMaximized();
-        const outcome = try self.drag_region_capability.handlePointerDown(
+        const outcome = try self.drag_region_capability.handleGesture(
             services orelse return error.RuntimeUnavailable,
-            down.x,
-            down.y,
+            gestureAction(gesture),
+            gesture.x,
+            gesture.y,
         );
         if (outcome == .toggle_maximize)
             try self.toggleMainWindowMaximized(runtime_value, window_id);
@@ -282,26 +264,14 @@ pub const State = struct {
         return environment(self.drag_region_capability.current(services), self.window_controls_capability.state());
     }
 
-    pub fn handlePointer(
+    pub fn handleGesture(
         self: *State,
         services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
-        pointer: bridge_api.WindowChromePointer,
+        gesture: bridge_api.WindowChromeGesture,
     ) !void {
         try requireMainWindow(window_id);
-        const outcome = switch (pointer) {
-            .down => |down| try self.drag_region_capability.handlePointerDown(
-                services,
-                down.x,
-                down.y,
-            ),
-            .reset => reset: {
-                self.drag_region_capability.resetPointerSequence();
-                break :reset drag_region.PointerOutcome.ignored;
-            },
-        };
-        if (outcome == .toggle_maximize)
-            try self.window_controls_capability.toggleMaximize();
+        _ = try self.drag_region_capability.handleGesture(services, gestureAction(gesture), gesture.x, gesture.y);
     }
 
     pub fn disconnect(self: *State, window_id: native_sdk.platform.WindowId) !void {
@@ -389,6 +359,13 @@ fn requireUnhiddenMainWindow(
         return error.WindowHidden;
 }
 
+fn gestureAction(gesture: bridge_api.WindowChromeGesture) drag_region.GestureAction {
+    return switch (gesture.action) {
+        .start_drag => .start_drag,
+        .toggle_maximize => .toggle_maximize,
+    };
+}
+
 fn environment(
     value: drag_region.Environment,
     controls: window_controls.State,
@@ -402,7 +379,11 @@ fn environment(
         .buttons_y = value.buttons_y,
         .buttons_width = value.buttons_width,
         .buttons_height = value.buttons_height,
-        .live_pointer_drag = value.live_pointer_drag,
+        .gesture_mode = switch (value.gesture_mode) {
+            .browser_mouse => .browser_mouse,
+            .native_press => .native_press,
+            .disabled => .disabled,
+        },
         .renderer_controls = controls.renderer_controls,
         .maximized = controls.maximized,
     };
@@ -513,15 +494,8 @@ test "Windows window query failure precedes attachment and preserves refresh ses
     try std.testing.expectError(error.WindowUnavailable, window.connectWindows(&harness.runtime, services, 1));
     try std.testing.expect(!window.drag_region_capability.document_attached);
     window.drag_region_capability.document_attached = true;
-    window.drag_region_capability.platform.first_press = .{
-        .tick_ms = 100,
-        .screen_point = .{ .x = 400, .y = 20 },
-        .window_rect = .{ .left = 100, .top = 100, .right = 900, .bottom = 700 },
-    };
-    const first = window.drag_region_capability.platform.first_press;
     try harness.runtime.hideWindow(1);
     // Hidden is allowed to query; an absent binding still fails explicitly.
     try std.testing.expectError(error.WindowUnavailable, window.refreshWindows(&harness.runtime, services, 1));
     try std.testing.expect(window.drag_region_capability.document_attached);
-    try std.testing.expect(std.meta.eql(first, window.drag_region_capability.platform.first_press));
 }

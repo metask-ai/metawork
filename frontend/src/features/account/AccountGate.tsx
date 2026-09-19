@@ -6,6 +6,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { SelectionMenu } from "../../components/ui/SelectionMenu.tsx";
 import { WindowControls } from "../../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../../components/ui/WindowTitlebar.tsx";
+import { bindWindowTitlebar } from "../../bridge/window-chrome.ts";
 import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 import { AboutMetaWorkDialog } from "./AboutMetaWorkDialog.tsx";
 
@@ -60,7 +61,7 @@ export function AccountGate({
 
   return (
     <main className="account-gate" data-readiness={account.state}>
-      <WindowTitlebar className="account-gate-toolbar">
+      <WindowTitlebar ref={bindWindowTitlebar} className="account-gate-toolbar">
         <div className="account-gate-brand" aria-label={t("app.name")}>
           <span className="brand-mark" aria-hidden="true">
             M

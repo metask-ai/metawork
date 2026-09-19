@@ -1,254 +1,174 @@
-# System WebView 拖动区域原位改造方案
+# System WebView 拖动区域最终建议方案
 
-状态：方案纠偏与有限证据记录，尚无已证明可接入现有产品的替代机制。2026-09-19 用户在指出方案偏离后，授权先修正计划与 TinyKG；撤回额外 32 DIP 拖动带，不再等待批准该候选。原改造目标未完成，生产替换不继续推进。本文不是规范性架构 decision record，不自动改变当前生效合同。
+日期：2026-09-19。分支：`feat/native-drag-region`。任务根：TinyKG `3145`。
 
-日期：2026-09-19。
+状态：用户在最终方案交付后明确要求使用 goal 实施，F1–F9（含 F2 的 Windows 行为迁移）已获实施授权。实现与验证进行中，未通过的验收不因授权而视为完成。
 
-分支为 `feat/native-drag-region`，TinyKG 任务根为 `3145`。旧 A `3146` 的失败与后续 A2 `3166` 的固定原型通过均保留原义；B1 `3147` 的实际 UI 接入未闭合，B2/C/D `3148`–`3150` 未完成。当前停止点是缺少满足现有界面和输入边界的完整机制，不是缺少用户对 32 DIP 的批准。第 12–14 节是历史授权与实验记录，其中的“下一步”不构成当前执行指令；当前恢复入口见 5.4、7 和 15.4。
+**选定路线：参考 Tauri 最新稳定版的窗口手势机制，在现有标题栏和 Bridge 上作最小适配。Windows 采用浏览器点击计数，不再维护 Host 首击历史；macOS 保留 SDK/AppKit。**不再以 CSS 原生区域能力作为本次前置，不再推进透明输入子窗口、区域镜像、业务 ACK 或额外拖动带。
 
-## 1. 目标与范围
+当前方案只有 F1–F9。文末第 12–15 节因原型证据追溯责任保留为历史，历史“下一步”、批准边界和章节编号不构成当前实施指令；其原始上下文见 Git `3e725c69`。
 
-在现有 `system_webview_drag_region` owner 内完成改造：保留现有一体化标题栏、Windows 拖动与双击最大化/还原，彻底移除全局 `document.pointerdown`，不把全局点击记账改挂到 `window` 或其他事件。标题栏高度、窗口按钮位置、业务内容空间及弹层覆盖/点击行为保持[现有 UI 合同](../docs/ui-design.md#43-一体化窗口栏)，不为适配原生子窗口另加拖动带、整体下移 WebView 或关闭浏览器缩放。
+## F1. 固定参考基线，限定最小偏离
 
-工程动机是减少应用层自行拼接窗口手势历史，而不是把 `document.pointerdown` 这个 API 本身判为错误。当前 `frontend/src/bridge/window-chrome.ts:149` 会把每次符合条件的业务按下转换为 reset，Host 的 `first_press` 又依赖它与失焦、原生边缘等来源共同中断。集中式被动记录器可以减少 IPC，且不要求业务组件接线或等待；但它仍让窗口逻辑依赖全页输入与 Renderer/Host 两侧的连续性状态。本次选择重新审视这一职责分配，而不只优化现有模型的通信次数。
+本次核对的最新稳定版为 [Tauri 2.11.5](https://github.com/tauri-apps/tauri/releases/tag/tauri-v2.11.5)，commit `7cd71369c00978a3783b6ae3e9972358abbe4ae6`。以该 revision 的 [drag.js](https://github.com/tauri-apps/tauri/blob/7cd71369c00978a3783b6ae3e9972358abbe4ae6/crates/tauri/src/window/scripts/drag.js)、[window plugin](https://github.com/tauri-apps/tauri/blob/7cd71369c00978a3783b6ae3e9972358abbe4ae6/crates/tauri/src/window/plugin.rs) 和 [Cargo.lock](https://github.com/tauri-apps/tauri/blob/7cd71369c00978a3783b6ae3e9972358abbe4ae6/Cargo.lock) 为基线，依赖对应 Tao 0.35.0、Wry 0.55.0。实施期间不自动漂移到 dev、alpha、教程片段或另一个版本；复制或改编源码时保留适用许可与来源。
 
-双击识别仍需要输入序列信息。目标是让合适的 OS/WebView 输入机制承担这项职责，不是宣称任何观察都应消失。该取舍同时符合用户此前对“即使不发 IPC、只在本地记录，也完全移除 document.pointerdown”的明确决定。本文件不据此禁止无关组件的正常事件委托，也不把捕获监听等同于阻止业务点击或导致复制故障。
+稳定版内置脚本在 document 冒泡监听 mousedown，仅在目标合格且 detail 为 1/2 时执行，Windows 的第二击请求 internal_toggle_maximize；其他计数不执行。Tao 将拖动交给 Windows caption move loop。这是一条现成机制，不要求应用建立原生区域镜像。
 
-- 普通复制、输入、选区和业务按钮不参与窗口手势协议。
-- 页面状态提交、AccountGate 切换和弹层打开不得等待窗口拖动能力的 IPC；移除全局点击耦合后，不得引入全局布局事务耦合。
-- 不更换 Native SDK 或桌面宿主，不 patch/fork/vendor SDK，不访问私有 WebView 对象。
-- 不引入手势 token、lease、点击编号或自制双击定时器。
-- 保留主窗口身份、Application/Bridge authority、关闭隐藏、托盘、显式退出和窗口状态持久化。
-- `system_webview_resize` 仍只拥有原生缩放输入；不合并成通用窗口 facade。
-- macOS 保留 AppKit 路径，只收窄 Renderer 入口；不照搬 Windows 输入子窗口。
+本项目的有意适配只有：
 
-不把“业务点击零手势命令”夸大为“所有业务操作绝不引起任何窗口 IPC”。但是否需要区域发布协议尚未成立，不能先定协议，再要求各业务 owner 配合。
+- 监听收窄到实际标题栏 DOM 节点；React 只登记节点，不读取平台、连接 DTO 或调用 transport。
+- 保留项目已有的完整控件/inert/no-drag 排除，以及启动窗口、generation、原生 top-band 与实时指针授权。
+- Windows 复用已有原生拖动与 window-controls owner，不移植另一套宿主；macOS 保留当前 SDK/AppKit 手势和系统偏好，不叠加 Tauri JS 双击执行。
+- 按实际挂载/卸载管理监听，按既有 Bridge 合同处理失败和迟到响应。
 
-## 2. 已知事实与设计判断
+[Wry 0.55.0 的 CSS 原生区域设置](https://github.com/tauri-apps/wry/blob/wry-v0.55.0/src/webview2/mod.rs)仍是未来能力替换参考。Native SDK 0.10.1 对启动 System WebView 的公开入口缺口不妨碍本次 JS 意图路线；不修改 SDK、私有对象或 upstream-only 政策。
 
-### 2.1 当前能力与参考边界
+## F2. 明确行为迁移，不再承诺旧状态机等价
 
-现有 Windows drag seam 已经通过 `ReleaseCapture` 和 `WM_NCLBUTTONDOWN/HTCAPTION` 调用系统拖动循环。缺口不是没有原生拖动执行能力，而是 `first_press` 依赖全页面 `reset` 才能维护双击连续性。
+采用 Tauri 的 Windows 点击语义，替换旧 Host 配对语义；用户在最终方案明确列出以下差异后批准实施。这是行为迁移，不是旧状态机的等价重构。
 
-现有 resize seam 已具备局部输入子窗口、原生命中、启动 binding、DPI/窗口状态更新和销毁清理。它为生命周期实现提供依据，但其窄边缘绘制证据不证明整块标题栏输入区域可用。
+对当前合格标题栏按下，Windows 只做以下映射：
 
-Tauri/Tao 的 JS 意图路径与 Wry 的 WebView2 CSS 区域路径是不同机制。前者在 DOM 事件路径确认拖动目标后才调用窗口动作；当前上游脚本仍使用 document 级 mousedown，不能原样满足本任务的输入边界。后者启用浏览器原生区域支持，具体能力见 2.2。自建透明输入子窗口不是这两条路径的同款实现，不能借用其成熟度结论。
+| 条件 | 请求 |
+| --- | --- |
+| 可信主键 mousedown，detail === 1 | start_drag |
+| 同上，detail === 2 | toggle_maximize |
+| detail 为其他值、目标被排除或 capability 未就绪 | 不发手势命令 |
+| 普通业务按下、失焦、原生边缘按下 | 不发送或维护双击 reset |
 
-### 2.2 Windows 浏览器原生区域：具体 SDK 缺口与替换条件
+Host 仍可因当前窗口/指针/生命周期不合格拒绝请求。浏览器计数不是执行授权；动作被拒绝不排队、不重放，也不另行修补后续点击计数。
 
-WebView2 的具体能力是 `ICoreWebView2Settings9::put_IsNonClientRegionSupportEnabled(TRUE)`，Wry 的 Rust binding 对应调用名为 `SetIsNonClientRegionSupportEnabled(true)`。启用后由 CSS `app-region: drag` / `app-region: no-drag` 声明区域；官方文档描述了拖动、右键系统菜单、双击最大化/还原。该设置默认关闭，变更在下一次导航后生效，不能视为可即时切换的布局屏障。[官方 API](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2settings9?view=webview2-1.0.3537.50)
+这意味着：
 
-这条路径的职责优势是浏览器同时拥有 DOM 布局和区域输入语义，MetaWork 不必额外镜像可拖动空白或记录全页点击；不宣称它完全没有边界条件或无需平台验收。
+- 正常双击继续最大化/还原，拖动继续交给 OS。
+- 不再保证“中间发生任何业务按下、失焦、原生边缘输入、失败或窗口矩形变化，都由应用强制中断双击”。
+- 给定标题 1 → 相邻控件 2 → 标题 3，最后一击无窗口动作；给定标题 1 → 控件 1 → 标题 2，最后一击可以请求最大化。
+- 给定标题 1 → 失焦 → 标题 2，最后一击可以请求最大化。仓库已有真实 [失焦计数证据](../docs/validation.md)，不是尚未发现的理论情形。
+- 连续 detail 为 3/4 时不发新手势；窗口移动后浏览器若重新从 1 计数，则按新事件处理。
+- 时间、距离及计数重置由目标 WebView 的浏览器机制决定。记录系统设置与正负边界，不再复制旧 Host 闭区间，也不承诺与原型 native child 的每个边界像素相同。
 
-当前固定 Native SDK 0.10.1 的已公开 `set_window_drag_regions` 只覆盖 GPU surface，启动 System WebView 不在覆盖范围；本次对其公开 platform/runtime surface 与 Windows 适配路径的检查没有找到可用于启动 System WebView 的上述设置入口。依赖携带 WebView2 接口声明不等于 MetaWork 已取得可调用的 public capability。能力缺口继续登记在[高层架构 §3.5](../docs/architecture.md#35-native-sdk)，不访问 SDK 私有 context 或 COM 对象，不修改 SDK，也不把等待上游作为本次交付路径。
+业务隔离的保证是“业务事件自身零窗口手势命令、不被窗口 handler 取消或修改焦点”，不是承诺浏览器将任何业务事件视为独立于下一次标题事件的计数序列。
 
-这里记录的是 Windows 上游等价能力的具体候选。未来官方固定版本若以任何合适的 public API 提供 System WebView 等价区域能力，且通过本文件的平台矩阵，应原位替换并删除失去职责的 Windows seam、wire 和验证分支。删除条件不限定 SDK 必须暴露这个 COM setter，不把 Windows API 当作 macOS 的替换条件。本轮不改写规范中的等价能力删除条件。
+标题栏高度、按钮位置、内容空间、弹层覆盖、复制/编辑/选区、系统关闭隐藏/托盘/显式退出不改变。macOS 不采用上述 Windows 行为迁移，维持 SDK/AppKit 与用户双击偏好。
 
-### 2.3 两条不同的 Renderer 路线，分别评估
+实施须同步本节涉及的合同及验证预期，不改变无关 Gate。本方案不再留下多条待选技术路线，也不把已接受的行为差异转换为再次开发自制状态机的理由。
 
-**仅靠 detail 的路线。**局部 mousedown 加 `detail === 2`，同时保留原 Host 首击缓存，不能仅凭这个数值证明双方指向同一次首击。此前 `[1,1,2]` 是浏览器计数重锚的源码模型反例；失焦还有仓库真实证据。它只否定 detail 单独充当连续性证明，不能用来否定下面的记录器。
+## F3. 局部 DOM 入口与真实界面接入
 
-**全局被动记录器路线。**为准确比较，按下列候选语义分析；不是批准新增协议或监听：
+AppShell/AccountGate 将 browser-side Bridge 的稳定窄绑定函数作为 DOM ref 注入 `WindowTitlebar`，后者只转交给真实 header，保持 Foundation UI 不导入 Bridge 的依赖边界；Bridge 拥有事件、会话和响应状态，挂载取得清理函数。当前 React 19 支持 ref cleanup。不得在 `main.tsx` 的 React 渲染之前只 querySelector 一次，不引入 MutationObserver、全页扫描或通用区域注册系统。
 
-1. document 的 pointerdown capture 记录可信 primary 主键按下。判定必须使用完整的 candidate 与交互排除规则；按钮即使位于标记 header 内，也必须判为非拖动目标。此类按下只令本地 `interrupted = true`，不发窗口命令、不取消事件、不改变焦点或 DOM。
-2. 标题按下的 mousedown capture 读取 `detail`，由有效标题动作入口在本次事件内将 `continue = !interrupted && detail === 2` 随 down 同步提交，然后将本地 interrupted 清为 false。单纯观察不消费记录；消费不等待 ACK，也不能让迟到完成回调修改下一次序列。本地初始/新文档状态视为 interrupted，具体动作失败分支仍须验证。
-3. Host 在 continue 为 false 时无条件清除旧首击，再处理当前有效按下；为 true 时仍需现有原生资格、首击存在、时间、距离和窗口矩形全部检查。保留失焦、原生边缘、断连与授权失败清理。
+- 监听绑定在真实 header：Windows 处理局部 mousedown；macOS 保持局部 pointerdown，以保留当前 SDK 输入时机。由 Host capability 决定哪一个入口生效，同一事件不会走两条动作路径。
+- 标题栏明确采用深层拖动语义，覆盖非交互标题文字及空白；不能直接套用 Tauri bare marker 的“只命中元素自身”语义而让当前标题 span 失去拖动。
+- 依据原生 composedPath，确认包含本次绑定 header，并检查完整交互排除。保留当前 button/SVG、input、链接、disclosure、可编辑/可聚焦内容、inert 和显式 no-drag 保护；采纳 Tauri 的交互排除模式，不复制其允许交互元素主动标记为 drag 的覆盖特例。
+- Windows 只有在 capability 就绪、目标合格且有动作时，按参考入口取消选字默认行为并停止该次拖动事件传播，立即发请求。无动作分支不取消事件；macOS 不额外改变当前 pointerdown 默认处理。
+- 使用原生局部监听，不以 React 逻辑树的冒泡替代 DOM 命中。原生传播被显式停止时尊重其结果，不回退到 document capture 追捕事件。
+- 窗口按钮的 click 处理也绑定在标题栏内，保持现有键盘激活、执行中禁用和恢复逻辑；普通业务按钮不进入窗口手势分支。
+- AccountGate 与 Workbench 的标题栏各自随挂载绑定、随卸载解除；动态 actions 由当次 DOM 命中自然排除。保留设置覆盖时已有的可命中 no-drag 外层，避免 inert 跳过子树后误命中 header。
+- modal、菜单与 portal 按实际 DOM 路径处理；路径不经过该 header 时不触发其原生监听。业务布局照常提交，不需要 IPC ACK。缩放、窄窗和语言变化不发布几何镜像，也不改变 CSS 布局。有效拖动范围始终是 DOM 候选与 Host 原生 top-band 的交集；不承诺缩放后的整个视觉 header 都取得原生执行权，也不扩大 top-band 来掩盖越界。
+- StrictMode 重挂、节点更换及重复清理不得重复注册或解除新节点的监听。文档 dispose 解除当前全部局部绑定；旧连接/响应不能重新绑定节点。
 
-两个 capture 观察步骤本身不发 IPC；只有有效标题动作入口发送 down。pointerdown 用于观察、mousedown 用于读取计数不能混用：仓库探针断言 pointerdown.detail 为 0；`ResizableSeparator.tsx:60` 取消 pointerdown，可抑制兼容 mousedown。因此只监听 mousedown 会漏记此类业务按下。[Pointer Events 规范](https://www.w3.org/TR/pointerevents3/#mapping-for-devices-that-support-hover)
+## F4. 最小 Bridge 合同
 
-以下是给定输入的条件推演，不是实际浏览器计数采样或平台验收。前提是完整资格判定、事件确实到达 capture、请求有序送达及 Host 原生检查正常：
+保留 connect / refresh / control / disconnect。以 `metawork.host.windowChrome.gesture` 原位替换旧 pointer command，不新增通用 OS action 协议，也不保留旧 phase 的兼容解析。
 
-| 场景                                         | 记录器/Host 对末次标题按下的处理                          | 模型结论                              |
-| -------------------------------------------- | --------------------------------------------------------- | ------------------------------------- |
-| 标题 A → 内容 B → 标题 C                     | B 置 interrupted，C 不续接                                | 不误 toggle                           |
-| 标题 A → 相邻控件 B → 标题 C，给定 `[1,2,3]` | B 置 interrupted；C 的 detail 也非 2                      | 不误 toggle                           |
-| 计数重锚，给定 `[1,1,2]`                     | B 置 interrupted，C 即使 detail 为 2 也不续接             | 此反例不能否定记录器                  |
-| 同位置 disabled 控件插入                     | 若真实按下到达 capture 且被完整规则排除，则置 interrupted | 条件下不误 toggle；事件路径需实机证明 |
-| 业务祖先 stopPropagation                     | document capture 先于下层业务处理器观察 B                 | 不因下层冒泡阻断而漏记                |
-| 相邻业务控件取消 pointerdown，无 mousedown   | pointerdown capture 已记录 B                              | 不依赖 B 的 mousedown                 |
-| 失焦或原生边缘按下，末次 detail 仍为 2       | 保留的 Host reset 已清首击                                | 即使 continue 为 true 也不能 toggle   |
-| 正常两次标题按下                             | 第二击可续接，仍过 Host 全部检查                          | 保留正常双击                          |
+gesture payload 固定为 `{ generation, action: "start_drag" | "toggle_maximize", x, y }`；坐标必须有界且有限。成功沿用 `{ generation, handled: true }`，含义仍是受理，不保证原生交互已完成。不传 HWND、window id、点击时间、计数、continuity hint 或 token。
 
-现有资料没有用上述反例证明记录器不可靠；也没有证明它是唯一候选或已通过全部验收。它可以集中在 Bridge 内，不要求业务 owner 接线，不能与已撤回的业务布局屏障混为一谈。普通下层 stopPropagation 也不是拒绝 document capture 的理由。
+connect/refresh 用闭合 `gestureMode: "browser_mouse" | "native_press" | "disabled"` 替换 livePointerDrag：
 
-本次不选记录器，依据是第 1 节的职责取舍与已明确的输入边界：它优化了 IPC，却保留全页输入记账及跨层连续性状态。技术可行性判断和本次是否选择必须分开。若未来重新选择它，需要明确改变设计决定，并修改 Bridge down 的字段、非拖动点击的中断语义及跨语言 fixture；只能说“Host 不镜像区域”原则可保留，不能说现有 Bridge 第 18/22 行整体不变。
+- browser_mouse：Windows，Bridge 按 F2 从 mousedown 选动作。
+- native_press：macOS，合格 primary pointerdown 只请求 start_drag；SDK/AppKit 自行处理这次按下的原生含义。Host 拒绝此模式下 Renderer 请求 toggle_maximize。
+- disabled：不发送手势；不猜平台或换用另一路径。
 
-### 2.4 当前取舍，不声称已穷尽所有实现
+模式只是当前已支持能力的判别，React 不消费它，不建立可配置策略框架。未就绪事件直接忽略，不在 connect/refresh 完成后回放。
 
-| 路径                       | 当前结论                                                                   |
-| -------------------------- | -------------------------------------------------------------------------- |
-| 现有 pointer down/reset    | 替换验证完成前保留的安全基线；确实仍有每次业务按下一次 reset，不算完成改造 |
-| 浏览器原生区域             | 职责参考与未来上游替换候选；当前 SDK 公开入口缺失，不能假设可直接接入      |
-| 原生输入子窗口             | A2 已证明固定原型的有限输入/绘制事实；真实 UI 接入未成立，退出默认实施路线 |
-| 固定专用拖动片区           | 额外 32 DIP 拖动带及整体下移 WebView 的候选已撤回；不等待其批准或继续原型 |
-| 被动 capture 记录器        | 已完成上述条件评估，本次不采用；不再用 detail 单用反例否定它               |
-| 动态区域镜像加业务提交屏障 | 已撤回；不得要求 AccountGate、actions 或弹层 owner 等窗口 IPC              |
+保留 origin、精确启动窗口、generation、严格字段和主线程检查。新请求仍使用唯一现有 transport；删除旧 pointer catalog/type/decoder/fixture，旧 command 和额外字段必须被拒绝。更新唯一 app.zon catalog 及其派生物，不以泛化 allowlist 或跳过 guard 完成迁移。
 
-这些是已讨论路径的处置，不是已穷尽所有实现的证明。原型可行性不等于产品适配成立；不能为维护已投入的实现路线而反复要求用户改变产品。当前按第 1 节边界收敛方案，不重新要求选择全局记录器、额外拖动带或 SDK 改造。
+## F5. Native owner 与失败处理
 
-## 3. 目标职责
+Windows 在现有 drag seam 内把“当前按下授权”从“首击配对”中分离，删除后者。两种 gesture 都先验证 document attached、当前主窗口可用/未隐藏、逻辑主鼠标键按下、实际 OS 光标、已绑定 root、native hit 和 DPI top-band；Renderer 坐标不授予执行权。
 
-| Owner                               | 职责                                                                                                       | 不承担的职责                                 |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| `WindowTitlebar` 与标题栏布局 owner | 声明自身的拖动意图和交互边界；不取得其他业务 owner 的提交权                                                | HWND、直接 transport、双击计时、阻塞页面提交 |
-| browser-side window chrome Bridge   | 局部入口生命周期、严格响应校验；具体输入机制须经第 5 节的可行性判断                                        | 全页事件观察、全页交互元素扫描、猜测窗口真值 |
-| Dispatcher                          | 来源、启动窗口、generation、payload 与主线程校验                                                           | 原生资源、双击状态                           |
-| Application window owner            | 组合 binding、drag/resize/controls 生命周期；具体调用链随已证明的输入机制确定，不预设必须有两个输入层      | 重建 SDK 窗口生命周期、直接散布 Win32 effect |
-| Windows drag seam                   | 替换前维持既有职责；替换后仅承担 SDK 未覆盖且已获准的窄能力，不预设保留 drag 子窗口                       | 任意窗口操作、业务布局事务                   |
-| Windows resize seam                 | 顶边/顶角输入、系统缩放；拥有当前有效原生 resize 占用区并提供窄的只读事实                                  | 业务控件命中、标题栏布局、直接 import drag   |
+- start_drag：复用现有 ReleaseCapture 与正确封装坐标的 WM_NCLBUTTONDOWN/HTCAPTION 路径，不复制 Tao 的内部线程/消息包装。
+- toggle_maximize：通过同一手势授权后，由 Application 调用已有 window-controls owner。复用执行原语，不直接转发到没有手势授权的按钮 control 分发入口，不增加双击缓存。
+- macOS：保留现有坐标 top-band 检查与正式 startWindowDrag；不同时发送 JS toggle，不改变交通灯与用户系统偏好。
+- resize：保留原生边缘命中、系统缩放、绘制和生命周期，只删除专为旧首击缓存存在的 reset 回调。无 drag child，不新增 Z 序/区域裁剪协调。
 
-已确定的方向是输入资格与窗口动作分离；布局如何与命中保持一致尚未解决，因此不再把“区域发布 → 原生命中”写成既定链路。
+保留窗口状态读取和生命周期校验；只移除专用于配对的 Press、tick、距离、window_rect 比较与 reset。不能按符号名批量删除其他 owner 仍使用的窗口矩形、focus refresh、隐藏/销毁或资源清理。
 
-## 4. Windows 原生输入层候选
+窗口手势立即提交，不等待状态读取，不设全局 gesture in-flight 锁，不将后续手势排队。失败或结果未知时不重试 toggle/start_drag、不 reconnect、不恢复旧引擎；复用既有 refresh、响应 epoch 和 generation 失效规则。动作 ACK 不当成移动/最大化完成，最终状态由 Host 事实确认。会话/刷新状态不是双击历史，不因“删除状态机”一并删除。
 
-以下保留已验证固定原型的机制与资源约束，不是当前默认实施路线或新一轮实验指令。A2 结果见 14.6；第 5 节的布局一致性问题不能靠这里的 Win32 原语自动解决，固定区域原型通过不能授权动态区域实现。
+## F6. 删除边界与规范同步
 
-候选的潜在收益是把标题栏按下纳入 OS 的非客户区输入，使应用不再用 DOM 业务点击拼接双击历史。需要证明的具体链路是“drag 子窗口首击 → 主窗口 move loop → WebView2/原生边缘插入 → drag 子窗口再次按下”。不能预先宣称任意跨 HWND 点击都会替本实现正确重置 OS 序列；capture、消息转发及最大化后的窗口变化都属于该证明。
+生产替换必须在同一完整变更中收口：
 
-1. 复用现有启动窗口 binding，在当前 UI 线程建立 drag-owned 输入子窗口。初始隐藏且无命中区域；不建立第二个顶层窗口或 WebView。
-2. 只覆盖显式登记的拖动片区。候选实现使用有界矩形集合与窗口 region 裁剪；空集合必须清空/禁用命中，不能把空 region 误作恢复整个矩形窗口。
-3. 片区内的命中为 `HTCAPTION`；片区外由真正的窗口形状排除，不能仅依赖跨线程 `HTTRANSPARENT` 穿透。
-4. 原生 `WM_NCLBUTTONDOWN` 进入现有系统拖动路径；`WM_NCLBUTTONDBLCLK` 经窄回调进入 Application 的最大化/还原入口。不得同时转发双击消息和调用 toggle，避免执行两次。
-5. 最大化窗口仍需要标题栏拖动恢复，不能照搬 resize 的“最大化时隐藏输入层”条件。隐藏、最小化、禁用、文档断开等状态分别定义并验证。
-6. 右键系统菜单通过主窗口原生路径处理，不新增自绘菜单。它属于拟验证行为，不因识别了 `HTCAPTION` 就宣称自动通过。
-7. drag/resize 的裁剪与 Z 序按 4.1 的单一责任划分实现，不能留给两个子窗口各自抢占最高层。
-8. 使用现有输入层的绘制策略作为候选，不增加整窗截图、重绘镜像或透明度补丁。静止 DOM 更新、动画、遮挡恢复与调整尺寸都必须验证。
+- 全局 document.pointerdown，以及本次局部化后失去职责的 document.click。
+- 业务 pointer.reset、blur reset、原生边缘 reset、first_press、配对时间/距离/窗口矩形状态、旧 pointer wire/DTO。
+- 不再使用的回调、常量和仅验证旧内部协议的断言；不保留静默 fallback、两个 active 手势引擎或生产开关。
 
-原生输入并不自动证明所有中断语义成立。首击进入主窗口 move loop 后的第二击、失焦与原生边缘插入，都属于 A 阶段否决项。
+保留已证实的旧失败作为历史证据。原型源码/脚本暂仍有证据复现责任，本次不扩大使用；新路径验收后检查哪些纯原型文件已无合同/证据职责再删除，保留被正式验证入口复用的输入驱动。历史只靠 Git 与现有证据追溯，不另建 active archive。
 
-### 4.1 原生裁剪、层级与更新归属
+实施时只同步真正变化的真源：
 
-- **resize seam 拥有排除事实。**使用当前窗口、DPI、可缩放/最大化/最小化/启用状态计算实际有效 resize 占用区；沿用现有原生边框指标，不能写死约 8 px。通过 Application 注入的窄接口提供同一份事实，不在 drag 或 Renderer 复制计算。resize 未启用时排除集合为空。
-- **drag seam 执行裁剪。**先将候选拖动区域可靠映射到原生客户区物理坐标，再限制到 native top band 并扣除有效 resize 区域；以裁剪后的真实窗口 region 安装。Renderer 不接收 HWND、不估计 OS 边框，也不承担这项排除。坐标映射未证明时不启用候选。
-- **Application 拥有组合顺序。**输入层的实际原生操作仍封装在对应 seam，Application 以明确调用/窄回调协调；不合并成通用 facade，也不让两个 seam 相互 import。
-- **Z 序固定为 resize 在 drag 之上、drag 在 WebView 内容之上。**drag 创建时保持隐藏，首次激活前由原生 seam 将其排在 resize 子窗口之后；drag 不使用 `HWND_TOP` 自行置顶。resize 保留其置顶职责，Application 协调 drag 的相对位置；不能把“创建一次排对了”当作永久成立。
-- **更新入口覆盖安装、SIZE、SHOWWINDOW、DPICHANGED、窗口启用/样式变化和 PARENTNOTIFY 引起的子窗口顺序变化。**在同一 UI 线程的受控更新中先撤销可能失效的 drag 命中，resize 更新并提供当前排除事实，再由 drag 裁剪、定位；仅在映射和候选片区的有效性仍成立时重新激活。不能因为原生尺寸更新完成就复用过期 DOM 区域。
-- **失败先保持不可命中并清理。**不能确认裁剪、相对层级或激活前提时，不启用 drag 子窗口；只读查询或定位失败不触发另一层的置顶重试循环。具体撤除失败按 5.5 处理。
+| 真源 | 本次责任 |
+| --- | --- |
+| Renderer Bridge 合同 | gesture wire、mode、局部入口与授权、响应/清理语义 |
+| UI 设计规范 | F2 的 Windows 行为变化；布局与业务隔离不变 |
+| 高层架构 | drag owner 不再持有首击历史；SDK 缺口和原位删除条件 |
+| validation | 新行为判据、原生授权及实机证据边界，旧证据保持原意 |
+| app.zon / 生成输入 | 精确 command catalog；不放宽来源或任意 action 权限 |
 
-原型须观察有效 resize 像素不会触发拖动、drag 像素不会被 WebView 抢走、其余控件像素正常交给 WebView；同时覆盖 child 创建/重排与最大化时 resize 隐藏而 drag 仍需可用。这里解决的是原生层之间的归属，不解决 5.1 的动态 DOM 一致性问题。
+不修改 AGENTS.md、SDK 依赖政策或无关规范。规范中旧“证据不足保留 Host 状态机”的约束在迁移获准前有效；推荐稿和合成测试不能解除它。迁移获准后，按 F2 明确更换行为合同，而不是遇到测试失败才改预期。
 
-## 5. 已撤回设计与尚待证明的机制
+## F7. 实施 DAG 与提交边界
 
-### 5.1 第一轮：为什么需要业务布局等窗口 ACK？
+不继续“原生子窗口原型 → 新区域协议 → 正式替换”的旧路径。恢复实施时，将未完成 DAG 的职责对齐为以下顺序；旧 A failed、A2 的有限 completed 结论保持，不能用于证明新路线。
 
-上一版用 `suspend → ACK → 提交 DOM → publish` 防止原生区域落后于页面。这说明候选设计建立了两份命中事实，却没有共同的提交边界。
+1. **行为与接口基线。**接受 F2 后同步实施范围，固定稳定版来源和预期表；补齐局部绑定、双击分支、权限/fixture 的回归用例。源码逻辑对照可纯本地执行，但不冒充真实点击计数。
+2. **完整单路径替换。**在开发分支同时接入标题栏生命周期、typed gesture、Windows 原语与 macOS 适配，删除旧监听/首击/reset；运行类型、Renderer、Bridge、Native 定向验证和 guard。不先合入“只删除入口但没有替代”的断档提交。
+3. **真实产品验收与清理。**通过正式产品路径运行 F8，绑定当前 artifact；收口失去职责的原型材料与验证记录，检查没有旧路径残留。
 
-可达反例：旧拖动区域 R 已安装；AccountGate 切换或标题栏 action 更新使 R 被控件占用。若 React 正常提交，Host 处理撤销之前，旧输入层仍能截获控件点击；若等待撤销 ACK，则页面状态提交依赖窗口 IPC。ACK 未到时，“保留旧视图、允许取消”不能正确呈现已经发生的 Product 状态变化。
+已启动 goal。TinyKG decision 3186 将稳定任务 ID 对齐为 B1 行为/接口基线、B2 局部 DOM/模式/生命周期回归、C 完整链路替换和自动验证、D 真实产品证据及清理；旧原型下一步不再适用，旧实验完成不证明新路径。
 
-代码依据：`frontend/src/app/App.tsx:763` 从 snapshot 推导 AccountGate，`:2667` 和 `:2691` 在 root render 直接分支；`AppShell.tsx:370`、`:384` 动态提交上下文和 actions，`frontend/src/index.css:3415` 使用内容相关的 grid 列宽。`frontend/src/components/ui/SelectionMenu.tsx:52` 的未受控打开状态与 `frontend/src/components/ui/Dialog.tsx:21` 的全视口 backdrop 也不是标题栏协调器拥有的布局事务。这里不推断 AccountGate 延迟等同于数据泄漏；已确认的问题是错误的呈现依赖和故障耦合。
+每个 DAG 子任务完成都评估是否提交，但任务数量不等于提交数量。以独立可审阅、可构建、可验证为边界：完整替换及其合同/回归应成一个一致单元；真实输入验证扩展和有独立价值的清理可另提交。不要逐个补丁产生检查点，也不要把全部实现、验证工具和无关文档压成一个大提交。已有四条提交不在本轮再次重写；本次计划先保留工作树修改，不单独制造提交。
 
-原布局屏障设计的 P1 已通过撤回该路线收口，不再是当前草案要求执行的动作；动态区域如何安全承载实际 UI 仍未解决。不能用事后 observer、更多版本号、业务层等待队列或“之后加测试”修复这个所有权问题，也不能把状态记录获准当作生产机制获准。
+## F8. 验收与停止条件
 
-### 5.2 第二轮：为什么发布失败就能断言原生区域已禁用？
+### 自动化
 
-上一版把 Host 安装结果与 Renderer 收到响应混为一个原子动作。实际调用顺序是平台 effect 先执行、再编码/运输响应（`src/bridge/dispatcher.zig:676`）。当前固定 SDK 的 invoke 在 post 成功后等待 complete 才结束 pending，没有内建等待期限；Windows 响应通过 `ExecuteScript` 单独送达，并没有向调用方提供跨层回滚保证。
+- 稳定版原脚本分支对照：普通双击、给定 1/2/3/4、1/1/2、失焦 1/2，确认采用的 Windows 分支；JS 只供应序列，不能证明浏览器会产生该序列。
+- 局部绑定：首次渲染、AccountGate/Workbench 切换、StrictMode、节点替换/卸载、迟到 connect、dispose 后事件；每次有效输入最多一个命令。
+- 目标排除：button/SVG、disabled、inert/no-drag 外层、可编辑/可聚焦内容、disclosure、portal、控件取消 pointerdown/传播；普通内容不被全页窗口 handler 观察或发送手势。
+- Bridge/Host：新旧 command 与字段的严格接受/拒绝，旧 generation、错误窗口、无当前主键、错误 native hit、top-band 越界、隐藏/销毁/断连、迟到响应；两种 Windows gesture 都测试授权。
+- macOS mode 分支与 SDK 调用次数，禁止双重 toggle；Windows 不触发 macOS 路径。
 
-可达故障序列：Host 安装成功 → 响应执行失败或未送达 → Renderer 未获确认。此时本地错误/超时不能证明区域已经撤销。版本号可以拒绝后续陈旧发布，却不能撤销一次已生效的安装；取消等待也不等于取消 Host effect。
+按验证规范运行 frontend typecheck、受影响 Renderer suite、跨语言 fixture/Bridge tests、window-chrome Zig root、architecture guard；共享 Native graph 真正受影响时运行正式 graph。缺 canonical AgentCore bundle 明确失败，不跳过后报通过。
 
-上一版失败语义的 P2 已通过撤回错误保证收口。未来若确需持久原生区域，必须分别处理“确认未应用”“确认已应用”“结果未知”，并给出 Host 侧可观察的撤销完成条件；不能把 unknown 当 disabled，也不能以冻结业务 UI 等待撤销来重新引入 5.1。当前没有宣称已实现这样的替代机制，此结论不要求改造通用 RPC 或修改 SDK。
+### 真实 System WebView 产品路径
 
-### 5.3 第三轮：为什么借用 resize 子窗口就足以证明标题栏可用？
+先测最可能否决接入的真实界面：AccountGate/Workbench、动态 actions、菜单/modal/portal、设置 inert 外层、窄窗、缩放与 DPI。记录当次 native composedPath、mousedown.detail、Bridge 意图和原生执行结果；这些只由验证探针记录，不能进入生产手势历史。
 
-不能。resize 的区域由原生窗口边缘决定，动态标题栏的可拖动空白由 DOM 布局、控件和遮罩共同决定；两者不是相同的一致性问题。`WS_EX_TRANSPARENT` 只提供受限制的绘制顺序语义，不保证任意 WebView 绘制和输入穿透。原生双击消息还受鼠标 capture 影响，转发首击进入主窗口 move loop 后的实际序列必须验证。
+再覆盖普通/最大化拖动恢复、默认及非默认双击时间、正负距离边界、三/四击、内容/相邻 normal/disabled/取消 pointerdown/stopPropagation 控件插入、失焦、原生边缘按下但不改变尺寸。期望按 F2 和实际浏览器计数计算，不再要求 down/reset/down，也不把所有插入场景一律判为“必须不 toggle”。业务事件自身零手势命令及当前手势的原生授权始终是硬要求。
 
-这不是已经复现的原生输入层缺陷，不额外列为 P1。当时修订的是证据等级：第 4 节只能作为候选，不能称为“成熟方案的具体实现”；现已退出默认实施路线。固定区域的绘制/输入证明与动态页面的一致性证明是两项独立义务，前者不能替代后者。
+验证复制/编辑/选区及按钮操作不受窗口 handler 取消；保留既有剪贴板检查，不把其他复制问题归因于窗口链路。验证正常绘制、上沿/上角 resize、关闭隐藏、Alt+F4、托盘重开、reload 和 clean shutdown。不重跑已经退出路线的透明 child 绘制/资源矩阵。
 
-### 5.4 现在允许推进什么
+不必另搭一个 Tauri 应用作为前置；固定源码对照只证明动作选择，正式产品的真实输入证明实际执行。若出现与参考机制不一致且不能解释的失败，停止合入并形成最小反例，不临时改算法/加计数状态/删断言，也不自动改换路线。
 
-本轮只修正计划与任务记录，不修改生产、SDK、UI 或 Gate，不启动新原型，不以继续追加固定区域测试替代真实 UI 的设计证明。
+每份实机证据绑定 revision/diff、binary hash、OS、Native SDK 和 WebView 版本。macOS 独立验证当前 SDK 输入时机及双击偏好；Windows 10/11、混合 DPI、负屏幕坐标分别记录覆盖。touch/pen、系统菜单、snap 等未闭合能力不借鼠标通过宣称完成。缺失必需平台证据时如实保留未完成项，不将方案定稿标为实施完成。
 
-- 保留第 1 节的既有界面与输入边界。执行方须先回答“谁同时拥有可见布局和命中”，并把 AccountGate、工作台动态操作与覆盖层放进同一完整方案，不再以固定空白矩形或未来补充的业务协调协议代替。
-- Wry 的浏览器原生区域是更贴近该职责目标的参考，但它依赖实际可调用的 SDK 能力。2.2 的公开入口缺口仍在，不能把原生 WebView2 支持、依赖头文件或 main view frame API 当作已经接通。
-- 自建原生输入子窗口退出默认生产路线。已做实验保留为有限证据；没有新增、可检验的机制假设时不重跑同类实验。额外拖动带已撤回，不能继续以其批准为前置，也不自动改选全局记录器、标准标题栏或 SDK patch。
-- 尚无满足全部目标的可实施替代，生产保持现状，明确“全局监听移除尚未交付”。这不是证明所有路线都不可能，也不是把等待上游当成交付承诺。恢复实现所需的新事实与证据见 15.4；没有新事实时不循环复查相同源码或重复询问用户。
+## F9. 三轮复盘结论与当前证据
 
-后续若有新的完整机制，先确认公开调用链、布局/命中所有权、手势中断与失败清理，再安排与它直接相关的最小验证。涉及坐标映射、旧响应或区域资源的断言只适用于确有这些机制的路线，不把原型的子窗口、区域协议或测试形态固化成所有实现的要求。
+| 复盘问题 | 收口结果 |
+| --- | --- |
+| 第一轮：是否仍用旧 Host 规则筛掉 Tauri，再另造机制？ | F1 固定稳定版和对应依赖，F2 明确采纳点击语义及差异，不再声称旧中断逐项等价 |
+| 第二轮：局部化会不会漏挂、吞控件或迫使布局协调？ | F3 绑定真实节点生命周期，沿实际 DOM 路径排除，保留 inert 外层；没有原生区域副本或业务 ACK |
+| 第三轮：是否借“最小适配”引入新引擎或丢授权？ | F4/F5 的 mode 只分已有平台能力；两种 Windows 动作共享授权；无首击缓存、重试、双重 macOS 执行或生产 fallback |
 
-### 5.5 与具体区域协议无关的清理约束
+已有稳定版原脚本的 6 组内存 JSDOM 逻辑检查确认：正常 1/2 请求 drag/toggle；控件插入 1/2/3 只请求首击 drag；控件重锚 1/1/2 与失焦 1/2 均请求 drag/toggle；固定 1/2/3/4 只有前两次动作；bare marker 的后代不拖动。这不是实机 Tauri 应用或新 MetaWork 路径验收。首次 Node 直接下载因网络超时未执行检查，改用只读下载后通过；不把失败尝试计为通过。
 
-- 资源安装失败须回滚；运行更新失败须撤除失效输入层并报告。不能只设置一个本地 disabled 标志，就声称实体 HWND 不再截获输入；撤除失败属于未处理完的能力故障。
-- disconnect、新 document、root 销毁及 Application cleanup 均须撤销对应输入资源与回调；旧响应不得激活新文档，无需因每次布局变化重新 connect。
-- 成功交给 `SetWindowRgn` 的 region 资源由系统拥有；失败分支负责释放尚未转移的资源。输入子窗口与主窗口两种销毁顺序均验证。
+三轮复盘没有证明“所有环境无风险”，而是将方案收敛为一条有明确行为、调用链、失败语义和验收边界的路线。定稿时生产尚未改动；后续实施授权见首页，验收仍需新路径自己的证据。
 
-## 6. macOS 与删除清单
+## 历史原型与纠偏记录
 
-macOS 保留现有 SDK/AppKit 原语及其双击偏好。browser-side Bridge 在真实标题栏/拖动片区按生命周期注册局部入口，不再使用 document 级 pointerdown；输入资格、交互排除与卸载清理仍由 Bridge 负责，React 不直接调用 transport。
-
-只有 Windows 输入机制确认成立后，才确定共享 `pointer` 命令的删除/收窄及 macOS 局部 `startDrag` 的 wire 变化。平台差异通过 Host capability 表达，不由 React 推断平台，不保留旧协议兼容分支。不能先把 Windows 入口删掉再寻找可用替代。
-
-Windows 路线通过后删除：`first_press`、自制时间/距离配对、逐次 down/reset、业务点击 reset、专为首击缓存存在的 blur/resize reset 回调及相应 DTO。保留独立的 focus refresh、资源清理与窗口状态检查，不能把所有 blur/focus/lifecycle 处理一起删掉。
-
-## 7. 实施阶段与通过条件
-
-以下保留原 DAG 的阶段责任，并标明纠偏后的状态；不是继续原生子窗口路线的执行授权。每个 DAG 子任务完成后，必须同时评估提交：验证充分且形成独立可交付改动时及时提交；否则在该任务的验证记录中说明暂缓原因。计划纠偏可以独立提交，但不因此关闭 B1 或总任务。
-
-原型同样受现有 capability 边界、exact-symbol allowlist 和验证 Gate 约束。若 A/B 原型需要扩大已登记的原生输入边界或新增受控符号，应先列出精确差异并取得相应批准，再实现原型；不能等到 C 再补批准，也不能用“隔离测试产物”绕过 guard。本轮不作这些修改。
-
-| 阶段                       | 交付与责任                                                                                                                                           | 完成/停止条件                                                                                             |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| 0：方案纠偏                | 撤回额外拖动带与等待批准的前提，区分原型证据、真实 UI 缺口和恢复条件                                                                                 | 本轮文档与任务记录的交付；不宣称已解决替代机制或关闭原目标                                                  |
-| A/A2：原生事实原型         | 旧 A `3146` 失败；后续 A2 `3166` 的固定区域输入、绘制及资源验证通过，见 14.6                                                                        | 结论仅限受测原型和环境；停止无新假设的追加实验，不直接推导生产适配成立                                    |
-| B1：实际 UI 的命中边界设计 | `3147` 未完成；保持现有界面，说明公开调用链及各时刻布局/命中的共同所有权                                                                           | 不用业务 ACK 屏障或事后追赶，不新增拖动带/下移 WebView/关闭缩放；完整机制未成立则不进入 B2                 |
-| B2：真实 UI 原型           | 按经确认的边界覆盖页面切换、动态 actions、菜单、遮罩、DPI、故障和生命周期                                                                            | 不冻结业务提交；无旧区域吃点击；失败有可观察的实际清理；通过方可确定最小 wire 与正式实现方案              |
-| C：正式替换                | 同步获准的合同，接入 Windows/macOS，删除失去职责的全局监听、首击/reset 路径、DTO 与回调                                                              | 单一 active path；普通业务点击零窗口手势命令；类型、fixture、测试和 guard 一致                            |
-| D：平台验收                | 当前实现的真实输入/绘制/生命周期证据与未验证范围                                                                                                     | 满足现有正式矩阵；不以旧 artifact、模型推演或合成 DOM 事件代替                                            |
-
-A 的最小输入证据逐例记录：实际输入时序、收到消息的 HWND/线程、native hit、capture、move loop 前后状态、最大化前后矩形与最终动作。不得为了让原型通过偷偷保留全局记录器、JS reset 或另一条拖动路径；双击、插入中断和绘制任一失败都记录为当前候选失败，而不是改写预期。
-
-B1 的交付必须具体到两个实际页面与覆盖层，不能只写“固定一个空白区”。先在保留现有标题栏、按钮和弹层行为的条件下解释最窄窗口、语言/字体、页面切换、浏览器缩放及 DPI 的完整输入路径。若该路径尚不存在，就如实报告缺口；不能通过提出产品让步把已投入的原型包装成可交付方案。
-
-暂缓替换并保留现状是证据不足时可接受的安全处置：维持目前的 Host 状态机及 down/reset 路径，明确每次业务按下仍会发送 reset，明确“全局监听移除尚未交付”。它不构成新版本中的并行 fallback，也不以本次文档通过为由宣称任务完成。原型材料按验证职责收口，不留下平行生产实现或 active archive。
-
-## 8. 验证矩阵
-
-- 原生手势：默认/非默认双击时间、距离内外、首击 move loop 后第二击、三/四击、普通拖动、最大化拖动恢复。
-- 中断：标题栏→内容→标题栏；标题栏→相邻控件→标题栏；同位置 disabled/传播阻断；相邻业务控件取消 pointerdown；此前模型反例的位置序列；失焦；边缘只按下但不改变尺寸。相邻距离以本机原生双击阈值校准，不只写一个未经校验的 CSS ±2px。
-- 原生候选看真实 HWND/线程、非客户区消息、capture 和窗口状态，不要求标题栏仍产生 DOM `mousedown.detail=[1,2,3]`，也不把 B 没有 mousedown 当成 B 没发生。
-- 业务隔离：复制、输入、选择文本、链接、菜单、inert、portal、控件 SVG。复制保持既有剪贴板断言，不把未证实的复制故障归因于本次窗口链路。
-- 一致性：正常页面/弹层提交不等待 chrome ACK；已应用但响应未送达、慢/迟到 ACK、原生 resize、尺寸 A→B→A、DPI 变化、旧 generation、新 document、重复卸载、取消等待不冒充撤销。具体协议断言须随选定机制确定，不假设 suspend/publish 已获批准。
-- 绘制：首次显示、静止更新、连续动画、明暗主题、遮挡恢复、反复 resize；不能用“拖动窗口后恢复正常”当作通过。
-- 原生层组合：边缘/拖动片区/HTML 控件的交界、resize 启停、DPI/样式变化、WebView child 创建及重排；验证实际裁剪和 Z 序，不仅检查计算出的矩形。
-- 生命周期：普通/最大化关闭隐藏、Alt+F4、最小化/任务栏恢复、托盘重开、reload、clean shutdown、资源计数和两种销毁顺序。
-- Windows 10/11、混合 DPI、负坐标、touch/pen、系统菜单与 snap 分别记录。未覆盖的能力保持明确未验证，不借鼠标通过推断触摸/笔或 Win11 Snap hover。
-- macOS 对局部入口、双击偏好、交通灯、首次拖动和卸载做独立实机验证；Windows 结果不代替。
-
-正式检查按现有标准入口执行：Renderer typecheck 与受影响 suite、Bridge 跨语言 fixture/Zig tests、`zig build test-window-chrome -Dtarget=x86_64-windows-gnu`、对应架构 guard 和真实 `node scripts/test-window-chrome-windows.mjs`。共享 native module graph 如受影响，再执行正式 Native graph。缺少 canonical staged bundle 明确失败，不跳过后宣称通过。
-
-每份平台证据绑定源码 revision/diff、二进制 hash、OS、Native SDK、WebView2 版本和实际运行命令。旧证据保留其历史含义，不改写成新实现已通过。
-
-## 9. 预计变更位置与合同审批
-
-实现集中于 `frontend/src/bridge/window-chrome.ts`、`WindowTitlebar.tsx`、AppShell/AccountGate 的标题栏布局入口、Bridge 类型/dispatcher/fixture、`src/app/window.zig` 与现有 drag 平台文件。resize 仅调整明确的命中优先级/清理协作和已失去职责的 reset 回调，不扩展其 owner。
-
-最终机制如果改变“Host 不镜像区域”、逐次 pointer 协议或标题栏交互范围，C 阶段之前须评审批准实际涉及的 Bridge/UI/architecture 合同变化；原型若更早触及这些边界，批准也须先于原型。当前不预先批准区域镜像。需求文档仅在用户可观察行为或范围实际变化时更新；validation 更新验证责任与新增证据。`app.zon` command catalog 和 exact-symbol allowlist 只随批准后的具体实现收口，不删除或泛化 guard 规避失败。不修改 AGENTS.md 或 upstream-only 政策。
-
-在 B1、B2 及实际机制所需的原生验证通过，并取得正式替换所需的合同批准前，本文件不能作为直接删除生产首击状态机的依据。旧 A 的失败不改写成成功，A2 的通过也不预先满足不同机制的验证责任。方案完善交付的是可核对的取舍、责任与恢复条件，不代表已有可用替代。
-
-## 10. 参考依据
-
-- [Tauri 拖动脚本](https://github.com/tauri-apps/tauri/blob/dev/crates/tauri/src/window/scripts/drag.js)与 [Wry WebView2 设置](https://github.com/tauri-apps/wry/blob/dev/src/webview2/mod.rs)：分别验证 DOM 意图与浏览器原生区域路径，不混为一套实现。
-- [Tao Windows 原生拖动入口](https://github.com/tauri-apps/tao/blob/dev/src/platform_impl/windows/window.rs)：用于理解原生动作路径；实施时固定所参考 revision，不复制可变 upstream 源码作为依赖。
-- [WebView2 ICoreWebView2Settings9](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2settings9?view=webview2-1.0.3537.50)：浏览器原生 app-region 能力及设置生效时机。
-- [Pointer Events 鼠标兼容映射](https://www.w3.org/TR/pointerevents3/#mapping-for-devices-that-support-hover)：取消 pointerdown 对 mousedown 的影响；具体 WebView 行为仍须实测。
-- [Win32 WM_NCLBUTTONDBLCLK](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-nclbuttondblclk)：系统非客户区双击消息与 capture 条件。
-- [Win32 SetWindowRgn](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowrgn)：窗口 region 与资源 ownership。
-- [Win32 SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)：相对 Z 序、显示/隐藏与不激活语义。
-- [Win32 Extended Window Styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles)：绘制透明性不等于任意情况下的输入穿透。
-- 仓库历史 `f6c1517f`、`62bdb9ba`、`f30d7e5e`、`494fc590`、`c952bfb5`，以及 validation 中的 `E-WIN-CHROME-EVENTS-20260916`、`E-WIN-TOP-RESIZE-20260916`；历史实现只作为失败模式和验证责任线索，不恢复旧的整页扫描或递归 child subclass。
-- 本次失败路径核对使用固定依赖 `node_modules/@native-sdk/cli/src/platform/windows/webview2_host.cpp:5051`、`:5062`、`:6463`；只读审计，没有修改依赖。这证明响应不是安装 effect 的事务回滚屏障，不声称本轮实际复现了响应丢失。
-- SDK 缺口核对：同一固定依赖的 `src/platform/types.zig:3193` 定义公开 drag-region 原语，`src/platform/windows/webview2_host.cpp:6684` 的目标必须是 GPU surface；WebView2 接口声明位于依赖的第三方头文件，不能据此推导 MetaWork 有权取得 SDK 私有 WebView 对象。
-
-## 11. 前次评审问题的处理状态
-
-- 记录器路线未单独评估、拒绝理由含混：文档问题已解决。2.3 分离 detail 单用与被动记录器，逐案说明模型、前提和真实取舍；不声称记录器已被反例否定或已通过实机验收。
-- “不挂全局记录器”缺少依据：文档问题已解决。第 1 节写明应用层输入历史依赖的工程动机及用户决定，区分集中式观察与业务 owner 被迫配合；不是通用 API 禁令。
-- drag/resize 裁剪与 Z 序归属：责任见 4.1，固定原型证据见 14.6；不把该证据扩展为动态标题栏可用。
-- SDK 缺口只写“未找到”：方案层已解决，见 2.2；明确 API/CSS 能力及生效时机，保留基于等价能力的删除条件，不修改 upstream-only 政策。
-- 复制故障归因：已纠正。旧监听会让复制按下参与 reset IPC，但未证明它导致复制失败；复制功能回归与监听副作用的因果验证分开。
-- document 冒泡被祖先 stopPropagation 截断：不能用于否定 capture 记录器，已在 2.3 澄清；后续 macOS 局部注册仍须验证真实传播与卸载。
-- 两次有序 invoke 的所谓“重排间隙”：不再作为改造理由。5.2 讨论的是 effect 已执行而响应未确认，与请求重排不是同一个问题。
-- 布局屏障与“发布失败即 disabled”：旧设计问题已通过撤回收口；布局一致性和实际清理的生产证明仍待候选给出，见第 5 节。
-- 当前结论：记录器评估和 A2 固定原型已有各自结论，但实际 UI 接入与平台验收未完成。本文不批准生产替换；不再将原生子窗口或额外拖动带列为默认路线，按 15.4 的新事实条件恢复，不围绕同一偏好循环评审。
+以下第 12–15 节保持历史原意。旧章节引用对应 Git `3e725c69` 中的旧方案，当前执行建议以 F1–F9 为准。
 
 ## 12. A 阶段已批准的精确边界
 

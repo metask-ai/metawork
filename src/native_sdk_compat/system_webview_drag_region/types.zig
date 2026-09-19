@@ -18,7 +18,9 @@ test "top band rejects unavailable, nonfinite and out-of-range coordinates" {
     try std.testing.expect(!pointInTopBand(20, 20, std.math.nan(f64)));
 }
 
-pub const PointerOutcome = enum {
+pub const GestureMode = enum { browser_mouse, native_press, disabled };
+pub const GestureAction = enum { start_drag, toggle_maximize };
+pub const GestureOutcome = enum {
     ignored,
     drag_started,
     toggle_maximize,

@@ -133,7 +133,10 @@ export async function probeFixedDragInput({
           assert.match(result.native, /msg=0x232/);
         }
         if (inputCase === "edge-reset")
-          assert.match(result.native, /resize-press/);
+          assert.equal(
+            result.os.interruption.controlClass,
+            "MetaWorkSystemWebViewTopResize",
+          );
         result.passed = true;
       } catch (error) {
         result.native = nativeLog().slice(start);

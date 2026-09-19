@@ -12,6 +12,7 @@ import { Icon } from "../components/ui/Icon.tsx";
 import { ResizableSeparator } from "../components/ui/ResizableSeparator.tsx";
 import { WindowControls } from "../components/ui/WindowControls.tsx";
 import { WindowTitlebar } from "../components/ui/WindowTitlebar.tsx";
+import { bindWindowTitlebar } from "../bridge/window-chrome.ts";
 import { shouldDismissSidePanelForEscape } from "./side-panel-interaction.ts";
 import { useI18n } from "../i18n/context.ts";
 import {
@@ -328,7 +329,7 @@ export function AppShell({
         onDismissRightPanel();
       }}
     >
-      <WindowTitlebar className="workbench-commandbar">
+      <WindowTitlebar ref={bindWindowTitlebar} className="workbench-commandbar">
         <div
           className="commandbar-leading-actions"
           data-metawork-window-drag-exclude={overlay ? "" : undefined}

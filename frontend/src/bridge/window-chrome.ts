@@ -6,11 +6,16 @@ import {
   type WindowChromeEnvironment,
 } from "./decode-contracts.ts";
 
-const candidateSelector = "[data-metawork-window-drag]";
 const controlSelector = "[data-metawork-window-control]";
 const exclusionSelector =
-  "button, input, select, textarea, label, details, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='link'], [role='textbox'], [tabindex], [inert], [data-metawork-window-drag-exclude]";
+  "button, input, select, textarea, label, details, summary, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='link'], [role='textbox'], [tabindex], [inert], [data-metawork-window-drag-exclude]";
 const controlActions = new Set(["minimize", "toggle_maximize", "close"]);
+let bindTitlebar: ((element: HTMLElement) => () => void) | null = null;
+
+// React registers only its actual DOM node; this module owns input and transport.
+export function bindWindowTitlebar(element: HTMLElement) {
+  return bindTitlebar?.(element) ?? (() => undefined);
+}
 
 export function installWindowChromeBridge() {
   const bridge = window.zero;
@@ -23,6 +28,7 @@ export function installWindowChromeBridge() {
   let refreshDirty = false;
   let controlInFlight = false;
   const disabledControls = new Set<HTMLButtonElement>();
+  const titlebars = new Map<HTMLElement, () => void>();
 
   function applyEnvironment(value: WindowChromeEnvironment) {
     environment = value;
@@ -112,51 +118,99 @@ export function installWindowChromeBridge() {
       // A replacement document may already have revoked this exact generation.
     }
   }
-  function isDragTarget(event: PointerEvent) {
-    let candidate = false;
-    for (const entry of event.composedPath()) {
+  function isDragTarget(event: Event, titlebar: HTMLElement) {
+    const path = event.composedPath();
+    if (!path.includes(titlebar)) return false;
+    for (const entry of path) {
       if (!(entry instanceof Element)) continue;
       if (entry.matches(exclusionSelector)) return false;
-      if (entry.matches(candidateSelector)) candidate = true;
     }
-    return candidate;
+    return true;
   }
-  async function submitPointer(
-    pointer: { phase: "down"; x: number; y: number } | { phase: "reset" },
+  async function submitGesture(
+    action: "start_drag" | "toggle_maximize",
+    event: MouseEvent,
   ) {
-    if (disposed || !generation || !environment?.livePointerDrag) return;
+    if (disposed || !generation) return;
     const requestGeneration = generation;
-    if (pointer.phase === "down") stateEpoch++;
+    stateEpoch++;
     try {
       assertWindowChromeHandled(
-        await bridge.invoke(commands.windowChromePointer, {
+        await bridge.invoke(commands.windowChromeGesture, {
           generation: requestGeneration,
-          ...pointer,
+          action,
+          x: event.clientX,
+          y: event.clientY,
         }),
         requestGeneration,
       );
     } catch {
-      // Never replay a pointer gesture or reconnect on a rejected action.
+      // Never replay a gesture or reconnect on a rejected action.
     } finally {
-      if (
-        !disposed &&
-        generation === requestGeneration &&
-        pointer.phase === "down"
-      )
-        scheduleRefresh();
+      if (!disposed && generation === requestGeneration) scheduleRefresh();
     }
   }
-  function onPointerDown(event: PointerEvent) {
-    if (!event.isTrusted || event.button !== 0 || !event.isPrimary) return;
-    void submitPointer(
-      isDragTarget(event)
-        ? { phase: "down", x: event.clientX, y: event.clientY }
-        : { phase: "reset" },
-    );
+  function bind(element: HTMLElement) {
+    titlebars.get(element)?.();
+    if (disposed) return () => undefined;
+    function onMouseDown(event: MouseEvent) {
+      if (
+        disposed ||
+        !generation ||
+        environment?.gestureMode !== "browser_mouse" ||
+        !event.isTrusted ||
+        event.button !== 0 ||
+        !isDragTarget(event, element) ||
+        (event.detail !== 1 && event.detail !== 2)
+      )
+        return;
+      // Tauri 2.11.5 drag.js Windows branch: only clicks 1 and 2 select actions.
+      // Binding is local and the entire noninteractive titlebar is draggable.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void submitGesture(
+        event.detail === 2 ? "toggle_maximize" : "start_drag",
+        event,
+      );
+    }
+    function onPointerDown(event: PointerEvent) {
+      if (
+        disposed ||
+        !generation ||
+        environment?.gestureMode !== "native_press" ||
+        !event.isTrusted ||
+        event.button !== 0 ||
+        !event.isPrimary ||
+        !isDragTarget(event, element)
+      )
+        return;
+      void submitGesture("start_drag", event);
+    }
+    function onClick(event: MouseEvent) {
+      if (event.composedPath().includes(element)) void onControlClick(event);
+    }
+    element.addEventListener("mousedown", onMouseDown);
+    element.addEventListener("pointerdown", onPointerDown);
+    element.addEventListener("click", onClick);
+    let unbound = false;
+    function unbind() {
+      if (unbound) return;
+      unbound = true;
+      element.removeEventListener("mousedown", onMouseDown);
+      element.removeEventListener("pointerdown", onPointerDown);
+      element.removeEventListener("click", onClick);
+      if (titlebars.get(element) === unbind) titlebars.delete(element);
+      for (const button of disabledControls) {
+        if (element.contains(button)) {
+          button.disabled = false;
+          disabledControls.delete(button);
+        }
+      }
+    }
+    titlebars.set(element, unbind);
+    return unbind;
   }
-  function onWindowBlur() {
-    void submitPointer({ phase: "reset" });
-  }
+  bindTitlebar = bind;
   function releaseControls() {
     for (const control of disabledControls) control.disabled = false;
     disabledControls.clear();
@@ -186,12 +240,14 @@ export function installWindowChromeBridge() {
     const requestGeneration = generation;
     controlInFlight = true;
     stateEpoch++;
-    for (const control of document.querySelectorAll<HTMLButtonElement>(
-      "button" + controlSelector,
-    )) {
-      if (!control.disabled) {
-        disabledControls.add(control);
-        control.disabled = true;
+    for (const titlebar of titlebars.keys()) {
+      for (const control of titlebar.querySelectorAll<HTMLButtonElement>(
+        "button" + controlSelector,
+      )) {
+        if (!control.disabled) {
+          disabledControls.add(control);
+          control.disabled = true;
+        }
       }
     }
     try {
@@ -229,10 +285,7 @@ export function installWindowChromeBridge() {
     });
   const unsubscribeResize = bridge.on("resize", scheduleRefresh);
   window.addEventListener("pagehide", dispose, { once: true });
-  window.addEventListener("blur", onWindowBlur);
   window.addEventListener("focus", scheduleRefresh);
-  document.addEventListener("pointerdown", onPointerDown, true);
-  document.addEventListener("click", onControlClick, true);
   function dispose() {
     if (disposed) return;
     disposed = true;
@@ -240,10 +293,9 @@ export function installWindowChromeBridge() {
     refreshDirty = false;
     unsubscribeResize();
     window.removeEventListener("pagehide", dispose);
-    window.removeEventListener("blur", onWindowBlur);
     window.removeEventListener("focus", scheduleRefresh);
-    document.removeEventListener("pointerdown", onPointerDown, true);
-    document.removeEventListener("click", onControlClick, true);
+    if (bindTitlebar === bind) bindTitlebar = null;
+    for (const unbind of titlebars.values()) unbind();
     releaseControls();
     const detachedGeneration = generation;
     generation = null;
