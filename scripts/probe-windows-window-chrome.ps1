@@ -225,6 +225,24 @@ function Invoke-MetaWorkDrag([int]$x, [int]$y, [int]$deltaX, [int]$deltaY) {
     [MetaWorkChromeProbe]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
 
+function Select-MetaWorkTaskbarButton([object[]]$Candidates, [string]$WindowTitle) {
+    if ([string]::IsNullOrWhiteSpace($WindowTitle)) { throw 'Test window has no title' }
+    # Windows 10 MSAA reports either the window title or a grouped button name
+    # such as "MetaWork - 1 running window". Prefix matching also selected the
+    # unrelated "metawork-site" group. Accept only this exact title / one-window
+    # group, and fail closed on ambiguity instead of choosing the first match.
+    $groupName = '^{0} - 1 .+$' -f [regex]::Escape($WindowTitle)
+    $matches = @($Candidates | Where-Object {
+        $_.Role -eq 43 -and ($_.State -band 0x18001) -eq 0 -and
+        $_.Width -gt 0 -and $_.Height -gt 0 -and
+        ($_.Name -ceq $WindowTitle -or $_.Name -cmatch $groupName)
+    })
+    if ($matches.Count -ne 1) {
+        throw "Expected one unambiguous taskbar button for '$WindowTitle'; found $($matches.Count)"
+    }
+    return $matches[0]
+}
+
 $process = Get-Process -Id $ProcessId
 $window = [IntPtr]$WindowHandle
 if ($WindowHandle -eq 0) {
@@ -271,7 +289,7 @@ public static class MetaWorkTaskbarAccessibility {
     [DllImport("oleacc.dll")]
     static extern int AccessibleChildren(IAccessible parent, int start, int count,
         [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex=2)] object[] children, out int obtained);
-    public sealed class Item { public string Name; public int Left, Top, Width, Height; }
+    public sealed class Item { public string Name; public int Role, State, Left, Top, Width, Height; }
     public static Item[] Items(IntPtr window) {
         Guid iid = new Guid("618736e0-3c3d-11cf-810c-00aa00389b71");
         IAccessible root;
@@ -283,7 +301,7 @@ public static class MetaWorkTaskbarAccessibility {
     static void Read(IAccessible owner, object child, List<Item> items) {
         string name = owner.get_accName(child);
         if (name == null || !name.StartsWith("MetaWork", StringComparison.OrdinalIgnoreCase)) return;
-        var item = new Item { Name = name };
+        var item = new Item { Name = name, Role = Convert.ToInt32(owner.get_accRole(child)), State = Convert.ToInt32(owner.get_accState(child)) };
         owner.accLocation(out item.Left, out item.Top, out item.Width, out item.Height, child);
         if (item.Width > 0 && item.Height > 0) items.Add(item);
     }
@@ -315,17 +333,22 @@ public static class MetaWorkTaskbarAccessibility {
     $elements = @($trays | ForEach-Object {
         $_.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
     })
-    $taskbarMatches = @($elements | Where-Object { $_.Current.ClassName -eq 'MSTaskListWClass' } | ForEach-Object {
+    $taskbarCandidates = @($elements | Where-Object { $_.Current.ClassName -eq 'MSTaskListWClass' } | ForEach-Object {
         [MetaWorkTaskbarAccessibility]::Items([IntPtr]$_.Current.NativeWindowHandle)
     })
     $ownedProcesses = @(Get-Process -Name metawork -ErrorAction SilentlyContinue)
-    if ($taskbarMatches.Count -eq 0 -or $ownedProcesses.Count -ne 1 -or $ownedProcesses[0].Id -ne $ProcessId) {
-        $diagnostics = @($elements | Where-Object { $_.Current.Name -like '*MetaWork*' } | ForEach-Object {
-            @{name=$_.Current.Name; type=$_.Current.ControlType.ProgrammaticName; offscreen=$_.Current.IsOffscreen; bounds=$_.Current.BoundingRectangle.ToString()}
-        }) | ConvertTo-Json -Compress
-        throw "Expected a taskbar affordance for the isolated MetaWork process; found $($trays.Count) taskbars, $($taskbarMatches.Count) elements and $($ownedProcesses.Count) processes; candidates=$diagnostics"
+    if ($ownedProcesses.Count -ne 1 -or $ownedProcesses[0].Id -ne $ProcessId) {
+        throw "Expected only the isolated MetaWork process; found $($ownedProcesses.Count) processes"
     }
-    $bounds = $taskbarMatches[0]
+    $process.Refresh()
+    $bounds = Select-MetaWorkTaskbarButton $taskbarCandidates $process.MainWindowTitle
+    $diagnostic = @{
+        title=$process.MainWindowTitle
+        candidates=$taskbarCandidates
+        selected=$bounds
+        foreground=[MetaWorkChromeProbe]::GetForegroundWindow().ToInt64().ToString()
+    } | ConvertTo-Json -Compress -Depth 5
+    Write-Output "taskbarCandidates=$diagnostic"
     if ($bounds.Width -le 0 -or $bounds.Height -le 0) { throw 'Taskbar button has no clickable bounds' }
     $point = New-Object MetaWorkChromeProbe+Point
     $point.X = [int]($bounds.Left + $bounds.Width / 2)

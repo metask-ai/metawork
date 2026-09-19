@@ -224,7 +224,11 @@ export async function probeWindowChromeControls({
       (value) => value.minimized,
       "Renderer minimize",
     );
-    await runProbe("control-taskbar-restore", ["-WindowHandle", handle]);
+    const taskbarInput = await runProbe("control-taskbar-restore", [
+      "-WindowHandle",
+      handle,
+    ]);
+    evidence.taskbarInput = taskbarInput;
     const restored = await until(
       nativeState,
       (value) => value.visible && !value.minimized,
@@ -322,6 +326,9 @@ export async function probeWindowChromeControls({
     process.stdout.write(
       "Windows controls lifecycle matrix passed: close/Alt+F4, hidden admission, taskbar restore, interleaving, reload and real button recovery.\n",
     );
+  } catch (error) {
+    evidence.failure = String(error?.stack ?? error);
+    throw error;
   } finally {
     await archiveDocument();
     webview.close();

@@ -208,9 +208,17 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 相同产品 artifact 的真实 UI 补充证据：`--ui-session-only` 的 AccountGate 标题文字、语言 portal、About modal 7 项及 clean shutdown 通过，`.zig-cache/tauri-gesture-ui-20260919-5/` 绑定上述 revision 加 diff `d21963cce152628cc9cd9a39647c71fbda3991ee3ec94f49ee51ccbab41cd9b8`、新增探针 SHA-256 `f22e0af616d5d5fc3ae12faab9a2a4277111216ad5e6aee13d872370d1a28016`。Workbench/设置通过既有隔离 AgentCore fixture 接入，用 `METAWORK_WINDOW_CHROME_WORKBENCH=1` 和 `METAWORK_WINDOW_CHROME_EVIDENCE_DIR` 启用 `node scripts/run-agentcore-vertical-windows.mjs` 内的具名窗口检查；`.zig-cache/tauri-gesture-workbench-20260919-2/` 绑定 diff `5e5623bf5f4bcf5a83e29785da515fd28a07c9a4aff9f6280b42e6e874d4ed00`、探针 SHA-256 `fe5129089bec450d27a159ca0708bf1febbf367a63ac5964b7134621524fce8b`。10 项窗口检查通过，含任务选择、实际标题栏拖动、任务面板按钮、账号菜单、设置 inert/no-drag 外层，以及 584 CSS px 窄窗。CDP 只读取实际 DOM、观察事件/transport，不替换这些产品组件；受测输入来自 Win32 脚本。
 
-后续完整复验 `.zig-cache/tauri-gesture-full-20260919-2/` 增加了真实浏览器 110% 缩放（devicePixelRatio `1.100000023841858`，最后恢复 `1`）下语言菜单零 gesture；35 项输入和 9 项 AccountGate 检查通过。此轮绑定相同产品 binary、上述 revision 加 diff `ba18c04ba8d5d205adeb628d2966bfdf8c42965c655a195fac3b7a35df28877f` 和 UI 探针 SHA-256 `955fe5823c826d072118aad406d8055ea702b19345d7f90398e8e82d0789b898`。**这轮整体失败**：controls 的任务栏恢复阶段，真实鼠标点击后窗口仍为 minimized，等待超时；相同源码/artifact 的独立 `--controls-session-only`（`.zig-cache/tauri-gesture-controls-20260919-1/`）重复同一失败。不将之前整轮通过覆盖后续失败，也不归因于新的 UI 探针或 SDK；实际任务栏命中与原生恢复原因仍待定位，当前完整验收未闭合。
+后续完整复验 `.zig-cache/tauri-gesture-full-20260919-2/` 增加了真实浏览器 110% 缩放（devicePixelRatio `1.100000023841858`，最后恢复 `1`）下语言菜单零 gesture；35 项输入和 9 项 AccountGate 检查通过。此轮绑定相同产品 binary、上述 revision 加 diff `ba18c04ba8d5d205adeb628d2966bfdf8c42965c655a195fac3b7a35df28877f` 和 UI 探针 SHA-256 `955fe5823c826d072118aad406d8055ea702b19345d7f90398e8e82d0789b898`。**这轮整体失败**：controls 的任务栏恢复阶段，真实鼠标点击后窗口仍为 minimized，等待超时；相同源码/artifact 的独立 `--controls-session-only`（`.zig-cache/tauri-gesture-controls-20260919-1/`）重复同一失败。不将之前整轮通过覆盖后续失败，也不归因于新的 UI 探针或 SDK；当时尚未定位实际命中，后续驱动诊断与复验见 [E-WIN-CHROME-TASKBAR-20260919](#e-win-chrome-taskbar-20260919)。
 
 这不证明完整 AgentCore vertical：带窗口探针的一轮在后续 Run 的 snapshot chunk `null` 超时；不启用该探针的对照在 preterminal presentation facts 断言失败。两者失败不同，不能据此声称共同根因已定位，也未到达复制验证。全量 Node `620 passed / 2 skipped`、窗口/Bridge 定向 Zig `33/33` 和 automation 构建 `11/11` 通过；正式 Native graph 被未修改的 history SQL `RunWire` 字段数 Gate（期望 27、实际 28）拒绝，不计通过。本证据不证明剪贴板、macOS 接线实机、Windows 11、混合 DPI、负坐标实屏、全部动态 action、touch/pen、snap、系统菜单或安装包。macOS 原生能力继续由 SDK/AppKit 提供，不因缺少本次接线回归而新增兼容实现。
+
+### E-WIN-CHROME-TASKBAR-20260919
+
+2026-09-19，在上述 Windows 10 / SDK / WebView2 环境诊断旧任务栏选择器：它以大小写不敏感的 `MetaWork` 前缀收集候选并取第一个，实际读到的首项为 `metawork-site - 5 个运行窗口`，不是隔离产品的 `MetaWork - 1 个运行窗口`。只读诊断未发送点击；该可复现误选说明旧恢复超时不能用来证明产品恢复失败。
+
+修正后的驱动要求当前窗口完整标题或其单窗口组名、可点击 MSAA button 和唯一候选，保留目标 PID 与任务栏命中校验；歧义直接失败，不调用程序化 restore 或重放点击。独立 controls 复验 `.zig-cache/tauri-taskbar-fixed-20260919-1/` 与完整入口 `.zig-cache/tauri-gesture-full-20260919-3/` 均 exit 0，记录明确选中 `MetaWork - 1 个运行窗口`，一次真实鼠标点击后 `minimized=false,maximized=true`。后者完整通过 35 项输入、9 项 AccountGate（含 110% 缩放）、8 项 controls，以及边缘缩放、绘制、重载、隐藏重开和 clean shutdown。
+
+两轮绑定 revision `bea3f767d7557d37cd574ca869554dd662f108da` 加 diff SHA-256 `03793254fa4b08e3507c735eeba5ed67b74a0e0b277390dedf4773be0855963a`；新增选择器回归文件 SHA-256 `5e2092911563a6319c4c137f797733d0d7152e27e7598de7402151ac847aec3d`。产品二进制仍为 `485fdac746efcdeac491970c3cee8ba7e23e773f4e12ead2601f0a756053e7a0`，未为此修改产品代码或降低原验收断言。原始 identity、diff、候选/原生状态和实屏截图保留在对应目录。这关闭任务栏测试驱动问题，不补齐上一项明确未通过的 Native/AgentCore graph、真实回复复制/编辑/选区或未验证平台。
 
 ## 未闭合验证缺口
 
