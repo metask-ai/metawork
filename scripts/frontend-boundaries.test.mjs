@@ -172,39 +172,21 @@ test("central conversation paths use only the shared AI UI vocabulary", async ()
   assert.doesNotMatch(composer, legacy);
 });
 
-test("transitional Account states never turn signed-out history into a security gate", async () => {
+test("Account states never replace the Workbench with a sign-in gate", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
-  const accountSurfacePolicy = await readFile(
-    resolve(sourceRoot, "app", "account-surface-policy.ts"),
-    "utf8",
-  );
-  const gating = await readFile(
-    resolve(sourceRoot, "features", "account", "gating.ts"),
+  const newTask = await readFile(
+    resolve(sourceRoot, "features", "tasks", "NewTaskView.tsx"),
     "utf8",
   );
   const accountIdentity = await readFile(
     resolve(sourceRoot, "features", "account", "AccountIdentity.tsx"),
     "utf8",
   );
-  assert.match(app, /<AccountGate/);
-  assert.match(app, /const hasTasks = snapshot\.tasks\.length !== 0;/);
-  assert.match(
-    app,
-    /accountSurfacePolicy\(\s*snapshot\.account,\s*snapshot\.models,\s*hasTasks,\s*\)/,
-  );
-  assert.match(
-    accountSurfacePolicy,
-    /if \(hasTasks\) return \{ gateRequired: false, setupRequired: false \};/,
-  );
-  assert.match(
-    app,
-    /if \(accountSetupRedirected && hasTasks\) \{[\s\S]*?setSettingsOpen\(false\);/,
-  );
-  assert.match(app, /selectAccountGateStatus\(statuses\)/);
-  assert.match(
-    gating,
-    /state === "checking" \|\|[\s\S]*?state === "signed_out" \|\|[\s\S]*?state === "authorizing"/,
-  );
+  assert.doesNotMatch(app, /AccountGate|accountGateRequired/);
+  assert.doesNotMatch(app, /accountSurfacePolicy|accountSetupRedirected/);
+  assert.match(app, /setup=\{newTaskSetup\}/);
+  assert.match(newTask, /setup \? \([\s\S]*?new-task-setup/);
+  assert.match(newTask, /\{composer\}/);
   assert.match(
     accountIdentity,
     /account\.state === "signed_out"[\s\S]*?onBeginLogin/,
@@ -468,8 +450,13 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
     resolve(sourceRoot, "app", "AppShell.tsx"),
     "utf8",
   );
-  const gate = await readFile(
-    resolve(sourceRoot, "features", "account", "AccountGate.tsx"),
+  const rootFailure = await readFile(
+    resolve(
+      sourceRoot,
+      "features",
+      "connection",
+      "ConnectionFailureScreen.tsx",
+    ),
     "utf8",
   );
   const css = await readFile(resolve(sourceRoot, "index.css"), "utf8");
@@ -495,17 +482,20 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.match(shell, /commandbar-alert-slot/);
   assert.match(shell, /aria-live="polite"/);
   assert.match(shell, /WindowTitlebar/);
-  assert.match(gate, /account-gate-toolbar/);
-  assert.match(gate, /WindowTitlebar/);
+  assert.match(rootFailure, /connection-failure-toolbar/);
+  assert.match(rootFailure, /WindowTitlebar/);
   assert.match(titlebar, /data-metawork-window-drag=""/);
   assert.match(titlebar, /<header[^>]*data-metawork-window-drag=""/);
   assert.doesNotMatch(titlebar, /createPortal|window-drag-region/);
   assert.doesNotMatch(titlebar, /onPointerDown|onDoubleClick|onContextMenu/);
-  assert.doesNotMatch(`${shell}\n${gate}`, /onPointerMove|setPointerCapture/);
+  assert.doesNotMatch(
+    `${shell}\n${rootFailure}`,
+    /onPointerMove|setPointerCapture/,
+  );
   assert.match(manifest, /\.titlebar = "hidden_inset_tall"/);
   assert.doesNotMatch(css, /-webkit-app-region:/);
-  assert.match(`${shell}\n${gate}`, /WindowControls/);
-  assert.doesNotMatch(`${shell}\n${gate}`, /windowPlatform/);
+  assert.match(`${shell}\n${rootFailure}`, /WindowControls/);
+  assert.doesNotMatch(`${shell}\n${rootFailure}`, /windowPlatform/);
   assert.match(controls, /data-metawork-window-control="minimize"/);
   assert.match(controls, /data-metawork-window-control="toggle_maximize"/);
   assert.match(controls, /data-metawork-window-control="close"/);
@@ -575,8 +565,8 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   );
   assert.doesNotMatch(css, /top: calc\(48px \+ env\(safe-area-inset-top/);
   assert.doesNotMatch(
-    `${shell}\n${gate}`,
-    /app-titlebar|account-gate-titlebar/,
+    `${shell}\n${rootFailure}`,
+    /app-titlebar|account-gate-titlebar|connection-failure-titlebar/,
   );
 });
 

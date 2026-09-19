@@ -13,22 +13,16 @@ const vite = await createServer({
   logLevel: "silent",
   server: { middlewareMode: true },
 });
-const { AccountGate } = await vite.ssrLoadModule(
-  "/src/features/account/AccountGate.tsx",
-);
 const { SettingsPage } = await vite.ssrLoadModule(
   "/src/features/settings/SettingsPage.tsx",
+);
+const { ConnectionFailureScreen } = await vite.ssrLoadModule(
+  "/src/features/connection/ConnectionFailureScreen.tsx",
 );
 const { formatAccountDecimal, formatAccountSyncedAt } =
   await vite.ssrLoadModule("/src/features/settings/account-summary-format.ts");
 const { buildUsageCalendar } = await vite.ssrLoadModule(
   "/src/features/settings/AccountUsageHeatmap.tsx",
-);
-const { requiresAccountGate, requiresAccountSetup } = await vite.ssrLoadModule(
-  "/src/features/account/gating.ts",
-);
-const { accountSurfacePolicy } = await vite.ssrLoadModule(
-  "/src/app/account-surface-policy.ts",
 );
 const { accountErrorMessageId } = await vite.ssrLoadModule(
   "/src/i18n/account-error.ts",
@@ -193,24 +187,6 @@ function withI18n(child) {
   );
 }
 
-function renderGate(account, props = {}) {
-  return withI18n(
-    createElement(AccountGate, {
-      account,
-      beginLoginDisabled: false,
-      cancelDisabled: false,
-      connectionFailed: false,
-      connectionRetryable: true,
-      connectionTitleId: "connection.failed",
-      connectionHelpId: "connection.failed_help",
-      reconnecting: false,
-      notice: "",
-      ...callbacks,
-      ...props,
-    }),
-  );
-}
-
 function renderSettings(account, models = readyModels, options = {}) {
   return withI18n(
     createElement(SettingsPage, {
@@ -251,46 +227,18 @@ function renderSettings(account, models = readyModels, options = {}) {
   );
 }
 
-test("checking signed-out and authorizing request the Account onboarding surface", () => {
-  assert.equal(
-    requiresAccountGate({ state: "checking" }, unavailableModels),
-    true,
+function renderConnectionFailure() {
+  return withI18n(
+    createElement(ConnectionFailureScreen, {
+      titleId: "connection.failed",
+      helpId: "connection.failed_help",
+      diagnostic: "transport unavailable",
+      retryable: true,
+      retrying: false,
+      onRetry() {},
+    }),
   );
-  assert.equal(
-    requiresAccountGate({ state: "authorizing" }, unavailableModels),
-    true,
-  );
-  assert.equal(
-    requiresAccountGate({ state: "signed_out" }, unavailableModels),
-    true,
-  );
-  assert.equal(
-    requiresAccountGate({ state: "authenticated" }, readyModels),
-    false,
-  );
-  assert.equal(
-    requiresAccountGate(
-      { state: "checking" },
-      {
-        defaultSelection: { sourceId: "provider-1", modelId: "model-1" },
-      },
-    ),
-    false,
-  );
-});
-
-test("an empty signed-out Workbench exposes one explicit sign-in action", () => {
-  const surface = accountSurfacePolicy(
-    { ...signedOut, state: "signed_out" },
-    unavailableModels,
-    false,
-  );
-  assert.deepEqual(surface, { gateRequired: true, setupRequired: false });
-  const markup = renderGate(signedOut);
-  assert.match(markup, /Sign in to MetaWork/);
-  assert.match(markup, />Sign in with Metask</);
-  assert.doesNotMatch(markup, /Cancel current action/);
-});
+}
 
 test("Account settings render each public session state with only its valid action", () => {
   const checkingMarkup = renderSettings(
@@ -298,7 +246,7 @@ test("Account settings render each public session state with only its valid acti
     unavailableModels,
     { initialSection: "account" },
   );
-  assert.match(checkingMarkup, /Checking sign-in/);
+  assert.match(checkingMarkup, /Checking Metask account/);
   assert.doesNotMatch(checkingMarkup, />Sign in</);
 
   const callbackMarkup = renderSettings(
@@ -322,95 +270,8 @@ test("Account settings render each public session state with only its valid acti
   const signedOutMarkup = renderSettings(signedOut, unavailableModels, {
     initialSection: "account",
   });
-  assert.match(signedOutMarkup, /Sign in to MetaWork/);
+  assert.match(signedOutMarkup, /Connect Metask/);
   assert.match(signedOutMarkup, />Sign in with Metask</);
-});
-
-test("unresolved authenticated catalog opens account setup", () => {
-  assert.equal(
-    requiresAccountSetup(
-      { state: "authenticated" },
-      {
-        providers: [{ ...readyModels.providers[0], catalogState: "choosing" }],
-        defaultSelection: readyModels.defaultSelection,
-      },
-    ),
-    true,
-  );
-  assert.equal(
-    requiresAccountSetup(
-      { state: "authenticated" },
-      {
-        providers: [{ ...readyModels.providers[0], catalogState: "failed" }],
-        defaultSelection: readyModels.defaultSelection,
-      },
-    ),
-    true,
-  );
-  // Transient loading resolves through the automatic post-login
-  // continuation; redirecting on it flashes settings on every startup.
-  assert.equal(
-    requiresAccountSetup(
-      { state: "authenticated" },
-      {
-        providers: [{ ...readyModels.providers[0], catalogState: "loading" }],
-        defaultSelection: readyModels.defaultSelection,
-      },
-    ),
-    false,
-  );
-  assert.equal(
-    requiresAccountSetup({ state: "authenticated" }, readyModels),
-    false,
-  );
-  assert.equal(
-    requiresAccountSetup({ state: "authenticated" }, readyModels),
-    false,
-  );
-});
-
-test("Product execution failure never opens Account setup", () => {
-  assert.equal(
-    requiresAccountSetup({ state: "authenticated" }, readyModels),
-    false,
-  );
-  assert.equal(
-    accountSurfacePolicy({ state: "authenticated" }, readyModels, false)
-      .setupRequired,
-    false,
-  );
-});
-
-test("Account onboarding never replaces a Workbench that already owns Tasks", () => {
-  const checking = accountSurfacePolicy(
-    { ...signedOut, state: "checking" },
-    unavailableModels,
-    true,
-  );
-  assert.deepEqual(checking, {
-    gateRequired: false,
-    setupRequired: false,
-  });
-
-  const unresolved = accountSurfacePolicy(
-    { ...readyAccount },
-    {
-      ...readyModels,
-      providers: [{ ...readyModels.providers[0], catalogState: "failed" }],
-    },
-    true,
-  );
-  assert.deepEqual(unresolved, {
-    gateRequired: false,
-    setupRequired: false,
-  });
-
-  const empty = accountSurfacePolicy(
-    { ...signedOut, state: "checking" },
-    unavailableModels,
-    false,
-  );
-  assert.equal(empty.gateRequired, true);
 });
 
 test("Account errors stay inside the Account failure domain", () => {
@@ -755,13 +616,13 @@ test("opening Account settings has no hidden catalog mutation", () => {
 });
 
 test("authorization has one cancel path and no reopen or reauthenticate branch", () => {
-  const markup = renderGate({
-    ...signedOut,
-    state: "authorizing",
-    canCancel: true,
-  });
+  const markup = renderSettings(
+    { ...signedOut, state: "authorizing", canCancel: true },
+    unavailableModels,
+    { initialSection: "account" },
+  );
   assert.match(markup, /Finishing Metask sign-in/);
-  assert.match(markup, /Cancel current action/);
+  assert.match(markup, />Cancel</);
   assert.doesNotMatch(
     markup,
     /Open sign-in page again|Sign in again|saved account|previous account/,
@@ -772,7 +633,7 @@ test("signed-out settings keep local history reachable and expose sign-in", () =
   const markup = renderSettings(signedOut, unavailableModels, {
     initialSection: "account",
   });
-  assert.match(markup, /Sign in to MetaWork/);
+  assert.match(markup, /Connect Metask/);
   assert.match(markup, />Sign in with Metask</);
   assert.doesNotMatch(markup, /Sign out on this device/);
 });
@@ -813,13 +674,7 @@ test("catalog failure remains an authenticated retryable settings state", () => 
 });
 
 test("cold connection failure exposes reconnect and bounded diagnostics", () => {
-  const markup = renderGate(
-    { ...signedOut, state: "checking" },
-    {
-      connectionFailed: true,
-      connectionDiagnostic: "transport unavailable",
-    },
-  );
+  const markup = renderConnectionFailure();
   assert.match(markup, /Reconnect/);
   assert.match(markup, /transport unavailable/);
 });

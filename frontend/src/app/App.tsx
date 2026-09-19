@@ -21,7 +21,6 @@ import {
   attentionStatus,
   publishStatus,
   quietStatus,
-  selectAccountGateStatus,
   selectCommandBarStatus,
   type ShellStatus,
   type ShellRoute,
@@ -32,13 +31,12 @@ import {
   connectionFailurePresentation,
   connectionStatus,
 } from "./connection-status.ts";
-import { accountSurfacePolicy } from "./account-surface-policy.ts";
 import { Icon } from "../components/ui/Icon.tsx";
 import { ConfirmationNotice } from "../components/ConfirmationNotice.tsx";
 import { AlertDialog } from "../components/ui/alert-dialog.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { AccountIdentity } from "../features/account/AccountIdentity.tsx";
-import { AccountGate } from "../features/account/AccountGate.tsx";
+import { ConnectionFailureScreen } from "../features/connection/ConnectionFailureScreen.tsx";
 import { accountErrorMessageId } from "../i18n/account-error.ts";
 import { persistenceRecoveryErrorMessageId } from "../i18n/persistence-recovery.ts";
 import {
@@ -244,7 +242,6 @@ export default function App() {
   const settingsRestoreFocus = useRef<HTMLElement | null>(null);
   const [settingsFocus, setSettingsFocus] =
     useState<SettingsFocusTarget>("title");
-  const [accountSetupRedirected, setAccountSetupRedirected] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [taskStageExposed, setTaskStageExposed] = useState(false);
   const [documentAttention, setDocumentAttention] = useState(() =>
@@ -805,55 +802,6 @@ export default function App() {
       current = false;
     };
   }, [client, completionAcknowledgement?.key]);
-  const hasTasks = snapshot.tasks.length !== 0;
-  const snapshotAcceptedForCurrentGeneration =
-    workbench.connectionGeneration !== "0" &&
-    workbench.snapshotGeneration === workbench.connectionGeneration;
-  const accountSurface = accountSurfacePolicy(
-    snapshot.account,
-    snapshot.models,
-    hasTasks,
-  );
-  const accountGateRequired =
-    snapshotAcceptedForCurrentGeneration && accountSurface.gateRequired;
-  const accountSetupRequired = accountSurface.setupRequired;
-
-  useEffect(() => {
-    if (accountSetupRedirected && hasTasks) {
-      setAccountSetupRedirected(false);
-      setSettingsFocus("title");
-      setSettingsOpen(false);
-      return;
-    }
-    if (accountSetupRedirected && snapshot.account.state !== "authenticated") {
-      setAccountSetupRedirected(false);
-      return;
-    }
-    if (accountSetupRequired && route === "workbench" && !settingsOpen) {
-      setAccountSetupRedirected(true);
-      openSettings("account");
-      return;
-    }
-    if (
-      !accountSetupRedirected ||
-      accountSetupRequired ||
-      route !== "workbench" ||
-      snapshot.account.state !== "authenticated"
-    )
-      return;
-    setAccountSetupRedirected(false);
-    setSettingsFocus("title");
-    setSettingsOpen(false);
-    window.requestAnimationFrame(() => composer.current?.focus());
-  }, [
-    accountSetupRedirected,
-    accountSetupRequired,
-    hasTasks,
-    route,
-    settingsOpen,
-    snapshot.account.state,
-  ]);
-
   const workbenchMutationDisabled = bridgeUnavailable;
   const currentTaskScope = activeTask ? `task:${activeTask.id}` : "new-task";
   const taskMutationDisabled =
@@ -1089,7 +1037,7 @@ export default function App() {
       const key = event.key.toLowerCase();
       if (key !== "k" && key !== "n") return;
       event.preventDefault();
-      if (accountGateRequired || bridgeUnavailable) return;
+      if (bridgeUnavailable) return;
       if (key === "k") {
         setSearchOpen(true);
       } else {
@@ -1099,16 +1047,16 @@ export default function App() {
     };
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [accountGateRequired, bridgeUnavailable]);
+  }, [bridgeUnavailable]);
 
   useEffect(() => {
     if (!client.available()) return;
     return client.onShortcut((detail) => {
       if (detail.id !== "settings.open") return;
-      if (accountGateRequired || bridgeUnavailable) return;
+      if (bridgeUnavailable) return;
       openSettings();
     });
-  }, [accountGateRequired, bridgeUnavailable, client]);
+  }, [bridgeUnavailable, client]);
 
   useEffect(() => {
     setEditingTitle(false);
@@ -1652,14 +1600,6 @@ export default function App() {
   }
 
   function closeSettings() {
-    // Leaving settings mid-reconfiguration abandons the unfinished change:
-    // cancel the parked catalog transaction so the previous execution comes
-    // back and the setup gate releases. First-time setup has nothing to fall
-    // back to, so the gate keeps the surface open after the cancel.
-    if (accountSetupRequired && snapshot.account.canCancel) {
-      void cancelAccountOperation();
-      return;
-    }
     setSettingsOpen(false);
     window.requestAnimationFrame(() => {
       settingsRestoreFocus.current?.focus();
@@ -2727,52 +2667,16 @@ export default function App() {
     connectionShellStatus,
   );
   const connectionRetryable = connectionFailure.retryable;
-  const accountGateStatus = selectAccountGateStatus(statuses);
   if (rootRenderBlockReason === "bootstrap_failed")
     return (
-      <AccountGate
-        account={snapshot.account}
-        beginLoginDisabled={viewSyncFailed || !bridgeReady || accountBusy}
-        cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
-        connectionFailed={viewSyncFailed}
-        connectionRetryable={connectionRetryable}
-        connectionTitleId={connectionFailure.titleId}
-        connectionHelpId={connectionFailure.helpId}
-        connectionSourceId={connectionShellStatus?.sourceId}
-        connectionDiagnostic={connectionShellStatus?.diagnostic}
-        reconnecting={connectionBusy}
-        notice={
-          accountGateStatus
-            ? t(accountGateStatus.id, accountGateStatus.values)
-            : ""
-        }
-        onReconnect={() => void retryViewSynchronization()}
-        onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
-        onCancel={() => void cancelAccountOperation()}
-      />
-    );
-
-  if (accountGateRequired)
-    return (
-      <AccountGate
-        account={snapshot.account}
-        beginLoginDisabled={viewSyncFailed || !bridgeReady || accountBusy}
-        cancelDisabled={viewSyncFailed || !bridgeReady || accountCancelBusy}
-        connectionFailed={viewSyncFailed}
-        connectionRetryable={connectionRetryable}
-        connectionTitleId={connectionFailure.titleId}
-        connectionHelpId={connectionFailure.helpId}
-        connectionSourceId={connectionShellStatus?.sourceId}
-        connectionDiagnostic={connectionShellStatus?.diagnostic}
-        reconnecting={connectionBusy}
-        notice={
-          accountGateStatus
-            ? t(accountGateStatus.id, accountGateStatus.values)
-            : ""
-        }
-        onReconnect={() => void retryViewSynchronization()}
-        onBeginLogin={() => void runAccountCommand(() => client.beginLogin())}
-        onCancel={() => void cancelAccountOperation()}
+      <ConnectionFailureScreen
+        titleId={connectionFailure.titleId}
+        helpId={connectionFailure.helpId}
+        sourceId={connectionShellStatus?.sourceId}
+        diagnostic={connectionShellStatus?.diagnostic}
+        retryable={connectionRetryable}
+        retrying={connectionBusy}
+        onRetry={() => void retryViewSynchronization()}
       />
     );
 
@@ -2815,6 +2719,95 @@ export default function App() {
     workspaceId: composerWorkspaceId ?? null,
     taskId: activeTask?.id ?? null,
   });
+  const customProviderSetupAvailable =
+    snapshot.capabilities.customProviderManagement &&
+    snapshot.capabilities.customProviderSecretCapture &&
+    snapshot.capabilities.customModelTest;
+  const metaskIsIntendedSource =
+    snapshot.models.defaultSelection === null ||
+    snapshot.models.defaultSelection.sourceId.startsWith("metask:");
+  const newTaskSetup = snapshot.newTaskAdmission.available
+    ? null
+    : metaskIsIntendedSource && snapshot.account.state === "checking"
+      ? {
+          title: t("task.setup.checking.title"),
+          body: t("task.setup.checking.body"),
+        }
+      : metaskIsIntendedSource && snapshot.account.state === "authorizing"
+        ? {
+            title: t("task.setup.authorizing.title"),
+            body: t("task.setup.authorizing.body"),
+            actions: snapshot.account.canCancel ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="md"
+                disabled={bridgeUnavailable || accountCancelBusy}
+                onClick={() => void cancelAccountOperation()}
+              >
+                {t("account.cancel")}
+              </Button>
+            ) : undefined,
+          }
+        : metaskIsIntendedSource && snapshot.account.state === "signed_out"
+          ? {
+              title: t("task.setup.source_required.title"),
+              body: t("task.setup.source_required.body"),
+              actions: (
+                <>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="md"
+                    disabled={bridgeUnavailable || accountBusy}
+                    onClick={() =>
+                      void runAccountCommand(() => client.beginLogin())
+                    }
+                  >
+                    {t("account.login")}
+                  </Button>
+                  {customProviderSetupAvailable && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="md"
+                      disabled={bridgeUnavailable}
+                      onClick={() => openSettings("providers")}
+                    >
+                      {t("task.setup.open_providers")}
+                    </Button>
+                  )}
+                </>
+              ),
+            }
+          : {
+              title: t("task.setup.models_required.title"),
+              body: t("task.setup.models_required.body"),
+              actions: (
+                <>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="md"
+                    disabled={bridgeUnavailable}
+                    onClick={() => openSettings("models")}
+                  >
+                    {t("settings.open_models")}
+                  </Button>
+                  {customProviderSetupAvailable && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="md"
+                      disabled={bridgeUnavailable}
+                      onClick={() => openSettings("providers")}
+                    >
+                      {t("task.setup.open_providers")}
+                    </Button>
+                  )}
+                </>
+              ),
+            };
   const composerFooter = (
     <>
       {activeTask && (
@@ -3736,6 +3729,7 @@ export default function App() {
             <NewTaskView
               hasWorkspace={Boolean(composerWorkspace)}
               composer={composerFooter}
+              setup={newTaskSetup}
               permissionProfiles={
                 snapshot.capabilities.permissionProfiles
                   ? snapshot.permissions.availableProfiles
