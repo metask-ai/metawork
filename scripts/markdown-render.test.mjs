@@ -43,11 +43,12 @@ test("drops unsafe link protocols", () => {
     createElement(
       Markdown,
       null,
-      '[safe](/docs) [unsafe](javascript:alert("x"))',
+      '[safe](/docs) [scheme-relative](//example.com) [unsafe](javascript:alert("x"))',
     ),
   );
 
   assert.match(markup, /href="\/docs"/);
+  assert.doesNotMatch(markup, /href="\/\//);
   assert.doesNotMatch(markup, /javascript:/);
 });
 

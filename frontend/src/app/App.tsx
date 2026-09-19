@@ -750,6 +750,21 @@ export default function App() {
     taskDrafts.invalidateAttachments,
   ]);
   const bridgeUnavailable = viewSyncFailed || !bridgeReady;
+  const openExternalLink = useCallback(
+    async (url: string) => {
+      if (viewSyncFailed || !bridgeReady) return false;
+      try {
+        return (await client.openExternalLink(url)).outcome === "opened";
+      } catch {
+        return false;
+      }
+    },
+    [bridgeReady, client, viewSyncFailed],
+  );
+  const markdownWebLink = useMemo(
+    () => ({ failedLabel: t("link.open_failed"), onOpen: openExternalLink }),
+    [openExternalLink, t],
+  );
   const completionAcknowledgement = completionAcknowledgementCandidate({
     task: newTaskDraftActive ? null : activeTask,
     workbenchRoute: route === "workbench",
@@ -3276,6 +3291,7 @@ export default function App() {
               filePreviewViewState ? (
               <FilePreviewView
                 state={filePreviewViewState}
+                webLink={markdownWebLink}
                 mode={activePanelView?.previewMode ?? "preview"}
                 scrollTop={activePanelView?.scrollTop ?? 0}
                 onModeChange={(mode) => {
@@ -3726,6 +3742,7 @@ export default function App() {
             <>
               <TaskContent
                 task={activeTask}
+                webLink={markdownWebLink}
                 snapshotReceivedAt={workbench.snapshotReceivedAt}
                 synchronized={!bridgeUnavailable}
                 requestingStop={Boolean(

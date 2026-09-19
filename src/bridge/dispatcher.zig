@@ -27,6 +27,7 @@ const max_attachment_in_flight: usize = 4;
 pub const attachment_chunk_bytes = 128 * 1024;
 const workspace_path_capacity = workspace_grant.max_path_bytes;
 const event_name = "metawork:host-signal";
+const max_external_link_url_bytes: usize = 4096;
 
 pub const WindowChromePlatformEnvironment = struct {
     top: f64,
@@ -98,6 +99,10 @@ pub const Platform = struct {
         ?*anyopaque,
         native_sdk.platform.WindowId,
     ) anyerror!void,
+    open_external_url_fn: *const fn (
+        ?*anyopaque,
+        []const u8,
+    ) anyerror!void = unavailableExternalUrl,
     now_fn: *const fn (?*anyopaque) u64,
     on_main_thread_fn: *const fn (?*anyopaque) bool,
 };
@@ -302,6 +307,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.window_chrome_pointer, .function = handleWindowChromePointer },
             .{ .name = commands.window_chrome_control, .function = controlWindowChrome },
             .{ .name = commands.window_chrome_disconnect, .function = disconnectWindowChrome },
+            .{ .name = commands.open_external_link, .function = openExternalLink },
             .{ .name = commands.choose_workspace, .function = chooseWorkspace },
             .{ .name = commands.choose_automatic_workspace_root, .function = chooseAutomaticWorkspaceRoot },
             .{ .name = commands.reset_automatic_workspace_root, .function = resetAutomaticWorkspaceRoot },
@@ -737,6 +743,34 @@ pub const Dispatcher = struct {
             generation == 0 or
             generation != self.window_chrome_generation)
             return error.StaleWindowChromeDocument;
+    }
+
+    fn openExternalLink(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireManagementAuthority(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(
+            handlers.ExternalLinkOpen,
+            invocation.request.payload,
+            32 * 1024,
+        );
+        defer parsed.deinit();
+        if (!validExternalLink(parsed.value.url))
+            return encodeExternalLinkOutcome(output, "rejected");
+        self.platform.open_external_url_fn(
+            self.platform.context,
+            parsed.value.url,
+        ) catch return encodeExternalLinkOutcome(output, "unavailable");
+        return encodeExternalLinkOutcome(output, "opened");
+    }
+
+    fn encodeExternalLinkOutcome(output: []u8, outcome: []const u8) ![]const u8 {
+        return std.fmt.bufPrint(output, "{{\"outcome\":\"{s}\"}}", .{outcome});
     }
 
     fn encodeWindowChromeHandled(output: []u8, generation: u64) ![]const u8 {
@@ -5377,6 +5411,55 @@ fn inactive(_: ?*anyopaque) bool {
     return false;
 }
 
+fn unavailableExternalUrl(_: ?*anyopaque, _: []const u8) anyerror!void {
+    return error.ExternalLinkUnavailable;
+}
+
+fn validExternalLink(value: []const u8) bool {
+    if (value.len == 0 or value.len > max_external_link_url_bytes or
+        !std.unicode.utf8ValidateSlice(value)) return false;
+    for (value) |byte| if (byte <= 0x20 or byte == 0x7f or byte == '\\')
+        return false;
+    const uri = std.Uri.parse(value) catch return false;
+    if (std.ascii.eqlIgnoreCase(uri.scheme, "http") or
+        std.ascii.eqlIgnoreCase(uri.scheme, "https"))
+    {
+        return uri.host != null and !uri.host.?.isEmpty() and
+            uri.user == null and uri.password == null;
+    }
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "mailto")) return false;
+    if (uri.host != null or uri.user != null or uri.password != null or
+        uri.port != null or uri.path.isEmpty() or uri.fragment != null)
+        return false;
+    return std.ascii.indexOfIgnoreCase(value, "%0d") == null and
+        std.ascii.indexOfIgnoreCase(value, "%0a") == null;
+}
+
+test "external link validation accepts only bounded credential-free web and mail targets" {
+    for ([_][]const u8{
+        "https://example.com/path?q=1#result",
+        "HTTP://localhost:3000/",
+        "mailto:test@example.com?subject=MetaWork",
+    }) |value| try std.testing.expect(validExternalLink(value));
+
+    for ([_][]const u8{
+        "",
+        "docs/help",
+        "//example.com",
+        "https:example.com",
+        "https://user:secret@example.com",
+        "https://example.com\\redirect",
+        "file:///tmp/report.txt",
+        "metawork://settings",
+        "mailto:",
+        "mailto:test@example.com?subject=a%0d%0abcc:x",
+    }) |value| try std.testing.expect(!validExternalLink(value));
+
+    var oversized: [max_external_link_url_bytes + 1]u8 = undefined;
+    @memset(&oversized, 'a');
+    try std.testing.expect(!validExternalLink(&oversized));
+}
+
 fn unavailableRandom(_: ?*anyopaque, _: []u8) bool {
     return false;
 }
@@ -5694,6 +5777,8 @@ test "Dispatcher validates authority before domain calls and preserves committed
         chrome_pointer_calls: usize = 0,
         chrome_control_calls: usize = 0,
         chrome_disconnect_calls: usize = 0,
+        external_link_calls: usize = 0,
+        external_link_error: ?anyerror = null,
         chrome_error: ?anyerror = null,
         on_main_thread: bool = true,
         account_result: account_contract.AccountCommandResult =
@@ -5803,6 +5888,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
             self.chrome_disconnect_calls += 1;
         }
 
+        fn openExternalUrl(context: ?*anyopaque, url: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            try std.testing.expect(validExternalLink(url));
+            self.external_link_calls += 1;
+            if (self.external_link_error) |err| return err;
+        }
+
         fn now(_: ?*anyopaque) u64 {
             return 7;
         }
@@ -5899,6 +5991,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
             .window_chrome_pointer_fn = Harness.handleWindowChromePointer,
             .window_chrome_control_fn = Harness.controlWindowChrome,
             .window_chrome_disconnect_fn = Harness.disconnectWindowChrome,
+            .open_external_url_fn = Harness.openExternalUrl,
             .now_fn = Harness.now,
             .on_main_thread_fn = Harness.onMainThread,
         },
@@ -5939,11 +6032,13 @@ test "Dispatcher validates authority before domain calls and preserves committed
         "{\"id\":\"snapshot-before-contract\",\"command\":\"metawork.workbench.snapshot\",\"payload\":{}}",
         "{\"id\":\"account-before-contract\",\"command\":\"metawork.account.beginLogin\",\"payload\":{}}",
         "{\"id\":\"task-before-contract\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspaceGrant\":\"1\"}}",
+        "{\"id\":\"link-before-contract\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"https://example.com\"}}",
     }) |request| {
         const before_contract = native_dispatcher.dispatch(request, source, &response);
         try std.testing.expect(std.mem.indexOf(u8, before_contract, "\"handler_failed\"") != null);
     }
     try std.testing.expectEqual(@as(usize, 0), harness.account_calls);
+    try std.testing.expectEqual(@as(usize, 0), harness.external_link_calls);
     try std.testing.expectEqual(initial_revision, workbench.currentRevision());
 
     const chrome_connect = native_dispatcher.dispatch(
@@ -6125,6 +6220,34 @@ test "Dispatcher validates authority before domain calls and preserves committed
         source,
         &response,
     );
+    for ([_][]const u8{
+        "{\"id\":\"open-https\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"https://example.com/a?q=1#result\"}}",
+        "{\"id\":\"open-http\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"http://localhost:3000/\"}}",
+        "{\"id\":\"open-mail\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"mailto:test@example.com?subject=MetaWork\"}}",
+    }) |request| {
+        const opened = native_dispatcher.dispatch(request, source, &response);
+        try std.testing.expect(std.mem.indexOf(u8, opened, "\"outcome\":\"opened\"") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 3), harness.external_link_calls);
+    for ([_][]const u8{
+        "{\"id\":\"relative-link\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"docs/help\"}}",
+        "{\"id\":\"credential-link\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"https://user:secret@example.com\"}}",
+        "{\"id\":\"custom-link\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"metawork://settings\"}}",
+        "{\"id\":\"newline-mail\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"mailto:test@example.com?subject=a%0Abcc:x\"}}",
+    }) |request| {
+        const rejected = native_dispatcher.dispatch(request, source, &response);
+        try std.testing.expect(std.mem.indexOf(u8, rejected, "\"outcome\":\"rejected\"") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 3), harness.external_link_calls);
+    harness.external_link_error = error.SystemHandlerUnavailable;
+    const unavailable_link = native_dispatcher.dispatch(
+        "{\"id\":\"unavailable-link\",\"command\":\"metawork.host.links.openExternal\",\"payload\":{\"url\":\"https://example.com\"}}",
+        source,
+        &response,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, unavailable_link, "\"outcome\":\"unavailable\"") != null);
+    try std.testing.expectEqual(@as(usize, 4), harness.external_link_calls);
+    harness.external_link_error = null;
     var recovery_request_storage: [256]u8 = undefined;
     const task_recovery_request = try std.fmt.bufPrint(
         &recovery_request_storage,

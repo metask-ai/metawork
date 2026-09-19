@@ -1,6 +1,9 @@
 import { useLayoutEffect, useRef } from "react";
 import type { FilePreview, FileReferenceView } from "../../bridge/contracts.ts";
-import { Markdown } from "../../components/ai/Markdown.tsx";
+import {
+  Markdown,
+  type MarkdownWebLink,
+} from "../../components/ai/Markdown.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Tabs } from "../../components/ui/tabs.tsx";
@@ -21,6 +24,7 @@ export function FilePreviewView({
   onModeChange,
   onScrollTopChange,
   onRetry,
+  webLink,
 }: {
   state: FilePreviewViewState;
   mode: FilePreviewMode;
@@ -28,6 +32,7 @@ export function FilePreviewView({
   onModeChange: (mode: FilePreviewMode) => void;
   onScrollTopChange: (scrollTop: number) => void;
   onRetry: () => void;
+  webLink: MarkdownWebLink;
 }) {
   const { t } = useI18n();
   const root = useRef<HTMLDivElement | null>(null);
@@ -96,7 +101,9 @@ export function FilePreviewView({
                     onScrollTopChange(event.currentTarget.scrollTop)
                   }
                 >
-                  <Markdown textResourcesOnly>{state.preview.content}</Markdown>
+                  <Markdown textResourcesOnly webLink={webLink}>
+                    {state.preview.content}
+                  </Markdown>
                 </Tabs.Panel>
                 <Tabs.Panel
                   value="source"

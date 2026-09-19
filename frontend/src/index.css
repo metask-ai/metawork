@@ -7533,6 +7533,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   text-underline-offset: 2px;
 }
 
+.ai-markdown-web-link {
+  display: inline;
+}
+
+.ai-markdown-link-error {
+  margin-left: 6px;
+  color: var(--ui-status-danger);
+  font-size: var(--text-micro);
+  text-decoration: none;
+}
+
 .ai-markdown .ai-markdown-reference {
   display: inline;
   height: auto;

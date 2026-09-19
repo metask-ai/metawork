@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) void {
     const window_chrome_bridge_tests = b.addTest(.{
         .name = "metawork-window-chrome-bridge",
         .root_module = test_modules.bridge,
-        .filters = &.{ "window chrome", "Dispatcher validates authority" },
+        .filters = &.{ "window chrome", "Dispatcher validates authority", "external link validation" },
     });
     window_chrome_step.dependOn(&b.addRunArtifact(window_chrome_bridge_tests).step);
     addLifecycleTests(

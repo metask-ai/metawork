@@ -1,10 +1,13 @@
 import {
   createContext,
   memo,
+  useCallback,
   useDeferredValue,
   useContext,
   useLayoutEffect,
+  useState,
   type ComponentPropsWithoutRef,
+  type MouseEvent,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -31,6 +34,13 @@ export type MarkdownCodeCopy = {
 
 const CodeCopyContext = createContext<MarkdownCodeCopy | undefined>(undefined);
 const InteractionContext = createContext(true);
+
+export type MarkdownWebLink = {
+  failedLabel: string;
+  onOpen: (href: string) => Promise<boolean>;
+};
+
+const WebLinkContext = createContext<MarkdownWebLink | undefined>(undefined);
 
 function referencePlugin(references: ReadonlyMap<string, MarkdownReference>) {
   const aliases = [...references.keys()]
@@ -113,7 +123,8 @@ function referencePlugin(references: ReadonlyMap<string, MarkdownReference>) {
 
 function safeHref(href: string | undefined): string | null {
   if (!href) return null;
-  if (!href.includes(":") && !href.startsWith("//")) return href;
+  if (href.startsWith("//")) return null;
+  if (!href.includes(":")) return href;
   try {
     const url = new URL(href, "https://metawork.invalid");
     if (["http:", "https:", "mailto:"].includes(url.protocol)) return href;
@@ -121,6 +132,58 @@ function safeHref(href: string | undefined): string | null {
     return null;
   }
   return null;
+}
+
+function WebLink({
+  href,
+  children,
+  ...props
+}: ComponentPropsWithoutRef<"a"> & { href: string }) {
+  const webLink = useContext(WebLinkContext);
+  const [failed, setFailed] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const open = useCallback(
+    (event: MouseEvent<HTMLAnchorElement>) => {
+      event.preventDefault();
+      if (!webLink || opening) return;
+      setFailed(false);
+      setOpening(true);
+      void webLink
+        .onOpen(href)
+        .then((opened) => setFailed(!opened))
+        .catch(() => setFailed(true))
+        .finally(() => setOpening(false));
+    },
+    [href, opening, webLink],
+  );
+
+  if (!webLink)
+    return (
+      <a {...props} href={href} target="_blank" rel="noreferrer noopener">
+        {children}
+      </a>
+    );
+
+  return (
+    <span className="ai-markdown-web-link">
+      <a
+        {...props}
+        href={href}
+        aria-busy={opening || undefined}
+        onClick={open}
+        onAuxClick={(event) => {
+          if (event.button === 1) open(event);
+        }}
+      >
+        {children}
+      </a>
+      {failed && (
+        <span className="ai-markdown-link-error" role="alert">
+          {webLink.failedLabel}
+        </span>
+      )}
+    </span>
+  );
 }
 
 // Stable component identities keep the actual opener mounted when preview state
@@ -177,9 +240,9 @@ const components: Components = {
     if (references && !/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(hrefValue))
       return <span>{content}</span>;
     return (
-      <a {...props} href={hrefValue} target="_blank" rel="noreferrer noopener">
+      <WebLink {...props} href={hrefValue}>
         {content}
-      </a>
+      </WebLink>
     );
   },
   img: ({ alt }) => <span>{alt}</span>,
@@ -222,13 +285,13 @@ export async function renderMarkdownForClipboard(
 const textResourceComponents: Components = {
   ...components,
   img: ({ alt }) => <span>{alt}</span>,
-  a: ({ href, children, node, ...props }) => {
+  a: ({ href, children, node: _node, ...props }) => {
     // Documents do not gain a relative-resource or app navigation capability.
     const value = safeHref(href);
     return value && /^https?:/i.test(value) ? (
-      <a {...props} href={value} target="_blank" rel="noreferrer noopener">
+      <WebLink {...props} href={value}>
         {children}
-      </a>
+      </WebLink>
     ) : (
       <span>{children}</span>
     );
@@ -276,6 +339,7 @@ export type MarkdownProps = Omit<
   references?: ReadonlyMap<string, MarkdownReference>;
   textResourcesOnly?: boolean;
   codeCopy?: MarkdownCodeCopy;
+  webLink?: MarkdownWebLink;
   interactive?: boolean;
   onStreamingCommit?: () => void;
   streaming?: boolean;
@@ -287,6 +351,7 @@ export function Markdown({
   references,
   textResourcesOnly = false,
   codeCopy,
+  webLink,
   interactive = true,
   onStreamingCommit,
   streaming = false,
@@ -306,17 +371,19 @@ export function Markdown({
       {...props}
     >
       <ReferenceContext.Provider value={references}>
-        <CodeCopyContext.Provider value={codeCopy}>
-          <InteractionContext.Provider value={interactive}>
-            <MarkdownBody
-              references={references}
-              referenceFingerprint={referenceFingerprint}
-              textResourcesOnly={textResourcesOnly}
-            >
-              {visibleChildren}
-            </MarkdownBody>
-          </InteractionContext.Provider>
-        </CodeCopyContext.Provider>
+        <WebLinkContext.Provider value={webLink}>
+          <CodeCopyContext.Provider value={codeCopy}>
+            <InteractionContext.Provider value={interactive}>
+              <MarkdownBody
+                references={references}
+                referenceFingerprint={referenceFingerprint}
+                textResourcesOnly={textResourcesOnly}
+              >
+                {visibleChildren}
+              </MarkdownBody>
+            </InteractionContext.Provider>
+          </CodeCopyContext.Provider>
+        </WebLinkContext.Provider>
       </ReferenceContext.Provider>
     </div>
   );

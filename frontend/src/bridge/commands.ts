@@ -11,6 +11,7 @@ export const commands = {
   windowChromePointer: "metawork.host.windowChrome.pointer",
   windowChromeControl: "metawork.host.windowChrome.control",
   windowChromeDisconnect: "metawork.host.windowChrome.disconnect",
+  openExternalLink: "metawork.host.links.openExternal",
   chooseWorkspace: "metawork.workspaces.choose",
   chooseAutomaticWorkspaceRoot: "metawork.workspaces.chooseAutomaticRoot",
   resetAutomaticWorkspaceRoot: "metawork.workspaces.resetAutomaticRoot",
