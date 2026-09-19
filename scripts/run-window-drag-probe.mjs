@@ -1,5 +1,5 @@
-// A-stage harness. Default launch is manual; --input-matrix explicitly drives
-// the isolated entry with the repository's scoped Win32 input probe.
+// A-stage harness. Default launch is manual; --input-matrix / --surface-matrix
+// explicitly drive the isolated entry with the scoped Win32 input probe.
 // Completion of this process is NOT a gesture/paint acceptance verdict.
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -12,14 +12,16 @@ import { runChild } from "./run-child-process.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import { allocateWebViewTestPort } from "./window-top-resize-paint.mjs";
 import { probeFixedDragInput } from "./window-drag-probe-input.mjs";
+import { probeFixedDragSurface } from "./window-drag-probe-surface.mjs";
 
 if (process.platform !== "win32")
   throw new Error("Windows-only native input probe");
 const buildOnly = process.argv[2] === "--build-only";
 const inputMatrix = process.argv[2] === "--input-matrix";
-if (process.argv.length !== (buildOnly || inputMatrix ? 3 : 2))
+const surfaceMatrix = process.argv[2] === "--surface-matrix";
+if (process.argv.length !== (buildOnly || inputMatrix || surfaceMatrix ? 3 : 2))
   throw new Error(
-    "usage: node scripts/run-window-drag-probe.mjs [--build-only|--input-matrix]",
+    "usage: node scripts/run-window-drag-probe.mjs [--build-only|--input-matrix|--surface-matrix]",
   );
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -148,7 +150,7 @@ if (buildOnly) {
     process.stderr.write(chunk);
   });
   console.log(
-    `Evidence: ${evidence}\nProcess: ${child.pid}\n${inputMatrix ? "Running scoped Win32 input matrix." : "Manual input only."} Ctrl+Shift+Q exits; the probe has a 15-minute watchdog.`,
+    `Evidence: ${evidence}\nProcess: ${child.pid}\n${inputMatrix || surfaceMatrix ? "Running scoped Win32 matrix." : "Manual input only."} Ctrl+Shift+Q exits; the probe has a 15-minute watchdog.`,
   );
   let outcome;
   let inputError;
@@ -169,7 +171,7 @@ if (buildOnly) {
       if (!child.pid || child.exitCode !== null) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    if (inputMatrix) {
+    if (inputMatrix || surfaceMatrix) {
       const results = [];
       const runProbe = async (mode, extra = []) => {
         const result = await execFileAsync(
@@ -194,24 +196,28 @@ if (buildOnly) {
         return result.stdout.trim();
       };
       try {
-        await probeFixedDragInput({
+        await (inputMatrix ? probeFixedDragInput : probeFixedDragSurface)({
           port,
           runProbe,
           nativeLog: () => stderr,
+          evidenceDir: evidence,
           async record(result) {
             results.push(result);
             await writeFile(
-              path.join(evidence, "input-matrix.json"),
+              path.join(
+                evidence,
+                inputMatrix ? "input-matrix.json" : "surface-matrix.json",
+              ),
               JSON.stringify(results, null, 2),
             );
             console.log(
-              `Input case ${result.name}: ${result.passed ? "passed" : "FAILED"}`,
+              `Matrix case ${result.name}: ${result.passed ? "passed" : "FAILED"}`,
             );
           },
         });
       } catch (error) {
         inputError = error;
-        console.error(`Input matrix failed: ${error.message}`);
+        console.error(`Matrix failed: ${error.message}`);
       } finally {
         try {
           await runProbe("probe-quit");

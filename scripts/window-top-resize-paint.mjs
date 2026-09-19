@@ -105,8 +105,16 @@ export async function connectTestWebView(port, { htmlTitle } = {}) {
   }
 }
 
-export async function probeTopResizePaint({ port, runProbe, evidenceDir }) {
-  const webview = await connectTestWebView(port);
+export async function probeTopResizePaint({
+  port,
+  runProbe,
+  evidenceDir,
+  fixedDrag = false,
+}) {
+  const webview = await connectTestWebView(
+    port,
+    fixedDrag ? { htmlTitle: "Fixed native drag input probe" } : {},
+  );
   const { send } = webview;
   try {
     for (const [index, color] of [
@@ -127,7 +135,7 @@ export async function probeTopResizePaint({ port, runProbe, evidenceDir }) {
           if (!strip) {
             strip = document.createElement('div');
             strip.id = 'metawork-resize-paint-probe';
-            strip.style.cssText = 'position:fixed;inset:0 0 auto;height:24px;z-index:2147483647;pointer-events:none';
+            strip.style.cssText = 'position:fixed;inset:0 0 auto;height:${fixedDrag ? 40 : 24}px;z-index:2147483647;pointer-events:none';
             document.body.append(strip);
           }
           for (let frame = 0; frame < 12; frame++) {
@@ -141,13 +149,21 @@ export async function probeTopResizePaint({ port, runProbe, evidenceDir }) {
         throw new Error(JSON.stringify(result.exceptionDetails));
       // Observe the new pixels before any resize, activation, or occlusion can
       // repair stale content underneath the input child.
-      await runProbe("paint-stationary", ["-ColorHex", color]);
+      const stationaryArgs = ["-ColorHex", color];
+      if (fixedDrag) stationaryArgs.push("-FixedDragPaint");
+      if (evidenceDir)
+        stationaryArgs.push(
+          "-OutputPath",
+          path.join(evidenceDir, `top-stationary-${index}.png`),
+        );
+      await runProbe("paint-stationary", stationaryArgs);
       const args = [
         "-ColorHex",
         color,
         "-ProbeWidth",
         String(900 + index * 30),
       ];
+      if (fixedDrag) args.push("-FixedDragPaint");
       if (evidenceDir)
         args.push(
           "-OutputPath",

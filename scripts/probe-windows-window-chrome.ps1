@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-alt-f4', 'control-taskbar-restore', 'probe-quit')]
+    [ValidateSet('doubleclick', 'drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-alt-f4', 'control-taskbar-restore', 'probe-quit', 'probe-layout', 'probe-animation', 'probe-resources')]
     [string]$Mode = 'drag',
     [string]$ColorHex,
     [string]$OutputPath,
@@ -11,6 +11,7 @@ param(
     [switch]$AllMonitors,
     [switch]$Direct,
     [switch]$KeepTopmost,
+    [switch]$FixedDragPaint,
     [string]$InputCase,
     [int]$DoubleClickMilliseconds = 0,
     [int]$PointX = 300,
@@ -340,7 +341,7 @@ if ($Direct -and (-not [MetaWorkChromeProbe]::IsWindowVisible($window) -or
     throw 'Direct resize requires an already visible, restored window'
 }
 try {
-if ($Mode -ne 'paint-stationary') {
+if ($Mode -notin @('paint-stationary', 'probe-animation')) {
     # Keep real mouse input on this test-owned window, even if Codex takes focus.
     if (-not [MetaWorkChromeProbe]::SetWindowPos($window, [IntPtr](-1), 0, 0, 0, 0, 0x0013)) {
         throw 'Could not establish unobscured pointer input'
@@ -515,6 +516,129 @@ if ($Mode -eq 'top-resize') {
     return
 }
 
+if ($Mode -eq 'probe-layout') {
+    if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Layout probe requires isolated native fixture' }
+    $drag = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
+    $resize = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkSystemWebViewTopResize', '')
+    if ($drag -eq [IntPtr]::Zero -or $resize -eq [IntPtr]::Zero) { throw 'Both native input children are required' }
+    $dragRect = Get-MetaWorkRect $drag
+    $resizeRect = Get-MetaWorkRect $resize
+    if ($dragRect.Top -lt $resizeRect.Bottom) { throw 'Drag shape overlaps the resize band' }
+    $point = New-Object MetaWorkChromeProbe+Point
+    $point.X = [int](($dragRect.Left + $dragRect.Right) / 2)
+    $point.Y = $resizeRect.Top + 1
+    if ([MetaWorkChromeProbe]::WindowFromPoint($point) -ne $resize) { throw 'Resize pixel is not owned by resize' }
+    $point.Y = $dragRect.Top + 1
+    if ([MetaWorkChromeProbe]::WindowFromPoint($point) -ne $drag) { throw 'Drag pixel is not owned by drag' }
+    $point.X = $dragRect.Right
+    $other = [MetaWorkChromeProbe]::WindowFromPoint($point)
+    if ($other -eq $drag -or $other -eq $resize -or [MetaWorkChromeProbe]::GetAncestor($other, 2) -ne $window) { throw 'Business pixel is not outside the native input regions' }
+    [ordered]@{ resize=$resize.ToInt64().ToString(); drag=$drag.ToInt64().ToString(); content=$other.ToInt64().ToString(); dragTop=$dragRect.Top; resizeBottom=$resizeRect.Bottom; passed=$true } | ConvertTo-Json -Compress
+    return
+}
+
+if ($Mode -eq 'probe-animation') {
+    if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Animation probe requires isolated native fixture' }
+    Add-Type -AssemblyName System.Drawing
+    $scale = [MetaWorkChromeProbe]::GetDpiForWindow($window) / 96.0
+    $origin = New-Object MetaWorkChromeProbe+Point
+    $client = New-Object MetaWorkChromeProbe+Rect
+    if (-not [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$origin) -or -not [MetaWorkChromeProbe]::GetClientRect($window, [ref]$client)) { throw 'Animation geometry unavailable' }
+    $drag = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
+    $point = New-Object MetaWorkChromeProbe+Point
+    $point.X = $origin.X + [int](216 * $scale); $point.Y = $origin.Y + [int](36 * $scale)
+    if ($drag -eq [IntPtr]::Zero -or [MetaWorkChromeProbe]::WindowFromPoint($point) -ne $drag) { throw 'Animated pixels do not lie beneath the native drag child' }
+    $patterns = @()
+    $bitmap = New-Object System.Drawing.Bitmap $client.Right,([int](40 * $scale))
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+        for ($frame = 0; $frame -lt 10; $frame++) {
+            $graphics.CopyFromScreen($origin.X, $origin.Y, 0, 0, $bitmap.Size)
+            if ($OutputPath) { $bitmap.Save(($OutputPath -replace '\.png$', "-$frame.png")) }
+            $row = @()
+            for ($x = 0; $x -lt [int](120 * $scale); $x++) {
+                $actual = $bitmap.GetPixel([int](216 * $scale) + $x, [int](36 * $scale)).ToArgb()
+                $reference = $bitmap.GetPixel([int](408 * $scale) + $x, [int](36 * $scale)).ToArgb()
+                if ($actual -ne $reference) { throw "Animation under native child differs from same-frame WebView reference at frame=$frame x=$x" }
+                $row += $actual
+            }
+            $patterns += ($row -join ',')
+            Start-Sleep -Milliseconds 75
+        }
+    } finally { $graphics.Dispose(); $bitmap.Dispose() }
+    $distinct = @($patterns | Select-Object -Unique).Count
+    if ($distinct -lt 3) { throw 'Animation did not visibly advance under the native child' }
+    [ordered]@{ frames=10; distinct=$distinct; sameFrameReference=$true; passed=$true } | ConvertTo-Json -Compress
+    return
+}
+
+if ($Mode -eq 'probe-resources') {
+    if ($process.ProcessName -ne 'metawork-drag-probe') { throw 'Resource probe requires isolated native fixture' }
+    Add-Type -AssemblyName System.Windows.Forms
+    $otherWindow = New-Object System.Windows.Forms.Form
+    $otherWindow.FormBorderStyle = 'None'
+    $otherWindow.StartPosition = 'Manual'
+    $otherWindow.SetBounds(20, 20, 140, 80)
+    $otherWindow.TopMost = $true
+    $samples = @()
+    try {
+        # Foreground permission is not persistent after returning focus to the
+        # other process. Exercise real, test-owned clicks instead of repeatedly
+        # asking SetForegroundWindow to override the OS activation rules.
+        $otherWindow.Show(); [System.Windows.Forms.Application]::DoEvents()
+        $fixturePoint = New-Object MetaWorkChromeProbe+Point
+        $fixturePoint.X = 40; $fixturePoint.Y = 40
+        if (-not [MetaWorkChromeProbe]::ClientToScreen($otherWindow.Handle, [ref]$fixturePoint)) { throw 'Resource fixture geometry unavailable' }
+        $contentPoint = New-Object MetaWorkChromeProbe+Point
+        $contentPoint.X = 400; $contentPoint.Y = 100
+        if (-not [MetaWorkChromeProbe]::ClientToScreen($window, [ref]$contentPoint)) { throw 'Resource content geometry unavailable' }
+        if ([MetaWorkChromeProbe]::GetAncestor([MetaWorkChromeProbe]::WindowFromPoint($contentPoint), 2) -ne $window) { throw 'Resource setup click is obscured' }
+        Invoke-MetaWorkClick $contentPoint.X $contentPoint.Y
+        [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 60
+        if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $window) { throw 'Resource setup click did not activate root' }
+        for ($iteration = 0; $iteration -lt 35; $iteration++) {
+            $old = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
+            $fixtureHit = [MetaWorkChromeProbe]::WindowFromPoint($fixturePoint)
+            if ($fixtureHit -ne $otherWindow.Handle) { throw "Resource fixture click is obscured: point=$($fixturePoint.X),$($fixturePoint.Y) hit=$fixtureHit expected=$($otherWindow.Handle) bounds=$($otherWindow.Bounds)" }
+            Invoke-MetaWorkClick $fixturePoint.X $fixturePoint.Y
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 60
+            [System.Windows.Forms.Application]::DoEvents()
+            $foreground = [MetaWorkChromeProbe]::GetForegroundWindow()
+            if ($foreground -ne $otherWindow.Handle) { throw "Resource cycle $iteration did not deactivate root: actual=$foreground expected=$($otherWindow.Handle)" }
+            $current = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
+            if ($current -eq [IntPtr]::Zero -or $current -eq $old -or [MetaWorkChromeProbe]::IsWindow($old) -or
+                [MetaWorkChromeProbe]::FindWindowExW($window, $current, 'MetaWorkFixedDragInputProbe', '') -ne [IntPtr]::Zero) { throw 'Resource replacement did not retire exactly one old child' }
+            $contentHit = [MetaWorkChromeProbe]::WindowFromPoint($contentPoint)
+            if ([MetaWorkChromeProbe]::GetAncestor($contentHit, 2) -ne $window -or $contentHit -eq $current) { throw 'Resource content click is obscured or hits drag input' }
+            Invoke-MetaWorkClick $contentPoint.X $contentPoint.Y
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 60
+            $foreground = [MetaWorkChromeProbe]::GetForegroundWindow()
+            if ($foreground -ne $window) { throw "Resource cycle $iteration did not reactivate root: actual=$foreground expected=$window" }
+            if ($iteration -ge 4) {
+                $samples += [ordered]@{ iteration=$iteration; user=[MetaWorkChromeProbe]::GetGuiResources($process.Handle, 1); gdi=[MetaWorkChromeProbe]::GetGuiResources($process.Handle, 0) }
+            }
+        }
+        $first = $samples[0]; $last = $samples[-1]
+        if ($samples.Where({ $_.user -le 0 -or $_.gdi -le 0 }).Count -ne 0) { throw 'Resource counters unavailable' }
+        if ($last.user -gt $first.user + 4 -or $last.gdi -gt $first.gdi + 4) { throw 'Repeated activation exceeded the existing USER/GDI growth bound' }
+        [ordered]@{ cycles=35; warmup=5; samples=$samples; activationPassed=$true } | ConvertTo-Json -Depth 4 -Compress
+        foreach ($state in @(0, 6)) {
+            [MetaWorkChromeProbe]::ShowWindow($window, $state) | Out-Null
+            Start-Sleep -Milliseconds 120
+            $current = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
+            if ([MetaWorkChromeProbe]::IsWindowVisible($current)) { throw 'Hidden/minimized root retains a visible drag input child' }
+            [MetaWorkChromeProbe]::ShowWindow($window, 9) | Out-Null
+            Start-Sleep -Milliseconds 120
+            $current = [MetaWorkChromeProbe]::FindWindowExW($window, [IntPtr]::Zero, 'MetaWorkFixedDragInputProbe', '')
+            if (-not [MetaWorkChromeProbe]::IsWindowVisible($current)) { throw 'Restored root did not restore native drag input' }
+        }
+        [ordered]@{ hiddenMinimizedRestore=$true; passed=$true } | ConvertTo-Json -Compress
+    } finally { $otherWindow.Dispose() }
+    return
+}
+
 if ($Mode -eq 'paint' -or $Mode -eq 'paint-stationary') {
     # The isolated WebView test injects a contrasting DOM strip. Read real
     # desktop pixels, including the native child, both while stationary and
@@ -541,7 +665,10 @@ if ($Mode -eq 'paint' -or $Mode -eq 'paint-stationary') {
         } finally { $cover.Close(); $cover.Dispose() }
         Start-Sleep -Milliseconds 200
     }
-    $bitmap = New-Object System.Drawing.Bitmap $client.Right,24
+    if ($FixedDragPaint -and $process.ProcessName -ne 'metawork-drag-probe') { throw 'Fixed drag paint requires isolated native fixture' }
+    $scale = [MetaWorkChromeProbe]::GetDpiForWindow($window) / 96.0
+    $paintHeight = if ($FixedDragPaint) { [int](40 * $scale) } else { 24 }
+    $bitmap = New-Object System.Drawing.Bitmap $client.Right,$paintHeight
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     try {
         $graphics.CopyFromScreen($origin.X, $origin.Y, 0, 0, $bitmap.Size)
@@ -550,8 +677,10 @@ if ($Mode -eq 'paint' -or $Mode -eq 'paint-stationary') {
             $bitmap.Save($OutputPath)
         }
         $expected = [System.Drawing.ColorTranslator]::FromHtml($ColorHex).ToArgb()
-        foreach ($x in @(12, [int]($client.Right / 2), ($client.Right - 12))) {
-            foreach ($y in @(1, 4, 6, 12, 20)) {
+        $sampleXs = if ($FixedDragPaint) { @(12, 201, 280, 359, 400) | ForEach-Object { [int]($_ * $scale) } } else { @(12, [int]($client.Right / 2), ($client.Right - 12)) }
+        $sampleYs = if ($FixedDragPaint) { @(1, 6, 12, 20, 39) | ForEach-Object { [int]($_ * $scale) } } else { @(1, 4, 6, 12, 20) }
+        foreach ($x in $sampleXs) {
+            foreach ($y in $sampleYs) {
                 if ($bitmap.GetPixel($x, $y).ToArgb() -ne $expected) {
                     throw "Native input child occludes WebView pixels at $x,$y; expected $ColorHex"
                 }
