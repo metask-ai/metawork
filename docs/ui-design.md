@@ -33,7 +33,7 @@
 
 MetaWork 是面向本地工作区的桌面 Agent Workbench，不是终端模拟器、聊天应用、完整 IDE 或通用 Agent 门户。
 
-Metask 登录和 ready ExecutionConfig 是进入 Workbench 的真实前置条件。首次启动必须诚实地以登录为唯一主动作，在 OAuth、目录准备和必要选择完成后才进入 Workspace、Task 与 Composer；不得提前展示一个大部分控件不可用的假 Workbench。
+Workbench shell 是应用启动后的稳定根界面；可信根 Snapshot 建立前不得开放 mutation。Account 登录只决定内置 Metask provider 能否取得授权，不得替换或遮住 Workbench；New task 只有在 ready ExecutionConfig 已安装后才显示可发送的 Composer，否则在原区域提供与当前来源事实一致的准备或恢复动作，不展示一个大部分控件不可用的假输入区。
 
 进入 Workbench 后，界面持续回答六个问题：
 
@@ -139,7 +139,7 @@ Workspace
 
 ## 4. 主窗口信息架构
 
-> Capability：**当前**。登录优先 gate、独立 Workspace projection、左栏、New task、Settings overlay、Task 内容与统一 Task Panel 已进入当前 shell；未通过 capability gate 的模块与标签仍必须隐藏。
+> Capability：**当前**。持续可达的 Workbench、独立 Workspace projection、左栏、New task、Settings overlay、Task 内容与统一 Task Panel 已进入当前 shell；未通过 capability gate 的模块与标签仍必须隐藏。
 
 ### 4.1 总体布局
 
@@ -194,7 +194,7 @@ Workspace
 - 正常连接、恢复成功和普通操作成功不持续占据命令栏；只有同步失败、命令失败或其他确实需要用户行动的异常才显示状态入口；
 - 异常状态按 connection、account、Workspace identity 或 Task identity 分域保存；并行 Task 的结果不得互相覆盖，命令栏只选择当前上下文中优先级最高的一项显示；
 - 已有 Task 的标题附近提供键盘可达的“任务信息”纯图标只读入口，所有宽度均保留图标、完整 accessible name、tooltip 和可见焦点，不常驻文字标签；左栏折叠时仍可用，New task 与无 Task 时隐藏。右侧栏开关由应用外壳提供，在主工作界面的各内容页面常驻，使用匹配实际显隐的 accessible name 和 aria-expanded；无 Task 或无内容时仍可操作，不因任务暂无文件而隐藏或禁用。设置仍使用覆盖层，底层开关与工作面共同 inert，不丢失先前显隐选择。窄窗将命令栏审批定位收为有完整 accessible name 的图标按钮，保证两侧栏开关与搜索不会被长标签遮挡；
-- 未登录界面的应用工具栏只保留产品 identity 与语言入口；语言不能藏进尚不可进入的设置；
+- 根启动或连接失败界面的应用工具栏只保留产品 identity、语言入口与真实窗口控件；语言不能藏进尚不可进入的设置；
 - Renderer 关闭按钮必须进入平台的 user-close 语义并遵循 manifest `close_policy = hide`，后台 Application 与计划任务继续运行；重新打开由 Native SDK 托盘菜单进入 Application 的 `showWindow`/`focusWindow` capability，显式 Quit 才进入应用 shutdown；
 - 不使用 `chromeless`；系统 resize frame、Snap Layout、拖动、双击、系统菜单、DPI 与高对比行为只按真实平台验收声明，不由 WebUI 模拟。Renderer 只绘制按钮并提交固定语义意图，不复制这些底层行为；
 - 语言、API、模型和诊断进入设置或对应任务上下文，不常驻命令栏；
@@ -456,7 +456,7 @@ Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显
 ```
 
 - “关于”是本地产品级动作，位于设置之后、退出登录之前；菜单项不重复展示产品名或版本，也不新增常驻侧栏行、Workbench 一级导航或设置分区。点击后打开紧凑模态窗，只展示 canonical Logo、产品名、Metask 开发者归属和从 `app.zon` 构建注入的版本；只有已有真实、安全 consumer 的官网、隐私、许可或更新能力才显示对应入口，不渲染宣传文案、占位动作或死链接；
-- About 不依赖 Account、Models、Bridge snapshot 或登录状态。没有 durable Task 而停留在独立登录/连接恢复表面时，使用同一弱化入口打开同一弹窗；菜单与触发器的无障碍名称必须表达“账户与应用”，不能继续声称只包含账号动作；
+- About 不依赖 Account、Models 或登录状态，在 Workbench 的账户与应用菜单中始终可用；菜单与触发器的无障碍名称必须表达“账户与应用”，不能继续声称只包含账号动作；
 - 账号菜单中的退出登录使用退出图标和与其他菜单项一致的中性颜色，不在尚未执行的导航层提前使用危险色；点击后在当前 Workbench 上直接打开危险操作确认框，不先导航到设置，最终确认按钮才使用危险样式。确认文案说明本机 Account 凭据会被清除、本地 Task 与历史记录会保留。Account logout 不等待 Product execution replacement 或 Schedule scrub；后续 Product cleanup 失败由 Execution/Schedule recovery surface 表达，不能补写 Account error。账号设置可以保留同一 Host 命令的独立退出入口，但不是账号菜单退出的必经路径；
 - 账号菜单只负责身份和导航；Metask API/model目录与用户管理的服务都进入 Models设置，不成为 Account字段；
 - 未登录时保留本地 Workbench 历史，并把左栏账号入口切换成登录动作。
@@ -955,31 +955,29 @@ Workspace 只作为 Task 与 New task 的路径上下文，不生成独立搜索
 
 ## 14. 首次启动与设置
 
-> Capability：**混合**。当前 Renderer 合同已提供登录优先、长期 Settings overlay，以及设置与 New task 共用的 Models-owned默认 API/模型选择；跨重启 execution rebind仍按独立 capability gate验收。
+> Capability：**混合**。当前 Renderer 合同已提供持续可达的 Workbench、长期 Settings overlay，以及设置与 New task 共用的 Models-owned默认 API/模型选择；跨重启 execution rebind仍按独立 capability gate验收。
 
 ### 14.1 首次启动
 
-首次启动是独立于 Workbench 的登录与执行准备界面。它保持短、诚实且可恢复：
+首次启动不设置独立登录页面。Renderer 直接挂载 Workbench shell；可信根 Snapshot 到达前，New task区域显示稳定的准备状态且全部mutation保持关闭。Snapshot 建立后仍停留在同一 Workbench，并由 New task 区域按 canonical Account、Models 与 Product admission 显示下一步：
 
-1. 按系统语言显示 MetaWork identity、一句价值说明和唯一主动作 `使用 Metask 登录`；
-2. 点击后由 Host 打开系统浏览器完成 OAuth，原位置进入 `等待 Metask 授权`；
-3. 等待期间提供 `重新打开登录页面` 与 `取消登录`，Host deadline 必须最终收口；
-4. OAuth成功后立即显示已连接 identity，并由 Host把 Account授权交给独立 Models continuation恢复或加载 API Key与模型；
-5. Models历史 intent命中时自动恢复，唯一候选自动采用；只有无法由合同决定的真实 API/模型歧义才在同一首次启动界面请求选择；
-6. 形成并安装 ready ExecutionConfig 后进入 Workbench New task；Account 已 authenticated 但 Product/Schedule recovery 尚未完成时，进入保留历史与全局 recovery action 的 Workbench shell，关闭相关 New task admission，不得自动跳到账号设置或用 Account surface 遮住恢复入口。
+1. ready ExecutionConfig 已安装时显示正常 Workspace、模型与 Composer；
+2. Metask 是预期来源且 Account 为 `checking` 时显示短暂的模型服务准备状态；
+3. Account 为 `signed_out` 时提供主动作 `登录 Metask`；完整 Custom Provider capability gate 已成立时同时提供 `配置其他模型服务`，不得要求用户先登录 Metask；
+4. Account 为 `authorizing` 时在原位置显示等待浏览器授权，并只在 `can_cancel` 为真时提供 `取消登录`；
+5. Account 已认证但 Models 或 Product admission 尚未 ready 时，显示打开 Models 设置或对应 Product recovery 的动作，不自动跳转设置；
+6. 根连接失败且尚未建立可信 Snapshot 时使用独立连接恢复表面，只表达连接事实、重试和安全诊断，不显示任何登录文案。
 
 ```text
-MetaWork
+New task
 
-使用本地 Agent 完成真实工作
-连接 Metask 后即可选择 Workspace 并创建任务。
+连接模型服务
+连接 Metask，或配置其他受支持的模型服务，然后创建第一个任务。
 
-[ 使用 Metask 登录 ]
+[ 登录 Metask ]  [ 配置其他模型服务 ]
 ```
 
-首次启动不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、protocol target、generation或 Keychain等技术术语。`checking`只显示稳定品牌与检查状态；`authorizing`只显示等待和取消，不提供“重新打开登录页”。OAuth已成功而 Models目录准备失败时保持当前 identity，在模型配置区提供目录重试；Models已就绪而 Schedule/Execution不可用时保持 Account/Models事实，在 Product recovery surface提供恢复。零 Task、Metask 为默认来源且登录无效时，`signed_out` 显示独立登录表面和唯一登录动作；已有 durable Task 时进入 Workbench shell并在左下角账号入口显示统一登录动作。Providers 设置是否出现只取决于完整 Host capability gate，不显示已保存账号、重新认证、账号不匹配或上一次登录信息。
-
-冷启动检查或 OAuth 授权期间使用稳定的品牌状态。确认 `signed_out` 后，零 Task 的 Metask 默认路径显示独立登录表面；有 durable Task 时保留 Workbench 与本地历史。如果没有 ready Custom Provider，只关闭 New task admission。完整 Custom Provider capability gate 已成立的平台仍显示 Providers 设置，使用户可以在不登录 Metask 时创建并验证自定义来源；Gate 未成立的平台隐藏整个入口。确认 `authenticated` 后继续目录准备。任何 live Task 若仍在运行，必须继续可查看和停止。
+New task 准备状态不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、protocol target、generation或 Keychain等技术术语，也不渲染无法发送且没有解释的 Composer。OAuth成功后由 Host把 Account授权交给独立 Models continuation恢复或加载目录；历史 intent命中时自动恢复，唯一候选自动采用，真实歧义进入 Models设置。OAuth identity成功后即使目录或 Product恢复失败也保持 Workbench与identity，不回退成登录页。任何 durable或live Task始终可查看，live Task仍可停止。
 
 ### 14.2 设置结构
 
@@ -1206,11 +1204,11 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 
 ## 17. 空状态与异常状态
 
-> Capability：**混合**。错误表达、Host/Core 中断、登录优先、独立 Workspace 和无伪 Resume 属于当前约束；execution rebind 与完整历史恢复按各自目标 capability 显示。
+> Capability：**混合**。错误表达、Host/Core 中断、持续可达的 Workbench、独立 Workspace 和无伪 Resume 属于当前约束；execution rebind 与完整历史恢复按各自目标 capability 显示。
 
 ### 17.1 未登录
 
-未登录不是 Workbench 空状态，而是独立登录界面。显示 MetaWork identity、一句直接说明和 `使用 Metask 登录`；不得渲染空 Workspace、空 Task、disabled New task 或空 Task Panel。等待浏览器授权、取消、重新打开、目录准备和真实歧义都在同一稳定位置演进。
+未登录是 Account 与 Metask provider 的局部状态，不是应用级页面。Workbench继续显示本地能力与历史；Metask 是预期来源且 New task admission 不可用时，New task区域显示 `登录 Metask`，并在完整 capability gate成立时同时提供其他模型服务设置。等待浏览器授权与取消在同一位置演进；目录准备和真实模型歧义进入 Models职责，不得回退或跳转成账号页面。
 
 ### 17.2 New task
 
@@ -1295,8 +1293,8 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 ### 19.4 Account 与首次启动
 
 - cold restore 不闪现 disabled Workbench；
-- 首次 signed out、Metask 为默认来源且没有本地历史：独立登录表面直接提供唯一登录动作；不得制造 saved account、上一次登录或 mismatch 分支；
-- OAuth 正常完成、浏览器未回调、重新打开、取消和 hard deadline；
+- 首次 signed out、Metask 为预期来源且没有本地历史：进入 Workbench New task 准备状态，直接提供登录动作，并在完整 capability gate成立时提供其他模型服务设置；不得制造 saved account、上一次登录或 mismatch 分支；
+- OAuth 正常完成、浏览器未回调、取消和 hard deadline；
 - 历史选择命中、唯一 Key/模型自动推进；
 - 多 API、多模型真实选择以及选择期间 reload；OAuth identity 成功后不退回未登录；
 - catalog timeout/有限重试、OAuth exchange 失败、持久化确定失败与结果不确定；
@@ -1356,7 +1354,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 右侧只挂载活动对象标签的文件详情或同 Run File Changes Review；标签切换卸载非活动 DOM，关闭标签后聚焦相邻标签，关闭最后一个标签同步隐藏面板并回到该标签的真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 隐藏右栏并回到真实对话入口；
 - 普通 Run start/terminal、新 pendingUi 和 usage revision 不自动开合右栏、不抢焦点；切换 Task、关闭标签或对象失效不泄漏旧详情和已读取 bytes，晚到 Promise 不覆盖新对象；隐藏右栏保留当前 Task 会话，切换 Task 清空会话；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Task Panel 关闭或 overlay 显示后功能不丢失；停靠态始终为中央工作面与 Task Panel 各保留至少 360 px，两者都不设置固定最大宽度；扣除左栏后的空间少于 720 px 时切换 overlay，低于 820 px 与左栏互斥，低于 620 px 使用全宽 overlay。验证样本至少覆盖 1440/左栏 320 的约 746+374、1200/左栏 320 的 520+360、1200/左栏 480 的 360+360、960/左栏关闭的 600+360、960/左栏打开的 overlay，以及超宽窗口右栏仍可继续扩大。
-- Windows Renderer 窗口按钮在登录页与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
+- Windows Renderer 窗口按钮在根启动/连接失败表面与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
 
 ### 19.9 视觉与 Foundation
 
