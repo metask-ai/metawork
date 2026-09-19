@@ -2465,7 +2465,7 @@ test("file headers independently collapse their diff with pointer and keyboard",
   );
 });
 
-test("Task Panel review focuses the file requested by an Edit audit link", () => {
+test("Task Panel review locally positions and focuses an audited file", () => {
   const changes = [
     fileChange({ id: "change-a", displayPath: "src/a.ts" }),
     fileChange({ id: "change-b", order: "2", displayPath: "src/b.ts" }),
@@ -2479,35 +2479,106 @@ test("Task Panel review focuses the file requested by an Edit audit link", () =>
     },
     onLoad() {},
   };
+  const handled = [];
   const view = render(
     localizedView(
-      createElement(StatefulFileChangesView, {
-        ...props,
-        focus: { displayPath: "src/b.ts", requestId: 1 },
-      }),
+      createElement(
+        "div",
+        { className: "review-scroll-boundary" },
+        createElement(StatefulFileChangesView, {
+          ...props,
+          focus: null,
+          onFocusHandled: (requestId) => handled.push(requestId),
+        }),
+      ),
     ),
   );
-  assert.equal(
-    document.activeElement,
-    document
-      .querySelector('[data-file-path="src/b.ts"]')
-      .querySelector(".task-panel-change-toggle"),
-  );
+  const boundary = document.querySelector(".review-scroll-boundary");
+  const review = document.querySelector(".task-panel-review");
+  const firstSection = document.querySelector('[data-file-path="src/a.ts"]');
+  const secondSection = document.querySelector('[data-file-path="src/b.ts"]');
+  boundary.scrollTop = 17;
+  boundary.scrollLeft = 23;
+  review.scrollTop = 100;
+  review.scrollLeft = 31;
+  Object.defineProperties(review, {
+    clientHeight: { configurable: true, value: 200 },
+    scrollHeight: { configurable: true, value: 800 },
+  });
+  review.getBoundingClientRect = () => new dom.window.DOMRect(0, 50, 300, 200);
+  firstSection.getBoundingClientRect = () =>
+    new dom.window.DOMRect(0, -350, 300, 100);
+  secondSection.getBoundingClientRect = () =>
+    new dom.window.DOMRect(0, 350, 300, 400);
 
-  view.rerender(
-    localizedView(
-      createElement(StatefulFileChangesView, {
-        ...props,
-        focus: { displayPath: "src/a.ts", requestId: 2 },
-      }),
-    ),
-  );
-  assert.equal(
-    document.activeElement,
-    document
-      .querySelector('[data-file-path="src/a.ts"]')
-      .querySelector(".task-panel-change-toggle"),
-  );
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+  const originalFocus = HTMLElement.prototype.focus;
+  let scrollIntoViewCalls = 0;
+  const focusOptions = [];
+  HTMLElement.prototype.scrollIntoView = () => scrollIntoViewCalls++;
+  Object.defineProperty(HTMLElement.prototype, "focus", {
+    configurable: true,
+    writable: true,
+    value(options) {
+      if (this.classList.contains("task-panel-change-toggle"))
+        focusOptions.push(options);
+      return originalFocus.call(this, options);
+    },
+  });
+
+  try {
+    view.rerender(
+      localizedView(
+        createElement(
+          "div",
+          { className: "review-scroll-boundary" },
+          createElement(StatefulFileChangesView, {
+            ...props,
+            focus: { displayPath: "src/b.ts", requestId: 1 },
+            onFocusHandled: (requestId) => handled.push(requestId),
+          }),
+        ),
+      ),
+    );
+    assert.equal(review.scrollTop, 400);
+    assert.equal(review.scrollLeft, 31);
+    assert.equal(boundary.scrollTop, 17);
+    assert.equal(boundary.scrollLeft, 23);
+    assert.equal(document.activeElement, secondSection.querySelector("button"));
+
+    view.rerender(
+      localizedView(
+        createElement(
+          "div",
+          { className: "review-scroll-boundary" },
+          createElement(StatefulFileChangesView, {
+            ...props,
+            focus: { displayPath: "src/a.ts", requestId: 2 },
+            onFocusHandled: (requestId) => handled.push(requestId),
+          }),
+        ),
+      ),
+    );
+    assert.equal(review.scrollTop, 0);
+    assert.equal(review.scrollLeft, 31);
+    assert.equal(boundary.scrollTop, 17);
+    assert.equal(boundary.scrollLeft, 23);
+    assert.equal(document.activeElement, firstSection.querySelector("button"));
+  } finally {
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+    Object.defineProperty(HTMLElement.prototype, "focus", {
+      configurable: true,
+      writable: true,
+      value: originalFocus,
+    });
+  }
+
+  assert.equal(scrollIntoViewCalls, 0);
+  assert.deepEqual(focusOptions, [
+    { preventScroll: true },
+    { preventScroll: true },
+  ]);
+  assert.deepEqual(handled, [1, 2]);
 });
 
 test("continuous Review requests an idle record when its section nears the viewport", async () => {
@@ -3236,17 +3307,21 @@ test("Task Panel tabs use manual keyboard activation and one tab stop", async ()
     const [activeTabId, setActiveTabId] = useState(tabs[0].tabId);
     return localizedView(
       createElement(
-        TaskPanel,
-        {
-          title: "Side panel",
-          tabs,
-          activeTabId,
-          attention: null,
-          onSelectTab: setActiveTabId,
-          onCloseTab() {},
-          onClose() {},
-        },
-        tabs.find((tab) => tab.tabId === activeTabId)?.title,
+        "div",
+        { className: "tabs-scroll-boundary" },
+        createElement(
+          TaskPanel,
+          {
+            title: "Side panel",
+            tabs,
+            activeTabId,
+            attention: null,
+            onSelectTab: setActiveTabId,
+            onCloseTab() {},
+            onClose() {},
+          },
+          tabs.find((tab) => tab.tabId === activeTabId)?.title,
+        ),
       ),
     );
   }
@@ -3255,27 +3330,76 @@ test("Task Panel tabs use manual keyboard activation and one tab stop", async ()
   const first = screen.getByRole("tab", { name: "a.txt" });
   const second = screen.getByRole("tab", { name: "b.txt" });
   const third = screen.getByRole("tab", { name: "c.txt" });
+  const boundary = document.querySelector(".tabs-scroll-boundary");
+  const tabList = screen.getByRole("tablist");
+  tabList.scrollLeft = 0;
+  tabList.getBoundingClientRect = () => new dom.window.DOMRect(0, 0, 100, 44);
+  [first, second, third].forEach((tab, index) => {
+    tab.parentElement.getBoundingClientRect = () =>
+      new dom.window.DOMRect(index * 80 - tabList.scrollLeft, 0, 80, 44);
+  });
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+  const originalFocus = HTMLElement.prototype.focus;
+  let scrollIntoViewCalls = 0;
+  const focusOptions = [];
+  HTMLElement.prototype.scrollIntoView = () => scrollIntoViewCalls++;
   first.focus();
+  boundary.scrollTop = 17;
+  boundary.scrollLeft = 23;
+  tabList.scrollLeft = 0;
+  Object.defineProperty(HTMLElement.prototype, "focus", {
+    configurable: true,
+    writable: true,
+    value(options) {
+      const scrollLeft = tabList.scrollLeft;
+      const boundaryScrollTop = boundary.scrollTop;
+      const boundaryScrollLeft = boundary.scrollLeft;
+      const result = originalFocus.call(this, options);
+      tabList.scrollLeft = scrollLeft;
+      boundary.scrollTop = boundaryScrollTop;
+      boundary.scrollLeft = boundaryScrollLeft;
+      if (this.classList.contains("task-panel-tab")) focusOptions.push(options);
+      return result;
+    },
+  });
 
-  await user.keyboard("{ArrowRight}");
-  assert.equal(document.activeElement, second);
-  assert.equal(first.getAttribute("aria-selected"), "true");
-  assert.equal(second.getAttribute("aria-selected"), "false");
-  assert.equal(screen.getByRole("tabpanel").textContent, "a.txt");
+  try {
+    await user.keyboard("{ArrowRight}");
+    assert.equal(document.activeElement, second);
+    assert.ok(tabList.scrollLeft > 0);
+    assert.equal(first.getAttribute("aria-selected"), "true");
+    assert.equal(second.getAttribute("aria-selected"), "false");
+    assert.equal(screen.getByRole("tabpanel").textContent, "a.txt");
 
-  await user.keyboard("{Enter}");
-  assert.equal(second.getAttribute("aria-selected"), "true");
-  assert.equal(screen.getByRole("tabpanel").textContent, "b.txt");
-  assert.deepEqual(
-    [first, second, third].map((tab) => tab.tabIndex),
-    [-1, 0, -1],
-  );
+    await user.keyboard("{Enter}");
+    assert.equal(second.getAttribute("aria-selected"), "true");
+    assert.equal(screen.getByRole("tabpanel").textContent, "b.txt");
+    assert.deepEqual(
+      [first, second, third].map((tab) => tab.tabIndex),
+      [-1, 0, -1],
+    );
 
-  await user.keyboard("{End}");
-  assert.equal(document.activeElement, third);
-  assert.equal(second.getAttribute("aria-selected"), "true");
-  await user.keyboard("{Home}");
-  assert.equal(document.activeElement, first);
+    await user.keyboard("{End}");
+    assert.equal(document.activeElement, third);
+    assert.equal(second.getAttribute("aria-selected"), "true");
+    await user.keyboard("{Home}");
+    assert.equal(document.activeElement, first);
+  } finally {
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+    Object.defineProperty(HTMLElement.prototype, "focus", {
+      configurable: true,
+      writable: true,
+      value: originalFocus,
+    });
+  }
+  assert.equal(scrollIntoViewCalls, 0);
+  assert.equal(boundary.scrollTop, 17);
+  assert.equal(boundary.scrollLeft, 23);
+  assert.deepEqual(focusOptions, [
+    { preventScroll: true },
+    { preventScroll: true },
+    { preventScroll: true },
+  ]);
 });
 
 test("Task Panel sessions replace the singleton review in place", () => {

@@ -409,14 +409,27 @@ export function FileChangesView({
 
   useLayoutEffect(() => {
     if (!focus || !review.current) return;
+    const reviewElement = review.current;
     const target = [
-      ...review.current.querySelectorAll<HTMLElement>("[data-file-path]"),
+      ...reviewElement.querySelectorAll<HTMLElement>("[data-file-path]"),
     ].find((candidate) => candidate.dataset.filePath === focus.displayPath);
     if (!target) return;
-    target.scrollIntoView({ block: "center" });
-    target
-      .querySelector<HTMLButtonElement>(".task-panel-change-toggle")
-      ?.focus();
+    const header = target.querySelector<HTMLButtonElement>(
+      ".task-panel-change-toggle",
+    );
+    if (!header) return;
+    const targetTop =
+      reviewElement.scrollTop +
+      target.getBoundingClientRect().top -
+      reviewElement.getBoundingClientRect().top;
+    reviewElement.scrollTop = Math.max(
+      0,
+      Math.min(
+        targetTop,
+        reviewElement.scrollHeight - reviewElement.clientHeight,
+      ),
+    );
+    header.focus({ preventScroll: true });
     onFocusHandled(focus.requestId);
   }, [focus, onFocusHandled]);
 

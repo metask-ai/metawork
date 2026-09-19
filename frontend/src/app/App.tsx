@@ -372,7 +372,9 @@ export default function App() {
           "[data-task-panel-tab-id]",
         ),
       ].find((candidate) => candidate.dataset.taskPanelTabId === tabId);
-      (tab ?? document.getElementById("task-panel-title"))?.focus();
+      (tab ?? document.getElementById("task-panel-title"))?.focus({
+        preventScroll: true,
+      });
     });
   }
 
@@ -1150,7 +1152,9 @@ export default function App() {
       const active = document.querySelector<HTMLButtonElement>(
         '#task-panel [role="tab"][aria-selected="true"]',
       );
-      (active ?? document.getElementById("task-panel-title"))?.focus();
+      (active ?? document.getElementById("task-panel-title"))?.focus({
+        preventScroll: true,
+      });
     });
   }
 
@@ -1170,7 +1174,9 @@ export default function App() {
     if (taskPanel.activeTab) focusTaskPanelTab(taskPanel.activeTab.tabId);
     else
       window.requestAnimationFrame(() =>
-        document.getElementById("task-panel-title")?.focus(),
+        document
+          .getElementById("task-panel-title")
+          ?.focus({ preventScroll: true }),
       );
   }
 
