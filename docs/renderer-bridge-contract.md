@@ -61,6 +61,8 @@ Run snapshot 已在 revision 1 内原地 hard cut 删除自由文本 `assistant`
 
 Tool 的 `bash` 必填且 nullable，只由 Host 为精确 `Bash` identifier 投影：`{ command: string | null, description: string | null, result: null | { exitCode: i32, stdout: string, stderr: string, stdoutIncomplete: boolean, stderrIncomplete: boolean } }`。description 依附已解析的 command；运行中的 Tool 或截断的原始 content 不得提供 result，截断的 input 不得提供 command。未知、超出解析预算或不完整的 envelope 保留原始安全证据而不猜测可读字段；解码后的文本仍受 credential 清洗。DTO 不改变 Tool state、Run activity、terminal、fileRefs 或持久化格式。
 
+Tool 另必填 `presentation` 与 `errorDetail`。`presentation` 为 null，或仅由 Host 按精确 built-in identifier 投影的 discriminated union：`read { target, offset, limit }`、`write|edit { target }`、`glob { pattern, scope }`、`grep { pattern, scope, include }`、`bash_output { jobId, result }`、`kill_shell { jobId }`、`web_search { query }`、`web_fetch { url, prompt, result }`；nullable 数字以 canonical decimal `u64` string 发布。`bash_output.result` 精确包含闭合 status `running | exited | killed`、stdout/stderr 与各自 incomplete 标志；`web_fetch.result` 精确包含 url、nullable bytes 与正文。截断 input 不得携带 presentation，运行中或截断 content 不得携带 result。解析失败保持 presentation null，由安全原始字段兜底，不在 Renderer 猜测。`errorDetail` 为 nullable string，只允许 failed Tool，由 Host 从已知错误 envelope 提取并再次 credential 清洗；无法解释时保持 null。上述字段不进入持久化格式，也不建立第二套 Tool identity 或 executor。
+
 `output`、`activity`、`tools` 与 `context` 只定义 Renderer 可消费的产品事实和 fail-closed 边界，不规定最终组件、布局、展开策略或更新节奏。当前 Agent 对话的 owner 链、Run exchange 槽位、active→terminal 呈现收口和 full Snapshot 渲染机制由 [UI 设计规范](ui-design.md#72-agent-对话渲染机制)定义；wire 字段存在、scripted Provider vertical 或静态 DOM 通过都不能替代真实 Provider cadence 与长任务阅读体验的独立验收。后续纯呈现调整仍可在不改变 revision 1 wire 语义的前提下进行。
 
 ## Skill source settings

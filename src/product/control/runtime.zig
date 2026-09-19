@@ -15103,6 +15103,42 @@ test "Bash presentation interprets only bounded known evidence and sanitizes dec
     }
 }
 
+test "built-in Tool presentation projects readable parameters and failures" {
+    var limits = testLimits();
+    limits.max_tools_per_run = 4;
+    limits.max_projection_bytes = 128 * 1024;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+
+    const events = [_][]const u8{
+        "{\"tool_result\":{\"id\":\"read-1\",\"name\":\"Read\",\"input\":\"{\\\"file_path\\\":\\\"/workspace/main.ts\\\",\\\"offset\\\":12,\\\"limit\\\":3}\",\"content\":\"12\\tconst value = true;\",\"is_error\":false,\"elapsed_ms\":1}}",
+        "{\"tool_result\":{\"id\":\"search-1\",\"name\":\"WebSearch\",\"input\":\"{\\\"query\\\":\\\"release notes\\\"}\",\"content\":\"provider wrapper\",\"is_error\":false,\"elapsed_ms\":3}}",
+        "{\"tool_result\":{\"id\":\"fetch-1\",\"name\":\"WebFetch\",\"input\":\"{\\\"url\\\":\\\"https://example.com\\\",\\\"prompt\\\":\\\"Find limits\\\"}\",\"content\":\"{\\\"url\\\":\\\"https://example.com\\\",\\\"bytes\\\":12,\\\"content\\\":\\\"hello world\\\"}\",\"is_error\":false,\"elapsed_ms\":4}}",
+        "{\"tool_result\":{\"id\":\"edit-1\",\"name\":\"Edit\",\"input\":\"{\\\"file_path\\\":\\\"/workspace/main.ts\\\"}\",\"content\":\"{\\\"error\\\":{\\\"detail\\\":\\\"Original text not found\\\"}}\",\"is_error\":true,\"elapsed_ms\":5}}",
+    };
+    for (events) |encoded| {
+        var envelope = try testEnvelope(3, 7, encoded);
+        defer envelope.deinit();
+        try control.applyEvent(&envelope);
+    }
+
+    var storage: [128 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&storage);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer parsed.deinit();
+    const tools = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("tools").?.array.items;
+    try std.testing.expectEqual(@as(usize, events.len), tools.len);
+    try std.testing.expectEqualStrings("read", tools[0].object.get("presentation").?.object.get("kind").?.string);
+    try std.testing.expectEqualStrings("12", tools[0].object.get("presentation").?.object.get("offset").?.string);
+    try std.testing.expectEqualStrings("web_search", tools[1].object.get("presentation").?.object.get("kind").?.string);
+    try std.testing.expectEqualStrings("release notes", tools[1].object.get("presentation").?.object.get("query").?.string);
+    const fetch = tools[2].object.get("presentation").?.object;
+    try std.testing.expectEqualStrings("web_fetch", fetch.get("kind").?.string);
+    try std.testing.expectEqualStrings("hello world", fetch.get("result").?.object.get("content").?.string);
+    try std.testing.expectEqualStrings("edit", tools[3].object.get("presentation").?.object.get("kind").?.string);
+    try std.testing.expectEqualStrings("Original text not found", tools[3].object.get("errorDetail").?.string);
+}
+
 test "Runtime projects tools and full-width usage without parsing protocol in Renderer" {
     var control = try testRuntime();
     defer control.deinit();

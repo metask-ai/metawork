@@ -2134,6 +2134,8 @@ export function decodeFileChangeDiff(value: unknown): FileChangeDiffResult {
 function decodeTool(value: unknown, path: string): ToolView {
   const item = object(value, path, [
     "bash",
+    "presentation",
+    "errorDetail",
     "id",
     "order",
     "name",
@@ -2158,14 +2160,41 @@ function decodeTool(value: unknown, path: string): ToolView {
   if ((state === "failed") !== isError)
     fail(path, "tool failure state and error flag must agree");
   const bash = decodeBashPresentation(item.bash, `${path}.bash`);
+  const presentation = decodeToolPresentation(
+    item.presentation,
+    `${path}.presentation`,
+  );
+  const errorDetail =
+    item.errorDetail === null
+      ? null
+      : stringValue(item.errorDetail, `${path}.errorDetail`);
   if (bash !== null && item.name !== "Bash")
     fail(path, "Bash presentation requires Bash identity");
+  if (
+    presentation !== null &&
+    presentation.kind !== toolPresentationKind(item.name)
+  )
+    fail(path, "tool presentation does not match tool identity");
+  if (presentation !== null && item.inputTruncated === true)
+    fail(path, "truncated tool input cannot expose a typed presentation");
+  if (errorDetail !== null && state !== "failed")
+    fail(path, "tool error detail requires a failed tool");
+  if (
+    presentation !== null &&
+    (presentation.kind === "bash_output" ||
+      presentation.kind === "web_fetch") &&
+    presentation.result !== null &&
+    (state === "running" || item.contentTruncated === true)
+  )
+    fail(path, "unfinished or truncated tools cannot expose a typed result");
   if (bash?.result && (state === "running" || item.contentTruncated === true))
     fail(path, "unfinished or truncated tools cannot expose a Bash result");
   if (bash !== null && bash.command !== null && item.inputTruncated === true)
     fail(path, "truncated tool input cannot expose a Bash command");
   return {
     bash,
+    presentation,
+    errorDetail,
     id: stringValue(item.id, `${path}.id`),
     order: positiveWireId(item.order, `${path}.order`),
     name: stringValue(item.name, `${path}.name`),
@@ -2191,6 +2220,166 @@ function decodeTool(value: unknown, path: string): ToolView {
       decodeFileReference,
     ),
   };
+}
+
+function toolPresentationKind(name: unknown) {
+  switch (name) {
+    case "Read":
+      return "read";
+    case "Write":
+      return "write";
+    case "Edit":
+      return "edit";
+    case "Glob":
+      return "glob";
+    case "Grep":
+      return "grep";
+    case "BashOutput":
+      return "bash_output";
+    case "KillShell":
+      return "kill_shell";
+    case "WebSearch":
+      return "web_search";
+    case "WebFetch":
+      return "web_fetch";
+    default:
+      return null;
+  }
+}
+
+function decodeToolPresentation(
+  value: unknown,
+  path: string,
+): ToolView["presentation"] {
+  if (value === null) return null;
+  const itemRecord = record(value, path);
+  const kind = enumValue(itemRecord.kind, `${path}.kind`, [
+    "read",
+    "write",
+    "edit",
+    "glob",
+    "grep",
+    "bash_output",
+    "kill_shell",
+    "web_search",
+    "web_fetch",
+  ] as const);
+  switch (kind) {
+    case "read": {
+      const item = object(value, path, ["kind", "target", "offset", "limit"]);
+      return {
+        kind,
+        target: stringValue(item.target, `${path}.target`),
+        offset:
+          item.offset === null ? null : wireId(item.offset, `${path}.offset`),
+        limit: item.limit === null ? null : wireId(item.limit, `${path}.limit`),
+      };
+    }
+    case "write":
+    case "edit": {
+      const item = object(value, path, ["kind", "target"]);
+      return { kind, target: stringValue(item.target, `${path}.target`) };
+    }
+    case "glob": {
+      const item = object(value, path, ["kind", "pattern", "scope"]);
+      return {
+        kind,
+        pattern: stringValue(item.pattern, `${path}.pattern`),
+        scope:
+          item.scope === null ? null : stringValue(item.scope, `${path}.scope`),
+      };
+    }
+    case "grep": {
+      const item = object(value, path, ["kind", "pattern", "scope", "include"]);
+      return {
+        kind,
+        pattern: stringValue(item.pattern, `${path}.pattern`),
+        scope:
+          item.scope === null ? null : stringValue(item.scope, `${path}.scope`),
+        include:
+          item.include === null
+            ? null
+            : stringValue(item.include, `${path}.include`),
+      };
+    }
+    case "bash_output": {
+      const item = object(value, path, ["kind", "jobId", "result"]);
+      if (item.result === null)
+        return {
+          kind,
+          jobId: stringValue(item.jobId, `${path}.jobId`),
+          result: null,
+        };
+      const result = object(item.result, `${path}.result`, [
+        "status",
+        "stdout",
+        "stderr",
+        "stdoutIncomplete",
+        "stderrIncomplete",
+      ]);
+      return {
+        kind,
+        jobId: stringValue(item.jobId, `${path}.jobId`),
+        result: {
+          status: enumValue(result.status, `${path}.result.status`, [
+            "running",
+            "exited",
+            "killed",
+          ] as const),
+          stdout: stringValue(result.stdout, `${path}.result.stdout`),
+          stderr: stringValue(result.stderr, `${path}.result.stderr`),
+          stdoutIncomplete: booleanValue(
+            result.stdoutIncomplete,
+            `${path}.result.stdoutIncomplete`,
+          ),
+          stderrIncomplete: booleanValue(
+            result.stderrIncomplete,
+            `${path}.result.stderrIncomplete`,
+          ),
+        },
+      };
+    }
+    case "kill_shell": {
+      const item = object(value, path, ["kind", "jobId"]);
+      return { kind, jobId: stringValue(item.jobId, `${path}.jobId`) };
+    }
+    case "web_search": {
+      const item = object(value, path, ["kind", "query"]);
+      return { kind, query: stringValue(item.query, `${path}.query`) };
+    }
+    case "web_fetch": {
+      const item = object(value, path, ["kind", "url", "prompt", "result"]);
+      const prompt =
+        item.prompt === null
+          ? null
+          : stringValue(item.prompt, `${path}.prompt`);
+      if (item.result === null)
+        return {
+          kind,
+          url: stringValue(item.url, `${path}.url`),
+          prompt,
+          result: null,
+        };
+      const result = object(item.result, `${path}.result`, [
+        "url",
+        "bytes",
+        "content",
+      ]);
+      return {
+        kind,
+        url: stringValue(item.url, `${path}.url`),
+        prompt,
+        result: {
+          url: stringValue(result.url, `${path}.result.url`),
+          bytes:
+            result.bytes === null
+              ? null
+              : wireId(result.bytes, `${path}.result.bytes`),
+          content: stringValue(result.content, `${path}.result.content`),
+        },
+      };
+    }
+  }
 }
 
 function decodeBashPresentation(

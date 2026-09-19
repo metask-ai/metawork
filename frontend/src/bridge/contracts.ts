@@ -332,6 +332,45 @@ export type FileChangeDiffResult =
       content: "";
     };
 
+export type ToolPresentation =
+  | {
+      kind: "read";
+      target: string;
+      offset: string | null;
+      limit: string | null;
+    }
+  | { kind: "write" | "edit"; target: string }
+  | { kind: "glob"; pattern: string; scope: string | null }
+  | {
+      kind: "grep";
+      pattern: string;
+      scope: string | null;
+      include: string | null;
+    }
+  | {
+      kind: "bash_output";
+      jobId: string;
+      result: {
+        status: "running" | "exited" | "killed";
+        stdout: string;
+        stderr: string;
+        stdoutIncomplete: boolean;
+        stderrIncomplete: boolean;
+      } | null;
+    }
+  | { kind: "kill_shell"; jobId: string }
+  | { kind: "web_search"; query: string }
+  | {
+      kind: "web_fetch";
+      url: string;
+      prompt: string | null;
+      result: {
+        url: string;
+        bytes: string | null;
+        content: string;
+      } | null;
+    };
+
 export type ToolView = {
   bash: {
     command: string | null;
@@ -344,6 +383,8 @@ export type ToolView = {
       stderrIncomplete: boolean;
     } | null;
   } | null;
+  presentation: ToolPresentation | null;
+  errorDetail: string | null;
   id: string;
   order: string;
   name: string;

@@ -449,7 +449,9 @@ fn writeRun(
             return error.SnapshotTooLarge;
         writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
         try text_projection.writeJson(writer, tool.name);
-        const presentation_redacted = try writeBashPresentation(writer, text_projection, tool);
+        var presentation_redacted = try writeBashPresentation(writer, text_projection, tool);
+        presentation_redacted = (try writeToolPresentation(writer, text_projection, tool)) or presentation_redacted;
+        presentation_redacted = (try writeToolErrorDetail(writer, text_projection, tool)) or presentation_redacted;
         writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
         // Decoding can reveal a credential hidden behind JSON escapes. Do not
         // expose its reconstructible raw representation in secondary details.
@@ -491,6 +493,66 @@ fn writeRun(
 const BashInput = struct {
     command: []const u8,
     description: ?[]const u8 = null,
+};
+
+const ReadInput = struct {
+    file_path: []const u8,
+    offset: ?u64 = null,
+    limit: ?u64 = null,
+};
+
+const FileMutationInput = struct {
+    file_path: []const u8,
+};
+
+const GlobInput = struct {
+    pattern: []const u8,
+    path: ?[]const u8 = null,
+};
+
+const GrepInput = struct {
+    pattern: []const u8,
+    path: ?[]const u8 = null,
+    glob: ?[]const u8 = null,
+};
+
+const BackgroundJobInput = struct {
+    job_id: []const u8,
+};
+
+const BashOutputResult = struct {
+    status: []const u8,
+    stdout: []const u8 = "",
+    stderr: []const u8 = "",
+    stdout_truncated: bool = false,
+    stderr_truncated: bool = false,
+
+    fn supported(self: BashOutputResult) bool {
+        return std.mem.eql(u8, self.status, "running") or
+            std.mem.eql(u8, self.status, "exited") or
+            std.mem.eql(u8, self.status, "killed");
+    }
+};
+
+const WebSearchInput = struct {
+    query: []const u8,
+};
+
+const WebFetchInput = struct {
+    url: []const u8,
+    prompt: ?[]const u8 = null,
+};
+
+const WebFetchResult = struct {
+    url: []const u8,
+    content: []const u8,
+    bytes: ?u64 = null,
+};
+
+const ToolErrorEnvelope = struct {
+    @"error": struct {
+        detail: []const u8,
+    },
 };
 
 // Only this exact, foreground result envelope is interpreted. Other tool
@@ -570,6 +632,235 @@ fn writeBashPresentation(
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
     return redacted;
+}
+
+fn writeToolPresentation(
+    writer: *std.Io.Writer,
+    text: TextProjection,
+    tool: *const task_state.ToolView,
+) Error!bool {
+    writer.writeAll(",\"presentation\":") catch return error.SnapshotTooLarge;
+    if (tool.input_truncated or tool.input.len > 128 * 1024) {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return false;
+    }
+
+    var scratch: [128 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var allocator = std.heap.FixedBufferAllocator.init(&scratch);
+    const options = std.json.ParseOptions{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed };
+    var redacted = false;
+
+    if (std.mem.eql(u8, tool.name, "Read")) {
+        const parsed = std.json.parseFromSlice(ReadInput, allocator.allocator(), tool.input, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        redacted = text.containsSensitive(value.file_path);
+        writer.writeAll("{\"kind\":\"read\",\"target\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, value.file_path);
+        try writeOptionalWireNumber(writer, "offset", value.offset);
+        try writeOptionalWireNumber(writer, "limit", value.limit);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+    if (std.mem.eql(u8, tool.name, "Write") or std.mem.eql(u8, tool.name, "Edit")) {
+        const parsed = std.json.parseFromSlice(FileMutationInput, allocator.allocator(), tool.input, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        redacted = text.containsSensitive(value.file_path);
+        writer.writeAll(if (std.mem.eql(u8, tool.name, "Write"))
+            "{\"kind\":\"write\",\"target\":"
+        else
+            "{\"kind\":\"edit\",\"target\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, value.file_path);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+    if (std.mem.eql(u8, tool.name, "Glob")) {
+        const parsed = std.json.parseFromSlice(GlobInput, allocator.allocator(), tool.input, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        redacted = text.containsSensitive(value.pattern) or
+            if (value.path) |path| text.containsSensitive(path) else false;
+        writer.writeAll("{\"kind\":\"glob\",\"pattern\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, value.pattern);
+        try writeOptionalProjectedText(writer, text, "scope", value.path);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+    if (std.mem.eql(u8, tool.name, "Grep")) {
+        const parsed = std.json.parseFromSlice(GrepInput, allocator.allocator(), tool.input, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        redacted = text.containsSensitive(value.pattern) or
+            (if (value.path) |path| text.containsSensitive(path) else false) or
+            (if (value.glob) |glob| text.containsSensitive(glob) else false);
+        writer.writeAll("{\"kind\":\"grep\",\"pattern\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, value.pattern);
+        try writeOptionalProjectedText(writer, text, "scope", value.path);
+        try writeOptionalProjectedText(writer, text, "include", value.glob);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+    if (std.mem.eql(u8, tool.name, "BashOutput")) {
+        const parsed = std.json.parseFromSlice(BackgroundJobInput, allocator.allocator(), tool.input, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        redacted = text.containsSensitive(value.job_id);
+        writer.writeAll("{\"kind\":\"bash_output\",\"jobId\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, value.job_id);
+        writer.writeAll(",\"result\":") catch return error.SnapshotTooLarge;
+        allocator.reset();
+        const result = if (tool.state != .running and !tool.content_truncated and tool.content.len <= scratch.len)
+            std.json.parseFromSlice(BashOutputResult, allocator.allocator(), tool.content, options) catch null
+        else
+            null;
+        if (result) |decoded| {
+            defer decoded.deinit();
+            const result_value = decoded.value;
+            if (result_value.supported()) {
+                redacted = redacted or text.containsSensitive(result_value.stdout) or
+                    text.containsSensitive(result_value.stderr);
+                writer.writeAll("{\"status\":") catch return error.SnapshotTooLarge;
+                try text.writeJson(writer, result_value.status);
+                writer.writeAll(",\"stdout\":") catch return error.SnapshotTooLarge;
+                try text.writeJson(writer, result_value.stdout);
+                writer.writeAll(",\"stderr\":") catch return error.SnapshotTooLarge;
+                try text.writeJson(writer, result_value.stderr);
+                writer.print(",\"stdoutIncomplete\":{},\"stderrIncomplete\":{}}}", .{
+                    result_value.stdout_truncated,
+                    result_value.stderr_truncated,
+                }) catch return error.SnapshotTooLarge;
+            } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+    if (std.mem.eql(u8, tool.name, "KillShell")) {
+        const parsed = std.json.parseFromSlice(BackgroundJobInput, allocator.allocator(), tool.input, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        redacted = text.containsSensitive(value.job_id);
+        writer.writeAll("{\"kind\":\"kill_shell\",\"jobId\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, value.job_id);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+    if (std.mem.eql(u8, tool.name, "WebSearch")) {
+        const parsed = std.json.parseFromSlice(WebSearchInput, allocator.allocator(), tool.input, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        redacted = text.containsSensitive(value.query);
+        writer.writeAll("{\"kind\":\"web_search\",\"query\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, value.query);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+    if (std.mem.eql(u8, tool.name, "WebFetch")) {
+        const parsed = std.json.parseFromSlice(WebFetchInput, allocator.allocator(), tool.input, options) catch {
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
+            return false;
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        redacted = text.containsSensitive(value.url) or
+            if (value.prompt) |prompt| text.containsSensitive(prompt) else false;
+        writer.writeAll("{\"kind\":\"web_fetch\",\"url\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, value.url);
+        try writeOptionalProjectedText(writer, text, "prompt", value.prompt);
+        writer.writeAll(",\"result\":") catch return error.SnapshotTooLarge;
+        allocator.reset();
+        const result = if (tool.state != .running and !tool.content_truncated and tool.content.len <= scratch.len)
+            std.json.parseFromSlice(WebFetchResult, allocator.allocator(), tool.content, options) catch null
+        else
+            null;
+        if (result) |decoded| {
+            defer decoded.deinit();
+            const result_value = decoded.value;
+            redacted = redacted or text.containsSensitive(result_value.url) or
+                text.containsSensitive(result_value.content);
+            writer.writeAll("{\"url\":") catch return error.SnapshotTooLarge;
+            try text.writeJson(writer, result_value.url);
+            try writeOptionalWireNumber(writer, "bytes", result_value.bytes);
+            writer.writeAll(",\"content\":") catch return error.SnapshotTooLarge;
+            try text.writeJson(writer, result_value.content);
+            writer.writeByte('}') catch return error.SnapshotTooLarge;
+        } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        return redacted;
+    }
+
+    writer.writeAll("null") catch return error.SnapshotTooLarge;
+    return false;
+}
+
+fn writeToolErrorDetail(
+    writer: *std.Io.Writer,
+    text: TextProjection,
+    tool: *const task_state.ToolView,
+) Error!bool {
+    writer.writeAll(",\"errorDetail\":") catch return error.SnapshotTooLarge;
+    if (tool.state != .failed or tool.content_truncated or tool.content.len > 128 * 1024) {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return false;
+    }
+    var scratch: [128 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var allocator = std.heap.FixedBufferAllocator.init(&scratch);
+    const parsed = std.json.parseFromSlice(
+        ToolErrorEnvelope,
+        allocator.allocator(),
+        tool.content,
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed },
+    ) catch {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return false;
+    };
+    defer parsed.deinit();
+    const detail = parsed.value.@"error".detail;
+    try text.writeJson(writer, detail);
+    return text.containsSensitive(detail);
+}
+
+fn writeOptionalProjectedText(
+    writer: *std.Io.Writer,
+    text: TextProjection,
+    comptime name: []const u8,
+    value: ?[]const u8,
+) Error!void {
+    writer.writeAll(",\"" ++ name ++ "\":") catch return error.SnapshotTooLarge;
+    if (value) |present| try text.writeJson(writer, present) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+}
+
+fn writeOptionalWireNumber(
+    writer: *std.Io.Writer,
+    comptime name: []const u8,
+    value: ?u64,
+) Error!void {
+    writer.writeAll(",\"" ++ name ++ "\":") catch return error.SnapshotTooLarge;
+    if (value) |present| writer.print("\"{d}\"", .{present}) catch
+        return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
 }
 
 fn writeRunOutput(
