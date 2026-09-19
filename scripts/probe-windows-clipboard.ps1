@@ -70,16 +70,16 @@ function Find-MetaWorkButton([string]$pattern) {
         [System.Windows.Automation.TreeScope]::Descendants,
         $buttonCondition
     )
-    $matches = @()
+    $matchingButtons = @()
     foreach ($item in $items) {
         if ($item.Current.Name -match $pattern) {
-            $matches += $item
+            $matchingButtons += $item
         }
     }
-    if ($matches.Count -eq 0) {
+    if ($matchingButtons.Count -eq 0) {
         throw "MetaWork clipboard target not found: $pattern"
     }
-    return $matches |
+    return $matchingButtons |
         Sort-Object { $_.Current.BoundingRectangle.Bottom } |
         Select-Object -Last 1
 }

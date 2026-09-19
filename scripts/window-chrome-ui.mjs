@@ -10,6 +10,7 @@ export async function probeWindowChromeUi({
   runProbe,
   evidenceDir,
   workbench = false,
+  conversation = false,
 }) {
   const webview = await connectTestWebView(port);
   const originalPixelRatio = await webview.evaluate("devicePixelRatio");
@@ -107,11 +108,15 @@ export async function probeWindowChromeUi({
     );
     await webview.evaluate(`(() => {
       window.__chromeUi = {events:[],calls:[]};
-      const observe = event => window.__chromeUi.events.push({
+      const observe = event => {
+        const record = {
         type:event.type, detail:event.detail, trusted:event.isTrusted,
         x:event.clientX,y:event.clientY,
         path:event.composedPath().filter(e=>e.tagName).map(e=>e.tagName + '.' + String(e.className)),
-      });
+        };
+        window.__chromeUi.events.push(record);
+        setTimeout(() => { record.defaultPrevented = event.defaultPrevented; }, 0);
+      };
       for (const name of ['pointerdown','mousedown','click']) window.addEventListener(name,observe,true);
       const transport = window.chrome.webview, post = transport.postMessage;
       transport.postMessage = function(message) {
@@ -124,7 +129,78 @@ export async function probeWindowChromeUi({
         for (const name of ['pointerdown','mousedown','click']) window.removeEventListener(name,observe,true);
       };
     })()`);
-    if (workbench) {
+    if (conversation) {
+      const copy = '.response-copy-action[data-latest="true"]';
+      const editor = ".ai-composer textarea";
+      const expected = "metawork agentcore vertical complete";
+      evidence.unverified = [
+        "clipboard HTML semantics and large payloads",
+        "mouse-drag text selection",
+        "mixed DPI",
+      ];
+      await until(
+        `document.querySelector('${copy}') && !document.querySelector('${editor}')?.disabled`,
+      );
+      assert.equal(
+        await webview.evaluate(`document.querySelector('${editor}').value`),
+        "",
+        "Only an empty isolated draft may be edited",
+      );
+      await webview.evaluate(
+        `document.querySelector('${copy}').scrollIntoView({block:'center'})`,
+      );
+      await businessClick(
+        "conversation-copy-response",
+        copy,
+        `document.querySelector('${copy}').dataset.copyState === 'copied'`,
+      );
+      const copied = evidence.cases.at(-1);
+      assert.ok(
+        copied.events
+          .filter((e) => ["pointerdown", "mousedown", "click"].includes(e.type))
+          .every((e) => e.defaultPrevented === false),
+        "Copy input must not be cancelled",
+      );
+      await check(
+        "conversation-paste-select-clear",
+        async () => {
+          await click(editor);
+          await until(
+            `document.activeElement === document.querySelector('${editor}')`,
+          );
+          await runProbe("control-paste-select");
+          const draft = await until(`(() => {
+          const e = document.querySelector('${editor}');
+          return e.value && e.selectionStart === 0 && e.selectionEnd === e.value.length
+            ? {value:e.value,start:e.selectionStart,end:e.selectionEnd} : null;
+        })()`);
+          evidence.draft = draft;
+          assert.equal(
+            draft.value,
+            expected,
+            "Real clipboard paste must match the fixture response",
+          );
+          await runProbe("control-clear-selection");
+          await until(`document.querySelector('${editor}').value === ''`);
+        },
+        [],
+        (record) => {
+          assert.deepEqual(record.after.rect, record.before.rect);
+          assert.equal(
+            record.calls.filter((c) => c.command.endsWith(".control")).length,
+            0,
+          );
+          assert.ok(
+            record.events
+              .filter((e) =>
+                ["pointerdown", "mousedown", "click"].includes(e.type),
+              )
+              .every((e) => e.defaultPrevented === false),
+            "Editor input must not be cancelled",
+          );
+        },
+      );
+    } else if (workbench) {
       await runProbe("control-layout");
       await until("innerWidth < 950");
       await businessClick(
@@ -321,7 +397,11 @@ export async function probeWindowChromeUi({
       await writeFile(
         path.join(
           evidenceDir,
-          workbench ? "window-chrome-workbench.json" : "window-chrome-ui.json",
+          conversation
+            ? "window-chrome-conversation.json"
+            : workbench
+              ? "window-chrome-workbench.json"
+              : "window-chrome-ui.json",
         ),
         JSON.stringify(evidence, null, 2),
       );
@@ -330,6 +410,6 @@ export async function probeWindowChromeUi({
     webview.close();
   }
   process.stdout.write(
-    `Mounted ${workbench ? "Workbench/settings/narrow-window" : "AccountGate title/language/About modal"} input passed.\n`,
+    `Mounted ${conversation ? "Conversation copy/paste/selection/edit" : workbench ? "Workbench/settings/narrow-window" : "AccountGate title/language/About modal"} input passed.\n`,
   );
 }

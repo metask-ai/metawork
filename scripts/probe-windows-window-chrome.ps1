@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [int]$ProcessId,
-    [ValidateSet('drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-layout', 'control-zoom-in', 'control-zoom-reset', 'control-alt-f4', 'control-taskbar-restore', 'probe-quit', 'probe-layout', 'probe-animation', 'probe-resources')]
+    [ValidateSet('drag', 'resize', 'top-resize', 'top-lifecycle', 'paint', 'paint-stationary', 'controls', 'close', 'minimize', 'activated', 'input-case', 'control-state', 'control-click', 'control-layout', 'control-zoom-in', 'control-zoom-reset', 'control-paste-select', 'control-clear-selection', 'control-alt-f4', 'control-taskbar-restore', 'probe-quit', 'probe-layout', 'probe-animation', 'probe-resources')]
     [string]$Mode = 'drag',
     [string]$ColorHex,
     [string]$OutputPath,
@@ -232,15 +232,15 @@ function Select-MetaWorkTaskbarButton([object[]]$Candidates, [string]$WindowTitl
     # unrelated "metawork-site" group. Accept only this exact title / one-window
     # group, and fail closed on ambiguity instead of choosing the first match.
     $groupName = '^{0} - 1 .+$' -f [regex]::Escape($WindowTitle)
-    $matches = @($Candidates | Where-Object {
+    $matchingButtons = @($Candidates | Where-Object {
         $_.Role -eq 43 -and ($_.State -band 0x18001) -eq 0 -and
         $_.Width -gt 0 -and $_.Height -gt 0 -and
         ($_.Name -ceq $WindowTitle -or $_.Name -cmatch $groupName)
     })
-    if ($matches.Count -ne 1) {
-        throw "Expected one unambiguous taskbar button for '$WindowTitle'; found $($matches.Count)"
+    if ($matchingButtons.Count -ne 1) {
+        throw "Expected one unambiguous taskbar button for '$WindowTitle'; found $($matchingButtons.Count)"
     }
-    return $matches[0]
+    return $matchingButtons[0]
 }
 
 $process = Get-Process -Id $ProcessId
@@ -400,6 +400,31 @@ if ($Mode -in @('control-zoom-in', 'control-zoom-reset')) {
     } finally {
         [MetaWorkChromeProbe]::keybd_event($zoomKey, 0, 2, [UIntPtr]::Zero)
         [MetaWorkChromeProbe]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
+    }
+    return
+}
+
+if ($Mode -in @('control-paste-select', 'control-clear-selection')) {
+    if ([MetaWorkChromeProbe]::GetForegroundWindow() -ne $window) { throw 'Editing requires foreground ownership' }
+    if ($Mode -eq 'control-paste-select') {
+        foreach ($key in @(0x56, 0x41)) {
+            try {
+                [MetaWorkChromeProbe]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+                [MetaWorkChromeProbe]::keybd_event($key, 0, 0, [UIntPtr]::Zero)
+                Start-Sleep -Milliseconds 80
+            } finally {
+                [MetaWorkChromeProbe]::keybd_event($key, 0, 2, [UIntPtr]::Zero)
+                [MetaWorkChromeProbe]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    } else {
+        try {
+            [MetaWorkChromeProbe]::keybd_event(0x08, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 80
+        } finally {
+            [MetaWorkChromeProbe]::keybd_event(0x08, 0, 2, [UIntPtr]::Zero)
+        }
     }
     return
 }

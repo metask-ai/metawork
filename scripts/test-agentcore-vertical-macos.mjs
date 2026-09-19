@@ -568,29 +568,7 @@ try {
         2,
       ),
     );
-    await probeWindowChromeUi({
-      port: chromeProbePort,
-      workbench: true,
-      evidenceDir,
-      runProbe: async (mode, args = []) => {
-        const result = await execFileAsync(
-          "powershell.exe",
-          [
-            "-NoProfile",
-            "-File",
-            path.join(root, "scripts/probe-windows-window-chrome.ps1"),
-            "-ProcessId",
-            String(app.pid),
-            "-Mode",
-            mode,
-            ...args,
-          ],
-          { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
-        );
-        process.stdout.write(result.stdout);
-        return result.stdout;
-      },
-    });
+    await probeWindowsChromeUi();
   }
   // Disabling the source invalidates the Workspace current authority, but the
   // already-created Task must still execute its pinned Skill below.
@@ -814,11 +792,10 @@ try {
     throw new Error(
       `typed File Changes diff was not served truthfully: ${JSON.stringify(fileChangeDiff)}`,
     );
-  assertLiveRunRevisions(
-    observedRunRevisions,
-    run,
-    productDeliveryEmitCount() - deliveryCountBeforeRun,
-  );
+  const runDeliveryEvents = productDeliveryEmitCount() - deliveryCountBeforeRun;
+  if (chromeProbePort !== null)
+    await probeWindowsChromeUi({ conversation: true });
+  assertLiveRunRevisions(observedRunRevisions, run, runDeliveryEvents);
   await captureVisual("terminal", 1320, 812);
   await captureVisual("terminal-narrow", 390, 812);
   await captureVisual("bash-detail", 1320, 812, false, false, false, true);
@@ -2106,6 +2083,33 @@ async function automate(...args) {
     cwd: appCwd,
     timeout: commandTimeoutMs,
     maxBuffer: 1024 * 1024,
+  });
+}
+
+async function probeWindowsChromeUi({ conversation = false } = {}) {
+  await probeWindowChromeUi({
+    port: chromeProbePort,
+    workbench: true,
+    conversation,
+    evidenceDir: process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR,
+    runProbe: async (mode, args = []) => {
+      const result = await execFileAsync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-File",
+          path.join(root, "scripts/probe-windows-window-chrome.ps1"),
+          "-ProcessId",
+          String(app.pid),
+          "-Mode",
+          mode,
+          ...args,
+        ],
+        { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
+      );
+      process.stdout.write(result.stdout);
+      return result.stdout;
+    },
   });
 }
 

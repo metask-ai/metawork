@@ -220,6 +220,14 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 两轮绑定 revision `bea3f767d7557d37cd574ca869554dd662f108da` 加 diff SHA-256 `03793254fa4b08e3507c735eeba5ed67b74a0e0b277390dedf4773be0855963a`；新增选择器回归文件 SHA-256 `5e2092911563a6319c4c137f797733d0d7152e27e7598de7402151ac847aec3d`。产品二进制仍为 `485fdac746efcdeac491970c3cee8ba7e23e773f4e12ead2601f0a756053e7a0`，未为此修改产品代码或降低原验收断言。原始 identity、diff、候选/原生状态和实屏截图保留在对应目录。这关闭任务栏测试驱动问题，不补齐上一项明确未通过的 Native/AgentCore graph、真实回复复制/编辑/选区或未验证平台。
 
+### E-WIN-CHROME-CONVERSATION-20260919
+
+2026-09-19，同上 Windows 10 / SDK / WebView2 环境与产品二进制，`METAWORK_WINDOW_CHROME_WORKBENCH=1 node scripts/run-agentcore-vertical-windows.mjs` 在真实 AgentCore 首次回复完成后检查实际回复按钮及 Composer。`.zig-cache/tauri-gesture-conversation-20260919-1/` 绑定 revision `a2193b14dd29e85ce521a0ea45cd63de203f2f87` 加 diff `a3b6e2ff7613ce2dd5e8320cf3acdfc286a99527a4b95104f2b3d51d347844fa`，保存 identity、源 diff 和两项检查的完整 DOM 事件/窗口调用/原生状态。
+
+真实鼠标点击复制后产品报告 `copied`；再点击空 Composer，用真实 Ctrl+V 粘贴得到完整 36 字符 fixture 回复，Ctrl+A 形成 `[0,36]` 选区，Backspace 清空。两次业务点击均产生可信 pointerdown/mousedown/click，事件分发后 `defaultPrevented=false`、窗口 Bridge 调用数为 0，原生窗口矩形不变。Workbench 的 10 项实际 UI 检查也通过。这证明本次窗口路径不吞掉该真实回复复制和键盘编辑/选择，不证明鼠标拖选、大文本或 HTML 格式完整性。
+
+**整轮 vertical 仍失败。**该轮通过首个 Run 的 live revision 和 checkpoint 检查，随后在原有 70 KiB 复制探针选按钮时触发 `AddHashTableToNonHashTable`，尚未验证该大文本写入：脚本将 PowerShell 自动变量 `$Matches` 用作数组，正则匹配将其覆盖为哈希表。只修正变量名并补纯选择器回归，没有降低复制断言。后续 `.zig-cache/tauri-gesture-conversation-20260919-2/` 绑定同一 revision 加 diff `b6582b629a7f559d122173d395ade425cd6091d79b8f299bf580b3be95c2d669`，Workbench 10 项通过，但首次 Run 快照读取再次报 `invalid snapshot chunk: null`，未到达复制复验。不能以这次早期失败认定变量修复无效，也不能以首轮普通复制通过宣称完整 vertical 或 70 KiB / 256 KiB 剪贴板验收通过。
+
 ## 未闭合验证缺口
 
 本节只防止错误能力声明。行为、边界和产品开放条件仍由所列真源定义；测试清单和逐项断言不在这里维护。
