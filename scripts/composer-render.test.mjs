@@ -315,7 +315,6 @@ function renderNewTaskView(composer = null, overrides = {}) {
       createElement(NewTaskView, {
         hasWorkspace: true,
         composer,
-        setup: null,
         permissionProfiles: [],
         permissionProfile: "approval_required",
         onPermissionProfileChange() {},
@@ -677,23 +676,6 @@ test("new Task places the Composer after the outcome prompt", () => {
   const composer = markup.indexOf('data-test="draft-composer"');
   assert.ok(prompt >= 0 && composer > prompt);
   assert.doesNotMatch(markup, /task-examples|task-example/);
-});
-
-test("new Task replaces an unavailable Composer with an actionable setup state", () => {
-  const markup = renderNewTaskView(
-    createElement("footer", { "data-test": "draft-composer" }, "Composer"),
-    {
-      setup: {
-        title: "Connect a model service",
-        body: "Choose a source before creating a task.",
-        actions: createElement("button", null, "Connect Metask"),
-      },
-      permissionProfiles: ["approval_required"],
-    },
-  );
-  assert.match(markup, /Connect a model service/);
-  assert.match(markup, />Connect Metask</);
-  assert.doesNotMatch(markup, /draft-composer|Permission policy/);
 });
 
 test("new Task exposes and remembers one immutable permission choice", () => {

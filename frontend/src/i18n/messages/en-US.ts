@@ -56,12 +56,12 @@ export const enUS = {
   "account.signed_in": "Signed in",
   "account.signed_out": "Not signed in",
   "account.ready": "Ready",
-  "account.checking.title": "Checking Metask account",
+  "account.checking.title": "Checking sign-in",
   "account.checking.body":
-    "MetaWork is checking the Metask account saved on this device.",
-  "account.sign_in_required.title": "Connect Metask",
+    "MetaWork is checking whether this device can sign in.",
+  "account.sign_in_required.title": "Sign in to MetaWork",
   "account.sign_in_required.body":
-    "Sign in to use model services provided through your Metask account.",
+    "Use your Metask account to load the APIs and models available to you.",
   "account.authorizing.title": "Finishing Metask sign-in",
   "account.authorizing.body":
     "Complete authorization in your browser if it is still open. MetaWork will continue automatically.",
@@ -523,19 +523,6 @@ export const enUS = {
     "Describe a clear outcome. The new task will use the current workspace, and MetaWork will keep the work, decisions, and result together.",
   "task.empty_body_without_workspace":
     "Describe a clear outcome and choose a workspace on first send. Cancelling the picker keeps your draft.",
-  "task.setup.checking.title": "Preparing model services",
-  "task.setup.checking.body":
-    "MetaWork is checking the account and model configuration saved on this device.",
-  "task.setup.authorizing.title": "Waiting for Metask authorization",
-  "task.setup.authorizing.body":
-    "Complete sign-in in your browser. MetaWork will continue automatically.",
-  "task.setup.source_required.title": "Connect a model service",
-  "task.setup.source_required.body":
-    "Use Metask, or configure another supported model service before creating your first task.",
-  "task.setup.models_required.title": "Finish model setup",
-  "task.setup.models_required.body":
-    "Choose a ready model source before creating a task. Existing tasks and local settings remain available.",
-  "task.setup.open_providers": "Configure another service",
   "task.created_empty_body":
     "This task is ready. Enter its first instruction to begin.",
   "task.no_tasks":

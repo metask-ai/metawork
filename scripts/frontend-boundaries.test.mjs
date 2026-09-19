@@ -172,7 +172,7 @@ test("central conversation paths use only the shared AI UI vocabulary", async ()
   assert.doesNotMatch(composer, legacy);
 });
 
-test("Account states never replace the Workbench with a sign-in gate", async () => {
+test("Account states never replace or reinterpret the Workbench", async () => {
   const app = await readFile(resolve(sourceRoot, "app", "App.tsx"), "utf8");
   const newTask = await readFile(
     resolve(sourceRoot, "features", "tasks", "NewTaskView.tsx"),
@@ -184,8 +184,7 @@ test("Account states never replace the Workbench with a sign-in gate", async () 
   );
   assert.doesNotMatch(app, /AccountGate|accountGateRequired/);
   assert.doesNotMatch(app, /accountSurfacePolicy|accountSetupRedirected/);
-  assert.match(app, /setup=\{newTaskSetup\}/);
-  assert.match(newTask, /setup \? \([\s\S]*?new-task-setup/);
+  assert.doesNotMatch(app, /newTaskSetup|task\.setup\./);
   assert.match(newTask, /\{composer\}/);
   assert.match(
     accountIdentity,

@@ -2719,95 +2719,6 @@ export default function App() {
     workspaceId: composerWorkspaceId ?? null,
     taskId: activeTask?.id ?? null,
   });
-  const customProviderSetupAvailable =
-    snapshot.capabilities.customProviderManagement &&
-    snapshot.capabilities.customProviderSecretCapture &&
-    snapshot.capabilities.customModelTest;
-  const metaskIsIntendedSource =
-    snapshot.models.defaultSelection === null ||
-    snapshot.models.defaultSelection.sourceId.startsWith("metask:");
-  const newTaskSetup = snapshot.newTaskAdmission.available
-    ? null
-    : metaskIsIntendedSource && snapshot.account.state === "checking"
-      ? {
-          title: t("task.setup.checking.title"),
-          body: t("task.setup.checking.body"),
-        }
-      : metaskIsIntendedSource && snapshot.account.state === "authorizing"
-        ? {
-            title: t("task.setup.authorizing.title"),
-            body: t("task.setup.authorizing.body"),
-            actions: snapshot.account.canCancel ? (
-              <Button
-                type="button"
-                variant="secondary"
-                size="md"
-                disabled={bridgeUnavailable || accountCancelBusy}
-                onClick={() => void cancelAccountOperation()}
-              >
-                {t("account.cancel")}
-              </Button>
-            ) : undefined,
-          }
-        : metaskIsIntendedSource && snapshot.account.state === "signed_out"
-          ? {
-              title: t("task.setup.source_required.title"),
-              body: t("task.setup.source_required.body"),
-              actions: (
-                <>
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="md"
-                    disabled={bridgeUnavailable || accountBusy}
-                    onClick={() =>
-                      void runAccountCommand(() => client.beginLogin())
-                    }
-                  >
-                    {t("account.login")}
-                  </Button>
-                  {customProviderSetupAvailable && (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="md"
-                      disabled={bridgeUnavailable}
-                      onClick={() => openSettings("providers")}
-                    >
-                      {t("task.setup.open_providers")}
-                    </Button>
-                  )}
-                </>
-              ),
-            }
-          : {
-              title: t("task.setup.models_required.title"),
-              body: t("task.setup.models_required.body"),
-              actions: (
-                <>
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="md"
-                    disabled={bridgeUnavailable}
-                    onClick={() => openSettings("models")}
-                  >
-                    {t("settings.open_models")}
-                  </Button>
-                  {customProviderSetupAvailable && (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="md"
-                      disabled={bridgeUnavailable}
-                      onClick={() => openSettings("providers")}
-                    >
-                      {t("task.setup.open_providers")}
-                    </Button>
-                  )}
-                </>
-              ),
-            };
   const composerFooter = (
     <>
       {activeTask && (
@@ -3729,7 +3640,6 @@ export default function App() {
             <NewTaskView
               hasWorkspace={Boolean(composerWorkspace)}
               composer={composerFooter}
-              setup={newTaskSetup}
               permissionProfiles={
                 snapshot.capabilities.permissionProfiles
                   ? snapshot.permissions.availableProfiles

@@ -58,10 +58,10 @@ export const zhCN: Record<MessageId, string> = {
   "account.signed_in": "已登录",
   "account.signed_out": "未登录",
   "account.ready": "可执行",
-  "account.checking.title": "正在检查 Metask 账号",
-  "account.checking.body": "MetaWork 正在检查这台设备上保存的 Metask 账号。",
-  "account.sign_in_required.title": "连接 Metask",
-  "account.sign_in_required.body": "登录后可使用 Metask 账号提供的模型服务。",
+  "account.checking.title": "正在检查登录状态",
+  "account.checking.body": "MetaWork 正在确认这台设备是否可以登录。",
+  "account.sign_in_required.title": "登录 MetaWork",
+  "account.sign_in_required.body": "使用 Metask 账号加载你可用的 API 和模型。",
   "account.authorizing.title": "正在完成 Metask 登录",
   "account.authorizing.body":
     "如果浏览器中的授权页面仍然打开，请完成授权；MetaWork 随后会自动继续。",
@@ -478,18 +478,6 @@ export const zhCN: Record<MessageId, string> = {
     "描述一个明确结果。新任务会使用当前工作区，MetaWork 会把过程、决定和结果整理在一起。",
   "task.empty_body_without_workspace":
     "描述一个明确结果；首次发送时再选择工作区。取消选择不会丢失草稿。",
-  "task.setup.checking.title": "正在准备模型服务",
-  "task.setup.checking.body": "MetaWork 正在检查这台设备上的账号和模型配置。",
-  "task.setup.authorizing.title": "等待 Metask 授权",
-  "task.setup.authorizing.body":
-    "请在浏览器中完成登录，完成后 MetaWork 会自动继续。",
-  "task.setup.source_required.title": "连接模型服务",
-  "task.setup.source_required.body":
-    "连接 Metask，或配置其他受支持的模型服务，然后创建第一个任务。",
-  "task.setup.models_required.title": "完成模型配置",
-  "task.setup.models_required.body":
-    "选择一个可用的模型来源后即可创建任务；已有任务和本地设置仍可使用。",
-  "task.setup.open_providers": "配置其他模型服务",
   "task.created_empty_body": "这个任务已经准备好，输入第一条指令即可开始。",
   "task.no_tasks": "从新建任务开始；需要目录时，发送前再选择。",
   "task.archived_hidden": "已归档任务当前隐藏。",

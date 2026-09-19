@@ -33,7 +33,7 @@
 
 MetaWork 是面向本地工作区的桌面 Agent Workbench，不是终端模拟器、聊天应用、完整 IDE 或通用 Agent 门户。
 
-Workbench shell 是应用启动后的稳定根界面；可信根 Snapshot 建立前不得开放 mutation。Account 登录只决定内置 Metask provider 能否取得授权，不得替换或遮住 Workbench；New task 只有在 ready ExecutionConfig 已安装后才显示可发送的 Composer，否则在原区域提供与当前来源事实一致的准备或恢复动作，不展示一个大部分控件不可用的假输入区。
+Workbench shell 是应用启动后的稳定根界面；可信根 Snapshot 建立前不得开放 mutation。Account 登录只决定内置 Metask provider 能否取得授权，不得替换或遮住 Workbench；New task 是否可以发送仍只服从 Product Control 的 execution admission。
 
 进入 Workbench 后，界面持续回答六个问题：
 
@@ -959,25 +959,9 @@ Workspace 只作为 Task 与 New task 的路径上下文，不生成独立搜索
 
 ### 14.1 首次启动
 
-首次启动不设置独立登录页面。Renderer 直接挂载 Workbench shell；可信根 Snapshot 到达前，New task区域显示稳定的准备状态且全部mutation保持关闭。Snapshot 建立后仍停留在同一 Workbench，并由 New task 区域按 canonical Account、Models 与 Product admission 显示下一步：
+首次启动不设置独立登录页面。Renderer 直接挂载 Workbench shell；可信根 Snapshot 到达前全部 mutation 保持关闭，确认根连接失败后使用独立连接恢复表面，只表达连接事实、重试和安全诊断，不显示任何登录文案。
 
-1. ready ExecutionConfig 已安装时显示正常 Workspace、模型与 Composer；
-2. Metask 是预期来源且 Account 为 `checking` 时显示短暂的模型服务准备状态；
-3. Account 为 `signed_out` 时提供主动作 `登录 Metask`；完整 Custom Provider capability gate 已成立时同时提供 `配置其他模型服务`，不得要求用户先登录 Metask；
-4. Account 为 `authorizing` 时在原位置显示等待浏览器授权，并只在 `can_cancel` 为真时提供 `取消登录`；
-5. Account 已认证但 Models 或 Product admission 尚未 ready 时，显示打开 Models 设置或对应 Product recovery 的动作，不自动跳转设置；
-6. 根连接失败且尚未建立可信 Snapshot 时使用独立连接恢复表面，只表达连接事实、重试和安全诊断，不显示任何登录文案。
-
-```text
-New task
-
-连接模型服务
-连接 Metask，或配置其他受支持的模型服务，然后创建第一个任务。
-
-[ 登录 Metask ]  [ 配置其他模型服务 ]
-```
-
-New task 准备状态不显示四步进度条，不要求用户点击“加载 API Key”，不出现 C1/C2、protocol target、generation或 Keychain等技术术语，也不渲染无法发送且没有解释的 Composer。OAuth成功后由 Host把 Account授权交给独立 Models continuation恢复或加载目录；历史 intent命中时自动恢复，唯一候选自动采用，真实歧义进入 Models设置。OAuth identity成功后即使目录或 Product恢复失败也保持 Workbench与identity，不回退成登录页。任何 durable或live Task始终可查看，live Task仍可停止。
+Account 状态只在 Workbench 的账号入口和 Account 设置中演进：`checking` 显示检查状态，`signed_out` 提供统一登录动作，`authorizing` 显示等待并仅在 `can_cancel` 为真时允许取消，`authenticated` 显示已验证 identity。Account 状态不得自动打开设置、替换 Workbench、隐藏 durable Task，或重新解释 Product Control 发布的 New task admission。OAuth成功后由 Host把 Account授权交给独立 Models continuation恢复或加载目录；历史 intent命中时自动恢复，唯一候选自动采用，真实歧义进入 Models设置。任何 live Task 始终可查看和停止。
 
 ### 14.2 设置结构
 
@@ -1208,7 +1192,7 @@ Foundation 组件只消费 `--ui-*`；只有直接表现品牌或状态本身时
 
 ### 17.1 未登录
 
-未登录是 Account 与 Metask provider 的局部状态，不是应用级页面。Workbench继续显示本地能力与历史；Metask 是预期来源且 New task admission 不可用时，New task区域显示 `登录 Metask`，并在完整 capability gate成立时同时提供其他模型服务设置。等待浏览器授权与取消在同一位置演进；目录准备和真实模型歧义进入 Models职责，不得回退或跳转成账号页面。
+未登录是 Account 与 Metask provider 的局部状态，不是应用级页面。Workbench继续显示本地能力与历史，左下角账号入口提供统一登录动作；等待浏览器授权与取消在账号入口和 Account 设置中演进。目录准备和真实模型歧义进入 Models职责，不得回退或跳转成账号页面。
 
 ### 17.2 New task
 
@@ -1292,8 +1276,8 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 
 ### 19.4 Account 与首次启动
 
-- cold restore 不闪现 disabled Workbench；
-- 首次 signed out、Metask 为预期来源且没有本地历史：进入 Workbench New task 准备状态，直接提供登录动作，并在完整 capability gate成立时提供其他模型服务设置；不得制造 saved account、上一次登录或 mismatch 分支；
+- cold restore 保持稳定的 Workbench shell，可信 Snapshot 到达前不开放 mutation，也不闪现独立登录页；
+- 首次 signed out 且没有本地历史：保持 Workbench，并由账号入口提供统一登录动作；不得制造 saved account、上一次登录或 mismatch 分支；
 - OAuth 正常完成、浏览器未回调、取消和 hard deadline；
 - 历史选择命中、唯一 Key/模型自动推进；
 - 多 API、多模型真实选择以及选择期间 reload；OAuth identity 成功后不退回未登录；

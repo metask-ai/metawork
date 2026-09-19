@@ -137,7 +137,7 @@ test("signed-out account identity separates account, status, and login action", 
   });
   assert.doesNotMatch(menu.textContent, /Metask account/);
   assert.doesNotMatch(menu.textContent, /Not signed in/);
-  assert.doesNotMatch(menu.textContent, /Connect Metask/);
+  assert.doesNotMatch(menu.textContent, /Sign in to MetaWork/);
 
   await user.click(
     screen.getByRole("menuitem", { name: "Sign in with Metask" }),

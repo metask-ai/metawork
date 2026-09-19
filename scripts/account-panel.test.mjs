@@ -246,7 +246,7 @@ test("Account settings render each public session state with only its valid acti
     unavailableModels,
     { initialSection: "account" },
   );
-  assert.match(checkingMarkup, /Checking Metask account/);
+  assert.match(checkingMarkup, /Checking sign-in/);
   assert.doesNotMatch(checkingMarkup, />Sign in</);
 
   const callbackMarkup = renderSettings(
@@ -270,7 +270,7 @@ test("Account settings render each public session state with only its valid acti
   const signedOutMarkup = renderSettings(signedOut, unavailableModels, {
     initialSection: "account",
   });
-  assert.match(signedOutMarkup, /Connect Metask/);
+  assert.match(signedOutMarkup, /Sign in to MetaWork/);
   assert.match(signedOutMarkup, />Sign in with Metask</);
 });
 
@@ -633,7 +633,7 @@ test("signed-out settings keep local history reachable and expose sign-in", () =
   const markup = renderSettings(signedOut, unavailableModels, {
     initialSection: "account",
   });
-  assert.match(markup, /Connect Metask/);
+  assert.match(markup, /Sign in to MetaWork/);
   assert.match(markup, />Sign in with Metask</);
   assert.doesNotMatch(markup, /Sign out on this device/);
 });

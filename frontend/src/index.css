@@ -7587,42 +7587,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.7;
 }
 
-.new-task-setup {
-  display: grid;
-  width: min(100%, 560px);
-  margin: 0 auto;
-  justify-items: center;
-  text-align: center;
-}
-
-.new-task-setup-symbol {
-  display: grid;
-  width: 44px;
-  height: 44px;
-  margin-bottom: 20px;
-  place-items: center;
-  border-radius: 13px;
-  color: var(--ui-action-primary);
-  background: var(--metask-primary-soft);
-  font-size: var(--text-lead);
-}
-
-.new-task-setup p {
-  max-width: 500px;
-  margin: 14px auto 0;
-  color: var(--ui-content-muted);
-  font-size: var(--text-body);
-  line-height: 1.7;
-}
-
-.new-task-setup-actions {
-  display: flex;
-  margin-top: 24px;
-  justify-content: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
 .new-task-permission {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
