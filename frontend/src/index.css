@@ -8646,21 +8646,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-surface-panel-2);
 }
-.task-panel-header h2 {
-  min-width: 0;
-  flex: 1;
-  margin: 0;
-  padding-left: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-label);
-  font-weight: 650;
-}
-.task-panel-header h2:focus-visible {
-  outline: 2px solid var(--ui-action-primary);
-  outline-offset: 3px;
-}
 .task-panel-tabs {
   display: flex;
   min-width: 0;

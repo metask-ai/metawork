@@ -372,7 +372,7 @@ export default function App() {
           "[data-task-panel-tab-id]",
         ),
       ].find((candidate) => candidate.dataset.taskPanelTabId === tabId);
-      (tab ?? document.getElementById("task-panel-title"))?.focus({
+      (tab ?? taskPanelToggle.current)?.focus({
         preventScroll: true,
       });
     });
@@ -1159,15 +1159,27 @@ export default function App() {
       (candidate) => candidate.tabId === tabId,
     );
     if (!tab) return;
+    const closingLastTab = taskPanel.session.tabs.length === 1;
+    const focusTarget = closingLastTab
+      ? sidePanelFocusReturnTarget(
+          taskPanelOpeners.current.get(tabId) ?? null,
+          taskPanelToggle.current,
+        )
+      : null;
     taskPanelOpeners.current.delete(tabId);
     if (tab.kind === "preview") filePreviewTabs.close(tabId);
     else clearFileChanges();
     taskPanel.closeTab(tabId);
+    if (closingLastTab) {
+      setRightPanelOpen(false);
+      if (focusTarget) window.requestAnimationFrame(() => focusTarget.focus());
+      return;
+    }
     window.requestAnimationFrame(() => {
       const active = document.querySelector<HTMLButtonElement>(
         '#task-panel [role="tab"][aria-selected="true"]',
       );
-      (active ?? document.getElementById("task-panel-title"))?.focus({
+      (active ?? taskPanelToggle.current)?.focus({
         preventScroll: true,
       });
     });
@@ -1187,12 +1199,6 @@ export default function App() {
     }
     setRightPanelOpen(true);
     if (taskPanel.activeTab) focusTaskPanelTab(taskPanel.activeTab.tabId);
-    else
-      window.requestAnimationFrame(() =>
-        document
-          .getElementById("task-panel-title")
-          ?.focus({ preventScroll: true }),
-      );
   }
 
   function closeDeleteConfirmation() {

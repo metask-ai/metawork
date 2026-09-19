@@ -3977,8 +3977,7 @@ test("Conversation context only shows pressure; successful compaction removes th
   assert.equal(document.querySelector(".composer-context"), null);
 });
 
-test("empty detail pane has one hide action and no review navigation layer", async () => {
-  let close = 0;
+test("empty detail pane omits generic visible header actions", async () => {
   const view = render(
     localizedView(
       createElement(
@@ -3990,7 +3989,7 @@ test("empty detail pane has one hide action and no review navigation layer", asy
           attention: createElement("button", null, "Needs your attention"),
           onSelectTab() {},
           onCloseTab() {},
-          onClose: () => close++,
+          onClose() {},
         },
         createElement("p", null, "diff body"),
       ),
@@ -4010,7 +4009,7 @@ test("empty detail pane has one hide action and no review navigation layer", asy
           attention: null,
           onSelectTab() {},
           onCloseTab() {},
-          onClose: () => close++,
+          onClose() {},
         },
         createElement("p", null, "tool body"),
       ),
@@ -4018,8 +4017,9 @@ test("empty detail pane has one hide action and no review navigation layer", asy
   );
   assert.equal(screen.queryByText("diff body"), null);
   assert.equal(screen.queryByRole("button", { name: "Back to changes" }), null);
-  fireEvent.click(screen.getByRole("button", { name: "Hide side panel" }));
-  assert.equal(close, 1);
+  assert.equal(document.querySelector(".task-panel-header"), null);
+  assert.equal(screen.queryByRole("button", { name: "Hide side panel" }), null);
+  assert.ok(screen.getByRole("heading", { name: "Tool details" }));
 });
 
 async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
@@ -4254,7 +4254,12 @@ test("permanent panel toggle hides and restores the active Task Panel session", 
   fireEvent.click(screen.getByRole("button", { name: /First task/ }));
   const panel = () => within(document.querySelector("#task-panel"));
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
-  assert.ok(panel().getByRole("heading", { name: "Side panel" }));
+  assert.equal(document.querySelector("#task-panel .task-panel-header"), null);
+  assert.ok(
+    panel()
+      .getByRole("heading", { name: "Side panel" })
+      .classList.contains("sr-only"),
+  );
   assert.equal(panel().queryByRole("navigation"), null);
   assert.equal(panel().queryByText("Overview"), null);
   assert.equal(previews.length, 0);
@@ -4432,11 +4437,13 @@ test("layout visibility and share survive Task changes, invalidation, and non-Ta
     dom.window.localStorage.getItem("metawork.panel.task.share"),
     share,
   );
-  fireEvent.click(
-    within(document.querySelector("#task-panel")).getByRole("button", {
+  assert.equal(
+    within(document.querySelector("#task-panel")).queryByRole("button", {
       name: "Hide side panel",
     }),
+    null,
   );
+  fireEvent.click(screen.getByRole("button", { name: "Hide side panel" }));
   fireEvent.click(screen.getByRole("button", { name: /First task/ }));
   assert.equal(shell.getAttribute("data-right-panel-open"), "false");
   assert.equal(
@@ -4587,10 +4594,12 @@ test("App keeps preview and Review resources independent and rejects stale respo
   await act(async () => previews[1].resolve(ready("late after switch")));
   assert.equal(screen.queryByText("late after switch"), null);
   assert.ok(document.querySelector("#task-panel") !== null);
+  const emptyPanel = within(document.querySelector("#task-panel"));
+  assert.equal(document.querySelector("#task-panel .task-panel-header"), null);
   assert.ok(
-    within(document.querySelector("#task-panel")).getByRole("heading", {
-      name: "Side panel",
-    }),
+    emptyPanel
+      .getByRole("heading", { name: "Side panel" })
+      .classList.contains("sr-only"),
   );
   fireEvent.click(screen.getByRole("button", { name: /First task/ }));
   assert.ok(document.querySelector("#task-panel") !== null);
@@ -4760,11 +4769,22 @@ test("App previews exact operation references, rejects superseded reads, and ref
       name: "Close b.txt",
     }),
   );
+  assert.equal(
+    document.querySelector("#task-panel").getAttribute("aria-hidden"),
+    "false",
+  );
   fireEvent.click(openers[1]);
   assert.deepEqual(previews[3].ids, ["3", "7", "ref-b"]);
   assert.equal(screen.queryByText("refreshed reference"), null);
   await act(async () => previews[3].resolve(ready("explicit reread")));
   assert.ok(screen.getByText("explicit reread"));
+  fireEvent.click(screen.getByRole("button", { name: "Close a.txt" }));
+  fireEvent.click(screen.getByRole("button", { name: "Close b.txt" }));
+  await act(
+    async () => new Promise((resolve) => requestAnimationFrame(resolve)),
+  );
+  assertTaskPanelShellHidden();
+  assert.equal(document.activeElement, openers[1]);
 });
 
 test("App attention only locates the original approval in docked and overlay layouts", async (ctx) => {

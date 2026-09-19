@@ -860,13 +860,13 @@ Renderer 只能显示 Host capability projection 声明已端到端支持的两�
 
 右栏显隐不属于内容目标。内容是当前 Task 内的对象标签会话：可以同时保留多个精确文件预览，File Changes Review 最多保留一个；未打开对象时呈现通用空态。文件预览只从对话内联引用进入，工作过程不重复文件入口；记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；不建立记录列表、单条详情页、返回层级、文件树或旧概览兼容开关。
 
-每个顶层标签代表一个具体对象，不代表“预览/审查”功能模式。文件标签以精确 `taskId + runId + referenceId` 去重；标题和 `displayPath` 只用于呈现，不能推断对象相同。Review 标签在当前 Task 内是 singleton：重开同一 Run 只激活已有标签，打开另一有效 Run 时在原位置原子替换其目标；验证失败不得先清空既有 Review。标签按首次创建顺序保持稳定，重新激活不重排；关闭活动标签后优先选择其右邻，否则选择左邻，关闭最后一个标签后右栏保持空态。
+每个顶层标签代表一个具体对象，不代表“预览/审查”功能模式。文件标签以精确 `taskId + runId + referenceId` 去重；标题和 `displayPath` 只用于呈现，不能推断对象相同。Review 标签在当前 Task 内是 singleton：重开同一 Run 只激活已有标签，打开另一有效 Run 时在原位置原子替换其目标；验证失败不得先清空既有 Review。标签按首次创建顺序保持稳定，重新激活不重排；关闭活动标签后优先选择其右邻，否则选择左邻，用户关闭最后一个标签时同步隐藏右栏并把焦点返回该标签的真实 opener，opener 失效时回到稳定的 Task Panel 开关。对象因 Task 切换或身份失效而被清空时不自动改变右栏显隐。
 
 隐藏右栏只改变布局显隐，保留当前 Task 会话内的标签、已读取内容、活动标签和各标签视图状态；关闭单个标签才释放对应正文并使未完成请求 stale。切换 Task、删除当前 Task、离开可承载 Task 内容的页面或连接身份整体失效时清空全部对象内容，但保留用户选择的右栏显隐与宽度；无 Task 时呈现空态。普通 Run 开始、终态和 Snapshot revision 不关闭仍有效的对象。Review 中单条记录失效只移除该记录及正文；所属 Run 或全部记录失效只关闭 Review 标签，不连带清除文件标签；文件引用失效也只关闭对应文件标签。
 
 身份有效性必须在渲染前判定，不能仅依赖 effect 清理。文件读取与 diff 请求继续使用精确身份和每对象独立的递增 request generation；标签关闭、Review 目标替换、Task 切换与目标失效后，晚到成功或失败都不能覆盖新内容。只挂载活动标签的正文，非活动标签保留会话内资源和视图状态但不得保留隐藏 DOM 或进入辅助技术树；不声称已取消 Host IO。显式刷新重新请求，激活已有成功文件标签不得无故重读。
 
-保留右栏宽度偏好及第 4 节的停靠/覆盖规则。面板头部提供单行对象标签条、活动对象动作和隐藏按钮；标签关闭与隐藏右栏必须是两个独立动作。每个标签记录最近一次真实 opener；从面板隐藏时焦点返回活动标签 opener，opener 已消失或 disabled 时回到稳定的 Task Panel 开关，从全局开关隐藏则焦点留在该开关。标签使用标准 tablist/tab/tabpanel 语义和手动键盘激活，嵌套 menu/dialog/popover 优先处理 Escape，面板尊重 defaultPrevented。隐藏右栏不改变 Task、审批或运行状态。
+保留右栏宽度偏好及第 4 节的停靠/覆盖规则。有对象标签时，面板头部提供单行对象标签条、活动对象动作和隐藏按钮；标签关闭与隐藏右栏必须是两个独立动作。未打开对象的空栏不显示通用容器标题条或重复隐藏按钮，仍保留可访问名称，并由命令栏常驻开关控制显隐。每个标签记录最近一次真实 opener；从面板隐藏时焦点返回活动标签 opener，opener 已消失或 disabled 时回到稳定的 Task Panel 开关，从全局开关隐藏则焦点留在该开关。标签使用标准 tablist/tab/tabpanel 语义和手动键盘激活，嵌套 menu/dialog/popover 优先处理 Escape，面板尊重 defaultPrevented。隐藏右栏不改变 Task、审批或运行状态。
 
 Plan、typed Outputs 与尚未开放的能力不渲染空壳或占位符。
 
@@ -1353,7 +1353,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 长英文、中文和 pseudo-locale 不溢出；
 - `queued / running / waiting_user` 的可见 Stop 只出现在 Composer 发送位置；顶部命令栏不重复出现，`stopping` 阻止重复请求并等待真实 terminal；
 - 右侧栏常驻开关可由键盘操作，无 Task 时也能独立开合；Task 切换、删除、目标失效不改变布局显隐或保存比例；任务信息纯图标、上下文压力提醒与审批定位入口可由键盘操作，缺少 pressure 时不显示上下文入口；Run 用量和历史 auto compact 不独立展示；
-- 右侧只挂载活动对象标签的文件详情或同 Run File Changes Review；标签切换卸载非活动 DOM，关闭标签后聚焦相邻标签，隐藏面板回到活动对象的真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 隐藏右栏并回到真实对话入口；
+- 右侧只挂载活动对象标签的文件详情或同 Run File Changes Review；标签切换卸载非活动 DOM，关闭标签后聚焦相邻标签，关闭最后一个标签同步隐藏面板并回到该标签的真实 opener，opener 失效时回到稳定 Task Panel 开关。Review 直接挂载连续差异文档并保持明确 Task + Run 身份，不提供列表/详情层级或内部返回；Escape 隐藏右栏并回到真实对话入口；
 - 普通 Run start/terminal、新 pendingUi 和 usage revision 不自动开合右栏、不抢焦点；切换 Task、关闭标签或对象失效不泄漏旧详情和已读取 bytes，晚到 Promise 不覆盖新对象；隐藏右栏保留当前 Task 会话，切换 Task 清空会话；
 - 左栏折叠后完全隐藏且命令栏入口仍可达；Task Panel 关闭或 overlay 显示后功能不丢失；停靠态始终为中央工作面与 Task Panel 各保留至少 360 px，两者都不设置固定最大宽度；扣除左栏后的空间少于 720 px 时切换 overlay，低于 820 px 与左栏互斥，低于 620 px 使用全宽 overlay。验证样本至少覆盖 1440/左栏 320 的约 746+374、1200/左栏 320 的 520+360、1200/左栏 480 的 360+360、960/左栏关闭的 600+360、960/左栏打开的 overlay，以及超宽窗口右栏仍可继续扩大。
 - Windows Renderer 窗口按钮在登录页与 Workbench 均可见、键盘可达；最小化、最大化/还原和遵循 `close_policy = hide` 的关闭命中真实窗口，按钮区域不进入 drag candidate；
