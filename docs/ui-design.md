@@ -1017,10 +1017,10 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 
 - `persistenceHealth = recovery_required` 显示单一显式恢复确认面；文案必须说明 Host 会先尝试恢复合法配置，只有文件缺失或确认损坏时才清空，不得无条件承诺删除 Provider 或模型配置。操作成功后完全以新 snapshot 为准；失败保留恢复面，不由 Renderer 猜测磁盘结果或自动重放；
 - 进入该设置 route只渲染 Host已提交的 Models projection，不触发隐藏同步；用户显式点击 `重新同步`时才刷新 Metask provider目录。已提交 intent在同步期间保持可读，`重新同步`只用于失败恢复或页面保持打开期间发生的 Metask外部变更，不能成为打开下拉框或切换默认值的前置步骤；
-- 页面以一组连续的 `Provider → API Key → 默认模型` 控件显示并修改 global default，并在组头持续显示当前已提交的 `Provider · Model`；Provider 先限定 credential authority，API Key 再限定模型目录，只有最终选择默认模型时才提交完整 `ModelRef`。Models 是唯一允许提交 global default 的产品页面；
-- API Key 列表对 Metask 显示名称、protocol、尾号和可用/需要处理状态；对 user-managed Provider 显示由 Host 安全持有的已保存 credential authority。两者都不显示完整 secret；
-- protocol 是 Host 从 API catalog 确定的只读技术事实，只作为 API 名称下的次级元数据展示；Renderer 不提供 protocol、base URL 或 credential 编辑入口；
-- 切换 Metask API 后加载其模型目录；切换 Provider 或 API Key 只准备并收窄当前候选，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；
+- 页面以一组连续的 `Provider → 默认模型` 控件显示并修改 global default，并在组头持续显示当前已提交的 `Provider · Model`；Provider 限定 source authority，只有最终选择默认模型时才提交完整 `ModelRef`。Models 是唯一允许提交 global default 的产品页面；
+- Metask 的 credential authority 由 OAuth 会话隐式提供，Models 页面不显示或选择 API Key；user-managed Provider 的已保存 credential 只在独立 Providers 页面管理，Models 页面也不重复投影凭据步骤；
+- Metask protocol 固定为 OpenAI Chat Completions，Renderer 不提供 protocol、base URL 或 credential 编辑入口；
+- 切换 Provider 只准备并收窄当前模型候选，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；
 - 默认模型选择与 New task Composer 使用同一 Host-owned selection，不维护两份互相漂移的 Renderer preference；
 - 既有 Task 只显示解释历史所需的 protocol、模型与 generation；不显示或保存 Account identity 与 API Key 元数据；
 - 跨重启历史 Task 保持只读；设置变化不能使其静默采用当前默认值或伪造 Session；
@@ -1032,14 +1032,14 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 
 设置视觉与控件遵循以下规则：
 
-- 页面背景、工作面、交互组和浮层使用视觉系统中的 `surface-app` / `surface-work`、分隔线与真实抬升关系建立层级；普通设置行不逐项卡片化，只有 Provider、API Key 和模型这种依赖型配置形成连续交互组；
+- 页面背景、工作面、交互组和浮层使用视觉系统中的 `surface-app` / `surface-work`、分隔线与真实抬升关系建立层级；普通设置行不逐项卡片化，Provider 和模型这种依赖型配置形成连续交互组；
 - 每个设置分区页面在内容列顶部使用一个醒目的页面标题；页面标题下用 13–15 px 的小分组标题组织设置项，具体控件再使用自己的字段标签。不得在页面标题、分组标题和字段标签之间重复写“设置”或同义标题；
 - 页面标题约 22–26 px，设置主文案 13–15 px，辅助文案不小于 12 px；disabled 状态只改变语义色和对比度，不缩小字号；
-- 语言、Provider、API Key 和模型统一使用经过键盘、焦点、碰撞和长列表验证的同一 headless Select primitive；正式设置页禁止依赖 WebView 平台主题的原生 `<select>`，也不建立另一套自绘菜单；
-- compact 选择器只显示一个短值；API 使用 detailed 选择器，以 API 名称为主信息，以 protocol 为次级说明，以脱敏尾号为尾部数据。protocol 和尾号不得表现成可编辑字段；
-- Provider、API Key 与默认模型控件在同一个工作面中以带步骤标记和连接线的连续配置链呈现，明确表达 `Provider → credential authority → source-qualified ModelRef`；不能再附加 Metask 专属配置块或第二个同名的默认模型控件。user-managed Provider 只有一份已保存 credential 时，API Key 步骤仍明确投影该 authority，但 credential 的创建、替换和删除只能进入独立 Providers 页面；
-- API 切换开始后只冻结相关配置组；模型目录加载、选择和持久化不得冻结语言、导航、历史阅读或取消仍被 Host 接受的操作；
-- 设置页把 Provider/API Key 候选准备与 global default mutation表现为一条分阶段的 Models-owned transaction；前两步只限定 source 与 credential authority，最后一步从该 source 的 ready 模型中提交唯一 global default。Metask provider-local 准备和最终 global default提交分别校验对应 catalog/source generation与 expected revision，再 durable提交 Models state；Custom Provider 使用其 provider revision 提交完整 `ModelRef`。Product后续 resolve/scrub/install失败时另行显示 desired/active mismatch与 recovery，不回滚 Models，也不把 Product failure显示成 Account mutation失败。Renderer可在 command acknowledgement前短暂回显用户请求，但收到 snapshot后必须以 Host projection为准；页面重建、失败和成功都不得依赖 Renderer临时状态恢复事务；
+- 语言、Provider 和模型统一使用经过键盘、焦点、碰撞和长列表验证的同一 headless Select primitive；正式设置页禁止依赖 WebView 平台主题的原生 `<select>`，也不建立另一套自绘菜单；
+- compact 选择器只显示一个短值；Provider 可以使用 detailed 选择器显示名称与来源说明，credential 与 protocol 不伪装成可编辑字段；
+- Provider 与默认模型控件在同一个工作面中以带步骤标记和连接线的连续配置链呈现，明确表达 `Provider → source-qualified ModelRef`；不能再附加 Metask 专属配置块、API Key 步骤或第二个同名的默认模型控件。credential 的创建、替换和删除只能进入独立 Providers 页面；
+- 模型目录加载、选择和持久化只冻结相关配置组，不得冻结语言、导航、历史阅读或取消仍被 Host 接受的操作；
+- 设置页把 Provider 候选准备与 global default mutation表现为一条分阶段的 Models-owned transaction；Provider 只限定 source，最后一步从该 source 的 ready 模型中提交唯一 global default。Metask provider-local 准备和最终 global default提交分别校验对应 catalog/source generation与 expected revision，再 durable提交 Models state；Custom Provider 使用其 provider revision 提交完整 `ModelRef`。Product后续 resolve/scrub/install失败时另行显示 desired/active mismatch与 recovery，不回滚 Models，也不把 Product failure显示成 Account mutation失败。Renderer可在 command acknowledgement前短暂回显用户请求，但收到 snapshot后必须以 Host projection为准；页面重建、失败和成功都不得依赖 Renderer临时状态恢复事务；
 - 常规桌面宽度下左侧分区导航切换独立的设置分区页面，右侧一次只渲染当前分区；页面标题和左侧分区导航保持稳定，当前分区内容列可独立滚动。窄窗口改为顶部横向分区导航，但仍不让导航与内容共享滚动层；
 - 浮层只在打开时使用克制的透明度与位置过渡；loading 指示只出现在真实运行的配置项，`prefers-reduced-motion` 下移除非必要动画；
 - 当前分区导航必须有持续可见的选中态和 `aria-current`，不能只在 hover 时出现；focus ring、菜单选中勾选、状态色和文字共同表达状态。
@@ -1059,7 +1059,7 @@ Account与 Models状态在设置中分别投影：Account按 `checking | signed_
 - `Test model` 只通过 Host/Agent Completion 发起有界请求，不创建 Task、历史 Run 或持久 Conversation；页面分别显示 generation readiness 和最新测试状态。已成为默认模型后仍可重测，失败只显示“最近测试失败”，不能把正在使用的 ready generation、默认选择或新 Task admission 静默撤销；
 - 第一版不提供自动模型发现；Provider 保存后由 Models 页明确填写 bounded model ID并执行测试，Provider 没有 ready 模型时不能成为默认来源；
 - global default 只在 Models 页作为一笔 Models-owned、source-qualified desired transaction提交；Providers 页不得因当前 Provider 是默认来源而禁用编辑或删除。Product Control随后独立 reconcile active binding，处理中只关闭相关新 Task admission，不回滚已提交 desired selection；
-- Metask provider catalog与当前 custom default同时投影；custom default生效时模型设置仍可查看 Metask API/模型，并通过显式“设为新任务默认”提交同一个 global default command。Account只决定 Metask provider当前能否授权，不参与默认来源选择；
+- Metask provider catalog与当前 custom default同时投影；custom default生效时模型设置仍可查看 Metask 模型，并通过显式“设为新任务默认”提交同一个 global default command。Account只决定 Metask provider当前能否授权，不参与默认来源选择；
 - 自定义 API 列表保留编辑和删除两个一级操作，API Key 更新位于编辑界面的凭据区域，不在列表行中抢占一级操作。credential storage 不可用时整个 Provider 设置入口隐藏，不提供局部编辑路径。endpoint、protocol 或 credential authority 变化推进 source generation并使该 Provider 全部模型回到待验证状态；普通 display/metadata 编辑只推进对应 provider revision/catalog generation。Provider 可以在模型集合为空时持久存在于 configuring 状态；两种 Provider 都通过 Models-owned custom model mutation添加或删除模型，不把模型伪装成 Provider 身份的一部分；
 - Models 按 exact Provider identity 与 expected provider revision 校验编辑/删除，不查询 live Session、Run、job 或 worker，也不以 consumer usage 拒绝 mutation。若 mutation 使当前 desired default 不可解析，Product Control 独立关闭 new admission 并进入 reconciliation；既有 Task/Run 保持自己的 owned binding，不静默改绑，历史仍保留；
 - Providers 页只管理 Provider 本身与 credential，不提供模型测试、默认模型、Workspace、权限策略、Task 历史或 AgentCore 内部状态。
@@ -1282,7 +1282,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 历史选择命中、唯一 Key/模型自动推进；
 - 多 API、多模型真实选择以及选择期间 reload；OAuth identity 成功后不退回未登录；
 - catalog timeout/有限重试、OAuth exchange 失败、持久化确定失败与结果不确定；
-- 无 API Key、无模型以及 Host 未提供管理入口时的可理解恢复文案；
+- Metask 无可用模型、目录加载失败以及 Host 未提供管理入口时的可理解恢复文案；
 - Bridge invoke timeout 后释放 busy、snapshot resync 后恢复 Host 动作；
 - ready 后进入 Workbench，左下角显示 identity；重认证、设置和退出只按 Account busy/error scope 收口，Product execution/Schedule recovery 使用独立 scope；Account ready + Execution unavailable 时 recovery action 可见且不会被账号设置 redirect 遮挡。
 

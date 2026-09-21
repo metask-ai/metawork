@@ -49,7 +49,7 @@ Renderer password form → typed Bridge create/replace → Models credential mut
 → Agent Session consumption
 ```
 
-两条来源最终都必须形成同一份显式 protocol、endpoint、model、credential、source generation 与 Product binding generation。Models 解析 source 时产生不含 Product generation 的 `OwnedSourceCandidate`；只有 Product Control 可以分配 binding generation 并将其转成 `ExecutionConfig`。Metask source id 为 `metask:<api-key-id>`，Custom Provider source id 为稳定 Provider id；`ModelRef = source_id + model_id` 是模型身份，display name 永远不是 identity。source generation、selection revision、catalog generation、provider revision 与 Product binding generation是不同轴，不能互相替代或假设有序。
+两条来源最终都必须形成同一份显式 protocol、endpoint、model、credential、source generation 与 Product binding generation。Models 解析 source 时产生不含 Product generation 的 `OwnedSourceCandidate`；只有 Product Control 可以分配 binding generation 并将其转成 `ExecutionConfig`。Metask source id 固定为 `metask`，其 protocol 固定为 `openai_chat_completions`，目录与调用 credential 均来自当前 OAuth authorization lease；Custom Provider source id 为稳定 Provider id。`ModelRef = source_id + model_id` 是模型身份，display name 永远不是 identity。source generation、selection revision、catalog generation、provider revision 与 Product binding generation是不同轴，不能互相替代或假设有序。
 
 默认 execution、Task attachment 和后台任务各自持有所需的 owned copy；Session、恢复、模型测试及自动标题消费已经解析的配置，不根据厂商、endpoint、模型名或 source id 重新选择 protocol。source id 与 credential locator 不进入 durable Task history。Product 层不定义供执行分派使用的 `ProviderKind`、厂商分类、协议反推或平行 protocol enum；内置官方配置模板的稳定 identity 只选择 Models-owned 配置策略，创建后仍展开并持久化为明确 protocol 与 endpoint。Agent 对 AgentCore ABI 的 provider code 映射仍是 Agent-owned transport 细节。
 
@@ -67,12 +67,12 @@ Account commits verified identity/credential generation
 → Application notifies Models coordinator
 → coordinator takes one owned authorization lease
 → Models prepares catalog attempt bound to principal + authorization generation
-→ Application worker loads API keys/models and returns owned completion
+→ Application worker uses the OAuth access token to load `/v1/models`
 → Models rejects stale generation or commits catalog/selection/source generation
 → Product Control reconciles Models desired authority into active execution
 ```
 
-authorization lease 由 Account 构造、Application 在单个 catalog job 中线性持有并清零。Models 只接收 attempt、principal、authorization generation 与 owned catalog completion；Models module 不导入 Account，也不持久化 OAuth token。catalog worker 不拥有 committed state，陈旧 completion 只能销毁。Models 的失败不调用 Account abort、不改变登录状态，也不补写 Account error。
+authorization lease 由 Account 构造、Application 在单个 catalog job 中线性持有并清零。Models 只接收 attempt、principal、authorization generation 与 owned catalog completion；Models module 不导入 Account，也不持久化 OAuth token。成功 completion 把 access token 的 owned copy 作为当前 Metask source 的 transient execution credential，下一次 authorization generation 变化会重新加载目录并替换该 copy；catalog worker 不拥有 committed state，陈旧 completion 只能销毁。Models 的失败不调用 Account abort、不改变登录状态，也不补写 Account error。
 
 authorization loss 的顺序相反：Application cancel/join 仍在运行的 Metask catalog job并销毁 lease，Models 将 Metask provider 置为 `needs_authentication`、清除 transient catalog credential与可解析目录。无 secret 的 Metask Provider-local/global selection intent 保留；custom source 不变。若 global default 指向 Metask，Product Control 随后关闭新的 Task admission并清除 active default；已经交给 Task/Run 的 binding 不回收、不改写。
 
@@ -108,11 +108,11 @@ Canonical snapshot 同样保持 owner 边界：根 `account` 只投影 Account i
 
 Models 每次 resolve 只产生一个调用方 owned candidate，绑定精确 `ModelRef + source_generation + protocol`；candidate 不持久化。Product Control 在 installed binding取得 ownership后负责其 credential清零。Schedule store 不可信或 scrub失败时不得安装候选；Models desired state保持不变，Product 发布 mismatch/recovery并等待重试，不能跳过 scrub。
 
-`models.json` schema 1 是 Models aggregate 的唯一 canonical store。它保存 Metask 的无 secret Provider-local intent、source-qualified global default、selection revision、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone；不保存 OAuth token、API credential、credential locator、migration marker 或 Product binding generation。API credential 只进入系统安全存储。当前 schema 1 只接受根 `custom_providers`；系统没有 `ModelConnection` 对象，也不识别、迁移或映射 `connections` 字段。
+`models.json` schema 2 是 Models aggregate 的唯一 canonical store。它保存 Metask 的无 secret Provider-local intent、source-qualified global default、selection revision、Custom Provider 的 id/display name/protocol/normalized endpoint、有界 model metadata、credential/test status、provider/source/catalog revision 和待完成 credential deletion tombstone；不保存 OAuth token、API credential、credential locator、migration marker 或 Product binding generation。Custom Provider API credential 只进入系统安全存储。schema 2 的 Metask intent 不含 API Key identity，Metask `source_id` 固定为 `metask`；系统没有 `ModelConnection` 对象，也不识别或映射 `connections` 字段。
 
-首次 bootstrap 只读取当前格式的 `models.json`。canonical 文件不存在时，在一次 Models transaction 中初始化空的当前 schema；`preferences.json`、`custom-providers.json` 及其 decoder、归档和迁移 marker 不属于当前 authority，也不参与恢复或 fallback。canonical bytes 缺失字段、包含旧 shape 或损坏时必须 fail closed，不能转换旧 generation/revision、猜测默认来源或静默清空已有事实。schema 标识保持为 1，当前格式通过原地 hard cut 收口。
+首次 bootstrap 读取 schema 2，并仅为既有 schema 1 Metask intent 提供一次确定性迁移：丢弃旧 `api_key_id`，把旧 `metask:<api-key-id>` selection source 归一为固定 `metask`，保留 model、revision、generation 与 Custom Provider 事实，下一次提交写回 schema 2。canonical 文件不存在时，在一次 Models transaction 中初始化空的 schema 2；`preferences.json`、`custom-providers.json` 及其 decoder、归档和迁移 marker 不属于当前 authority，也不参与恢复或 fallback。除此之外的缺失字段、未知 shape 或损坏必须 fail closed，不能猜测 generation/revision、默认来源或静默清空已有事实。
 
-Models persistence health 精确区分：当前 canonical 可用为 `ready`；Models file capability 存在但 canonical 读取、严格解码或提交结果不可信为 `recovery_required`；file capability 本身不存在为 `unavailable`。只有 `recovery_required` 允许用户确认显式恢复；Models owner 与 Product Control 必须在执行时重新校验该资格。恢复执行时先重新读取并严格解码 canonical：合法当前 schema 必须重装且不得清空，其中中断的 `testing` 状态确定性收敛为 `failed` 并在确认提交后恢复 `ready`；读取失败或资源耗尽拒绝恢复且不得写盘；只有文件缺失或严格解码确认损坏时，才允许用当前可信内存事实安装空的 schema 1 store。`ready` 与 `unavailable` 都拒绝该命令，Renderer 不能为其显示恢复动作。恢复不迁移、猜测解释或归档旧 bytes，不改写 Account、Workspace、Task、Run 或对话历史；既有 Task 已拥有的 ExecutionConfig 继续按原生命周期收口。
+Models persistence health 精确区分：当前 canonical 可用为 `ready`；Models file capability 存在但 canonical 读取、严格解码或提交结果不可信为 `recovery_required`；file capability 本身不存在为 `unavailable`。只有 `recovery_required` 允许用户确认显式恢复；Models owner 与 Product Control 必须在执行时重新校验该资格。恢复执行时先重新读取并严格解码 canonical：合法 schema 1/2 必须重装且不得清空，其中 schema 1 按上一段迁移，中断的 `testing` 状态确定性收敛为 `failed`，并在确认提交后恢复 `ready`；读取失败或资源耗尽拒绝恢复且不得写盘；只有文件缺失或严格解码确认损坏时，才允许用当前可信内存事实安装空的 schema 2 store。`ready` 与 `unavailable` 都拒绝该命令，Renderer 不能为其显示恢复动作。恢复不猜测解释或归档旧 bytes，不改写 Account、Workspace、Task、Run 或对话历史；既有 Task 已拥有的 ExecutionConfig 继续按原生命周期收口。
 
 Provider 删除先提交 credential cleanup tombstone，再删除系统 credential，最后原子清除 tombstone；创建先提交目标 id tombstone，再写 credential，最后以一次 registry commit 替换为完整 Provider。credential 替换先持久撤销旧 readiness 和对应 default，再覆盖同一稳定 Provider credential locator，最后以新的 provider/source generation 恢复为待测试状态；写入或最终提交失败时 Provider 必须保持 `missing/configuring`，不得让旧 readiness 配上新 credential。启动与后续 mutation 必须排空 tombstone。确认 credential 缺失时撤销对应 default 并持久化 `credential_status = missing`；安全存储暂时不可读不能被误写成已确认缺失。Execution 恢复与 Account identity 恢复相互独立，一方 unavailable 不得使另一方的持久化事实被清空或覆盖。
 
