@@ -308,7 +308,7 @@ completion receipt 是上述 best-effort Task projection 的低频视图事实�
 
 store 读取上限为 16 MiB。commit 必须在同一目录完成 durable atomic replace，并区分 `committed | failed | outcome_unknown`；临时文件命名、frame header、checksum 算法和 codec 内部布局由唯一实现与测试拥有，不在本文镜像。
 
-Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；其 File Changes `collecting` 若存在必须收口为 `incomplete` 并保留已记录项。旧历史缺少 Run 提交时间或 File Changes 字段时恢复为 `null`，不能伪造时间或空观测。未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
+Host 重启从通过校验的 store 重建 durable history 和 detached attachment。没有 live owner 的 non-terminal Run/compact 保守收口为 interrupted，不重放输入、工具、permission 或结果不确定 mutation；所有在进程终止时仍为 `pending` 的 Run/compact 都原子转为 `excluded`，terminal operation 保留原 phase/outcome，non-terminal operation 再收口为 interrupted。其 File Changes `collecting` 若存在必须收口为 `incomplete` 并保留已记录项。旧历史缺少 Run 提交时间或 File Changes 字段时恢复为 `null`，不能伪造时间或空观测。未完成 Tool 不进入恢复 projection，已经 durable 完成的 Tool result 保留。
 
 #### 4.3.1 History schema
 
@@ -334,6 +334,8 @@ schema 迁移仅建立空业务表，不建立默认 Runtime 状态。迁移完�
 
 AgentCore checkpoint blob 与 Product checkpoint record 是两个提交边界。每个成功收口且 Session 可复用的 Run/compact 可以在 terminal product fact 发布后导出 checkpoint；blob 必须先 durable commit，随后 Product 才能把引用它的 checkpoint record 提交进 Task history。
 
+Run/compact 的 durable coverage 精确取 `pending | covered | excluded`。`pending` 表示当前 live attachment 仍可能把 operation 纳入后续 checkpoint；`covered` 表示 canonical checkpoint 已知包含它；`excluded` 表示记录保留在 Product history，但不属于恢复后的 Conversation。checkpoint record commit 与其 coverage overlay 是一个 Product transaction：overlay 后 checkpoint 的 last ids 必须分别等于最大 covered Run/compact id，且不能剩余 pending；不满足即拒绝 commit 并记录 dependency contract failure。`excluded` 不得转回 `covered`，跨 attachment 也不存在 pending 继承。
+
 checkpoint record 只保存：
 
 - blob 的 Task/generation/size/digest identity；
@@ -346,7 +348,7 @@ checkpoint record 只保存：
 
 ### 4.6 Conversation attachment recovery
 
-Conversation recovery 是 detached Task 的 attachment 重建事务，不是 transcript 重放、Task 克隆或新的 Product owner。恢复资格必须同时证明：
+Conversation recovery 是 detached Task 的 attachment 重建事务，不是 transcript 重放、Task 克隆或新的 Product owner。Product 分别维护 Product history 高水位、Conversation covered 前沿和 checkpoint 前沿，三者不得混为“最新终态”。checkpoint restore 资格必须同时证明：
 
 - source Task、binding、checkpoint 与 terminal anchor 未变化；
 - Workspace identity、kind、epoch、root、authorization 与 Automatic owner 精确；
@@ -355,11 +357,17 @@ Conversation recovery 是 detached Task 的 attachment 重建事务，不是 tra
 - Task 未归档、删除、运行其他 operation、replacement 或 shutdown；
 - 当前 recovery attempt 和 poison 状态允许进入。
 
+checkpoint 必须与 covered 前沿精确相等，并且不能存在 pending operation；`checkpoint <= Product history` 不是合法替代。checkpoint 之后允许存在且仅允许存在连续的 excluded 尾部。若历史中出现晚于 checkpoint 的 covered operation、checkpoint 前沿不是最大 covered id、anchor 未 covered/terminal 或存在 pending，恢复必须拒绝。所有新 Session 的 Run/compact allocator 都以 Product history 高水位为 floor；restore expectation 仍使用 checkpoint 自己的精确 ids，两者不得互相替代。
+
+唯一无 checkpoint 恢复例外是：Task 没有 checkpoint record、covered 前沿均为零且没有 pending operation。此时 Product 可以在原 Task 上 fresh attach 空 Conversation，以完整 Product history 高水位初始化 allocator；全部 excluded 历史继续可见，不进入新上下文，也不自动重放。只要存在 covered 历史，checkpoint 缺失、损坏或 store 不可用都必须 fail closed。
+
 历史 execution generation 只证明历史 Run 使用过哪个 execution，不是恢复当前 credential 的句柄，也不要求等于 target generation。Skill、MCP、Permission 和 projection continuity 是恢复后的可选能力状态，不是 Conversation 恢复资格；AgentCore 合法返回 degraded Session 时，Product 接受已恢复 Conversation，并让不可重建 authority 保持安全失效。
 
 用户显式发起恢复后，Product 冻结完整 source/target authority 并提交 bounded recovery job。job 不保存 Task/Workspace 指针，不查询 Product Skill，不构造 MCP Selection，也不取得 durable permission rule；它只验证 checkpoint source 并调用 Agent restore。I/O、Agent Runtime、capacity、cancellation 与 typed AgentCore refusal 必须作为 attempt 结果返回，不能折叠成一个终局连接失败。
 
 成功 candidate 回到主线程后必须再次校验全部 source/target token、attachment、archive/removal、replacement 与 shutdown。stale candidate 只销毁。若 target generation 与 durable binding 不同，先以一个 durable adoption transaction 同时推进 Task binding、binding epoch 与 checkpoint anchor，commit 成功后才安装 attachment；明确失败销毁 candidate 并保留 detached Task，outcome unknown 冻结后续 mutation。进程若在 durable adoption 后、attachment install 前退出，下次启动从已推进的 binding/anchor 重新恢复，不改写历史 Run provenance。
+
+graceful close/shutdown 必须先停止 admission，对已进入 AgentCore 的 operation 请求终止并等待真实 terminal/event drain，再等待 checkpoint postprocess 与全部 worker lease settled；只有此后才能把剩余 pending 标为 excluded、持久化最终历史并开始 Session close/release。checkpoint commit 与 pending exclusion 不得并发交错。已提交 history 但尚未进入 Core 的失败直接归为 excluded；尚未提交 history 的 prepared operation 不产生可排除记录。
 
 ## 5. `.skill` 交换 artifact
 

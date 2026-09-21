@@ -43,7 +43,7 @@ MetaWork 当前不定义为：
 
 ### Task 与内部 Agent Session
 
-Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态、Run 历史、Session maintenance 历史和不含 secret 的 execution binding 历史。Task 的模型 binding 独立于 Models 全局默认值：设置页模型只作为新建 Task 默认值；已有 Task 只有在 Models 当前 Metask catalog 与该 Task 精确持有的 source/protocol/binding authority一致时，才能在 Composer 选择下一轮模型。默认 credential、protocol、source 或 generation 已变化时，Task继续使用自身 pinned execution，模型控件只读。当前 Custom Provider binding不开放已有 Task模型切换。attached Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。Run、会改变 Conversation 的 maintenance operation 与 Conversation restore 共用一个 Product Task-owned active operation 槽，不能并发进入同一 Session。历史 Task 可以跨重启恢复为 detached 记录；只有 Host 证明最新 checkpoint、Task/binding、Workspace 与 ExecutionConfig 身份精确，且 persistence、checkpoint store 与 Agent Runtime 可用时，用户才能显式重建原 Conversation attachment。Skill、MCP 与 Permission authority 是否完整恢复只决定恢复后的能力状态；它们失效时接受 AgentCore 的 degraded Session 并安全收缩能力，不能否定 Conversation 恢复成功。
+Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态、Run 历史、Session maintenance 历史和不含 secret 的 execution binding 历史。Task 的模型 binding 独立于 Models 全局默认值：设置页模型只作为新建 Task 默认值；已有 Task 只有在 Models 当前 Metask catalog 与该 Task 精确持有的 source/protocol/binding authority一致时，才能在 Composer 选择下一轮模型。默认 credential、protocol、source 或 generation 已变化时，Task继续使用自身 pinned execution，模型控件只读。当前 Custom Provider binding不开放已有 Task模型切换。attached Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。Run、会改变 Conversation 的 maintenance operation 与 Conversation restore 共用一个 Product Task-owned active operation 槽，不能并发进入同一 Session。历史 Task 可以跨重启恢复为 detached 记录：已有 Conversation 历史时，Host 必须证明最新 checkpoint 精确覆盖所有 included operation，并证明 Task/binding、Workspace 与 ExecutionConfig authority；若从未形成 checkpoint 且全部历史都被明确排除在 Conversation 外，则可以在原 Task 上建立空 Conversation，并从 Product 历史高水位继续分配 operation id。两种路径都不得重放历史输入。Skill、MCP 与 Permission authority 是否完整恢复只决定恢复后的能力状态；它们失效时接受 AgentCore 的 degraded Session并安全收缩能力，不能否定 Conversation恢复成功。
 
 MCP 不可用不得阻止普通 Text Task 创建。Task 标题附近的只读任务信息必须区分创建时已复制 MCP selection、MCP 已就绪但未选择工具，以及创建时 MCP 不可用；该事实不能被解释为可热附加能力，也不能包含 server、tool 或 credential 细节。
 
@@ -180,8 +180,9 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - manual compact 必须发布真实的 queued/compacting/stopping 与 terminal outcome；`compacted / no_change / degraded / aborted` 保持各自语义，before/after context token 只作为估算展示，compact provider usage 与 Run usage 分开记录；
 - 用户可以取消当前 Run；
 - 用户可以取消 active compact；Run 或 compact 的取消都必须等待 AgentCore 给出真实终止结果，不能只在 UI 中停止渲染。
-- Application 重启后，满足恢复资格的 open Task 必须在 Composer 中提供显式“恢复对话”动作；点击左栏 Task 只负责导航和阅读历史，不得隐式恢复 Session、启动 Run 或重放任何输入；
-- Conversation 恢复只从最新已提交 checkpoint 重建 Agent Session attachment。恢复完成前禁止新 Run 和其他 Session mutation；失败必须保留历史、给出稳定原因并仅在 Host 再次证明资格后允许用户重试。
+- Application 重启后，点击左栏 Task 只负责导航和阅读历史，不得隐式恢复 Session、启动 Run 或重放任何输入；当用户发送下一条消息时，Renderer 可以先请求 Host 重建 attachment，必须等 canonical Snapshot 确认可继续后才能提交新 Run；
+- 每个 Run/compact 历史必须发布它是否包含在恢复后的 Conversation 上下文中。被排除的记录仍完整可见，Task 主阅读流必须说明“部分历史不在恢复上下文”，但不得因此禁用已成功重建的 Composer；
+- Conversation 恢复优先从最新已提交 checkpoint 重建 Agent Session attachment；仅当没有 checkpoint、没有 included/pending 历史时，才允许在原 Task 上 fresh attach 空 Conversation。恢复完成前禁止新 Run 和其他 Session mutation；已有 included 历史但 checkpoint 缺失、损坏或不精确时继续 fail closed。失败必须保留历史、给出稳定原因并仅在 Host 再次证明资格后允许用户重试。
 
 ### 5.5 审批与输入
 

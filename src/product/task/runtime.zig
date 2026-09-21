@@ -401,7 +401,10 @@ pub const CloseError = ControlError || std.Thread.SpawnError || error{
     TaskBusy,
 };
 
+pub const RecoveryMode = enum { checkpoint, fresh };
+
 pub const RecoveryStartFacts = struct {
+    mode: RecoveryMode,
     workspace_id: u64,
     workspace_epoch: u64,
     execution_model: []const u8,
@@ -425,6 +428,27 @@ pub const RecoveryStartInput = struct {
     executor: ExecutorPort,
 };
 
+pub const FreshConversationCommitEffect = struct {
+    context: *anyopaque,
+    commit_fn: *const fn (*anyopaque) DurableCommit,
+
+    fn commit(self: FreshConversationCommitEffect) DurableCommit {
+        return self.commit_fn(self.context);
+    }
+};
+
+pub const FreshConversationStartInput = struct {
+    expected_binding_epoch: u64,
+    workspace_id: u64,
+    workspace_epoch: u64,
+    workspace_root: []const u8,
+    canonical_user_home: []const u8,
+    workspace_trust: RecoveryWorkspaceTrust,
+    execution: models_contract.ConfigInput,
+    agent_runtime: *agent.Runtime,
+    commit_binding: FreshConversationCommitEffect,
+};
+
 pub const RecoveryStartError = agent.Error || std.mem.Allocator.Error || error{
     UnknownTask,
     BindingEpochMismatch,
@@ -432,6 +456,9 @@ pub const RecoveryStartError = agent.Error || std.mem.Allocator.Error || error{
     RestoreAttemptExhausted,
     ExecutorShuttingDown,
     QueueFull,
+    BindingEpochExhausted,
+    TaskPersistenceFailed,
+    TaskPersistenceOutcomeUnknown,
 };
 
 pub const MutationError = std.mem.Allocator.Error || error{
@@ -3035,10 +3062,128 @@ pub const Runtime = struct {
             .denied => return error.RecoveryUnavailable,
         }
         return .{
+            .mode = if (freshConversationAllowed(task)) .fresh else .checkpoint,
             .workspace_id = task.durable.workspace_id,
             .workspace_epoch = task.durable.workspace_epoch,
             .execution_model = task.durable.execution_model,
         };
+    }
+
+    /// Installs a new empty AgentCore Conversation for a detached Task whose
+    /// entire visible history is explicitly excluded from Conversation
+    /// recovery. Product history ids remain consumed through the allocation
+    /// floor; no historical operation is replayed.
+    pub fn startFreshConversation(
+        self: *Runtime,
+        task_id: u64,
+        input: FreshConversationStartInput,
+    ) RecoveryStartError!u64 {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (input.expected_binding_epoch == 0 or
+            input.expected_binding_epoch != task.durable.binding_epoch)
+            return error.BindingEpochMismatch;
+        if (!freshConversationAllowed(task) or
+            input.workspace_id != task.durable.workspace_id or
+            input.workspace_epoch != task.durable.workspace_epoch or
+            input.execution.execution_generation == 0 or
+            input.execution.target.protocol != task.durable.execution_protocol or
+            task.runtime.active_operation != .none or
+            task.runtime.liveConst() != null)
+            return error.RecoveryUnavailable;
+        if (self.next_restore_attempt_id == 0 or
+            self.next_restore_attempt_id == std.math.maxInt(u64))
+            return error.RestoreAttemptExhausted;
+
+        var execution_input = input.execution;
+        execution_input.target.model = task.durable.execution_model;
+        var execution = try owned_task_execution.OwnedTaskExecution.clone(
+            self.allocator,
+            execution_input,
+        );
+        errdefer execution.deinit();
+        var epoch_storage: [32]u8 = undefined;
+        const epoch_token = std.fmt.bufPrint(
+            &epoch_storage,
+            "{d}",
+            .{input.workspace_epoch},
+        ) catch unreachable;
+        const permission = agentSessionPermission(
+            task.durable.permission_profile,
+            task.durable.permission_interaction,
+        );
+        var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
+            .model_binding = .{
+                .target = .{
+                    .provider_id = execution_input.target.provider_id,
+                    .protocol = agent_protocol.toAgent(execution_input.target.protocol),
+                    .base_url = execution_input.target.base_url,
+                    .model = task.durable.execution_model,
+                },
+                .credential = execution_input.api_key,
+            },
+            .permission_mode = permission.mode,
+            .shell_policy = permission.shell,
+            .permission_interaction = permission.interaction,
+            .workspace = .{
+                .canonical_root = input.workspace_root,
+                .trust = switch (input.workspace_trust) {
+                    .explicitly_trusted => .explicitly_trusted,
+                    .temporary => .{ .temporary = input.workspace_root },
+                },
+            },
+            .canonical_user_home = input.canonical_user_home,
+            .workspace_epoch = if (input.canonical_user_home.len != 0)
+                epoch_token
+            else
+                "",
+            .skill_catalog = null,
+            .skill_policy = null,
+            .mcp_selection = null,
+            .operation_id_floor = .{
+                .last_run_id = task_policy.runHistoryHighWater(task),
+                .last_compact_id = task_policy.compactHistoryHighWater(task),
+            },
+        });
+        var binding_live = true;
+        errdefer if (binding_live and !discardFreshBinding(&binding)) {
+            self.recovery_poisoned = true;
+        };
+
+        if (input.execution.execution_generation != task.durable.execution_generation) {
+            if (task.durable.binding_epoch == std.math.maxInt(u64))
+                return error.BindingEpochExhausted;
+            const previous_generation = task.durable.execution_generation;
+            const previous_epoch = task.durable.binding_epoch;
+            task.durable.execution_generation = input.execution.execution_generation;
+            task.durable.binding_epoch = previous_epoch + 1;
+            switch (input.commit_binding.commit()) {
+                .committed => {},
+                .failed, .outcome_unknown => |outcome| {
+                    task.durable.execution_generation = previous_generation;
+                    task.durable.binding_epoch = previous_epoch;
+                    return switch (outcome) {
+                        .failed => error.TaskPersistenceFailed,
+                        .outcome_unknown => error.TaskPersistenceOutcomeUnknown,
+                        .committed => unreachable,
+                    };
+                },
+            }
+        }
+
+        const attempt_id = self.next_restore_attempt_id;
+        task.runtime.attachment = .{ .attached = .{
+            .binding = binding.take(),
+            .execution = execution.take(),
+            .pinned_catalog = null,
+        } };
+        binding_live = false;
+        task.runtime.mcp_authority_at_creation = .unavailable;
+        task.runtime.last_restore_failure = null;
+        task.runtime.last_restore_report = null;
+        task.runtime.last_restore_permission = null;
+        task.conversation_observation = .{};
+        self.next_restore_attempt_id += 1;
+        return attempt_id;
     }
 
     pub fn startRecovery(
@@ -3230,6 +3375,7 @@ pub const Runtime = struct {
             .runtime_admission = external.runtime_admission,
             .execution_admission = external.execution_admission,
             .core = .{
+                .fresh_conversation_allowed = freshConversationAllowed(task),
                 .checkpoint_available = checkpoint != null and
                     task.durable.checkpoint_anchor == .available,
                 .checkpoint_binding_exact = checkpoint_binding_valid,
@@ -4818,6 +4964,22 @@ fn checkpointMutationPending(
 ) bool {
     return health.load(.acquire) != .unavailable and
         task.runtime.worker_leases.hasLive();
+}
+
+fn freshConversationAllowed(task: *const task_state.Task) bool {
+    return task.durable.checkpoint == null and
+        task_policy.maxCoveredRunId(task) == 0 and
+        task_policy.maxCoveredCompactId(task) == 0 and
+        !task_policy.hasPendingConversationCoverage(task);
+}
+
+fn discardFreshBinding(binding: *task_agent_session.Binding) bool {
+    switch (binding.closeOutcome(.session_close)) {
+        .closed => {},
+        .failure => return false,
+    }
+    binding.releaseClosed() catch return false;
+    return true;
 }
 
 fn taskExecutionInput(

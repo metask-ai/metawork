@@ -64,6 +64,7 @@ pub const Error = lifecycle.Error || product_attachment.Error || product_schedul
     TaskPersistenceUnavailable,
     TaskPersistenceFailed,
     TaskPersistenceOutcomeUnknown,
+    BindingEpochExhausted,
     RunGenerationExhausted,
     ExecutorShuttingDown,
     TaskCapacity,
@@ -3769,35 +3770,52 @@ pub const Runtime = struct {
         );
         const workspace = self.workspace.recoveryBinding(facts.workspace_id) orelse unreachable;
         const canonical_user_home = self.canonical_user_home orelse unreachable;
-        const store = self.checkpoint_store orelse unreachable;
-        const attempt_id = try self.task_runtime.startRecovery(task_id, .{
-            .expected_binding_epoch = expected_binding_epoch,
-            .workspace_id = workspace.id,
-            .workspace_epoch = workspace.epoch,
-            .workspace_root = workspace.canonical_root,
-            .canonical_user_home = canonical_user_home,
-            .workspace_trust = switch (workspace.trust) {
-                .explicitly_trusted => .explicitly_trusted,
-                .temporary => .temporary,
-            },
-            .workspace_kind = switch (workspace.kind) {
-                .manual => .manual,
-                .automatic => .automatic,
-            },
-            .execution = self.execution_state.executionInput().?,
-            .agent_runtime = self.agent_runtime,
-            .checkpoint_store = store,
-            .checkpoint_limits = checkpoint_export_limits,
-            .notifier = .{
-                .context = self.change_notifier.context,
-                .notify_fn = self.change_notifier.wake,
-            },
-            .executor = .{
-                .context = self,
-                .enqueue_fn = enqueueTaskRuntimeExecutor,
-                .cancel_fn = cancelTaskRuntimeExecutor,
-            },
-        });
+        const execution = self.execution_state.executionInput().?;
+        const workspace_trust: task_runtime.RecoveryWorkspaceTrust = switch (workspace.trust) {
+            .explicitly_trusted => .explicitly_trusted,
+            .temporary => .temporary,
+        };
+        const attempt_id = switch (facts.mode) {
+            .fresh => try self.task_runtime.startFreshConversation(task_id, .{
+                .expected_binding_epoch = expected_binding_epoch,
+                .workspace_id = workspace.id,
+                .workspace_epoch = workspace.epoch,
+                .workspace_root = workspace.canonical_root,
+                .canonical_user_home = canonical_user_home,
+                .workspace_trust = workspace_trust,
+                .execution = execution,
+                .agent_runtime = self.agent_runtime,
+                .commit_binding = .{
+                    .context = self,
+                    .commit_fn = commitTaskRuntimeCandidate,
+                },
+            }),
+            .checkpoint => try self.task_runtime.startRecovery(task_id, .{
+                .expected_binding_epoch = expected_binding_epoch,
+                .workspace_id = workspace.id,
+                .workspace_epoch = workspace.epoch,
+                .workspace_root = workspace.canonical_root,
+                .canonical_user_home = canonical_user_home,
+                .workspace_trust = workspace_trust,
+                .workspace_kind = switch (workspace.kind) {
+                    .manual => .manual,
+                    .automatic => .automatic,
+                },
+                .execution = execution,
+                .agent_runtime = self.agent_runtime,
+                .checkpoint_store = self.checkpoint_store orelse unreachable,
+                .checkpoint_limits = checkpoint_export_limits,
+                .notifier = .{
+                    .context = self.change_notifier.context,
+                    .notify_fn = self.change_notifier.wake,
+                },
+                .executor = .{
+                    .context = self,
+                    .enqueue_fn = enqueueTaskRuntimeExecutor,
+                    .cancel_fn = cancelTaskRuntimeExecutor,
+                },
+            }),
+        };
         self.bumpRevision();
         return attempt_id;
     }

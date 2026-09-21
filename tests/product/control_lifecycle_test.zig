@@ -1361,7 +1361,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     _ = try restored.runTask(task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(
         &restored,
-        "\"id\":\"2\",\"phase\":\"completed\"",
+        "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         "\"outcome\":\"completed\"",
     );
     fake_core.lock();
@@ -1780,7 +1780,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     _ = try continued.runTask(task_id, .{ .text = "automatic second run" });
     try waitTaskSnapshot(
         &continued,
-        "\"id\":\"2\",\"phase\":\"completed\"",
+        "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         "\"outcome\":\"completed\"",
     );
     fake_core.lock();
@@ -3250,7 +3250,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     var terminal_needle: [96]u8 = undefined;
     const terminal = try std.fmt.bufPrint(
         &terminal_needle,
-        "\"id\":\"{d}\",\"phase\":\"completed\"",
+        "\"id\":\"{d}\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         .{pure_run_id},
     );
     try waitControlSnapshot(&workbench, terminal);
@@ -3287,7 +3287,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     } });
     const text_terminal = try std.fmt.bufPrint(
         &terminal_needle,
-        "\"id\":\"{d}\",\"phase\":\"completed\"",
+        "\"id\":\"{d}\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         .{text_run_id},
     );
     try waitControlSnapshot(&workbench, text_terminal);
@@ -4874,7 +4874,7 @@ test "compact queue rejection persists a legal terminal record and returns its o
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"operationId\":\"1\",\"afterRunId\":\"1\",\"phase\":\"failed\"",
+        "\"operationId\":\"1\",\"afterRunId\":\"1\",\"conversationCoverage\":\"included\",\"phase\":\"failed\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -5229,7 +5229,7 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
     );
     try waitTaskSnapshot(
         &restored,
-        "\"id\":\"3\",\"phase\":\"completed\"",
+        "\"id\":\"3\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         "\"outcome\":\"completed\"",
     );
 }
@@ -5364,7 +5364,7 @@ test "cold start excludes a killed in-flight tail and continues above its Produc
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
-        "\"id\":\"2\",\"phase\":\"interrupted\"",
+        "\"id\":\"2\",\"conversationCoverage\":\"excluded\",\"phase\":\"interrupted\"",
     );
     _ = try restored.restoreTaskConversation(
         task_id,
@@ -5382,7 +5382,131 @@ test "cold start excludes a killed in-flight tail and continues above its Produc
     );
     try waitTaskSnapshot(
         &restored,
-        "\"id\":\"3\",\"phase\":\"completed\"",
+        "\"id\":\"3\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
+        "\"outcome\":\"completed\"",
+    );
+}
+
+test "cold start after first Run is killed fresh-attaches above excluded history" {
+    fake_core.reset();
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+
+    var runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    };
+    var first_configuration = productControlConfiguration();
+    first_configuration.directories.canonical_user_home = home;
+    first_configuration.task_persistence = persistence.capability();
+    var first = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        first_configuration,
+    );
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    try installControlExecution(&first);
+    const task_id = try first.createTask(productControlTaskInput());
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try first.runTask(task_id, .{ .text = "killed before first checkpoint" }),
+    );
+    try waitControlSnapshot(&first, "\"currentRunPhase\":\"running\"");
+    const killed_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(killed_history);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        killed_history,
+        "\"id\":1,\"coverage\":\"pending\"",
+    ) != null);
+    first.shutdownExecutor();
+    first.deinit();
+    first_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    fake_core.reset();
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
+    var restored_configuration = productControlConfiguration();
+    restored_configuration.directories.canonical_user_home = home;
+    restored_configuration.task_persistence = persistence.capabilityRestored(killed_history);
+    var restored = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        restored_configuration,
+    );
+    defer restored.deinit();
+    try installControlExecution(&restored);
+    _ = try restored.openWorkspace(productControlTaskInput());
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+    fake_core.lock();
+    const restore_calls = fake_core.checkpoint_restores;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), restore_calls);
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try restored.runTask(task_id, .{ .text = "continue with a fresh Conversation" }),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         "\"outcome\":\"completed\"",
     );
 }
@@ -5545,7 +5669,7 @@ test "queued pre-Core shutdown tail stays visible but does not invalidate its ch
     try waitTaskSnapshot(
         &restored,
         "\"title\":\"continuation target\"",
-        "\"id\":\"3\",\"phase\":\"completed\"",
+        "\"id\":\"3\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
     );
 }
 

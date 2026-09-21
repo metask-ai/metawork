@@ -273,6 +273,12 @@ export function TaskContent({
     : null;
   const latestCopyableId = latestCopyableResponseId(task?.runs ?? []);
   const latestInputId = task?.runs.at(-1)?.id ?? null;
+  const hasExcludedConversationHistory =
+    task?.runs.some((run) => run.conversationCoverage === "excluded") ||
+    task?.compacts.some(
+      (compact) => compact.conversationCoverage === "excluded",
+    ) ||
+    false;
 
   useEffect(() => {
     if (!hasRunTimes) return;
@@ -357,6 +363,11 @@ export function TaskContent({
           : undefined
       }
     >
+      {hasExcludedConversationHistory && (
+        <p className="projection-notice conversation-coverage-notice" role="note">
+          {t("task.conversation_history_excluded")}
+        </p>
+      )}
       {task?.runs.map((run) => {
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;

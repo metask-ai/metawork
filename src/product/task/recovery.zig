@@ -37,6 +37,10 @@ pub const ExecutionAdmission = enum { available, unavailable };
 /// absent: Skill, MCP and durable permission continuity may only narrow the
 /// restored Session after this decision.
 pub const CoreRecoveryAuthority = struct {
+    /// A detached Task may start a new empty AgentCore Conversation only when
+    /// Product history proves that no operation belongs to a prior
+    /// checkpointed Conversation. Excluded history still remains visible.
+    fresh_conversation_allowed: bool = false,
     checkpoint_available: bool = false,
     checkpoint_binding_exact: bool = false,
     checkpoint_history_exact: bool = false,
@@ -64,11 +68,13 @@ pub fn evaluateRecoveryAdmission(facts: RecoveryAdmissionFacts) AdmissionDecisio
     if (facts.operation != .none) return .{ .denied = .authority_unavailable };
     if (facts.archived) return .{ .denied = .task_archived };
     if (!facts.task_persistence_ready) return .{ .denied = .persistence_unavailable };
-    if (!facts.checkpoint_store_ready) return .{ .denied = .checkpoint_unavailable };
-    if (!facts.core.checkpoint_available or
-        !facts.core.checkpoint_binding_exact or
-        !facts.core.checkpoint_history_exact)
-        return .{ .denied = .checkpoint_unavailable };
+    if (!facts.core.fresh_conversation_allowed) {
+        if (!facts.checkpoint_store_ready) return .{ .denied = .checkpoint_unavailable };
+        if (!facts.core.checkpoint_available or
+            !facts.core.checkpoint_binding_exact or
+            !facts.core.checkpoint_history_exact)
+            return .{ .denied = .checkpoint_unavailable };
+    }
     if (facts.execution_admission != .available)
         return .{ .denied = .execution_rebind_required };
     if (!facts.core.workspace_identity_exact or !facts.core.automatic_owner_exact)
@@ -149,6 +155,35 @@ test "failed recovery remains one retryable continuation state" {
     const result = project(facts);
     try std.testing.expect(result.recovery_available);
     try std.testing.expectEqual(UnavailableReason.session_recovery_failed, result.continuation.unavailable);
+}
+
+test "fresh Conversation recovery does not require a checkpoint store" {
+    var facts = eligibleFacts();
+    facts.checkpoint_store_ready = false;
+    facts.core.checkpoint_available = false;
+    facts.core.checkpoint_binding_exact = false;
+    facts.core.checkpoint_history_exact = false;
+    facts.core.fresh_conversation_allowed = true;
+    const result = project(facts);
+    try std.testing.expect(result.recovery_available);
+    try std.testing.expectEqual(
+        UnavailableReason.session_recovery_required,
+        result.continuation.unavailable,
+    );
+}
+
+test "covered history without a checkpoint remains fail closed" {
+    var facts = eligibleFacts();
+    facts.core.checkpoint_available = false;
+    facts.core.checkpoint_binding_exact = false;
+    facts.core.checkpoint_history_exact = false;
+    facts.core.fresh_conversation_allowed = false;
+    const result = project(facts);
+    try std.testing.expect(!result.recovery_available);
+    try std.testing.expectEqual(
+        UnavailableReason.checkpoint_unavailable,
+        result.continuation.unavailable,
+    );
 }
 
 test "recovery admission is fail closed for every core prerequisite" {
