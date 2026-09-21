@@ -5511,6 +5511,89 @@ test "cold start after first Run is killed fresh-attaches above excluded history
     );
 }
 
+test "poisoned Session closes and the same Task continues with a fresh Conversation" {
+    fake_core.reset();
+    fake_core.setNextPlan(.invalid_result_layout);
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = persistence.capability();
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const task_id = try workbench.createTask(productControlTaskInput());
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try workbench.runTask(task_id, .{ .text = "poison this Session" }),
+    );
+    try waitTaskSnapshot(
+        &workbench,
+        "\"id\":\"1\"",
+        "\"conversationCoverage\":\"excluded\",\"phase\":\"failed\"",
+    );
+    try waitTaskSnapshot(
+        &workbench,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    fake_core.lock();
+    const destroyed_after_poison = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), destroyed_after_poison);
+
+    _ = try workbench.restoreTaskConversation(
+        task_id,
+        try workbench.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &workbench,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try workbench.runTask(task_id, .{ .text = "continue the same Task" }),
+    );
+    try waitTaskSnapshot(
+        &workbench,
+        "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
+        "\"outcome\":\"completed\"",
+    );
+}
+
 test "queued pre-Core shutdown tail stays visible but does not invalidate its checkpoint" {
     fake_core.reset();
     fake_core.setCheckpointGeneration(1);

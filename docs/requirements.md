@@ -45,6 +45,8 @@ MetaWork 当前不定义为：
 
 Task 是用户可持续补充的产品工作上下文，归属于 Workspace，拥有消息、运行状态、Run 历史、Session maintenance 历史和不含 secret 的 execution binding 历史。Task 的模型 binding 独立于 Models 全局默认值：设置页模型只作为新建 Task 默认值；已有 Task 只有在 Models 当前 Metask catalog 与该 Task 精确持有的 source/protocol/binding authority一致时，才能在 Composer 选择下一轮模型。默认 credential、protocol、source 或 generation 已变化时，Task继续使用自身 pinned execution，模型控件只读。当前 Custom Provider binding不开放已有 Task模型切换。attached Task 在当前进程中持有一个内部 Agent Session 与 Conversation；Session 是执行生命周期术语，不是第二个产品对象或 Renderer 身份。Run、会改变 Conversation 的 maintenance operation 与 Conversation restore 共用一个 Product Task-owned active operation 槽，不能并发进入同一 Session。历史 Task 可以跨重启恢复为 detached 记录：已有 Conversation 历史时，Host 必须证明最新 checkpoint 精确覆盖所有 included operation，并证明 Task/binding、Workspace 与 ExecutionConfig authority；若从未形成 checkpoint 且全部历史都被明确排除在 Conversation 外，则可以在原 Task 上建立空 Conversation，并从 Product 历史高水位继续分配 operation id。两种路径都不得重放历史输入。Skill、MCP 与 Permission authority 是否完整恢复只决定恢复后的能力状态；它们失效时接受 AgentCore 的 degraded Session并安全收缩能力，不能否定 Conversation恢复成功。
 
+当前 Agent Session 因运行失败进入 poisoned 后，Host 必须在本轮 terminal、checkpoint 与资源引用全部收口后关闭并释放该 Session，再把同一 Task 转为可恢复的 detached 历史；用户后续发送消息沿既有 Conversation restore/fresh attach 路径继续，不要求结束 Task 或创建新 Task。Session close 或资源 release 失败时必须保留真实的 attached/closing 状态并拒绝伪恢复，不能丢弃 owner、泄漏资源或自动无限重试。
+
 MCP 不可用不得阻止普通 Text Task 创建。Task 标题附近的只读任务信息必须区分创建时已复制 MCP selection、MCP 已就绪但未选择工具，以及创建时 MCP 不可用；该事实不能被解释为可热附加能力，也不能包含 server、tool 或 credential 细节。
 
 ### Turn / Run

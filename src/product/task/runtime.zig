@@ -2752,7 +2752,7 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             std.debug.assert(!task.runtime.worker_leases.hasLive());
-            excludePendingConversationTail(task);
+            _ = excludePendingConversationTail(task);
         }
     }
 
@@ -3563,8 +3563,8 @@ pub const Runtime = struct {
     pub fn syncCloseCompletions(
         self: *Runtime,
         effects: ReleaseEffects,
-    ) bool {
-        var changed = false;
+    ) LifecycleSync {
+        var result: LifecycleSync = .{};
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             const completion = task.runtime.close_completion.load(.acquire);
@@ -3578,7 +3578,8 @@ pub const Runtime = struct {
             switch (completion) {
                 .closed => {
                     std.debug.assert(!task.runtime.worker_leases.hasLive());
-                    excludePendingConversationTail(task);
+                    result.durable_changed = excludePendingConversationTail(task) or
+                        result.durable_changed;
                     std.debug.assert(
                         task.runtime.closingWorkerBinding().?.state() == .released,
                     );
@@ -3606,6 +3607,29 @@ pub const Runtime = struct {
                 .none, .running => unreachable,
             }
             task.runtime.cancel_requested = false;
+            result.changed = true;
+        }
+        return result;
+    }
+
+    /// A poisoned Session cannot accept another operation. Once the operation
+    /// that produced that disposition and its checkpoint transaction have
+    /// settled, route it through the ordinary close/release owner so the Task
+    /// can become detached and use Conversation recovery. Close failures stay
+    /// attached/closing and require an explicit retry; otherwise a persistent
+    /// destroy failure would become a busy automatic retry loop.
+    pub fn requestPoisonedSessionCloses(self: *Runtime) bool {
+        var changed = false;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.deletion == .deleting or
+                task.runtime.close_requested or
+                task.runtime.close_failed or
+                task.runtime.close_thread != null)
+                continue;
+            const attached = task.runtime.attachedConst() orelse continue;
+            if (attached.health != .session_poisoned) continue;
+            task.runtime.close_requested = true;
             changed = true;
         }
         return changed;
@@ -3793,8 +3817,11 @@ pub const Runtime = struct {
         result.changed = operations.changed or result.changed;
         result.durable_changed = operations.durable_changed or result.durable_changed;
         result.changed = self.syncCheckpointPostprocesses(effects.checkpoint) or result.changed;
+        result.changed = self.requestPoisonedSessionCloses() or result.changed;
         result.changed = self.syncRequestedCloses(effects.notifier) or result.changed;
-        result.changed = self.syncCloseCompletions(effects.release) or result.changed;
+        const closes = self.syncCloseCompletions(effects.release);
+        result.changed = closes.changed or result.changed;
+        result.durable_changed = closes.durable_changed or result.durable_changed;
         return result;
     }
 };
@@ -3887,15 +3914,23 @@ fn rollbackCheckpointCoverageOverlay(
     }
 }
 
-fn excludePendingConversationTail(task: *task_state.Task) void {
+fn excludePendingConversationTail(task: *task_state.Task) bool {
+    var changed = false;
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
-        if (run.coverage == .pending) run.coverage = .excluded;
+        if (run.coverage == .pending) {
+            run.coverage = .excluded;
+            changed = true;
+        }
     }
     for (task.durable.compacts) |*entry| {
         const compact = &(entry.* orelse continue);
-        if (compact.coverage == .pending) compact.coverage = .excluded;
+        if (compact.coverage == .pending) {
+            compact.coverage = .excluded;
+            changed = true;
+        }
     }
+    return changed;
 }
 
 fn markAutomaticTitleUserOverride(task: *task_state.Task) void {

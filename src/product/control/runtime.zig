@@ -14525,6 +14525,100 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
     );
 }
 
+test "poisoned Session close preserves ownership until successful release" {
+    const Harness = struct {
+        fn complete(
+            binding: *task_test_agent_session.Binding,
+            completion: *std.atomic.Value(CloseCompletion),
+            result: CloseCompletion,
+        ) void {
+            if (result == .closed) binding.markReleasedForTest();
+            completion.store(result, .release);
+        }
+    };
+    const cases = [_]struct {
+        completion: CloseCompletion,
+        expected_health: ?task_test_attachment.AttachedHealth,
+    }{
+        .{ .completion = .closed, .expected_health = null },
+        .{ .completion = .failed_reusable, .expected_health = .available },
+        .{ .completion = .failed_poisoned, .expected_health = .session_poisoned },
+        .{ .completion = .failed_closing, .expected_health = null },
+    };
+
+    for (cases) |case| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = &control.task_runtime.tasks[0].?;
+        defer detachTaskForTest(&control, task);
+        task.runtime.active_operation = .none;
+        task.runtime.active_run_id = 0;
+        const route_id = task.runtime.routeId();
+        foldTerminalDisposition(task, .poisoned);
+        try std.testing.expect(control.task_runtime.requestPoisonedSessionCloses());
+        try std.testing.expect(task.runtime.close_requested);
+
+        // The close worker is simulated here so each typed completion can be
+        // checked independently without teaching the fixture Binding to own a
+        // second close implementation.
+        task.runtime.close_requested = false;
+        try std.testing.expect(task.runtime.beginClosing());
+        task.runtime.close_completion.store(.running, .release);
+        task.runtime.close_thread = try std.Thread.spawn(.{}, Harness.complete, .{
+            task.runtime.closingWorkerBinding().?,
+            &task.runtime.close_completion,
+            case.completion,
+        });
+        for (0..10_000) |_| {
+            if (task.runtime.close_completion.load(.acquire) == case.completion) break;
+            std.Thread.yield() catch {};
+        }
+        try std.testing.expectEqual(
+            case.completion,
+            task.runtime.close_completion.load(.acquire),
+        );
+
+        control.syncLifecycle();
+        try std.testing.expect(task.runtime.close_thread == null);
+        switch (case.completion) {
+            .closed => {
+                try std.testing.expect(task.runtime.live() == null);
+                try std.testing.expectEqual(@as(u64, 0), task.runtime.routeId());
+                try std.testing.expectEqual(
+                    task_test_state.ConversationCoverage.excluded,
+                    task.durable.runs[0].?.coverage,
+                );
+                try std.testing.expect(!task.runtime.close_failed);
+            },
+            .failed_reusable, .failed_poisoned => {
+                const attached = task.runtime.attachedConst().?;
+                try std.testing.expectEqual(case.expected_health.?, attached.health);
+                try std.testing.expectEqual(route_id, task.runtime.routeId());
+                try std.testing.expect(task.runtime.executionConst() != null);
+                try std.testing.expect(task.runtime.close_failed);
+                try std.testing.expectEqual(
+                    task_test_state.ConversationCoverage.pending,
+                    task.durable.runs[0].?.coverage,
+                );
+                try std.testing.expect(!control.task_runtime.requestPoisonedSessionCloses());
+                try std.testing.expect(!task.runtime.close_requested);
+            },
+            .failed_closing => {
+                try std.testing.expect(task.runtime.hasClosingSession());
+                try std.testing.expectEqual(route_id, task.runtime.routeId());
+                try std.testing.expect(task.runtime.executionConst() != null);
+                try std.testing.expect(task.runtime.close_failed);
+                try std.testing.expectEqual(TaskLifecycle.closing, taskLifecycle(task));
+                try std.testing.expectEqual(
+                    task_test_state.ConversationCoverage.pending,
+                    task.durable.runs[0].?.coverage,
+                );
+            },
+            .none, .running => unreachable,
+        }
+    }
+}
+
 test "canonical prompt title and terminal diagnostic never retain the registered credential" {
     var control = try testRuntime();
     defer control.deinit();

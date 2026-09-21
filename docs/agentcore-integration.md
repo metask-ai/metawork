@@ -305,6 +305,8 @@ Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 
 
 下面顺序描述 Agent Session close 自身。Product 在调用它之前必须先停止 Task admission、收口 active Run/compact、等待 terminal event drain、checkpoint postprocess 与 worker lease settled；可复用 Session 的 checkpoint export 必须发生在 Session destroy 之前。随后 Product 才能排除未进入当前 Conversation 的剩余 pending history，并进入 Agent close。异常进程终止没有该机会，Product 在下一次冷启动按 durable coverage 归一化。
 
+Agent terminal disposition 为 poisoned 时，Product 也必须使用这条唯一 close 顺序：先让产生该 disposition 的 operation、event、checkpoint 与 Product worker lease 收口，再 close/release Session，成功后才 detach 并进入 Product-owned Conversation recovery。close failure 返回的 Session disposition 是实际 attachment health；Product 必须保留相应 owner 与资源，不得把失败解释为 detach，也不得自动循环 destroy。
+
 ```text
 1. close control lease acquisition gate and CAS Session state → Closing
 2. reject new Run/compact and UI response
