@@ -1035,6 +1035,43 @@ pub const Session = struct {
         if (should_abort) self.abortRun(run_id, signal);
     }
 
+    /// Fails the active Run when Product observes a UI request identity that
+    /// contradicts its durable history. The dependency-contract failure owns
+    /// the terminal result; waking and aborting the callback only make the
+    /// already-invalid Run converge promptly.
+    pub fn failUiRequestIdentityContract(self: *Session, run_id: u64) Error!void {
+        self.lock();
+        if (self.state == .closing or self.state == .closed) {
+            self.unlock();
+            return error.SessionClosing;
+        }
+        if (self.state == .poisoned) {
+            self.unlock();
+            return error.SessionPoisoned;
+        }
+        if (run_id == 0 or run_id != self.active_run_id or self.run_done or
+            self.state == .idle)
+        {
+            self.unlock();
+            return error.NoSuchRun;
+        }
+        self.dependency_contract_failure = true;
+        setTerminationSignalLocked(self, .{ .callback_failure = .ui });
+        wakeUiLocked(self);
+        const was_queued = self.state == .queued;
+        const should_abort = !self.cancel_requested and !was_queued and
+            self.core_call_in_progress;
+        self.cancel_requested = true;
+        if (should_abort) self.abort_calls_in_progress += 1;
+        self.unlock();
+
+        if (was_queued) {
+            _ = self.agent_runtime.notifyEventConsumer();
+            return;
+        }
+        if (should_abort) self.abortRun(run_id, .{ .callback_failure = .ui });
+    }
+
     pub fn requestControlledTermination(
         self: *Session,
         run_id: u64,

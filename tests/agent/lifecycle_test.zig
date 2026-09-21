@@ -2325,6 +2325,38 @@ test "UI request validates identity and close wakes a suspended callback" {
     try closeSession(cancelled, .session_close);
 }
 
+test "Product UI identity collision fails and poisons the active Run" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const run_id = try submitSession(session, "request colliding UI identity");
+    try session.waitForState(.waiting_ui);
+
+    try session.failUiRequestIdentityContract(run_id);
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    defer terminal.deinit();
+    try std.testing.expectEqual(
+        @as(?lifecycle.TerminalFailure, .dependency_contract),
+        terminal.failure,
+    );
+    try std.testing.expectEqual(
+        lifecycle.SessionDisposition.poisoned,
+        terminal.session_disposition_at_completion,
+    );
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+    try closeSession(session, .session_close);
+}
+
 test "Session UI requests allocate above the Product history floor" {
     fake_core.reset();
     fake_core.setNextPlan(.ui_wait);

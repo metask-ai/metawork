@@ -381,6 +381,7 @@ pub const ControlError = agent.Error || std.mem.Allocator.Error || error{
     UnknownTask,
     NoSuchRun,
     NoSuchCompact,
+    UiRequestIdentityCollision,
     TaskClosing,
     TaskPersistenceFailed,
     TaskPersistenceOutcomeUnknown,
@@ -760,23 +761,29 @@ pub const PreparedUiResponse = struct {
     previous_activity_order: u64,
     previous_recent_order: u64,
     previous_next_recent_order: u64,
+    history_inserted: bool,
     active: bool = true,
 
     pub fn rollback(self: *PreparedUiResponse) void {
         std.debug.assert(self.active);
-        rollbackUiRecord(
-            self.task,
-            self.run,
-            self.history_slot,
-            self.previous_history_record,
-            self.previous_history_next,
-            self.previous_history_count,
-            self.previous_pending_request_id,
-            self.previous_pending_order,
-            self.previous_activity_order,
-            self.previous_recent_order,
-        );
-        self.runtime.next_recent_order = self.previous_next_recent_order;
+        if (self.history_inserted) {
+            rollbackUiRecord(
+                self.task,
+                self.run,
+                self.history_slot,
+                self.previous_history_record,
+                self.previous_history_next,
+                self.previous_history_count,
+                self.previous_pending_request_id,
+                self.previous_pending_order,
+                self.previous_activity_order,
+                self.previous_recent_order,
+            );
+            self.runtime.next_recent_order = self.previous_next_recent_order;
+        } else {
+            self.task.runtime.pending_ui_request_id = self.previous_pending_request_id;
+            self.task.runtime.pending_ui_order = self.previous_pending_order;
+        }
         self.access.deinit();
         self.active = false;
     }
@@ -785,6 +792,11 @@ pub const PreparedUiResponse = struct {
         self: *PreparedUiResponse,
     ) (agent.Error || std.mem.Allocator.Error)!void {
         std.debug.assert(self.active);
+        if (!self.history_inserted) {
+            self.access.deinit();
+            self.active = false;
+            return;
+        }
         self.access.respondPermission(
             self.run_id,
             self.request_id,
@@ -1519,11 +1531,18 @@ pub const Runtime = struct {
             run_id,
             run_record.redaction_secret,
         );
+        var identity_collision = false;
         const dispatch = requestRunTermination(run_record, .user_cancel);
         if (effects.executor.cancel(run_record)) {
             run_record.terminal_observed = true;
-            if (record) |value| pushUiRecord(task, value);
-            task.runtime.cancel_requested = false;
+            if (record) |value| switch (pushUiRecord(task, value)) {
+                .inserted, .already_resolved => {},
+                .identity_collision => {
+                    identity_collision = true;
+                    failUiRequestIdentityCollision(task, &access, run_id);
+                },
+            };
+            task.runtime.cancel_requested = identity_collision;
             task.durable.recent_order = self.takeRecentOrder();
             return true;
         }
@@ -1532,7 +1551,10 @@ pub const Runtime = struct {
             .already_finishing, .already_terminal, .stale_run, .session_closing => false,
         };
         if (!stopping) return false;
-        if (record) |value| pushUiRecord(task, value);
+        if (record) |value| switch (pushUiRecord(task, value)) {
+            .inserted, .already_resolved => {},
+            .identity_collision => failUiRequestIdentityCollision(task, &access, run_id),
+        };
         task.runtime.cancel_requested = true;
         _ = task_state.setActivePhase(run_record, .stopping);
         task.durable.recent_order = self.takeRecentOrder();
@@ -1550,6 +1572,11 @@ pub const Runtime = struct {
         const run_record = task_state.findRun(task.durable.runs, run_id) orelse
             return error.NoSuchRun;
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
+        errdefer access.deinit();
+        const pending = access.pendingUiObservation() orelse
+            return error.NoPendingUiRequest;
+        if (pending.run_id != run_id or pending.request_id != request_id)
+            return error.StaleUiResponse;
         const record = prepareUiRecord(
             self,
             &access,
@@ -1567,8 +1594,15 @@ pub const Runtime = struct {
         const previous_activity_order = run_record.next_activity_order;
         const previous_recent_order = task.durable.recent_order;
         const previous_next_recent_order = self.next_recent_order;
-        pushUiRecord(task, record);
-        task.durable.recent_order = self.takeRecentOrder();
+        const insertion = pushUiRecord(task, record);
+        switch (insertion) {
+            .inserted => task.durable.recent_order = self.takeRecentOrder(),
+            .already_resolved => {},
+            .identity_collision => {
+                failUiRequestIdentityCollision(task, &access, run_id);
+                return error.UiRequestIdentityCollision;
+            },
+        }
         return .{
             .runtime = self,
             .task = task,
@@ -1586,6 +1620,7 @@ pub const Runtime = struct {
             .previous_activity_order = previous_activity_order,
             .previous_recent_order = previous_recent_order,
             .previous_next_recent_order = previous_next_recent_order,
+            .history_inserted = insertion == .inserted,
         };
     }
 
@@ -1703,7 +1738,11 @@ pub const Runtime = struct {
         task.runtime.close_requested = true;
         if (closeReady(task))
             try startCloseWorker(task, effects.worker.notifier, retrying);
-        if (cancelled_ui) |record| pushUiRecord(task, record);
+        if (cancelled_ui) |record| switch (pushUiRecord(task, record)) {
+            .inserted, .already_resolved => {},
+            .identity_collision => if (observation_access) |*access|
+                failUiRequestIdentityCollision(task, access, record.run_id),
+        };
         task.durable.recent_order = self.takeRecentOrder();
         return true;
     }
@@ -3424,10 +3463,25 @@ pub const Runtime = struct {
             else
                 null;
             defer if (observation_access) |*access| access.deinit();
-            const pending = if (observation_access) |*access|
+            const observed_pending = if (observation_access) |*access|
                 access.pendingUiObservation()
             else
                 null;
+            var pending = observed_pending;
+            if (observed_pending) |observation| switch (classifyUiRecordIdentity(
+                task.durable.ui_history,
+                observation.run_id,
+                observation.request_id,
+            )) {
+                .inserted => {},
+                .already_resolved => pending = null,
+                .identity_collision => {
+                    pending = null;
+                    if (observation_access) |*access|
+                        failUiRequestIdentityCollision(task, access, observation.run_id);
+                    result.changed = true;
+                },
+            };
             const pending_request_id = if (pending) |value| value.request_id else 0;
             if (task.runtime.pending_ui_request_id != pending_request_id) {
                 task.runtime.pending_ui_request_id = pending_request_id;
@@ -4138,6 +4192,14 @@ fn writePendingUiProjection(
     if (task.runtime.pending_ui_request_id != pending.request_id or
         task.runtime.pending_ui_order == 0)
     {
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+        return;
+    }
+    if (classifyUiRecordIdentity(
+        task.durable.ui_history,
+        pending.run_id,
+        pending.request_id,
+    ) != .inserted) {
         writer.writeAll("null") catch return error.SnapshotTooLarge;
         return;
     }
@@ -5608,6 +5670,23 @@ fn poisonAttachment(task: *task_state.Task) void {
         attached.health = .session_poisoned;
 }
 
+fn failUiRequestIdentityCollision(
+    task: *task_state.Task,
+    access: *task_agent_session.Access,
+    run_id: u64,
+) void {
+    task.runtime.pending_ui_request_id = 0;
+    task.runtime.pending_ui_order = 0;
+    task.runtime.cancel_requested = true;
+    if (task_state.findRun(task.durable.runs, run_id)) |run_record| {
+        if (!task_state.isTerminalPhase(task_state.runPhase(run_record))) {
+            _ = task_state.setActivePhase(run_record, .stopping);
+        }
+    }
+    access.failUiRequestIdentityContract(run_id) catch {};
+    poisonAttachment(task);
+}
+
 fn prepareUiRecord(
     self: *Runtime,
     access: *task_agent_session.Access,
@@ -5677,9 +5756,46 @@ fn fillUiRecord(
     record.redacted = projected.redacted;
 }
 
-fn pushUiRecord(task: *task_state.Task, record: task_state.UiRecord) void {
-    for (task.durable.ui_history) |entry| if (entry) |existing|
-        if (existing.request_id == record.request_id) return;
+const UiRecordInsertion = enum {
+    inserted,
+    already_resolved,
+    identity_collision,
+};
+
+fn classifyUiRecordIdentity(
+    history: []const ?task_state.UiRecord,
+    run_id: u64,
+    request_id: u64,
+) UiRecordInsertion {
+    for (history) |entry| if (entry) |existing| {
+        if (existing.request_id != request_id) continue;
+        return if (existing.run_id == run_id)
+            .already_resolved
+        else
+            .identity_collision;
+    };
+    return .inserted;
+}
+
+fn pushUiRecord(
+    task: *task_state.Task,
+    record: task_state.UiRecord,
+) UiRecordInsertion {
+    const identity = classifyUiRecordIdentity(
+        task.durable.ui_history,
+        record.run_id,
+        record.request_id,
+    );
+    if (identity != .inserted) {
+        if (identity == .already_resolved and
+            task.runtime.active_run_id == record.run_id and
+            task.runtime.pending_ui_request_id == record.request_id)
+        {
+            task.runtime.pending_ui_request_id = 0;
+            task.runtime.pending_ui_order = 0;
+        }
+        return identity;
+    }
     var stored = record;
     if (stored.permission == null and stored.agent_request_id_len != 0) {
         if (task_state.findRun(task.durable.runs, stored.run_id)) |run_record| {
@@ -5712,6 +5828,7 @@ fn pushUiRecord(task: *task_state.Task, record: task_state.UiRecord) void {
         task.durable.ui_history_count + 1,
         task.durable.ui_history.len,
     );
+    return .inserted;
 }
 
 fn rollbackUiRecord(
@@ -5908,4 +6025,82 @@ test "Runtime owns bounded Task collection and monotonic process facts" {
         runtime.takeTaskId(),
     );
     try std.testing.expectEqual(std.math.maxInt(u64), runtime.next_task_id);
+}
+
+test "UI history distinguishes idempotent settlement from cross-Run collision" {
+    const history = [_]?task_state.UiRecord{
+        .{
+            .request_id = 9,
+            .run_id = 3,
+            .kind = .permission,
+            .state = .allowed_once,
+        },
+        null,
+    };
+    try std.testing.expectEqual(
+        UiRecordInsertion.already_resolved,
+        classifyUiRecordIdentity(&history, 3, 9),
+    );
+    try std.testing.expectEqual(
+        UiRecordInsertion.identity_collision,
+        classifyUiRecordIdentity(&history, 4, 9),
+    );
+    try std.testing.expectEqual(
+        UiRecordInsertion.inserted,
+        classifyUiRecordIdentity(&history, 4, 10),
+    );
+
+    var runs: [0]?task_state.RunRecord = .{};
+    var compacts: [0]?task_state.CompactRecord = .{};
+    var mutable_history = history;
+    var task = task_state.Task{
+        .durable = .{
+            .id = 1,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 1,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &mutable_history,
+            .ui_history_count = 1,
+            .ui_history_next = 1,
+        },
+        .runtime = .{
+            .active_run_id = 3,
+            .pending_ui_request_id = 9,
+            .pending_ui_order = 7,
+        },
+    };
+    try std.testing.expectEqual(
+        UiRecordInsertion.already_resolved,
+        pushUiRecord(&task, .{
+            .request_id = 9,
+            .run_id = 3,
+            .kind = .permission,
+            .state = .denied,
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 0), task.runtime.pending_ui_request_id);
+    try std.testing.expectEqual(@as(usize, 1), task.durable.ui_history_count);
+
+    task.runtime.active_run_id = 4;
+    task.runtime.pending_ui_request_id = 9;
+    task.runtime.pending_ui_order = 8;
+    try std.testing.expectEqual(
+        UiRecordInsertion.identity_collision,
+        pushUiRecord(&task, .{
+            .request_id = 9,
+            .run_id = 4,
+            .kind = .permission,
+            .state = .denied,
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 9), task.runtime.pending_ui_request_id);
+    try std.testing.expectEqual(@as(usize, 1), task.durable.ui_history_count);
 }

@@ -69,6 +69,7 @@ pub const Error = lifecycle.Error || product_attachment.Error || product_schedul
     ExecutorShuttingDown,
     TaskCapacity,
     TaskIdentityExhausted,
+    UiRequestIdentityCollision,
     WorkspaceCapacity,
     WorkspaceIdentityExhausted,
     WorkspaceIdentityUntrusted,
@@ -4142,12 +4143,19 @@ pub const Runtime = struct {
         response: UiResponse,
     ) Error!void {
         self.syncLifecycle();
-        var prepared = try self.task_runtime.respondUi(
+        var prepared = self.task_runtime.respondUi(
             task_id,
             run_id,
             request_id,
             response,
-        );
+        ) catch |err| {
+            if (err == error.UiRequestIdentityCollision) {
+                self.commitTaskStateNoFail();
+                self.bumpRevision();
+                self.syncLifecycle();
+            }
+            return err;
+        };
         self.commitTaskStateBestEffort() catch |err| {
             prepared.rollback();
             return err;

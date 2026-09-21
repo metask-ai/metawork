@@ -258,6 +258,10 @@ pub const Access = struct {
         return self.get().respondPermission(run_id, request_id, choice);
     }
 
+    pub fn failUiRequestIdentityContract(self: *Access, run_id: u64) !void {
+        return self.get().failUiRequestIdentityContract(run_id);
+    }
+
     pub fn pendingUiObservation(
         self: *Access,
     ) ?agent.Session.PendingUiObservation {
