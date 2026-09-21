@@ -334,6 +334,7 @@ const CaptureSink = struct {
 
 const RefreshTransport = struct {
     blocking: bool = false,
+    incomplete_profile: bool = false,
     started: std.atomic.Value(u32) = .init(0),
 
     fn transport(self: *RefreshTransport) metask.Transport {
@@ -347,7 +348,9 @@ const RefreshTransport = struct {
     ) metask.TransportError!metask.Response {
         const self: *RefreshTransport = @ptrCast(@alignCast(context));
         if (request.kind == .current_user) {
-            const body =
+            const body = if (self.incomplete_profile)
+                \\{"code":0,"message":"success","data":{"id":1}}
+            else
                 \\{"code":0,"message":"success","data":{"id":1,"email":"stored@example.com","username":"Stored User","concurrency":5}}
             ;
             @memcpy(output[0..body.len], body);
@@ -542,7 +545,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
     );
 }
 
-test "refresh-only restore commits rotation before loading identity" {
+test "refresh-only restore accepts an identity with incomplete profile data" {
     var refresh = try oauth.Secret.init(
         std.testing.allocator,
         "old-refresh",
@@ -551,7 +554,7 @@ test "refresh-only restore commits rotation before loading identity" {
     var credential_owner: credentials.CredentialOwner = .{};
     defer credential_owner.deinit();
     credential_owner.installRefreshToken(&refresh);
-    var transport: RefreshTransport = .{};
+    var transport: RefreshTransport = .{ .incomplete_profile = true };
     var capture: CaptureSink = .{};
     var attempt: NetworkAttempt = .{};
     try attempt.startRefresh(
@@ -586,4 +589,7 @@ test "refresh-only restore commits rotation before loading identity" {
     defer identified.deinit();
     const identity = identified.completion.payload.identity_loaded;
     try std.testing.expectEqualStrings("1", identity.accountId());
+    try std.testing.expectEqualStrings("", identity.displayName());
+    try std.testing.expectEqualStrings("", identity.emailHint());
+    try std.testing.expectEqual(@as(?u32, null), identity.concurrency_limit);
 }

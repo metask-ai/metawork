@@ -1828,6 +1828,41 @@ test "authorization lease requires authenticated matching unexpired credentials"
     try std.testing.expect(!runtime.acceptsAuthorizationGeneration(generation));
 }
 
+test "incomplete profile identity still issues an authorization lease" {
+    var transport: RuntimeTestTransport = .{};
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    TestSupport.attachPlatform(&runtime, &platform);
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try runtime.credentials.installStored(
+        runtime.allocator,
+        "access-token",
+        "refresh-token",
+        200,
+        "account-1",
+    );
+    runtime.bumpAuthorizationGeneration();
+    var authenticated: Prepared = .{
+        .transition = try state_impl.TestSupport.prepareAuthenticated(
+            &runtime.account,
+            try state_impl.AccountIdentity.init("account-1", "", "", null),
+        ),
+    };
+    defer authenticated.deinit();
+    runtime.commit(&authenticated);
+
+    var lease = (try runtime.authorizationLease()).?;
+    defer lease.deinit();
+    try std.testing.expectEqualStrings("account-1", lease.principal_ref);
+    try std.testing.expectEqualStrings("access-token", lease.access_token);
+    try std.testing.expect(runtime.acceptsAuthorizationGeneration(
+        lease.authorization_generation,
+    ));
+}
+
 test "recharge page opens only for an authenticated Account" {
     var transport: RuntimeTestTransport = .{};
     var runtime = try initRuntimeForUnitTest(&transport);

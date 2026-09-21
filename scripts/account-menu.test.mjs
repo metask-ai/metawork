@@ -108,6 +108,19 @@ test("authenticated account identity does not repeat a healthy connection status
   assert.equal(trigger.querySelector("small"), null);
 });
 
+test("authenticated account without profile data uses a neutral identity", () => {
+  const { container } = renderIdentity(
+    {},
+    { state: "authenticated", displayName: "" },
+  );
+
+  const trigger = screen.getByRole("button", {
+    name: "Account and application menu",
+  });
+  assert.match(trigger.textContent, /Signed in/);
+  assert.equal(container.querySelector(".account-avatar")?.textContent, "S");
+});
+
 test("signed-out account identity separates account, status, and login action", async () => {
   let loginCalls = 0;
   const user = userEvent.setup({ document: dom.window.document });
