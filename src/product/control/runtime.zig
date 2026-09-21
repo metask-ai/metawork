@@ -10231,6 +10231,9 @@ test "Task state round trip restores product history without fabricating a Sessi
     const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TestTaskPersistence{ .storage = persistence_storage };
+    const source_history_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(source_history_storage);
+    var source_history_len: usize = 0;
 
     {
         var source = try testRuntime();
@@ -10292,6 +10295,11 @@ test "Task state round trip restores product history without fabricating a Sessi
         try std.testing.expect(
             std.mem.indexOf(u8, persistence.storage[0..persistence.len], "SECRET-KEY") == null,
         );
+        @memcpy(
+            source_history_storage[0..persistence.len],
+            persistence.storage[0..persistence.len],
+        );
+        source_history_len = persistence.len;
 
         const terminal_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
         defer std.testing.allocator.free(terminal_storage);
@@ -10443,11 +10451,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         );
     }
 
-    const source_history = try std.testing.allocator.dupe(
-        u8,
-        persistence.storage[0..persistence.len],
-    );
-    defer std.testing.allocator.free(source_history);
+    const source_history = source_history_storage[0..source_history_len];
     {
         const legacy_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
         defer std.testing.allocator.free(legacy_storage);
@@ -10501,7 +10505,7 @@ test "Task state round trip restores product history without fabricating a Sessi
     try std.testing.expect(task.runtime.executionConst() == null);
     try std.testing.expectEqual(ActiveOperation.none, task.runtime.active_operation);
     try std.testing.expectEqual(
-        ContinuationUnavailableReason.checkpoint_unavailable,
+        ContinuationUnavailableReason.execution_rebind_required,
         restored.task_runtime.continuationProjection(
             task.durable.id,
             restored.taskRuntimeProjectionEffects(),
@@ -10547,7 +10551,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         std.mem.indexOf(u8, snapshot, "\"conversationRecovery\":true") != null,
     );
     try std.testing.expect(
-        std.mem.indexOf(u8, snapshot, "\"continuationUnavailableReason\":\"checkpoint_unavailable\"") != null,
+        std.mem.indexOf(u8, snapshot, "\"continuationUnavailableReason\":\"execution_rebind_required\"") != null,
     );
 
     try restored.setTaskArchived(3, true);
@@ -10686,7 +10690,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
     try std.testing.expectEqual(WorkspaceAuthorization.available, workspaces[0].authorization);
     const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
-        ContinuationUnavailableReason.checkpoint_unavailable,
+        ContinuationUnavailableReason.execution_rebind_required,
         restored.task_runtime.continuationProjection(
             task.durable.id,
             restored.taskRuntimeProjectionEffects(),
@@ -14403,6 +14407,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
 test "terminal publication is allocation-free write-once bounded history" {
     var control = try testRuntime();
     defer control.deinit();
+    defer detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     const diagnostic = try std.testing.allocator.alloc(u8, run.terminal_diagnostic.len + 17);
     defer std.testing.allocator.free(diagnostic);
@@ -16469,10 +16474,17 @@ test "event drain barrier atomically publishes terminal product state" {
     try std.testing.expect(std.mem.indexOf(u8, pending, "final assistant suffix") == null);
 
     const revision_before_finalization = control.revision;
-    finalizeTestTerminalEvents(&control);
+    control.markTerminalRunsBeforeEventDrain();
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expect(control.revision > revision_before_finalization);
     run.commentary_count = 1;
     run.commentary_ends[0] = @intCast(run.assistant.committed_len);
+
+    // This test owns a fixture Binding that deliberately cannot exercise the
+    // asynchronous Agent Session close path. Detach before snapshot lifecycle
+    // reconciliation so the terminal-publication assertion stays scoped to
+    // its event-drain barrier instead of starting a fake close worker.
+    detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
 
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeSnapshot(&terminal_storage);

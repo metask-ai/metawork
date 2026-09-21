@@ -43,7 +43,10 @@ const targetPolicies = [
     systemLibraries: ["advapi32", "crypt32"],
     abiRevision: supportedAbiRevision,
     abiTableSize: 64,
-    lock: path.join("build_support", "agentcore-bundle.windows-x86_64.lock.json"),
+    lock: path.join(
+      "build_support",
+      "agentcore-bundle.windows-x86_64.lock.json",
+    ),
   },
   {
     supportedHosts: [{ platform: "darwin", architectures: ["arm64"] }],
@@ -58,7 +61,10 @@ const targetPolicies = [
     systemLibraries: [],
     abiRevision: supportedAbiRevision,
     abiTableSize: 64,
-    lock: path.join("build_support", "agentcore-bundle.macos-aarch64.lock.json"),
+    lock: path.join(
+      "build_support",
+      "agentcore-bundle.macos-aarch64.lock.json",
+    ),
   },
   {
     supportedHosts: [{ platform: "darwin", architectures: ["arm64", "x64"] }],

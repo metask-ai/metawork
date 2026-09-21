@@ -222,6 +222,7 @@ function renderCompletedSurface(
     runs: [
       {
         id: "9",
+        conversationCoverage: "included",
         phase: pendingUi ? "waiting_ui" : "completed",
         execution: {
           generation: "1",
@@ -655,6 +656,7 @@ test("Task content does not project manual Compact history", () => {
     {
       operationId: "11",
       afterRunId: "9",
+      conversationCoverage: "included",
       phase: "compacted",
       cause: null,
       beforeContextTokens: "100",
@@ -817,7 +819,11 @@ test("a poisoned Task explains why continuation is unavailable", () => {
     composeDisabled: true,
   });
   assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
-  assert.match(markup, /End this task and start a new one to continue/);
+  assert.match(
+    markup,
+    /This conversation cannot continue right now\. Check recovery status and try again/,
+  );
+  assert.doesNotMatch(markup, /End this task and start a new one/);
 });
 
 test("execution target incompatibility does not mislabel the Conversation as lost", () => {

@@ -1906,6 +1906,7 @@ test("Compact projection is append-only and mutually exclusive with Run work", (
   task.compacts.push({
     operationId: "11",
     afterRunId: "7",
+    conversationCoverage: "included",
     phase: "compacted",
     cause: null,
     beforeContextTokens: "100",

@@ -4874,7 +4874,7 @@ test "compact queue rejection persists a legal terminal record and returns its o
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"operationId\":\"1\",\"afterRunId\":\"1\",\"conversationCoverage\":\"included\",\"phase\":\"failed\"",
+        "\"operationId\":\"1\",\"afterRunId\":\"1\",\"conversationCoverage\":\"excluded\",\"phase\":\"failed\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

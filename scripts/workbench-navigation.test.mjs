@@ -35,6 +35,7 @@ import {
 function run(id, text, assistant, outcome, toolContent = "", cause = null) {
   return {
     id,
+    conversationCoverage: "included",
     phase:
       outcome === null
         ? "running"
@@ -239,6 +240,7 @@ test("manual Compact participates in Task action ordering without becoming a Run
       {
         operationId: "11",
         afterRunId: "9",
+        conversationCoverage: "included",
         phase: "compacting",
         cause: null,
         beforeContextTokens: "0",

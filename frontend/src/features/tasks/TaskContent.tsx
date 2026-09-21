@@ -364,7 +364,10 @@ export function TaskContent({
       }
     >
       {hasExcludedConversationHistory && (
-        <p className="projection-notice conversation-coverage-notice" role="note">
+        <p
+          className="projection-notice conversation-coverage-notice"
+          role="note"
+        >
           {t("task.conversation_history_excluded")}
         </p>
       )}

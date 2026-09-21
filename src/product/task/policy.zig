@@ -879,6 +879,7 @@ test "checkpoint matches covered frontier and permits only excluded Product tail
             .compacts = &compacts,
             .ui_history = &ui_history,
         },
+        .runtime = .{},
     };
     const record: checkpoint_record.Record = .{
         .blob = .{

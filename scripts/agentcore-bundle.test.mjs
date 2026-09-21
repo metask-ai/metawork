@@ -379,7 +379,11 @@ test("staged preflight refuses a retired revision lock", async (t) => {
   });
   candidate.manifest.contract.binary_abi_revision = 14;
   await writeFile(
-    path.join(root, "build_support", "agentcore-bundle.windows-x86_64.lock.json"),
+    path.join(
+      root,
+      "build_support",
+      "agentcore-bundle.windows-x86_64.lock.json",
+    ),
     JSON.stringify(candidate.manifest),
   );
   await assert.rejects(
