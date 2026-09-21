@@ -475,6 +475,18 @@ pub const CheckpointPostprocess = struct {
     lease: ?worker_lease.WorkerLease = null,
 };
 
+/// Whether this durable Product operation is present in the recoverable
+/// AgentCore Conversation represented by the latest committed checkpoint.
+pub const ConversationCoverage = enum {
+    /// The live attachment may still advance a checkpoint over this operation.
+    pending,
+    /// A committed checkpoint is known to contain this operation.
+    covered,
+    /// This operation remains visible in Product history but is not part of
+    /// the Conversation restored from the latest committed checkpoint.
+    excluded,
+};
+
 pub const RunRecord = struct {
     /// Runtime-only monotonic admission time. Never restored from history.
     admitted_at_ms: ?u64 = null,
@@ -492,6 +504,7 @@ pub const RunRecord = struct {
     /// null rather than receiving a reconstructed time.
     finished_at_unix_ms: ?u64 = null,
     id: u64,
+    coverage: ConversationCoverage = .pending,
     generation: u64,
     execution_generation: u64,
     execution_protocol: Protocol,
@@ -563,6 +576,7 @@ pub const RunRecord = struct {
 
 pub const CompactRecord = struct {
     id: u64,
+    coverage: ConversationCoverage = .pending,
     after_run_id: u64,
     agent_handoff: std.atomic.Value(AgentHandoffState) = .init(.queued),
     pending_interruption: std.atomic.Value(PendingInterruption) = .init(.none),

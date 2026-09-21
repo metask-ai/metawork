@@ -10280,6 +10280,25 @@ test "Task state round trip restores product history without fabricating a Sessi
         terminal_state.value.tasks[0].runs[0].file_change_observation = "complete";
         terminal_state.value.tasks[0].active_operation = null;
         terminal_state.value.tasks[0].completion_seen_run_id = null;
+        var pending_compacts = [_]task_persistence.CompactWire{.{
+            .id = 9,
+            .coverage = "pending",
+            .after_run_id = 7,
+            .phase = "compacted",
+            .cause = null,
+            .before_context_tokens = 10,
+            .after_context_tokens = 5,
+            .usage = .{
+                .input_tokens = 0,
+                .output_tokens = 0,
+                .cache_read_input_tokens = 0,
+                .cache_creation_input_tokens = 0,
+            },
+            .diagnostic = "",
+            .diagnostic_truncated = false,
+            .diagnostic_redacted = false,
+        }};
+        terminal_state.value.tasks[0].compacts = &pending_compacts;
         const terminal_bytes = try task_persistence.encode(
             terminal_storage,
             terminal_state.value,
@@ -10302,6 +10321,22 @@ test "Task state round trip restores product history without fabricating a Sessi
         try std.testing.expectEqual(@as(u64, 7), terminal_task.durable.completion_seen_run_id);
         try std.testing.expectEqual(@as(?u64, null), task_test_policy.unreadCompletionRunId(terminal_task));
         try std.testing.expectEqual(RunPhase.completed, runPhase(terminal_run));
+        try std.testing.expectEqual(
+            task_test_state.ConversationCoverage.excluded,
+            terminal_run.coverage,
+        );
+        const terminal_compact = task_test_state.findCompact(
+            terminal_task.durable.compacts,
+            9,
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            task_test_state.CompactPhase.compacted,
+            task_test_state.compactProjectionFacts(terminal_compact).phase,
+        );
+        try std.testing.expectEqual(
+            task_test_state.ConversationCoverage.excluded,
+            terminal_compact.coverage,
+        );
         try std.testing.expectEqual(task_test_state.AssistantOutputKind.final, terminal_run.assistant_output_kind.?);
         try std.testing.expectEqual(@as(?usize, 0), terminal_run.assistant_output_start);
         try std.testing.expectEqual(
@@ -10341,6 +10376,44 @@ test "Task state round trip restores product history without fabricating a Sessi
         try std.testing.expectEqual(
             task_test_state.EventProjectionFailure.dependency_contract_failure,
             failed_run.event_projection_failure.?,
+        );
+
+        const interrupted_compact_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(interrupted_compact_storage);
+        pending_compacts[0].phase = "compacting";
+        terminal_state.value.tasks[0].active_operation = .{ .kind = "compact", .id = 9 };
+        const interrupted_compact_bytes = try task_persistence.encode(
+            interrupted_compact_storage,
+            terminal_state.value,
+            source.taskPersistenceLimits(),
+        );
+        var interrupted_compact_restore = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            testLimits(),
+            .{
+                .task_persistence = persistence.capability(interrupted_compact_bytes),
+            },
+        );
+        defer interrupted_compact_restore.deinit();
+        const restored_compact_task = interrupted_compact_restore.task_runtime.find(3) orelse
+            return error.TestUnexpectedResult;
+        const interrupted_compact = task_test_state.findCompact(
+            restored_compact_task.durable.compacts,
+            9,
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            task_test_state.CompactPhase.interrupted,
+            task_test_state.compactProjectionFacts(interrupted_compact).phase,
+        );
+        try std.testing.expectEqual(
+            task_test_state.ConversationCoverage.excluded,
+            interrupted_compact.coverage,
+        );
+        try std.testing.expectEqual(
+            ActiveOperation.none,
+            restored_compact_task.runtime.active_operation,
         );
     }
 
@@ -10414,6 +10487,10 @@ test "Task state round trip restores product history without fabricating a Sessi
     );
     const run = findRun(task.durable.runs, 7) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(RunPhase.interrupted, runPhase(run));
+    try std.testing.expectEqual(
+        task_test_state.ConversationCoverage.excluded,
+        run.coverage,
+    );
     try std.testing.expectEqual(RunOutcome.interrupted, productTerminalFacts(run).?.outcome);
     try std.testing.expectEqual(
         task_test_state.FileChangeObservation.incomplete,

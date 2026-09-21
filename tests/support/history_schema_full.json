@@ -39,6 +39,7 @@
       "runs": [
         {
           "id": 11,
+          "coverage": "covered",
           "generation": 13,
           "execution_generation": 17,
           "execution_protocol": "openai_responses",
@@ -145,6 +146,7 @@
       "compacts": [
         {
           "id": 23,
+          "coverage": "covered",
           "after_run_id": 11,
           "phase": "compacted",
           "cause": null,

@@ -458,6 +458,7 @@ fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, ordinal: usize) !void 
         .task_id = try batch.u(task_id),
         .ordinal = try integer(ordinal),
         .id = try batch.u(v.id),
+        .coverage = t(v.coverage),
         .generation = try batch.u(v.generation),
         .execution_generation = try batch.u(v.execution_generation),
         .execution_protocol = t(v.execution_protocol),
@@ -468,6 +469,7 @@ fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, ordinal: usize) !void 
         .assistant_redacted = boolean(v.assistant_redacted),
         .assistant_output_kind = ot(v.assistant_output_kind),
         .assistant_output_start = try batch.ou(v.assistant_output_start),
+        .elapsed_ms = try batch.ou(v.elapsed_ms),
         .submitted_at_unix_ms = try oi(v.submitted_at_unix_ms),
         .finished_at_unix_ms = try oi(v.finished_at_unix_ms),
         .phase = t(v.phase),
@@ -491,6 +493,7 @@ fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, ordinal: usize) !void 
 fn readRun(row: Record) !wire.RunWire {
     var v: wire.RunWire = undefined;
     v.id = try row.u("id");
+    v.coverage = try row.t("coverage");
     v.generation = try row.u("generation");
     v.execution_generation = try row.u("execution_generation");
     v.execution_protocol = try row.t("execution_protocol");
@@ -501,6 +504,7 @@ fn readRun(row: Record) !wire.RunWire {
     v.assistant_redacted = try row.boolean("assistant_redacted");
     v.assistant_output_kind = try row.ot("assistant_output_kind");
     v.assistant_output_start = try row.ou("assistant_output_start");
+    v.elapsed_ms = try row.ou("elapsed_ms");
     v.submitted_at_unix_ms = try row.oi("submitted_at_unix_ms");
     v.finished_at_unix_ms = try row.oi("finished_at_unix_ms");
     v.phase = try row.t("phase");
@@ -630,10 +634,10 @@ comptime {
     if (std.meta.fields(wire.TaskFailureWire).len != 3) @compileError("Review every history SQL field mapping after TaskFailureWire changes");
     if (std.meta.fields(wire.WorkspaceWire).len != 7) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
     if (std.meta.fields(wire.TaskWire).len != 20) @compileError("Review every history SQL field mapping after TaskWire changes");
-    if (std.meta.fields(wire.RunWire).len != 27) @compileError("Review every history SQL field mapping after RunWire changes");
+    if (std.meta.fields(wire.RunWire).len != 29) @compileError("Review every history SQL field mapping after RunWire changes");
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");
     if (std.meta.fields(wire.FileChangeWire).len != 11) @compileError("Review every history SQL field mapping after FileChangeWire changes");
-    if (std.meta.fields(wire.CompactWire).len != 10) @compileError("Review every history SQL field mapping after CompactWire changes");
+    if (std.meta.fields(wire.CompactWire).len != 11) @compileError("Review every history SQL field mapping after CompactWire changes");
     if (std.meta.fields(wire.UiRecordWire).len != 11) @compileError("Review every history SQL field mapping after UiRecordWire changes");
     if (std.meta.fields(wire.CheckpointWire).len != 3) @compileError("Review every history SQL field mapping after CheckpointWire changes");
     if (std.meta.fields(wire.CheckpointBlobWire).len != 3) @compileError("Review history fixture coverage after CheckpointBlobWire changes");

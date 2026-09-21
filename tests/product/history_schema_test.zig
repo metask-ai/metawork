@@ -71,6 +71,7 @@ test "history schema preserves null empty and nonterminal history variants" {
                 run.event_projection_failure = "consumer_rejected";
             },
             2 => {
+                run.coverage = "pending";
                 run.phase = "waiting_ui";
                 run.outcome = null;
                 run.cause = null;
@@ -83,6 +84,7 @@ test "history schema preserves null empty and nonterminal history variants" {
                 task.active_operation = .{ .kind = "run", .id = run.id };
             },
             3 => {
+                task.compacts[0].coverage = "pending";
                 task.compacts[0].phase = "compacting";
                 task.compacts[0].cause = null;
                 task.active_operation = .{ .kind = "compact", .id = task.compacts[0].id };

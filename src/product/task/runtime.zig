@@ -623,6 +623,7 @@ pub const PreparedRun = struct {
             task_execution.publishAutomaticTitleFallback(run_record);
             task_execution.cancelPreparedRunOrPanic(self.job.sessionAccess(), self.run_id);
             self.job.destroy();
+            run_record.coverage = .excluded;
             _ = task_execution.commitRunTerminal(
                 self.effects.worker.projector,
                 run_record,
@@ -692,6 +693,7 @@ pub const PreparedCompact = struct {
                 self.operation_id,
             );
             self.job.destroy();
+            compact.coverage = .excluded;
             _ = task_execution.commitCompactProductTerminal(
                 self.effects.worker.projector,
                 compact,
