@@ -33,11 +33,11 @@ fn validateResult(result: wire.RunResultV1) !void {
         return error.ProviderRunFailed;
 }
 
-fn expectInputLimit(api: agentcore.Api, session: *wire.SessionHandle, parts: []const wire.RunInputPartV1, options: *const wire.RunOptionsV1, name: []const u8) !void {
+fn expectInputLimit(api: agentcore.Api, session: *wire.SessionHandle, run_id: u64, parts: []const wire.RunInputPartV1, options: *const wire.RunOptionsV1, name: []const u8) !void {
     var result: wire.RunResultV1 = undefined;
     var diagnostic = std.mem.zeroes(wire.OwnedBytesV1);
     defer releaseOwned(api, &diagnostic);
-    const status = api.session().runMultimodal(session, 2, parts, options, &result, &diagnostic);
+    const status = api.session().runMultimodal(session, run_id, parts, options, &result, &diagnostic);
     std.debug.print("{s}: status={d}\n", .{ name, status });
     if (status != wire.STATUS_RESOURCE_LIMIT) return error.UnexpectedInputLimitStatus;
 }
@@ -125,6 +125,30 @@ fn expectIdleModelMutation(api: agentcore.Api, session: *wire.SessionHandle) !vo
     }
 }
 
+fn expectSessionFrontier(
+    api: agentcore.Api,
+    session: *wire.SessionHandle,
+    expected_run_id: u64,
+    expected_compact_id: u64,
+    operation: []const u8,
+) !void {
+    var encoded = std.mem.zeroes(wire.OwnedBytesV1);
+    defer releaseOwned(api, &encoded);
+    try expectOk(api, operation, api.sessionControl().describe()(session, &encoded, null));
+    var description = try agentcore.decodeSessionDescription(
+        std.heap.page_allocator,
+        try agentcore.borrowedBytes(.{ .ptr = encoded.ptr, .len = encoded.len }),
+    );
+    defer description.deinit();
+    std.debug.print(
+        "{s}: last_run_id={d} last_compact_id={d}\n",
+        .{ operation, description.value.last_run_id, description.value.last_compact_id },
+    );
+    if (description.value.last_run_id != expected_run_id or
+        description.value.last_compact_id != expected_compact_id)
+        return error.UnexpectedSessionFrontier;
+}
+
 fn makeRuntime(api: agentcore.Api) !*wire.RuntimeHandle {
     const names = [_][]const u8{
         "Read",      "Write",           "Edit",      "Glob",     "Grep", "Bash", "BashOutput",
@@ -192,12 +216,13 @@ pub fn main() !void {
     var result = std.mem.zeroes(wire.RunResultV1);
     var diagnostic = std.mem.zeroes(wire.OwnedBytesV1);
     defer releaseOwned(api, &diagnostic);
+    const first_run_id: u64 = 3;
     try expectOk(
         api,
         "session_run_provider_test",
         api.session().runText(
             raw_session,
-            1,
+            first_run_id,
             agentcore.bytesView("Reply with one short sentence."),
             &options,
             &result,
@@ -214,6 +239,7 @@ pub fn main() !void {
     const active_mutation_status = provider_test.active_model_mutation_status orelse return error.ActiveModelMutationNotObserved;
     if (active_mutation_status == .ok) return error.ActiveModelMutationAccepted;
     try expectIdleModelMutation(api, raw_session);
+    try expectSessionFrontier(api, raw_session, first_run_id, 0, "describe_after_fresh_run_gap");
     std.debug.print(
         "provider_test events={d} stop_reason={d} turns={d} tool_calls={d}\n",
         .{ provider_test.event_count, result.stop_reason_code, result.turns, result.tool_calls },
@@ -226,21 +252,22 @@ pub fn main() !void {
         agentcore.imagePart("image/gif", "__GIF__"),
     };
     const too_many = [_]wire.RunInputPartV1{agentcore.textPart("x")} ** (wire.MAX_RUN_INPUT_PARTS_V1 + 1);
-    try expectInputLimit(api, raw_session, &too_many, &options, "too_many_parts");
+    const multimodal_run_id = first_run_id + 1;
+    try expectInputLimit(api, raw_session, multimodal_run_id, &too_many, &options, "too_many_parts");
     const oversized = try std.heap.page_allocator.alloc(u8, wire.MAX_RUN_INPUT_IMAGE_DATA_BYTES_V1 + 4);
     defer std.heap.page_allocator.free(oversized);
     @memset(oversized, 'A');
     const oversized_parts = [_]wire.RunInputPartV1{agentcore.imagePart("image/png", oversized)};
-    try expectInputLimit(api, raw_session, &oversized_parts, &options, "oversized_image");
+    try expectInputLimit(api, raw_session, multimodal_run_id, &oversized_parts, &options, "oversized_image");
     const total_parts = [_]wire.RunInputPartV1{agentcore.imagePart("image/png", oversized[0..wire.MAX_RUN_INPUT_IMAGE_DATA_BYTES_V1])} ** 4;
-    try expectInputLimit(api, raw_session, &total_parts, &options, "oversized_aggregate");
+    try expectInputLimit(api, raw_session, multimodal_run_id, &total_parts, &options, "oversized_aggregate");
     releaseOwned(api, &diagnostic);
-    const image_status = api.session().runMultimodal(raw_session, 2, &parts, &options, &result, &diagnostic);
+    const image_status = api.session().runMultimodal(raw_session, multimodal_run_id, &parts, &options, &result, &diagnostic);
     if (diagnostic.len != 0) std.debug.print("image diagnostic: {s}\n", .{try agentcore.borrowedBytes(.{ .ptr = diagnostic.ptr, .len = diagnostic.len })});
     try expectOk(api, "multimodal", image_status);
     try validateResult(result);
     releaseOwned(api, &diagnostic);
-    const history_run_id: u64 = 3;
+    const history_run_id = multimodal_run_id + 1;
     try expectOk(api, "multimodal_history", api.session().runText(raw_session, history_run_id, agentcore.bytesView("Continue with the images."), &options, &result, &diagnostic));
     try validateResult(result);
     releaseOwned(api, &diagnostic);
@@ -301,9 +328,26 @@ pub fn main() !void {
     provider_test.session = restored;
     try expectIdleModelMutation(api, restored orelse return error.MissingRestoredSession);
     releaseOwned(api, &diagnostic);
-    const restored_run_id = large_run_id + 1;
+    const restored_run_id = large_run_id + 2;
     try expectOk(api, "restored_multimodal_history", api.session().runText(restored, restored_run_id, agentcore.bytesView("Continue after restore."), &options, &result, &diagnostic));
     try validateResult(result);
+    const compact_id: u64 = 6;
+    var compact_result = std.mem.zeroes(wire.CompactResultV1);
+    releaseOwned(api, &diagnostic);
+    try expectOk(
+        api,
+        "restored_compact_gap",
+        api.sessionControl().compact()(restored, compact_id, &compact_result, &diagnostic),
+    );
+    if (compact_result.struct_size != @sizeOf(wire.CompactResultV1))
+        return error.InvalidCompactResult;
+    try expectSessionFrontier(api, restored orelse return error.MissingRestoredSession, restored_run_id, compact_id, "describe_after_id_gaps");
+    checkpoint.len = 0;
+    checkpoint.offset = 0;
+    releaseOwned(api, &diagnostic);
+    try expectOk(api, "export_after_id_gaps", api.sessionControl().exportCheckpoint()(restored, &export_config, &exported, &diagnostic));
+    if (exported.total_bytes != checkpoint.len or checkpoint.len == 0)
+        return error.InvalidCheckpoint;
 
     if (__EXPECT_UNKNOWN_IMAGE_REJECTION__) {
         try expectOk(api, "set_unknown_model", api.sessionControl().setModel()(restored, agentcore.bytesView("unknown-provider-test-model"), null));
