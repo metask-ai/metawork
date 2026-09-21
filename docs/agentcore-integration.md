@@ -261,6 +261,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 - Permission rule update 不得改变 Task-owned PermissionProfile；Task 创建后只允许 same-profile Run 与 restore；
 - 第二个 Run 明确排队或拒绝；
 - run ID 单调且与 Session 绑定；
+- fresh/restore Session 可以分别接收 Product 提供的 Run、compact 与 UI request allocation floor；新 Run/compact id 必须严格大于各自 Product operation history 高水位，新 UI request id 必须严格大于 durable UI history 高水位，这些 floor 都不改变 checkpoint restore expectation；
 - queued Run 不接触 AgentCore mutable state；
 - queued Text/Skill input 在复制前按 Host byte limit、catalog identity 和参数数量拒绝，保证 executor 有界时输入内存也有明确上限；
 - multimodal input 在任何 owned allocation 前校验 parts、文本附件名称与正文、全部文本和编码图片上限，并预留 Runtime 共享输入预算；预算覆盖并发 prepare、Queued 与 Running，失败回滚及终止释放均恰好一次；
@@ -274,6 +275,8 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 正式 Host 在同一状态机上直接加入 bundle typed SDK，不另建 Adapter：event callback 先校验并形成 SDK-owned parse owner，再以单调 Host Session ID 和 Run ID 进入 FIFO bounded sink；UI callback 保留校验后的 request owner，response 只由 request-aware SDK encoder 生成。同步 UI 等待没有 deadline：response、cancel、close 或 shutdown 之一在 callback 返回前收敛等待；人类决策不由 Host 过期。
 
 当前实现由 Product Control 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun(RunInput)` 并把 Product Control-owned job 放入自身 bounded Executor。`RunInput` 只有 Text、typed Skill 与上述 multimodal 三个分支；Agent 在 admission 时有界深拷贝整个输入，Skill argument JSON 只通过官方 SDK encoder 在同步 `SessionApi.runSkill` 调用边界内生成，旧 `session_run` 和 slash 字符串不进入 Agent。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。`beginRun()` 失败会在同一 Session lock 下返回 typed completion disposition，Product Control 据此生成 pre-execution terminal payload，不再额外读取 Session snapshot。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
+
+checkpoint restore 的 expectation 必须使用 checkpoint description 的精确 `last_run_id / last_compact_id`；Product history 中 excluded operation 只进入 Run/compact allocation floor。AgentCore 可以因此在 restore 后跳过被 Product 消耗但从未进入该 Conversation 的 operation ids。durable UI history 独立形成 UI request allocation floor，使新 Session 不会复用已经解决或取消的 request id；UI request 不属于 checkpoint expectation。无 checkpoint 且 Product 确认没有 covered/pending history 时，Product 可以创建普通 fresh Session，并把全部 Product operation history 与 durable UI history 高水位分别作为对应 floor；Agent 不重放 Product history，也不把 excluded operation 写进 Conversation。
 
 ### Skill catalog ownership
 
@@ -299,6 +302,10 @@ Renderer Bridge revision 1 原地 hard cut 后，`metawork.tasks.run` 只接受 
 每个 Session 拥有独立分配、存活到 Session release 的 `SessionControlBlock`。`RunControlLease` 用 closed-bit + atomic reference count 保活该 control block，并携带单调 `run_generation`；旧 lease 在下一 Run 复用执行槽后返回 `stale_run`，Run 自然完成后返回 `already_terminal`。Session close 先关闭 lease acquisition gate，再等待 Run、callback 和全部 control lease 归零；该 quiescence wait 不持有 Session/Product Control lock。`Run.execute()` 返回 immutable `TerminalResult`，worker 在释放 execution base lease 前将它提交到 Product Control admission 时预留的 write-once terminal payload。Product Control executor worker 入队前取得的 Task-owned stable record reference 归零前，所属 Task 即使已经归档也不得物理删除；Product Control 保留已受理的删除意图并在引用归零后完成事务；不存在只被测试消费的第二套公开 record-reference 协议。
 
 ### Close 顺序
+
+下面顺序描述 Agent Session close 自身。Product 在调用它之前必须先停止 Task admission、收口 active Run/compact、等待 terminal event drain、checkpoint postprocess 与 worker lease settled；可复用 Session 的 checkpoint export 必须发生在 Session destroy 之前。随后 Product 才能排除未进入当前 Conversation 的剩余 pending history，并进入 Agent close。异常进程终止没有该机会，Product 在下一次冷启动按 durable coverage 归一化。
+
+Agent terminal disposition 为 poisoned 时，Product 也必须使用这条唯一 close 顺序：先让产生该 disposition 的 operation、event、checkpoint 与 Product worker lease 收口，再 close/release Session，成功后才 detach 并进入 Product-owned Conversation recovery。close failure 返回的 Session disposition 是实际 attachment health；Product 必须保留相应 owner 与资源，不得把失败解释为 detach，也不得自动循环 destroy。
 
 ```text
 1. close control lease acquisition gate and CAS Session state → Closing

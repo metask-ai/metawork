@@ -479,6 +479,8 @@ export const zhCN: Record<MessageId, string> = {
   "task.empty_body_without_workspace":
     "描述一个明确结果；首次发送时再选择工作区。取消选择不会丢失草稿。",
   "task.created_empty_body": "这个任务已经准备好，输入第一条指令即可开始。",
+  "task.conversation_history_excluded":
+    "部分历史记录未包含在恢复后的对话上下文中。后续消息仍可继续。",
   "task.no_tasks": "从新建任务开始；需要目录时，发送前再选择。",
   "task.archived_hidden": "已归档任务当前隐藏。",
   "task.show_archived": "显示已归档（{count}）",
@@ -566,7 +568,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_no_task": "请先开始一个任务",
   "run.placeholder_archived": "恢复此任务后才能继续",
   "run.placeholder_closing": "此任务正在结束",
-  "run.placeholder_unavailable": "结束此任务并新建任务后才能继续",
+  "run.placeholder_unavailable": "当前会话暂时无法继续，请检查恢复状态后重试",
   "run.placeholder_execution_rebind_required":
     "当前执行配置无法承载此会话，请切换到支持该任务模型的账号或连接",
   "run.draft_only": "已在本地保存为草稿。当前工作结束后即可发送。",
@@ -611,6 +613,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.terminal.partial_stopped": "工作已停止，回复未完整生成",
   "run.terminal.partial_interrupted": "工作意外中断，回复未完整生成",
   "run.terminal.partial_failed": "工作失败，回复未完整生成",
+  "run.conversation_history_excluded":
+    "本轮消息仍保留在任务记录中，但未包含在恢复后的模型上下文中。后续消息仍可继续。",
   "run.process.title": "执行详情",
   "run.process.elapsed": "本轮用时 {duration}",
   "run.process.toggle_tool": "展开或收起 {name} 的详情",

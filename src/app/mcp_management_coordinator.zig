@@ -7,7 +7,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const agent = @import("metawork_agent");
 const control_ports = @import("metawork_product_control_ports");
-const test_control = if (builtin.is_test) @import("lifecycle_fixture").product_control else struct {};
+const test_fixture = if (builtin.is_test) @import("lifecycle_fixture") else struct {};
+const test_control = if (builtin.is_test) test_fixture.product_control else struct {};
 const product_mcp = @import("metawork_product_mcp");
 const mcp_configuration = product_mcp.contract;
 const mcp_types = product_mcp;
@@ -1720,11 +1721,15 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
     )).?;
     var manifest_owned = true;
     defer if (manifest_owned) manifest.deinit();
-    var agent_runtime: agent.Runtime = undefined;
+    const agent_runtime = try test_fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        agent_runtime.shutdown() catch {};
+        agent_runtime.deinit();
+    }
     var workbench_owner = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &agent_runtime,
+        agent_runtime,
         .{ .worker_count = 1, .queue_capacity = 1 },
         .{ .mcp = .{
             .preparation = &preparation,
@@ -1772,7 +1777,7 @@ test "MCP configuration apply publishes failed when preparation cannot start" {
         failing.allocator(),
         std.testing.io,
         workbench_owner.mcpManagementPort(),
-        &agent_runtime,
+        agent_runtime,
         &credential_store,
         &authorizations,
         .{
@@ -1929,12 +1934,16 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
     )).?;
     var manifest_owned = true;
     defer if (manifest_owned) manifest.deinit();
-    var agent_runtime: agent.Runtime = undefined;
+    const agent_runtime = try test_fixture.createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        agent_runtime.shutdown() catch {};
+        agent_runtime.deinit();
+    }
     var identity_generator: IdentityGenerator = .{};
     var workbench_owner = try test_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
-        &agent_runtime,
+        agent_runtime,
         .{
             .worker_count = 1,
             .queue_capacity = 1,
@@ -1991,7 +2000,7 @@ test "MCP Application coordinator completes dynamic registration and OAuth loopb
         std.testing.allocator,
         std.testing.io,
         workbench_owner.mcpManagementPort(),
-        &agent_runtime,
+        agent_runtime,
         &credential_store,
         &active_authorizations,
         .{

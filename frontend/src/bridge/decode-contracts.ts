@@ -2446,6 +2446,7 @@ function decodeRun(value: unknown, path: string): RunView {
     "submittedAtUnixMs",
     "finishedAtUnixMs",
     "id",
+    "conversationCoverage",
     "phase",
     "permissionProfile",
     "permissionInteraction",
@@ -2609,6 +2610,11 @@ function decodeRun(value: unknown, path: string): RunView {
     fail(path, "terminal Run cannot retain provisional output");
   return {
     id: positiveWireId(item.id, `${path}.id`),
+    conversationCoverage: enumValue(
+      item.conversationCoverage,
+      `${path}.conversationCoverage`,
+      ["included", "excluded"] as const,
+    ),
     phase,
     permissionProfile: enumValue(
       item.permissionProfile,
@@ -2852,6 +2858,7 @@ function decodeCompact(value: unknown, path: string): CompactView {
   const item = object(value, path, [
     "operationId",
     "afterRunId",
+    "conversationCoverage",
     "phase",
     "cause",
     "beforeContextTokens",
@@ -2872,6 +2879,11 @@ function decodeCompact(value: unknown, path: string): CompactView {
   return {
     operationId: positiveWireId(item.operationId, `${path}.operationId`),
     afterRunId: positiveWireId(item.afterRunId, `${path}.afterRunId`),
+    conversationCoverage: enumValue(
+      item.conversationCoverage,
+      `${path}.conversationCoverage`,
+      ["included", "excluded"] as const,
+    ),
     phase,
     cause,
     beforeContextTokens: wireId(

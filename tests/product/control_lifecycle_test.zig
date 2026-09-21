@@ -396,7 +396,7 @@ test "Skill source authorization keeps new and restored Automatic snapshots cata
     }
 }
 
-test "Skill source authorization returns after immediate and asynchronous Workspace removal failures" {
+test "Skill source authorization returns after close failures and checkpoint interleaving" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
     defer {
@@ -439,19 +439,24 @@ test "Skill source authorization returns after immediate and asynchronous Worksp
         const epoch = try workbench.workspaceEpoch(workspace_id);
         const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
         if (immediate_failure) {
-            // A terminal Run whose checkpoint still owns a worker lease cannot
-            // start Session detach; exercise the real synchronous failure path.
+            // Close admission succeeds, but Session close must not start until
+            // the exporting checkpoint has settled and released its lease.
             fake_core.controlNextCheckpointExport();
             _ = try workbench.runTask(task_id, .{ .text = "hold checkpoint during removal" });
             fake_core.waitCheckpointExportEntered();
             try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
-            try std.testing.expectError(error.TaskClosing, workbench.removeWorkspaceAtEpoch(workspace_id, epoch));
+            fake_core.failNextSessionDestroy();
+            try workbench.removeWorkspaceAtEpoch(workspace_id, epoch);
             fake_core.releaseCheckpointExport();
         } else {
             fake_core.failNextSessionDestroy();
             try workbench.removeWorkspaceAtEpoch(workspace_id, epoch);
         }
         try waitControlSnapshot(&workbench, "\"lastRemovalFailure\":\"task_close_failed\"");
+        if (immediate_failure) try std.testing.expectEqual(
+            product_task.testing.state_module.ConversationCoverage.covered,
+            workbench.task_runtime.tasks[0].?.durable.runs[0].?.coverage,
+        );
         try settleWorkspaceSkillQueries(&workbench, workspace_id);
         try probe.expectQueries(2);
         try expectWorkspaceSkillProjection(&workbench, workspace_id, true);
@@ -961,6 +966,15 @@ test "Run checkpoint commits immutable blob before durable descriptor" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         post_compact_history,
+        "\"coverage\":\"pending\"",
+    ) == null);
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        std.mem.count(u8, post_compact_history, "\"coverage\":\"covered\""),
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        post_compact_history,
         "\"last_run_id\":2,\"last_compact_id\":1",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
@@ -1294,7 +1308,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"1\"",
-        "\"continuationAvailable\":true",
+        "\"activeOperation\":null",
     );
     try std.testing.expectEqual(@as(u64, 2), try restored.taskBindingEpoch(task_id));
     try std.testing.expectEqual(
@@ -1347,7 +1361,7 @@ test "restart recovery revalidates live authority and continues the same Convers
     _ = try restored.runTask(task_id, .{ .text = "continue after restart" });
     try waitTaskSnapshot(
         &restored,
-        "\"id\":\"2\",\"phase\":\"completed\"",
+        "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         "\"outcome\":\"completed\"",
     );
     fake_core.lock();
@@ -1766,7 +1780,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
     _ = try continued.runTask(task_id, .{ .text = "automatic second run" });
     try waitTaskSnapshot(
         &continued,
-        "\"id\":\"2\",\"phase\":\"completed\"",
+        "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         "\"outcome\":\"completed\"",
     );
     fake_core.lock();
@@ -1916,6 +1930,10 @@ test "definite descriptor failure preserves terminal history and leaves a recove
     }
     try std.testing.expect(persistence.commits > terminal_commits);
     try checkpoint_store.verify(identity);
+    try std.testing.expectEqual(
+        product_task.testing.state_module.ConversationCoverage.pending,
+        workbench.task_runtime.tasks[0].?.durable.runs[0].?.coverage,
+    );
     const durable_terminal = persistence_storage[0..persistence.len];
     try std.testing.expect(std.mem.indexOf(u8, durable_terminal, "\"phase\":\"completed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, durable_terminal, "\"checkpoint\":null") != null);
@@ -2020,6 +2038,10 @@ test "unknown descriptor commit remains retryable without freezing Product Task"
     }
     try std.testing.expect(outcome_observed);
     try checkpoint_store.verify(identity);
+    try std.testing.expectEqual(
+        product_task.testing.state_module.ConversationCoverage.pending,
+        workbench.task_runtime.tasks[0].?.durable.runs[0].?.coverage,
+    );
     try workbench.setTaskArchived(task_id, true);
     try workbench.setTaskArchived(task_id, false);
     try workbench.renameTask(task_id, "Still usable");
@@ -3228,7 +3250,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     var terminal_needle: [96]u8 = undefined;
     const terminal = try std.fmt.bufPrint(
         &terminal_needle,
-        "\"id\":\"{d}\",\"phase\":\"completed\"",
+        "\"id\":\"{d}\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         .{pure_run_id},
     );
     try waitControlSnapshot(&workbench, terminal);
@@ -3265,7 +3287,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     } });
     const text_terminal = try std.fmt.bufPrint(
         &terminal_needle,
-        "\"id\":\"{d}\",\"phase\":\"completed\"",
+        "\"id\":\"{d}\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
         .{text_run_id},
     );
     try waitControlSnapshot(&workbench, text_terminal);
@@ -4852,7 +4874,7 @@ test "compact queue rejection persists a legal terminal record and returns its o
     try std.testing.expect(std.mem.indexOf(
         u8,
         snapshot,
-        "\"operationId\":\"1\",\"afterRunId\":\"1\",\"phase\":\"failed\"",
+        "\"operationId\":\"1\",\"afterRunId\":\"1\",\"conversationCoverage\":\"excluded\",\"phase\":\"failed\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -5062,6 +5084,723 @@ test "Product Control shutdown terminates a waiting UI Run before joining worker
     workbench.shutdownExecutor();
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"interrupted\"");
     try waitControlSnapshot(&workbench, "\"continuationAvailable\":false");
+}
+
+test "graceful shutdown checkpoints an interrupted Run and restart continues with the next id" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var checkpoint_tmp = std.testing.tmpDir(.{});
+    defer checkpoint_tmp.cleanup();
+    var checkpoint_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const checkpoint_root_len = try checkpoint_tmp.dir.realPath(
+        std.testing.io,
+        &checkpoint_root_storage,
+    );
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
+        std.testing.io,
+        checkpoint_root_storage[0..checkpoint_root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+
+    var runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    };
+    var first_configuration = productControlConfiguration();
+    first_configuration.directories.canonical_user_home = home;
+    first_configuration.task_persistence = persistence.capability();
+    first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var first = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        first_configuration,
+    );
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    try installControlExecution(&first);
+    const task_id = try first.createTask(productControlTaskInput());
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try first.runTask(task_id, .{ .text = "checkpoint before shutdown" }),
+    );
+    try waitCheckpointRecord(&first, &persistence);
+
+    fake_core.setCheckpointGeneration(2);
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try first.runTask(task_id, .{ .text = "interrupt this Run during shutdown" }),
+    );
+    try waitControlSnapshot(&first, "\"currentRunPhase\":\"running\"");
+    first.shutdownExecutor();
+    const shutdown_history = persistence_storage[0..persistence.len];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        shutdown_history,
+        "\"last_run_id\":2,\"last_compact_id\":0",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        shutdown_history,
+        "\"id\":2,\"coverage\":\"covered\"",
+    ) != null);
+    const restart_history = try std.testing.allocator.dupe(u8, shutdown_history);
+    defer std.testing.allocator.free(restart_history);
+    first.deinit();
+    first_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    fake_core.reset();
+    fake_core.setRestoreHistory(2, 0);
+    fake_core.setCheckpointGeneration(2);
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
+    var restored_configuration = productControlConfiguration();
+    restored_configuration.directories.canonical_user_home = home;
+    restored_configuration.task_persistence = persistence.capabilityRestored(restart_history);
+    restored_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var restored = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        restored_configuration,
+    );
+    defer restored.deinit();
+    try installControlExecution(&restored);
+    _ = try restored.openWorkspace(productControlTaskInput());
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+    fake_core.setCheckpointGeneration(3);
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        try restored.runTask(task_id, .{ .text = "continue after restart" }),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"3\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
+        "\"outcome\":\"completed\"",
+    );
+}
+
+test "checkpoint restore preserves Product Run and UI request allocation floors" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var checkpoint_tmp = std.testing.tmpDir(.{});
+    defer checkpoint_tmp.cleanup();
+    var checkpoint_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const checkpoint_root_len = try checkpoint_tmp.dir.realPath(
+        std.testing.io,
+        &checkpoint_root_storage,
+    );
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
+        std.testing.io,
+        checkpoint_root_storage[0..checkpoint_root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+
+    var runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    };
+    var first_configuration = productControlConfiguration();
+    first_configuration.directories.canonical_user_home = home;
+    first_configuration.task_persistence = persistence.capability();
+    first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var first = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        first_configuration,
+    );
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    try installControlExecution(&first);
+    const task_id = try first.createTask(productControlTaskInput());
+    fake_core.setSessionPlan(.ui_wait);
+    fake_core.rearmControlled();
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try first.runTask(task_id, .{ .text = "resolve permission before checkpoint" }),
+    );
+    try waitTaskSnapshot(
+        &first,
+        "\"currentRunPhase\":\"waiting_ui\"",
+        "\"pendingUi\":{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    try first.respondUi(task_id, 1, 1, .{ .permission = .allow_once });
+    try waitTaskSnapshot(
+        &first,
+        "\"currentRunPhase\":\"running\"",
+        "\"uiHistory\":[{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    fake_core.releaseControlled();
+    try waitCheckpointRecord(&first, &persistence);
+
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try first.runTask(task_id, .{ .text = "killed before terminal" }),
+    );
+    try waitControlSnapshot(&first, "\"currentRunPhase\":\"running\"");
+    const killed_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(killed_history);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        killed_history,
+        "\"id\":2,\"coverage\":\"pending\"",
+    ) != null);
+
+    // Cleanup must retain checkpoint 1; the copied bytes above are the exact
+    // crash image used by the second Product Runtime.
+    fake_core.forceNextCheckpointExportStatus(wire.STATUS_RESOURCE_LIMIT);
+    first.shutdownExecutor();
+    first.deinit();
+    first_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    fake_core.reset();
+    fake_core.setRestoreHistory(1, 0);
+    fake_core.setCheckpointGeneration(1);
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
+    var restored_configuration = productControlConfiguration();
+    restored_configuration.directories.canonical_user_home = home;
+    restored_configuration.task_persistence = persistence.capabilityRestored(killed_history);
+    restored_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var restored = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        restored_configuration,
+    );
+    defer restored.deinit();
+    try installControlExecution(&restored);
+    _ = try restored.openWorkspace(productControlTaskInput());
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"id\":\"2\",\"conversationCoverage\":\"excluded\",\"phase\":\"interrupted\"",
+    );
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+    fake_core.setSessionPlan(.ui_wait);
+    fake_core.rearmControlled();
+    fake_core.setCheckpointGeneration(2);
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        try restored.runTask(task_id, .{ .text = "request permission after checkpoint restore" }),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"pendingUi\":{\"requestId\":\"2\",\"runId\":\"3\"",
+        "\"uiHistory\":[{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    try restored.respondUi(task_id, 3, 2, .{ .permission = .allow_once });
+    fake_core.releaseControlled();
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"3\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
+        "\"outcome\":\"completed\"",
+    );
+}
+
+test "fresh attach preserves Product Run and UI request allocation floors" {
+    fake_core.reset();
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+
+    var runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    };
+    var first_configuration = productControlConfiguration();
+    first_configuration.directories.canonical_user_home = home;
+    first_configuration.task_persistence = persistence.capability();
+    var first = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        first_configuration,
+    );
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    try installControlExecution(&first);
+    const task_id = try first.createTask(productControlTaskInput());
+    fake_core.setSessionPlan(.ui_wait);
+    fake_core.rearmControlled();
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try first.runTask(task_id, .{ .text = "resolve permission before first checkpoint" }),
+    );
+    try waitTaskSnapshot(
+        &first,
+        "\"currentRunPhase\":\"waiting_ui\"",
+        "\"pendingUi\":{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    try first.respondUi(task_id, 1, 1, .{ .permission = .allow_once });
+    try waitTaskSnapshot(
+        &first,
+        "\"currentRunPhase\":\"running\"",
+        "\"uiHistory\":[{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    const killed_history = try std.testing.allocator.dupe(
+        u8,
+        persistence_storage[0..persistence.len],
+    );
+    defer std.testing.allocator.free(killed_history);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        killed_history,
+        "\"id\":1,\"coverage\":\"pending\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        killed_history,
+        "\"ui_history\":[{\"request_id\":1,\"run_id\":1",
+    ) != null);
+    first.shutdownExecutor();
+    first.deinit();
+    first_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    fake_core.reset();
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    runtime_live = true;
+    var restored_configuration = productControlConfiguration();
+    restored_configuration.directories.canonical_user_home = home;
+    restored_configuration.task_persistence = persistence.capabilityRestored(killed_history);
+    var restored = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        restored_configuration,
+    );
+    defer restored.deinit();
+    try installControlExecution(&restored);
+    _ = try restored.openWorkspace(productControlTaskInput());
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    _ = try restored.restoreTaskConversation(
+        task_id,
+        try restored.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+    fake_core.lock();
+    const restore_calls = fake_core.checkpoint_restores;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), restore_calls);
+    fake_core.setSessionPlan(.ui_wait);
+    fake_core.rearmControlled();
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try restored.runTask(task_id, .{ .text = "request permission after fresh attach" }),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"pendingUi\":{\"requestId\":\"2\",\"runId\":\"2\"",
+        "\"uiHistory\":[{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    try restored.respondUi(task_id, 2, 2, .{ .permission = .allow_once });
+    fake_core.releaseControlled();
+    try waitTaskSnapshot(
+        &restored,
+        "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
+        "\"outcome\":\"completed\"",
+    );
+}
+
+test "poisoned Session closes and the same Task continues with a fresh Conversation" {
+    fake_core.reset();
+    fake_core.setNextPlan(.invalid_result_layout);
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = persistence.capability();
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const task_id = try workbench.createTask(productControlTaskInput());
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try workbench.runTask(task_id, .{ .text = "poison this Session" }),
+    );
+    try waitTaskSnapshot(
+        &workbench,
+        "\"id\":\"1\"",
+        "\"conversationCoverage\":\"excluded\",\"phase\":\"failed\"",
+    );
+    try waitTaskSnapshot(
+        &workbench,
+        "\"id\":\"1\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    fake_core.lock();
+    const destroyed_after_poison = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), destroyed_after_poison);
+
+    _ = try workbench.restoreTaskConversation(
+        task_id,
+        try workbench.taskBindingEpoch(task_id),
+    );
+    try waitTaskSnapshot(
+        &workbench,
+        "\"id\":\"1\"",
+        "\"continuationAvailable\":true",
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try workbench.runTask(task_id, .{ .text = "continue the same Task" }),
+    );
+    try waitTaskSnapshot(
+        &workbench,
+        "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
+        "\"outcome\":\"completed\"",
+    );
+}
+
+test "queued pre-Core shutdown tail stays visible but does not invalidate its checkpoint" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    const home = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        ".",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(home);
+    var checkpoint_tmp = std.testing.tmpDir(.{});
+    defer checkpoint_tmp.cleanup();
+    var checkpoint_root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const checkpoint_root_len = try checkpoint_tmp.dir.realPath(
+        std.testing.io,
+        &checkpoint_root_storage,
+    );
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(
+        std.testing.io,
+        checkpoint_root_storage[0..checkpoint_root_len],
+    );
+    defer checkpoint_store.deinit();
+    const persistence_storage = try std.testing.allocator.alloc(
+        u8,
+        product_task.history.max_store_bytes,
+    );
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TaskPersistenceProbe{ .storage = persistence_storage };
+
+    var runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 2,
+    });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    };
+    var first_configuration = productControlConfiguration();
+    first_configuration.directories.canonical_user_home = home;
+    first_configuration.task_persistence = persistence.capability();
+    first_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var first = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 2,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        first_configuration,
+    );
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    try installControlExecution(&first);
+    const continuation_task = try first.createTask(productControlTaskInput());
+    try first.renameTask(continuation_task, "continuation target");
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try first.runTask(continuation_task, .{ .text = "durable checkpoint" }),
+    );
+    try waitCheckpointRecord(&first, &persistence);
+
+    const blocker_task = try first.createTask(productControlTaskInput());
+    try first.renameTask(blocker_task, "executor blocker");
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    _ = try first.runTask(blocker_task, .{ .text = "occupy executor" });
+    try waitTaskSnapshot(
+        &first,
+        "\"title\":\"executor blocker\"",
+        "\"currentRunPhase\":\"running\"",
+    );
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try first.runTask(continuation_task, .{ .text = "never entered AgentCore" }),
+    );
+    try waitTaskSnapshot(
+        &first,
+        "\"title\":\"continuation target\"",
+        "\"currentRunPhase\":\"queued\"",
+    );
+    first.shutdownExecutor();
+    fake_core.lock();
+    const run_calls_before_restart = fake_core.run_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 2), run_calls_before_restart);
+    const shutdown_history = persistence_storage[0..persistence.len];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        shutdown_history,
+        "\"id\":2,\"coverage\":\"excluded\"",
+    ) != null);
+    const restart_history = try std.testing.allocator.dupe(u8, shutdown_history);
+    defer std.testing.allocator.free(restart_history);
+    first.deinit();
+    first_live = false;
+    try shutdownTestComposition(runtime);
+    deinitTestComposition(runtime);
+    runtime_live = false;
+
+    fake_core.reset();
+    fake_core.setRestoreHistory(1, 0);
+    fake_core.setCheckpointGeneration(1);
+    runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 2,
+    });
+    runtime_live = true;
+    var restored_configuration = productControlConfiguration();
+    restored_configuration.directories.canonical_user_home = home;
+    restored_configuration.task_persistence = persistence.capabilityRestored(restart_history);
+    restored_configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var restored = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_tasks = 2,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        },
+        restored_configuration,
+    );
+    defer restored.deinit();
+    try installControlExecution(&restored);
+    _ = try restored.openWorkspace(productControlTaskInput());
+    try waitTaskSnapshot(
+        &restored,
+        "\"title\":\"continuation target\"",
+        "\"continuationRecoveryAvailable\":true",
+    );
+    _ = try restored.restoreTaskConversation(
+        continuation_task,
+        try restored.taskBindingEpoch(continuation_task),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"title\":\"continuation target\"",
+        "\"continuationAvailable\":true",
+    );
+    fake_core.setCheckpointGeneration(2);
+    try std.testing.expectEqual(
+        @as(u64, 3),
+        try restored.runTask(
+            continuation_task,
+            .{ .text = "continue after queued tail" },
+        ),
+    );
+    try waitTaskSnapshot(
+        &restored,
+        "\"title\":\"continuation target\"",
+        "\"id\":\"3\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
+    );
 }
 
 test "Product Control shutdown rejects new Task admission without creating product state" {

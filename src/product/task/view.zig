@@ -337,8 +337,9 @@ fn writeRun(
     now_ms: ?u64,
 ) Error!void {
     const terminal = projection.terminal;
-    writer.print("{{\"id\":\"{d}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
+    writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
         run.id,
+        if (run.coverage == .excluded) "excluded" else "included",
         @tagName(projection.phase),
         @tagName(run.permission_profile),
         @tagName(run.permission_interaction),
@@ -981,8 +982,13 @@ fn writeCompact(
     const projection = task_state.compactProjectionFacts(compact);
     const terminal = projection.terminal;
     writer.print(
-        "{{\"operationId\":\"{d}\",\"afterRunId\":\"{d}\",\"phase\":\"{s}\",\"cause\":",
-        .{ compact.id, compact.after_run_id, @tagName(projection.phase) },
+        "{{\"operationId\":\"{d}\",\"afterRunId\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"cause\":",
+        .{
+            compact.id,
+            compact.after_run_id,
+            if (compact.coverage == .excluded) "excluded" else "included",
+            @tagName(projection.phase),
+        },
     ) catch return error.SnapshotTooLarge;
     if (if (terminal) |payload| payload.cause else null) |cause|
         jsonValue(writer, @tagName(cause)) catch return error.SnapshotTooLarge

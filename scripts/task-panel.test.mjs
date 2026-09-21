@@ -125,6 +125,7 @@ function terminal(
 function run(overrides = {}) {
   return {
     id: "9",
+    conversationCoverage: "included",
     phase: "completed",
     execution: {
       generation: "7",
@@ -653,6 +654,7 @@ function task(overrides = {}) {
     currentRunPhase: null,
     context: { pressure: null, lastAutoCompact: null },
     runs: [],
+    compacts: [],
     pendingUi: null,
     uiHistory: [],
     ...overrides,

@@ -7013,6 +7013,14 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-micro);
 }
 
+.conversation-coverage-notice {
+  margin: 0 0 20px;
+}
+
+.run-conversation-coverage-notice {
+  margin: 8px 0 0;
+}
+
 .ai-intervention {
   position: relative;
   padding: 18px 0 2px;

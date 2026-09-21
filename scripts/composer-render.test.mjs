@@ -215,13 +215,14 @@ function renderCompletedSurface(
     redacted: false,
   },
   compacts = [],
-  { pendingUi = null, uiHistory = [] } = {},
+  { pendingUi = null, uiHistory = [], conversationCoverage = "included" } = {},
 ) {
   const task = {
     id: "3",
     runs: [
       {
         id: "9",
+        conversationCoverage,
         phase: pendingUi ? "waiting_ui" : "completed",
         execution: {
           generation: "1",
@@ -583,6 +584,27 @@ test("Task content keeps Tool and Run metadata out of the reading flow", () => {
   assert.doesNotMatch(markup, /Read|fixture\.txt|tokens|runId/);
 });
 
+test("excluded conversation history is explained beside its owning Run", () => {
+  const markup = renderCompletedSurface(
+    "The interrupted response remains visible",
+    undefined,
+    [],
+    { conversationCoverage: "excluded" },
+  );
+  const exchange = markup.indexOf('class="ai-exchange"');
+  const input = markup.indexOf("Inspect the release", exchange);
+  const notice = markup.indexOf(
+    "This message remains in the task history, but is not included in the restored model context",
+    exchange,
+  );
+  assert.ok(exchange >= 0 && input > exchange && notice > input);
+  assert.equal(
+    (markup.match(/run-conversation-coverage-notice/g) ?? []).length,
+    1,
+  );
+  assert.doesNotMatch(markup.slice(0, exchange), /restored model context/);
+});
+
 test("Task content preserves typed Skill identity and positional arguments", () => {
   const markup = renderCompletedSurface("Review complete", {
     kind: "skill",
@@ -655,6 +677,7 @@ test("Task content does not project manual Compact history", () => {
     {
       operationId: "11",
       afterRunId: "9",
+      conversationCoverage: "included",
       phase: "compacted",
       cause: null,
       beforeContextTokens: "100",
@@ -817,7 +840,11 @@ test("a poisoned Task explains why continuation is unavailable", () => {
     composeDisabled: true,
   });
   assert.match(markup.match(/<textarea[^>]*>/)?.[0] ?? "", /disabled/);
-  assert.match(markup, /End this task and start a new one to continue/);
+  assert.match(
+    markup,
+    /This conversation cannot continue right now\. Check recovery status and try again/,
+  );
+  assert.doesNotMatch(markup, /End this task and start a new one/);
 });
 
 test("execution target incompatibility does not mislabel the Conversation as lost", () => {

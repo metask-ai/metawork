@@ -240,6 +240,7 @@ pub fn executeRun(context: *anyopaque) void {
         .run => |value| value,
         .failure => |failure| {
             run.agent_handoff.store(.finishing, .release);
+            run.coverage = .excluded;
             commitBeginFailure(job.projector, run, failure);
             publishAutomaticTitleFallback(run);
             job.notifier.notify();
@@ -291,6 +292,7 @@ pub fn cancelRun(context: *anyopaque) void {
         else => unreachable,
     };
     cancelPreparedRunOrPanic(job.sessionAccess(), run.id);
+    run.coverage = .excluded;
     _ = commitRunTerminal(
         job.projector,
         run,
@@ -317,6 +319,7 @@ pub fn executeCompact(context: *anyopaque) void {
     compact.agent_handoff.store(.running, .release);
     var terminal = job.sessionAccess().executePreparedCompact(compact.id) catch |err| {
         compact.agent_handoff.store(.finishing, .release);
+        compact.coverage = .excluded;
         _ = commitCompactProductTerminal(
             job.projector,
             compact,
@@ -354,6 +357,7 @@ pub fn cancelCompact(context: *anyopaque) void {
     _ = compact.pending_interruption.cmpxchgStrong(.none, .app_shutdown, .acq_rel, .acquire);
     const interruption = policy.pendingExternalInterruption(compact);
     cancelPreparedCompactOrPanic(job.sessionAccess(), compact.id);
+    compact.coverage = .excluded;
     _ = commitCompactProductTerminal(
         job.projector,
         compact,

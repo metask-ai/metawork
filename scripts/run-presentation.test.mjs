@@ -51,6 +51,7 @@ test("finished time uses a locale-aware relative label with an absolute value", 
 function run(overrides = {}) {
   return {
     id: "7",
+    conversationCoverage: "included",
     phase: "running",
     permissionProfile: "approval_required",
     permissionInteraction: "interactive",

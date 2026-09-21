@@ -525,6 +525,8 @@ export const enUS = {
     "Describe a clear outcome and choose a workspace on first send. Cancelling the picker keeps your draft.",
   "task.created_empty_body":
     "This task is ready. Enter its first instruction to begin.",
+  "task.conversation_history_excluded":
+    "Some history is not included in the restored conversation context. You can still continue with a new message.",
   "task.no_tasks":
     "Start a new task; choose a folder before sending when one is needed.",
   "task.archived_hidden": "Archived tasks are hidden.",
@@ -619,7 +621,7 @@ export const enUS = {
   "run.placeholder_archived": "Restore this task to continue",
   "run.placeholder_closing": "This task is ending",
   "run.placeholder_unavailable":
-    "End this task and start a new one to continue",
+    "This conversation cannot continue right now. Check recovery status and try again",
   "run.placeholder_execution_rebind_required":
     "The current execution cannot run this conversation. Switch to an account or connection that supports the task model",
   "run.draft_only":
@@ -677,6 +679,8 @@ export const enUS = {
   "run.terminal.partial_interrupted":
     "Work was interrupted before the response was complete",
   "run.terminal.partial_failed": "Work failed before the response was complete",
+  "run.conversation_history_excluded":
+    "This message remains in the task history, but is not included in the restored model context. You can still continue with a new message.",
   "run.process.title": "Execution details",
   "run.process.elapsed": "Turn time {duration}",
   "run.process.toggle_tool": "Show or hide details for {name}",

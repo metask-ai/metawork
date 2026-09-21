@@ -29,6 +29,7 @@ pub const ProjectionAuthorityQuery = runtime.ProjectionAuthorityQuery;
 pub const ProjectionAuthority = runtime.ProjectionAuthority;
 pub const ProjectionEffects = runtime.ProjectionEffects;
 pub const RecoveryAdmissionEffects = runtime.RecoveryAdmissionEffects;
+pub const RecoveryWorkspaceTrust = runtime.RecoveryWorkspaceTrust;
 pub const ProjectedText = runtime.ProjectedText;
 pub const TextProjection = runtime.TextProjection;
 pub const DurableCommit = runtime.DurableCommit;

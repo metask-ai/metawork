@@ -553,6 +553,7 @@ pub const OperationWire = struct { kind: []const u8, id: u64 };
 
 pub const RunWire = struct {
     id: u64,
+    coverage: []const u8,
     generation: u64,
     execution_generation: u64,
     execution_protocol: []const u8,
@@ -669,6 +670,7 @@ pub const UsageWire = struct {
 
 pub const CompactWire = struct {
     id: u64,
+    coverage: []const u8,
     after_run_id: u64,
     phase: []const u8,
     cause: ?[]const u8,
@@ -820,6 +822,7 @@ pub fn projectTask(
             "";
         compacts[compact_index] = .{
             .id = compact.id,
+            .coverage = @tagName(compact.coverage),
             .after_run_id = compact.after_run_id,
             .phase = @tagName(projection.phase),
             .cause = if (terminal) |payload|
@@ -1085,6 +1088,7 @@ fn projectRun(
         null;
     return .{
         .id = run.id,
+        .coverage = @tagName(run.coverage),
         .generation = run.generation,
         .execution_generation = run.execution_generation,
         .execution_protocol = @tagName(run.execution_protocol),
@@ -1401,6 +1405,10 @@ fn restoreCheckpointRecord(
 }
 
 fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_state.RunRecord {
+    const persisted_coverage = parseEnum(
+        task_state.ConversationCoverage,
+        wire.coverage,
+    ) orelse return error.TaskStoreCorrupt;
     var input = try restoreRunInput(projection, wire.input);
     errdefer deinitRestoredRunInput(projection, &input);
     var assistant: task_state.TrackedText = .{};
@@ -1506,6 +1514,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
     errdefer projection.free(execution_model);
     return .{
         .id = wire.id,
+        .coverage = if (persisted_coverage == .pending) .excluded else persisted_coverage,
         .generation = wire.generation,
         .execution_generation = wire.execution_generation,
         .execution_protocol = parseEnum(task_state.Protocol, wire.execution_protocol) orelse
@@ -1810,12 +1819,17 @@ fn restoreCompact(
     projection: RestoreProjection,
     wire: CompactWire,
 ) RestoreError!task_state.CompactRecord {
+    const persisted_coverage = parseEnum(
+        task_state.ConversationCoverage,
+        wire.coverage,
+    ) orelse return error.TaskStoreCorrupt;
     const interrupted = !persistedTerminalCompactPhase(wire.phase);
     const diagnostic = try projection.alloc(projection.limits.max_terminal_diagnostic_bytes);
     errdefer projection.free(diagnostic);
     @memcpy(diagnostic[0..wire.diagnostic.len], wire.diagnostic);
     return .{
         .id = wire.id,
+        .coverage = if (persisted_coverage == .pending) .excluded else persisted_coverage,
         .after_run_id = wire.after_run_id,
         .terminal_publication = .init(.published),
         .terminal_payload = .{
@@ -2607,6 +2621,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         task.completion_seen_run_id.? == 0;
     for (task.runs, 0..) |run, index| {
         if (run.id == 0 or run.generation == 0 or run.execution_generation == 0 or
+            !oneOf(run.coverage, &.{ "pending", "covered", "excluded" }) or
             !oneOf(run.execution_protocol, &.{ "openai_responses", "anthropic_messages", "openai_chat_completions", "gemini_native" }) or
             !validText(run.execution_model, limits.max_execution_model_bytes, false) or
             !validPermissionProfile(run.permission_profile) or
@@ -2741,7 +2756,8 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                     return error.Invalid;
         } else {
             if (!oneOf(run.phase, &.{ "queued", "running", "waiting_ui", "stopping" }) or
-                run.outcome != null or run.cause != null)
+                run.outcome != null or run.cause != null or
+                !std.mem.eql(u8, run.coverage, "pending"))
                 return error.Invalid;
             if (run.file_change_observation) |observation|
                 if (std.mem.eql(u8, observation, "complete"))
@@ -2775,6 +2791,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
     if (task.next_run_generation < max_generation) return error.Invalid;
     for (task.compacts, 0..) |compact, index| {
         if (compact.id == 0 or compact.after_run_id == 0 or
+            !oneOf(compact.coverage, &.{ "pending", "covered", "excluded" }) or
             !validText(compact.diagnostic, limits.max_terminal_diagnostic_bytes, true))
             return error.Invalid;
         for (task.compacts[0..index]) |previous|
@@ -2785,7 +2802,9 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         if (!terminalCompactPhase(compact.phase)) {
             if (!oneOf(compact.phase, &.{ "queued", "compacting", "stopping" }))
                 return error.Invalid;
-            if (compact.cause != null) return error.Invalid;
+            if (compact.cause != null or
+                !std.mem.eql(u8, compact.coverage, "pending"))
+                return error.Invalid;
             active_count += 1;
         } else {
             const failed = std.mem.eql(u8, compact.phase, "aborted") or
@@ -3366,6 +3385,7 @@ test "a retired PDF Task is isolated without blocking valid Task recovery" {
     }};
     var legacy_runs = [_]RunWire{.{
         .id = 1,
+        .coverage = "excluded",
         .generation = 1,
         .execution_generation = 1,
         .execution_protocol = "openai_chat_completions",
@@ -3542,6 +3562,7 @@ test "task store round-trips per-run execution generations across binding adopti
     var runs: [2]RunWire = undefined;
     runs[0] = .{
         .id = 1,
+        .coverage = "covered",
         .generation = 1,
         .execution_generation = 13,
         .execution_protocol = "openai_chat_completions",
@@ -3584,6 +3605,7 @@ test "task store round-trips per-run execution generations across binding adopti
     };
     runs[1] = runs[0];
     runs[1].id = 2;
+    runs[1].coverage = "excluded";
     runs[1].generation = 2;
     runs[1].execution_generation = 17;
     runs[1].input.text = "after adoption";
@@ -3623,6 +3645,38 @@ test "task store round-trips per-run execution generations across binding adopti
         .workspaces = &workspaces,
         .tasks = &tasks,
     }, testLimits());
+    var retired_payload: [64 * 1024]u8 = undefined;
+    @memcpy(retired_payload[0..bytes.len], bytes);
+    var cursor: usize = 0;
+    while (cursor < bytes.len) {
+        const payload_len = std.mem.readInt(
+            u32,
+            @as(*const [4]u8, @ptrCast(retired_payload[cursor + 24 .. cursor + 28].ptr)),
+            .little,
+        );
+        const payload_start = cursor + frame_header_bytes;
+        const payload_end = payload_start + payload_len;
+        if (retired_payload[cursor + 5] == record_task) {
+            const field = std.mem.indexOf(
+                u8,
+                retired_payload[payload_start..payload_end],
+                "\"coverage\"",
+            ) orelse return error.TestUnexpectedResult;
+            retired_payload[payload_start + field + "\"coverag".len] = 'X';
+            std.mem.writeInt(
+                u32,
+                @as(*[4]u8, @ptrCast(retired_payload[cursor + 32 .. cursor + 36].ptr)),
+                std.hash.Crc32.hash(retired_payload[payload_start..payload_end]),
+                .little,
+            );
+            break;
+        }
+        cursor = payload_end;
+    }
+    try std.testing.expectError(
+        error.TaskStoreCorrupt,
+        decode(std.testing.allocator, retired_payload[0..bytes.len], testLimits()),
+    );
     var decoded = try decode(std.testing.allocator, bytes, testLimits());
     defer decoded.deinit();
     try std.testing.expectEqualStrings(
@@ -3648,6 +3702,8 @@ test "task store round-trips per-run execution generations across binding adopti
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].binding.execution_generation);
     try std.testing.expectEqual(@as(u64, 13), decoded.value.tasks[0].runs[0].execution_generation);
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].runs[1].execution_generation);
+    try std.testing.expectEqualStrings("covered", decoded.value.tasks[0].runs[0].coverage);
+    try std.testing.expectEqualStrings("excluded", decoded.value.tasks[0].runs[1].coverage);
     try std.testing.expectEqualStrings(
         "final",
         decoded.value.tasks[0].runs[0].assistant_output_kind.?,
@@ -3711,6 +3767,7 @@ test "task store rejects states that would violate the product contract" {
     }};
     var runs = [_]RunWire{.{
         .id = 1,
+        .coverage = "covered",
         .generation = 1,
         .execution_generation = 1,
         .execution_protocol = "openai_chat_completions",
@@ -3750,6 +3807,7 @@ test "task store rejects states that would violate the product contract" {
     }};
     var compacts = [_]CompactWire{.{
         .id = 2,
+        .coverage = "covered",
         .after_run_id = 1,
         .phase = "compacted",
         .cause = null,
@@ -3807,6 +3865,14 @@ test "task store rejects states that would violate the product contract" {
         .workspaces = &workspaces,
         .tasks = &tasks,
     };
+    try validate(&state, testLimits());
+
+    runs[0].coverage = "unknown";
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    runs[0].coverage = "covered";
+    compacts[0].coverage = "unknown";
+    try std.testing.expectError(error.Invalid, validate(&state, testLimits()));
+    compacts[0].coverage = "covered";
     try validate(&state, testLimits());
 
     tasks[0].completion_seen_run_id = 1;

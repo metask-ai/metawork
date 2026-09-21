@@ -64,10 +64,12 @@ pub const Error = lifecycle.Error || product_attachment.Error || product_schedul
     TaskPersistenceUnavailable,
     TaskPersistenceFailed,
     TaskPersistenceOutcomeUnknown,
+    BindingEpochExhausted,
     RunGenerationExhausted,
     ExecutorShuttingDown,
     TaskCapacity,
     TaskIdentityExhausted,
+    UiRequestIdentityCollision,
     WorkspaceCapacity,
     WorkspaceIdentityExhausted,
     WorkspaceIdentityUntrusted,
@@ -3769,35 +3771,52 @@ pub const Runtime = struct {
         );
         const workspace = self.workspace.recoveryBinding(facts.workspace_id) orelse unreachable;
         const canonical_user_home = self.canonical_user_home orelse unreachable;
-        const store = self.checkpoint_store orelse unreachable;
-        const attempt_id = try self.task_runtime.startRecovery(task_id, .{
-            .expected_binding_epoch = expected_binding_epoch,
-            .workspace_id = workspace.id,
-            .workspace_epoch = workspace.epoch,
-            .workspace_root = workspace.canonical_root,
-            .canonical_user_home = canonical_user_home,
-            .workspace_trust = switch (workspace.trust) {
-                .explicitly_trusted => .explicitly_trusted,
-                .temporary => .temporary,
-            },
-            .workspace_kind = switch (workspace.kind) {
-                .manual => .manual,
-                .automatic => .automatic,
-            },
-            .execution = self.execution_state.executionInput().?,
-            .agent_runtime = self.agent_runtime,
-            .checkpoint_store = store,
-            .checkpoint_limits = checkpoint_export_limits,
-            .notifier = .{
-                .context = self.change_notifier.context,
-                .notify_fn = self.change_notifier.wake,
-            },
-            .executor = .{
-                .context = self,
-                .enqueue_fn = enqueueTaskRuntimeExecutor,
-                .cancel_fn = cancelTaskRuntimeExecutor,
-            },
-        });
+        const execution = self.execution_state.executionInput().?;
+        const workspace_trust: task_runtime.RecoveryWorkspaceTrust = switch (workspace.trust) {
+            .explicitly_trusted => .explicitly_trusted,
+            .temporary => .temporary,
+        };
+        const attempt_id = switch (facts.mode) {
+            .fresh => try self.task_runtime.startFreshConversation(task_id, .{
+                .expected_binding_epoch = expected_binding_epoch,
+                .workspace_id = workspace.id,
+                .workspace_epoch = workspace.epoch,
+                .workspace_root = workspace.canonical_root,
+                .canonical_user_home = canonical_user_home,
+                .workspace_trust = workspace_trust,
+                .execution = execution,
+                .agent_runtime = self.agent_runtime,
+                .commit_binding = .{
+                    .context = self,
+                    .commit_fn = commitTaskRuntimeCandidate,
+                },
+            }),
+            .checkpoint => try self.task_runtime.startRecovery(task_id, .{
+                .expected_binding_epoch = expected_binding_epoch,
+                .workspace_id = workspace.id,
+                .workspace_epoch = workspace.epoch,
+                .workspace_root = workspace.canonical_root,
+                .canonical_user_home = canonical_user_home,
+                .workspace_trust = workspace_trust,
+                .workspace_kind = switch (workspace.kind) {
+                    .manual => .manual,
+                    .automatic => .automatic,
+                },
+                .execution = execution,
+                .agent_runtime = self.agent_runtime,
+                .checkpoint_store = self.checkpoint_store orelse unreachable,
+                .checkpoint_limits = checkpoint_export_limits,
+                .notifier = .{
+                    .context = self.change_notifier.context,
+                    .notify_fn = self.change_notifier.wake,
+                },
+                .executor = .{
+                    .context = self,
+                    .enqueue_fn = enqueueTaskRuntimeExecutor,
+                    .cancel_fn = cancelTaskRuntimeExecutor,
+                },
+            }),
+        };
         self.bumpRevision();
         return attempt_id;
     }
@@ -4124,12 +4143,19 @@ pub const Runtime = struct {
         response: UiResponse,
     ) Error!void {
         self.syncLifecycle();
-        var prepared = try self.task_runtime.respondUi(
+        var prepared = self.task_runtime.respondUi(
             task_id,
             run_id,
             request_id,
             response,
-        );
+        ) catch |err| {
+            if (err == error.UiRequestIdentityCollision) {
+                self.commitTaskStateNoFail();
+                self.bumpRevision();
+                self.syncLifecycle();
+            }
+            return err;
+        };
         self.commitTaskStateBestEffort() catch |err| {
             prepared.rollback();
             return err;
@@ -4405,6 +4431,10 @@ pub const Runtime = struct {
             .recovery = self.taskRuntimeRecoveryEffects(),
             .release = self.taskRuntimeReleaseEffects(),
             .checkpoint = self.taskRuntimeCheckpointEffects(),
+            .notifier = .{
+                .context = self.change_notifier.context,
+                .notify_fn = self.change_notifier.wake,
+            },
         });
         changed = task_sync.changed or changed;
         var durable_changed = task_sync.durable_changed;
@@ -5644,8 +5674,12 @@ pub const Runtime = struct {
             catalogSnapshotLimits(self.limits),
         );
         if (self.mcp) |*runtime| runtime.finishShutdownAfterExecutorJoin();
-        self.syncLifecycle();
+        // The joined Run may have published its terminal and checkpoint only
+        // after the last UI-loop drain. Finish the canonical event barrier
+        // before settling checkpoint transactions.
+        self.drainAgentEvents() catch {};
         self.settleCheckpointTransactionsForShutdown();
+        self.task_runtime.excludePendingConversationTailAfterShutdown();
         self.commitTaskStateNoFail();
     }
 
@@ -10210,6 +10244,9 @@ test "Task state round trip restores product history without fabricating a Sessi
     const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
     defer std.testing.allocator.free(persistence_storage);
     var persistence = TestTaskPersistence{ .storage = persistence_storage };
+    const source_history_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(source_history_storage);
+    var source_history_len: usize = 0;
 
     {
         var source = try testRuntime();
@@ -10271,6 +10308,11 @@ test "Task state round trip restores product history without fabricating a Sessi
         try std.testing.expect(
             std.mem.indexOf(u8, persistence.storage[0..persistence.len], "SECRET-KEY") == null,
         );
+        @memcpy(
+            source_history_storage[0..persistence.len],
+            persistence.storage[0..persistence.len],
+        );
+        source_history_len = persistence.len;
 
         const terminal_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
         defer std.testing.allocator.free(terminal_storage);
@@ -10285,6 +10327,25 @@ test "Task state round trip restores product history without fabricating a Sessi
         terminal_state.value.tasks[0].runs[0].file_change_observation = "complete";
         terminal_state.value.tasks[0].active_operation = null;
         terminal_state.value.tasks[0].completion_seen_run_id = null;
+        var pending_compacts = [_]task_persistence.CompactWire{.{
+            .id = 9,
+            .coverage = "pending",
+            .after_run_id = 7,
+            .phase = "compacted",
+            .cause = null,
+            .before_context_tokens = 10,
+            .after_context_tokens = 5,
+            .usage = .{
+                .input_tokens = 0,
+                .output_tokens = 0,
+                .cache_read_input_tokens = 0,
+                .cache_creation_input_tokens = 0,
+            },
+            .diagnostic = "",
+            .diagnostic_truncated = false,
+            .diagnostic_redacted = false,
+        }};
+        terminal_state.value.tasks[0].compacts = &pending_compacts;
         const terminal_bytes = try task_persistence.encode(
             terminal_storage,
             terminal_state.value,
@@ -10307,6 +10368,22 @@ test "Task state round trip restores product history without fabricating a Sessi
         try std.testing.expectEqual(@as(u64, 7), terminal_task.durable.completion_seen_run_id);
         try std.testing.expectEqual(@as(?u64, null), task_test_policy.unreadCompletionRunId(terminal_task));
         try std.testing.expectEqual(RunPhase.completed, runPhase(terminal_run));
+        try std.testing.expectEqual(
+            task_test_state.ConversationCoverage.excluded,
+            terminal_run.coverage,
+        );
+        const terminal_compact = task_test_state.findCompact(
+            terminal_task.durable.compacts,
+            9,
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            task_test_state.CompactPhase.compacted,
+            task_test_state.compactProjectionFacts(terminal_compact).phase,
+        );
+        try std.testing.expectEqual(
+            task_test_state.ConversationCoverage.excluded,
+            terminal_compact.coverage,
+        );
         try std.testing.expectEqual(task_test_state.AssistantOutputKind.final, terminal_run.assistant_output_kind.?);
         try std.testing.expectEqual(@as(?usize, 0), terminal_run.assistant_output_start);
         try std.testing.expectEqual(
@@ -10347,13 +10424,47 @@ test "Task state round trip restores product history without fabricating a Sessi
             task_test_state.EventProjectionFailure.dependency_contract_failure,
             failed_run.event_projection_failure.?,
         );
+
+        const interrupted_compact_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(interrupted_compact_storage);
+        pending_compacts[0].phase = "compacting";
+        terminal_state.value.tasks[0].active_operation = .{ .kind = "compact", .id = 9 };
+        const interrupted_compact_bytes = try task_persistence.encode(
+            interrupted_compact_storage,
+            terminal_state.value,
+            source.taskPersistenceLimits(),
+        );
+        var interrupted_compact_restore = try Runtime.init(
+            std.testing.allocator,
+            std.testing.io,
+            &test_agent_runtime,
+            testLimits(),
+            .{
+                .task_persistence = persistence.capability(interrupted_compact_bytes),
+            },
+        );
+        defer interrupted_compact_restore.deinit();
+        const restored_compact_task = interrupted_compact_restore.task_runtime.find(3) orelse
+            return error.TestUnexpectedResult;
+        const interrupted_compact = task_test_state.findCompact(
+            restored_compact_task.durable.compacts,
+            9,
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            task_test_state.CompactPhase.interrupted,
+            task_test_state.compactProjectionFacts(interrupted_compact).phase,
+        );
+        try std.testing.expectEqual(
+            task_test_state.ConversationCoverage.excluded,
+            interrupted_compact.coverage,
+        );
+        try std.testing.expectEqual(
+            ActiveOperation.none,
+            restored_compact_task.runtime.active_operation,
+        );
     }
 
-    const source_history = try std.testing.allocator.dupe(
-        u8,
-        persistence.storage[0..persistence.len],
-    );
-    defer std.testing.allocator.free(source_history);
+    const source_history = source_history_storage[0..source_history_len];
     {
         const legacy_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
         defer std.testing.allocator.free(legacy_storage);
@@ -10407,7 +10518,7 @@ test "Task state round trip restores product history without fabricating a Sessi
     try std.testing.expect(task.runtime.executionConst() == null);
     try std.testing.expectEqual(ActiveOperation.none, task.runtime.active_operation);
     try std.testing.expectEqual(
-        ContinuationUnavailableReason.checkpoint_unavailable,
+        ContinuationUnavailableReason.execution_rebind_required,
         restored.task_runtime.continuationProjection(
             task.durable.id,
             restored.taskRuntimeProjectionEffects(),
@@ -10419,6 +10530,10 @@ test "Task state round trip restores product history without fabricating a Sessi
     );
     const run = findRun(task.durable.runs, 7) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(RunPhase.interrupted, runPhase(run));
+    try std.testing.expectEqual(
+        task_test_state.ConversationCoverage.excluded,
+        run.coverage,
+    );
     try std.testing.expectEqual(RunOutcome.interrupted, productTerminalFacts(run).?.outcome);
     try std.testing.expectEqual(
         task_test_state.FileChangeObservation.incomplete,
@@ -10449,7 +10564,7 @@ test "Task state round trip restores product history without fabricating a Sessi
         std.mem.indexOf(u8, snapshot, "\"conversationRecovery\":true") != null,
     );
     try std.testing.expect(
-        std.mem.indexOf(u8, snapshot, "\"continuationUnavailableReason\":\"checkpoint_unavailable\"") != null,
+        std.mem.indexOf(u8, snapshot, "\"continuationUnavailableReason\":\"execution_rebind_required\"") != null,
     );
 
     try restored.setTaskArchived(3, true);
@@ -10588,7 +10703,7 @@ test "Automatic Workspace history survives an unavailable allocator" {
     try std.testing.expectEqual(WorkspaceAuthorization.available, workspaces[0].authorization);
     const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
-        ContinuationUnavailableReason.checkpoint_unavailable,
+        ContinuationUnavailableReason.execution_rebind_required,
         restored.task_runtime.continuationProjection(
             task.durable.id,
             restored.taskRuntimeProjectionEffects(),
@@ -14305,6 +14420,7 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
 test "terminal publication is allocation-free write-once bounded history" {
     var control = try testRuntime();
     defer control.deinit();
+    defer detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     const diagnostic = try std.testing.allocator.alloc(u8, run.terminal_diagnostic.len + 17);
     defer std.testing.allocator.free(diagnostic);
@@ -14425,6 +14541,100 @@ test "terminal disposition folds exactly once without reopening a closing Task" 
             control.taskRuntimeProjectionEffects(),
         ).?.unavailable,
     );
+}
+
+test "poisoned Session close preserves ownership until successful release" {
+    const Harness = struct {
+        fn complete(
+            binding: *task_test_agent_session.Binding,
+            completion: *std.atomic.Value(CloseCompletion),
+            result: CloseCompletion,
+        ) void {
+            if (result == .closed) binding.markReleasedForTest();
+            completion.store(result, .release);
+        }
+    };
+    const cases = [_]struct {
+        completion: CloseCompletion,
+        expected_health: ?task_test_attachment.AttachedHealth,
+    }{
+        .{ .completion = .closed, .expected_health = null },
+        .{ .completion = .failed_reusable, .expected_health = .available },
+        .{ .completion = .failed_poisoned, .expected_health = .session_poisoned },
+        .{ .completion = .failed_closing, .expected_health = null },
+    };
+
+    for (cases) |case| {
+        var control = try testRuntime();
+        defer control.deinit();
+        const task = &control.task_runtime.tasks[0].?;
+        defer detachTaskForTest(&control, task);
+        task.runtime.active_operation = .none;
+        task.runtime.active_run_id = 0;
+        const route_id = task.runtime.routeId();
+        foldTerminalDisposition(task, .poisoned);
+        try std.testing.expect(control.task_runtime.requestPoisonedSessionCloses());
+        try std.testing.expect(task.runtime.close_requested);
+
+        // The close worker is simulated here so each typed completion can be
+        // checked independently without teaching the fixture Binding to own a
+        // second close implementation.
+        task.runtime.close_requested = false;
+        try std.testing.expect(task.runtime.beginClosing());
+        task.runtime.close_completion.store(.running, .release);
+        task.runtime.close_thread = try std.Thread.spawn(.{}, Harness.complete, .{
+            task.runtime.closingWorkerBinding().?,
+            &task.runtime.close_completion,
+            case.completion,
+        });
+        for (0..10_000) |_| {
+            if (task.runtime.close_completion.load(.acquire) == case.completion) break;
+            std.Thread.yield() catch {};
+        }
+        try std.testing.expectEqual(
+            case.completion,
+            task.runtime.close_completion.load(.acquire),
+        );
+
+        control.syncLifecycle();
+        try std.testing.expect(task.runtime.close_thread == null);
+        switch (case.completion) {
+            .closed => {
+                try std.testing.expect(task.runtime.live() == null);
+                try std.testing.expectEqual(@as(u64, 0), task.runtime.routeId());
+                try std.testing.expectEqual(
+                    task_test_state.ConversationCoverage.excluded,
+                    task.durable.runs[0].?.coverage,
+                );
+                try std.testing.expect(!task.runtime.close_failed);
+            },
+            .failed_reusable, .failed_poisoned => {
+                const attached = task.runtime.attachedConst().?;
+                try std.testing.expectEqual(case.expected_health.?, attached.health);
+                try std.testing.expectEqual(route_id, task.runtime.routeId());
+                try std.testing.expect(task.runtime.executionConst() != null);
+                try std.testing.expect(task.runtime.close_failed);
+                try std.testing.expectEqual(
+                    task_test_state.ConversationCoverage.pending,
+                    task.durable.runs[0].?.coverage,
+                );
+                try std.testing.expect(!control.task_runtime.requestPoisonedSessionCloses());
+                try std.testing.expect(!task.runtime.close_requested);
+            },
+            .failed_closing => {
+                try std.testing.expect(task.runtime.hasClosingSession());
+                try std.testing.expectEqual(route_id, task.runtime.routeId());
+                try std.testing.expect(task.runtime.executionConst() != null);
+                try std.testing.expect(task.runtime.close_failed);
+                try std.testing.expectEqual(TaskLifecycle.closing, taskLifecycle(task));
+                try std.testing.expectEqual(
+                    task_test_state.ConversationCoverage.pending,
+                    task.durable.runs[0].?.coverage,
+                );
+            },
+            .none, .running => unreachable,
+        }
+    }
 }
 
 test "canonical prompt title and terminal diagnostic never retain the registered credential" {
@@ -16280,10 +16490,17 @@ test "event drain barrier atomically publishes terminal product state" {
     try std.testing.expect(std.mem.indexOf(u8, pending, "final assistant suffix") == null);
 
     const revision_before_finalization = control.revision;
-    finalizeTestTerminalEvents(&control);
+    control.markTerminalRunsBeforeEventDrain();
+    control.finalizeMarkedTerminalRunsAfterEventDrain();
     try std.testing.expect(control.revision > revision_before_finalization);
     run.commentary_count = 1;
     run.commentary_ends[0] = @intCast(run.assistant.committed_len);
+
+    // This test owns a fixture Binding that deliberately cannot exercise the
+    // asynchronous Agent Session close path. Detach before snapshot lifecycle
+    // reconciliation so the terminal-publication assertion stays scoped to
+    // its event-drain barrier instead of starting a fake close worker.
+    detachTaskForTest(&control, &control.task_runtime.tasks[0].?);
 
     var terminal_storage: [96 * 1024]u8 = undefined;
     const terminal = try control.writeSnapshot(&terminal_storage);

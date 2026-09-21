@@ -817,6 +817,9 @@ pub const Runtime = struct {
             .workspace_epoch = workspace_epoch,
             .permission_interaction = options.permission_interaction,
             .control_block = control_block,
+            .next_run_id = options.operation_id_floor.last_run_id,
+            .next_compact_id = options.operation_id_floor.last_compact_id,
+            .ui_request_id = options.operation_id_floor.last_ui_request_id,
         };
         control_block.* = .{ .session = session };
 
@@ -917,7 +920,9 @@ pub const Runtime = struct {
         if (!std.mem.eql(u8, binding.target.model, options.expectation.model) or
             options.expectation.logical_session_id.len == 0 or
             options.expectation.logical_session_id.len > max_core_session_id_bytes or
-            options.expectation.checkpoint_generation == 0)
+            options.expectation.checkpoint_generation == 0 or
+            session_options.operation_id_floor.last_run_id < options.expectation.last_run_id or
+            session_options.operation_id_floor.last_compact_id < options.expectation.last_compact_id)
             return error.RestoreInvalid;
         if (session_options.canonical_user_home.len != 0)
             try validateCanonicalDirectory(
@@ -1057,8 +1062,9 @@ pub const Runtime = struct {
             .workspace_epoch = workspace_epoch,
             .permission_interaction = session_options.permission_interaction,
             .control_block = control_block,
-            .next_run_id = options.expectation.last_run_id,
-            .next_compact_id = options.expectation.last_compact_id,
+            .next_run_id = session_options.operation_id_floor.last_run_id,
+            .next_compact_id = session_options.operation_id_floor.last_compact_id,
+            .ui_request_id = session_options.operation_id_floor.last_ui_request_id,
             .core_session_identity = identity,
         };
         control_block.* = .{ .session = session };

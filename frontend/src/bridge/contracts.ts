@@ -642,11 +642,14 @@ export type RunActivity =
   | { kind: "finalizing" }
   | { kind: "stopping" };
 
+export type ConversationCoverage = "included" | "excluded";
+
 export type RunView = {
   elapsedMs: string | null;
   submittedAtUnixMs: string | null;
   finishedAtUnixMs: string | null;
   id: string;
+  conversationCoverage: ConversationCoverage;
   phase: RunPhase;
   permissionProfile: PermissionProfile;
   permissionInteraction: PermissionInteraction;
@@ -712,6 +715,7 @@ export type CompactCause = (typeof compactCauses)[number];
 export type CompactView = {
   operationId: string;
   afterRunId: string;
+  conversationCoverage: ConversationCoverage;
   phase: CompactPhase;
   cause: CompactCause | null;
   beforeContextTokens: string;
