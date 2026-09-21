@@ -679,6 +679,8 @@ export const enUS = {
   "run.terminal.partial_interrupted":
     "Work was interrupted before the response was complete",
   "run.terminal.partial_failed": "Work failed before the response was complete",
+  "run.conversation_history_excluded":
+    "This message remains in the task history, but is not included in the restored model context. You can still continue with a new message.",
   "run.process.title": "Execution details",
   "run.process.elapsed": "Turn time {duration}",
   "run.process.toggle_tool": "Show or hide details for {name}",

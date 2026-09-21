@@ -215,14 +215,14 @@ function renderCompletedSurface(
     redacted: false,
   },
   compacts = [],
-  { pendingUi = null, uiHistory = [] } = {},
+  { pendingUi = null, uiHistory = [], conversationCoverage = "included" } = {},
 ) {
   const task = {
     id: "3",
     runs: [
       {
         id: "9",
-        conversationCoverage: "included",
+        conversationCoverage,
         phase: pendingUi ? "waiting_ui" : "completed",
         execution: {
           generation: "1",
@@ -582,6 +582,27 @@ test("Task content keeps Tool and Run metadata out of the reading flow", () => {
   assert.match(markup, /Inspect the release/);
   assert.match(markup, /Release is ready/);
   assert.doesNotMatch(markup, /Read|fixture\.txt|tokens|runId/);
+});
+
+test("excluded conversation history is explained beside its owning Run", () => {
+  const markup = renderCompletedSurface(
+    "The interrupted response remains visible",
+    undefined,
+    [],
+    { conversationCoverage: "excluded" },
+  );
+  const exchange = markup.indexOf('class="ai-exchange"');
+  const input = markup.indexOf("Inspect the release", exchange);
+  const notice = markup.indexOf(
+    "This message remains in the task history, but is not included in the restored model context",
+    exchange,
+  );
+  assert.ok(exchange >= 0 && input > exchange && notice > input);
+  assert.equal(
+    (markup.match(/run-conversation-coverage-notice/g) ?? []).length,
+    1,
+  );
+  assert.doesNotMatch(markup.slice(0, exchange), /restored model context/);
 });
 
 test("Task content preserves typed Skill identity and positional arguments", () => {

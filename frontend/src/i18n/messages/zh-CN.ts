@@ -613,6 +613,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.terminal.partial_stopped": "工作已停止，回复未完整生成",
   "run.terminal.partial_interrupted": "工作意外中断，回复未完整生成",
   "run.terminal.partial_failed": "工作失败，回复未完整生成",
+  "run.conversation_history_excluded":
+    "本轮消息仍保留在任务记录中，但未包含在恢复后的模型上下文中。后续消息仍可继续。",
   "run.process.title": "执行详情",
   "run.process.elapsed": "本轮用时 {duration}",
   "run.process.toggle_tool": "展开或收起 {name} 的详情",
