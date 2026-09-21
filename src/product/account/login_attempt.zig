@@ -6,6 +6,8 @@ const oauth = @import("account_oauth");
 const loopback = @import("account_loopback");
 const metask = @import("metask_client");
 
+pub const registered_callback_port = oauth.callback_port;
+
 pub const WorkerResult = union(enum) {
     exchange: CallbackExchangeInput,
     failed: state.WorkerFailure,
@@ -296,7 +298,7 @@ pub const TestSupport = if (@import("builtin").is_test) struct {
         return CallbackExchangeInput.init(
             &code,
             &material.verifier,
-            49152,
+            registered_callback_port,
             std.Io.Clock.Timestamp.fromNow(io, remaining),
         );
     }
@@ -351,7 +353,7 @@ const FakeLoopback = struct {
     }
 
     fn open(_: *anyopaque) loopback.ServerError!u16 {
-        return 49152;
+        return registered_callback_port;
     }
 
     fn wait(
@@ -395,7 +397,7 @@ test "rejected login result publication releases stale token ownership" {
     var input = CallbackExchangeInput.init(
         &code,
         &material.verifier,
-        49152,
+        registered_callback_port,
         std.Io.Clock.Timestamp.fromNow(std.testing.io, LoginAttempt.attempt_timeout),
     );
     var result: WorkerResult = .{ .exchange = input.take() };
@@ -442,7 +444,7 @@ test "login attempt publishes owned callback exchange input" {
     var result = capture.result orelse return error.TestUnexpectedResult;
     defer result.deinit();
     try std.testing.expectEqualStrings("code", result.exchange.code.view());
-    try std.testing.expectEqual(@as(u16, 49152), result.exchange.callback_port);
+    try std.testing.expectEqual(registered_callback_port, result.exchange.callback_port);
     try std.testing.expectEqualSlices(
         u8,
         &attempt.material.verifier,

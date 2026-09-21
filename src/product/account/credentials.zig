@@ -22,11 +22,12 @@ pub const CredentialRotation = struct {
         return self.tokens.accountId();
     }
 
-    pub fn belongsToAccount(
-        self: *const CredentialRotation,
+    pub fn bindAccountId(
+        self: *CredentialRotation,
         account_id: []const u8,
-    ) bool {
-        return std.mem.eql(u8, self.accountId(), account_id);
+    ) oauth.ProtocolError!void {
+        std.debug.assert(self.owned);
+        try self.tokens.bindAccountId(account_id);
     }
 
     pub fn persistenceInput(
@@ -120,6 +121,14 @@ pub const CredentialOwner = struct {
     ) bool {
         const current = if (self.tokens) |*value| value else return false;
         return std.mem.eql(u8, current.accountId(), principal_ref);
+    }
+
+    pub fn bindPrincipal(
+        self: *CredentialOwner,
+        principal_ref: []const u8,
+    ) oauth.ProtocolError!void {
+        const current = if (self.tokens) |*value| value else return error.InvalidTokenResponse;
+        try current.bindAccountId(principal_ref);
     }
 
     pub fn refresh(
@@ -285,13 +294,13 @@ test "refresh rotation is available before strict identity lookup" {
                 0 => blk: {
                     if (request.kind != .refresh_token) return error.ProtocolFailed;
                     const body =
-                        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"account-1"}
+                        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600}
                     ;
                     @memcpy(output[0..body.len], body);
                     break :blk .{ .status = 200, .body = output[0..body.len] };
                 },
                 1 => blk: {
-                    if (request.kind != .current_user or
+                    if (request.kind != .userinfo or
                         !std.mem.eql(u8, request.bearer orelse "", "new-access"))
                         return error.ProtocolFailed;
                     const body = "{\"code\":\"INVALID_API_KEY\"}";
@@ -325,7 +334,7 @@ test "refresh rotation is available before strict identity lookup" {
     try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
 
-test "refresh rotation identity is captured before ownership transfer" {
+test "refresh rotation binds the current principal before ownership transfer" {
     var owner: CredentialOwner = .{};
     defer owner.deinit();
     try owner.installStored(
@@ -335,21 +344,22 @@ test "refresh rotation identity is captured before ownership transfer" {
         10,
         "account-1",
     );
-    var rotated_tokens = try oauth.TokenSet.fromStored(
+    var rotated_tokens = try oauth.parseTokenResponse(
         std.testing.allocator,
-        "new-access",
-        "new-refresh",
-        20,
-        "account-1",
+        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":20}
+    ,
+        0,
+        false,
     );
     var rotation: CredentialRotation = .{
         .tokens = rotated_tokens.take(),
     };
     defer rotation.deinit();
 
-    const belongs_to_current_account = rotation.belongsToAccount("account-1");
+    try std.testing.expectEqualStrings("", rotation.accountId());
+    try rotation.bindAccountId("account-1");
     owner.replaceRotation(&rotation);
 
-    try std.testing.expect(belongs_to_current_account);
+    try std.testing.expect(owner.belongsToPrincipal("account-1"));
     try std.testing.expect(owner.available());
 }

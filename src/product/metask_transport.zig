@@ -8,6 +8,7 @@ const std = @import("std");
 pub const RequestKind = enum {
     exchange_code,
     refresh_token,
+    userinfo,
     current_user,
     usage_dashboard,
     usage_history,

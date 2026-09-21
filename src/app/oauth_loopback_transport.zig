@@ -15,8 +15,15 @@ pub const Server = struct {
     listener_closed: std.atomic.Value(bool) = .init(false),
 
     pub fn init(io: std.Io) loopback.ServerError!Server {
+        return initOnPort(io, 0);
+    }
+
+    pub fn initOnPort(
+        io: std.Io,
+        bind_port: u16,
+    ) loopback.ServerError!Server {
         const address: std.Io.net.IpAddress = .{
-            .ip4 = .loopback(0),
+            .ip4 = .loopback(bind_port),
         };
         const listener = address.listen(io, .{
             .kernel_backlog = 4,
@@ -269,10 +276,11 @@ pub const Server = struct {
 /// vtable. Exactly one Account login may own the adapter at a time.
 pub const Adapter = struct {
     io: std.Io,
+    port: u16,
     server: ?Server = null,
 
-    pub fn init(io: std.Io) Adapter {
-        return .{ .io = io };
+    pub fn init(io: std.Io, port: u16) Adapter {
+        return .{ .io = io, .port = port };
     }
 
     pub fn deinit(self: *Adapter) void {
@@ -293,7 +301,7 @@ pub const Adapter = struct {
     fn open(context: *anyopaque) loopback.ServerError!u16 {
         const self: *Adapter = @ptrCast(@alignCast(context));
         if (self.server != null) return error.BindFailed;
-        self.server = try Server.init(self.io);
+        self.server = try Server.initOnPort(self.io, self.port);
         return self.server.?.port();
     }
 

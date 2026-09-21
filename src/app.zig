@@ -8,6 +8,7 @@ const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const account_api = @import("metawork_account");
+const account_oauth = @import("account_oauth");
 const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
@@ -617,7 +618,10 @@ pub fn run(init: std.process.Init) !void {
         .allocator = std.heap.c_allocator,
         .io = init.io,
     };
-    var account_loopback = oauth_loopback_transport.Adapter.init(init.io);
+    var account_loopback = oauth_loopback_transport.Adapter.init(
+        init.io,
+        account_oauth.callback_port,
+    );
     defer account_loopback.deinit();
     var account_runtime = account_api.Runtime.init(
         std.heap.c_allocator,
