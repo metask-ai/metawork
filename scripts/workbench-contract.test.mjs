@@ -2556,6 +2556,26 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     availableChoices: ["deny_once", "allow_once"],
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(pendingPermission));
+
+  const resolvedAndPending = clone(pendingPermission);
+  resolvedAndPending.tasks[0].uiHistory.push({
+    requestId: "9",
+    runId: "7",
+    order: "2",
+    kind: "permission",
+    state: "allowed_once",
+    detail: "{}",
+    itemCount: 0,
+    detailTruncated: false,
+    redacted: false,
+    agentRequestId: "",
+    permission: null,
+  });
+  assert.throws(
+    () => decodeWorkbenchSnapshot(resolvedAndPending),
+    /a pending UI request cannot already be resolved/,
+  );
+
   delete pendingPermission.tasks[0].pendingUi.redacted;
   assert.throws(
     () => decodeWorkbenchSnapshot(pendingPermission),

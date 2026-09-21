@@ -330,6 +330,7 @@ const OwnedRunInput = union(enum) {
 pub const OperationIdFloor = struct {
     last_run_id: u64 = 0,
     last_compact_id: u64 = 0,
+    last_ui_request_id: u64 = 0,
 };
 
 pub const SessionOpenOptions = struct {

@@ -3142,6 +3142,7 @@ pub const Runtime = struct {
             .operation_id_floor = .{
                 .last_run_id = task_policy.runHistoryHighWater(task),
                 .last_compact_id = task_policy.compactHistoryHighWater(task),
+                .last_ui_request_id = task_policy.uiRequestHistoryHighWater(task),
             },
         });
         var binding_live = true;
@@ -3273,6 +3274,7 @@ pub const Runtime = struct {
                 .checkpoint = checkpoint_copy,
                 .run_id_floor = task_policy.runHistoryHighWater(task),
                 .compact_id_floor = task_policy.compactHistoryHighWater(task),
+                .ui_request_id_floor = task_policy.uiRequestHistoryHighWater(task),
                 .workspace = workspace,
                 .execution = execution.take(),
                 .source_execution_generation = task.durable.execution_generation,

@@ -74,6 +74,7 @@ pub const PreparedAttempt = struct {
     checkpoint: checkpoint_record.Record,
     run_id_floor: u64,
     compact_id_floor: u64,
+    ui_request_id_floor: u64,
     workspace: OwnedWorkspaceBinding,
     execution: owned_execution.OwnedTaskExecution,
     source_execution_generation: u64,
@@ -433,6 +434,7 @@ pub const Job = struct {
                 .operation_id_floor = .{
                     .last_run_id = self.attempt.run_id_floor,
                     .last_compact_id = self.attempt.compact_id_floor,
+                    .last_ui_request_id = self.attempt.ui_request_id_floor,
                 },
             },
             .checkpoint_limits = self.checkpoint_limits,

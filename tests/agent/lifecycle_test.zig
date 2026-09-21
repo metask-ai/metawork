@@ -2325,6 +2325,45 @@ test "UI request validates identity and close wakes a suspended callback" {
     try closeSession(cancelled, .session_close);
 }
 
+test "Session UI requests allocate above the Product history floor" {
+    fake_core.reset();
+    fake_core.setNextPlan(.ui_wait);
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const workspace_root = if (std.fs.path.sep == '\\')
+        "C:\\tmp\\metawork-gate2"
+    else
+        "/tmp/metawork-gate2";
+    const temporary_root = if (std.fs.path.sep == '\\') "C:\\tmp" else "/tmp";
+    const session = try runtime.createSession(.{
+        .model_binding = fixtureModelBinding(.anthropic_messages),
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{
+            .canonical_root = workspace_root,
+            .trust = .{ .temporary = temporary_root },
+        },
+        .operation_id_floor = .{ .last_ui_request_id = 7 },
+    });
+    const run_id = try submitSession(session, "request UI after restored Product history");
+    try session.waitForState(.waiting_ui);
+    const request_id = session.pendingUiRequest().?;
+    try std.testing.expectEqual(@as(u64, 8), request_id);
+    try session.respondPermission(run_id, request_id, .allow_once);
+    fake_core.releaseControlled();
+    try session.waitRun(run_id);
+    var terminal = takeTestTerminal(session, run_id);
+    terminal.deinit();
+    try closeSession(session, .session_close);
+}
+
 fn openNoninteractivePermissionSession(
     runtime: *lifecycle.Runtime,
 ) !*lifecycle.Session {
@@ -2925,10 +2964,14 @@ test "checkpoint restore keeps expectation at checkpoint while allocating above 
     fake_core.reset();
     fake_core.setCheckpointGeneration(3);
     fake_core.setRestoreHistory(1, 1);
-    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 1,
+    });
     defer {
-        runtime.shutdown() catch unreachable;
-        runtime.deinit();
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
     }
     var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
     var options = restoreOptions(
@@ -2940,14 +2983,25 @@ test "checkpoint restore keeps expectation at checkpoint while allocating above 
     options.session.operation_id_floor = .{
         .last_run_id = 3,
         .last_compact_id = 4,
+        .last_ui_request_id = 7,
     };
     const route = try runtime.restoreSessionRoute(options);
+    fake_core.setSessionPlan(.ui_wait);
     const run_id = try route.session.prepareRun(.{ .text = "continue after excluded history" });
     try std.testing.expectEqual(@as(u64, 4), run_id);
     try route.session.cancelPreparedRun(run_id);
     const compact_id = try route.session.prepareCompact();
     try std.testing.expectEqual(@as(u64, 5), compact_id);
     try route.session.cancelPreparedCompact(compact_id);
+    const permission_run_id = try submitSession(route.session, "request UI after excluded history");
+    try route.session.waitForState(.waiting_ui);
+    const request_id = route.session.pendingUiRequest().?;
+    try std.testing.expectEqual(@as(u64, 8), request_id);
+    try route.session.respondPermission(permission_run_id, request_id, .allow_once);
+    fake_core.releaseControlled();
+    try route.session.waitRun(permission_run_id);
+    var terminal = takeTestTerminal(route.session, permission_run_id);
+    terminal.deinit();
     try closeSession(route.session, .session_close);
     try runtime.releaseClosedSession(route.session);
 }

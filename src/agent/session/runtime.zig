@@ -819,6 +819,7 @@ pub const Runtime = struct {
             .control_block = control_block,
             .next_run_id = options.operation_id_floor.last_run_id,
             .next_compact_id = options.operation_id_floor.last_compact_id,
+            .ui_request_id = options.operation_id_floor.last_ui_request_id,
         };
         control_block.* = .{ .session = session };
 
@@ -1063,6 +1064,7 @@ pub const Runtime = struct {
             .control_block = control_block,
             .next_run_id = session_options.operation_id_floor.last_run_id,
             .next_compact_id = session_options.operation_id_floor.last_compact_id,
+            .ui_request_id = session_options.operation_id_floor.last_ui_request_id,
             .core_session_identity = identity,
         };
         control_block.* = .{ .session = session };

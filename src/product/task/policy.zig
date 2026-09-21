@@ -454,6 +454,15 @@ pub fn compactHistoryHighWater(task: *const task_state.Task) u64 {
     return latest;
 }
 
+pub fn uiRequestHistoryHighWater(task: *const task_state.Task) u64 {
+    var latest: u64 = 0;
+    for (task.durable.ui_history) |entry| {
+        const record = entry orelse continue;
+        latest = @max(latest, record.request_id);
+    }
+    return latest;
+}
+
 pub fn maxCoveredRunId(task: *const task_state.Task) u64 {
     var latest: u64 = 0;
     for (task.durable.runs) |*entry| {
@@ -914,4 +923,36 @@ test "checkpoint matches covered frontier and permits only excluded Product tail
     task.durable.runs[1].?.coverage = .excluded;
     task.durable.runs[0].?.coverage = .excluded;
     try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
+}
+
+test "UI request history high-water follows the bounded ring contents" {
+    var runs: [0]?task_state.RunRecord = .{};
+    var compacts: [0]?task_state.CompactRecord = .{};
+    var ui_history = [_]?task_state.UiRecord{
+        .{ .request_id = 8, .run_id = 1, .kind = .permission, .state = .allowed_once },
+        .{ .request_id = 11, .run_id = 3, .kind = .permission, .state = .cancelled },
+        .{ .request_id = 9, .run_id = 2, .kind = .permission, .state = .denied },
+    };
+    const task = task_state.Task{
+        .durable = .{
+            .id = 3,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 2,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+            .ui_history_count = ui_history.len,
+            .ui_history_next = 1,
+        },
+        .runtime = .{},
+    };
+
+    try std.testing.expectEqual(@as(u64, 11), uiRequestHistoryHighWater(&task));
 }
