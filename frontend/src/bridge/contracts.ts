@@ -165,6 +165,7 @@ export type AccountView = {
   accountId: string;
   displayName: string;
   emailHint: string;
+  phoneHint: string;
   concurrencyLimit: number | null;
   errorCode: AccountErrorCode;
   safeDiagnostic: string;

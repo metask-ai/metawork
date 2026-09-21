@@ -1309,6 +1309,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
     "accountId",
     "displayName",
     "emailHint",
+    "phoneHint",
     "concurrencyLimit",
     "errorCode",
     "safeDiagnostic",
@@ -1319,6 +1320,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
   const accountId = stringValue(item.accountId, `${path}.accountId`);
   const displayName = stringValue(item.displayName, `${path}.displayName`);
   const emailHint = stringValue(item.emailHint, `${path}.emailHint`);
+  const phoneHint = stringValue(item.phoneHint, `${path}.phoneHint`);
   const concurrencyLimit =
     item.concurrencyLimit === null
       ? null
@@ -1555,15 +1557,11 @@ function decodeAccount(value: unknown, path: string): AccountView {
     (accountId.length !== 0 ||
       displayName.length !== 0 ||
       emailHint.length !== 0 ||
+      phoneHint.length !== 0 ||
       concurrencyLimit !== null)
   )
     fail(path, "a non-authenticated Account must hide identity");
-  if (
-    state === "authenticated" &&
-    (accountId.length === 0 ||
-      displayName.length === 0 ||
-      concurrencyLimit === null)
-  )
+  if (state === "authenticated" && accountId.length === 0)
     fail(path, "an authenticated Account requires identity");
   if (canCancel && state !== "authorizing")
     fail(path, "cancellation requires active authorization");
@@ -1628,6 +1626,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
     accountId,
     displayName,
     emailHint,
+    phoneHint,
     concurrencyLimit,
     errorCode,
     safeDiagnostic,

@@ -42,6 +42,7 @@ pub const Projection = struct {
     account_id: FixedText(account.Limits.account_id_bytes) = .{},
     display_name: FixedText(account.Limits.display_name_bytes) = .{},
     email_hint: FixedText(account.Limits.email_hint_bytes) = .{},
+    phone_hint: FixedText(account.Limits.phone_hint_bytes) = .{},
     concurrency_limit: ?u32 = null,
     safe_diagnostic: FixedText(account.Limits.safe_diagnostic_bytes) = .{},
     error_code: account.ErrorCode = .none,
@@ -94,6 +95,7 @@ pub const Projection = struct {
         self.account_id.setNoFail(source.account_id);
         self.display_name.setNoFail(source.display_name);
         self.email_hint.setNoFail(source.email_hint);
+        self.phone_hint.setNoFail(source.phone_hint);
         self.concurrency_limit = source.concurrency_limit;
         self.error_code = source.error_code;
         self.safe_diagnostic.setNoFail(source.safe_diagnostic);
@@ -166,6 +168,7 @@ pub const Projection = struct {
             .account_id = self.account_id.view(),
             .display_name = self.display_name.view(),
             .email_hint = self.email_hint.view(),
+            .phone_hint = self.phone_hint.view(),
             .concurrency_limit = self.concurrency_limit,
             .error_code = self.error_code,
             .safe_diagnostic = self.safe_diagnostic.view(),
@@ -255,6 +258,7 @@ test "Account projection copies the complete summary without allocating" {
             .account_id = "42",
             .display_name = "Fixture User",
             .email_hint = "f***@example.com",
+            .phone_hint = "138****8000",
             .concurrency_limit = 5,
             .summary = .{
                 .usage_eligibility = .enabled,
@@ -291,6 +295,7 @@ test "Account projection copies the complete summary without allocating" {
     projection.commitNoFail(fact);
     const view = projection.view();
     try account.validateView(view);
+    try std.testing.expectEqualStrings("138****8000", view.phone_hint);
     try std.testing.expectEqualStrings("-1.25", view.summary.wallet.balance_u);
     try std.testing.expectEqualStrings("37", view.summary.usage.today.?.total_tokens);
     try std.testing.expectEqualStrings("2.5", view.summary.usage.total.?.actual_cost_u);

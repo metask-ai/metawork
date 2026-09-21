@@ -300,7 +300,9 @@ pub const CurrentUser = struct {
     username_len: usize = 0,
     email_hint: [contract.Limits.email_hint_bytes]u8 = undefined,
     email_hint_len: usize = 0,
-    concurrency_limit: u32 = 0,
+    phone_hint: [contract.Limits.phone_hint_bytes]u8 = undefined,
+    phone_hint_len: usize = 0,
+    concurrency_limit: ?u32 = null,
 
     pub fn usernameView(self: *const CurrentUser) []const u8 {
         return self.username[0..self.username_len];
@@ -308,6 +310,10 @@ pub const CurrentUser = struct {
 
     pub fn emailHintView(self: *const CurrentUser) []const u8 {
         return self.email_hint[0..self.email_hint_len];
+    }
+
+    pub fn phoneHintView(self: *const CurrentUser) []const u8 {
+        return self.phone_hint[0..self.phone_hint_len];
     }
 };
 
@@ -318,10 +324,34 @@ const CurrentUserEnvelope = struct {
 
 const CurrentUserResponse = struct {
     id: i64,
-    username: []const u8,
-    email: []const u8 = "",
-    concurrency: i64,
+    // These profile fields are deliberately dynamic: a missing or unusable
+    // value must not make otherwise valid principal evidence fail login.
+    username: std.json.Value = .null,
+    email: std.json.Value = .null,
+    phone_number: std.json.Value = .null,
+    concurrency: std.json.Value = .null,
 };
+
+fn optionalText(output: []u8, value: std.json.Value) []const u8 {
+    const text = switch (value) {
+        .string => |text| text,
+        else => return output[0..0],
+    };
+    if (text.len > output.len or !std.unicode.utf8ValidateSlice(text))
+        return output[0..0];
+    @memcpy(output[0..text.len], text);
+    return output[0..text.len];
+}
+
+fn optionalConcurrency(value: std.json.Value) ?u32 {
+    const raw = switch (value) {
+        .integer => |number| number,
+        .number_string => |text| std.fmt.parseInt(i64, text, 10) catch return null,
+        else => return null,
+    };
+    if (raw <= 0) return 0;
+    return std.math.cast(u32, raw);
+}
 
 fn maskEmail(output: []u8, email: []const u8) ProtocolError![]const u8 {
     if (email.len == 0) return output[0..0];
@@ -344,6 +374,27 @@ fn maskEmail(output: []u8, email: []const u8) ProtocolError![]const u8 {
         return error.InvalidCurrentUserResponse;
     writer.writeAll("***@") catch return error.InvalidCurrentUserResponse;
     writer.writeAll(email[at + 1 ..]) catch
+        return error.InvalidCurrentUserResponse;
+    return writer.buffered();
+}
+
+fn maskPhone(output: []u8, phone: []const u8) ProtocolError![]const u8 {
+    if (phone.len == 0) return output[0..0];
+    const digits = if (phone[0] == '+') phone[1..] else phone;
+    if (digits.len < 7 or digits.len > 20)
+        return error.InvalidCurrentUserResponse;
+    for (digits) |byte| {
+        if (byte < '0' or byte > '9')
+            return error.InvalidCurrentUserResponse;
+    }
+    const prefix_len = @min(@as(usize, 3), digits.len - 4);
+    var writer = std.Io.Writer.fixed(output);
+    if (phone[0] == '+')
+        writer.writeByte('+') catch return error.InvalidCurrentUserResponse;
+    writer.writeAll(digits[0..prefix_len]) catch
+        return error.InvalidCurrentUserResponse;
+    writer.writeAll("****") catch return error.InvalidCurrentUserResponse;
+    writer.writeAll(digits[digits.len - 4 ..]) catch
         return error.InvalidCurrentUserResponse;
     return writer.buffered();
 }
@@ -372,21 +423,22 @@ pub fn parseCurrentUser(
         .{raw.data.id},
     ) catch return error.InvalidCurrentUserResponse;
     if (raw.code != 0 or raw.data.id <= 0 or
-        !std.mem.eql(u8, account_id, expected_account_id) or
-        raw.data.username.len == 0 or
-        raw.data.username.len > contract.Limits.display_name_bytes or
-        !std.unicode.utf8ValidateSlice(raw.data.username) or
-        raw.data.concurrency > std.math.maxInt(u32))
+        !std.mem.eql(u8, account_id, expected_account_id))
         return error.InvalidCurrentUserResponse;
     var result: CurrentUser = .{};
-    @memcpy(result.username[0..raw.data.username.len], raw.data.username);
-    result.username_len = raw.data.username.len;
-    const email_hint = try maskEmail(&result.email_hint, raw.data.email);
+    const username = optionalText(&result.username, raw.data.username);
+    result.username_len = username.len;
+    const email_hint = switch (raw.data.email) {
+        .string => |email| maskEmail(&result.email_hint, email) catch result.email_hint[0..0],
+        else => result.email_hint[0..0],
+    };
     result.email_hint_len = email_hint.len;
-    result.concurrency_limit = if (raw.data.concurrency <= 0)
-        0
-    else
-        @intCast(raw.data.concurrency);
+    const phone_hint = switch (raw.data.phone_number) {
+        .string => |phone| maskPhone(&result.phone_hint, phone) catch result.phone_hint[0..0],
+        else => result.phone_hint[0..0],
+    };
+    result.phone_hint_len = phone_hint.len;
+    result.concurrency_limit = optionalConcurrency(raw.data.concurrency);
     return result;
 }
 
@@ -615,27 +667,28 @@ test "token decoder validates consumed fields and tolerates additive metadata" {
     );
 }
 
-test "current user decoder binds username to the token account" {
+test "current user decoder binds the principal and projects optional profile fields" {
     const info = try parseCurrentUser(
-        \\{"code":0,"message":"success","data":{"id":42,"email":"user@example.com","username":"Meta User","concurrency":5,"role":"user","unknown":true}}
+        \\{"code":0,"message":"success","data":{"id":42,"email":"user@example.com","phone_number":"13800138000","username":"Meta User","concurrency":5,"role":"user","unknown":true}}
     ,
         "42",
     );
     try std.testing.expectEqualStrings("Meta User", info.usernameView());
     try std.testing.expectEqualStrings("u***@example.com", info.emailHintView());
-    try std.testing.expectEqual(@as(u32, 5), info.concurrency_limit);
+    try std.testing.expectEqualStrings("138****8000", info.phoneHintView());
+    try std.testing.expectEqual(@as(?u32, 5), info.concurrency_limit);
     const unlimited = try parseCurrentUser(
         \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":0}}
     ,
         "42",
     );
-    try std.testing.expectEqual(@as(u32, 0), unlimited.concurrency_limit);
+    try std.testing.expectEqual(@as(?u32, 0), unlimited.concurrency_limit);
     const legacy_unlimited = try parseCurrentUser(
         \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":-1}}
     ,
         "42",
     );
-    try std.testing.expectEqual(@as(u32, 0), legacy_unlimited.concurrency_limit);
+    try std.testing.expectEqual(@as(?u32, 0), legacy_unlimited.concurrency_limit);
     try std.testing.expectError(
         error.InvalidCurrentUserResponse,
         parseCurrentUser(
@@ -644,23 +697,58 @@ test "current user decoder binds username to the token account" {
             "42",
         ),
     );
-    try std.testing.expectError(
-        error.InvalidCurrentUserResponse,
-        parseCurrentUser(
-            \\{"code":0,"data":{"id":42,"username":"","concurrency":5}}
-        ,
-            "42",
-        ),
+    const incomplete = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"username":"","email":null,"concurrency":null}}
+    ,
+        "42",
     );
+    try std.testing.expectEqualStrings("", incomplete.usernameView());
+    try std.testing.expectEqualStrings("", incomplete.emailHintView());
+    try std.testing.expectEqualStrings("", incomplete.phoneHintView());
+    try std.testing.expectEqual(@as(?u32, null), incomplete.concurrency_limit);
+
+    const absent = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqualStrings("", absent.usernameView());
+    try std.testing.expectEqualStrings("", absent.emailHintView());
+    try std.testing.expectEqualStrings("", absent.phoneHintView());
+    try std.testing.expectEqual(@as(?u32, null), absent.concurrency_limit);
+
+    const malformed = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"username":7,"email":{"value":"user@example.com"},"phone_number":13800138000,"concurrency":"5"}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqualStrings("", malformed.usernameView());
+    try std.testing.expectEqualStrings("", malformed.emailHintView());
+    try std.testing.expectEqualStrings("", malformed.phoneHintView());
+    try std.testing.expectEqual(@as(?u32, null), malformed.concurrency_limit);
+
+    const oversized_concurrency = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"concurrency":4294967296}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqual(@as(?u32, null), oversized_concurrency.concurrency_limit);
 }
 
-test "current user decoder publishes only a bounded masked email hint" {
+test "current user decoder ignores unusable optional profile values" {
     const unicode = try parseCurrentUser(
         \\{"code":0,"data":{"id":42,"email":"朱健@example.com","username":"Meta User","concurrency":3}}
     ,
         "42",
     );
     try std.testing.expectEqualStrings("朱***@example.com", unicode.emailHintView());
+
+    const phone = try parseCurrentUser(
+        \\{"code":0,"data":{"id":42,"phone_number":"+8613800138000"}}
+    ,
+        "42",
+    );
+    try std.testing.expectEqualStrings("+861****8000", phone.phoneHintView());
 
     const absent = try parseCurrentUser(
         \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":3}}
@@ -670,14 +758,32 @@ test "current user decoder publishes only a bounded masked email hint" {
     try std.testing.expectEqualStrings("", absent.emailHintView());
 
     for ([_][]const u8{
-        \\{"code":0,"data":{"id":42,"email":"invalid","username":"Meta User","concurrency":3}},
-        \\{"code":0,"data":{"id":42,"email":"a@@example.com","username":"Meta User","concurrency":3}},
+        "{\"code\":0,\"data\":{\"id\":42,\"email\":\"invalid\",\"username\":\"Meta User\",\"concurrency\":3}}",
+        "{\"code\":0,\"data\":{\"id\":42,\"email\":\"a@@example.com\",\"username\":\"Meta User\",\"concurrency\":3}}",
     }) |payload| {
-        try std.testing.expectError(
-            error.InvalidCurrentUserResponse,
-            parseCurrentUser(payload, "42"),
-        );
+        const invalid = try parseCurrentUser(payload, "42");
+        try std.testing.expectEqualStrings("", invalid.emailHintView());
     }
+
+    for ([_][]const u8{
+        "{\"code\":0,\"data\":{\"id\":42,\"phone_number\":\"12345\"}}",
+        "{\"code\":0,\"data\":{\"id\":42,\"phone_number\":\"138-0013-8000\"}}",
+        "{\"code\":0,\"data\":{\"id\":42,\"phone_number\":\"++8613800138000\"}}",
+    }) |payload| {
+        const invalid = try parseCurrentUser(payload, "42");
+        try std.testing.expectEqualStrings("", invalid.phoneHintView());
+    }
+
+    var long_username: [contract.Limits.display_name_bytes + 1]u8 = undefined;
+    @memset(&long_username, 'x');
+    const payload = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"code\":0,\"data\":{{\"id\":42,\"username\":\"{s}\"}}}}",
+        .{&long_username},
+    );
+    defer std.testing.allocator.free(payload);
+    const oversized = try parseCurrentUser(payload, "42");
+    try std.testing.expectEqualStrings("", oversized.usernameView());
 }
 
 test "optional account summary fields never become identity gates" {

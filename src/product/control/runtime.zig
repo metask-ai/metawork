@@ -5228,6 +5228,9 @@ pub const Runtime = struct {
         writer.writeAll(",\"emailHint\":") catch
             return error.SnapshotTooLarge;
         try self.projectedJsonValue(writer, view.email_hint);
+        writer.writeAll(",\"phoneHint\":") catch
+            return error.SnapshotTooLarge;
+        try self.projectedJsonValue(writer, view.phone_hint);
         writer.writeAll(",\"concurrencyLimit\":") catch
             return error.SnapshotTooLarge;
         if (view.concurrency_limit) |limit|
@@ -7981,6 +7984,7 @@ pub const TestSupport = if (builtin.is_test) struct {
                 .account_id = "account-1",
                 .display_name = "Fixture User",
                 .email_hint = "f***@example.com",
+                .phone_hint = "138****8000",
                 .concurrency_limit = 5,
             },
         });
@@ -10101,6 +10105,7 @@ test "Product Control snapshot serializer preserves complete Account summary his
             .account_id = "account-1",
             .display_name = "Fixture User",
             .email_hint = "f***@example.com",
+            .phone_hint = "138****8000",
             .concurrency_limit = 5,
             .summary = .{
                 .usage_eligibility = .enabled,
@@ -14594,6 +14599,8 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
         @splat('d');
     const email_hint: [account_contract.Limits.email_hint_bytes]u8 =
         @splat('e');
+    const phone_hint: [account_contract.Limits.phone_hint_bytes]u8 =
+        @splat('1');
     const diagnostic: [account_contract.Limits.safe_diagnostic_bytes]u8 =
         @splat('x');
     control.commitAccountFactNoFail(.{
@@ -14603,6 +14610,7 @@ fn installMaximumAccountProjection(control: *Runtime) !void {
             .account_id = &account_id,
             .display_name = &display_name,
             .email_hint = &email_hint,
+            .phone_hint = &phone_hint,
             .concurrency_limit = std.math.maxInt(u32),
             .error_code = .invalid_state,
             .safe_diagnostic = &diagnostic,
