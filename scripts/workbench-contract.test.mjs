@@ -2207,9 +2207,10 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const authenticatedWithoutDisplayName = clone(fixture);
   authenticatedWithoutDisplayName.account.displayName = "";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(authenticatedWithoutDisplayName),
-    /authenticated Account requires identity/,
+  authenticatedWithoutDisplayName.account.emailHint = "";
+  authenticatedWithoutDisplayName.account.concurrencyLimit = null;
+  assert.doesNotThrow(() =>
+    decodeWorkbenchSnapshot(authenticatedWithoutDisplayName),
   );
 
   const diagnosticWithoutError = clone(fixture);

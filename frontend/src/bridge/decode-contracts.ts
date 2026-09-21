@@ -1558,12 +1558,7 @@ function decodeAccount(value: unknown, path: string): AccountView {
       concurrencyLimit !== null)
   )
     fail(path, "a non-authenticated Account must hide identity");
-  if (
-    state === "authenticated" &&
-    (accountId.length === 0 ||
-      displayName.length === 0 ||
-      concurrencyLimit === null)
-  )
+  if (state === "authenticated" && accountId.length === 0)
     fail(path, "an authenticated Account requires identity");
   if (canCancel && state !== "authorizing")
     fail(path, "cancellation requires active authorization");

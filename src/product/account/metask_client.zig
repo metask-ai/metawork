@@ -355,7 +355,7 @@ test "login exchanges tokens before resolving a strict identity" {
         "u***@example.com",
         identity.emailHint(),
     );
-    try std.testing.expectEqual(@as(u32, 5), identity.concurrency_limit);
+    try std.testing.expectEqual(@as(?u32, 5), identity.concurrency_limit);
     try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
 

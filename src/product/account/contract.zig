@@ -276,9 +276,7 @@ pub fn validateView(view: AccountView) ValidationError!void {
             if (!isEmptySummary(view.summary)) return error.InconsistentState;
         },
         .authenticated => {
-            if (view.account_id.len == 0 or view.display_name.len == 0)
-                return error.InconsistentState;
-            _ = view.concurrency_limit orelse return error.InconsistentState;
+            if (view.account_id.len == 0) return error.InconsistentState;
         },
     }
     try validateSummary(view.summary);
@@ -551,6 +549,10 @@ test "Account view validates identity and nested summary independently" {
                 .synced_at_unix_ms = "1000",
             },
         },
+    });
+    try validateView(.{
+        .state = .authenticated,
+        .account_id = "account-1",
     });
     try std.testing.expectError(error.InconsistentState, validateView(.{
         .state = .signed_out,

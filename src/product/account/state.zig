@@ -211,7 +211,7 @@ pub const Account = struct {
             .account_id = self.state.account_id,
             .display_name = self.state.display_name,
             .email_hint = self.state.email_hint,
-            .concurrency_limit = self.state.concurrency_limit orelse return null,
+            .concurrency_limit = self.state.concurrency_limit,
         };
     }
 
@@ -593,13 +593,13 @@ pub const AccountIdentity = struct {
     account_id: AccountId,
     display_name: DisplayName,
     email_hint: EmailHint,
-    concurrency_limit: u32,
+    concurrency_limit: ?u32,
 
     pub fn init(
         account_id: []const u8,
         display_name: []const u8,
         email_hint: []const u8,
-        concurrency_limit: u32,
+        concurrency_limit: ?u32,
     ) contract.ValidationError!AccountIdentity {
         if (account_id.len == 0) return error.FieldEmpty;
         return .{
@@ -782,6 +782,43 @@ test "explicit login persists tokens before publishing identity" {
     try std.testing.expectEqualStrings("account-1", account.view().account_id);
     try std.testing.expectEqualStrings("u***@example.com", account.view().email_hint);
     try std.testing.expectEqual(@as(?u32, 5), account.view().concurrency_limit);
+}
+
+test "optional profile omissions do not block authenticated identity" {
+    var account = Account.initSignedOutForTest();
+    var begin = switch (account.prepareCommand(.begin_login)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &begin);
+    try commitLoginExchange(&account);
+
+    var persisted: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .tokens_persisted,
+    };
+    var load_identity = switch (account.prepareCompletion(&persisted)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &load_identity);
+
+    var identity: WorkerCompletion = .{
+        .attempt_id = account.activeAttempt().?,
+        .payload = .{ .identity_loaded = try .init("account-1", "", "", null) },
+    };
+    var authenticated = switch (account.prepareCompletion(&identity)) {
+        .transition => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    commitPrepared(&account, &authenticated);
+
+    try std.testing.expectEqual(contract.AccountState.authenticated, account.view().state);
+    try std.testing.expectEqualStrings("account-1", account.view().account_id);
+    try std.testing.expectEqualStrings("", account.view().display_name);
+    try std.testing.expectEqualStrings("", account.view().email_hint);
+    try std.testing.expectEqual(@as(?u32, null), account.view().concurrency_limit);
+    try contract.validateView(account.view());
 }
 
 test "explicit login accepts a newly verified identity" {
