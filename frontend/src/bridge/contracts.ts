@@ -224,7 +224,6 @@ export type ModelsErrorCode =
   | "catalog_unavailable"
   | "catalog_invalid"
   | "catalog_too_large"
-  | "no_api_keys"
   | "no_models"
   | "operation_in_progress"
   | "local_resource_exhausted";
@@ -238,19 +237,12 @@ export type ModelsView = {
     recommended: boolean;
     catalogState: ModelsCatalogState;
     principalRef: string;
-    apiKeys: {
-      id: string;
-      name: string;
-      suffix: string;
-      protocol: Protocol;
-    }[];
     models: {
       id: string;
       displayName: string;
       metadata: ModelMetadata;
       metadataProvenance: ModelMetadataProvenance;
     }[];
-    selectedApiKeyId: string;
     catalogGeneration: string;
     sourceGeneration: string;
     errorCode: ModelsErrorCode;

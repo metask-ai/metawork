@@ -50,8 +50,8 @@ function metaskModels() {
         ],
       },
     ],
-    metaskSelection: { sourceId: "metask:key-1", modelId: "model-1" },
-    defaultSelection: { sourceId: "metask:key-1", modelId: "model-1" },
+    metaskSelection: { sourceId: "metask", modelId: "model-1" },
+    defaultSelection: { sourceId: "metask", modelId: "model-1" },
     customProviders: [],
   };
 }
@@ -68,7 +68,7 @@ function admission(activeModelRef) {
 test("a new Task starts from the active default without emitting an override", () => {
   const state = newTaskModelSelectionState(
     metaskModels(),
-    admission({ sourceId: "metask:key-1", modelId: "model-1" }),
+    admission({ sourceId: "metask", modelId: "model-1" }),
     null,
   );
 
@@ -101,7 +101,7 @@ test("the New task Composer consumes editable draft model state", () => {
 test("a new Task model override is source-qualified and does not mutate the default", () => {
   const models = metaskModels();
   const originalDefault = structuredClone(models.defaultSelection);
-  const requested = { sourceId: "metask:key-1", modelId: "model-2" };
+  const requested = { sourceId: "metask", modelId: "model-2" };
   const state = newTaskModelSelectionState(
     models,
     admission(models.defaultSelection),
@@ -120,8 +120,8 @@ test("a new Task model override is source-qualified and does not mutate the defa
 test("a catalog change invalidates a draft model instead of silently falling back", () => {
   const state = newTaskModelSelectionState(
     metaskModels(),
-    admission({ sourceId: "metask:key-1", modelId: "model-1" }),
-    { sourceId: "metask:key-1", modelId: "removed-model" },
+    admission({ sourceId: "metask", modelId: "model-1" }),
+    { sourceId: "metask", modelId: "removed-model" },
   );
 
   assert.equal(state.editable, true);

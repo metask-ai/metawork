@@ -61,15 +61,13 @@ export const enUS = {
     "MetaWork is checking whether this device can sign in.",
   "account.sign_in_required.title": "Sign in to MetaWork",
   "account.sign_in_required.body":
-    "Use your Metask account to load the APIs and models available to you.",
+    "Use your Metask account to load the models available to you.",
   "account.authorizing.title": "Finishing Metask sign-in",
   "account.authorizing.body":
     "Complete authorization in your browser if it is still open. MetaWork will continue automatically.",
   "account.action_failed": "Account action needs attention",
-  "account.error.no_api_keys":
-    "No API Keys are available for this Metask account. Add one in Metask, then try again.",
   "account.error.no_models":
-    "The selected API Key has no available models (its quota may be exhausted). Pick another API Key, or check it in Metask and retry.",
+    "No models are available for this Metask account. Refresh the catalog or check the account in Metask and retry.",
   "account.error.deadline":
     "Metask did not respond in time. Check your connection and try again.",
   "account.error.browser":
@@ -1037,18 +1035,13 @@ export const enUS = {
   "settings.current_default": "Current",
   "settings.provider": "Provider",
   "settings.provider_help":
-    "Choose the service that provides the model and its credential authority.",
+    "Choose the service, then select one of its available models.",
   "settings.choose_provider": "Choose a provider",
   "settings.provider_menu_help":
     "Only providers with a ready credential and tested model can become the default.",
   "settings.provider_managed_description":
     "Managed through your Metask account",
   "settings.api_key": "API key",
-  "settings.api_key_help":
-    "Choose which Metask API key supplies the model catalog.",
-  "settings.provider_api_key_help":
-    "This provider uses its saved API key. Replace it on the Providers page.",
-  "settings.saved_api_key": "Saved API key",
   "settings.open_models": "Open Models",
   "settings.default_selection_missing":
     "No executable default model is selected",
@@ -1103,14 +1096,9 @@ export const enUS = {
     "Secure credential capture is unavailable on this Host",
   "settings.custom_provider_credential.missing": "Credential required",
   "settings.custom_provider_credential.invalid": "Credential rejected",
-  "settings.catalog_count": "APIs {apis} · Models {models}",
+  "settings.catalog_count": "Models {models}",
+  "settings.loading_models": "Loading available models",
   "settings.language_help": "Changes apply immediately on this device.",
-  "settings.only_api_help":
-    "Metask currently returns only this API. Other APIs appear after the next sync.",
-  "settings.api_menu_help":
-    "Protocol is supplied by Metask and shown for reference.",
-  "settings.provider_api_menu_help":
-    "This provider's saved credential is managed on the Providers page.",
   "settings.default_model": "Default model",
   "settings.default_model_help":
     "Choose the model used by new tasks. Existing tasks keep their own model.",
@@ -1121,7 +1109,7 @@ export const enUS = {
   "settings.only_model_help":
     "This configuration currently provides only one available model.",
   "settings.model_menu_help":
-    "Choose from models available to the selected provider and API key.",
+    "Choose from models available to the selected provider.",
   "settings.custom_model_add_help":
     "Enter the model ID exposed by this provider. It will be tested before it can become the default.",
   "settings.custom_model_add": "Add model",
@@ -1135,23 +1123,16 @@ export const enUS = {
   "settings.change_selection": "Change",
   "settings.view_selection": "View options",
   "settings.model_loading": "Loading models…",
-  "settings.model_waiting_api": "Choose an API first",
-  "settings.loading_models_for": "Loading models available to {api}…",
   "settings.switch.pending_label": "Pending change",
   "settings.switch.saving_label": "Saving",
-  "settings.switch.preparing_api": "Preparing {api}",
   "settings.switch.preparing_model": "Preparing {model}",
-  "settings.switch.loading_models": "Loading models for {api}",
-  "settings.switch.choose_model": "Choose a model for {api}",
-  "settings.switch.choose_model_help":
-    "The new default is not saved until you choose a model.",
-  "settings.switch.choose_api_help":
-    "Choose the API that should supply models for new tasks.",
   "settings.switch.saving": "Saving the new default",
   "settings.switch.saving_detail":
     "{api} · {model} will be used for new tasks when saving finishes.",
   "settings.switch.current_preserved":
     "Your current default stays active until this finishes.",
+  "settings.switch.current_model_preserved":
+    "Your current default model, {model}, stays active until this finishes.",
   "settings.switch.refreshing":
     "Your current default stays active while account options refresh.",
   "settings.switch.working":

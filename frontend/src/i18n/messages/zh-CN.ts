@@ -61,15 +61,13 @@ export const zhCN: Record<MessageId, string> = {
   "account.checking.title": "正在检查登录状态",
   "account.checking.body": "MetaWork 正在确认这台设备是否可以登录。",
   "account.sign_in_required.title": "登录 MetaWork",
-  "account.sign_in_required.body": "使用 Metask 账号加载你可用的 API 和模型。",
+  "account.sign_in_required.body": "使用 Metask 账号加载你可用的模型。",
   "account.authorizing.title": "正在完成 Metask 登录",
   "account.authorizing.body":
     "如果浏览器中的授权页面仍然打开，请完成授权；MetaWork 随后会自动继续。",
   "account.action_failed": "账号操作需要处理",
-  "account.error.no_api_keys":
-    "这个 Metask 账号还没有可用的 API Key。请在 Metask 中添加后重试。",
   "account.error.no_models":
-    "所选 API Key 没有可用模型（可能配额已用尽）。请换一个 API Key，或在 Metask 中检查后重试。",
+    "这个 Metask 账号当前没有可用模型。请重新同步目录，或在 Metask 中检查账号后重试。",
   "account.error.deadline": "Metask 未能及时响应。请检查网络后重试。",
   "account.error.browser": "MetaWork 无法打开登录页面，请重新打开。",
   "account.error.authorization": "未能完成 Metask 登录，请重新登录。",
@@ -946,16 +944,12 @@ export const zhCN: Record<MessageId, string> = {
   "settings.default_model_for_new_tasks": "新任务默认模型",
   "settings.current_default": "当前默认",
   "settings.provider": "Provider",
-  "settings.provider_help": "选择提供模型及其凭据权限的服务。",
+  "settings.provider_help": "先选择提供模型的服务，再选择可用模型。",
   "settings.choose_provider": "选择 Provider",
   "settings.provider_menu_help":
     "只有凭据可用且模型已测试的 Provider 才能成为默认来源。",
   "settings.provider_managed_description": "通过 Metask 账号管理",
   "settings.api_key": "API Key",
-  "settings.api_key_help": "选择由哪个 Metask API Key 提供模型目录。",
-  "settings.provider_api_key_help":
-    "该 Provider 使用已保存的 API Key；如需替换，请前往 Provider 页面。",
-  "settings.saved_api_key": "已保存的 API Key",
   "settings.open_models": "打开模型设置",
   "settings.default_selection_missing": "未设置可执行的默认模型",
   "settings.providers_help":
@@ -1006,13 +1000,9 @@ export const zhCN: Record<MessageId, string> = {
     "当前 Host 不支持安全凭据采集",
   "settings.custom_provider_credential.missing": "需要凭据",
   "settings.custom_provider_credential.invalid": "凭据被拒绝",
-  "settings.catalog_count": "API {apis} · 模型 {models}",
+  "settings.catalog_count": "模型 {models}",
+  "settings.loading_models": "正在加载可用模型",
   "settings.language_help": "更改会立即应用到这台设备。",
-  "settings.only_api_help":
-    "Metask 当前只返回这一个可用 API；其他 API 会在下次同步后出现。",
-  "settings.api_menu_help": "协议由 Metask 提供，此处仅用于识别。",
-  "settings.provider_api_menu_help":
-    "该 Provider 的已保存凭据由 Provider 页面管理。",
   "settings.default_model": "默认模型",
   "settings.default_model_help":
     "选择新任务使用的模型；已有任务继续使用创建时绑定的模型。",
@@ -1021,7 +1011,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.new_task_model_invalid":
     "之前选择的模型已不可用；请重新选择模型后再发送。",
   "settings.only_model_help": "当前配置只提供这一个可用模型。",
-  "settings.model_menu_help": "从所选 Provider 与 API Key 的可用模型中选择。",
+  "settings.model_menu_help": "从所选 Provider 的可用模型中选择。",
   "settings.custom_model_add_help":
     "输入这个 Provider 开放的模型 ID；测试通过后才能设为默认模型。",
   "settings.custom_model_add": "添加模型",
@@ -1035,19 +1025,14 @@ export const zhCN: Record<MessageId, string> = {
   "settings.change_selection": "更改",
   "settings.view_selection": "查看选项",
   "settings.model_loading": "正在加载模型…",
-  "settings.model_waiting_api": "请先选择 API",
-  "settings.loading_models_for": "正在加载 {api} 可用的模型…",
   "settings.switch.pending_label": "待应用更改",
   "settings.switch.saving_label": "正在保存",
-  "settings.switch.preparing_api": "正在准备 {api}",
   "settings.switch.preparing_model": "正在准备 {model}",
-  "settings.switch.loading_models": "正在加载 {api} 的模型",
-  "settings.switch.choose_model": "为 {api} 选择模型",
-  "settings.switch.choose_model_help": "选择模型后才会保存新的默认配置。",
-  "settings.switch.choose_api_help": "选择为新任务提供模型的 API。",
   "settings.switch.saving": "正在保存新的默认配置",
   "settings.switch.saving_detail": "保存完成后，新任务将使用 {api} · {model}。",
   "settings.switch.current_preserved": "完成前，当前默认配置仍然有效。",
+  "settings.switch.current_model_preserved":
+    "完成前，当前默认模型 {model} 仍然有效。",
   "settings.switch.refreshing": "同步账号选项期间，当前默认配置仍然有效。",
   "settings.switch.working": "此操作完成前，相关账号设置会保持锁定。",
   "settings.switch.cancelled": "已取消更改，{api} · {model} 仍为默认配置。",

@@ -136,13 +136,6 @@ function providerAddressHost(value: string) {
   }
 }
 
-function apiLabel(
-  api: ModelsView["providers"][number]["apiKeys"][number],
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  return api.name.trim() || `${t("account.api_fallback")} ${api.id}`;
-}
-
 function modelLabel(
   model: ModelsView["providers"][number]["models"][number],
   t: ReturnType<typeof useI18n>["t"],
@@ -196,7 +189,6 @@ export function SettingsPage({
   onResetAutomaticWorkspaceRoot,
   onRetryAutomaticWorkspaceRoot,
   onCancel,
-  onSelectApiKey,
   onSelectModel,
   onCreateCustomProvider,
   onCreateBuiltinProvider,
@@ -241,7 +233,6 @@ export function SettingsPage({
     expectedGeneration: string,
   ) => Promise<AutomaticWorkspaceRootMutationOutcome>;
   onCancel: () => void;
-  onSelectApiKey: (id: string) => void;
   onSelectModel: (id: string) => void;
   onCreateCustomProvider: (input: CustomProviderSubmission) => Promise<boolean>;
   onCreateBuiltinProvider: (input: {
@@ -305,9 +296,6 @@ export function SettingsPage({
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(initialSection);
   const [providersPage, setProvidersPage] = useState<ProvidersPage>("list");
-  const [requestedApi, setRequestedApi] = useState<RequestedSelection | null>(
-    null,
-  );
   const [requestedModel, setRequestedModel] =
     useState<RequestedSelection | null>(null);
   const [requestedProviderId, setRequestedProviderId] = useState<string | null>(
@@ -356,14 +344,12 @@ export function SettingsPage({
   const metaskProvider = models.providers.find(
     (provider) => provider.id === "metask",
   );
-  const metaskApiKeys = metaskProvider?.apiKeys ?? [];
   const metaskModels = metaskProvider?.models ?? [];
   const metaskCatalogState =
     metaskProvider?.catalogState ?? "needs_authentication";
-  const selectedApiId = metaskProvider?.selectedApiKeyId ?? "";
   const selectedModelId = models.metaskSelection?.modelId ?? "";
   const committedProviderId = models.defaultSelection
-    ? models.defaultSelection.sourceId.startsWith("metask:")
+    ? models.defaultSelection.sourceId === "metask"
       ? "metask"
       : models.defaultSelection.sourceId
     : "";
@@ -392,18 +378,13 @@ export function SettingsPage({
         committedDefaultModel?.displayName || models.defaultSelection.modelId
       }`
     : t("settings.default_selection_missing");
-  const committedApi = metaskApiKeys.find((key) => key.id === selectedApiId);
   const committedModel = metaskModels.find(
     (model) => model.id === selectedModelId,
   );
-  const candidateApiId = requestedApi?.selectionId ?? "";
   const candidateModelId = requestedModel?.selectionId ?? "";
-  const candidateApi =
-    metaskApiKeys.find((key) => key.id === candidateApiId) ?? null;
   const candidateModel =
     metaskModels.find((model) => model.id === candidateModelId) ?? null;
   const modelCatalogLoading = models.operation === "refreshing_catalog";
-  const apiBusy = modelCatalogLoading;
   const modelBusy = modelCatalogLoading;
   const authenticated = account.state === "authenticated";
   const accountIdentityTitle = authenticated
@@ -431,12 +412,6 @@ export function SettingsPage({
           provider.credentialStatus === "ready" &&
           provider.state !== "disabled",
       ));
-  const canChooseApi =
-    modelsPersistenceReady &&
-    selectedProviderId.length > 0 &&
-    (providerIsMetask
-      ? authenticated && !modelCatalogLoading
-      : selectedCustomProvider?.credentialStatus === "ready");
   const canChooseModel =
     modelsPersistenceReady &&
     (providerIsMetask
@@ -478,29 +453,6 @@ export function SettingsPage({
     ],
     [account.state, metaskCatalogState, models.customProviders, t],
   );
-  const apiOptions = useMemo<SelectionMenuOption[]>(() => {
-    if (selectedProviderId === "metask") {
-      return metaskApiKeys.map((key) => ({
-        value: key.id,
-        label: apiLabel(key, t),
-        description: customProviderProtocolLabel(key.protocol, t),
-        descriptionKind: "text",
-        trailing: key.suffix ? `•••• ${key.suffix}` : undefined,
-      }));
-    }
-    if (!selectedCustomProvider) return [];
-    return [
-      {
-        value: selectedCustomProvider.id,
-        label: t("settings.saved_api_key"),
-        description: customProviderCredentialLabel(
-          selectedCustomProvider.credentialStatus,
-          t,
-        ),
-        descriptionKind: "text",
-      },
-    ];
-  }, [metaskApiKeys, selectedCustomProvider, selectedProviderId, t]);
   const modelOptions = useMemo<SelectionMenuOption[]>(() => {
     const options =
       selectedProviderId === "metask"
@@ -556,9 +508,6 @@ export function SettingsPage({
   const customProviders = models.customProviders.filter(
     (provider) => provider.builtinProviderId === null,
   );
-  const displayedApiId = providerIsMetask
-    ? selectedApiId
-    : (selectedCustomProvider?.id ?? "");
   const displayedModelId = providerIsMetask
     ? committedProviderId === "metask"
       ? selectedModelId
@@ -567,14 +516,9 @@ export function SettingsPage({
         models.defaultSelection?.sourceId === selectedCustomProvider.id
       ? models.defaultSelection.modelId
       : "";
-  const apiHasAlternative = apiOptions.some(
-    (option) => option.value !== displayedApiId,
-  );
   const modelHasAlternative = modelOptions.some(
     (option) => option.value !== displayedModelId,
   );
-  const apiIsOnlyOption =
-    displayedApiId.length > 0 && apiOptions.length === 1 && !apiHasAlternative;
   const modelIsOnlyOption =
     displayedModelId.length > 0 &&
     modelOptions.length === 1 &&
@@ -582,32 +526,17 @@ export function SettingsPage({
   const modelPlaceholder =
     providerIsMetask && modelCatalogLoading
       ? t("settings.model_loading")
-      : providerIsMetask &&
-          metaskCatalogState === "choosing" &&
-          candidateApiId.length === 0
-        ? t("settings.model_waiting_api")
-        : t("account.choose_model");
-  const committedApiName = committedApi
-    ? apiLabel(committedApi, t)
-    : t("account.api_fallback");
+      : t("account.choose_model");
   const committedModelName =
     (committedModel ? modelLabel(committedModel, t) : "") ||
     selectedModelId ||
     t("account.model_fallback");
-  const candidateApiName =
-    (candidateApi ? apiLabel(candidateApi, t) : "") ||
-    (requestedApi?.selectionId === candidateApiId
-      ? requestedApi.label
-      : candidateApiId) ||
-    t("account.api_fallback");
   const candidateModelName =
     (candidateModel ? modelLabel(candidateModel, t) : "") ||
     (requestedModel?.selectionId === candidateModelId
       ? requestedModel.label
       : candidateModelId) ||
     t("account.model_fallback");
-  const apiHasPendingChange =
-    candidateApiId.length > 0 && candidateApiId !== selectedApiId;
   const modelHasPendingChange =
     candidateModelId.length > 0 && candidateModelId !== selectedModelId;
   const transactionStatus = (() => {
@@ -621,39 +550,20 @@ export function SettingsPage({
             title: t("settings.switch.preparing_model", {
               model: candidateModelName,
             }),
-            detail: t("settings.switch.current_preserved", {
-              api: committedApiName,
-              model: committedModelName,
-            }),
-          };
-        }
-        if (apiHasPendingChange) {
-          return {
-            title: t("settings.switch.preparing_api", {
-              api: candidateApiName,
-            }),
-            detail: t("settings.switch.current_preserved", {
-              api: committedApiName,
+            detail: t("settings.switch.current_model_preserved", {
               model: committedModelName,
             }),
           };
         }
         return {
-          title: t("account.operation.loading_keys"),
+          title: t("settings.loading_models"),
           detail: t("settings.switch.refreshing"),
         };
       case "choosing":
-        return candidateApiId
-          ? {
-              title: t("settings.switch.choose_model", {
-                api: candidateApiName,
-              }),
-              detail: t("settings.switch.choose_model_help"),
-            }
-          : {
-              title: t("account.operation.selecting_key"),
-              detail: t("settings.switch.choose_api_help"),
-            };
+        return {
+          title: t("account.choose_model"),
+          detail: t("settings.default_model_help"),
+        };
       case "unavailable":
       case "ready":
       case "failed":
@@ -827,7 +737,6 @@ export function SettingsPage({
       account.state !== "authenticated" ||
       (metaskCatalogState === "ready" && !disabled)
     ) {
-      setRequestedApi(null);
       setRequestedModel(null);
     }
   }, [
@@ -1499,7 +1408,6 @@ export function SettingsPage({
                         <>
                           <span className="settings-catalog-count">
                             {t("settings.catalog_count", {
-                              apis: metaskApiKeys.length,
                               models: metaskModels.length,
                             })}
                           </span>
@@ -1509,7 +1417,7 @@ export function SettingsPage({
                               disabled ||
                               accountDisabled ||
                               !authenticated ||
-                              apiBusy
+                              modelBusy
                             }
                             onClick={onRefresh}
                           >
@@ -1550,7 +1458,6 @@ export function SettingsPage({
                         contentClassName="settings-selection-menu"
                         onValueChange={(value) => {
                           setRequestedProviderId(value);
-                          setRequestedApi(null);
                           setRequestedModel(null);
                           setCustomModelId("");
                         }}
@@ -1558,84 +1465,9 @@ export function SettingsPage({
                     </div>
                   </div>
 
-                  <div className="settings-field settings-field-api">
-                    <span className="settings-field-step" aria-hidden="true">
-                      02
-                    </span>
-                    <div className="settings-field-copy">
-                      <label htmlFor="settings-api">
-                        {t("settings.api_key")}
-                      </label>
-                      <p>
-                        {t(
-                          providerIsMetask
-                            ? apiIsOnlyOption
-                              ? "settings.only_api_help"
-                              : "settings.api_key_help"
-                            : "settings.provider_api_key_help",
-                        )}
-                      </p>
-                    </div>
-                    <div className="settings-control-stack">
-                      <SelectionMenu
-                        triggerId="settings-api"
-                        value={
-                          providerIsMetask
-                            ? candidateApiId || displayedApiId
-                            : displayedApiId
-                        }
-                        options={apiOptions}
-                        placeholder={t("account.choose_key")}
-                        ariaLabel={t("settings.api_key")}
-                        helper={t(
-                          providerIsMetask
-                            ? "settings.api_menu_help"
-                            : "settings.provider_api_menu_help",
-                        )}
-                        actionLabel={t(
-                          apiIsOnlyOption
-                            ? "settings.view_selection"
-                            : displayedApiId
-                              ? "settings.change_selection"
-                              : "settings.choose_selection",
-                        )}
-                        disabled={
-                          disabled ||
-                          (providerIsMetask && accountDisabled) ||
-                          !canChooseApi ||
-                          apiOptions.length === 0
-                        }
-                        busy={providerIsMetask && apiBusy}
-                        valueLayout="detailed"
-                        leading={<Icon name="account" />}
-                        triggerClassName="settings-control settings-control-detailed"
-                        contentClassName="settings-selection-menu"
-                        onValueChange={(value) => {
-                          if (!providerIsMetask) return;
-                          const api = metaskApiKeys.find(
-                            (candidate) => candidate.id === value,
-                          );
-                          if (!api) return;
-                          setRequestedApi({
-                            selectionId: value,
-                            label: apiLabel(api, t),
-                          });
-                          setRequestedModel(null);
-                          onSelectApiKey(value);
-                        }}
-                      />
-                      {providerIsMetask && apiHasPendingChange && (
-                        <span className="settings-pending-label">
-                          <span aria-hidden="true" />
-                          {t("settings.switch.pending_label")}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
                   <div className="settings-field">
                     <span className="settings-field-step" aria-hidden="true">
-                      03
+                      02
                     </span>
                     <div className="settings-field-copy">
                       <label htmlFor="settings-model">
@@ -1645,15 +1477,8 @@ export function SettingsPage({
                         {!providerIsMetask &&
                         selectedCustomProvider?.models.length === 0
                           ? t("settings.custom_model_add_help")
-                          : providerIsMetask &&
-                              modelCatalogLoading &&
-                              (candidateApi || committedApi)
-                            ? t("settings.loading_models_for", {
-                                api:
-                                  candidateApi?.name ||
-                                  committedApi?.name ||
-                                  t("account.api_fallback"),
-                              })
+                          : providerIsMetask && modelCatalogLoading
+                            ? t("settings.loading_models")
                             : t(
                                 modelIsOnlyOption
                                   ? "settings.only_model_help"

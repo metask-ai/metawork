@@ -899,8 +899,7 @@ export default function App() {
     snapshot.models.defaultSelection === null &&
     snapshot.models.metaskSelection !== null &&
     metaskProvider?.catalogState === "ready" &&
-    snapshot.models.metaskSelection.sourceId ===
-      `metask:${metaskProvider.selectedApiKeyId}` &&
+    snapshot.models.metaskSelection.sourceId === "metask" &&
     metaskProvider.models.some(
       (model) => model.id === snapshot.models.metaskSelection?.modelId,
     ),
@@ -1413,7 +1412,7 @@ export default function App() {
     if (!provider) return;
     const configured = await runExecutionCommand(() =>
       client.configureMetaskSelection({
-        sourceId: `metask:${provider.selectedApiKeyId}`,
+        sourceId: "metask",
         modelId,
         expectedMetaskSelectionRevision:
           snapshot.models.metaskSelectionRevision,
@@ -3298,19 +3297,6 @@ export default function App() {
               )
             }
             onCancel={() => void cancelAccountOperation()}
-            onSelectApiKey={(id) =>
-              metaskProvider
-                ? void runExecutionCommand(() =>
-                    client.selectMetaskApiKey({
-                      sourceId: `metask:${id}`,
-                      expectedMetaskSelectionRevision:
-                        snapshot.models.metaskSelectionRevision,
-                      expectedCatalogGeneration:
-                        metaskProvider.catalogGeneration,
-                    }),
-                  )
-                : undefined
-            }
             onSelectModel={(id) => void selectMetaskModel(id)}
             onCreateCustomProvider={(input) =>
               runExecutionCommand(() => client.createCustomProvider(input))

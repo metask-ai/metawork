@@ -229,7 +229,6 @@ const modelsErrorCodes = [
   "catalog_unavailable",
   "catalog_invalid",
   "catalog_too_large",
-  "no_api_keys",
   "no_models",
   "operation_in_progress",
   "local_resource_exhausted",
@@ -1843,32 +1842,12 @@ function decodeModels(value: unknown, path: string): ModelsView {
         "recommended",
         "catalogState",
         "principalRef",
-        "apiKeys",
         "models",
-        "selectedApiKeyId",
         "catalogGeneration",
         "sourceGeneration",
         "errorCode",
         "safeDiagnostic",
       ]);
-      const apiKeys = arrayValue(
-        provider.apiKeys,
-        `${itemPath}.apiKeys`,
-        (value, keyPath) => {
-          const key = object(value, keyPath, [
-            "id",
-            "name",
-            "suffix",
-            "protocol",
-          ]);
-          return {
-            id: stringValue(key.id, `${keyPath}.id`),
-            name: stringValue(key.name, `${keyPath}.name`),
-            suffix: stringValue(key.suffix, `${keyPath}.suffix`),
-            protocol: enumValue(key.protocol, `${keyPath}.protocol`, protocols),
-          };
-        },
-      );
       const models = arrayValue(
         provider.models,
         `${itemPath}.models`,
@@ -1897,19 +1876,8 @@ function decodeModels(value: unknown, path: string): ModelsView {
           };
         },
       );
-      if (new Set(apiKeys.map((key) => key.id)).size !== apiKeys.length)
-        fail(`${itemPath}.apiKeys`, "API Key identities must be unique");
       if (new Set(models.map((model) => model.id)).size !== models.length)
         fail(`${itemPath}.models`, "model identities must be unique");
-      const selectedApiKeyId = stringValue(
-        provider.selectedApiKeyId,
-        `${itemPath}.selectedApiKeyId`,
-      );
-      if (
-        selectedApiKeyId.length > 0 &&
-        !apiKeys.some((key) => key.id === selectedApiKeyId)
-      )
-        fail(itemPath, "the selected API Key must belong to its provider");
       return {
         id: stringValue(provider.id, `${itemPath}.id`),
         displayName: stringValue(
@@ -1929,9 +1897,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
           provider.principalRef,
           `${itemPath}.principalRef`,
         ),
-        apiKeys,
         models,
-        selectedApiKeyId,
         catalogGeneration: wireId(
           provider.catalogGeneration,
           `${itemPath}.catalogGeneration`,
@@ -1968,7 +1934,7 @@ function decodeModels(value: unknown, path: string): ModelsView {
     ["metaskSelection", metaskSelection],
     ["defaultSelection", defaultSelection],
   ] as const) {
-    if (selection && selection.sourceId.startsWith("metask:")) {
+    if (selection && selection.sourceId === "metask") {
       const provider = providers.find((candidate) => candidate.id === "metask");
       if (
         provider?.catalogState === "ready" &&

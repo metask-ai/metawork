@@ -66,7 +66,7 @@ export function newTaskModelSelectionState(
 }
 
 function resolveAuthority(models: ModelsView, sourceId: string) {
-  if (sourceId.startsWith("metask:")) {
+  if (sourceId === "metask") {
     const provider = models.providers.find(
       (candidate) => candidate.id === "metask",
     );
