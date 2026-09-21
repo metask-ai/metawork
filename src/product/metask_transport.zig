@@ -12,7 +12,6 @@ pub const RequestKind = enum {
     current_user,
     usage_dashboard,
     usage_history,
-    keys,
     models,
 };
 

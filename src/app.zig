@@ -263,7 +263,6 @@ const App = struct {
             .context = models_management,
             .refresh_catalog_fn = refreshModelsCatalog,
             .reset_store_fn = resetModelsStore,
-            .select_metask_api_key_fn = selectMetaskApiKey,
         });
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
@@ -719,14 +718,6 @@ fn refreshModelsCatalog(context: *anyopaque) models_contract.CommandResult {
 fn resetModelsStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
     return coordinator.resetModelsStore(expected_revision);
-}
-
-fn selectMetaskApiKey(
-    context: *anyopaque,
-    command: models_contract.SelectMetaskApiKeyCommand,
-) models_contract.CommandResult {
-    const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
-    return coordinator.selectMetaskApiKey(command);
 }
 
 test "Application remains a composition root with explicit platform limits" {

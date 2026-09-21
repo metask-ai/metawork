@@ -135,9 +135,7 @@ const CatalogJob = struct {
     notifier: ProbeNotifier,
     attempt_id: u64,
     authorization_generation: u64,
-    preferred_api_key_id: []u8,
     preferred_model_id: []u8,
-    required_api_key_id: []u8,
     lease: account_contract.OwnedAuthorizationLease,
     lease_active: bool = true,
     cancellation: metask_transport.Cancellation,
@@ -158,12 +156,8 @@ const CatalogJob = struct {
         std.debug.assert(preparation.authorization_generation == lease.authorization_generation);
         const self = try allocator.create(CatalogJob);
         errdefer allocator.destroy(self);
-        const preferred_api_key_id = try allocator.dupe(u8, preparation.preferred_api_key_id);
-        errdefer allocator.free(preferred_api_key_id);
         const preferred_model_id = try allocator.dupe(u8, preparation.preferred_model_id);
         errdefer allocator.free(preferred_model_id);
-        const required_api_key_id = try allocator.dupe(u8, preparation.required_api_key_id);
-        errdefer allocator.free(required_api_key_id);
         self.* = .{
             .allocator = allocator,
             .io = io,
@@ -171,9 +165,7 @@ const CatalogJob = struct {
             .notifier = notifier,
             .attempt_id = preparation.attempt_id,
             .authorization_generation = preparation.authorization_generation,
-            .preferred_api_key_id = preferred_api_key_id,
             .preferred_model_id = preferred_model_id,
-            .required_api_key_id = required_api_key_id,
             .lease = lease.take(),
             .cancellation = metask_transport.Cancellation.init(io),
         };
@@ -201,34 +193,12 @@ const CatalogJob = struct {
             .cancellation = &self.cancellation,
             .deadline = deadline,
         };
-        session.loadApiKeys(
+        session.loadModels(
             self.transport,
             self.lease.access_token,
             self.lease.principal_ref,
             control,
         ) catch |err| {
-            self.error_code = models_metask.errorCode(err);
-            return;
-        };
-        const api_key_id = if (self.required_api_key_id.len != 0) required: {
-            if (!session.hasApiKey(self.required_api_key_id)) {
-                self.error_code = .catalog_invalid;
-                return;
-            }
-            break :required self.required_api_key_id;
-        } else if (self.preferred_api_key_id.len != 0 and
-            session.hasApiKey(self.preferred_api_key_id))
-            self.preferred_api_key_id
-        else
-            session.firstApiKeyId() orelse {
-                self.error_code = .no_api_keys;
-                return;
-            };
-        session.selectApiKey(api_key_id) catch |err| {
-            self.error_code = models_metask.errorCode(err);
-            return;
-        };
-        session.loadModels(self.transport, control) catch |err| {
             self.error_code = models_metask.errorCode(err);
             return;
         };
@@ -265,8 +235,6 @@ const CatalogJob = struct {
         if (self.completion) |*completion| completion.deinit();
         if (self.lease_active) self.lease.deinit();
         self.allocator.free(self.preferred_model_id);
-        self.allocator.free(self.preferred_api_key_id);
-        self.allocator.free(self.required_api_key_id);
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);
@@ -417,7 +385,7 @@ pub const Coordinator = struct {
             self.catalog_job = null;
         }
         self.observed_authorization_generation = lease.authorization_generation;
-        _ = self.startCatalogJob(&lease, null);
+        _ = self.startCatalogJob(&lease);
     }
 
     pub fn refreshCatalog(self: *Coordinator) models_contract.CommandResult {
@@ -432,7 +400,7 @@ pub const Coordinator = struct {
         };
         defer lease.deinit();
         self.observed_authorization_generation = lease.authorization_generation;
-        return self.startCatalogJob(&lease, null);
+        return self.startCatalogJob(&lease);
     }
 
     /// Resets Product-owned Models state through the snapshot CAS boundary,
@@ -453,43 +421,15 @@ pub const Coordinator = struct {
         return result;
     }
 
-    pub fn selectMetaskApiKey(
-        self: *Coordinator,
-        command: models_contract.SelectMetaskApiKeyCommand,
-    ) models_contract.CommandResult {
-        self.assertMainThread();
-        if (self.catalog_job != null)
-            return .rejected(.operation_in_progress);
-        var lease = (self.account.authorizationLease() catch
-            return .rejected(.local_resource_exhausted)) orelse {
-            self.management.setMetaskAuthorizationUnavailable();
-            self.observed_authorization_generation = 0;
-            return .rejected(.authorization_unavailable);
-        };
-        defer lease.deinit();
-        self.observed_authorization_generation = lease.authorization_generation;
-        return self.startCatalogJob(&lease, command);
-    }
-
     fn startCatalogJob(
         self: *Coordinator,
         lease: *account_contract.OwnedAuthorizationLease,
-        selection: ?models_contract.SelectMetaskApiKeyCommand,
     ) models_contract.CommandResult {
         const notifier = self.probe_notifier orelse {
             self.management.setMetaskAuthorizationUnavailable();
             return .rejected(.catalog_unavailable);
         };
-        const preparation = if (selection) |command|
-            switch (self.management.prepareMetaskApiKeySelection(
-                lease.principal_ref,
-                lease.authorization_generation,
-                command,
-            )) {
-                .ready => |value| value,
-                .rejected => |error_code| return .rejected(error_code),
-            }
-        else switch (self.management.prepareMetaskCatalogRefresh(
+        const preparation = switch (self.management.prepareMetaskCatalogRefresh(
             lease.principal_ref,
             lease.authorization_generation,
         )) {
@@ -601,7 +541,6 @@ fn managementError(error_code: models_contract.ModelsError) models_contract.Mana
         .catalog_unavailable,
         .catalog_invalid,
         .catalog_too_large,
-        .no_api_keys,
         .no_models,
         => .catalog_unavailable,
     };

@@ -200,7 +200,6 @@ pub const Adapter = struct {
                 ) catch return .protocol_failed;
                 break :blk .{ endpoint, .GET };
             },
-            .keys => .{ models_metask.api_keys_url, .GET },
             .models => .{ models_metask.models_url, .GET },
         };
         var headers: [4]std.http.Header = undefined;

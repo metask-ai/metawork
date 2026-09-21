@@ -54,7 +54,6 @@ pub const ModelsManagement = struct {
     begin_custom_provider_probe_fn: *const fn (*anyopaque, models_contract.CustomModelTestCommand) models_contract.Preparation,
     complete_custom_model_test_fn: *const fn (*anyopaque, models_contract.CustomModelTestCommand, bool) models_contract.CommandResult,
     prepare_metask_catalog_refresh_fn: *const fn (*anyopaque, []const u8, u64) models_contract.CatalogRefreshPrepareResult,
-    prepare_metask_api_key_selection_fn: *const fn (*anyopaque, []const u8, u64, models_contract.SelectMetaskApiKeyCommand) models_contract.CatalogSelectionPrepareResult,
     complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_ports.OwnedCatalogCompletion) models_contract.ModelsError,
     fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
     metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
@@ -93,9 +92,6 @@ pub const ModelsManagement = struct {
     }
     pub fn prepareMetaskCatalogRefresh(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
         return self.prepare_metask_catalog_refresh_fn(self.context, principal_ref, authorization_generation);
-    }
-    pub fn prepareMetaskApiKeySelection(self: ModelsManagement, principal_ref: []const u8, authorization_generation: u64, command: models_contract.SelectMetaskApiKeyCommand) models_contract.CatalogSelectionPrepareResult {
-        return self.prepare_metask_api_key_selection_fn(self.context, principal_ref, authorization_generation, command);
     }
     pub fn completeMetaskCatalogRefresh(self: ModelsManagement, attempt_id: u64, authorization_generation: u64, completion: *models_ports.OwnedCatalogCompletion) models_contract.ModelsError {
         return self.complete_metask_catalog_refresh_fn(self.context, attempt_id, authorization_generation, completion);

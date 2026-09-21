@@ -76,7 +76,6 @@
             .{ .name = "metawork.account.logout", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.refreshCatalog", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.resetStore", .origins = .{"zero://app"} },
-            .{ .name = "metawork.models.selectMetaskApiKey", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.configureMetaskSelection", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.selectDefault", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.customProviders.create", .origins = .{"zero://app"} },

@@ -96,7 +96,6 @@ pub const Registry = struct {
     providers: std.ArrayList(OwnedProvider) = .empty,
     pending_credential_deletions: std.ArrayList([]u8) = .empty,
     metask_principal_ref: []u8 = &.{},
-    metask_api_key_id: []u8 = &.{},
     metask_model_id: []u8 = &.{},
     metask_protocol: ?contract.Protocol = null,
     metask_source_generation: u64 = 0,
@@ -121,7 +120,6 @@ pub const Registry = struct {
         self.view_storage.deinit(self.allocator);
         self.model_view_storage.deinit(self.allocator);
         self.freeSelectionText(&self.metask_principal_ref);
-        self.freeSelectionText(&self.metask_api_key_id);
         self.freeSelectionText(&self.metask_model_id);
         self.freeSelectionText(&self.default_source_id);
         self.freeSelectionText(&self.default_model_id);
@@ -149,8 +147,6 @@ pub const Registry = struct {
         }
         if (self.metask_principal_ref.len != 0)
             result.metask_principal_ref = try self.allocator.dupe(u8, self.metask_principal_ref);
-        if (self.metask_api_key_id.len != 0)
-            result.metask_api_key_id = try self.allocator.dupe(u8, self.metask_api_key_id);
         if (self.metask_model_id.len != 0)
             result.metask_model_id = try self.allocator.dupe(u8, self.metask_model_id);
         if (self.default_source_id.len != 0)
@@ -575,7 +571,6 @@ pub const Registry = struct {
 
     pub const MetaskIntent = struct {
         principal_ref: []const u8,
-        api_key_id: []const u8,
         model_id: []const u8,
         protocol: ?contract.Protocol,
         source_generation: u64,
@@ -586,7 +581,6 @@ pub const Registry = struct {
         if (self.metask_principal_ref.len == 0) return null;
         return .{
             .principal_ref = self.metask_principal_ref,
-            .api_key_id = self.metask_api_key_id,
             .model_id = self.metask_model_id,
             .protocol = self.metask_protocol,
             .source_generation = self.metask_source_generation,
@@ -597,7 +591,6 @@ pub const Registry = struct {
     pub fn configureMetask(
         self: *Registry,
         principal_ref: []const u8,
-        api_key_id: []const u8,
         model_id: []const u8,
         protocol: ?contract.Protocol,
         source_generation: u64,
@@ -605,11 +598,9 @@ pub const Registry = struct {
         next_default_selection_revision: ?u64,
     ) (std.mem.Allocator.Error || Error)!void {
         const same_selection = std.mem.eql(u8, principal_ref, self.metask_principal_ref) and
-            std.mem.eql(u8, api_key_id, self.metask_api_key_id) and
             std.mem.eql(u8, model_id, self.metask_model_id);
-        const updates_default = self.metaskChangeUpdatesDefault(api_key_id, model_id);
+        const updates_default = self.metaskChangeUpdatesDefault(model_id);
         if (principal_ref.len == 0 or principal_ref.len > contract.Limits.principal_ref_bytes or
-            api_key_id.len == 0 or api_key_id.len > contract.Limits.api_key_id_bytes or
             model_id.len == 0 or model_id.len > contract.Limits.model_id_bytes or
             ((protocol == null) != (source_generation == 0)) or selection_revision == 0 or
             (!same_selection and selection_revision == self.metask_selection_revision))
@@ -623,23 +614,19 @@ pub const Registry = struct {
         }
         const principal = try self.allocator.dupe(u8, principal_ref);
         errdefer self.allocator.free(principal);
-        const api_key = try self.allocator.dupe(u8, api_key_id);
-        errdefer self.allocator.free(api_key);
         const model = try self.allocator.dupe(u8, model_id);
         errdefer self.allocator.free(model);
         var default_source: []u8 = &.{};
         if (updates_default)
-            default_source = try metaskSourceIdAlloc(self.allocator, api_key_id);
+            default_source = try self.allocator.dupe(u8, contract.metask_source_id);
         errdefer if (default_source.len != 0) self.allocator.free(default_source);
         var default_model: []u8 = &.{};
         if (updates_default)
             default_model = try self.allocator.dupe(u8, model_id);
         errdefer if (default_model.len != 0) self.allocator.free(default_model);
         self.freeSelectionText(&self.metask_principal_ref);
-        self.freeSelectionText(&self.metask_api_key_id);
         self.freeSelectionText(&self.metask_model_id);
         self.metask_principal_ref = principal;
-        self.metask_api_key_id = api_key;
         self.metask_model_id = model;
         self.metask_protocol = protocol;
         self.metask_source_generation = source_generation;
@@ -671,13 +658,7 @@ pub const Registry = struct {
         model_id: []const u8,
     ) bool {
         if (self.metaskIntent()) |intent| {
-            var source_storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
-            const metask_source = std.fmt.bufPrint(
-                &source_storage,
-                "metask:{s}",
-                .{intent.api_key_id},
-            ) catch return false;
-            if (std.mem.eql(u8, metask_source, source_id))
+            if (std.mem.eql(u8, contract.metask_source_id, source_id))
                 return std.mem.eql(u8, intent.model_id, model_id);
         }
         const index = self.findIndex(source_id) orelse return false;
@@ -686,24 +667,16 @@ pub const Registry = struct {
 
     fn defaultTracksMetaskIntent(self: *const Registry) bool {
         const intent = self.metaskIntent() orelse return false;
-        var source_storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
-        const source_id = std.fmt.bufPrint(
-            &source_storage,
-            "metask:{s}",
-            .{intent.api_key_id},
-        ) catch return false;
-        return std.mem.eql(u8, self.default_source_id, source_id) and
+        return std.mem.eql(u8, self.default_source_id, contract.metask_source_id) and
             std.mem.eql(u8, self.default_model_id, intent.model_id);
     }
 
     pub fn metaskChangeUpdatesDefault(
         self: *const Registry,
-        api_key_id: []const u8,
         model_id: []const u8,
     ) bool {
         return self.defaultTracksMetaskIntent() and
-            (!std.mem.eql(u8, api_key_id, self.metask_api_key_id) or
-                !std.mem.eql(u8, model_id, self.metask_model_id));
+            !std.mem.eql(u8, model_id, self.metask_model_id);
     }
 
     pub fn selectMetaskDefault(
@@ -713,7 +686,7 @@ pub const Registry = struct {
         const intent = self.metaskIntent() orelse return error.InvalidData;
         if (selection_revision == 0 or selection_revision == self.selection_revision)
             return error.InvalidData;
-        const source_id = try metaskSourceIdAlloc(self.allocator, intent.api_key_id);
+        const source_id = try self.allocator.dupe(u8, contract.metask_source_id);
         errdefer self.allocator.free(source_id);
         const model_id = try self.allocator.dupe(u8, intent.model_id);
         self.clearDefaultSelection();
@@ -998,13 +971,6 @@ pub const Registry = struct {
     }
 };
 
-pub fn metaskSourceIdAlloc(
-    allocator: std.mem.Allocator,
-    api_key_id: []const u8,
-) std.mem.Allocator.Error![]u8 {
-    return std.fmt.allocPrint(allocator, "metask:{s}", .{api_key_id});
-}
-
 fn cloneProvider(
     allocator: std.mem.Allocator,
     source: OwnedProvider,
@@ -1041,7 +1007,8 @@ fn cloneProvider(
 
 const MetaskIntentWire = struct {
     principal_ref: []const u8,
-    api_key_id: []const u8,
+    /// Schema 1 migration input. Schema 2 always writes null.
+    api_key_id: ?[]const u8 = null,
     model_id: []const u8,
     protocol: ?contract.Protocol = null,
     source_generation: u64 = 0,
@@ -1121,7 +1088,6 @@ pub fn encodeAlloc(
     }
     const metask: ?MetaskIntentWire = if (registry.metaskIntent()) |intent| .{
         .principal_ref = intent.principal_ref,
-        .api_key_id = intent.api_key_id,
         .model_id = intent.model_id,
         .protocol = intent.protocol,
         .source_generation = intent.source_generation,
@@ -1132,7 +1098,7 @@ pub fn encodeAlloc(
         .model_id = selection.model_id,
     } else null;
     const wire: CanonicalWire = .{
-        .schema = 1,
+        .schema = 2,
         .metask = metask,
         .default_selection = default_selection,
         .selection_revision = registry.selection_revision,
@@ -1163,7 +1129,7 @@ pub fn decode(
     };
     defer parsed.deinit();
     const wire = parsed.value;
-    if (wire.schema != 1 or
+    if ((wire.schema != 1 and wire.schema != 2) or
         wire.custom_providers.len > contract.Limits.custom_provider_entries or
         wire.pending_credential_deletions.len > max_pending_credential_deletions)
         return error.InvalidData;
@@ -1171,11 +1137,12 @@ pub fn decode(
     errdefer result.deinit();
     result.selection_revision = wire.selection_revision;
     if (wire.metask) |metask| {
+        if ((wire.schema == 1) != (metask.api_key_id != null))
+            return error.InvalidData;
         if ((metask.protocol == null) != (metask.source_generation == 0))
             return error.InvalidData;
         try result.configureMetask(
             metask.principal_ref,
-            metask.api_key_id,
             metask.model_id,
             metask.protocol,
             metask.source_generation,
@@ -1254,9 +1221,14 @@ pub fn decode(
         if (selection.source_id.len == 0 or selection.model_id.len == 0 or
             wire.selection_revision == 0)
             return error.InvalidData;
-        if (!result.validDurableSelection(selection.source_id, selection.model_id))
+        const source_id = if (wire.schema == 1 and
+            std.mem.startsWith(u8, selection.source_id, "metask:"))
+            contract.metask_source_id
+        else
+            selection.source_id;
+        if (!result.validDurableSelection(source_id, selection.model_id))
             return error.InvalidData;
-        result.default_source_id = try allocator.dupe(u8, selection.source_id);
+        result.default_source_id = try allocator.dupe(u8, source_id);
         result.default_model_id = try allocator.dupe(u8, selection.model_id);
     }
     for (result.views()) |view|
@@ -1760,9 +1732,8 @@ test "registry keeps a tracked Metask default coherent with intent changes" {
     defer registry.deinit();
     try registry.configureMetask(
         "principal-1",
-        "api-1",
         "model-1",
-        .anthropic_messages,
+        .openai_chat_completions,
         3,
         5,
         null,
@@ -1773,9 +1744,8 @@ test "registry keeps a tracked Metask default coherent with intent changes" {
         error.InvalidData,
         registry.configureMetask(
             "principal-1",
-            "api-1",
             "model-2",
-            .anthropic_messages,
+            .openai_chat_completions,
             3,
             6,
             null,
@@ -1786,41 +1756,37 @@ test "registry keeps a tracked Metask default coherent with intent changes" {
 
     try registry.configureMetask(
         "principal-1",
-        "api-1",
         "model-2",
-        .anthropic_messages,
+        .openai_chat_completions,
         3,
         6,
         8,
     );
     try std.testing.expectEqualStrings("model-2", registry.metaskIntent().?.model_id);
-    try std.testing.expectEqualStrings("metask:api-1", registry.defaultSelection().?.source_id);
+    try std.testing.expectEqualStrings("metask", registry.defaultSelection().?.source_id);
     try std.testing.expectEqualStrings("model-2", registry.defaultSelection().?.model_id);
     try std.testing.expectEqual(@as(u64, 8), registry.selection_revision);
 
     try registry.configureMetask(
         "principal-1",
-        "api-2",
         "model-2",
-        .openai_responses,
+        .openai_chat_completions,
         9,
         10,
-        11,
+        null,
     );
-    try std.testing.expectEqualStrings("api-2", registry.metaskIntent().?.api_key_id);
-    try std.testing.expectEqualStrings("metask:api-2", registry.defaultSelection().?.source_id);
+    try std.testing.expectEqualStrings("metask", registry.defaultSelection().?.source_id);
     try std.testing.expectEqualStrings("model-2", registry.defaultSelection().?.model_id);
-    try std.testing.expectEqual(@as(u64, 11), registry.selection_revision);
+    try std.testing.expectEqual(@as(u64, 8), registry.selection_revision);
 
     const encoded = try encodeAlloc(std.testing.allocator, &registry);
     defer std.testing.allocator.free(encoded);
     var restored = try decode(std.testing.allocator, encoded);
     defer restored.deinit();
-    try std.testing.expectEqualStrings("api-2", restored.metaskIntent().?.api_key_id);
     try std.testing.expectEqualStrings("model-2", restored.metaskIntent().?.model_id);
-    try std.testing.expectEqualStrings("metask:api-2", restored.defaultSelection().?.source_id);
+    try std.testing.expectEqualStrings("metask", restored.defaultSelection().?.source_id);
     try std.testing.expectEqualStrings("model-2", restored.defaultSelection().?.model_id);
-    try std.testing.expectEqual(@as(u64, 11), restored.selection_revision);
+    try std.testing.expectEqual(@as(u64, 8), restored.selection_revision);
 }
 
 test "registry fails closed when a durable credential disappears" {

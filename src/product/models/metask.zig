@@ -5,18 +5,13 @@ const contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
 const transport_api = @import("metask_transport");
 
-pub const api_keys_url = "https://napi.metask-ai.com/api/v1/keys?page=1&page_size=100";
-pub const models_url = "https://napi.metask-ai.com/v1/models";
-pub const anthropic_messages_url =
-    contract.metask_anthropic_messages_url;
+pub const models_url = "https://app.metask-ai.com/v1/models";
 pub const openai_chat_completions_url =
     contract.metask_openai_chat_completions_url;
-pub const gemini_base_url = contract.metask_gemini_base_url;
 
 pub const Limits = struct {
     pub const response_bytes: usize = 4 * 1024 * 1024;
     pub const json_scratch_bytes: usize = 8 * 1024 * 1024;
-    pub const api_key_suffix_bytes: usize = 4;
 };
 
 pub const Error = error{
@@ -28,11 +23,8 @@ pub const Error = error{
     ProtocolInvalid,
     CatalogTooLarge,
     CatalogFieldTooLarge,
-    NoApiKeys,
     NoModels,
-    ApiKeyNotFound,
     ModelNotFound,
-    UnsupportedProvider,
     SourceCandidateInvalid,
     OutOfMemory,
 };
@@ -48,10 +40,8 @@ pub fn errorCode(err: Error) contract.ModelsError {
         error.ProtocolInvalid => .catalog_invalid,
         error.CatalogTooLarge => .catalog_too_large,
         error.CatalogFieldTooLarge => .catalog_too_large,
-        error.NoApiKeys => .no_api_keys,
         error.NoModels => .no_models,
-        error.ApiKeyNotFound, error.ModelNotFound => .catalog_invalid,
-        error.UnsupportedProvider,
+        error.ModelNotFound,
         error.SourceCandidateInvalid,
         => .catalog_invalid,
         error.OutOfMemory => .local_resource_exhausted,
@@ -87,10 +77,7 @@ fn BoundedString(comptime capacity: usize) type {
     };
 }
 
-const ApiKeyId = BoundedString(contract.Limits.api_key_id_bytes);
 const AccountId = BoundedString(contract.Limits.principal_ref_bytes);
-const ApiKeyName = BoundedString(contract.Limits.api_key_name_bytes);
-const ApiKeySuffix = BoundedString(contract.Limits.api_key_suffix_bytes);
 const ModelId = BoundedString(contract.Limits.model_id_bytes);
 const ModelDisplayName =
     BoundedString(contract.Limits.model_display_name_bytes);
@@ -120,30 +107,10 @@ const Secret = struct {
         return self.bytes;
     }
 
-    fn takeBytes(self: *Secret) []u8 {
-        std.debug.assert(self.owned);
-        const bytes = self.bytes;
-        self.* = .{};
-        return bytes;
-    }
-
     fn deinit(self: *Secret) void {
         if (!self.owned) return;
         secureFree(self.allocator, self.bytes);
         self.* = .{};
-    }
-};
-
-const ApiKeyEntry = struct {
-    id: ApiKeyId,
-    name: ApiKeyName,
-    suffix: ApiKeySuffix,
-    protocol: contract.Protocol,
-    secret: Secret,
-
-    fn deinit(self: *ApiKeyEntry) void {
-        self.secret.deinit();
-        self.* = undefined;
     }
 };
 
@@ -155,9 +122,8 @@ const ModelEntry = struct {
 
 pub const CatalogSession = struct {
     allocator: std.mem.Allocator,
-    api_keys: std.ArrayList(ApiKeyEntry) = .empty,
     models: std.ArrayList(ModelEntry) = .empty,
-    selected_key_index: ?usize = null,
+    credential: Secret = .{},
     owner_account_id: AccountId = .{},
     /// HTTP status of the most recent catalog request, 0 before any request
     /// or after a transport-level failure. Owned by the single in-flight
@@ -169,8 +135,7 @@ pub const CatalogSession = struct {
     }
 
     pub fn deinit(self: *CatalogSession) void {
-        self.clearApiKeys();
-        self.api_keys.deinit(self.allocator);
+        self.credential.deinit();
         self.models.deinit(self.allocator);
         self.* = undefined;
     }
@@ -182,10 +147,12 @@ pub const CatalogSession = struct {
     }
 
     pub fn reset(self: *CatalogSession) void {
-        self.clearApiKeys();
+        self.credential.deinit();
+        self.models.clearRetainingCapacity();
+        self.owner_account_id = .{};
     }
 
-    pub fn loadApiKeys(
+    pub fn loadModels(
         self: *CatalogSession,
         transport: transport_api.Transport,
         oauth_access_token: []const u8,
@@ -194,7 +161,7 @@ pub const CatalogSession = struct {
     ) Error!void {
         const validated_account_id = try AccountId.init(account_id);
         self.last_http_status = 0;
-        var replacement = try fetchApiKeys(
+        var replacement = try fetchModels(
             self.allocator,
             transport,
             oauth_access_token,
@@ -202,68 +169,15 @@ pub const CatalogSession = struct {
             &self.last_http_status,
         );
         errdefer replacement.deinit();
-        self.clearApiKeys();
-        self.api_keys.deinit(self.allocator);
-        self.api_keys = replacement.entries;
-        replacement.entries = .empty;
-        self.selected_key_index = null;
-        self.owner_account_id = validated_account_id;
-    }
-
-    pub fn selectApiKey(
-        self: *CatalogSession,
-        id: []const u8,
-    ) Error!void {
-        const index = self.findApiKey(id) orelse
-            return error.ApiKeyNotFound;
-        if (self.api_keys.items[index].secret.view().len == 0)
-            return error.ApiKeyNotFound;
-        self.models.clearRetainingCapacity();
-        self.selected_key_index = index;
-    }
-
-    pub fn loadModels(
-        self: *CatalogSession,
-        transport: transport_api.Transport,
-        control: ?transport_api.RequestControl,
-    ) Error!void {
-        const index = self.selected_key_index orelse
-            return error.ApiKeyNotFound;
-        try self.loadModelsForApiKeyIndex(index, transport, control);
-    }
-
-    pub fn loadModelsForApiKey(
-        self: *CatalogSession,
-        id: []const u8,
-        transport: transport_api.Transport,
-        control: ?transport_api.RequestControl,
-    ) Error!void {
-        const index = self.findApiKey(id) orelse
-            return error.ApiKeyNotFound;
-        try self.loadModelsForApiKeyIndex(index, transport, control);
-    }
-
-    fn loadModelsForApiKeyIndex(
-        self: *CatalogSession,
-        index: usize,
-        transport: transport_api.Transport,
-        control: ?transport_api.RequestControl,
-    ) Error!void {
-        const credential = self.api_keys.items[index].secret.view();
-        if (credential.len == 0) return error.ApiKeyNotFound;
-        self.last_http_status = 0;
-        var replacement = try fetchModels(
-            self.allocator,
-            transport,
-            credential,
-            control,
-            &self.last_http_status,
-        );
-        errdefer replacement.deinit();
+        var credential = try Secret.init(self.allocator, oauth_access_token);
+        errdefer credential.deinit();
+        self.credential.deinit();
         self.models.deinit(self.allocator);
         self.models = replacement.entries;
         replacement.entries = .empty;
-        self.selected_key_index = index;
+        self.credential = credential;
+        credential = .{};
+        self.owner_account_id = validated_account_id;
     }
 
     pub fn prepareSourceCandidate(
@@ -273,15 +187,10 @@ pub const CatalogSession = struct {
     ) Error!contract.OwnedSourceCandidate {
         if (metask_source_generation == 0)
             return error.SourceCandidateInvalid;
-        const key_index = self.selected_key_index orelse
-            return error.ApiKeyNotFound;
         if (self.findModel(model_id) == null)
             return error.ModelNotFound;
-        const entry = &self.api_keys.items[key_index];
-        const base_url = baseUrl(entry.protocol) orelse
-            return error.UnsupportedProvider;
-        if (entry.secret.view().len == 0)
-            return error.ApiKeyNotFound;
+        if (self.credential.view().len == 0)
+            return error.SourceCandidateInvalid;
 
         var owned_model: ?[]u8 = self.allocator.dupe(
             u8,
@@ -290,7 +199,7 @@ pub const CatalogSession = struct {
         errdefer if (owned_model) |bytes| self.allocator.free(bytes);
         var owned_base_url: ?[]u8 = self.allocator.dupe(
             u8,
-            base_url,
+            openai_chat_completions_url,
         ) catch return error.OutOfMemory;
         errdefer if (owned_base_url) |bytes| self.allocator.free(bytes);
         // The Models source retains its runtime credential so it can issue
@@ -298,7 +207,7 @@ pub const CatalogSession = struct {
         // a bounded copy that it will secure-zero on every terminal path.
         const owned_secret = self.allocator.dupe(
             u8,
-            entry.secret.view(),
+            self.credential.view(),
         ) catch return error.OutOfMemory;
         const transferred_model = owned_model.?;
         const transferred_base_url = owned_base_url.?;
@@ -307,36 +216,17 @@ pub const CatalogSession = struct {
         var result = contract.OwnedSourceCandidate.initOwned(
             self.allocator,
             .metask,
-            entry.protocol,
+            .openai_chat_completions,
             transferred_model,
             transferred_base_url,
             metask_source_generation,
             owned_secret,
-            entry.id.view(),
+            "",
         ) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.SourceCandidateInvalid;
         errdefer result.deinit();
         contract.validateMetaskSourceCandidate(result.input()) catch
             return error.SourceCandidateInvalid;
         return result;
-    }
-
-    pub fn writeApiKeyViews(
-        self: *const CatalogSession,
-        output: []contract.ApiKeyView,
-    ) []const contract.ApiKeyView {
-        std.debug.assert(output.len >= self.api_keys.items.len);
-        for (self.api_keys.items, output[0..self.api_keys.items.len]) |
-            *entry,
-            *view,
-        | {
-            view.* = .{
-                .id = entry.id.view(),
-                .name = entry.name.view(),
-                .suffix = entry.suffix.view(),
-                .protocol = entry.protocol,
-            };
-        }
-        return output[0..self.api_keys.items.len];
     }
 
     pub fn writeModelViews(
@@ -357,46 +247,24 @@ pub const CatalogSession = struct {
         return output[0..self.models.items.len];
     }
 
-    pub fn selectedApiKeyId(
-        self: *const CatalogSession,
-    ) []const u8 {
-        const index = self.selected_key_index orelse return "";
-        return self.api_keys.items[index].id.view();
-    }
-
     pub fn selectedProtocol(self: *const CatalogSession) ?contract.Protocol {
-        const index = self.selected_key_index orelse return null;
-        return self.api_keys.items[index].protocol;
+        return if (self.credential.view().len == 0) null else .openai_chat_completions;
     }
 
     pub fn ownsSourceSelection(
         self: *const CatalogSession,
         account_id: []const u8,
-        api_key_id: []const u8,
         model_id: []const u8,
     ) bool {
         if (!std.mem.eql(u8, self.ownerAccountId(), account_id) or
-            !std.mem.eql(u8, self.selectedApiKeyId(), api_key_id) or
             self.findModel(model_id) == null)
             return false;
-        const index = self.selected_key_index orelse return false;
-        return self.api_keys.items[index].secret.view().len > 0;
-    }
-
-    /// Default candidate for automatic continuation: the catalog's first
-    /// entry. Selection stays overridable in settings afterwards.
-    pub fn firstApiKeyId(self: *const CatalogSession) ?[]const u8 {
-        if (self.api_keys.items.len == 0) return null;
-        return self.api_keys.items[0].id.view();
+        return self.credential.view().len > 0;
     }
 
     pub fn firstModelId(self: *const CatalogSession) ?[]const u8 {
         if (self.models.items.len == 0) return null;
         return self.models.items[0].id.view();
-    }
-
-    pub fn hasApiKey(self: *const CatalogSession, id: []const u8) bool {
-        return self.findApiKey(id) != null;
     }
 
     pub fn hasModel(self: *const CatalogSession, id: []const u8) bool {
@@ -407,26 +275,11 @@ pub const CatalogSession = struct {
         return self.owner_account_id.view();
     }
 
-    fn findApiKey(self: *const CatalogSession, id: []const u8) ?usize {
-        for (self.api_keys.items, 0..) |*entry, index| {
-            if (std.mem.eql(u8, entry.id.view(), id)) return index;
-        }
-        return null;
-    }
-
     fn findModel(self: *const CatalogSession, id: []const u8) ?usize {
         for (self.models.items, 0..) |*entry, index| {
             if (std.mem.eql(u8, entry.id.view(), id)) return index;
         }
         return null;
-    }
-
-    fn clearApiKeys(self: *CatalogSession) void {
-        for (self.api_keys.items) |*entry| entry.deinit();
-        self.api_keys.clearRetainingCapacity();
-        self.models.clearRetainingCapacity();
-        self.selected_key_index = null;
-        self.owner_account_id = .{};
     }
 };
 
@@ -497,13 +350,6 @@ fn PublicText(comptime capacity: usize) type {
     };
 }
 
-const PublicApiKey = struct {
-    id: PublicText(contract.Limits.api_key_id_bytes) = .{},
-    name: PublicText(contract.Limits.api_key_name_bytes) = .{},
-    suffix: PublicText(contract.Limits.api_key_suffix_bytes) = .{},
-    protocol: contract.Protocol = .anthropic_messages,
-};
-
 const PublicModel = struct {
     id: PublicText(contract.Limits.model_id_bytes) = .{},
     display_name: PublicText(contract.Limits.model_display_name_bytes) = .{},
@@ -517,12 +363,6 @@ const PublicModel = struct {
 /// state changes read only those secret-free caches, so cancel and shutdown
 /// never race worker-owned secrets.
 pub const PublicCatalog = struct {
-    model_catalog_api_key_id: PublicText(contract.Limits.api_key_id_bytes) = .{},
-    api_keys: [contract.Limits.api_key_entries]PublicApiKey =
-        @splat(.{}),
-    api_key_views: [contract.Limits.api_key_entries]contract.ApiKeyView =
-        undefined,
-    api_key_count: usize = 0,
     models: [contract.Limits.model_entries]PublicModel = @splat(.{}),
     model_views: [contract.Limits.model_entries]contract.ModelView =
         undefined,
@@ -532,22 +372,6 @@ pub const PublicCatalog = struct {
         self: *PublicCatalog,
         session: *const CatalogSession,
     ) void {
-        self.model_catalog_api_key_id.set(session.selectedApiKeyId());
-        var api_key_views: [contract.Limits.api_key_entries]contract.ApiKeyView =
-            undefined;
-        const source_api_keys = session.writeApiKeyViews(&api_key_views);
-        std.debug.assert(source_api_keys.len <= self.api_keys.len);
-        self.api_key_count = source_api_keys.len;
-        for (
-            source_api_keys,
-            self.api_keys[0..source_api_keys.len],
-        ) |source, *storage| {
-            storage.id.set(source.id);
-            storage.name.set(source.name);
-            storage.suffix.set(source.suffix);
-            storage.protocol = source.protocol;
-        }
-
         var model_views: [contract.Limits.model_entries]contract.ModelView =
             undefined;
         const source_models = session.writeModelViews(&model_views);
@@ -564,36 +388,13 @@ pub const PublicCatalog = struct {
     }
 
     pub fn clear(self: *PublicCatalog) void {
-        self.model_catalog_api_key_id.set("");
-        self.api_key_count = 0;
         self.model_count = 0;
-    }
-
-    pub fn hasApiKey(self: *const PublicCatalog, id: []const u8) bool {
-        for (self.api_keys[0..self.api_key_count]) |*entry|
-            if (std.mem.eql(u8, entry.id.view(), id)) return true;
-        return false;
     }
 
     pub fn hasModel(self: *const PublicCatalog, id: []const u8) bool {
         for (self.models[0..self.model_count]) |*entry|
             if (std.mem.eql(u8, entry.id.view(), id)) return true;
         return false;
-    }
-
-    pub fn apiKeyViews(self: *PublicCatalog) []const contract.ApiKeyView {
-        for (
-            self.api_keys[0..self.api_key_count],
-            self.api_key_views[0..self.api_key_count],
-        ) |*storage, *view| {
-            view.* = .{
-                .id = storage.id.view(),
-                .name = storage.name.view(),
-                .suffix = storage.suffix.view(),
-                .protocol = storage.protocol,
-            };
-        }
-        return self.api_key_views[0..self.api_key_count];
     }
 
     pub fn modelViews(self: *PublicCatalog) []const contract.ModelView {
@@ -609,33 +410,18 @@ pub const PublicCatalog = struct {
         }
         return self.model_views[0..self.model_count];
     }
-
-    pub fn catalogApiKeyId(self: *const PublicCatalog) []const u8 {
-        return self.model_catalog_api_key_id.view();
-    }
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
-    pub fn replaceOwnedSelection(
+    pub fn replaceOwnedCatalog(
         session: *CatalogSession,
         account_id: []const u8,
-        api_key: contract.ApiKeyView,
-        secret_value: []const u8,
+        access_token: []const u8,
         models: []const contract.ModelView,
     ) Error!void {
         session.reset();
         session.owner_account_id = try .init(account_id);
-        var secret = try Secret.init(session.allocator, secret_value);
-        errdefer secret.deinit();
-        session.api_keys.append(session.allocator, .{
-            .id = try .init(api_key.id),
-            .name = try .init(api_key.name),
-            .suffix = try .init(api_key.suffix),
-            .protocol = api_key.protocol,
-            .secret = secret,
-        }) catch return error.OutOfMemory;
-        secret = .{};
-        session.selected_key_index = 0;
+        session.credential = try Secret.init(session.allocator, access_token);
         for (models) |model| {
             session.models.append(session.allocator, .{
                 .id = try .init(model.id),
@@ -644,35 +430,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             }) catch return error.OutOfMemory;
         }
     }
-
-    pub fn appendOwnedApiKey(
-        session: *CatalogSession,
-        api_key: contract.ApiKeyView,
-        secret_value: []const u8,
-    ) Error!void {
-        var secret = try Secret.init(session.allocator, secret_value);
-        errdefer secret.deinit();
-        session.api_keys.append(session.allocator, .{
-            .id = try .init(api_key.id),
-            .name = try .init(api_key.name),
-            .suffix = try .init(api_key.suffix),
-            .protocol = api_key.protocol,
-            .secret = secret,
-        }) catch return error.OutOfMemory;
-        secret = .{};
-    }
 } else struct {};
-
-const ParsedApiKeys = struct {
-    allocator: std.mem.Allocator,
-    entries: std.ArrayList(ApiKeyEntry) = .empty,
-
-    fn deinit(self: *ParsedApiKeys) void {
-        for (self.entries.items) |*entry| entry.deinit();
-        self.entries.deinit(self.allocator);
-        self.* = undefined;
-    }
-};
 
 const ParsedModels = struct {
     allocator: std.mem.Allocator,
@@ -684,35 +442,10 @@ const ParsedModels = struct {
     }
 };
 
-fn fetchApiKeys(
-    allocator: std.mem.Allocator,
-    transport: transport_api.Transport,
-    oauth_access_token: []const u8,
-    control: ?transport_api.RequestControl,
-    status_out: *u16,
-) Error!ParsedApiKeys {
-    const response_buffer = allocator.alloc(
-        u8,
-        Limits.response_bytes,
-    ) catch return error.OutOfMemory;
-    defer {
-        std.crypto.secureZero(u8, response_buffer);
-        allocator.free(response_buffer);
-    }
-    const response = transport.perform(.{
-        .kind = .keys,
-        .bearer = oauth_access_token,
-        .control = control,
-    }, response_buffer) catch |err| return transportError(err);
-    status_out.* = response.status;
-    try requireSuccess(response.status);
-    return parseApiKeys(allocator, response.body);
-}
-
 fn fetchModels(
     allocator: std.mem.Allocator,
     transport: transport_api.Transport,
-    api_key: []const u8,
+    access_token: []const u8,
     control: ?transport_api.RequestControl,
     status_out: *u16,
 ) Error!ParsedModels {
@@ -726,40 +459,13 @@ fn fetchModels(
     }
     const response = transport.perform(.{
         .kind = .models,
-        .bearer = api_key,
+        .bearer = access_token,
         .control = control,
     }, response_buffer) catch |err| return transportError(err);
     status_out.* = response.status;
     try requireSuccess(response.status);
     return parseModels(allocator, response.body);
 }
-
-const ApiKeysResponse = struct {
-    code: i64,
-    message: []const u8,
-    data: struct {
-        items: []const ApiKeyWire,
-        total: usize,
-        page: usize,
-        page_size: usize,
-        pages: usize,
-    },
-};
-
-const ApiKeyWire = struct {
-    id: u64,
-    key: []const u8,
-    name: []const u8,
-    group_id: u64,
-    status: []const u8,
-    group: GroupWire,
-};
-
-const GroupWire = struct {
-    id: u64,
-    platform: []const u8,
-    status: []const u8,
-};
 
 const ModelsResponse = struct {
     object: []const u8,
@@ -856,77 +562,6 @@ fn tokenLimit(value: std.json.Value) Error!?u64 {
     return if (number == 0) null else number;
 }
 
-fn parseApiKeys(
-    allocator: std.mem.Allocator,
-    body: []const u8,
-) Error!ParsedApiKeys {
-    if (body.len == 0 or body.len > Limits.response_bytes)
-        return error.CatalogTooLarge;
-    const scratch = allocator.alloc(
-        u8,
-        jsonScratchSize(body.len),
-    ) catch return error.OutOfMemory;
-    defer {
-        std.crypto.secureZero(u8, scratch);
-        allocator.free(scratch);
-    }
-    var fba = std.heap.FixedBufferAllocator.init(scratch);
-    const response = std.json.parseFromSliceLeaky(
-        ApiKeysResponse,
-        fba.allocator(),
-        body,
-        .{
-            .ignore_unknown_fields = true,
-            .max_value_len = contract.Limits.credential_bytes,
-            .allocate = .alloc_if_needed,
-        },
-    ) catch |err| return parseError(err);
-    if (response.code != 0 or
-        !std.mem.eql(u8, response.message, "success") or
-        response.data.page != 1 or
-        response.data.page_size != 100 or
-        response.data.pages != 1 or
-        response.data.total != response.data.items.len)
-        return error.ProtocolInvalid;
-    if (response.data.items.len > contract.Limits.api_key_entries)
-        return error.CatalogTooLarge;
-
-    var result: ParsedApiKeys = .{ .allocator = allocator };
-    errdefer result.deinit();
-    for (response.data.items) |item| {
-        if (!std.mem.eql(u8, item.status, "active") or
-            !std.mem.eql(u8, item.group.status, "active"))
-            continue;
-        if (item.group_id != item.group.id)
-            return error.ProtocolInvalid;
-        const protocol = protocolForPlatform(item.group.platform) orelse
-            return error.UnsupportedProvider;
-        var id_storage: [contract.Limits.api_key_id_bytes]u8 = undefined;
-        const id = std.fmt.bufPrint(&id_storage, "{d}", .{item.id}) catch
-            return error.CatalogFieldTooLarge;
-        for (result.entries.items) |*existing| {
-            if (std.mem.eql(u8, existing.id.view(), id))
-                return error.ProtocolInvalid;
-        }
-        if (item.key.len < Limits.api_key_suffix_bytes * 2)
-            return error.ProtocolInvalid;
-        var entry: ApiKeyEntry = .{
-            .id = try .init(id),
-            .name = try .optional(item.name),
-            .suffix = try .init(
-                item.key[item.key.len - Limits.api_key_suffix_bytes ..],
-            ),
-            .protocol = protocol,
-            .secret = try .init(allocator, item.key),
-        };
-        errdefer entry.deinit();
-        result.entries.append(allocator, entry) catch
-            return error.OutOfMemory;
-    }
-    if (result.entries.items.len == 0) return error.NoApiKeys;
-    return result;
-}
-
 fn parseModels(
     allocator: std.mem.Allocator,
     body: []const u8,
@@ -984,28 +619,12 @@ fn parseModels(
     return result;
 }
 
-fn protocolForPlatform(platform: []const u8) ?contract.Protocol {
-    if (std.mem.eql(u8, platform, "anthropic")) return .anthropic_messages;
-    if (std.mem.eql(u8, platform, "openai")) return .openai_chat_completions;
-    if (std.mem.eql(u8, platform, "gemini")) return .gemini_native;
-    return null;
-}
-
 fn jsonScratchSize(body_len: usize) usize {
     const minimum = 64 * 1024;
     return @min(
         Limits.json_scratch_bytes,
         @max(minimum, body_len * 4),
     );
-}
-
-fn baseUrl(protocol: contract.Protocol) ?[]const u8 {
-    return switch (protocol) {
-        .openai_responses => null,
-        .anthropic_messages => anthropic_messages_url,
-        .openai_chat_completions => openai_chat_completions_url,
-        .gemini_native => gemini_base_url,
-    };
 }
 
 fn validHeaderCredential(value: []const u8) bool {
@@ -1182,136 +801,45 @@ test "model declarations distinguish unknown, supported, and unsupported without
     }
 }
 
-test "live-shape catalogs expose masked views and issue independent candidates" {
-    var keys = try parseApiKeys(std.testing.allocator, key_fixture);
+test "OAuth catalog issues independent OpenAI-compatible candidates" {
     var session = CatalogSession.init(std.testing.allocator);
     defer session.deinit();
-    session.api_keys = keys.entries;
-    keys.entries = .empty;
-    try session.selectApiKey("325");
+    session.owner_account_id = try .init("account-1");
+    session.credential = try Secret.init(std.testing.allocator, "oauth-access");
     var models = try parseModels(std.testing.allocator, model_fixture);
     session.models = models.entries;
     models.entries = .empty;
-    try std.testing.expectEqualStrings("325", session.firstApiKeyId().?);
     try std.testing.expectEqualStrings("model-1", session.firstModelId().?);
-
-    var key_views: [contract.Limits.api_key_entries]contract.ApiKeyView =
-        undefined;
-    const visible_keys = session.writeApiKeyViews(&key_views);
-    try std.testing.expectEqual(@as(usize, 1), visible_keys.len);
-    try std.testing.expectEqualStrings("1234", visible_keys[0].suffix);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        visible_keys[0].name,
-        "test-api-key",
-    ) == null);
     var public_catalog: PublicCatalog = .{};
     public_catalog.replaceFromSession(&session);
 
     var candidate = try session.prepareSourceCandidate("model-1", 1);
     defer candidate.deinit();
     try std.testing.expectEqual(
-        contract.Protocol.anthropic_messages,
+        contract.Protocol.openai_chat_completions,
         candidate.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
-        anthropic_messages_url,
+        openai_chat_completions_url,
         candidate.input().target.base_url,
     );
     try std.testing.expectEqualStrings(
-        "test-api-key-1234",
+        "oauth-access",
         candidate.input().api_key,
     );
     var second_candidate = try session.prepareSourceCandidate("model-1", 2);
     defer second_candidate.deinit();
     try std.testing.expectEqualStrings(
-        "test-api-key-1234",
+        "oauth-access",
         second_candidate.input().api_key,
     );
     session.reset();
-    const public_keys = public_catalog.apiKeyViews();
     const public_models = public_catalog.modelViews();
-    try std.testing.expectEqual(@as(usize, 1), public_keys.len);
-    try std.testing.expectEqualStrings("325", public_keys[0].id);
     try std.testing.expectEqual(@as(usize, 1), public_models.len);
     try std.testing.expectEqualStrings("model-1", public_models[0].id);
 }
 
-test "catalog maps Gemini platform to AgentCore Gemini target" {
-    const gemini_fixture = std.mem.replaceOwned(
-        u8,
-        std.testing.allocator,
-        key_fixture,
-        "\"platform\":\"anthropic\"",
-        "\"platform\":\"gemini\"",
-    ) catch return error.SkipZigTest;
-    defer std.testing.allocator.free(gemini_fixture);
-
-    var keys = try parseApiKeys(std.testing.allocator, gemini_fixture);
-    var session = CatalogSession.init(std.testing.allocator);
-    defer session.deinit();
-    session.api_keys = keys.entries;
-    keys.entries = .empty;
-    try session.selectApiKey("325");
-
-    var models = try parseModels(std.testing.allocator, model_fixture);
-    session.models = models.entries;
-    models.entries = .empty;
-    var candidate = try session.prepareSourceCandidate("model-1", 1);
-    defer candidate.deinit();
-    try std.testing.expectEqual(
-        contract.Protocol.gemini_native,
-        candidate.input().target.protocol,
-    );
-    try std.testing.expectEqualStrings(
-        gemini_base_url,
-        candidate.input().target.base_url,
-    );
-}
-
-test "catalog accepts additive metadata and rejects duplicate ids, pagination, and platforms" {
-    const items_marker = "\"items\":[";
-    const item_start =
-        (std.mem.indexOf(u8, key_fixture, items_marker) orelse
-            return error.SkipZigTest) + items_marker.len;
-    const item_end = std.mem.lastIndexOf(u8, key_fixture, "],") orelse
-        return error.SkipZigTest;
-    const duplicated_items = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{s},{s}{s}",
-        .{
-            key_fixture[0..item_end],
-            key_fixture[item_start..item_end],
-            key_fixture[item_end..],
-        },
-    );
-    defer std.testing.allocator.free(duplicated_items);
-    const duplicate = std.mem.replaceOwned(
-        u8,
-        std.testing.allocator,
-        duplicated_items,
-        "\"total\":1",
-        "\"total\":2",
-    ) catch return error.SkipZigTest;
-    defer std.testing.allocator.free(duplicate);
-    try std.testing.expectError(
-        error.ProtocolInvalid,
-        parseApiKeys(std.testing.allocator, duplicate),
-    );
-    const unknown = std.mem.replaceOwned(
-        u8,
-        std.testing.allocator,
-        key_fixture,
-        "\"code\":0",
-        "\"code\":0,\"unknown\":true",
-    ) catch return error.SkipZigTest;
-    defer std.testing.allocator.free(unknown);
-    var additive_keys = try parseApiKeys(std.testing.allocator, unknown);
-    defer additive_keys.deinit();
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        additive_keys.entries.items.len,
-    );
+test "catalog accepts additive model metadata" {
     const model_unknown = std.mem.replaceOwned(
         u8,
         std.testing.allocator,
@@ -1329,45 +857,9 @@ test "catalog accepts additive metadata and rejects duplicate ids, pagination, a
         @as(usize, 1),
         additive_models.entries.items.len,
     );
-    const missing_consumed = std.mem.replaceOwned(
-        u8,
-        std.testing.allocator,
-        key_fixture,
-        "\"group_id\":11",
-        "\"group_identifier\":11",
-    ) catch return error.SkipZigTest;
-    defer std.testing.allocator.free(missing_consumed);
-    try std.testing.expectError(
-        error.ProtocolInvalid,
-        parseApiKeys(std.testing.allocator, missing_consumed),
-    );
-    const paged = std.mem.replaceOwned(
-        u8,
-        std.testing.allocator,
-        key_fixture,
-        "\"pages\":1",
-        "\"pages\":2",
-    ) catch return error.SkipZigTest;
-    defer std.testing.allocator.free(paged);
-    try std.testing.expectError(
-        error.ProtocolInvalid,
-        parseApiKeys(std.testing.allocator, paged),
-    );
-    const unsupported = std.mem.replaceOwned(
-        u8,
-        std.testing.allocator,
-        key_fixture,
-        "\"platform\":\"anthropic\"",
-        "\"platform\":\"unknown\"",
-    ) catch return error.SkipZigTest;
-    defer std.testing.allocator.free(unsupported);
-    try std.testing.expectError(
-        error.UnsupportedProvider,
-        parseApiKeys(std.testing.allocator, unsupported),
-    );
 }
 
-test "catalog request flow uses OAuth then direct API key credentials" {
+test "catalog request flow uses OAuth access token directly" {
     const Fake = struct {
         step: usize = 0,
 
@@ -1379,14 +871,8 @@ test "catalog request flow uses OAuth then direct API key credentials" {
             const self: *@This() = @ptrCast(@alignCast(context));
             const body = switch (self.step) {
                 0 => blk: {
-                    if (request.kind != .keys or
-                        !std.mem.eql(u8, request.bearer orelse "", "oauth-access"))
-                        return error.ProtocolFailed;
-                    break :blk key_fixture;
-                },
-                1 => blk: {
                     if (request.kind != .models or
-                        !std.mem.eql(u8, request.bearer orelse "", "test-api-key-1234"))
+                        !std.mem.eql(u8, request.bearer orelse "", "oauth-access"))
                         return error.ProtocolFailed;
                     break :blk model_fixture;
                 },
@@ -1410,76 +896,17 @@ test "catalog request flow uses OAuth then direct API key credentials" {
         .context = &fake,
         .perform_fn = Fake.perform,
     };
-    try session.loadApiKeys(
+    try session.loadModels(
         transport,
         "oauth-access",
         "account-1",
         null,
     );
-    try session.selectApiKey("325");
-    try session.loadModels(transport, null);
     try std.testing.expectEqualStrings(
         "account-1",
         session.ownerAccountId(),
     );
-    try std.testing.expectEqual(@as(usize, 2), fake.step);
-}
-
-test "failed model reload preserves the committed private catalog" {
-    const Fake = struct {
-        step: usize = 0,
-
-        fn perform(
-            context: *anyopaque,
-            request: transport_api.Request,
-            response_buffer: []u8,
-        ) transport_api.TransportError!transport_api.Response {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (request.kind != .models) return error.ProtocolFailed;
-            const body = switch (self.step) {
-                0 => declared_model_fixture,
-                1 =>
-                \\{"object":"list","has_more":false,"data":[{"id":"model-1","object":"model","type":"model","max_tokens":"invalid"}]}
-                ,
-                else => return error.NetworkFailed,
-            };
-            self.step += 1;
-            if (body.len > response_buffer.len)
-                return error.ResponseTooLarge;
-            @memcpy(response_buffer[0..body.len], body);
-            return .{
-                .status = 200,
-                .body = response_buffer[0..body.len],
-            };
-        }
-    };
-
-    var keys = try parseApiKeys(std.testing.allocator, key_fixture);
-    var session = CatalogSession.init(std.testing.allocator);
-    defer session.deinit();
-    session.api_keys = keys.entries;
-    keys.entries = .empty;
-    session.owner_account_id = try .init("account-1");
-    var fake: Fake = .{};
-    const transport: transport_api.Transport = .{
-        .context = &fake,
-        .perform_fn = Fake.perform,
-    };
-
-    try session.loadModelsForApiKey("325", transport, null);
-    try std.testing.expectEqualStrings("model-1", session.firstModelId().?);
-    const original_metadata = session.models.items[0].metadata;
-    try std.testing.expectError(
-        error.ProtocolInvalid,
-        session.loadModelsForApiKey("325", transport, null),
-    );
-    try std.testing.expectEqualDeep(original_metadata, session.models.items[0].metadata);
-    try std.testing.expectError(
-        error.ServiceUnavailable,
-        session.loadModelsForApiKey("325", transport, null),
-    );
-    try std.testing.expectEqualStrings("model-1", session.firstModelId().?);
-    try std.testing.expectEqualDeep(original_metadata, session.models.items[0].metadata);
+    try std.testing.expectEqual(@as(usize, 1), fake.step);
 }
 
 test "catalog enforces response and field bounds before publication" {
@@ -1491,32 +918,7 @@ test "catalog enforces response and field bounds before publication" {
     @memset(oversized, ' ');
     try std.testing.expectError(
         error.CatalogTooLarge,
-        parseApiKeys(std.testing.allocator, oversized),
-    );
-
-    const long_name = try std.testing.allocator.alloc(
-        u8,
-        contract.Limits.api_key_name_bytes + 1,
-    );
-    defer std.testing.allocator.free(long_name);
-    @memset(long_name, 'x');
-    const replacement = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "\"name\":\"{s}\"",
-        .{long_name},
-    );
-    defer std.testing.allocator.free(replacement);
-    const invalid = try std.mem.replaceOwned(
-        u8,
-        std.testing.allocator,
-        key_fixture,
-        "\"name\":\"Prod\"",
-        replacement,
-    );
-    defer std.testing.allocator.free(invalid);
-    try std.testing.expectError(
-        error.CatalogFieldTooLarge,
-        parseApiKeys(std.testing.allocator, invalid),
+        parseModels(std.testing.allocator, oversized),
     );
 }
 

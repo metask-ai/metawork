@@ -2602,15 +2602,15 @@ test "retired Schedule data leaves Account ready and New Task admission unavaila
     var execution = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
-        .anthropic_messages,
+        .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
-            models_contract.metask_anthropic_messages_url,
+            models_contract.metask_openai_chat_completions_url,
         ),
         1,
         try std.testing.allocator.dupe(u8, "fixture-secret"),
-        "key-1",
+        "",
     );
     var execution_owned = true;
     defer if (execution_owned) execution.deinit();

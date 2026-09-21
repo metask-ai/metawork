@@ -671,7 +671,7 @@ fn testExecution(
         owned_base_url,
         generation,
         owned_credential,
-        "fixture-provider",
+        "",
     ) catch unreachable;
 }
 
