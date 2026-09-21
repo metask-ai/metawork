@@ -436,22 +436,74 @@ pub fn hasActiveOperation(task: *const task_state.Task) bool {
     };
 }
 
-pub fn lastFinalizedRunId(task: *const task_state.Task) ?u64 {
+pub fn runHistoryHighWater(task: *const task_state.Task) u64 {
     var latest: u64 = 0;
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
-        if (!run.event_stream_finalized or task_state.productTerminalFacts(run) == null)
+        latest = @max(latest, run.id);
+    }
+    return latest;
+}
+
+pub fn compactHistoryHighWater(task: *const task_state.Task) u64 {
+    var latest: u64 = 0;
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        latest = @max(latest, compact.id);
+    }
+    return latest;
+}
+
+pub fn maxCoveredRunId(task: *const task_state.Task) u64 {
+    var latest: u64 = 0;
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (run.coverage == .covered) latest = @max(latest, run.id);
+    }
+    return latest;
+}
+
+pub fn maxCoveredCompactId(task: *const task_state.Task) u64 {
+    var latest: u64 = 0;
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        if (compact.coverage == .covered) latest = @max(latest, compact.id);
+    }
+    return latest;
+}
+
+pub fn hasPendingConversationCoverage(task: *const task_state.Task) bool {
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (run.coverage == .pending) return true;
+    }
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        if (compact.coverage == .pending) return true;
+    }
+    return false;
+}
+
+pub fn lastConversationRunId(task: *const task_state.Task) ?u64 {
+    var latest: u64 = 0;
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (run.coverage == .excluded or
+            !run.event_stream_finalized or
+            task_state.productTerminalFacts(run) == null)
             continue;
         latest = @max(latest, run.id);
     }
     return if (latest == 0) null else latest;
 }
 
-pub fn latestCompactId(task: *const task_state.Task) u64 {
+pub fn lastConversationCompactId(task: *const task_state.Task) u64 {
     var latest: u64 = 0;
     for (task.durable.compacts) |*entry| {
         const compact = &(entry.* orelse continue);
-        if (task_state.compactProjectionFacts(compact).terminal == null) continue;
+        if (compact.coverage == .excluded or
+            task_state.compactProjectionFacts(compact).terminal == null)
+            continue;
         latest = @max(latest, compact.id);
     }
     return latest;
@@ -465,7 +517,7 @@ pub fn continuationAvailable(capability: task_state.ContinuationCapability) bool
 }
 
 pub fn taskLifecycle(task: *const task_state.Task) task_state.TaskLifecycle {
-    if (task.deletion == .deleting) return .closing;
+    if (task.deletion == .deleting or task.runtime.close_requested) return .closing;
     return switch (task.runtime.attachment) {
         .closing => .closing,
         .detached, .attached => .open,
@@ -500,12 +552,24 @@ pub fn checkpointMatchesCurrentHistory(
     task: *const task_state.Task,
     record: checkpoint_record.Record,
 ) bool {
-    if (record.session.last_run_id != (lastFinalizedRunId(task) orelse 0) or
-        record.session.last_compact_id != latestCompactId(task))
+    if (hasPendingConversationCoverage(task) or
+        record.session.last_run_id != maxCoveredRunId(task) or
+        record.session.last_compact_id != maxCoveredCompactId(task))
         return false;
     return switch (record.anchor.terminal) {
-        .run => |id| id == record.session.last_run_id,
-        .compact => |id| id == record.session.last_compact_id,
+        .run => |id| id == record.session.last_run_id and
+            if (task_state.findRun(task.durable.runs, id)) |run|
+                run.coverage == .covered and
+                    run.event_stream_finalized and
+                    task_state.productTerminalFacts(run) != null
+            else
+                false,
+        .compact => |id| id == record.session.last_compact_id and
+            if (task_state.findCompact(task.durable.compacts, id)) |compact|
+                compact.coverage == .covered and
+                    task_state.compactProjectionFacts(compact).terminal != null
+            else
+                false,
     };
 }
 
@@ -720,7 +784,7 @@ test "Run outcome phases remain truthful" {
     try std.testing.expectEqual(task_state.RunPhase.failed, phaseForOutcome(.dependency_contract_failure));
 }
 
-test "unobserved Compact terminal remains active and cannot anchor a checkpoint" {
+test "unobserved Compact terminal remains active and stays outside Conversation frontier" {
     var runs: [0]?task_state.RunRecord = .{};
     var compacts = [_]?task_state.CompactRecord{.{
         .id = 11,
@@ -758,9 +822,95 @@ test "unobserved Compact terminal remains active and cannot anchor a checkpoint"
     };
 
     try std.testing.expect(hasActiveOperation(&task));
-    try std.testing.expectEqual(@as(u64, 0), latestCompactId(&task));
+    try std.testing.expectEqual(@as(u64, 11), compactHistoryHighWater(&task));
+    try std.testing.expectEqual(@as(u64, 0), lastConversationCompactId(&task));
 
     task.durable.compacts[0].?.terminal_observed = true;
     try std.testing.expect(!hasActiveOperation(&task));
-    try std.testing.expectEqual(@as(u64, 11), latestCompactId(&task));
+    try std.testing.expectEqual(@as(u64, 11), lastConversationCompactId(&task));
+}
+
+fn terminalRun(id: u64, coverage: task_state.ConversationCoverage) task_state.RunRecord {
+    return .{
+        .id = id,
+        .coverage = coverage,
+        .generation = id,
+        .execution_generation = 1,
+        .execution_protocol = .anthropic_messages,
+        .execution_model = @constCast("model"),
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = @constCast("input") } },
+        .commentary_ends = @constCast(&[_]u64{}),
+        .tools = @constCast(&[_]?task_state.ToolView{}),
+        .terminal_publication = .init(.published),
+        .terminal_payload = .{
+            .phase = .completed,
+            .outcome = .completed,
+            .cause = null,
+            .session_disposition_at_completion = .reusable,
+        },
+        .terminal_observed = true,
+        .event_stream_finalized = true,
+        .terminal_diagnostic = @constCast(""),
+    };
+}
+
+test "checkpoint matches covered frontier and permits only excluded Product tail" {
+    var runs = [_]?task_state.RunRecord{
+        terminalRun(1, .covered),
+        terminalRun(3, .excluded),
+    };
+    var compacts: [0]?task_state.CompactRecord = .{};
+    var ui_history: [0]?task_state.UiRecord = .{};
+    var task = task_state.Task{
+        .durable = .{
+            .id = 3,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 2,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+        },
+    };
+    const record: checkpoint_record.Record = .{
+        .blob = .{
+            .task_id = 3,
+            .generation = 1,
+            .digest = [_]u8{0x5a} ** 32,
+            .byte_size = 1,
+        },
+        .session = .{
+            .logical_session_id = @constCast("logical-session"),
+            .last_run_id = 1,
+            .last_compact_id = 0,
+            .model = @constCast("model"),
+        },
+        .anchor = .{ .terminal = .{ .run = 1 }, .binding_epoch = 1 },
+    };
+
+    try std.testing.expectEqual(@as(u64, 3), runHistoryHighWater(&task));
+    try std.testing.expectEqual(@as(u64, 1), maxCoveredRunId(&task));
+    try std.testing.expectEqual(@as(?u64, 1), lastConversationRunId(&task));
+    try std.testing.expect(checkpointMatchesCurrentHistory(&task, record));
+
+    // A later covered Run may never be accepted by weakening exact equality
+    // to `checkpoint <= history`.
+    task.durable.runs[1].?.coverage = .covered;
+    try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
+
+    task.durable.runs[1].?.coverage = .pending;
+    try std.testing.expect(hasPendingConversationCoverage(&task));
+    try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
+
+    task.durable.runs[1].?.coverage = .excluded;
+    task.durable.runs[0].?.coverage = .excluded;
+    try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
 }

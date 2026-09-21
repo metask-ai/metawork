@@ -4405,6 +4405,10 @@ pub const Runtime = struct {
             .recovery = self.taskRuntimeRecoveryEffects(),
             .release = self.taskRuntimeReleaseEffects(),
             .checkpoint = self.taskRuntimeCheckpointEffects(),
+            .notifier = .{
+                .context = self.change_notifier.context,
+                .notify_fn = self.change_notifier.wake,
+            },
         });
         changed = task_sync.changed or changed;
         var durable_changed = task_sync.durable_changed;
@@ -5641,8 +5645,12 @@ pub const Runtime = struct {
             catalogSnapshotLimits(self.limits),
         );
         if (self.mcp) |*runtime| runtime.finishShutdownAfterExecutorJoin();
-        self.syncLifecycle();
+        // The joined Run may have published its terminal and checkpoint only
+        // after the last UI-loop drain. Finish the canonical event barrier
+        // before settling checkpoint transactions.
+        self.drainAgentEvents() catch {};
         self.settleCheckpointTransactionsForShutdown();
+        self.task_runtime.excludePendingConversationTailAfterShutdown();
         self.commitTaskStateNoFail();
     }
 

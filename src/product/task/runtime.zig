@@ -901,6 +901,7 @@ pub const LifecycleEffects = struct {
     recovery: RecoveryEffects,
     release: ReleaseEffects,
     checkpoint: CheckpointEffects,
+    notifier: task_execution.Notifier,
 };
 
 pub const ProjectionAuthorityQuery = struct {
@@ -1270,6 +1271,8 @@ pub const Runtime = struct {
         var prepared = true;
         errdefer if (prepared)
             task_execution.cancelPreparedRunOrPanic(&access, run_id);
+        if (run_id <= task_policy.runHistoryHighWater(task))
+            return error.CoreCallFailed;
         const slot = try reserveRun(self, task, input, effects);
         var record_owned = true;
         errdefer if (record_owned) discardRun(self, task, slot, effects.release);
@@ -1310,7 +1313,7 @@ pub const Runtime = struct {
             .terminal_kind = .run,
             .terminal_id = run_id,
             .last_run_id = run_id,
-            .last_compact_id = task_policy.latestCompactId(task),
+            .last_compact_id = task_policy.lastConversationCompactId(task),
             .model = run_record.execution_model,
         };
 
@@ -1373,7 +1376,7 @@ pub const Runtime = struct {
             return error.TaskBusy;
         const slot = findEmptyCompact(task.durable.compacts) orelse
             return error.CompactCapacity;
-        const after_run_id = task_policy.lastFinalizedRunId(task) orelse
+        const after_run_id = task_policy.lastConversationRunId(task) orelse
             return error.NoSuchRun;
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
         var access_live = true;
@@ -1382,6 +1385,8 @@ pub const Runtime = struct {
         var prepared = true;
         errdefer if (prepared)
             task_execution.cancelPreparedCompactOrPanic(&access, operation_id);
+        if (operation_id <= task_policy.compactHistoryHighWater(task))
+            return error.CoreCallFailed;
         const diagnostic = try effects.text.allocateCapacity(
             effects.limits.max_terminal_diagnostic_bytes,
         );
@@ -1604,20 +1609,11 @@ pub const Runtime = struct {
         effects: OperationEffects,
     ) CloseError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (!task_policy.hasActiveOperation(task) and
-            checkpointMutationPending(task, effects.worker.checkpoint.store_health))
-        {
-            cancelTaskCheckpoints(task);
-            return error.TaskBusy;
-        }
-        if (task.runtime.close_thread != null) return error.CloseInProgress;
+        if (task.runtime.close_requested or task.runtime.close_thread != null)
+            return error.CloseInProgress;
         const retrying = task.runtime.close_failed and
             task.runtime.hasClosingSession();
         if (task.runtime.live() == null) return false;
-        const prior_health = if (task.runtime.attached()) |attached|
-            attached.health
-        else
-            task_attachment.AttachedHealth.available;
         if (task.runtime.active_operation == .compact) {
             const compact_id = switch (task.runtime.active_operation) {
                 .compact => |id| id,
@@ -1669,8 +1665,6 @@ pub const Runtime = struct {
                 );
             }
         }
-        if (!retrying) std.debug.assert(task.runtime.beginClosing());
-        const binding = task.runtime.closingWorkerBinding() orelse unreachable;
         task.runtime.cancel_requested = task.runtime.active_operation == .run;
         if (task_state.findRun(
             task.durable.runs,
@@ -1679,20 +1673,9 @@ pub const Runtime = struct {
             if (!task_state.isTerminalPhase(task_state.runPhase(run_record)))
                 _ = task_state.setActivePhase(run_record, .stopping);
         }
-        task.runtime.close_failed = false;
-        task.runtime.close_completion.store(.running, .release);
-        task.runtime.close_thread = std.Thread.spawn(.{}, closeWorker, .{
-            &task.runtime.close_completion,
-            binding,
-            effects.worker.notifier,
-        }) catch |err| {
-            task.runtime.close_completion.store(.none, .release);
-            if (retrying)
-                task.runtime.close_failed = true
-            else
-                task.runtime.restoreCloseFailure(prior_health);
-            return err;
-        };
+        task.runtime.close_requested = true;
+        if (closeReady(task))
+            try startCloseWorker(task, effects.worker.notifier, retrying);
         if (cancelled_ui) |record| pushUiRecord(task, record);
         task.durable.recent_order = self.takeRecentOrder();
         return true;
@@ -2619,6 +2602,20 @@ pub const Runtime = struct {
             },
             .candidate_ready => {
                 const candidate = &postprocess.payload.candidate;
+                const overlay = beginCheckpointCoverageOverlay(
+                    task,
+                    candidate,
+                ) orelse {
+                    task.durable.checkpoint_attempt = .dependency_contract;
+                    _ = effects.commit(null);
+                    const rejected_identity = candidate.record.blob;
+                    candidate.record.deinit(self.allocator);
+                    postprocess.payload = .none;
+                    postprocess.state.store(.settled, .release);
+                    releaseCheckpointLease(postprocess);
+                    effects.delete(rejected_identity);
+                    return true;
+                };
                 switch (effects.commit(.{
                     .task_id = task.durable.id,
                     .record = &candidate.record,
@@ -2626,6 +2623,7 @@ pub const Runtime = struct {
                 })) {
                     .committed => {},
                     .failed => {
+                        rollbackCheckpointCoverageOverlay(task, overlay);
                         candidate.record.deinit(self.allocator);
                         postprocess.payload = .none;
                         postprocess.state.store(.settled, .release);
@@ -2633,6 +2631,7 @@ pub const Runtime = struct {
                         return true;
                     },
                     .outcome_unknown => {
+                        rollbackCheckpointCoverageOverlay(task, overlay);
                         task.durable.checkpoint_attempt = .outcome_unknown;
                         candidate.record.deinit(self.allocator);
                         postprocess.payload = .none;
@@ -2679,7 +2678,6 @@ pub const Runtime = struct {
     ) void {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            cancelTaskCheckpoints(task);
             cancelTaskAutomaticTitles(task);
             if (!task.runtime.worker_leases.hasLive()) continue;
             switch (task.runtime.active_operation) {
@@ -2717,6 +2715,17 @@ pub const Runtime = struct {
                     if (executor.cancel(run)) run.terminal_observed = true;
                 },
             }
+        }
+    }
+
+    /// Called only after the Product executor has joined and checkpoint
+    /// postprocesses have settled. Any remaining pending operation is visible
+    /// Product history that the final checkpoint did not cover.
+    pub fn excludePendingConversationTailAfterShutdown(self: *Runtime) void {
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            std.debug.assert(!task.runtime.worker_leases.hasLive());
+            excludePendingConversationTail(task);
         }
     }
 
@@ -3117,6 +3126,8 @@ pub const Runtime = struct {
                 .workspace_epoch = input.workspace_epoch,
                 .workspace_kind = input.workspace_kind,
                 .checkpoint = checkpoint_copy,
+                .run_id_floor = task_policy.runHistoryHighWater(task),
+                .compact_id_floor = task_policy.compactHistoryHighWater(task),
                 .workspace = workspace,
                 .execution = execution.take(),
                 .source_execution_generation = task.durable.execution_generation,
@@ -3420,6 +3431,8 @@ pub const Runtime = struct {
             task.runtime.close_completion.store(.none, .release);
             switch (completion) {
                 .closed => {
+                    std.debug.assert(!task.runtime.worker_leases.hasLive());
+                    excludePendingConversationTail(task);
                     std.debug.assert(
                         task.runtime.closingWorkerBinding().?.state() == .released,
                     );
@@ -3430,9 +3443,11 @@ pub const Runtime = struct {
                         snapshot.deinit();
                     }
                     task.conversation_observation = .{};
+                    task.runtime.close_requested = false;
                     task.runtime.close_failed = false;
                 },
                 .failed_reusable, .failed_poisoned, .failed_closing => {
+                    task.runtime.close_requested = false;
                     task.runtime.close_failed = true;
                     if (task.deletion == .deleting) task.deletion = .failed;
                     switch (completion) {
@@ -3445,6 +3460,25 @@ pub const Runtime = struct {
                 .none, .running => unreachable,
             }
             task.runtime.cancel_requested = false;
+            changed = true;
+        }
+        return changed;
+    }
+
+    fn syncRequestedCloses(
+        self: *Runtime,
+        notifier: task_execution.Notifier,
+    ) bool {
+        var changed = false;
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (!task.runtime.close_requested or !closeReady(task)) continue;
+            const retrying = task.runtime.close_failed and
+                task.runtime.hasClosingSession();
+            startCloseWorker(task, notifier, retrying) catch {
+                task.runtime.close_requested = false;
+                task.runtime.close_failed = true;
+            };
             changed = true;
         }
         return changed;
@@ -3608,15 +3642,115 @@ pub const Runtime = struct {
         result.durable_changed = recovery.durable_changed or result.durable_changed;
         result.mcp_refresh_needed = recovery.mcp_refresh_needed;
 
-        result.changed = self.syncCloseCompletions(effects.release) or result.changed;
         result.changed = self.requestPermissionStops() or result.changed;
         const operations = self.syncOperationRecords();
         result.changed = operations.changed or result.changed;
         result.durable_changed = operations.durable_changed or result.durable_changed;
         result.changed = self.syncCheckpointPostprocesses(effects.checkpoint) or result.changed;
+        result.changed = self.syncRequestedCloses(effects.notifier) or result.changed;
+        result.changed = self.syncCloseCompletions(effects.release) or result.changed;
         return result;
     }
 };
+
+const CheckpointCoverageOverlay = struct {
+    prior_run_id: u64,
+    prior_compact_id: u64,
+    next_run_id: u64,
+    next_compact_id: u64,
+};
+
+fn beginCheckpointCoverageOverlay(
+    task: *task_state.Task,
+    candidate: *const task_state.CheckpointCandidate,
+) ?CheckpointCoverageOverlay {
+    const record = candidate.record;
+    record.validateBinding(task.durable.id, task.durable.binding_epoch) catch
+        return null;
+    const prior_run_id = if (task.durable.checkpoint) |prior|
+        prior.session.last_run_id
+    else
+        0;
+    const prior_compact_id = if (task.durable.checkpoint) |prior|
+        prior.session.last_compact_id
+    else
+        0;
+    if (record.session.last_run_id < prior_run_id or
+        record.session.last_compact_id < prior_compact_id)
+        return null;
+
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        switch (run.coverage) {
+            .excluded => {},
+            .covered => if (run.id > prior_run_id or
+                run.id > record.session.last_run_id) return null,
+            .pending => if (run.id <= prior_run_id or
+                run.id > record.session.last_run_id) return null,
+        }
+    }
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        switch (compact.coverage) {
+            .excluded => {},
+            .covered => if (compact.id > prior_compact_id or
+                compact.id > record.session.last_compact_id) return null,
+            .pending => if (compact.id <= prior_compact_id or
+                compact.id > record.session.last_compact_id) return null,
+        }
+    }
+
+    const overlay: CheckpointCoverageOverlay = .{
+        .prior_run_id = prior_run_id,
+        .prior_compact_id = prior_compact_id,
+        .next_run_id = record.session.last_run_id,
+        .next_compact_id = record.session.last_compact_id,
+    };
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (run.coverage == .pending) run.coverage = .covered;
+    }
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        if (compact.coverage == .pending) compact.coverage = .covered;
+    }
+    if (!task_policy.checkpointMatchesCurrentHistory(task, record)) {
+        rollbackCheckpointCoverageOverlay(task, overlay);
+        return null;
+    }
+    return overlay;
+}
+
+fn rollbackCheckpointCoverageOverlay(
+    task: *task_state.Task,
+    overlay: CheckpointCoverageOverlay,
+) void {
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (run.coverage == .covered and
+            run.id > overlay.prior_run_id and
+            run.id <= overlay.next_run_id)
+            run.coverage = .pending;
+    }
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        if (compact.coverage == .covered and
+            compact.id > overlay.prior_compact_id and
+            compact.id <= overlay.next_compact_id)
+            compact.coverage = .pending;
+    }
+}
+
+fn excludePendingConversationTail(task: *task_state.Task) void {
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        if (run.coverage == .pending) run.coverage = .excluded;
+    }
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        if (compact.coverage == .pending) compact.coverage = .excluded;
+    }
+}
 
 fn markAutomaticTitleUserOverride(task: *task_state.Task) void {
     for (task.durable.runs) |*entry| {
@@ -5159,6 +5293,57 @@ fn requestPermissionTermination(
         .stale_run => .stale_run,
         .session_closing => .session_closing,
     };
+}
+
+fn closeReady(task: *const task_state.Task) bool {
+    if (task.runtime.active_operation != .none or
+        task_state.hasUnfinalizedTerminalEvents(task) or
+        task.runtime.worker_leases.hasLive())
+        return false;
+    for (task.durable.runs) |*entry| {
+        const run = &(entry.* orelse continue);
+        switch (run.checkpoint.state.load(.acquire)) {
+            .none, .settled => {},
+            .exporting, .failure_ready, .candidate_ready => return false,
+        }
+    }
+    for (task.durable.compacts) |*entry| {
+        const compact = &(entry.* orelse continue);
+        switch (compact.checkpoint.state.load(.acquire)) {
+            .none, .settled => {},
+            .exporting, .failure_ready, .candidate_ready => return false,
+        }
+    }
+    return true;
+}
+
+fn startCloseWorker(
+    task: *task_state.Task,
+    notifier: task_execution.Notifier,
+    retrying: bool,
+) std.Thread.SpawnError!void {
+    const prior_health = if (task.runtime.attached()) |attached|
+        attached.health
+    else
+        task_attachment.AttachedHealth.available;
+    if (!retrying) std.debug.assert(task.runtime.beginClosing());
+    const binding = task.runtime.closingWorkerBinding() orelse unreachable;
+    task.runtime.close_failed = false;
+    task.runtime.close_completion.store(.running, .release);
+    task.runtime.close_thread = std.Thread.spawn(.{}, closeWorker, .{
+        &task.runtime.close_completion,
+        binding,
+        notifier,
+    }) catch |err| {
+        task.runtime.close_completion.store(.none, .release);
+        task.runtime.close_requested = false;
+        if (retrying)
+            task.runtime.close_failed = true
+        else
+            task.runtime.restoreCloseFailure(prior_health);
+        return err;
+    };
+    task.runtime.close_requested = false;
 }
 
 fn closeWorker(

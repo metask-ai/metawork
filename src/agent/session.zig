@@ -327,6 +327,11 @@ const OwnedRunInput = union(enum) {
     }
 };
 
+pub const OperationIdFloor = struct {
+    last_run_id: u64 = 0,
+    last_compact_id: u64 = 0,
+};
+
 pub const SessionOpenOptions = struct {
     model_binding: ModelBinding,
     permission_mode: PermissionMode,
@@ -338,6 +343,9 @@ pub const SessionOpenOptions = struct {
     skill_catalog: ?*CatalogLease = null,
     skill_policy: ?SkillPolicyInput = null,
     mcp_selection: ?*const McpSelection = null,
+    /// Product history may contain operations intentionally excluded from the
+    /// Conversation checkpoint. They still consume public operation ids.
+    operation_id_floor: OperationIdFloor = .{},
 };
 
 pub const SkillPolicyInput = struct {

@@ -120,6 +120,10 @@ fn restoreOptions(
                 .canonical_root = workspace_root,
                 .trust = .{ .temporary = temporary_root },
             },
+            .operation_id_floor = .{
+                .last_run_id = last_run_id,
+                .last_compact_id = last_compact_id,
+            },
         },
         .checkpoint_limits = checkpoint_test_limits,
         .source = source,
@@ -2915,6 +2919,37 @@ test "checkpoint restore installs one exact logical Session and continues identi
         try closeSession(route.session, .session_close);
         try runtime.releaseClosedSession(route.session);
     }
+}
+
+test "checkpoint restore keeps expectation at checkpoint while allocating above Product history" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(3);
+    fake_core.setRestoreHistory(1, 1);
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+    var options = restoreOptions(
+        source.source(),
+        "000000000000000000000001",
+        1,
+        1,
+    );
+    options.session.operation_id_floor = .{
+        .last_run_id = 3,
+        .last_compact_id = 4,
+    };
+    const route = try runtime.restoreSessionRoute(options);
+    const run_id = try route.session.prepareRun(.{ .text = "continue after excluded history" });
+    try std.testing.expectEqual(@as(u64, 4), run_id);
+    try route.session.cancelPreparedRun(run_id);
+    const compact_id = try route.session.prepareCompact();
+    try std.testing.expectEqual(@as(u64, 5), compact_id);
+    try route.session.cancelPreparedCompact(compact_id);
+    try closeSession(route.session, .session_close);
+    try runtime.releaseClosedSession(route.session);
 }
 
 test "Runtime shutdown waits for restore and rejects its late candidate" {

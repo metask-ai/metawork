@@ -153,6 +153,7 @@ pub const PermissionInteraction = session_impl.PermissionInteraction;
 pub const EventReadyNotification = session_impl.EventReadyNotification;
 pub const EventReadyNotifier = session_impl.EventReadyNotifier;
 pub const SessionOpenOptions = session_impl.SessionOpenOptions;
+pub const OperationIdFloor = session_impl.OperationIdFloor;
 pub const SkillPolicyInput = session_impl.SkillPolicyInput;
 pub const SessionRestoreOptions = session_impl.SessionRestoreOptions;
 pub const SessionRestoreRoute = session_impl.SessionRestoreRoute;

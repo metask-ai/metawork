@@ -96,6 +96,9 @@ pub const State = struct {
     last_restore_permission: ?RestorePermissionSummary = null,
     close_thread: ?std.Thread = null,
     close_completion: std.atomic.Value(CloseCompletion) = .init(.none),
+    /// Admission closes immediately, while the Session close itself waits for
+    /// the active operation and its checkpoint transaction to settle.
+    close_requested: bool = false,
     close_failed: bool = false,
     cancel_requested: bool = false,
     /// Runtime-only model selection requested while the Session is busy.
