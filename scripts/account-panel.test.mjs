@@ -83,6 +83,7 @@ const signedOut = {
   accountId: "",
   displayName: "",
   emailHint: "",
+  phoneHint: "",
   concurrencyLimit: null,
   errorCode: "none",
   safeDiagnostic: "",
@@ -124,6 +125,7 @@ const readyAccount = {
   accountId: "account-1",
   displayName: "Metask User",
   emailHint: "m***@example.com",
+  phoneHint: "",
   concurrencyLimit: 5,
 };
 

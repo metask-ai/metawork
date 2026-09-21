@@ -1532,6 +1532,7 @@ pub const TestSupport = if (builtin.is_test) struct {
                 account_id,
                 display_name,
                 "u***@example.com",
+                "",
                 5,
             ),
         ) };
@@ -1560,6 +1561,7 @@ pub const TestSupport = if (builtin.is_test) struct {
                 identity_account_id,
                 display_name,
                 "u***@example.com",
+                "",
                 5,
             ),
         ) };
@@ -1848,7 +1850,7 @@ test "incomplete profile identity still issues an authorization lease" {
     var authenticated: Prepared = .{
         .transition = try state_impl.TestSupport.prepareAuthenticated(
             &runtime.account,
-            try state_impl.AccountIdentity.init("account-1", "", "", null),
+            try state_impl.AccountIdentity.init("account-1", "", "", "", null),
         ),
     };
     defer authenticated.deinit();

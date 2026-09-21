@@ -16,6 +16,10 @@ import {
 } from "../../components/ui/SelectionMenu.tsx";
 import { useI18n, type Locale, type MessageId } from "../../i18n/context.ts";
 import { accountErrorText } from "../../i18n/account-error.ts";
+import {
+  accountIdentityInitial,
+  accountIdentityLabel,
+} from "../account/identity.ts";
 import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";
@@ -403,7 +407,7 @@ export function SettingsPage({
   const modelBusy = modelCatalogLoading;
   const authenticated = account.state === "authenticated";
   const accountIdentityTitle = authenticated
-    ? account.displayName || t("account.signed_in")
+    ? accountIdentityLabel(account, t("account.signed_in"))
     : account.state === "checking"
       ? t("account.checking.title")
       : account.state === "authorizing"
@@ -1305,17 +1309,24 @@ export function SettingsPage({
                   data-session-state={account.state}
                 >
                   <span className="settings-avatar" aria-hidden="true">
-                    {[...(account.displayName || "M")][0]?.toLocaleUpperCase()}
+                    {accountIdentityInitial(account)}
                   </span>
                   <div className="settings-identity-copy">
-                    <strong title={account.displayName}>
+                    <strong title={accountIdentityTitle}>
                       {accountIdentityTitle}
                     </strong>
                     {authenticated ? (
                       <div className="settings-identity-meta">
-                        {account.emailHint ? (
+                        {account.emailHint &&
+                        account.emailHint !== accountIdentityTitle ? (
                           <span title={account.emailHint}>
                             {account.emailHint}
+                          </span>
+                        ) : null}
+                        {account.phoneHint &&
+                        account.phoneHint !== accountIdentityTitle ? (
+                          <span title={account.phoneHint}>
+                            {account.phoneHint}
                           </span>
                         ) : null}
                         <span>

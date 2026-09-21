@@ -86,6 +86,7 @@ export const initialWorkbenchState: WorkbenchState = {
       accountId: "",
       displayName: "",
       emailHint: "",
+      phoneHint: "",
       concurrencyLimit: null,
       errorCode: "none",
       safeDiagnostic: "",

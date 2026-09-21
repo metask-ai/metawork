@@ -67,6 +67,8 @@ test.after(async () => {
 const account = {
   state: "authenticated",
   displayName: "Metask User",
+  emailHint: "m***@example.com",
+  phoneHint: "",
 };
 const productVersion = readNativePackageManifest(process.cwd()).metadata
   .version;
@@ -108,17 +110,53 @@ test("authenticated account identity does not repeat a healthy connection status
   assert.equal(trigger.querySelector("small"), null);
 });
 
+test("authenticated account without a username uses its email hint", () => {
+  const { container } = renderIdentity(
+    {},
+    {
+      state: "authenticated",
+      displayName: "",
+      emailHint: "m***@example.com",
+      phoneHint: "138****8000",
+    },
+  );
+
+  const trigger = screen.getByRole("button", {
+    name: "Account and application menu",
+  });
+  assert.match(trigger.textContent, /m\*\*\*@example\.com/);
+  assert.equal(container.querySelector(".account-avatar")?.textContent, "M");
+});
+
+test("authenticated phone account uses its masked phone hint", () => {
+  const { container } = renderIdentity(
+    {},
+    {
+      state: "authenticated",
+      displayName: "",
+      emailHint: "",
+      phoneHint: "138****8000",
+    },
+  );
+
+  const trigger = screen.getByRole("button", {
+    name: "Account and application menu",
+  });
+  assert.match(trigger.textContent, /138\*\*\*\*8000/);
+  assert.equal(container.querySelector(".account-avatar")?.textContent, "M");
+});
+
 test("authenticated account without profile data uses a neutral identity", () => {
   const { container } = renderIdentity(
     {},
-    { state: "authenticated", displayName: "" },
+    { state: "authenticated", displayName: "", emailHint: "", phoneHint: "" },
   );
 
   const trigger = screen.getByRole("button", {
     name: "Account and application menu",
   });
   assert.match(trigger.textContent, /Signed in/);
-  assert.equal(container.querySelector(".account-avatar")?.textContent, "S");
+  assert.equal(container.querySelector(".account-avatar")?.textContent, "M");
 });
 
 test("signed-out account identity separates account, status, and login action", async () => {
@@ -132,7 +170,7 @@ test("signed-out account identity separates account, status, and login action", 
       onOpenSettings() {},
       onLogout() {},
     },
-    { state: "signed_out", displayName: "" },
+    { state: "signed_out", displayName: "", emailHint: "", phoneHint: "" },
   );
 
   const trigger = screen.getByRole("button", {

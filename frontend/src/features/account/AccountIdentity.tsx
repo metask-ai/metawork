@@ -7,6 +7,7 @@ import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import { AboutMetaWorkDialog } from "./AboutMetaWorkDialog.tsx";
+import { accountIdentityInitial, accountIdentityLabel } from "./identity.ts";
 
 export function AccountIdentity({
   account,
@@ -34,7 +35,7 @@ export function AccountIdentity({
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   const authenticated = account.state === "authenticated";
   const identityName = authenticated
-    ? account.displayName || t("account.signed_in")
+    ? accountIdentityLabel(account, t("account.signed_in"))
     : t("account.provider");
   const identityStatus =
     account.state === "checking"
@@ -44,7 +45,7 @@ export function AccountIdentity({
         : account.state === "signed_out"
           ? t("account.signed_out")
           : null;
-  const initial = [...identityName.trim()][0]?.toLocaleUpperCase() || "M";
+  const initial = accountIdentityInitial(account);
 
   useEffect(() => {
     if (!authenticated) setConfirmSignOut(false);

@@ -320,6 +320,7 @@ const readySettingsAccount = {
   accountId: "account-1",
   displayName: "Metask User",
   emailHint: "m***@example.com",
+  phoneHint: "",
   concurrencyLimit: 5,
   errorCode: "none",
   safeDiagnostic: "",

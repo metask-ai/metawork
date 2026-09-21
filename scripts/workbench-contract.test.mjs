@@ -675,6 +675,7 @@ test("durable Metask intent remains decodable when the current catalog is unavai
     accountId: "",
     displayName: "",
     emailHint: "",
+    phoneHint: "",
     concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
@@ -1738,6 +1739,7 @@ test("Custom Provider readiness survives an isolated failed retest", () => {
     accountId: "",
     displayName: "",
     emailHint: "",
+    phoneHint: "",
     concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
@@ -2208,6 +2210,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   const authenticatedWithoutDisplayName = clone(fixture);
   authenticatedWithoutDisplayName.account.displayName = "";
   authenticatedWithoutDisplayName.account.emailHint = "";
+  authenticatedWithoutDisplayName.account.phoneHint = "138****8000";
   authenticatedWithoutDisplayName.account.concurrencyLimit = null;
   assert.doesNotThrow(() =>
     decodeWorkbenchSnapshot(authenticatedWithoutDisplayName),
@@ -2308,6 +2311,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     accountId: "",
     displayName: "",
     emailHint: "",
+    phoneHint: "",
     concurrencyLimit: null,
     errorCode: "none",
     safeDiagnostic: "",
@@ -2328,6 +2332,13 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   signedOut.newTaskAdmission.activeSelectionRevision = "0";
   signedOut.newTaskAdmission.available = false;
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(signedOut));
+
+  const leakedSignedOutPhone = clone(signedOut);
+  leakedSignedOutPhone.account.phoneHint = "138****8000";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(leakedSignedOutPhone),
+    /must hide identity/,
+  );
 
   const leakedSignedOutSummary = clone(signedOut);
   leakedSignedOutSummary.account.summary = readySummary.account.summary;
