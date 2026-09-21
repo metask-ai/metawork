@@ -50,13 +50,13 @@ test("Windows distributions derive exact target and artifact identities", () => 
   assert.equal(x64.targetId, "x86_64-windows-gnu");
   assert.equal(x64.peMachine, 0x8664);
   assert.equal(x64.innoArchitecture, "x64compatible");
-  assert.equal(x64.installerArtifactName, "metawork-0.1.11-windows-x64.exe");
+  assert.equal(x64.installerArtifactName, "metawork-0.1.12-windows-x64.exe");
   assert.equal(arm64.targetId, "aarch64-windows-gnu");
   assert.equal(arm64.peMachine, 0xaa64);
   assert.equal(arm64.innoArchitecture, "arm64");
   assert.equal(
     arm64.installerArtifactName,
-    "metawork-0.1.11-windows-arm64.exe",
+    "metawork-0.1.12-windows-arm64.exe",
   );
   assert.throws(
     () => windowsDistributionForArchitecture("x86"),

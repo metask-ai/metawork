@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-09-21
+
+### Added
+
+- 新增安全外部链接打开机制：Agent 回复中的 HTTP(S)/mailto 及 Markdown 文件预览中的 HTTP(S) 链接由 Host 交给系统处理，并在原位置反馈失败。
+- 新增终态 Run 耗时持久化；当 Run 包含 Tool 时，在“执行详情”中显示最终耗时。
+- 建立 Product 历史的 SQL schema 与有序迁移验证基线；生产持久化仍沿用既有 framed history。
+
+### Changed
+
+- 移除应用级 Account Gate：无论登录状态均进入 Workbench；未登录时保留本地历史，账号状态仅在账号入口与设置中呈现。
+- Tool 详情改为展示 Host 为内置 Tool 投影的语义化证据，Edit/Write 路径可直达同一 Run 的文件更改审查。
+- System WebView 标题栏手势收口到实际标题栏节点的浏览器事件，Host 仍按原生窗口事实复核授权。
+- 优化侧栏开合动画、Task Panel 空态，以及关闭最后一个对象标签后的显隐与焦点恢复。
+
+### Fixed
+
+- 修复 Metask 资料字段不完整时错误阻断登录；用户名、邮箱、手机号和并发额度改为非阻断的可选投影，并新增脱敏手机号提示。
+- 修复中断尾部或 `poisoned` Session 导致既有 Task 无法安全继续的问题；持久化 Conversation coverage，并保留未纳入恢复上下文的历史。
+
 ## [0.1.11] - 2026-09-18
 
 ### Added
@@ -270,7 +290,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.11...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/metask-ai/metawork/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/metask-ai/metawork/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/metask-ai/metawork/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/metask-ai/metawork/compare/v0.1.8...v0.1.9
