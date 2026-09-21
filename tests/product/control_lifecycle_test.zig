@@ -5234,7 +5234,7 @@ test "graceful shutdown checkpoints an interrupted Run and restart continues wit
     );
 }
 
-test "cold start excludes a killed in-flight tail and continues above its Product id" {
+test "checkpoint restore preserves Product Run and UI request allocation floors" {
     fake_core.reset();
     fake_core.setCheckpointGeneration(1);
     const home = try std.Io.Dir.cwd().realPathFileAlloc(
@@ -5293,10 +5293,24 @@ test "cold start excludes a killed in-flight tail and continues above its Produc
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
     const task_id = try first.createTask(productControlTaskInput());
+    fake_core.setSessionPlan(.ui_wait);
+    fake_core.rearmControlled();
     try std.testing.expectEqual(
         @as(u64, 1),
-        try first.runTask(task_id, .{ .text = "durable checkpoint" }),
+        try first.runTask(task_id, .{ .text = "resolve permission before checkpoint" }),
     );
+    try waitTaskSnapshot(
+        &first,
+        "\"currentRunPhase\":\"waiting_ui\"",
+        "\"pendingUi\":{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    try first.respondUi(task_id, 1, 1, .{ .permission = .allow_once });
+    try waitTaskSnapshot(
+        &first,
+        "\"currentRunPhase\":\"running\"",
+        "\"uiHistory\":[{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    fake_core.releaseControlled();
     try waitCheckpointRecord(&first, &persistence);
 
     fake_core.setSessionPlan(.controlled);
@@ -5375,11 +5389,20 @@ test "cold start excludes a killed in-flight tail and continues above its Produc
         "\"id\":\"1\"",
         "\"continuationAvailable\":true",
     );
+    fake_core.setSessionPlan(.ui_wait);
+    fake_core.rearmControlled();
     fake_core.setCheckpointGeneration(2);
     try std.testing.expectEqual(
         @as(u64, 3),
-        try restored.runTask(task_id, .{ .text = "continue beyond killed Run" }),
+        try restored.runTask(task_id, .{ .text = "request permission after checkpoint restore" }),
     );
+    try waitTaskSnapshot(
+        &restored,
+        "\"pendingUi\":{\"requestId\":\"2\",\"runId\":\"3\"",
+        "\"uiHistory\":[{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    try restored.respondUi(task_id, 3, 2, .{ .permission = .allow_once });
+    fake_core.releaseControlled();
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"3\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
@@ -5387,7 +5410,7 @@ test "cold start excludes a killed in-flight tail and continues above its Produc
     );
 }
 
-test "cold start after first Run is killed fresh-attaches above excluded history" {
+test "fresh attach preserves Product Run and UI request allocation floors" {
     fake_core.reset();
     const home = try std.Io.Dir.cwd().realPathFileAlloc(
         std.testing.io,
@@ -5432,13 +5455,23 @@ test "cold start after first Run is killed fresh-attaches above excluded history
     defer if (first_live) first.deinit();
     try installControlExecution(&first);
     const task_id = try first.createTask(productControlTaskInput());
-    fake_core.setSessionPlan(.controlled);
+    fake_core.setSessionPlan(.ui_wait);
     fake_core.rearmControlled();
     try std.testing.expectEqual(
         @as(u64, 1),
-        try first.runTask(task_id, .{ .text = "killed before first checkpoint" }),
+        try first.runTask(task_id, .{ .text = "resolve permission before first checkpoint" }),
     );
-    try waitControlSnapshot(&first, "\"currentRunPhase\":\"running\"");
+    try waitTaskSnapshot(
+        &first,
+        "\"currentRunPhase\":\"waiting_ui\"",
+        "\"pendingUi\":{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    try first.respondUi(task_id, 1, 1, .{ .permission = .allow_once });
+    try waitTaskSnapshot(
+        &first,
+        "\"currentRunPhase\":\"running\"",
+        "\"uiHistory\":[{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
     const killed_history = try std.testing.allocator.dupe(
         u8,
         persistence_storage[0..persistence.len],
@@ -5448,6 +5481,11 @@ test "cold start after first Run is killed fresh-attaches above excluded history
         u8,
         killed_history,
         "\"id\":1,\"coverage\":\"pending\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        killed_history,
+        "\"ui_history\":[{\"request_id\":1,\"run_id\":1",
     ) != null);
     first.shutdownExecutor();
     first.deinit();
@@ -5500,10 +5538,19 @@ test "cold start after first Run is killed fresh-attaches above excluded history
     const restore_calls = fake_core.checkpoint_restores;
     fake_core.unlock();
     try std.testing.expectEqual(@as(usize, 0), restore_calls);
+    fake_core.setSessionPlan(.ui_wait);
+    fake_core.rearmControlled();
     try std.testing.expectEqual(
         @as(u64, 2),
-        try restored.runTask(task_id, .{ .text = "continue with a fresh Conversation" }),
+        try restored.runTask(task_id, .{ .text = "request permission after fresh attach" }),
     );
+    try waitTaskSnapshot(
+        &restored,
+        "\"pendingUi\":{\"requestId\":\"2\",\"runId\":\"2\"",
+        "\"uiHistory\":[{\"requestId\":\"1\",\"runId\":\"1\"",
+    );
+    try restored.respondUi(task_id, 2, 2, .{ .permission = .allow_once });
+    fake_core.releaseControlled();
     try waitTaskSnapshot(
         &restored,
         "\"id\":\"2\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",

@@ -357,9 +357,9 @@ Conversation recovery 是 detached Task 的 attachment 重建事务，不是 tra
 - Task 未归档、删除、运行其他 operation、replacement 或 shutdown；
 - 当前 recovery attempt 和 poison 状态允许进入。
 
-checkpoint 必须与 covered 前沿精确相等，并且不能存在 pending operation；`checkpoint <= Product history` 不是合法替代。checkpoint 之后允许存在且仅允许存在连续的 excluded 尾部。若历史中出现晚于 checkpoint 的 covered operation、checkpoint 前沿不是最大 covered id、anchor 未 covered/terminal 或存在 pending，恢复必须拒绝。所有新 Session 的 Run/compact allocator 都以 Product history 高水位为 floor；restore expectation 仍使用 checkpoint 自己的精确 ids，两者不得互相替代。
+checkpoint 必须与 covered 前沿精确相等，并且不能存在 pending operation；`checkpoint <= Product history` 不是合法替代。checkpoint 之后允许存在且仅允许存在连续的 excluded 尾部。若历史中出现晚于 checkpoint 的 covered operation、checkpoint 前沿不是最大 covered id、anchor 未 covered/terminal 或存在 pending，恢复必须拒绝。所有新 Session 的 Run/compact allocator 都以各自 Product operation history 高水位为 floor，UI request allocator 则以 durable UI history 高水位为独立 floor；restore expectation 仍只使用 checkpoint 自己的精确 Run/compact ids，任何 allocation floor 都不得替代 expectation。
 
-唯一无 checkpoint 恢复例外是：Task 没有 checkpoint record、covered 前沿均为零且没有 pending operation。此时 Product 可以在原 Task 上 fresh attach 空 Conversation，以完整 Product history 高水位初始化 allocator；全部 excluded 历史继续可见，不进入新上下文，也不自动重放。只要存在 covered 历史，checkpoint 缺失、损坏或 store 不可用都必须 fail closed。
+唯一无 checkpoint 恢复例外是：Task 没有 checkpoint record、covered 前沿均为零且没有 pending operation。此时 Product 可以在原 Task 上 fresh attach 空 Conversation，以完整 Product operation history 和 durable UI history 高水位初始化各自 allocator；全部 excluded 历史继续可见，不进入新上下文，也不自动重放。只要存在 covered 历史，checkpoint 缺失、损坏或 store 不可用都必须 fail closed。
 
 历史 execution generation 只证明历史 Run 使用过哪个 execution，不是恢复当前 credential 的句柄，也不要求等于 target generation。Skill、MCP、Permission 和 projection continuity 是恢复后的可选能力状态，不是 Conversation 恢复资格；AgentCore 合法返回 degraded Session 时，Product 接受已恢复 Conversation，并让不可重建 authority 保持安全失效。
 

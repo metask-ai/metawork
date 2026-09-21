@@ -261,7 +261,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 - Permission rule update 不得改变 Task-owned PermissionProfile；Task 创建后只允许 same-profile Run 与 restore；
 - 第二个 Run 明确排队或拒绝；
 - run ID 单调且与 Session 绑定；
-- fresh/restore Session 可以接收 Product operation id allocation floor；它只保证新 Run/compact id 严格大于已存在的 Product history 高水位，不改变 checkpoint restore expectation；
+- fresh/restore Session 可以分别接收 Product 提供的 Run、compact 与 UI request allocation floor；新 Run/compact id 必须严格大于各自 Product operation history 高水位，新 UI request id 必须严格大于 durable UI history 高水位，这些 floor 都不改变 checkpoint restore expectation；
 - queued Run 不接触 AgentCore mutable state；
 - queued Text/Skill input 在复制前按 Host byte limit、catalog identity 和参数数量拒绝，保证 executor 有界时输入内存也有明确上限；
 - multimodal input 在任何 owned allocation 前校验 parts、文本附件名称与正文、全部文本和编码图片上限，并预留 Runtime 共享输入预算；预算覆盖并发 prepare、Queued 与 Running，失败回滚及终止释放均恰好一次；
@@ -276,7 +276,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 
 当前实现由 Product Control 预留 durable Run record、generation、tool slots 与 terminal diagnostic buffer，再调用 `Session.prepareRun(RunInput)` 并把 Product Control-owned job 放入自身 bounded Executor。`RunInput` 只有 Text、typed Skill 与上述 multimodal 三个分支；Agent 在 admission 时有界深拷贝整个输入，Skill argument JSON 只通过官方 SDK encoder 在同步 `SessionApi.runSkill` 调用边界内生成，旧 `session_run` 和 slash 字符串不进入 Agent。worker claim 后以原子 `starting` 状态调用 `Session.beginRun()`；成功后先发布 generation-bound `RunControl` 和 `running`，再调用唯一 latch-aware `Run.execute()`。`beginRun()` 失败会在同一 Session lock 下返回 typed completion disposition，Product Control 据此生成 pre-execution terminal payload，不再额外读取 Session snapshot。cancel/close/shutdown 在 `starting` 时只发布 first-writer pending termination，在 `running` 时取得 `RunControlLease` 后于锁外请求终止。Agent Runtime 不 enqueue、不停止、也不销毁 Executor。
 
-checkpoint restore 的 expectation 必须使用 checkpoint description 的精确 `last_run_id / last_compact_id`；Product history 中 excluded operation 只进入 `operation_id_floor`。AgentCore 可以因此在 restore 后跳过被 Product 消耗但从未进入该 Conversation 的 ids。无 checkpoint 且 Product 确认没有 covered/pending history时，Product可以创建普通 fresh Session，并把全部 Product history 高水位作为相同 floor；Agent 不重放 Product history，也不把 excluded operation 写进 Conversation。
+checkpoint restore 的 expectation 必须使用 checkpoint description 的精确 `last_run_id / last_compact_id`；Product history 中 excluded operation 只进入 Run/compact allocation floor。AgentCore 可以因此在 restore 后跳过被 Product 消耗但从未进入该 Conversation 的 operation ids。durable UI history 独立形成 UI request allocation floor，使新 Session 不会复用已经解决或取消的 request id；UI request 不属于 checkpoint expectation。无 checkpoint 且 Product 确认没有 covered/pending history 时，Product 可以创建普通 fresh Session，并把全部 Product operation history 与 durable UI history 高水位分别作为对应 floor；Agent 不重放 Product history，也不把 excluded operation 写进 Conversation。
 
 ### Skill catalog ownership
 
