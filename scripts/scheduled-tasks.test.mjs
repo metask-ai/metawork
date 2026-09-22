@@ -118,10 +118,10 @@ test("Scheduled tasks is a truthful independent management page", () => {
       failureReason: null,
       binding: {
         status: "bound",
-        modelRef: { sourceId: "metask:key-1", modelId: "fixture-model" },
+        modelRef: { sourceId: "metask", modelId: "fixture-model" },
         sourceGeneration: "1",
         selectionRevision: "3",
-        protocol: "anthropic_messages",
+        protocol: "openai_chat_completions",
       },
       input: {
         kind: "text",
@@ -425,10 +425,10 @@ test("Scheduled task Bridge commands preserve IDs, epochs, and exact payloads", 
   const mutation = {
     title: "Summary",
     binding: {
-      modelRef: { sourceId: "metask:key-1", modelId: "fixture-model" },
+      modelRef: { sourceId: "metask", modelId: "fixture-model" },
       sourceGeneration: "1",
       selectionRevision: "3",
-      protocol: "anthropic_messages",
+      protocol: "openai_chat_completions",
     },
     permissionProfile: "full_access",
     input: { kind: "text", text: "Summarize" },

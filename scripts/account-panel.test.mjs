@@ -100,9 +100,7 @@ const unavailableModels = {
       recommended: true,
       catalogState: "needs_authentication",
       principalRef: "",
-      apiKeys: [],
       models: [],
-      selectedApiKeyId: "",
       catalogGeneration: "0",
       sourceGeneration: "0",
       errorCode: "authorization_unavailable",
@@ -137,24 +135,15 @@ const readyModels = {
       ...unavailableModels.providers[0],
       catalogState: "ready",
       principalRef: "account-1",
-      apiKeys: [
-        {
-          id: "key-1",
-          name: "Primary",
-          suffix: "1234",
-          protocol: "anthropic_messages",
-        },
-      ],
       models: [{ id: "model-1", displayName: "Model One" }],
-      selectedApiKeyId: "key-1",
       catalogGeneration: "1",
       sourceGeneration: "1",
       errorCode: "none",
     },
   ],
-  metaskSelection: { sourceId: "metask:key-1", modelId: "model-1" },
+  metaskSelection: { sourceId: "metask", modelId: "model-1" },
   metaskSelectionRevision: "1",
-  defaultSelection: { sourceId: "metask:key-1", modelId: "model-1" },
+  defaultSelection: { sourceId: "metask", modelId: "model-1" },
   selectionRevision: "1",
   errorCode: "none",
 };
@@ -555,7 +544,6 @@ test("Models canonical recovery preserves Account identity and freezes selectors
   assert.match(accountMarkup, /Metask User/);
   assert.match(modelsMarkup, /Model configuration needs attention/);
   assert.doesNotMatch(modelsMarkup, />Sign in with Metask</);
-  assert.match(modelsMarkup, /id="settings-api"[^>]*disabled/);
   assert.match(modelsMarkup, /id="settings-model"[^>]*disabled/);
   assert.match(modelsMarkup, />Recover model configuration</);
 });
@@ -572,14 +560,13 @@ test("Models without a persistence capability do not offer destructive reset", (
     { initialSection: "models" },
   );
   assert.doesNotMatch(markup, />Recover model configuration</);
-  assert.match(markup, /id="settings-api"[^>]*disabled/);
   assert.match(markup, /id="settings-model"[^>]*disabled/);
 });
 
 test("Execution commands never enter the Account busy or error scope", () => {
   assert.doesNotMatch(
     appSource,
-    /runAccountCommand\(\(\) =>\s*client\.(?:refreshModelsCatalog|selectMetaskApiKey|configureMetaskSelection|selectModelsDefault|createCustomProvider|updateCustomProvider|replaceCustomProviderCredential|removeCustomProvider|testCustomModel)/,
+    /runAccountCommand\(\(\) =>\s*client\.(?:refreshModelsCatalog|configureMetaskSelection|selectModelsDefault|createCustomProvider|updateCustomProvider|replaceCustomProviderCredential|removeCustomProvider|testCustomModel)/,
   );
   assert.match(
     appSource,
@@ -649,7 +636,6 @@ test("authenticated settings project current catalog defaults", () => {
   });
   assert.match(accountMarkup, /Metask User/);
   assert.match(accountMarkup, /Sign out on this device/);
-  assert.match(modelsMarkup, /Primary/);
   assert.match(modelsMarkup, /Model One/);
   assert.doesNotMatch(modelsMarkup, /<section[^>]*settings-custom-providers/);
 });

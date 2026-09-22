@@ -61,7 +61,6 @@ export const commands = {
   accountOpenRecharge: "metawork.account.openRecharge",
   modelsRefreshCatalog: "metawork.models.refreshCatalog",
   modelsResetStore: "metawork.models.resetStore",
-  selectMetaskApiKey: "metawork.models.selectMetaskApiKey",
   configureMetaskSelection: "metawork.models.configureMetaskSelection",
   selectModelsDefault: "metawork.models.selectDefault",
   customProviderCreate: "metawork.models.customProviders.create",

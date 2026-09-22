@@ -3,13 +3,15 @@ const std = @import("std");
 const contract = @import("metawork_account_contract");
 const mechanics = @import("oauth_mechanics");
 
-pub const authority = "https://napi.metask-ai.com";
+pub const authority = "https://app.metask-ai.com";
 pub const authorize_url = authority ++ "/oauth/authorize";
-pub const token_url = authority ++ "/oauth/token";
-pub const revoke_url = authority ++ "/oauth/revoke";
-pub const client_id = "metawork-app";
-pub const scope = "metawork:use";
-pub const callback_path = "/auth/callback";
+pub const token_url = authority ++ "/api/oauth/token";
+pub const userinfo_url = authority ++ "/api/oauth/userinfo";
+pub const client_id = "metawork";
+pub const scope = "openid profile email";
+pub const callback_port: u16 = 3000;
+pub const callback_path = "/auth/metask/callback";
+pub const redirect_uri = "http://localhost:3000" ++ callback_path;
 
 pub const Limits = struct {
     pub const secret_bytes: usize = 4096;
@@ -22,6 +24,7 @@ pub const Limits = struct {
     pub const callback_error_description_bytes: usize = 4096;
     pub const token_body_bytes: usize = 16 * 1024;
     pub const current_user_body_bytes: usize = 16 * 1024;
+    pub const authorization_id_bytes: usize = 256;
 };
 
 pub const ProtocolError = error{
@@ -78,7 +81,8 @@ pub const Secret = struct {
 pub const AttemptMaterial = mechanics.AttemptMaterial;
 
 pub fn writeRedirectUri(writer: *std.Io.Writer, port: u16) !void {
-    try mechanics.writeLoopbackRedirectUri(writer, port, callback_path);
+    if (port != callback_port) return error.InvalidCallback;
+    try writer.writeAll(redirect_uri);
 }
 
 pub fn buildAuthorizeUrl(
@@ -89,7 +93,7 @@ pub fn buildAuthorizeUrl(
     var redirect_storage: [128]u8 = undefined;
     var redirect_writer = std.Io.Writer.fixed(&redirect_storage);
     writeRedirectUri(&redirect_writer, port) catch return error.InvalidCallback;
-    const redirect_uri = redirect_writer.buffered();
+    const callback_uri = redirect_writer.buffered();
 
     var writer = std.Io.Writer.fixed(output);
     writer.writeAll(authorize_url) catch return error.BufferTooSmall;
@@ -98,7 +102,7 @@ pub fn buildAuthorizeUrl(
     writer.writeByte('&') catch return error.BufferTooSmall;
     writePair(&writer, "client_id", client_id) catch return error.BufferTooSmall;
     writer.writeByte('&') catch return error.BufferTooSmall;
-    writePair(&writer, "redirect_uri", redirect_uri) catch return error.BufferTooSmall;
+    writePair(&writer, "redirect_uri", callback_uri) catch return error.BufferTooSmall;
     writer.writeByte('&') catch return error.BufferTooSmall;
     writePair(&writer, "scope", scope) catch return error.BufferTooSmall;
     writer.writeByte('&') catch return error.BufferTooSmall;
@@ -192,6 +196,19 @@ pub const TokenSet = struct {
         return self.account_id[0..self.account_id_len];
     }
 
+    pub fn bindAccountId(
+        self: *TokenSet,
+        account_id: []const u8,
+    ) ProtocolError!void {
+        if (account_id.len == 0 or account_id.len > self.account_id.len)
+            return error.FieldTooLarge;
+        if (!std.unicode.utf8ValidateSlice(account_id))
+            return error.InvalidEncoding;
+        std.crypto.secureZero(u8, &self.account_id);
+        @memcpy(self.account_id[0..account_id.len], account_id);
+        self.account_id_len = account_id.len;
+    }
+
     pub fn deinit(self: *TokenSet) void {
         self.access_token.deinit();
         self.refresh_token.deinit();
@@ -240,14 +257,14 @@ const TokenResponse = struct {
     refresh_token: []const u8,
     token_type: []const u8,
     expires_in: u64,
-    scope: []const u8,
-    account_id: []const u8,
+    scope: ?[]const u8 = null,
 };
 
 pub fn parseTokenResponse(
     allocator: std.mem.Allocator,
     body: []const u8,
     now_unix_seconds: i64,
+    require_scope: bool,
 ) (ProtocolError || std.mem.Allocator.Error)!TokenSet {
     if (body.len == 0 or body.len > Limits.token_body_bytes)
         return error.InvalidTokenResponse;
@@ -284,18 +301,16 @@ pub fn parseTokenResponse(
     result.refresh_token = try Secret.init(allocator, raw.refresh_token);
     errdefer result.refresh_token.deinit();
 
-    if (!std.mem.eql(u8, raw.scope, scope))
-        return error.InvalidTokenResponse;
-    if (raw.account_id.len == 0 or raw.account_id.len > result.account_id.len)
-        return error.FieldTooLarge;
-    if (!std.unicode.utf8ValidateSlice(raw.account_id))
-        return error.InvalidEncoding;
-    @memcpy(result.account_id[0..raw.account_id.len], raw.account_id);
-    result.account_id_len = raw.account_id.len;
+    if (raw.scope) |returned_scope| {
+        if (!std.mem.eql(u8, returned_scope, scope))
+            return error.InvalidTokenResponse;
+    } else if (require_scope) return error.InvalidTokenResponse;
     return result;
 }
 
 pub const CurrentUser = struct {
+    account_id: [contract.Limits.account_id_bytes]u8 = undefined,
+    account_id_len: usize = 0,
     username: [contract.Limits.display_name_bytes]u8 = undefined,
     username_len: usize = 0,
     email_hint: [contract.Limits.email_hint_bytes]u8 = undefined,
@@ -303,6 +318,10 @@ pub const CurrentUser = struct {
     phone_hint: [contract.Limits.phone_hint_bytes]u8 = undefined,
     phone_hint_len: usize = 0,
     concurrency_limit: ?u32 = null,
+
+    pub fn accountId(self: *const CurrentUser) []const u8 {
+        return self.account_id[0..self.account_id_len];
+    }
 
     pub fn usernameView(self: *const CurrentUser) []const u8 {
         return self.username[0..self.username_len];
@@ -317,19 +336,15 @@ pub const CurrentUser = struct {
     }
 };
 
-const CurrentUserEnvelope = struct {
-    code: i64,
-    data: CurrentUserResponse,
-};
-
 const CurrentUserResponse = struct {
-    id: i64,
+    sub: []const u8,
+    client_id: []const u8,
+    authorization_id: []const u8,
     // These profile fields are deliberately dynamic: a missing or unusable
     // value must not make otherwise valid principal evidence fail login.
-    username: std.json.Value = .null,
+    name: std.json.Value = .null,
     email: std.json.Value = .null,
     phone_number: std.json.Value = .null,
-    concurrency: std.json.Value = .null,
 };
 
 fn optionalText(output: []u8, value: std.json.Value) []const u8 {
@@ -341,16 +356,6 @@ fn optionalText(output: []u8, value: std.json.Value) []const u8 {
         return output[0..0];
     @memcpy(output[0..text.len], text);
     return output[0..text.len];
-}
-
-fn optionalConcurrency(value: std.json.Value) ?u32 {
-    const raw = switch (value) {
-        .integer => |number| number,
-        .number_string => |text| std.fmt.parseInt(i64, text, 10) catch return null,
-        else => return null,
-    };
-    if (raw <= 0) return 0;
-    return std.math.cast(u32, raw);
 }
 
 fn maskEmail(output: []u8, email: []const u8) ProtocolError![]const u8 {
@@ -401,7 +406,6 @@ fn maskPhone(output: []u8, phone: []const u8) ProtocolError![]const u8 {
 
 pub fn parseCurrentUser(
     body: []const u8,
-    expected_account_id: []const u8,
 ) ProtocolError!CurrentUser {
     if (body.len == 0 or body.len > Limits.current_user_body_bytes)
         return error.InvalidCurrentUserResponse;
@@ -409,36 +413,37 @@ pub fn parseCurrentUser(
     defer std.crypto.secureZero(u8, &scratch);
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
     var parsed = std.json.parseFromSlice(
-        CurrentUserEnvelope,
+        CurrentUserResponse,
         fba.allocator(),
         body,
         .{ .ignore_unknown_fields = true },
     ) catch return error.InvalidCurrentUserResponse;
     defer parsed.deinit();
     const raw = parsed.value;
-    var account_id_storage: [32]u8 = undefined;
-    const account_id = std.fmt.bufPrint(
-        &account_id_storage,
-        "{d}",
-        .{raw.data.id},
-    ) catch return error.InvalidCurrentUserResponse;
-    if (raw.code != 0 or raw.data.id <= 0 or
-        !std.mem.eql(u8, account_id, expected_account_id))
+    if (raw.sub.len == 0 or
+        raw.sub.len > contract.Limits.account_id_bytes or
+        !std.unicode.utf8ValidateSlice(raw.sub) or
+        !std.mem.eql(u8, raw.client_id, client_id) or
+        raw.authorization_id.len == 0 or
+        raw.authorization_id.len > Limits.authorization_id_bytes or
+        !std.unicode.utf8ValidateSlice(raw.authorization_id))
         return error.InvalidCurrentUserResponse;
     var result: CurrentUser = .{};
-    const username = optionalText(&result.username, raw.data.username);
+    @memcpy(result.account_id[0..raw.sub.len], raw.sub);
+    result.account_id_len = raw.sub.len;
+    const username = optionalText(&result.username, raw.name);
     result.username_len = username.len;
-    const email_hint = switch (raw.data.email) {
+    const email_hint = switch (raw.email) {
         .string => |email| maskEmail(&result.email_hint, email) catch result.email_hint[0..0],
         else => result.email_hint[0..0],
     };
     result.email_hint_len = email_hint.len;
-    const phone_hint = switch (raw.data.phone_number) {
+    const phone_hint = switch (raw.phone_number) {
         .string => |phone| maskPhone(&result.phone_hint, phone) catch result.phone_hint[0..0],
         else => result.phone_hint[0..0],
     };
     result.phone_hint_len = phone_hint.len;
-    result.concurrency_limit = optionalConcurrency(raw.data.concurrency);
+    result.concurrency_limit = null;
     return result;
 }
 
@@ -466,7 +471,6 @@ pub fn buildRefreshBody(
 ) ProtocolError![]const u8 {
     return writeForm(output, &.{
         .{ "grant_type", "refresh_token" },
-        .{ "client_id", client_id },
         .{ "refresh_token", refresh_token.view() },
     });
 }
@@ -515,18 +519,22 @@ test "PKCE uses RFC 7636 S256 shape and authorize URL is fixed origin" {
     try std.testing.expectEqual(Limits.state_bytes, material.state.len);
     try std.testing.expectEqual(Limits.challenge_bytes, material.challenge.len);
     var buffer: [Limits.authorization_url_bytes]u8 = undefined;
-    const url = try buildAuthorizeUrl(&buffer, 49152, &material);
+    const url = try buildAuthorizeUrl(&buffer, callback_port, &material);
     try std.testing.expect(std.mem.startsWith(u8, url, authorize_url ++ "?"));
     try std.testing.expect(std.mem.indexOf(
         u8,
         url,
-        "redirect_uri=http%3A%2F%2F127.0.0.1%3A49152%2Fauth%2Fcallback",
+        "redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fmetask%2Fcallback",
     ) != null);
     try std.testing.expect(std.mem.endsWith(
         u8,
         url,
         "code_challenge_method=S256",
     ));
+    try std.testing.expectError(
+        error.InvalidCallback,
+        buildAuthorizeUrl(&buffer, callback_port + 1, &material),
+    );
 }
 
 test "callback parser rejects wrong path duplicates and state mismatch" {
@@ -622,155 +630,108 @@ test "callback parser validates RFC 9207 issuer without normalization" {
 test "token decoder validates consumed fields and tolerates additive metadata" {
     var tokens = try parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"acct-1"}
+        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email","gateway_url":"https://app.metask-ai.com"}
     ,
         100,
+        true,
     );
     defer tokens.deinit();
     try std.testing.expectEqualStrings("new-access", tokens.access_token.view());
     try std.testing.expectEqualStrings("new-refresh", tokens.refresh_token.view());
     try std.testing.expectEqual(@as(i64, 3700), tokens.expires_at);
-    try std.testing.expectEqualStrings("acct-1", tokens.accountId());
+    try std.testing.expectEqualStrings("", tokens.accountId());
+    try tokens.bindAccountId("account-1");
+    try std.testing.expectEqualStrings("account-1", tokens.accountId());
     var extended = try parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"metawork:use","account_id":"acct-1","unknown":true}
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"unknown":true}
     ,
         0,
+        false,
     );
     extended.deinit();
     try std.testing.expectError(
         error.InvalidTokenResponse,
         parseTokenResponse(
             std.testing.allocator,
-            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"account_id":"acct-1"}
+            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1}
         ,
             0,
+            true,
         ),
     );
     try std.testing.expectError(
         error.InvalidTokenResponse,
         parseTokenResponse(
             std.testing.allocator,
-            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"unexpected","account_id":"acct-1"}
+            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"unexpected"}
         ,
             0,
-        ),
-    );
-    try std.testing.expectError(
-        error.InvalidTokenResponse,
-        parseTokenResponse(
-            std.testing.allocator,
-            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"metawork:use"}
-        ,
-            0,
+            true,
         ),
     );
 }
 
 test "current user decoder binds the principal and projects optional profile fields" {
     const info = try parseCurrentUser(
-        \\{"code":0,"message":"success","data":{"id":42,"email":"user@example.com","phone_number":"13800138000","username":"Meta User","concurrency":5,"role":"user","unknown":true}}
-    ,
-        "42",
+        \\{"sub":"user-42","email":"user@example.com","email_verified":true,"name":"Meta User","phone_number":"13800138000","client_id":"metawork","authorization_id":"auth-1","unknown":true}
     );
+    try std.testing.expectEqualStrings("user-42", info.accountId());
     try std.testing.expectEqualStrings("Meta User", info.usernameView());
     try std.testing.expectEqualStrings("u***@example.com", info.emailHintView());
     try std.testing.expectEqualStrings("138****8000", info.phoneHintView());
-    try std.testing.expectEqual(@as(?u32, 5), info.concurrency_limit);
-    const unlimited = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":0}}
-    ,
-        "42",
-    );
-    try std.testing.expectEqual(@as(?u32, 0), unlimited.concurrency_limit);
-    const legacy_unlimited = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":-1}}
-    ,
-        "42",
-    );
-    try std.testing.expectEqual(@as(?u32, 0), legacy_unlimited.concurrency_limit);
+    try std.testing.expectEqual(@as(?u32, null), info.concurrency_limit);
     try std.testing.expectError(
         error.InvalidCurrentUserResponse,
         parseCurrentUser(
-            \\{"code":0,"data":{"id":43,"username":"Meta User","concurrency":5}}
-        ,
-            "42",
+            \\{"sub":"user-42","name":"Meta User","client_id":"another-client","authorization_id":"auth-1"}
         ),
     );
     const incomplete = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42,"username":"","email":null,"concurrency":null}}
-    ,
-        "42",
+        \\{"sub":"user-42","name":"","email":null,"phone_number":null,"client_id":"metawork","authorization_id":"auth-1"}
     );
     try std.testing.expectEqualStrings("", incomplete.usernameView());
     try std.testing.expectEqualStrings("", incomplete.emailHintView());
     try std.testing.expectEqualStrings("", incomplete.phoneHintView());
     try std.testing.expectEqual(@as(?u32, null), incomplete.concurrency_limit);
-
-    const absent = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42}}
-    ,
-        "42",
-    );
-    try std.testing.expectEqualStrings("", absent.usernameView());
-    try std.testing.expectEqualStrings("", absent.emailHintView());
-    try std.testing.expectEqualStrings("", absent.phoneHintView());
-    try std.testing.expectEqual(@as(?u32, null), absent.concurrency_limit);
-
     const malformed = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42,"username":7,"email":{"value":"user@example.com"},"phone_number":13800138000,"concurrency":"5"}}
-    ,
-        "42",
+        \\{"sub":"user-42","name":7,"email":{"value":"user@example.com"},"phone_number":13800138000,"client_id":"metawork","authorization_id":"auth-1"}
     );
     try std.testing.expectEqualStrings("", malformed.usernameView());
     try std.testing.expectEqualStrings("", malformed.emailHintView());
     try std.testing.expectEqualStrings("", malformed.phoneHintView());
-    try std.testing.expectEqual(@as(?u32, null), malformed.concurrency_limit);
-
-    const oversized_concurrency = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42,"concurrency":4294967296}}
-    ,
-        "42",
-    );
-    try std.testing.expectEqual(@as(?u32, null), oversized_concurrency.concurrency_limit);
 }
 
 test "current user decoder ignores unusable optional profile values" {
     const unicode = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42,"email":"朱健@example.com","username":"Meta User","concurrency":3}}
-    ,
-        "42",
+        \\{"sub":"user-42","email":"朱健@example.com","name":"Meta User","client_id":"metawork","authorization_id":"auth-1"}
     );
     try std.testing.expectEqualStrings("朱***@example.com", unicode.emailHintView());
 
     const phone = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42,"phone_number":"+8613800138000"}}
-    ,
-        "42",
+        \\{"sub":"user-42","phone_number":"+8613800138000","client_id":"metawork","authorization_id":"auth-1"}
     );
     try std.testing.expectEqualStrings("+861****8000", phone.phoneHintView());
 
     const absent = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":3}}
-    ,
-        "42",
+        \\{"sub":"user-42","name":"Meta User","client_id":"metawork","authorization_id":"auth-1"}
     );
     try std.testing.expectEqualStrings("", absent.emailHintView());
 
     for ([_][]const u8{
-        "{\"code\":0,\"data\":{\"id\":42,\"email\":\"invalid\",\"username\":\"Meta User\",\"concurrency\":3}}",
-        "{\"code\":0,\"data\":{\"id\":42,\"email\":\"a@@example.com\",\"username\":\"Meta User\",\"concurrency\":3}}",
+        "{\"sub\":\"user-42\",\"email\":\"invalid\",\"name\":\"Meta User\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
+        "{\"sub\":\"user-42\",\"email\":\"a@@example.com\",\"name\":\"Meta User\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
     }) |payload| {
-        const invalid = try parseCurrentUser(payload, "42");
+        const invalid = try parseCurrentUser(payload);
         try std.testing.expectEqualStrings("", invalid.emailHintView());
     }
 
     for ([_][]const u8{
-        "{\"code\":0,\"data\":{\"id\":42,\"phone_number\":\"12345\"}}",
-        "{\"code\":0,\"data\":{\"id\":42,\"phone_number\":\"138-0013-8000\"}}",
-        "{\"code\":0,\"data\":{\"id\":42,\"phone_number\":\"++8613800138000\"}}",
+        "{\"sub\":\"user-42\",\"phone_number\":\"12345\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
+        "{\"sub\":\"user-42\",\"phone_number\":\"138-0013-8000\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
+        "{\"sub\":\"user-42\",\"phone_number\":\"++8613800138000\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}",
     }) |payload| {
-        const invalid = try parseCurrentUser(payload, "42");
+        const invalid = try parseCurrentUser(payload);
         try std.testing.expectEqualStrings("", invalid.phoneHintView());
     }
 
@@ -778,19 +739,17 @@ test "current user decoder ignores unusable optional profile values" {
     @memset(&long_username, 'x');
     const payload = try std.fmt.allocPrint(
         std.testing.allocator,
-        "{{\"code\":0,\"data\":{{\"id\":42,\"username\":\"{s}\"}}}}",
+        "{{\"sub\":\"user-42\",\"name\":\"{s}\",\"client_id\":\"metawork\",\"authorization_id\":\"auth-1\"}}",
         .{&long_username},
     );
     defer std.testing.allocator.free(payload);
-    const oversized = try parseCurrentUser(payload, "42");
+    const oversized = try parseCurrentUser(payload);
     try std.testing.expectEqualStrings("", oversized.usernameView());
 }
 
 test "optional account summary fields never become identity gates" {
     const info = try parseCurrentUser(
-        \\{"code":0,"data":{"id":42,"username":"Meta User","concurrency":5,"balance":"temporarily-invalid","run_mode":7}}
-    ,
-        "42",
+        \\{"sub":"user-42","name":"Meta User","client_id":"metawork","authorization_id":"auth-1","balance":"temporarily-invalid","run_mode":7}
     );
     try std.testing.expectEqualStrings("Meta User", info.usernameView());
 }
@@ -803,25 +762,25 @@ test "authorization code and refresh bodies do not widen client contract" {
         &body_storage,
         &code,
         "verifier",
-        12345,
+        callback_port,
     );
     try std.testing.expect(std.mem.indexOf(
         u8,
         body,
-        "client_id=metawork-app",
+        "client_id=metawork",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "code=abc%20%2F%3F") != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         body,
-        "redirect_uri=http%3A%2F%2F127.0.0.1%3A12345%2Fauth%2Fcallback",
+        "redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fmetask%2Fcallback",
     ) != null);
 
     var refresh = try Secret.init(std.testing.allocator, "refresh-token");
     defer refresh.deinit();
     const refresh_body = try buildRefreshBody(&body_storage, &refresh);
     try std.testing.expectEqualStrings(
-        "grant_type=refresh_token&client_id=metawork-app&refresh_token=refresh-token",
+        "grant_type=refresh_token&refresh_token=refresh-token",
         refresh_body,
     );
 }

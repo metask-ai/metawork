@@ -18,7 +18,6 @@ pub const TestSupport = if (builtin.is_test) struct {
     pub fn installMetaskDefault(
         runtime: *Runtime,
         principal_ref: []const u8,
-        api_key: contract.ApiKeyView,
         secret: []const u8,
         models: []const contract.ModelView,
         selected_model: []const u8,
@@ -30,24 +29,19 @@ pub const TestSupport = if (builtin.is_test) struct {
         runtime.assertMainThread();
         runtime.metask_catalog.deinit();
         runtime.metask_catalog = metask_provider.CatalogSession.init(runtime.allocator);
-        try metask_provider.TestSupport.replaceOwnedSelection(
+        try metask_provider.TestSupport.replaceOwnedCatalog(
             &runtime.metask_catalog,
             principal_ref,
-            api_key,
             secret,
             models,
         );
         if (!runtime.metask_catalog.hasModel(selected_model))
             return error.InvalidTestModel;
-        const configure_updates_default = runtime.registry.metaskChangeUpdatesDefault(
-            api_key.id,
-            selected_model,
-        );
+        const configure_updates_default = runtime.registry.metaskChangeUpdatesDefault(selected_model);
         try runtime.registry.configureMetask(
             principal_ref,
-            api_key.id,
             selected_model,
-            api_key.protocol,
+            .openai_chat_completions,
             source_generation,
             metask_selection_revision,
             if (configure_updates_default) default_selection_revision else null,
@@ -124,7 +118,6 @@ pub const Runtime = struct {
     metask_catalog_generation: u64 = 0,
     metask_error: contract.ModelsError = .none,
     metask_safe_diagnostic: FixedText(contract.Limits.safe_diagnostic_bytes) = .{},
-    metask_source_id: FixedText("metask:".len + contract.Limits.api_key_id_bytes) = .{},
     provider_views: [1]contract.ProviderView = undefined,
     catalog_attempt: ?struct {
         id: u64,
@@ -195,18 +188,10 @@ pub const Runtime = struct {
         const intent = self.registry.metaskIntent();
         var metask_selection: ?contract.ModelRef = null;
         if (intent) |value| {
-            const source_id = std.fmt.bufPrint(
-                &self.metask_source_id.bytes,
-                "metask:{s}",
-                .{value.api_key_id},
-            ) catch "";
-            self.metask_source_id.len = source_id.len;
-            if (source_id.len != 0) metask_selection = .{
-                .source_id = self.metask_source_id.view(),
+            metask_selection = .{
+                .source_id = contract.metask_source_id,
                 .model_id = value.model_id,
             };
-        } else {
-            self.metask_source_id.len = 0;
         }
         self.provider_views[0] = .{
             .id = contract.metask_source_id,
@@ -214,18 +199,10 @@ pub const Runtime = struct {
             .recommended = true,
             .catalog_state = self.metask_catalog_state,
             .principal_ref = if (intent) |value| value.principal_ref else "",
-            .api_keys = if (self.metask_public_catalog) |public_catalog|
-                public_catalog.apiKeyViews()
-            else
-                &.{},
             .models = if (self.metask_public_catalog) |public_catalog|
                 public_catalog.modelViews()
             else
                 &.{},
-            .selected_api_key_id = if (self.metask_public_catalog) |public_catalog|
-                public_catalog.catalogApiKeyId()
-            else
-                "",
             .catalog_generation = self.metask_catalog_generation,
             .source_generation = if (intent) |value| value.source_generation else 0,
             .error_code = self.metask_error,
@@ -260,51 +237,13 @@ pub const Runtime = struct {
         return self.beginMetaskCatalogRefresh(
             principal_ref,
             authorization_generation,
-            "",
         );
-    }
-
-    pub fn prepareMetaskApiKeySelection(
-        self: *Runtime,
-        principal_ref: []const u8,
-        authorization_generation: u64,
-        command: contract.SelectMetaskApiKeyCommand,
-    ) contract.CatalogSelectionPrepareResult {
-        self.assertMainThread();
-        if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
-        if (self.catalog_attempt != null) return .{ .rejected = .operation_in_progress };
-        if (self.metask_catalog_state != .ready or
-            self.metask_catalog_generation == 0 or
-            command.expected_catalog_generation != self.metask_catalog_generation)
-            return .{ .rejected = .generation_mismatch };
-        const intent = self.registry.metaskIntent() orelse
-            return .{ .rejected = .invalid_provider };
-        if (command.expected_metask_selection_revision != intent.selection_revision or
-            !std.mem.eql(u8, principal_ref, intent.principal_ref))
-            return .{ .rejected = .generation_mismatch };
-        if (!std.mem.startsWith(u8, command.source_id, "metask:") or
-            command.source_id.len == "metask:".len)
-            return .{ .rejected = .invalid_provider };
-        const api_key_id = command.source_id["metask:".len..];
-        if (api_key_id.len > contract.Limits.api_key_id_bytes or
-            self.metask_public_catalog == null or
-            !self.metask_public_catalog.?.hasApiKey(api_key_id))
-            return .{ .rejected = .invalid_provider };
-        return switch (self.beginMetaskCatalogRefresh(
-            principal_ref,
-            authorization_generation,
-            api_key_id,
-        )) {
-            .ready => |value| .{ .ready = value },
-            .rejected => |error_code| .{ .rejected = mapModelsError(error_code) },
-        };
     }
 
     fn beginMetaskCatalogRefresh(
         self: *Runtime,
         principal_ref: []const u8,
         authorization_generation: u64,
-        required_api_key_id: []const u8,
     ) contract.CatalogRefreshPrepareResult {
         if (!self.store_healthy) return .{ .rejected = .persistence_unavailable };
         if (self.catalog_attempt != null) return .{ .rejected = .operation_in_progress };
@@ -336,14 +275,7 @@ pub const Runtime = struct {
             .attempt_id = attempt_id,
             .principal_ref = self.catalog_attempt.?.principal_ref.view(),
             .authorization_generation = authorization_generation,
-            .preferred_api_key_id = if (same_principal) intent.?.api_key_id else "",
-            .preferred_model_id = if (same_principal and
-                (required_api_key_id.len == 0 or std.mem.eql(
-                    u8,
-                    required_api_key_id,
-                    intent.?.api_key_id,
-                ))) intent.?.model_id else "",
-            .required_api_key_id = required_api_key_id,
+            .preferred_model_id = if (same_principal) intent.?.model_id else "",
         } };
     }
 
@@ -374,13 +306,12 @@ pub const Runtime = struct {
             self.metask_error = .authorization_unavailable;
             return self.metask_error;
         }
-        const api_key_id = session.selectedApiKeyId();
         const protocol = session.selectedProtocol() orelse {
             self.metask_catalog_state = .failed;
             self.metask_error = .catalog_invalid;
             return self.metask_error;
         };
-        if (api_key_id.len == 0 or !session.hasModel(selected_model_id)) {
+        if (!session.hasModel(selected_model_id)) {
             self.metask_catalog_state = .failed;
             self.metask_error = .catalog_invalid;
             return self.metask_error;
@@ -395,13 +326,11 @@ pub const Runtime = struct {
         const current = candidate.metaskIntent();
         const same_selection = if (current) |value|
             std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
-                std.mem.eql(u8, value.api_key_id, api_key_id) and
                 std.mem.eql(u8, value.model_id, selected_model_id)
         else
             false;
         const same_authority = if (current) |value|
             std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
-                std.mem.eql(u8, value.api_key_id, api_key_id) and
                 value.protocol == protocol and value.source_generation != 0
         else
             false;
@@ -429,7 +358,7 @@ pub const Runtime = struct {
             self.metask_error = .local_resource_exhausted;
             return self.metask_error;
         };
-        const updates_default = candidate.metaskChangeUpdatesDefault(api_key_id, selected_model_id);
+        const updates_default = candidate.metaskChangeUpdatesDefault(selected_model_id);
         const default_selection_revision = if (updates_default)
             self.freshGeneration(candidate.selection_revision) catch {
                 self.metask_catalog_state = .failed;
@@ -440,7 +369,6 @@ pub const Runtime = struct {
             null;
         candidate.configureMetask(
             attempt.principal_ref.view(),
-            api_key_id,
             selected_model_id,
             protocol,
             source_generation,
@@ -515,17 +443,15 @@ pub const Runtime = struct {
         const current_revision = if (current) |value| value.selection_revision else 0;
         if (command.expected_metask_selection_revision != current_revision)
             return .rejected(.generation_mismatch);
-        const api_key_id = self.metask_catalog.selectedApiKeyId();
         const protocol = self.metask_catalog.selectedProtocol() orelse
             return .rejected(.invalid_provider);
-        if (!metaskSourceMatches(command.selection.source_id, api_key_id) or
+        if (!std.mem.eql(u8, command.selection.source_id, contract.metask_source_id) or
             !self.metask_catalog.hasModel(command.selection.model_id))
             return .rejected(.model_not_found);
         const principal_ref = self.metask_catalog.ownerAccountId();
         if (principal_ref.len == 0) return .rejected(.invalid_provider);
         if (current) |value| {
             if (std.mem.eql(u8, value.principal_ref, principal_ref) and
-                std.mem.eql(u8, value.api_key_id, api_key_id) and
                 std.mem.eql(u8, value.model_id, command.selection.model_id) and
                 value.protocol == protocol and value.source_generation != 0)
                 return .acceptedResult();
@@ -536,7 +462,6 @@ pub const Runtime = struct {
         defer candidate.deinit();
         const same_authority = if (current) |value|
             std.mem.eql(u8, value.principal_ref, principal_ref) and
-                std.mem.eql(u8, value.api_key_id, api_key_id) and
                 value.protocol == protocol and value.source_generation != 0
         else
             false;
@@ -547,10 +472,7 @@ pub const Runtime = struct {
                 return .rejected(.local_resource_exhausted);
         const metask_selection_revision = self.freshGeneration(current_revision) catch
             return .rejected(.local_resource_exhausted);
-        const updates_default = candidate.metaskChangeUpdatesDefault(
-            api_key_id,
-            command.selection.model_id,
-        );
+        const updates_default = candidate.metaskChangeUpdatesDefault(command.selection.model_id);
         const default_selection_revision = if (updates_default)
             self.freshGeneration(candidate.selection_revision) catch
                 return .rejected(.local_resource_exhausted)
@@ -558,7 +480,6 @@ pub const Runtime = struct {
             null;
         candidate.configureMetask(
             principal_ref,
-            api_key_id,
             command.selection.model_id,
             protocol,
             source_generation,
@@ -581,11 +502,10 @@ pub const Runtime = struct {
             command.expected_source_generation != intent.source_generation or
             command.expected_catalog_generation != self.metask_catalog_generation or
             self.metask_catalog_state != .ready or
-            !metaskSourceMatches(command.selection.source_id, intent.api_key_id) or
+            !std.mem.eql(u8, command.selection.source_id, contract.metask_source_id) or
             !std.mem.eql(u8, command.selection.model_id, intent.model_id) or
             !self.metask_catalog.ownsSourceSelection(
                 intent.principal_ref,
-                intent.api_key_id,
                 intent.model_id,
             ))
             return .rejected(.generation_mismatch);
@@ -619,7 +539,7 @@ pub const Runtime = struct {
             command.expected_source_generation == 0 or
             command.expected_catalog_generation == 0)
             return .rejected(.invalid_provider);
-        if (std.mem.startsWith(u8, command.selection.source_id, "metask:"))
+        if (std.mem.eql(u8, command.selection.source_id, contract.metask_source_id))
             return self.selectMetaskDefault(command);
         if (!self.store_healthy) return .rejected(.persistence_unavailable);
         if (command.expected_selection_revision != self.registry.selection_revision)
@@ -658,13 +578,7 @@ pub const Runtime = struct {
         self.assertMainThread();
         const selection = self.registry.defaultSelection() orelse return null;
         if (self.registry.metaskIntent()) |intent| {
-            var source_storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
-            const source_id = std.fmt.bufPrint(
-                &source_storage,
-                "metask:{s}",
-                .{intent.api_key_id},
-            ) catch return null;
-            if (std.mem.eql(u8, selection.source_id, source_id)) {
+            if (std.mem.eql(u8, selection.source_id, contract.metask_source_id)) {
                 const protocol = intent.protocol orelse return null;
                 if (intent.source_generation == 0 or self.registry.selection_revision == 0)
                     return null;
@@ -699,7 +613,6 @@ pub const Runtime = struct {
                 break :blk self.metask_catalog_state == .ready and
                     self.metask_catalog.ownsSourceSelection(
                         intent.principal_ref,
-                        intent.api_key_id,
                         intent.model_id,
                     ) and self.metask_catalog.selectedProtocol() == intent.protocol;
             },
@@ -739,13 +652,7 @@ pub const Runtime = struct {
         if (intent.source_generation == 0 or
             intent.source_generation != expected_source_generation)
             return false;
-        var source_storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
-        const source_id = std.fmt.bufPrint(
-            &source_storage,
-            "metask:{s}",
-            .{intent.api_key_id},
-        ) catch return false;
-        return std.mem.eql(u8, target.source_id, source_id) and
+        return std.mem.eql(u8, target.source_id, contract.metask_source_id) and
             self.metaskModelAvailable(
                 expected_catalog_generation,
                 protocol,
@@ -763,7 +670,7 @@ pub const Runtime = struct {
         protocol: contract.Protocol,
     ) bool {
         self.assertMainThread();
-        if (std.mem.startsWith(u8, target.source_id, "metask:"))
+        if (std.mem.eql(u8, target.source_id, contract.metask_source_id))
             return self.metaskSourceModelAvailable(
                 target,
                 expected_source_generation,
@@ -1207,19 +1114,12 @@ pub const Runtime = struct {
         self.assertMainThread();
         const selection = self.registry.defaultSelection() orelse return null;
         if (self.registry.metaskIntent()) |intent| {
-            var source_storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
-            const source_id = std.fmt.bufPrint(
-                &source_storage,
-                "metask:{s}",
-                .{intent.api_key_id},
-            ) catch return error.InvalidProvider;
-            if (std.mem.eql(u8, selection.source_id, source_id)) {
+            if (std.mem.eql(u8, selection.source_id, contract.metask_source_id)) {
                 if (!std.mem.eql(u8, selection.model_id, intent.model_id) or
                     intent.protocol == null or intent.source_generation == 0 or
                     self.metask_catalog_state != .ready or
                     !self.metask_catalog.ownsSourceSelection(
                         intent.principal_ref,
-                        intent.api_key_id,
                         intent.model_id,
                     ) or self.metask_catalog.selectedProtocol() != intent.protocol)
                     return null;
@@ -1421,7 +1321,6 @@ fn mapModelsError(error_code: contract.ModelsError) contract.ManagementError {
         .catalog_unavailable,
         .catalog_invalid,
         .catalog_too_large,
-        .no_api_keys,
         .no_models,
         => .catalog_unavailable,
     };
@@ -1445,16 +1344,6 @@ fn isDefaultModel(registry: *const registry_impl.Registry, model: contract.Model
     const selection = registry.defaultSelection() orelse return false;
     return std.mem.eql(u8, selection.source_id, model.source_id) and
         std.mem.eql(u8, selection.model_id, model.model_id);
-}
-
-fn metaskSourceMatches(source_id: []const u8, api_key_id: []const u8) bool {
-    var storage: ["metask:".len + contract.Limits.api_key_id_bytes]u8 = undefined;
-    const expected = std.fmt.bufPrint(
-        &storage,
-        "metask:{s}",
-        .{api_key_id},
-    ) catch return false;
-    return std.mem.eql(u8, source_id, expected);
 }
 
 const CanonicalCommitTestStore = struct {
@@ -2030,27 +1919,11 @@ test "Models owns Metask catalog authority without changing global default" {
         .rejected => return error.TestUnexpectedResult,
     };
     var catalog = metask_provider.CatalogSession.init(std.testing.allocator);
-    try metask_provider.TestSupport.replaceOwnedSelection(
+    try metask_provider.TestSupport.replaceOwnedCatalog(
         &catalog,
         "principal-1",
-        .{
-            .id = "api-1",
-            .name = "Primary",
-            .suffix = "1234",
-            .protocol = .anthropic_messages,
-        },
         "model-secret",
         &.{.{ .id = "model-1", .display_name = "Model One" }},
-    );
-    try metask_provider.TestSupport.appendOwnedApiKey(
-        &catalog,
-        .{
-            .id = "api-2",
-            .name = "Secondary",
-            .suffix = "5678",
-            .protocol = .openai_responses,
-        },
-        "secondary-secret",
     );
     var completion = try metask_provider.OwnedCatalogCompletion.init(
         std.testing.allocator,
@@ -2070,7 +1943,6 @@ test "Models owns Metask catalog authority without changing global default" {
     const first = runtime.view();
     try std.testing.expectEqual(contract.CatalogState.ready, first.providers[0].catalog_state);
     try std.testing.expectEqualStrings("principal-1", first.providers[0].principal_ref);
-    try std.testing.expectEqualStrings("api-1", first.providers[0].selected_api_key_id);
     try std.testing.expectEqualStrings("model-1", first.metask_selection.?.model_id);
     try std.testing.expect(first.providers[0].source_generation != 0);
     try std.testing.expect(first.metask_selection_revision != 0);
@@ -2079,52 +1951,15 @@ test "Models owns Metask catalog authority without changing global default" {
     const first_selection_revision = first.metask_selection_revision;
     const first_catalog_generation = first.providers[0].catalog_generation;
 
-    try std.testing.expect(runtime.prepareMetaskApiKeySelection(
-        "principal-1",
-        6,
-        .{
-            .source_id = "metask:api-2",
-            .expected_metask_selection_revision = first_selection_revision +% 1,
-            .expected_catalog_generation = first_catalog_generation,
-        },
-    ) == .rejected);
-    const key_switch = switch (runtime.prepareMetaskApiKeySelection(
-        "principal-1",
-        6,
-        .{
-            .source_id = "metask:api-2",
-            .expected_metask_selection_revision = first_selection_revision,
-            .expected_catalog_generation = first_catalog_generation,
-        },
-    )) {
-        .ready => |value| value,
-        .rejected => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqualStrings("api-2", key_switch.required_api_key_id);
-    try std.testing.expectEqualStrings("", key_switch.preferred_model_id);
-    runtime.failMetaskCatalogRefresh(
-        key_switch.attempt_id,
-        key_switch.authorization_generation,
-        .catalog_invalid,
-        "",
-    );
-
     const refreshed = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 6)) {
         .ready => |value| value,
         .rejected => return error.TestUnexpectedResult,
     };
-    try std.testing.expectEqualStrings("api-1", refreshed.preferred_api_key_id);
     try std.testing.expectEqualStrings("model-1", refreshed.preferred_model_id);
     var same_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
-    try metask_provider.TestSupport.replaceOwnedSelection(
+    try metask_provider.TestSupport.replaceOwnedCatalog(
         &same_catalog,
         "principal-1",
-        .{
-            .id = "api-1",
-            .name = "Primary",
-            .suffix = "1234",
-            .protocol = .anthropic_messages,
-        },
         "rotated-model-secret",
         &.{.{ .id = "model-1", .display_name = "Model One" }},
     );
@@ -2149,7 +1984,7 @@ test "Models owns Metask catalog authority without changing global default" {
 
     try std.testing.expect(runtime.selectMetaskDefault(.{
         .selection = .{
-            .source_id = "metask:api-1",
+            .source_id = "metask",
             .model_id = "model-1",
         },
         .expected_selection_revision = second.selection_revision,
@@ -2160,7 +1995,7 @@ test "Models owns Metask catalog authority without changing global default" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(contract.Source.metask, default_authority.source);
     try std.testing.expectEqualStrings(
-        "metask:api-1",
+        "metask",
         default_authority.selection.source_id,
     );
     try std.testing.expectEqualStrings("model-1", default_authority.selection.model_id);
@@ -2190,9 +2025,7 @@ test "Models owns Metask catalog authority without changing global default" {
         contract.CatalogState.needs_authentication,
         unavailable.providers[0].catalog_state,
     );
-    try std.testing.expectEqual(@as(usize, 0), unavailable.providers[0].api_keys.len);
     try std.testing.expectEqual(@as(usize, 0), unavailable.providers[0].models.len);
-    try std.testing.expectEqualStrings("", unavailable.providers[0].selected_api_key_id);
     try std.testing.expectEqualStrings("model-1", unavailable.metask_selection.?.model_id);
     try std.testing.expect(!runtime.defaultResolvable());
     try std.testing.expect((try runtime.resolveDefault()) == null);
@@ -2221,15 +2054,9 @@ test "Metask catalog drift keeps a tracked global default durable" {
         };
         var initial_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
         defer initial_catalog.deinit();
-        try metask_provider.TestSupport.replaceOwnedSelection(
+        try metask_provider.TestSupport.replaceOwnedCatalog(
             &initial_catalog,
             "principal-1",
-            .{
-                .id = "api-1",
-                .name = "Primary",
-                .suffix = "1111",
-                .protocol = .anthropic_messages,
-            },
             "initial-secret",
             &.{.{ .id = "model-1", .display_name = "Model One" }},
         );
@@ -2249,7 +2076,7 @@ test "Metask catalog drift keeps a tracked global default durable" {
         );
         const initial_view = runtime.view();
         try std.testing.expect(runtime.selectMetaskDefault(.{
-            .selection = .{ .source_id = "metask:api-1", .model_id = "model-1" },
+            .selection = .{ .source_id = "metask", .model_id = "model-1" },
             .expected_selection_revision = initial_view.selection_revision,
             .expected_source_generation = initial_view.providers[0].source_generation,
             .expected_catalog_generation = initial_view.providers[0].catalog_generation,
@@ -2260,19 +2087,12 @@ test "Metask catalog drift keeps a tracked global default durable" {
             .ready => |value| value,
             .rejected => return error.TestUnexpectedResult,
         };
-        try std.testing.expectEqualStrings("api-1", refresh.preferred_api_key_id);
         try std.testing.expectEqualStrings("model-1", refresh.preferred_model_id);
         var replacement_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
         defer replacement_catalog.deinit();
-        try metask_provider.TestSupport.replaceOwnedSelection(
+        try metask_provider.TestSupport.replaceOwnedCatalog(
             &replacement_catalog,
             "principal-1",
-            .{
-                .id = "api-2",
-                .name = "Replacement",
-                .suffix = "2222",
-                .protocol = .openai_responses,
-            },
             "replacement-secret",
             &.{.{ .id = "model-2", .display_name = "Model Two" }},
         );
@@ -2293,10 +2113,9 @@ test "Metask catalog drift keeps a tracked global default durable" {
 
         const drifted = runtime.view();
         try std.testing.expect(runtime.store_healthy);
-        try std.testing.expectEqualStrings("api-2", drifted.providers[0].selected_api_key_id);
-        try std.testing.expectEqualStrings("metask:api-2", drifted.metask_selection.?.source_id);
+        try std.testing.expectEqualStrings("metask", drifted.metask_selection.?.source_id);
         try std.testing.expectEqualStrings("model-2", drifted.metask_selection.?.model_id);
-        try std.testing.expectEqualStrings("metask:api-2", drifted.default_selection.?.source_id);
+        try std.testing.expectEqualStrings("metask", drifted.default_selection.?.source_id);
         try std.testing.expectEqualStrings("model-2", drifted.default_selection.?.model_id);
         try std.testing.expect(drifted.selection_revision != previous_selection_revision);
         committed_selection_revision = drifted.selection_revision;
@@ -2315,12 +2134,10 @@ test "Metask catalog drift keeps a tracked global default durable" {
             contract.CatalogState.needs_authentication,
             restored.providers[0].catalog_state,
         );
-        try std.testing.expectEqual(@as(usize, 0), restored.providers[0].api_keys.len);
         try std.testing.expectEqual(@as(usize, 0), restored.providers[0].models.len);
-        try std.testing.expectEqualStrings("", restored.providers[0].selected_api_key_id);
-        try std.testing.expectEqualStrings("metask:api-2", restored.metask_selection.?.source_id);
+        try std.testing.expectEqualStrings("metask", restored.metask_selection.?.source_id);
         try std.testing.expectEqualStrings("model-2", restored.metask_selection.?.model_id);
-        try std.testing.expectEqualStrings("metask:api-2", restored.default_selection.?.source_id);
+        try std.testing.expectEqualStrings("metask", restored.default_selection.?.source_id);
         try std.testing.expectEqualStrings("model-2", restored.default_selection.?.model_id);
         try std.testing.expectEqual(committed_selection_revision, restored.selection_revision);
     }
@@ -2356,7 +2173,7 @@ test "Models bootstrap initializes canonical store and ignores retired files" {
         return error.TestExpectedEqual;
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings(
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
+        "{\"schema\":2,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
         bytes,
     );
 }
@@ -2428,7 +2245,7 @@ test "Models reset replaces damaged canonical bytes with current empty schema" {
         return error.TestExpectedEqual;
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings(
-        "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
+        "{\"schema\":2,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
         bytes,
     );
 }

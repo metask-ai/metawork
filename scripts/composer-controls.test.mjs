@@ -364,34 +364,19 @@ const readySettingsModels = {
       recommended: true,
       catalogState: "ready",
       principalRef: "account-1",
-      apiKeys: [
-        {
-          id: "key-1",
-          name: "Primary",
-          suffix: "1234",
-          protocol: "anthropic_messages",
-        },
-        {
-          id: "key-2",
-          name: "Backup",
-          suffix: "5678",
-          protocol: "openai_chat_completions",
-        },
-      ],
       models: [
         { id: "model-1", displayName: "Model One" },
         { id: "model-2", displayName: "Model Two" },
       ],
-      selectedApiKeyId: "key-1",
       catalogGeneration: "1",
       sourceGeneration: "1",
       errorCode: "none",
       safeDiagnostic: "",
     },
   ],
-  metaskSelection: { sourceId: "metask:key-1", modelId: "model-1" },
+  metaskSelection: { sourceId: "metask", modelId: "model-1" },
   metaskSelectionRevision: "1",
-  defaultSelection: { sourceId: "metask:key-1", modelId: "model-1" },
+  defaultSelection: { sourceId: "metask", modelId: "model-1" },
   selectionRevision: "1",
   operation: "idle",
   errorCode: "none",
@@ -447,7 +432,6 @@ function settingsElement(account, overrides = {}) {
         return Promise.resolve(false);
       },
       onCancel() {},
-      onSelectApiKey() {},
       onSelectModel() {},
       onCreateCustomProvider() {
         return Promise.resolve(false);
@@ -701,11 +685,8 @@ test("Automatic Workspace location waits for the canonical snapshot and restores
 });
 
 function renderSettings(account, overrides = {}) {
-  const selections = { api: [], model: [] };
+  const selections = { model: [] };
   const callbacks = {
-    onSelectApiKey(value) {
-      selections.api.push(value);
-    },
     onSelectModel(value) {
       selections.model.push(value);
     },
@@ -1019,65 +1000,12 @@ test("Provider Base URLs map to all four existing protocol endpoints", () => {
   );
 });
 
-test("Settings completes the API transaction before replacing committed defaults", async () => {
+test("Settings moves directly from Provider to model selection", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const view = renderSettings(readySettingsAccount);
 
-  await user.click(screen.getByRole("combobox", { name: "API key" }));
-  await user.click(await screen.findByRole("option", { name: /Backup/ }));
-  assert.deepEqual(view.selections.api, ["key-2"]);
-  assert.match(
-    screen.getByRole("combobox", { name: "API key" }).textContent,
-    /Backup.*OpenAI.*5678/,
-  );
-  assert.match(screen.getByText("Pending change").textContent, /Pending/);
-
-  view.rerenderModels(
-    settingsModels(
-      { catalogState: "loading" },
-      { operation: "refreshing_catalog" },
-    ),
-  );
-  assert.match(screen.getByRole("status").textContent, /Preparing Backup/);
-  assert.match(
-    screen.getByRole("status").textContent,
-    /current default stays active/i,
-  );
-  assert.match(
-    dom.window.document.getElementById("settings-model")?.textContent ?? "",
-    /Model One/,
-  );
-
-  view.rerenderModels(
-    settingsModels(
-      { catalogState: "loading", models: [] },
-      { operation: "refreshing_catalog" },
-    ),
-  );
-
-  const api = screen.getByRole("combobox", { name: "API key" });
-  const model = screen.getByRole("combobox", { name: "Default model" });
-  assert.match(api.textContent, /Backup.*OpenAI.*5678/);
-  assert.equal(api.getAttribute("aria-busy"), "true");
-  assert.match(model.textContent, /Loading models/);
-  assert.equal(model.hasAttribute("disabled"), true);
-
-  view.rerenderModels(
-    settingsModels({
-      catalogState: "choosing",
-      models: [{ id: "model-2", displayName: "Model Two" }],
-    }),
-  );
-  assert.match(
-    screen.getByRole("status").textContent,
-    /Choose a model for Backup/,
-  );
-  assert.equal(
-    screen
-      .getByRole("combobox", { name: "Default model" })
-      .hasAttribute("disabled"),
-    false,
-  );
+  assert.equal(screen.queryByRole("combobox", { name: "API key" }), null);
+  assert.match(screen.getByText("Models 2").textContent, /Models 2/);
   await user.click(screen.getByRole("combobox", { name: "Default model" }));
   await user.click(await screen.findByRole("option", { name: /Model Two/ }));
   assert.deepEqual(view.selections.model, ["model-2"]);
@@ -1092,23 +1020,22 @@ test("Settings completes the API transaction before replacing committed defaults
     ),
   );
   assert.match(screen.getByRole("status").textContent, /Preparing Model Two/);
-  assert.equal(screen.queryByRole("button", { name: "Cancel" }), null);
+  assert.match(
+    screen.getByRole("status").textContent,
+    /current default model, model-1/i,
+  );
+  const model = screen.getByRole("combobox", { name: "Default model" });
+  assert.equal(model.getAttribute("aria-busy"), "true");
+  assert.equal(model.hasAttribute("disabled"), true);
 
   view.rerenderModels(
     settingsModels(
+      { models: [{ id: "model-2", displayName: "Model Two" }] },
       {
-        models: [{ id: "model-2", displayName: "Model Two" }],
-        selectedApiKeyId: "key-2",
-      },
-      {
-        metaskSelection: { sourceId: "metask:key-2", modelId: "model-2" },
-        defaultSelection: { sourceId: "metask:key-2", modelId: "model-2" },
+        metaskSelection: { sourceId: "metask", modelId: "model-2" },
+        defaultSelection: { sourceId: "metask", modelId: "model-2" },
       },
     ),
-  );
-  assert.match(
-    screen.getByRole("combobox", { name: "API key" }).textContent,
-    /Backup/,
   );
   assert.match(
     screen.getByRole("combobox", { name: "Default model" }).textContent,
@@ -1180,12 +1107,10 @@ test("Settings keeps Metask available while a custom provider is the default", a
   });
 
   const provider = screen.getByRole("combobox", { name: "Provider" });
-  const apiKey = screen.getByRole("combobox", { name: "API key" });
   const defaultModel = screen.getByRole("combobox", {
     name: "Default model",
   });
   assert.match(provider.textContent, /Team OpenAI/);
-  assert.match(apiKey.textContent, /Saved API key/);
   assert.match(defaultModel.textContent, /GPT-5/);
   await user.click(defaultModel);
   await user.click(await screen.findByRole("option", { name: /GPT-5 mini/ }));
@@ -1193,10 +1118,6 @@ test("Settings keeps Metask available while a custom provider is the default", a
 
   await user.click(provider);
   await user.click(await screen.findByRole("option", { name: /Metask/ }));
-  assert.match(
-    screen.getByRole("combobox", { name: "API key" }).textContent,
-    /Primary/,
-  );
   assert.match(
     screen.getByRole("combobox", { name: "Default model" }).textContent,
     /Choose a model/,
@@ -1253,10 +1174,6 @@ test("Models keeps adding and removing models after the first provider model", a
   await user.click(
     await screen.findByRole("option", { name: /Multi-model provider/ }),
   );
-  assert.match(
-    screen.getByRole("combobox", { name: "API key" }).textContent,
-    /Saved API key/,
-  );
 
   const modelId = screen.getByRole("textbox", { name: "Model ID" });
   await user.type(modelId, "gpt-5.6-sol");
@@ -1286,10 +1203,6 @@ test("Settings keeps Account cancellation independent from Models loading", asyn
   );
 
   assert.equal(
-    screen.getByRole("combobox", { name: "API key" }).hasAttribute("disabled"),
-    true,
-  );
-  assert.equal(
     screen
       .getByRole("combobox", { name: "Default model" })
       .hasAttribute("disabled"),
@@ -1318,10 +1231,6 @@ test("Settings reports Models failure without changing Account identity", async 
     initialSection: "models",
   });
 
-  assert.match(
-    screen.getByRole("combobox", { name: "API key" }).textContent,
-    /Primary/,
-  );
   assert.match(
     screen.getByRole("combobox", { name: "Default model" }).textContent,
     /Model One/,

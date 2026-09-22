@@ -52,7 +52,7 @@ test("the first send uses Host generations and creates one Task before its Run",
   const calls = [];
   const created = [];
   const modelSelection = {
-    targetModelRef: { sourceId: "metask:key-1", modelId: "model-2" },
+    targetModelRef: { sourceId: "metask", modelId: "model-2" },
     expectedSourceGeneration: "19",
     expectedCatalogGeneration: "29",
   };

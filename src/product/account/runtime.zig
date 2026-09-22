@@ -986,6 +986,15 @@ pub const Runtime = struct {
             self.account.activeRequestUsesCredential())
             completion.payload.failed.error_code = self.deleteInvalidCredential();
 
+        if (completion.payload == .identity_loaded and
+            self.account.activeAttempt() == completion.attempt_id)
+        {
+            const identity = completion.payload.identity_loaded;
+            self.credentials.bindPrincipal(identity.accountId()) catch {
+                const error_code = self.deleteInvalidCredential();
+                completion.payload = .{ .failed = .fromCode(error_code) };
+            };
+        }
         const loaded_identity = completion.payload == .identity_loaded;
         const login_failed_with_identity = self.account.currentIdentity() != null and
             !refresh_attempt and completion.payload == .failed;
@@ -1057,10 +1066,9 @@ pub const Runtime = struct {
         rotation: *credentials_impl.CredentialRotation,
     ) PrepareResult {
         const identity = self.account.currentIdentity();
-        const belongs_to_current_account = if (identity) |current|
-            rotation.belongsToAccount(current.accountId())
-        else
-            true;
+        if (identity) |current|
+            rotation.bindAccountId(current.accountId()) catch
+                return self.prepareFailure(attempt_id, .metask_protocol_invalid);
         const platform = self.platform orelse
             return self.prepareFailure(attempt_id, .credential_store_write_failed);
         credential_store.commitRefresh(
@@ -1069,10 +1077,6 @@ pub const Runtime = struct {
         ) catch |err| return self.prepareFailure(attempt_id, accountStoreError(err));
         self.credentials.replaceRotation(rotation);
         self.bumpAuthorizationGeneration();
-        if (!belongs_to_current_account) {
-            const error_code = self.deleteInvalidCredential();
-            return self.prepareFailure(attempt_id, error_code);
-        }
         var completion: state_impl.WorkerCompletion = .{
             .attempt_id = attempt_id,
             .payload = .tokens_persisted,
@@ -1473,7 +1477,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             const self: *Loopback = @ptrCast(@alignCast(context));
             self.open_count += 1;
             if (self.open_fails) return error.BindFailed;
-            return 49152;
+            return login_attempt.registered_callback_port;
         }
 
         fn wait(
@@ -1713,7 +1717,7 @@ pub const TestSupport = if (builtin.is_test) struct {
     }
 
     fn testLoopbackOpen(_: *anyopaque) loopback_impl.ServerError!u16 {
-        return 49152;
+        return login_attempt.registered_callback_port;
     }
 
     fn testLoopbackWait(

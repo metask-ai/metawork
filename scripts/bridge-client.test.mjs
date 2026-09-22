@@ -303,7 +303,7 @@ test("Task model selection carries source-qualified authority", async () => {
       "11",
       "model-1",
       "17",
-      { sourceId: "metask:key-1", modelId: "model-2" },
+      { sourceId: "metask", modelId: "model-2" },
       "19",
       "23",
     ),
@@ -317,7 +317,7 @@ test("Task model selection carries source-qualified authority", async () => {
         expectedModel: "model-1",
         expectedExecutionGeneration: "17",
         targetModelRef: {
-          sourceId: "metask:key-1",
+          sourceId: "metask",
           modelId: "model-2",
         },
         expectedSourceGeneration: "19",
@@ -740,10 +740,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
-      if (
-        command === "metawork.models.configureMetaskSelection" ||
-        command === "metawork.models.selectMetaskApiKey"
-      )
+      if (command === "metawork.models.configureMetaskSelection")
         return { accepted: true, errorCode: "none", attemptId: null };
       if (command === "metawork.tasks.create")
         return {
@@ -797,15 +794,10 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
   });
 
   await client.configureMetaskSelection({
-    sourceId: "metask:key-1",
+    sourceId: "metask",
     modelId: "model-3",
     expectedMetaskSelectionRevision: "17",
     expectedCatalogGeneration: "19",
-  });
-  await client.selectMetaskApiKey({
-    sourceId: "metask:key-2",
-    expectedMetaskSelectionRevision: "21",
-    expectedCatalogGeneration: "23",
   });
   assert.deepEqual(
     await client.createTask(
@@ -817,7 +809,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
       "23",
       "27",
       {
-        targetModelRef: { sourceId: "metask:key-2", modelId: "model-4" },
+        targetModelRef: { sourceId: "metask", modelId: "model-4" },
         expectedSourceGeneration: "31",
         expectedCatalogGeneration: "37",
       },
@@ -893,18 +885,10 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
     {
       command: "metawork.models.configureMetaskSelection",
       payload: {
-        sourceId: "metask:key-1",
+        sourceId: "metask",
         modelId: "model-3",
         expectedMetaskSelectionRevision: "17",
         expectedCatalogGeneration: "19",
-      },
-    },
-    {
-      command: "metawork.models.selectMetaskApiKey",
-      payload: {
-        sourceId: "metask:key-2",
-        expectedMetaskSelectionRevision: "21",
-        expectedCatalogGeneration: "23",
       },
     },
     {
@@ -918,7 +902,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
         expectedExecutionGeneration: "23",
         expectedSelectionRevision: "27",
         modelSelection: {
-          targetModelRef: { sourceId: "metask:key-2", modelId: "model-4" },
+          targetModelRef: { sourceId: "metask", modelId: "model-4" },
           expectedSourceGeneration: "31",
           expectedCatalogGeneration: "37",
         },
@@ -996,7 +980,7 @@ test("Models recovery and global default commands preserve their exact revision 
   });
   assert.deepEqual(
     await client.selectModelsDefault({
-      sourceId: "metask:key-1",
+      sourceId: "metask",
       modelId: "model-1",
       expectedSelectionRevision: "43",
       expectedSourceGeneration: "47",
@@ -1012,7 +996,7 @@ test("Models recovery and global default commands preserve their exact revision 
     {
       command: "metawork.models.selectDefault",
       payload: {
-        sourceId: "metask:key-1",
+        sourceId: "metask",
         modelId: "model-1",
         expectedSelectionRevision: "43",
         expectedSourceGeneration: "47",

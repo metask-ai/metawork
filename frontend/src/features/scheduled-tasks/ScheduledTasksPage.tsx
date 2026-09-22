@@ -159,17 +159,14 @@ function currentBinding(
   const metask = snapshot.models.providers.find(
     (provider) => provider.id === "metask",
   );
-  const apiKey = metask?.apiKeys.find(
-    (candidate) => "metask:" + candidate.id === selection!.sourceId,
-  );
   const model = metask?.models.find(
     (candidate) => candidate.id === selection!.modelId,
   );
   if (
     !metask ||
+    selection!.sourceId !== "metask" ||
     metask.catalogState !== "ready" ||
     metask.sourceGeneration === "0" ||
-    !apiKey ||
     !model ||
     !sameModelRef(snapshot.models.metaskSelection, selection)
   )
@@ -178,7 +175,7 @@ function currentBinding(
     modelRef: selection!,
     sourceGeneration: metask.sourceGeneration,
     selectionRevision: snapshot.models.selectionRevision,
-    protocol: apiKey.protocol,
+    protocol: "openai_chat_completions",
   };
 }
 

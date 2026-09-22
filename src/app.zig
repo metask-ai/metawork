@@ -8,6 +8,7 @@ const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const account_api = @import("metawork_account");
+const account_oauth = @import("account_oauth");
 const product_identity = @import("metawork_product_identity");
 const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
@@ -262,7 +263,6 @@ const App = struct {
             .context = models_management,
             .refresh_catalog_fn = refreshModelsCatalog,
             .reset_store_fn = resetModelsStore,
-            .select_metask_api_key_fn = selectMetaskApiKey,
         });
         (self.dispatcher orelse @panic("Bridge Dispatcher is not composed")).startIngress();
     }
@@ -617,7 +617,10 @@ pub fn run(init: std.process.Init) !void {
         .allocator = std.heap.c_allocator,
         .io = init.io,
     };
-    var account_loopback = oauth_loopback_transport.Adapter.init(init.io);
+    var account_loopback = oauth_loopback_transport.Adapter.init(
+        init.io,
+        account_oauth.callback_port,
+    );
     defer account_loopback.deinit();
     var account_runtime = account_api.Runtime.init(
         std.heap.c_allocator,
@@ -715,14 +718,6 @@ fn refreshModelsCatalog(context: *anyopaque) models_contract.CommandResult {
 fn resetModelsStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
     return coordinator.resetModelsStore(expected_revision);
-}
-
-fn selectMetaskApiKey(
-    context: *anyopaque,
-    command: models_contract.SelectMetaskApiKeyCommand,
-) models_contract.CommandResult {
-    const coordinator: *models_coordinator.Coordinator = @ptrCast(@alignCast(context));
-    return coordinator.selectMetaskApiKey(command);
 }
 
 test "Application remains a composition root with explicit platform limits" {

@@ -19,7 +19,7 @@
 Account 是独立 Product owner，只拥有：
 
 - OAuth Authorization Code + PKCE 登录、refresh token rotation 与退出；
-- 当前 access token、通过 `/me` 严格验证的 Metask identity，以及进程内无 secret 的 wallet/usage/history summary；
+- 当前 access token、通过 OAuth Userinfo 严格验证的 Metask identity，以及进程内无 secret 的 wallet/usage/history summary；
 - Account authorization generation，以及供 Application 单次转移的有界 authorization lease；
 - Account command/completion 合法性、attempt identity、deadline/cancel、effect queue 与 mailbox；
 - 唯一 canonical、无 secret 的 `AccountView` 与 `AccountFact`；
@@ -27,7 +27,7 @@ Account 是独立 Product owner，只拥有：
 
 Account 不拥有：
 
-- provider、API Key/model catalog、模型 metadata、Provider-local/global selection、source generation 或模型配置持久化；
+- provider、model catalog、Custom Provider API Key、模型 metadata、Provider-local/global selection、source generation 或模型配置持久化；
 - `Protocol`、`ModelRef`、source candidate、`ExecutionConfig`、默认来源、active binding、Task admission 或 consumer recovery；
 - user-managed Custom Provider、credential vault、model probe、provider/source generation 或 readiness；
 - Native SDK、HTTP client、窗口、WebView、socket、平台 timer 或 credential-store 具体实现；
@@ -81,29 +81,28 @@ Account 不知道 provider 当前是否为默认值、是否存在 custom source
 
 正式客户端只接受以下固定 public-client 合同：
 
-| 项目            | 固定值                                                               |
-| --------------- | -------------------------------------------------------------------- |
-| Flow            | OAuth 2.0 Authorization Code + PKCE S256                             |
-| Authority       | `https://napi.metask-ai.com`                                         |
-| Authorize       | `https://napi.metask-ai.com/oauth/authorize`                         |
-| Token           | `https://napi.metask-ai.com/oauth/token`                             |
-| Revoke identity | `https://napi.metask-ai.com/oauth/revoke`                            |
-| Client ID       | `metawork-app`，无 `client_secret`                                   |
-| Scope           | `metawork:use`                                                       |
-| Redirect        | `http://127.0.0.1:{dynamic_port}/auth/callback`                      |
-| Identity        | bearer `GET https://napi.metask-ai.com/api/v1/auth/me`               |
-| Usage summary   | bearer `GET https://napi.metask-ai.com/api/v1/usage/dashboard/stats` |
-| Usage history   | bearer `GET https://napi.metask-ai.com/api/v1/usage/dashboard/trend` |
+| 项目          | 固定值                                                               |
+| ------------- | -------------------------------------------------------------------- |
+| Flow          | OAuth 2.0 Authorization Code + PKCE S256                             |
+| Authority     | `https://app.metask-ai.com`                                          |
+| Authorize     | `https://app.metask-ai.com/oauth/authorize`                          |
+| Token         | `https://app.metask-ai.com/api/oauth/token`                          |
+| Userinfo      | bearer `GET https://app.metask-ai.com/api/oauth/userinfo`            |
+| Client ID     | `metawork`，无 `client_secret`                                       |
+| Scope         | `openid profile email`                                               |
+| Redirect      | `http://localhost:3000/auth/metask/callback`                         |
+| Usage summary | bearer `GET https://napi.metask-ai.com/api/v1/usage/dashboard/stats` |
+| Usage history | bearer `GET https://napi.metask-ai.com/api/v1/usage/dashboard/trend` |
 
-Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。callback 只绑定 IPv4 loopback 动态端口，不依赖 `localhost` DNS、不绑定 wildcard，只接受一次精确路径的 `GET`，严格解析 query、拒绝重复或 unknown 参数，并以 constant-time 比较 `state`。
+Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。callback listener 固定绑定 IPv4 loopback `127.0.0.1:3000`，授权请求必须使用后台登记的精确 `localhost` redirect；端口被占用时登录明确失败，不改用动态端口或其他 URI。callback 只接受一次精确路径的 `GET`，严格解析 query、拒绝重复或 unknown 参数，并以 constant-time 比较 `state`。
 
-token response 必须有界解码，包含非空 `access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`、精确 scope 与非空 `account_id`。refresh token 成功轮换并 durable commit 后不得恢复旧 token。
+authorization-code token response 必须有界解码，包含非空 `access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in` 与精确 scope；refresh response 具有相同 token 与过期字段，允许省略 scope。token response 不提供 principal；refresh token 成功轮换并 durable commit 后不得恢复旧 token。
 
-只有 `/me` 是有界、结构完整的 JSON，返回 `code = 0`，且正整数 `data.id` 的十进制文本精确匹配 token `account_id`，Account 才能提交 authenticated identity。`data.username`、`data.email`、`data.phone_number` 与 `data.concurrency` 都是非阻断、best-effort 资料字段：缺失、`null`、空值、类型错误、格式错误或超出字段边界都不得拒绝 identity。合法有界UTF-8 `username` 发布为 `display_name`，否则发布空值；合法非空 `email` 必须无控制字符且恰含一个分隔本地部分与域名的 `@`，Account Host只保留首个Unicode码点加 `***@` 与原域名组成的 `email_hint`，否则发布空值；合法 `phone_number` 只允许可选前导 `+` 和 7–20 位ASCII数字，Account Host只保留可选 `+`、前三位数字、`****` 与末四位数字组成的 `phone_hint`，否则发布空值；合法 `concurrency` 正整数按 `u32` 发布，零或负数按 Metask 后端语义规范化为 `0`，不可用值发布为 `null`。承载完整资料的response buffer在解析后清零。只有失败请求实际使用了当前 credential 时，明确 `401/403` 才能删除该 credential 并进入 `signed_out`：refresh exchange 使用旧 refresh token，`/me` identity validation 使用刚提交的新 access token；authorization-code exchange 不使用 retained credential，其 `400/401/403` 必须归类为 `oauth_exchange_failed`，不得删除已有会话的 credential。network、deadline、`429` 或 `5xx` 保留可恢复 credential 并发布 Account error，不得回退到旧 identity。
+只有 Userinfo 是有界、结构完整的 JSON，具有非空 UTF-8 `sub`、精确 `client_id = metawork` 与非空有界 `authorization_id`，Account 才能把 `sub` 绑定到已提交 token 并提交 authenticated identity。`name`、`email` 与 `phone_number` 都是非阻断、best-effort 资料字段：缺失、`null`、空值、类型错误、格式错误或超出字段边界都不得拒绝 identity。合法有界 UTF-8 `name` 发布为 `display_name`，否则发布空值；合法非空 `email` 必须无控制字符且恰含一个分隔本地部分与域名的 `@`，Account Host 只保留首个 Unicode 码点加 `***@` 与原域名组成的 `email_hint`，否则发布空值；合法 `phone_number` 只允许可选前导 `+` 和 7–20 位 ASCII 数字，Account Host 只保留可选 `+`、前三位数字、`****` 与末四位数字组成的 `phone_hint`，否则发布空值。新 Userinfo 不提供 concurrency，Account 发布 `null`。承载完整资料的 response buffer 在解析后清零。只有失败请求实际使用了当前 credential 时，明确 `401/403` 才能删除该 credential 并进入 `signed_out`：refresh exchange 使用旧 refresh token，Userinfo identity validation 使用刚提交的新 access token；authorization-code exchange 不使用 retained credential，其 `400/401/403` 必须归类为 `oauth_exchange_failed`，不得删除已有会话的 credential。network、deadline、`429` 或 `5xx` 保留可恢复 credential 并发布 Account error，不得回退到旧 identity。
 
-`/me` 的 `balance` 与 `run_mode` 对登录验证是可选附加字段：缺失、unknown 或 summary decode 失败不能阻止 principal 提交。Account summary 使用独立请求和状态，先严格校验 `/me` 的 principal，再把 run mode规范化为 `usage_eligibility`；`simple` 映射为 disabled并跳过usage/history，`standard`映射为enabled后读取dashboard stats和以周一为起点、截至上海当天的最近 53 个周列（365–371 个日历日）的dashboard trend，缺失或未知值映射为unknown且fail closed不请求usage/history。history 请求固定使用 `granularity=day&timezone=Asia/Shanghai`，Host拥有时区、范围和粒度语义；Renderer不提交或推断这些参数，也不得读取或推断raw run mode。服务端新增未知JSON字段可以忽略，但已消费字段类型必须严格；identity 的四个 best-effort资料字段是明确例外，字段自身不可用时只丢弃该投影。余额允许后端合法的负值；actual cost与Token计数必须非负。全部金额必须在Host中规范化为十进制定点字符串，不允许NaN、Infinity、指数形式或二进制浮点直接跨Bridge；Token计数必须规范化为十进制整数文本。history 的范围必须从周一开始并覆盖最近53个周列；范围、日期顺序、唯一性和上界必须整体通过验证后才可提交。成功响应中范围内缺失日期由Renderer解释为零使用，失败或不完整响应不得清空旧值或伪造零使用。summary只描述整个Metask账户，不得暗示为MetaWork独占消耗。
+旧 `/api/v1/auth/me` 不再参与登录 identity，只由独立 Account summary 请求读取 `balance` 与 `run_mode`；缺失、unknown 或 summary decode 失败不能回滚已经提交的 principal。Account summary 使用独立请求和状态，严格校验 `/me` 的 principal，再把 run mode规范化为 `usage_eligibility`；`simple` 映射为 disabled并跳过usage/history，`standard`映射为enabled后读取dashboard stats和以周一为起点、截至上海当天的最近 53 个周列（365–371 个日历日）的dashboard trend，缺失或未知值映射为unknown且fail closed不请求usage/history。history 请求固定使用 `granularity=day&timezone=Asia/Shanghai`，Host拥有时区、范围和粒度语义；Renderer不提交或推断这些参数，也不得读取或推断raw run mode。服务端新增未知JSON字段可以忽略，但已消费字段类型必须严格；identity 的三个 best-effort资料字段是明确例外，字段自身不可用时只丢弃该投影。余额允许后端合法的负值；actual cost与Token计数必须非负。全部金额必须在Host中规范化为十进制定点字符串，不允许NaN、Infinity、指数形式或二进制浮点直接跨Bridge；Token计数必须规范化为十进制整数文本。history 的范围必须从周一开始并覆盖最近53个周列；范围、日期顺序、唯一性和上界必须整体通过验证后才可提交。成功响应中范围内缺失日期由Renderer解释为零使用，失败或不完整响应不得清空旧值或伪造零使用。summary只描述整个Metask账户，不得暗示为MetaWork独占消耗。
 
-API Key 与 `/v1/models` 的 request、decode、metadata、固定 provider endpoint 和目录规则属于 Models 的 Metask provider，不在 Account 合同中定义。OAuth token、PKCE verifier、authorization code、access/refresh token、Authorization header 和 authorization lease 不得进入 Renderer、Bridge、日志、Snapshot 或产品历史。
+`/v1/models` 与 `/v1/chat/completions` 的 request、decode、metadata、固定 provider endpoint 和目录规则属于 Models 的 Metask provider，不在 Account 合同中定义。Account 只通过 generation-bound lease 交付当前 OAuth access token；Models 将其作为目录与模型调用的 transient bearer credential，不建立 Metask API Key 选择。OAuth token、PKCE verifier、authorization code、access/refresh token、Authorization header 和 authorization lease 不得进入 Renderer、Bridge、日志、Snapshot 或产品历史。
 
 ## 6. 事务、effect 与 commit
 
@@ -119,7 +118,7 @@ none
 
 每个非 `none` transaction 拥有非零 attempt identity、唯一合法阶段、至多一个 worker/effect，以及成功、明确失败、取消、deadline 和 shutdown 的 terminal 规则。command 和 completion 先产生 prepared transition；coordinator 必须按 committed current 与 prepared next 把它精确分类为 `starts | continues | finishes | no_attempt`。新 attempt 的 effect admission 失败不得提交；continuation admission 失败先提交已经观察到的外部阶段，再以 typed failure 关闭同一 attempt；terminal/no-attempt admission 失败不得误判为 continuation 或触发无 active attempt 的 panic，shutdown 必须在销毁未提交 effect 后完成收口。
 
-登录路径为：OAuth callback → token exchange → refresh token durable commit → `/me` identity validation → Account terminal commit。loopback worker 只等待 callback并交付包含 authorization code、PKCE verifier、callback port 与总 deadline 的 owned exchange input；主线程必须先提交 `token_exchange(login)`，再由独立 network attempt 发出一次 token request，不得在 callback worker 内跨过 commit boundary或自动重放 code exchange。登录总 deadline 为 5 分钟，exchange deadline 为 `min(总 deadline 剩余时间, 30 秒)`。token 已提交后，identity 请求失败不能回滚旧 token。每次显式 `begin_login` 都开始新的 OAuth，不得消费安全存储中保留的 refresh token；显式重新登录可以替换 identity，但旧 identity 在新 `/me` 验证成功前不得被新值冒充。
+登录路径为：OAuth callback → token exchange → refresh token durable commit → Userinfo identity validation 与 token principal binding → Account terminal commit。loopback worker 只等待 callback并交付包含 authorization code、PKCE verifier、callback port 与总 deadline 的 owned exchange input；主线程必须先提交 `token_exchange(login)`，再由独立 network attempt 发出一次 token request，不得在 callback worker 内跨过 commit boundary或自动重放 code exchange。登录总 deadline 为 5 分钟，exchange deadline 为 `min(总 deadline 剩余时间, 30 秒)`。token 已提交后，identity 请求失败不能回滚旧 token。每次显式 `begin_login` 都开始新的 OAuth，不得消费安全存储中保留的 refresh token；显式重新登录可以替换 identity，但旧 identity 在新 Userinfo 验证成功前不得被新值冒充。
 
 Account coordinator 必须先提交 Account Runtime，再把 canonical Account fact提交给 Product Control，最后通知 Application 的 Models observer。Models 的 refresh/clear/install 结果不得回写、回滚或补充 Account transaction。
 
@@ -142,7 +141,7 @@ Account durable authority 只有系统安全存储中的 Metask refresh token：
 - production 与 automation 的 credential service 隔离，不得相互恢复。
 - Account Runtime 和平台 binding 不拥有数据目录、路径创建或文件权限；Models 等其他 owner 的持久化路径不得作为 Account 初始化前置条件。
 
-冷启动是唯一可以消费 retained refresh token 的入口：没有 refresh token 时直接进入 `signed_out`；存在时只尝试一次 restore，先 refresh并提交 rotation，再以 `/me` 建立 identity。retryable restore failure 保留 credential 和错误事实，但后续显式登录必须开始新 OAuth，不能重新进入隐式 restore 或形成无出口循环。credential-store read failure 是 Account error，不得伪造成有效登录或 Models catalog failure。
+冷启动是唯一可以消费 retained refresh token 的入口：没有 refresh token 时直接进入 `signed_out`；存在时只尝试一次 restore，先 refresh并提交 rotation，再以 Userinfo 建立 identity。retryable restore failure 保留 credential 和错误事实，但后续显式登录必须开始新 OAuth，不能重新进入隐式 restore 或形成无出口循环。credential-store read failure 是 Account error，不得伪造成有效登录或 Models catalog failure。
 
 ## 8. 并发、取消、shutdown 与回归不变量
 
@@ -153,7 +152,7 @@ Account durable authority 只有系统安全存储中的 Metask refresh token：
 - refresh timer 或 wall clock 失败不得静默；`refresh_schedule_failed` 必须保留 `authenticated` identity、提供显式 retry，并与 hard-expiry lease gate 共同 fail closed；
 - shutdown 停止新 command，取消 timer，cancel/join worker，消费或销毁 mailbox，清零 access/refresh token，最后断开 ports；`deinit` 不执行平台 effect；
 - 登录、refresh、restore、重新登录、取消、logout、明确 credential-store 失败、network/deadline failure、stale completion、mailbox collision 与 shutdown 都必须保持单一 terminal fact；
-- `/me` 未验证时绝不发布 authenticated identity；
+- Userinfo 未验证时绝不发布 authenticated identity；
 - authorization generation 只随可用授权建立/替换，旧 generation 的 lease 和 completion不能再次生效；
 - wallet/usage/history summary 的 failure、partial success 和 stale 只改变 summary子投影，不回滚 identity、token rotation或 authorization generation；
 - logout 后 Account 为 `signed_out`，Models 中 Metask provider 不可解析，custom source与已交付的 Task binding 不被改写；

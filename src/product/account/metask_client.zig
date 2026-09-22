@@ -6,6 +6,7 @@ const oauth = @import("account_oauth");
 const summary = @import("account_summary");
 const transport_api = @import("metask_transport");
 
+pub const userinfo_url = oauth.userinfo_url;
 pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
 pub const usage_dashboard_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/stats";
 pub const usage_history_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/trend";
@@ -14,6 +15,7 @@ pub const usage_history_timezone = summary.history_timezone;
 pub const RequestKind = enum {
     exchange_code,
     refresh_token,
+    userinfo,
     current_user,
     usage_dashboard,
     usage_history,
@@ -109,6 +111,7 @@ pub fn exchangeAuthorizationCode(
         allocator,
         response.body,
         now_unix_seconds,
+        true,
     ) catch return error.ProtocolInvalid;
 }
 
@@ -153,6 +156,7 @@ pub fn refreshWithToken(
         allocator,
         response.body,
         now_unix_seconds,
+        false,
     ) catch return error.ProtocolInvalid;
 }
 
@@ -161,28 +165,26 @@ pub fn fetchIdentity(
     tokens: *const oauth.TokenSet,
     control: ?RequestControl,
 ) ClientError!state.AccountIdentity {
-    var current_user_storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &current_user_storage);
+    var userinfo_storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
+    defer std.crypto.secureZero(u8, &userinfo_storage);
     const response = transport.perform(
         .{
-            .kind = .current_user,
+            .kind = .userinfo,
             .bearer = tokens.access_token.view(),
             .control = control,
         },
-        &current_user_storage,
+        &userinfo_storage,
     ) catch |err| return transportFailure(err);
     if (response.status != 200)
         return classifyStatus(response.status, false);
-    const current_user = oauth.parseCurrentUser(
-        response.body,
-        tokens.accountId(),
-    ) catch return error.ProtocolInvalid;
+    const userinfo = oauth.parseCurrentUser(response.body) catch
+        return error.ProtocolInvalid;
     return state.AccountIdentity.init(
-        tokens.accountId(),
-        current_user.usernameView(),
-        current_user.emailHintView(),
-        current_user.phoneHintView(),
-        current_user.concurrency_limit,
+        userinfo.accountId(),
+        userinfo.usernameView(),
+        userinfo.emailHintView(),
+        userinfo.phoneHintView(),
+        userinfo.concurrency_limit,
     ) catch return error.ProtocolInvalid;
 }
 
@@ -301,18 +303,18 @@ const FakeTransport = struct {
                 if (std.mem.indexOf(
                     u8,
                     request.body,
-                    "client_id=metawork-app",
+                    "client_id=metawork",
                 ) == null) return error.ProtocolFailed;
                 break :blk
-                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"1"}
+                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email"}
                 ;
             },
             1 => blk: {
-                if (request.kind != .current_user or
+                if (request.kind != .userinfo or
                     !std.mem.eql(u8, request.bearer orelse "", "access"))
                     return error.ProtocolFailed;
                 break :blk
-                \\{"code":0,"message":"success","data":{"id":1,"email":"user@example.com","phone_number":"13800138000","username":"Meta User","concurrency":5,"role":"user"}}
+                \\{"sub":"1","email":"user@example.com","email_verified":true,"name":"Meta User","phone_number":"13800138000","client_id":"metawork","authorization_id":"auth-1"}
                 ;
             },
             else => return error.ProtocolFailed,
@@ -336,7 +338,7 @@ test "login exchanges tokens before resolving a strict identity" {
         fake.transport(),
         &code,
         "verifier",
-        40123,
+        oauth.callback_port,
         100,
         null,
     );
@@ -357,11 +359,11 @@ test "login exchanges tokens before resolving a strict identity" {
         identity.emailHint(),
     );
     try std.testing.expectEqualStrings("138****8000", identity.phoneHint());
-    try std.testing.expectEqual(@as(?u32, 5), identity.concurrency_limit);
+    try std.testing.expectEqual(@as(?u32, null), identity.concurrency_limit);
     try std.testing.expectEqual(@as(usize, 2), fake.step);
 }
 
-test "current-user failure never falls back to the token account id" {
+test "userinfo failure never infers a principal from the token" {
     var tokens = try oauth.TokenSet.fromStored(
         std.testing.allocator,
         "access",
@@ -376,7 +378,7 @@ test "current-user failure never falls back to the token account id" {
             request: Request,
             output: []u8,
         ) TransportError!Response {
-            if (request.kind != .current_user) return error.ProtocolFailed;
+            if (request.kind != .userinfo) return error.ProtocolFailed;
             const body = "{}";
             @memcpy(output[0..body.len], body);
             return .{ .status = 503, .body = output[0..body.len] };
@@ -395,9 +397,10 @@ test "current-user failure never falls back to the token account id" {
 test "refresh requires and installs the rotated refresh token" {
     var previous = try oauth.parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"old-access","refresh_token":"old-refresh","token_type":"Bearer","expires_in":20,"scope":"metawork:use","account_id":"acct-1"}
+        \\{"access_token":"old-access","refresh_token":"old-refresh","token_type":"Bearer","expires_in":20,"scope":"openid profile email"}
     ,
         0,
+        true,
     );
     defer previous.deinit();
     var fake = struct {
@@ -414,7 +417,7 @@ test "refresh requires and installs the rotated refresh token" {
                 ) == null)
                 return error.ProtocolFailed;
             const body =
-                \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"bearer","expires_in":30,"scope":"metawork:use","account_id":"acct-1"}
+                \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"bearer","expires_in":30}
             ;
             @memcpy(response_buffer[0..body.len], body);
             return .{ .status = 200, .body = response_buffer[0..body.len] };

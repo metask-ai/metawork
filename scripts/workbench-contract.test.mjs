@@ -822,8 +822,7 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
 
 test("Workbench snapshot hard cut rejects retired provider fields", () => {
   const retiredApiKey = clone(fixture);
-  retiredApiKey.models.providers[0].apiKeys[0].provider = "anthropic";
-  delete retiredApiKey.models.providers[0].apiKeys[0].protocol;
+  retiredApiKey.models.providers[0].apiKeys = [];
   assert.throws(() => decodeWorkbenchSnapshot(retiredApiKey), /expected keys/);
 
   const retiredBinding = clone(fixture);
@@ -1198,10 +1197,10 @@ test("Scheduled Task projection decodes recurrence and occurrence without secret
       failureReason: null,
       binding: {
         status: "bound",
-        modelRef: { sourceId: "metask:key-1", modelId: "fixture-model" },
+        modelRef: { sourceId: "metask", modelId: "fixture-model" },
         sourceGeneration: "1",
         selectionRevision: "3",
-        protocol: "anthropic_messages",
+        protocol: "openai_chat_completions",
       },
       input: {
         kind: "text",
@@ -2187,11 +2186,11 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     decodeWorkbenchSnapshot(readyAccountWithoutInstalledExecution),
   );
 
-  const keyOutsideCatalog = clone(fixture);
-  keyOutsideCatalog.models.providers[0].selectedApiKeyId = "missing-key";
+  const retiredKeySelection = clone(fixture);
+  retiredKeySelection.models.providers[0].selectedApiKeyId = "missing-key";
   assert.throws(
-    () => decodeWorkbenchSnapshot(keyOutsideCatalog),
-    /selected API Key must belong/,
+    () => decodeWorkbenchSnapshot(retiredKeySelection),
+    /expected keys/,
   );
 
   const modelOutsideCatalog = clone(fixture);
@@ -2321,9 +2320,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   signedOut.models.availability = "needs_authentication";
   signedOut.models.providers[0].catalogState = "needs_authentication";
   signedOut.models.providers[0].principalRef = "";
-  signedOut.models.providers[0].apiKeys = [];
   signedOut.models.providers[0].models = [];
-  signedOut.models.providers[0].selectedApiKeyId = "";
   signedOut.models.providers[0].catalogGeneration = "0";
   signedOut.models.providers[0].sourceGeneration = "0";
   signedOut.models.providers[0].errorCode = "authorization_unavailable";

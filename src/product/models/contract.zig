@@ -15,23 +15,15 @@ pub const Limits = struct {
     pub const base_url_bytes: usize = 2048;
     pub const credential_bytes: usize = 4096;
     pub const principal_ref_bytes: usize = 256;
-    pub const api_key_id_bytes: usize = 128;
-    pub const api_key_name_bytes: usize = 256;
-    pub const api_key_suffix_bytes: usize = 32;
     pub const safe_diagnostic_bytes: usize = 512;
-    pub const api_key_entries: usize = 256;
     pub const model_entries: usize = 512;
     pub const custom_provider_entries: usize = 8;
     pub const custom_provider_model_entries: usize = 16;
 };
 
 pub const metask_source_id = "metask";
-pub const metask_anthropic_messages_url =
-    "https://napi.metask-ai.com/v1/messages";
 pub const metask_openai_chat_completions_url =
-    "https://napi.metask-ai.com/v1/chat/completions";
-pub const metask_gemini_base_url =
-    "https://generativelanguage.googleapis.com";
+    "https://app.metask-ai.com/v1/chat/completions";
 
 pub const ModelRef = struct {
     source_id: []const u8,
@@ -97,17 +89,9 @@ pub const ModelsError = enum {
     catalog_unavailable,
     catalog_invalid,
     catalog_too_large,
-    no_api_keys,
     no_models,
     operation_in_progress,
     local_resource_exhausted,
-};
-
-pub const ApiKeyView = struct {
-    id: []const u8,
-    name: []const u8,
-    suffix: []const u8,
-    protocol: Protocol,
 };
 
 /// Provider declarations, not MetaWork feature gates. null means unknown.
@@ -164,9 +148,7 @@ pub const ProviderView = struct {
     recommended: bool,
     catalog_state: CatalogState,
     principal_ref: []const u8 = "",
-    api_keys: []const ApiKeyView = &.{},
     models: []const ModelView = &.{},
-    selected_api_key_id: []const u8 = "",
     catalog_generation: u64 = 0,
     source_generation: u64 = 0,
     error_code: ModelsError = .none,
@@ -191,9 +173,7 @@ pub const CatalogRefreshPreparation = struct {
     attempt_id: u64,
     principal_ref: []const u8,
     authorization_generation: u64,
-    preferred_api_key_id: []const u8,
     preferred_model_id: []const u8,
-    required_api_key_id: []const u8 = "",
 };
 
 pub const CatalogRefreshPrepareResult = union(enum) {
@@ -337,12 +317,6 @@ pub const ConfigureMetaskSelectionCommand = struct {
     expected_catalog_generation: u64,
 };
 
-pub const SelectMetaskApiKeyCommand = struct {
-    source_id: []const u8,
-    expected_metask_selection_revision: u64,
-    expected_catalog_generation: u64,
-};
-
 pub const SelectDefaultCommand = struct {
     selection: ModelRef,
     expected_selection_revision: u64,
@@ -388,11 +362,6 @@ pub const ManagementError = enum {
     test_unavailable,
     user_cancelled,
     local_resource_exhausted,
-};
-
-pub const CatalogSelectionPrepareResult = union(enum) {
-    ready: CatalogRefreshPreparation,
-    rejected: ManagementError,
 };
 
 pub const CommandResult = struct {
@@ -517,13 +486,21 @@ pub const OwnedSourceCandidate = struct {
         errdefer allocator.free(owned_model);
         errdefer allocator.free(owned_base_url);
         errdefer secureFree(allocator, owned_api_key);
-        validateRequired(instance_id, Limits.instance_id_bytes) catch
-            return error.InvalidSourceCandidate;
-        const provider_id = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{s}",
-            .{ @tagName(source), instance_id },
-        );
+        const provider_id = switch (source) {
+            .metask => blk: {
+                if (instance_id.len != 0) return error.InvalidSourceCandidate;
+                break :blk try allocator.dupe(u8, metask_source_id);
+            },
+            .custom_provider => blk: {
+                validateRequired(instance_id, Limits.instance_id_bytes) catch
+                    return error.InvalidSourceCandidate;
+                break :blk try std.fmt.allocPrint(
+                    allocator,
+                    "{s}:{s}",
+                    .{ @tagName(source), instance_id },
+                );
+            },
+        };
         errdefer allocator.free(provider_id);
         const candidate_input: SourceCandidateInput = .{
             .target = .{
@@ -631,13 +608,21 @@ pub const OwnedConfig = struct {
         errdefer allocator.free(owned_model);
         errdefer allocator.free(owned_base_url);
         errdefer secureFree(allocator, owned_api_key);
-        validateRequired(instance_id, Limits.instance_id_bytes) catch
-            return error.InvalidExecutionConfig;
-        const provider_id = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{s}",
-            .{ @tagName(source), instance_id },
-        );
+        const provider_id = switch (source) {
+            .metask => blk: {
+                if (instance_id.len != 0) return error.InvalidExecutionConfig;
+                break :blk try allocator.dupe(u8, metask_source_id);
+            },
+            .custom_provider => blk: {
+                validateRequired(instance_id, Limits.instance_id_bytes) catch
+                    return error.InvalidExecutionConfig;
+                break :blk try std.fmt.allocPrint(
+                    allocator,
+                    "{s}:{s}",
+                    .{ @tagName(source), instance_id },
+                );
+            },
+        };
         errdefer allocator.free(provider_id);
         const config_input: ConfigInput = .{
             .target = .{
@@ -930,17 +915,11 @@ pub fn validateSourceCandidateStructure(input: SourceCandidateInput) ValidationE
 
 pub fn validateMetaskSourceCandidate(input: SourceCandidateInput) ValidationError!void {
     try validateSourceCandidateStructure(input);
-    const prefix = @tagName(Source.metask) ++ ":";
-    if (!std.mem.startsWith(u8, input.target.provider_id, prefix) or
-        input.target.provider_id.len == prefix.len)
+    if (!std.mem.eql(u8, input.target.provider_id, metask_source_id))
         return error.InconsistentState;
-    const expected_endpoint: []const u8 = switch (input.target.protocol) {
-        .openai_responses => return error.UnsupportedProtocol,
-        .anthropic_messages => metask_anthropic_messages_url,
-        .openai_chat_completions => metask_openai_chat_completions_url,
-        .gemini_native => metask_gemini_base_url,
-    };
-    if (!std.mem.eql(u8, input.target.base_url, expected_endpoint))
+    if (input.target.protocol != .openai_chat_completions)
+        return error.UnsupportedProtocol;
+    if (!std.mem.eql(u8, input.target.base_url, metask_openai_chat_completions_url))
         return error.InvalidBaseUrl;
 }
 
@@ -1068,12 +1047,12 @@ fn observingSourceCandidate(
     return OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
-        .anthropic_messages,
+        .openai_chat_completions,
         try allocator.dupe(u8, "metask-model"),
-        try allocator.dupe(u8, "https://napi.metask-ai.com/v1/messages"),
+        try allocator.dupe(u8, metask_openai_chat_completions_url),
         7,
         secret,
-        "key-1",
+        "",
     );
 }
 
@@ -1139,12 +1118,12 @@ test "source candidate keeps source and execution generations independent" {
     var candidate = try OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
-        .anthropic_messages,
+        .openai_chat_completions,
         try allocator.dupe(u8, "metask-model"),
-        try allocator.dupe(u8, "https://napi.metask-ai.com/v1/messages"),
+        try allocator.dupe(u8, metask_openai_chat_completions_url),
         7,
         try allocator.dupe(u8, "secret"),
-        "key-1",
+        "",
     );
     defer candidate.deinit();
 
@@ -1152,7 +1131,7 @@ test "source candidate keeps source and execution generations independent" {
     var config = try candidate.intoConfig(29);
     defer config.deinit();
     try std.testing.expectEqual(@as(u64, 29), config.input().execution_generation);
-    try std.testing.expectEqualStrings("metask:key-1", config.input().target.provider_id);
+    try std.testing.expectEqualStrings("metask", config.input().target.provider_id);
     try std.testing.expectEqualStrings("secret", config.input().api_key);
 }
 

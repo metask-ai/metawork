@@ -2589,19 +2589,6 @@ pub const Runtime = struct {
         );
     }
 
-    pub fn prepareMetaskApiKeySelection(
-        self: *Runtime,
-        principal_ref: []const u8,
-        authorization_generation: u64,
-        command: models_contract.SelectMetaskApiKeyCommand,
-    ) models_contract.CatalogSelectionPrepareResult {
-        return self.custom_providers.prepareMetaskApiKeySelection(
-            principal_ref,
-            authorization_generation,
-            command,
-        );
-    }
-
     pub fn completeMetaskCatalogRefresh(
         self: *Runtime,
         attempt_id: u64,
@@ -5375,19 +5362,7 @@ pub const Runtime = struct {
                 @tagName(provider.catalog_state),
             }) catch return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, provider.principal_ref);
-            writer.writeAll(",\"apiKeys\":[") catch return error.SnapshotTooLarge;
-            for (provider.api_keys, 0..) |api_key, index| {
-                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, api_key.id);
-                writer.writeAll(",\"name\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, api_key.name);
-                writer.writeAll(",\"suffix\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, api_key.suffix);
-                writer.print(",\"protocol\":\"{s}\"}}", .{@tagName(api_key.protocol)}) catch
-                    return error.SnapshotTooLarge;
-            }
-            writer.writeAll("],\"models\":[") catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"models\":[") catch return error.SnapshotTooLarge;
             for (provider.models, 0..) |model, index| {
                 if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
                 writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
@@ -5401,9 +5376,7 @@ pub const Runtime = struct {
                 }) catch return error.SnapshotTooLarge;
                 writer.writeByte('}') catch return error.SnapshotTooLarge;
             }
-            writer.writeAll("],\"selectedApiKeyId\":") catch return error.SnapshotTooLarge;
-            try self.projectedJsonValue(writer, provider.selected_api_key_id);
-            writer.print(",\"catalogGeneration\":\"{d}\",\"sourceGeneration\":\"{d}\",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
+            writer.print("],\"catalogGeneration\":\"{d}\",\"sourceGeneration\":\"{d}\",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
                 provider.catalog_generation,
                 provider.source_generation,
                 @tagName(provider.error_code),
@@ -7789,7 +7762,6 @@ pub const Runtime = struct {
             .begin_custom_provider_probe_fn = controlBeginCustomProviderProbe,
             .complete_custom_model_test_fn = controlCompleteCustomModelTest,
             .prepare_metask_catalog_refresh_fn = controlPrepareMetaskCatalogRefresh,
-            .prepare_metask_api_key_selection_fn = controlPrepareMetaskApiKeySelection,
             .complete_metask_catalog_refresh_fn = controlCompleteMetaskCatalogRefresh,
             .fail_metask_catalog_refresh_fn = controlFailMetaskCatalogRefresh,
             .metask_authorization_unavailable_fn = controlMetaskAuthorizationUnavailable,
@@ -7899,12 +7871,6 @@ pub const TestSupport = if (builtin.is_test) struct {
         try models_aggregate.TestSupport.installMetaskDefault(
             &control.custom_providers,
             "account-1",
-            .{
-                .id = "key-1",
-                .name = "Fixture API",
-                .suffix = "ture",
-                .protocol = .anthropic_messages,
-            },
             "fixture-secret",
             models,
             selected_model,
@@ -7934,15 +7900,15 @@ pub const TestSupport = if (builtin.is_test) struct {
         var execution = try models_contract.OwnedConfig.initOwned(
             std.testing.allocator,
             .metask,
-            .anthropic_messages,
+            .openai_chat_completions,
             try std.testing.allocator.dupe(u8, "fixture-model"),
             try std.testing.allocator.dupe(
                 u8,
-                models_contract.metask_anthropic_messages_url,
+                models_contract.metask_openai_chat_completions_url,
             ),
             generation,
             try std.testing.allocator.dupe(u8, credential),
-            "key-1",
+            "",
         );
         errdefer execution.deinit();
         try control.beginExecutionReplacement();
@@ -7959,12 +7925,6 @@ pub const TestSupport = if (builtin.is_test) struct {
     pub fn prepareMetaskDefault(control: *Runtime, generation: u64) !void {
         if (generation == 0 or generation > std.math.maxInt(u64) - 3)
             return error.InvalidExecutionGeneration;
-        const api_key: models_contract.ApiKeyView = .{
-            .id = "key-1",
-            .name = "Primary",
-            .suffix = "1234",
-            .protocol = .anthropic_messages,
-        };
         const models = [_]models_contract.ModelView{.{
             .id = "fixture-model",
             .display_name = "Fixture model",
@@ -8002,7 +7962,6 @@ pub const TestSupport = if (builtin.is_test) struct {
         try models_aggregate.TestSupport.installMetaskDefault(
             &control.custom_providers,
             "account-1",
-            api_key,
             "fixture-secret",
             &models,
             "fixture-model",
@@ -8070,9 +8029,6 @@ fn controlCompleteCustomModelTest(context: *anyopaque, command: models_contract.
 }
 fn controlPrepareMetaskCatalogRefresh(context: *anyopaque, principal_ref: []const u8, authorization_generation: u64) models_contract.CatalogRefreshPrepareResult {
     return controlOwner(context).prepareMetaskCatalogRefresh(principal_ref, authorization_generation);
-}
-fn controlPrepareMetaskApiKeySelection(context: *anyopaque, principal_ref: []const u8, authorization_generation: u64, command: models_contract.SelectMetaskApiKeyCommand) models_contract.CatalogSelectionPrepareResult {
-    return controlOwner(context).prepareMetaskApiKeySelection(principal_ref, authorization_generation, command);
 }
 fn controlCompleteMetaskCatalogRefresh(context: *anyopaque, attempt_id: u64, authorization_generation: u64, completion: *models_ports.OwnedCatalogCompletion) models_contract.ModelsError {
     return controlOwner(context).completeMetaskCatalogRefresh(attempt_id, authorization_generation, completion);
@@ -9257,7 +9213,7 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
         .id = 7,
         .generation = 1,
         .execution_generation = 1,
-        .execution_protocol = .anthropic_messages,
+        .execution_protocol = .openai_chat_completions,
         .execution_model = execution_model,
         .permission_profile = .approval_required,
         .permission_interaction = .interactive,
@@ -9281,7 +9237,7 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
             .id = 3,
             .recent_order = 1,
             .execution_generation = 1,
-            .execution_protocol = .anthropic_messages,
+            .execution_protocol = .openai_chat_completions,
             .execution_model = execution_model,
             .permission_profile = .approval_required,
             .permission_interaction = .interactive,
@@ -9477,10 +9433,10 @@ fn replaceTaskCredentialForTest(
     live.execution.deinit();
     var replacement = try OwnedTaskExecution.clone(std.testing.allocator, .{
         .target = .{
-            .provider_id = "metask:fixture-provider",
-            .protocol = .anthropic_messages,
+            .provider_id = models_contract.metask_source_id,
+            .protocol = .openai_chat_completions,
             .model = "fixture-model",
-            .base_url = models_contract.metask_anthropic_messages_url,
+            .base_url = models_contract.metask_openai_chat_completions_url,
         },
         .execution_generation = task.durable.execution_generation,
         .api_key = credential,
@@ -11004,8 +10960,6 @@ test "Product Control snapshot serializer keeps durable Metask intent after auth
         after.providers[0].catalog_state,
     );
     try std.testing.expectEqual(@as(usize, 0), after.providers[0].models.len);
-    try std.testing.expectEqual(@as(usize, 0), after.providers[0].api_keys.len);
-    try std.testing.expectEqualStrings("", after.providers[0].selected_api_key_id);
     try std.testing.expectEqualStrings(
         metask_selection.model_id,
         after.metask_selection.?.model_id,
@@ -11222,15 +11176,15 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     var replacement = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
-        .anthropic_messages,
+        .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
-            models_contract.metask_anthropic_messages_url,
+            models_contract.metask_openai_chat_completions_url,
         ),
         2,
         try std.testing.allocator.dupe(u8, "NEXT-SECRET"),
-        "key-1",
+        "",
     );
     errdefer replacement.deinit();
     try TestSupport.prepareMetaskDefault(&control, 2);
@@ -11265,15 +11219,15 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     var blocked = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
-        .anthropic_messages,
+        .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
-            models_contract.metask_anthropic_messages_url,
+            models_contract.metask_openai_chat_completions_url,
         ),
         3,
         try std.testing.allocator.dupe(u8, "BLOCKED-SECRET"),
-        "key-1",
+        "",
     );
     var blocked_owned = true;
     defer if (blocked_owned) blocked.deinit();
@@ -12964,15 +12918,9 @@ test "default replacement preserves Task generation and installs the next admiss
         ),
         2,
         try std.testing.allocator.dupe(u8, "metawork"),
-        "key-2",
+        "",
     );
     errdefer replacement.deinit();
-    const replacement_api_keys = [_]models_contract.ApiKeyView{.{
-        .id = "key-2",
-        .name = "Secondary",
-        .suffix = "5678",
-        .protocol = .openai_chat_completions,
-    }};
     const replacement_models = [_]models_contract.ModelView{.{
         .id = "fixture-model-2",
         .display_name = "Fixture model 2",
@@ -12990,7 +12938,6 @@ test "default replacement preserves Task generation and installs the next admiss
     try models_aggregate.TestSupport.installMetaskDefault(
         &control.custom_providers,
         "account-1",
-        replacement_api_keys[0],
         "metawork",
         &replacement_models,
         "fixture-model-2",
@@ -13152,12 +13099,6 @@ test "same-source default model change preserves execution generation and advanc
     try models_aggregate.TestSupport.installMetaskDefault(
         &control.custom_providers,
         "account-1",
-        .{
-            .id = "key-1",
-            .name = "Fixture API",
-            .suffix = "ture",
-            .protocol = .anthropic_messages,
-        },
         "fixture-secret",
         &models,
         "fixture-model-2",
@@ -13214,12 +13155,6 @@ test "same-source default model change preserves execution generation and advanc
     try models_aggregate.TestSupport.installMetaskDefault(
         &control.custom_providers,
         "account-1",
-        .{
-            .id = "key-1",
-            .name = "Fixture API",
-            .suffix = "ture",
-            .protocol = .anthropic_messages,
-        },
         "fixture-secret",
         &models,
         "fixture-model",
@@ -14400,15 +14335,15 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
     var replacement = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
-        .anthropic_messages,
+        .openai_chat_completions,
         try std.testing.allocator.dupe(u8, "fixture-model-2"),
         try std.testing.allocator.dupe(
             u8,
-            models_contract.metask_anthropic_messages_url,
+            models_contract.metask_openai_chat_completions_url,
         ),
         2,
         try std.testing.allocator.dupe(u8, "SECRET-KEY-2"),
-        "fixture-provider",
+        "",
     );
     errdefer replacement.deinit();
     try control.prepareExecutionInstall(replacement.input());

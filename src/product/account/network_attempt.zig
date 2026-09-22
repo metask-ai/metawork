@@ -347,11 +347,11 @@ const RefreshTransport = struct {
         output: []u8,
     ) metask.TransportError!metask.Response {
         const self: *RefreshTransport = @ptrCast(@alignCast(context));
-        if (request.kind == .current_user) {
+        if (request.kind == .userinfo) {
             const body = if (self.incomplete_profile)
-                \\{"code":0,"message":"success","data":{"id":1}}
+                \\{"sub":"1","client_id":"metawork","authorization_id":"auth-1"}
             else
-                \\{"code":0,"message":"success","data":{"id":1,"email":"stored@example.com","username":"Stored User","concurrency":5}}
+                \\{"sub":"1","email":"stored@example.com","name":"Stored User","client_id":"metawork","authorization_id":"auth-1"}
             ;
             @memcpy(output[0..body.len], body);
             return .{ .status = 200, .body = output[0..body.len] };
@@ -370,7 +370,7 @@ const RefreshTransport = struct {
             return error.Cancelled;
         }
         const body =
-            \\{"access_token":"fresh-access","refresh_token":"fresh-refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"1"}
+            \\{"access_token":"fresh-access","refresh_token":"fresh-refresh","token_type":"Bearer","expires_in":3600}
         ;
         @memcpy(output[0..body.len], body);
         return .{ .status = 200, .body = output[0..body.len] };
@@ -410,7 +410,7 @@ const LoginTransport = struct {
             return error.Cancelled;
         }
         const body =
-            \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"metawork:use","account_id":"acct-1"}
+            \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email"}
         ;
         @memcpy(output[0..body.len], body);
         return .{ .status = 200, .body = output[0..body.len] };
@@ -450,7 +450,7 @@ test "login exchange uses the remaining login deadline capped at thirty seconds"
     attempt.deinit();
     var result = capture.result orelse return error.TestUnexpectedResult;
     defer result.deinit();
-    try std.testing.expectEqualStrings("acct-1", result.login.accountId());
+    try std.testing.expectEqualStrings("", result.login.accountId());
 
     var blocking: LoginTransport = .{ .blocking = true };
     var cancelled_capture: CaptureSink = .{};
@@ -516,7 +516,7 @@ test "refresh attempt transfers one opaque generation and cancels cleanly" {
     defer refreshed.deinit();
     try std.testing.expectEqual(@as(u64, 9), capture.attempt_id);
     try std.testing.expectEqualStrings(
-        "1",
+        "",
         refreshed.refresh.accountId(),
     );
     try std.testing.expectEqual(@as(?i64, 10), credential_owner.expiresAt());
