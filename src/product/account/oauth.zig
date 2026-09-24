@@ -9,9 +9,9 @@ pub const token_url = authority ++ "/api/oauth/token";
 pub const userinfo_url = authority ++ "/api/oauth/userinfo";
 pub const client_id = "metawork";
 pub const scope = "openid profile email";
-pub const callback_port: u16 = 3000;
+pub const callback_port: u16 = 13090;
 pub const callback_path = "/auth/metask/callback";
-pub const redirect_uri = "http://localhost:3000" ++ callback_path;
+pub const redirect_uri = "http://localhost:13090" ++ callback_path;
 
 pub const Limits = struct {
     pub const secret_bytes: usize = 4096;
@@ -524,7 +524,7 @@ test "PKCE uses RFC 7636 S256 shape and authorize URL is fixed origin" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         url,
-        "redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fmetask%2Fcallback",
+        "redirect_uri=http%3A%2F%2Flocalhost%3A13090%2Fauth%2Fmetask%2Fcallback",
     ) != null);
     try std.testing.expect(std.mem.endsWith(
         u8,
@@ -773,7 +773,7 @@ test "authorization code and refresh bodies do not widen client contract" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         body,
-        "redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fauth%2Fmetask%2Fcallback",
+        "redirect_uri=http%3A%2F%2Flocalhost%3A13090%2Fauth%2Fmetask%2Fcallback",
     ) != null);
 
     var refresh = try Secret.init(std.testing.allocator, "refresh-token");
