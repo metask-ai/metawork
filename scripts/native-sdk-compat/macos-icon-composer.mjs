@@ -17,6 +17,7 @@ import path from "node:path";
 export const macosAppIconName = "MetaWork";
 export const supportedActoolVersions = Object.freeze([
   Object.freeze({ bundleVersion: "24765", shortVersion: "26.6" }),
+  Object.freeze({ bundleVersion: "25098", shortVersion: "27.0" }),
 ]);
 
 const nativeSdkFallbackIconName = "AppIcon.icns";

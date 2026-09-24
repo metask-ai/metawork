@@ -67,26 +67,35 @@ test("macOS Icon Composer source is the flat canonical app icon", () => {
 });
 
 test("macOS Icon Composer packaging pins the reviewed actool compiler", () => {
-  const report = `<?xml version="1.0" encoding="UTF-8"?>
+  const xcode26Report = `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict><key>com.apple.actool.version</key><dict>
 <key>bundle-version</key><string>24765</string>
 <key>short-bundle-version</key><string>26.6</string>
 </dict></dict></plist>`;
-  assert.deepEqual(parseActoolVersionReport(report), {
+  const xcode27Report = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>com.apple.actool.version</key><dict>
+<key>bundle-version</key><string>25098</string>
+<key>short-bundle-version</key><string>27.0</string>
+</dict></dict></plist>`;
+  assert.deepEqual(parseActoolVersionReport(xcode26Report), {
     bundleVersion: "24765",
     shortVersion: "26.6",
   });
   assert.deepEqual(
-    requireSupportedActoolVersion(parseActoolVersionReport(report)),
+    requireSupportedActoolVersion(parseActoolVersionReport(xcode26Report)),
     { bundleVersion: "24765", shortVersion: "26.6" },
+  );
+  assert.deepEqual(
+    requireSupportedActoolVersion(parseActoolVersionReport(xcode27Report)),
+    { bundleVersion: "25098", shortVersion: "27.0" },
   );
   assert.throws(
     () =>
       requireSupportedActoolVersion({
         bundleVersion: "99999",
-        shortVersion: "27.0",
+        shortVersion: "27.1",
       }),
-    /unsupported actool 27\.0/u,
+    /unsupported actool 27\.1/u,
   );
   assert.throws(
     () => parseActoolVersionReport("not a plist"),
