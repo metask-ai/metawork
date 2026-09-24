@@ -21,8 +21,12 @@ import { promisify } from "node:util";
 import { buildAutomationDebugArtifact } from "./build.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import { verifyAgentCoreRuntimeAssets } from "./agentcore-runtime-assets.mjs";
-import { allocateWebViewTestPort } from "./window-top-resize-paint.mjs";
+import {
+  allocateWebViewTestPort,
+  connectTestWebView,
+} from "./window-top-resize-paint.mjs";
 import { probeWindowChromeUi } from "./window-chrome-ui.mjs";
+import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -293,10 +297,10 @@ const provider = createProvider(responses, {
 });
 const baseUrl = await provider.listen();
 const chromeProbePort =
-  process.platform === "win32" &&
-  process.env.METAWORK_WINDOW_CHROME_WORKBENCH === "1"
-    ? await allocateWebViewTestPort()
-    : null;
+  process.platform === "win32" ? await allocateWebViewTestPort() : null;
+const chromeUiProbeEnabled =
+  chromeProbePort !== null &&
+  process.env.METAWORK_WINDOW_CHROME_WORKBENCH === "1";
 
 let output = "";
 let exitState = null;
@@ -515,7 +519,7 @@ try {
       `Task snapshot disagrees with the accepted binding epoch: ${JSON.stringify(createdTask.binding)}`,
     );
   const deliveryCountBeforeRun = productDeliveryEmitCount();
-  if (chromeProbePort !== null) {
+  if (chromeUiProbeEnabled) {
     const evidenceDir = process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR;
     if (!evidenceDir)
       throw new Error("Workbench chrome probe requires an evidence directory");
@@ -793,8 +797,7 @@ try {
       `typed File Changes diff was not served truthfully: ${JSON.stringify(fileChangeDiff)}`,
     );
   const runDeliveryEvents = productDeliveryEmitCount() - deliveryCountBeforeRun;
-  if (chromeProbePort !== null)
-    await probeWindowsChromeUi({ conversation: true });
+  if (chromeUiProbeEnabled) await probeWindowsChromeUi({ conversation: true });
   assertLiveRunRevisions(observedRunRevisions, run, runDeliveryEvents);
   await captureVisual("terminal", 1320, 812);
   await captureVisual("terminal-narrow", 390, 812);
@@ -1135,6 +1138,7 @@ try {
     },
   ]);
   await probeWindowsClipboard({
+    taskId,
     expectedPath: windowsClipboard70Path,
     expectedBytes: 70 * 1024,
     marker: "CLIPBOARD_70K_END",
@@ -1249,6 +1253,7 @@ try {
     `Streaming Markdown WebView evidence: ${JSON.stringify({ responseBytes: Buffer.byteLength(textTerminal.run.output.response), textDeliveryEvents })}\n`,
   );
   await probeWindowsClipboard({
+    taskId,
     expectedPath: windowsClipboard256Path,
     expectedBytes: 256 * 1024,
     marker: "CLIPBOARD_256K_END",
@@ -1765,6 +1770,18 @@ async function expectMissing(filePath) {
 }
 
 async function invokeBridge(command, payload) {
+  if (chromeProbePort !== null) {
+    const webview = await connectTestWebView(chromeProbePort, {
+      requestTimeoutMs: commandTimeoutMs,
+    });
+    try {
+      return await invokeWebViewBridge(webview, command, payload);
+    } finally {
+      webview.close();
+    }
+  }
+  // macOS keeps the SDK automation path. Windows uses the real Renderer
+  // request Promise because unrelated page responses share one SDK artifact.
   const id = `agentcore-vertical-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   let stopResponseWatch = false;
   const responseWatch = (async () => {
@@ -2114,12 +2131,68 @@ async function probeWindowsChromeUi({ conversation = false } = {}) {
 }
 
 async function probeWindowsClipboard({
+  taskId,
   expectedPath,
   expectedBytes,
   marker,
   expectedCode = null,
 }) {
   if (process.platform !== "win32") return;
+  const webview = await connectTestWebView(chromeProbePort);
+  let point;
+  try {
+    await poll(
+      async () => {
+        const selection = await webview.evaluate(`(() => {
+          const task = [...document.querySelectorAll('.task-list-item')]
+            .find(candidate => candidate.dataset.taskId === ${JSON.stringify(taskId)});
+          if (!task) return {ready:false, reason:'task_not_rendered'};
+          if (task.getAttribute('aria-current') === 'page') return {ready:true};
+          task.click();
+          return {ready:false, reason:'selection_pending'};
+        })()`);
+        if (selection?.ready) return true;
+        throw new Error(JSON.stringify(selection));
+      },
+      commandTimeoutMs,
+      `Renderer Task ${taskId} selection`,
+    );
+    // Earlier code-copy checks scroll to an older exchange. UIA screen-order
+    // sorting cannot identify the latest reply because offscreen bounds collapse.
+    // data-latest binds the control to the canonical latest copyable Run; the
+    // clipboard assertions below verify the complete fixture and its marker.
+    point = await poll(
+      async () => {
+        const observation = await webview.evaluate(`(() => {
+          const buttons = document.querySelectorAll('.response-copy-action[data-latest="true"]');
+          if (buttons.length !== 1) return {point:null, buttonCount:buttons.length};
+          const button = buttons[0];
+          const markerPresent = button.closest('.ai-exchange')?.textContent.includes(${JSON.stringify(marker)}) === true;
+          if (!markerPresent)
+            return {point:null, buttonCount:buttons.length, markerPresent};
+          button.scrollIntoView({block:'center', behavior:'instant'});
+          const r = button.getBoundingClientRect();
+          const x = r.x + r.width / 2, y = r.y + r.height / 2;
+          const hit = document.elementFromPoint(x,y);
+          if (!r.width || !r.height || button.disabled || !button.contains(hit))
+            return {
+              point:null,
+              buttonCount:buttons.length,
+              bounds:{x:r.x,y:r.y,width:r.width,height:r.height},
+              disabled:button.disabled,
+              hit:hit?.tagName ?? null,
+            };
+          return {point:{x:Math.round(x * devicePixelRatio), y:Math.round(y * devicePixelRatio)}};
+        })()`);
+        if (observation?.point) return observation.point;
+        throw new Error(JSON.stringify(observation));
+      },
+      commandTimeoutMs,
+      "Latest response copy action",
+    );
+  } finally {
+    webview.close();
+  }
   const args = [
     "-NoProfile",
     "-Sta",
@@ -2135,6 +2208,10 @@ async function probeWindowsClipboard({
     String(expectedBytes),
     "-Marker",
     marker,
+    "-ResponseClientX",
+    String(point.x),
+    "-ResponseClientY",
+    String(point.y),
   ];
   if (expectedCode !== null) args.push("-ExpectedCode", expectedCode);
   const { stdout } = await execFileAsync(

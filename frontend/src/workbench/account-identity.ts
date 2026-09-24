@@ -1,4 +1,4 @@
-import type { AccountView } from "../../bridge/contracts.ts";
+import type { AccountView } from "../bridge/contracts.ts";
 
 type IdentityFields = Pick<
   AccountView,

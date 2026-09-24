@@ -19,7 +19,7 @@ import { accountErrorText } from "../../i18n/account-error.ts";
 import {
   accountIdentityInitial,
   accountIdentityLabel,
-} from "../account/identity.ts";
+} from "../../workbench/account-identity.ts";
 import { AccountBalance, AccountUsageSummary } from "./AccountUsageSummary.tsx";
 
 export type SettingsFocusTarget = "title" | "account" | "models" | "providers";

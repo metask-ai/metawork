@@ -6,8 +6,11 @@ import { Button } from "../../components/ui/button.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { useI18n } from "../../i18n/context.ts";
+import {
+  accountIdentityInitial,
+  accountIdentityLabel,
+} from "../../workbench/account-identity.ts";
 import { AboutMetaWorkDialog } from "./AboutMetaWorkDialog.tsx";
-import { accountIdentityInitial, accountIdentityLabel } from "./identity.ts";
 
 export function AccountIdentity({
   account,

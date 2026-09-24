@@ -16,7 +16,10 @@ export async function allocateWebViewTestPort() {
   return port;
 }
 
-export async function connectTestWebView(port) {
+export async function connectTestWebView(
+  port,
+  { requestTimeoutMs = 5000 } = {},
+) {
   let page;
   const deadline = Date.now() + 10_000;
   while (!page && Date.now() < deadline) {
@@ -46,7 +49,7 @@ export async function connectTestWebView(port) {
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`Paint probe ${method} timed out`));
-      }, 5000);
+      }, requestTimeoutMs);
       pending.set(id, (response) => {
         clearTimeout(timer);
         pending.delete(id);

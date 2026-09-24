@@ -41,6 +41,16 @@ test("Windows desktop vertical exercises real large response and code clipboard 
     (source.match(/await probeWindowsClipboard\(\{/g) ?? []).length,
     2,
   );
+  assert.equal(
+    (source.match(/await probeWindowsClipboard\(\{\s*taskId,/g) ?? []).length,
+    2,
+  );
+  assert.match(source, /candidate\.dataset\.taskId ===/);
+  assert.match(source, /task\.getAttribute\('aria-current'\) === 'page'/);
+  assert.match(
+    source,
+    /\.textContent\.includes\(\$\{JSON\.stringify\(marker\)\}\)/,
+  );
   assert.match(source, /expectedCode: 'const clipboardProbe = "70K";'/);
   assert.match(source, /probe-windows-clipboard\.ps1/);
 
@@ -66,6 +76,7 @@ test("Windows desktop vertical exercises real large response and code clipboard 
   assert.match(windowsClipboardProbe, /<pre\\b/);
   assert.match(windowsClipboardProbe, /<code\\b/);
   assert.match(windowsClipboardProbe, /mouse_event\(2,/);
+  assert.match(windowsClipboardProbe, /function Restore-MetaWorkForeground/);
   assert.match(windowsClipboardProbe, /Copy failed/);
 });
 

@@ -128,15 +128,20 @@ pub fn main(init: std.process.Init) !void {
     const description = exported.success.description;
     try session.close(.session_close);
     try runtime.releaseClosedSession(session);
+    var restore_options = options;
+    restore_options.operation_id_floor = .{
+        .last_run_id = description.last_run_id,
+        .last_compact_id = description.last_compact_id,
+    };
     const restored = try runtime.restoreSessionRoute(.{
-        .session = options,
+        .session = restore_options,
         .checkpoint_limits = limits,
         .source = .{ .context = &checkpoint, .read_fn = Checkpoint.read },
         .expectation = .{
             .logical_session_id = description.session_id,
             .checkpoint_generation = exported.success.checkpoint.generation,
-            .last_run_id = last_run,
-            .last_compact_id = 0,
+            .last_run_id = description.last_run_id,
+            .last_compact_id = description.last_compact_id,
             .model = model,
         },
     });
