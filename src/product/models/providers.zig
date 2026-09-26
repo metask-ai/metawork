@@ -1733,7 +1733,7 @@ test "registry keeps a tracked Metask default coherent with intent changes" {
     try registry.configureMetask(
         "principal-1",
         "model-1",
-        .openai_chat_completions,
+        .anthropic_messages,
         3,
         5,
         null,
@@ -1745,7 +1745,7 @@ test "registry keeps a tracked Metask default coherent with intent changes" {
         registry.configureMetask(
             "principal-1",
             "model-2",
-            .openai_chat_completions,
+            .anthropic_messages,
             3,
             6,
             null,
@@ -1757,7 +1757,7 @@ test "registry keeps a tracked Metask default coherent with intent changes" {
     try registry.configureMetask(
         "principal-1",
         "model-2",
-        .openai_chat_completions,
+        .anthropic_messages,
         3,
         6,
         8,
@@ -1770,7 +1770,7 @@ test "registry keeps a tracked Metask default coherent with intent changes" {
     try registry.configureMetask(
         "principal-1",
         "model-2",
-        .openai_chat_completions,
+        .anthropic_messages,
         9,
         10,
         null,

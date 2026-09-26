@@ -289,6 +289,7 @@ test("Text schedules use an Automatic Workspace without requiring a Manual Works
   assert.equal("workspaceId" in created, false);
   assert.equal(created.input.kind, "text");
   assert.equal(created.permissionProfile, "full_access");
+  assert.equal(created.binding.protocol, "anthropic_messages");
 });
 
 test("schedule instructions have no separate Skill or Workspace configuration", () => {

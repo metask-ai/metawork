@@ -22,8 +22,8 @@ pub const Limits = struct {
 };
 
 pub const metask_source_id = "metask";
-pub const metask_openai_chat_completions_url =
-    "https://app.metask-ai.com/v1/chat/completions";
+pub const metask_anthropic_messages_url =
+    "https://app.metask-ai.com/v1/messages";
 
 pub const ModelRef = struct {
     source_id: []const u8,
@@ -917,9 +917,9 @@ pub fn validateMetaskSourceCandidate(input: SourceCandidateInput) ValidationErro
     try validateSourceCandidateStructure(input);
     if (!std.mem.eql(u8, input.target.provider_id, metask_source_id))
         return error.InconsistentState;
-    if (input.target.protocol != .openai_chat_completions)
+    if (input.target.protocol != .anthropic_messages)
         return error.UnsupportedProtocol;
-    if (!std.mem.eql(u8, input.target.base_url, metask_openai_chat_completions_url))
+    if (!std.mem.eql(u8, input.target.base_url, metask_anthropic_messages_url))
         return error.InvalidBaseUrl;
 }
 
@@ -1047,9 +1047,9 @@ fn observingSourceCandidate(
     return OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
-        .openai_chat_completions,
+        .anthropic_messages,
         try allocator.dupe(u8, "metask-model"),
-        try allocator.dupe(u8, metask_openai_chat_completions_url),
+        try allocator.dupe(u8, metask_anthropic_messages_url),
         7,
         secret,
         "",
@@ -1069,7 +1069,7 @@ test "source candidate secure-zeroes rejected and released owned secrets" {
             .metask,
             .anthropic_messages,
             try allocator.dupe(u8, "metask-model"),
-            try allocator.dupe(u8, "https://napi.metask-ai.com/v1/messages"),
+            try allocator.dupe(u8, metask_anthropic_messages_url),
             0,
             rejected_secret,
             "key-1",
@@ -1118,9 +1118,9 @@ test "source candidate keeps source and execution generations independent" {
     var candidate = try OwnedSourceCandidate.initOwned(
         allocator,
         .metask,
-        .openai_chat_completions,
+        .anthropic_messages,
         try allocator.dupe(u8, "metask-model"),
-        try allocator.dupe(u8, metask_openai_chat_completions_url),
+        try allocator.dupe(u8, metask_anthropic_messages_url),
         7,
         try allocator.dupe(u8, "secret"),
         "",

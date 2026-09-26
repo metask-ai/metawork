@@ -6,8 +6,7 @@ const models_ports = @import("product_models_ports");
 const transport_api = @import("metask_transport");
 
 pub const models_url = "https://app.metask-ai.com/v1/models";
-pub const openai_chat_completions_url =
-    contract.metask_openai_chat_completions_url;
+pub const anthropic_messages_url = contract.metask_anthropic_messages_url;
 
 pub const Limits = struct {
     pub const response_bytes: usize = 4 * 1024 * 1024;
@@ -199,7 +198,7 @@ pub const CatalogSession = struct {
         errdefer if (owned_model) |bytes| self.allocator.free(bytes);
         var owned_base_url: ?[]u8 = self.allocator.dupe(
             u8,
-            openai_chat_completions_url,
+            anthropic_messages_url,
         ) catch return error.OutOfMemory;
         errdefer if (owned_base_url) |bytes| self.allocator.free(bytes);
         // The Models source retains its runtime credential so it can issue
@@ -216,7 +215,7 @@ pub const CatalogSession = struct {
         var result = contract.OwnedSourceCandidate.initOwned(
             self.allocator,
             .metask,
-            .openai_chat_completions,
+            .anthropic_messages,
             transferred_model,
             transferred_base_url,
             metask_source_generation,
@@ -248,7 +247,7 @@ pub const CatalogSession = struct {
     }
 
     pub fn selectedProtocol(self: *const CatalogSession) ?contract.Protocol {
-        return if (self.credential.view().len == 0) null else .openai_chat_completions;
+        return if (self.credential.view().len == 0) null else .anthropic_messages;
     }
 
     pub fn ownsSourceSelection(
@@ -801,7 +800,7 @@ test "model declarations distinguish unknown, supported, and unsupported without
     }
 }
 
-test "OAuth catalog issues independent OpenAI-compatible candidates" {
+test "OAuth catalog issues independent Anthropic Messages candidates" {
     var session = CatalogSession.init(std.testing.allocator);
     defer session.deinit();
     session.owner_account_id = try .init("account-1");
@@ -816,11 +815,11 @@ test "OAuth catalog issues independent OpenAI-compatible candidates" {
     var candidate = try session.prepareSourceCandidate("model-1", 1);
     defer candidate.deinit();
     try std.testing.expectEqual(
-        contract.Protocol.openai_chat_completions,
+        contract.Protocol.anthropic_messages,
         candidate.input().target.protocol,
     );
     try std.testing.expectEqualStrings(
-        openai_chat_completions_url,
+        anthropic_messages_url,
         candidate.input().target.base_url,
     );
     try std.testing.expectEqualStrings(

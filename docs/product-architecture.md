@@ -49,7 +49,7 @@ Renderer password form → typed Bridge create/replace → Models credential mut
 → Agent Session consumption
 ```
 
-两条来源最终都必须形成同一份显式 protocol、endpoint、model、credential、source generation 与 Product binding generation。Models 解析 source 时产生不含 Product generation 的 `OwnedSourceCandidate`；只有 Product Control 可以分配 binding generation 并将其转成 `ExecutionConfig`。Metask source id 固定为 `metask`，其 protocol 固定为 `openai_chat_completions`，目录与调用 credential 均来自当前 OAuth authorization lease；Custom Provider source id 为稳定 Provider id。`ModelRef = source_id + model_id` 是模型身份，display name 永远不是 identity。source generation、selection revision、catalog generation、provider revision 与 Product binding generation是不同轴，不能互相替代或假设有序。
+两条来源最终都必须形成同一份显式 protocol、endpoint、model、credential、source generation 与 Product binding generation。Models 解析 source 时产生不含 Product generation 的 `OwnedSourceCandidate`；只有 Product Control 可以分配 binding generation 并将其转成 `ExecutionConfig`。Metask source id 固定为 `metask`，其 protocol 固定为 `anthropic_messages`，目录与调用 credential 均来自当前 OAuth authorization lease；Custom Provider source id 为稳定 Provider id。`ModelRef = source_id + model_id` 是模型身份，display name 永远不是 identity。source generation、selection revision、catalog generation、provider revision 与 Product binding generation是不同轴，不能互相替代或假设有序。
 
 默认 execution、Task attachment 和后台任务各自持有所需的 owned copy；Session、恢复、模型测试及自动标题消费已经解析的配置，不根据厂商、endpoint、模型名或 source id 重新选择 protocol。source id 与 credential locator 不进入 durable Task history。Product 层不定义供执行分派使用的 `ProviderKind`、厂商分类、协议反推或平行 protocol enum；内置官方配置模板的稳定 identity 只选择 Models-owned 配置策略，创建后仍展开并持久化为明确 protocol 与 endpoint。Agent 对 AgentCore ABI 的 provider code 映射仍是 Agent-owned transport 细节。
 

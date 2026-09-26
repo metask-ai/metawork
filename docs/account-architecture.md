@@ -102,7 +102,7 @@ authorization-code token response 必须有界解码，包含非空 `access_toke
 
 旧 `/api/v1/auth/me` 不再参与登录 identity，只由独立 Account summary 请求读取 `balance` 与 `run_mode`；缺失、unknown 或 summary decode 失败不能回滚已经提交的 principal。Account summary 使用独立请求和状态，严格校验 `/me` 的 principal，再把 run mode规范化为 `usage_eligibility`；`simple` 映射为 disabled并跳过usage/history，`standard`映射为enabled后读取dashboard stats和以周一为起点、截至上海当天的最近 53 个周列（365–371 个日历日）的dashboard trend，缺失或未知值映射为unknown且fail closed不请求usage/history。history 请求固定使用 `granularity=day&timezone=Asia/Shanghai`，Host拥有时区、范围和粒度语义；Renderer不提交或推断这些参数，也不得读取或推断raw run mode。服务端新增未知JSON字段可以忽略，但已消费字段类型必须严格；identity 的三个 best-effort资料字段是明确例外，字段自身不可用时只丢弃该投影。余额允许后端合法的负值；actual cost与Token计数必须非负。全部金额必须在Host中规范化为十进制定点字符串，不允许NaN、Infinity、指数形式或二进制浮点直接跨Bridge；Token计数必须规范化为十进制整数文本。history 的范围必须从周一开始并覆盖最近53个周列；范围、日期顺序、唯一性和上界必须整体通过验证后才可提交。成功响应中范围内缺失日期由Renderer解释为零使用，失败或不完整响应不得清空旧值或伪造零使用。summary只描述整个Metask账户，不得暗示为MetaWork独占消耗。
 
-`/v1/models` 与 `/v1/chat/completions` 的 request、decode、metadata、固定 provider endpoint 和目录规则属于 Models 的 Metask provider，不在 Account 合同中定义。Account 只通过 generation-bound lease 交付当前 OAuth access token；Models 将其作为目录与模型调用的 transient bearer credential，不建立 Metask API Key 选择。OAuth token、PKCE verifier、authorization code、access/refresh token、Authorization header 和 authorization lease 不得进入 Renderer、Bridge、日志、Snapshot 或产品历史。
+`/v1/models` 与 `/v1/messages` 的 request、decode、metadata、固定 provider endpoint 和目录规则属于 Models 的 Metask provider，不在 Account 合同中定义。Account 只通过 generation-bound lease 交付当前 OAuth access token；Models 将其作为目录与模型调用的 transient bearer credential，不建立 Metask API Key 选择。OAuth token、PKCE verifier、authorization code、access/refresh token、Authorization header 和 authorization lease 不得进入 Renderer、Bridge、日志、Snapshot 或产品历史。
 
 ## 6. 事务、effect 与 commit
 

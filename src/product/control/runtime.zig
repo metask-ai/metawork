@@ -7900,11 +7900,11 @@ pub const TestSupport = if (builtin.is_test) struct {
         var execution = try models_contract.OwnedConfig.initOwned(
             std.testing.allocator,
             .metask,
-            .openai_chat_completions,
+            .anthropic_messages,
             try std.testing.allocator.dupe(u8, "fixture-model"),
             try std.testing.allocator.dupe(
                 u8,
-                models_contract.metask_openai_chat_completions_url,
+                models_contract.metask_anthropic_messages_url,
             ),
             generation,
             try std.testing.allocator.dupe(u8, credential),
@@ -9213,7 +9213,7 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
         .id = 7,
         .generation = 1,
         .execution_generation = 1,
-        .execution_protocol = .openai_chat_completions,
+        .execution_protocol = .anthropic_messages,
         .execution_model = execution_model,
         .permission_profile = .approval_required,
         .permission_interaction = .interactive,
@@ -9237,7 +9237,7 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
             .id = 3,
             .recent_order = 1,
             .execution_generation = 1,
-            .execution_protocol = .openai_chat_completions,
+            .execution_protocol = .anthropic_messages,
             .execution_model = execution_model,
             .permission_profile = .approval_required,
             .permission_interaction = .interactive,
@@ -9434,9 +9434,9 @@ fn replaceTaskCredentialForTest(
     var replacement = try OwnedTaskExecution.clone(std.testing.allocator, .{
         .target = .{
             .provider_id = models_contract.metask_source_id,
-            .protocol = .openai_chat_completions,
+            .protocol = .anthropic_messages,
             .model = "fixture-model",
-            .base_url = models_contract.metask_openai_chat_completions_url,
+            .base_url = models_contract.metask_anthropic_messages_url,
         },
         .execution_generation = task.durable.execution_generation,
         .api_key = credential,
@@ -11176,11 +11176,11 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     var replacement = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
-        .openai_chat_completions,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
-            models_contract.metask_openai_chat_completions_url,
+            models_contract.metask_anthropic_messages_url,
         ),
         2,
         try std.testing.allocator.dupe(u8, "NEXT-SECRET"),
@@ -11219,11 +11219,11 @@ test "execution replacement durably scrubs Schedule before ownership transfer" {
     var blocked = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
-        .openai_chat_completions,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model"),
         try std.testing.allocator.dupe(
             u8,
-            models_contract.metask_openai_chat_completions_url,
+            models_contract.metask_anthropic_messages_url,
         ),
         3,
         try std.testing.allocator.dupe(u8, "BLOCKED-SECRET"),
@@ -12910,11 +12910,11 @@ test "default replacement preserves Task generation and installs the next admiss
     var replacement = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
-        .openai_chat_completions,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model-2"),
         try std.testing.allocator.dupe(
             u8,
-            models_contract.metask_openai_chat_completions_url,
+            models_contract.metask_anthropic_messages_url,
         ),
         2,
         try std.testing.allocator.dupe(u8, "metawork"),
@@ -14335,11 +14335,11 @@ test "Runtime shutdown releases current and Task-owned execution generations" {
     var replacement = try models_contract.OwnedConfig.initOwned(
         std.testing.allocator,
         .metask,
-        .openai_chat_completions,
+        .anthropic_messages,
         try std.testing.allocator.dupe(u8, "fixture-model-2"),
         try std.testing.allocator.dupe(
             u8,
-            models_contract.metask_openai_chat_completions_url,
+            models_contract.metask_anthropic_messages_url,
         ),
         2,
         try std.testing.allocator.dupe(u8, "SECRET-KEY-2"),

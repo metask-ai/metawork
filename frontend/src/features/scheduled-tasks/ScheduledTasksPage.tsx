@@ -175,7 +175,7 @@ function currentBinding(
     modelRef: selection!,
     sourceGeneration: metask.sourceGeneration,
     selectionRevision: snapshot.models.selectionRevision,
-    protocol: "openai_chat_completions",
+    protocol: "anthropic_messages",
   };
 }
 

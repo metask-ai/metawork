@@ -41,7 +41,7 @@ pub const TestSupport = if (builtin.is_test) struct {
         try runtime.registry.configureMetask(
             principal_ref,
             selected_model,
-            .openai_chat_completions,
+            .anthropic_messages,
             source_generation,
             metask_selection_revision,
             if (configure_updates_default) default_selection_revision else null,
@@ -2017,6 +2017,14 @@ test "Models owns Metask catalog authority without changing global default" {
     try std.testing.expectEqual(
         first_source_generation,
         second_candidate.input().source_generation,
+    );
+    try std.testing.expectEqual(
+        contract.Protocol.anthropic_messages,
+        second_candidate.input().target.protocol,
+    );
+    try std.testing.expectEqualStrings(
+        contract.metask_anthropic_messages_url,
+        second_candidate.input().target.base_url,
     );
 
     runtime.setMetaskAuthorizationUnavailable();
