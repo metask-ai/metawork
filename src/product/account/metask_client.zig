@@ -7,18 +7,13 @@ const summary = @import("account_summary");
 const transport_api = @import("metask_transport");
 
 pub const userinfo_url = oauth.userinfo_url;
-pub const current_user_url = "https://napi.metask-ai.com/api/v1/auth/me";
-pub const usage_dashboard_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/stats";
-pub const usage_history_url = "https://napi.metask-ai.com/api/v1/usage/dashboard/trend";
-pub const usage_history_timezone = summary.history_timezone;
+pub const usage_stats_url = "https://app.metask-ai.com/v1/usage/stats";
 
 pub const RequestKind = enum {
     exchange_code,
     refresh_token,
     userinfo,
-    current_user,
-    usage_dashboard,
-    usage_history,
+    usage_stats,
 };
 
 pub const Request = struct {
@@ -26,12 +21,12 @@ pub const Request = struct {
     body: []const u8 = "",
     bearer: ?[]const u8 = null,
     control: ?RequestControl = null,
-    usage_history_range: ?UsageHistoryRange = null,
+    usage_stats_range: ?UsageStatsRange = null,
 };
 
-pub const UsageHistoryRange = struct {
-    start_date: []const u8,
-    end_date: []const u8,
+pub const UsageStatsRange = struct {
+    since: []const u8,
+    before: []const u8,
 };
 
 pub const Response = transport_api.Response;
@@ -188,68 +183,30 @@ pub fn fetchIdentity(
     ) catch return error.ProtocolInvalid;
 }
 
-pub fn fetchWalletSummary(
-    transport: Transport,
-    bearer: []const u8,
-    principal_ref: []const u8,
-    control: ?RequestControl,
-) ClientError!summary.WalletData {
-    var storage: [oauth.Limits.current_user_body_bytes]u8 = undefined;
-    defer std.crypto.secureZero(u8, &storage);
-    const response = transport.perform(
-        .{
-            .kind = .current_user,
-            .bearer = bearer,
-            .control = control,
-        },
-        &storage,
-    ) catch |err| return transportFailure(err);
-    if (response.status != 200) return classifyStatus(response.status, false);
-    return summary.parseWallet(response.body, principal_ref) catch
-        return error.ProtocolInvalid;
-}
-
-pub fn fetchUsageSummary(
-    transport: Transport,
-    bearer: []const u8,
-    control: ?RequestControl,
-) ClientError!summary.UsageData {
-    var storage: [32 * 1024]u8 = undefined;
-    defer std.crypto.secureZero(u8, &storage);
-    const response = transport.perform(
-        .{
-            .kind = .usage_dashboard,
-            .bearer = bearer,
-            .control = control,
-        },
-        &storage,
-    ) catch |err| return transportFailure(err);
-    if (response.status != 200) return classifyStatus(response.status, false);
-    return summary.parseUsage(response.body) catch return error.ProtocolInvalid;
-}
-
 pub fn fetchUsageHistory(
     transport: Transport,
     bearer: []const u8,
     range: summary.HistoryRange,
     control: ?RequestControl,
 ) ClientError!summary.UsageHistoryData {
+    const stats_range = range.usageStatsRange() catch
+        return error.ProtocolInvalid;
     var storage: [192 * 1024]u8 = undefined;
     defer std.crypto.secureZero(u8, &storage);
     const response = transport.perform(
         .{
-            .kind = .usage_history,
+            .kind = .usage_stats,
             .bearer = bearer,
             .control = control,
-            .usage_history_range = .{
-                .start_date = range.start_date.view(),
-                .end_date = range.end_date.view(),
+            .usage_stats_range = .{
+                .since = stats_range.since.view(),
+                .before = stats_range.before.view(),
             },
         },
         &storage,
     ) catch |err| return transportFailure(err);
     if (response.status != 200) return classifyStatus(response.status, false);
-    return summary.parseUsageHistory(response.body, range) catch
+    return summary.parseUsageStats(response.body, range) catch
         return error.ProtocolInvalid;
 }
 

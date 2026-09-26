@@ -59,16 +59,14 @@ pub const Adapter = struct {
                     .exchange_code => .exchange_code,
                     .refresh_token => .refresh_token,
                     .userinfo => .userinfo,
-                    .current_user => .current_user,
-                    .usage_dashboard => .usage_dashboard,
-                    .usage_history => .usage_history,
+                    .usage_stats => .usage_stats,
                 },
                 .body = request.body,
                 .bearer = request.bearer,
                 .control = request.control,
-                .usage_history_range = if (request.usage_history_range) |range| .{
-                    .start_date = range.start_date,
-                    .end_date = range.end_date,
+                .usage_stats_range = if (request.usage_stats_range) |range| .{
+                    .since = range.since,
+                    .before = range.before,
                 } else null,
             },
             response_buffer,
@@ -179,23 +177,20 @@ pub const Adapter = struct {
             authorization = authorization_storage[0 .. "Bearer ".len + bearer.len];
         }
 
-        var endpoint_storage: [256]u8 = undefined;
+        var endpoint_storage: [384]u8 = undefined;
         const endpoint, const method: std.http.Method = switch (request.kind) {
             .exchange_code, .refresh_token => .{ oauth.token_url, .POST },
             .userinfo => .{ account_metask.userinfo_url, .GET },
-            .current_user => .{ account_metask.current_user_url, .GET },
-            .usage_dashboard => .{ account_metask.usage_dashboard_url, .GET },
-            .usage_history => blk: {
-                const range = request.usage_history_range orelse
+            .usage_stats => blk: {
+                const range = request.usage_stats_range orelse
                     return .protocol_failed;
                 const endpoint = std.fmt.bufPrint(
                     &endpoint_storage,
-                    "{s}?start_date={s}&end_date={s}&granularity=day&timezone={s}",
+                    "{s}?scope=user&granularity=day&since={s}&before={s}",
                     .{
-                        account_metask.usage_history_url,
-                        range.start_date,
-                        range.end_date,
-                        account_metask.usage_history_timezone,
+                        account_metask.usage_stats_url,
+                        range.since,
+                        range.before,
                     },
                 ) catch return .protocol_failed;
                 break :blk .{ endpoint, .GET };

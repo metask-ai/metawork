@@ -289,7 +289,7 @@ test("refresh scheduling failure exposes the explicit Account retry", () => {
   assert.match(markup, />Retry sign-in refresh</);
 });
 
-test("Account settings render the whole-account balance and exact usage ledger", () => {
+test("Account settings render gateway usage history without legacy summaries", () => {
   const markup = renderSettings(
     {
       ...readyAccount,
@@ -297,24 +297,17 @@ test("Account settings render the whole-account balance and exact usage ledger",
         operation: "idle",
         usageEligibility: "enabled",
         wallet: {
-          availability: "ready",
-          balanceU: "100.25",
-          syncedAt: "1789344000000",
+          availability: "unavailable",
+          balanceU: null,
+          syncedAt: null,
           errorCode: "none",
           safeDiagnostic: "",
         },
         usage: {
-          availability: "ready",
-          today: {
-            inputTokens: "344800",
-            outputTokens: "496100",
-            cacheCreationTokens: "0",
-            cacheReadTokens: "1490000",
-            totalTokens: "2330900",
-            actualCostU: "149.739",
-          },
-          total: { totalTokens: "1204200000", actualCostU: "23420.1178" },
-          syncedAt: "1789344000000",
+          availability: "unavailable",
+          today: null,
+          total: null,
+          syncedAt: null,
           errorCode: "none",
           safeDiagnostic: "",
         },
@@ -345,17 +338,13 @@ test("Account settings render the whole-account balance and exact usage ledger",
   assert.match(markup, /Account usage/);
   assert.doesNotMatch(markup, /Metask connected/);
   assert.match(markup, /whole Metask account, not only activity in MetaWork/);
-  assert.match(markup, /100\.25 U/);
   assert.match(markup, /m\*\*\*@example\.com/);
   assert.match(markup, /Concurrency allowance 5/);
   assert.match(markup, /title="Open the Metask recharge page in your browser"/);
   assert.match(markup, />Recharge</);
-  assert.match(
-    markup,
-    /Account information[\s\S]*settings-identity-balance[\s\S]*100\.25 U[\s\S]*Account usage/,
-  );
+  assert.doesNotMatch(markup, /settings-identity-balance|>Balance</);
   assert.match(markup, /2,330,900 Token/);
-  assert.match(markup, /1,204,200,000 Token/);
+  assert.doesNotMatch(markup, /1,204,200,000 Token|>All time</);
   assert.match(markup, /Input 344,800 · Output 496,100/);
   assert.match(markup, /Token usage history/);
   assert.match(markup, /Daily Token usage calendar/);
@@ -366,7 +355,7 @@ test("Account settings render the whole-account balance and exact usage ledger",
   assert.doesNotMatch(markup, /RPM|TPM|response time|API keys|standard cost/i);
 });
 
-test("Account summary failure stays local, stale values remain, and simple mode hides usage", () => {
+test("Account summary failure stays local and legacy disabled projection hides usage", () => {
   const partial = {
     ...readyAccount,
     summary: {
@@ -415,7 +404,7 @@ test("Account summary failure stays local, stale values remain, and simple mode 
     errorCode: "none",
     safeDiagnostic: "",
   };
-  assert.match(
+  assert.doesNotMatch(
     renderSettings(usageOnlyFailure, readyModels, {
       initialSection: "account",
     }),
@@ -502,13 +491,14 @@ test("Account history calendar fills sparse days and keeps complete week columns
   assert.equal(compact.at(-1).date, "2026-09-15");
 });
 
-test("unknown Account usage remains actionable without guessing a mode", () => {
+test("pre-sync Account usage remains actionable without a legacy balance", () => {
   const markup = renderSettings(readyAccount, readyModels, {
     initialSection: "account",
   });
   assert.match(markup, /cannot confirm this account&#x27;s usage mode yet/);
   assert.match(markup, />Refresh account usage</);
-  assert.match(markup, />Balance</);
+  assert.doesNotMatch(markup, />Balance</);
+  assert.match(markup, />Recharge</);
 });
 
 test("an unlimited Account concurrency value stays visible", () => {

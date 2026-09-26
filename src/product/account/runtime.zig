@@ -78,8 +78,6 @@ const SummaryJob = struct {
             .authorization_generation = self.authorization_generation,
             .principal_ref_len = self.lease.principal_ref.len,
             .synced_at_unix_ms = self.synced_at_unix_ms,
-            .wallet = .{ .failed = .account_operation_failed },
-            .usage = .not_requested,
             .history = .not_requested,
         };
         @memcpy(
@@ -94,39 +92,18 @@ const SummaryJob = struct {
             .cancellation = &self.cancellation,
             .deadline = deadline,
         };
-        const wallet = metask_client.fetchWalletSummary(
-            self.transport,
-            self.lease.access_token,
-            self.lease.principal_ref,
-            control,
-        ) catch |err| {
-            completion.wallet = .{ .failed = metask_client.errorCode(err) };
-            self.completion = completion;
-            return;
-        };
-        completion.wallet = .{ .succeeded = wallet };
-        if (wallet.usage_eligibility == .enabled) {
-            completion.usage = if (metask_client.fetchUsageSummary(
+        completion.history = if (self.history_range) |range|
+            if (metask_client.fetchUsageHistory(
                 self.transport,
                 self.lease.access_token,
+                range,
                 control,
-            )) |usage|
-                .{ .succeeded = usage }
+            )) |history|
+                .{ .succeeded = history }
             else |err|
-                .{ .failed = metask_client.errorCode(err) };
-            completion.history = if (self.history_range) |range|
-                if (metask_client.fetchUsageHistory(
-                    self.transport,
-                    self.lease.access_token,
-                    range,
-                    control,
-                )) |history|
-                    .{ .succeeded = history }
-                else |err|
-                    .{ .failed = metask_client.errorCode(err) }
-            else
-                .{ .failed = .account_operation_failed };
-        }
+                .{ .failed = metask_client.errorCode(err) }
+        else
+            .{ .failed = .account_operation_failed };
         self.completion = completion;
     }
 

@@ -19,7 +19,7 @@
 Account 是独立 Product owner，只拥有：
 
 - OAuth Authorization Code + PKCE 登录、refresh token rotation 与退出；
-- 当前 access token、通过 OAuth Userinfo 严格验证的 Metask identity，以及进程内无 secret 的 wallet/usage/history summary；
+- 当前 access token、通过 OAuth Userinfo 严格验证的 Metask identity，以及进程内无 secret 的 usage history summary；
 - Account authorization generation，以及供 Application 单次转移的有界 authorization lease；
 - Account command/completion 合法性、attempt identity、deadline/cancel、effect queue 与 mailbox；
 - 唯一 canonical、无 secret 的 `AccountView` 与 `AccountFact`；
@@ -60,9 +60,9 @@ Application 可以同时持有 Account Runtime 与 Models 管理 capability，�
 checking | signed_out | authorizing | authenticated
 ```
 
-`AccountView` 只包含 `state`、`can_cancel`、经过验证的 `account_id`、best-effort `display_name/email_hint/phone_hint/concurrency_limit`、Account-owned error，以及嵌套的 `summary`；四个资料字段都可以缺失，`concurrency_limit = null` 表示后端资料缺失或不可用，`concurrency_limit = 0` 精确表示 Metask 后端的不限并发语义。完整邮箱和手机号不得进入view、fact、Snapshot、日志或安全诊断；非authenticated状态必须隐藏全部identity字段。`summary` 精确分为全局 `operation = idle | refreshing`、`usage_eligibility = unknown | disabled | enabled` 与独立的 `wallet/usage/history`；每个子投影包含 `availability = unavailable | loading | ready | stale`、nullable 数据、nullable同步时间和 Account summary 安全错误。wallet 只发布 U 余额；usage 只发布今日 input/output/cache creation/cache read/total Token、今日 actual cost、累计 total Token与累计 actual cost；history 发布后端返回的日历范围以及最多 371 个严格递增且日期唯一的每日 input/output/cache creation/cache read/total Token与 actual cost。日期精确为 `YYYY-MM-DD`，金额和 Token 都以 canonical decimal string 越过 Bridge，Host 不发布浮点数。模型目录、默认模型、source、generation、Task admission、API Key和 connection 均不得进入 `AccountView` 或 `AccountFact`。
+`AccountView` 只包含 `state`、`can_cancel`、经过验证的 `account_id`、best-effort `display_name/email_hint/phone_hint/concurrency_limit`、Account-owned error，以及嵌套的 `summary`；四个资料字段都可以缺失，`concurrency_limit = null` 表示后端资料缺失或不可用，`concurrency_limit = 0` 精确表示 Metask 后端的不限并发语义。完整邮箱和手机号不得进入view、fact、Snapshot、日志或安全诊断；非authenticated状态必须隐藏全部identity字段。`summary` 保留全局 `operation = idle | refreshing`、`usage_eligibility = unknown | disabled | enabled` 与 `wallet/usage/history` 的稳定 wire shape；当前 OAuth 合同在 authenticated history 同步时将 eligibility 置为 enabled，wallet 与 usage 保持 unavailable且不携带数据或错误，history 发布后端返回的日历范围以及最多 371 个严格递增且日期唯一的每日 input/output/cache creation/cache read/total Token与 recorded cost。日期精确为 `YYYY-MM-DD`，金额和 Token 都以 canonical decimal string 越过 Bridge，Host 不发布浮点数。模型目录、默认模型、source、generation、Task admission、API Key和 connection 均不得进入 `AccountView` 或 `AccountFact`。
 
-公开命令只有 `begin_login | cancel_operation | retry_refresh | refresh_summary | open_recharge | logout`。`retry_refresh` 只恢复已验证会话的 Account-owned token refresh 调度：token 已进入 refresh window 时立即启动 refresh，否则重新 arm Host timer；`refresh_summary` 只在 authenticated 时显式刷新 wallet/usage/history，不刷新 token或 Models目录。`open_recharge` 只在authenticated时请求平台通过系统浏览器打开Account-owned固定充值页，不接收URL、token、account id或query，也不改变Account状态或发布fact。Account error space只描述 OAuth、identity、refresh token、summary、平台 effect 和自身资源失败，不包含 catalog、model、source、execution、Task、Session 或 consumer 语义。
+公开命令只有 `begin_login | cancel_operation | retry_refresh | refresh_summary | open_recharge | logout`。`retry_refresh` 只恢复已验证会话的 Account-owned token refresh 调度：token 已进入 refresh window 时立即启动 refresh，否则重新 arm Host timer；`refresh_summary` 只在 authenticated 时显式刷新 usage history，不刷新 token或 Models目录。`open_recharge` 只在authenticated时请求平台通过系统浏览器打开Account-owned固定充值页 `https://app.metask-ai.com/app/billing`，不接收URL、token、account id或query，也不改变Account状态或发布fact。Account error space只描述 OAuth、identity、refresh token、summary、平台 effect 和自身资源失败，不包含 catalog、model、source、execution、Task、Session 或 consumer 语义。
 
 ## 4. Authorization lease 与 Metask provider
 
@@ -91,8 +91,7 @@ Account 不知道 provider 当前是否为默认值、是否存在 custom source
 | Client ID     | `metawork`，无 `client_secret`                                       |
 | Scope         | `openid profile email`                                               |
 | Redirect      | `http://localhost:13090/auth/metask/callback`                        |
-| Usage summary | bearer `GET https://napi.metask-ai.com/api/v1/usage/dashboard/stats` |
-| Usage history | bearer `GET https://napi.metask-ai.com/api/v1/usage/dashboard/trend` |
+| Usage history | bearer `GET https://app.metask-ai.com/v1/usage/stats`               |
 
 Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。callback listener 固定绑定 IPv4 loopback `127.0.0.1:13090`，授权请求必须使用后台登记的精确 `localhost` redirect；端口被占用时登录明确失败，不改用动态端口或其他 URI。callback 只接受一次精确路径的 `GET`，严格解析 query、拒绝重复或 unknown 参数，并以 constant-time 比较 `state`。
 
@@ -100,7 +99,7 @@ authorization-code token response 必须有界解码，包含非空 `access_toke
 
 只有 Userinfo 是有界、结构完整的 JSON，具有非空 UTF-8 `sub`、精确 `client_id = metawork` 与非空有界 `authorization_id`，Account 才能把 `sub` 绑定到已提交 token 并提交 authenticated identity。`name`、`email` 与 `phone_number` 都是非阻断、best-effort 资料字段：缺失、`null`、空值、类型错误、格式错误或超出字段边界都不得拒绝 identity。合法有界 UTF-8 `name` 发布为 `display_name`，否则发布空值；合法非空 `email` 必须无控制字符且恰含一个分隔本地部分与域名的 `@`，Account Host 只保留首个 Unicode 码点加 `***@` 与原域名组成的 `email_hint`，否则发布空值；合法 `phone_number` 只允许可选前导 `+` 和 7–20 位 ASCII 数字，Account Host 只保留可选 `+`、前三位数字、`****` 与末四位数字组成的 `phone_hint`，否则发布空值。新 Userinfo 不提供 concurrency，Account 发布 `null`。承载完整资料的 response buffer 在解析后清零。只有失败请求实际使用了当前 credential 时，明确 `401/403` 才能删除该 credential 并进入 `signed_out`：refresh exchange 使用旧 refresh token，Userinfo identity validation 使用刚提交的新 access token；authorization-code exchange 不使用 retained credential，其 `400/401/403` 必须归类为 `oauth_exchange_failed`，不得删除已有会话的 credential。network、deadline、`429` 或 `5xx` 保留可恢复 credential 并发布 Account error，不得回退到旧 identity。
 
-旧 `/api/v1/auth/me` 不再参与登录 identity，只由独立 Account summary 请求读取 `balance` 与 `run_mode`；缺失、unknown 或 summary decode 失败不能回滚已经提交的 principal。Account summary 使用独立请求和状态，严格校验 `/me` 的 principal，再把 run mode规范化为 `usage_eligibility`；`simple` 映射为 disabled并跳过usage/history，`standard`映射为enabled后读取dashboard stats和以周一为起点、截至上海当天的最近 53 个周列（365–371 个日历日）的dashboard trend，缺失或未知值映射为unknown且fail closed不请求usage/history。history 请求固定使用 `granularity=day&timezone=Asia/Shanghai`，Host拥有时区、范围和粒度语义；Renderer不提交或推断这些参数，也不得读取或推断raw run mode。服务端新增未知JSON字段可以忽略，但已消费字段类型必须严格；identity 的三个 best-effort资料字段是明确例外，字段自身不可用时只丢弃该投影。余额允许后端合法的负值；actual cost与Token计数必须非负。全部金额必须在Host中规范化为十进制定点字符串，不允许NaN、Infinity、指数形式或二进制浮点直接跨Bridge；Token计数必须规范化为十进制整数文本。history 的范围必须从周一开始并覆盖最近53个周列；范围、日期顺序、唯一性和上界必须整体通过验证后才可提交。成功响应中范围内缺失日期由Renderer解释为零使用，失败或不完整响应不得清空旧值或伪造零使用。summary只描述整个Metask账户，不得暗示为MetaWork独占消耗。
+新的 OAuth gateway token 只发送给新 OAuth Userinfo 与 `app.metask-ai.com/v1/*`，不得发送给旧 `/api/v1/auth/me` 或 `/api/v1/usage/dashboard/*`，也不得以旧 `run_mode` 决定 history admission。authenticated identity 建立后，Account 直接把 `usage_eligibility` 置为 enabled并读取以周一为起点、截至上海当天的最近 53 个周列（365–371 个日历日）的 usage stats。history 请求固定使用 `scope=user&granularity=day`，Host拥有 `Asia/Shanghai` 日历范围并把本地日边界换算为 UTC `since`（包含）与 `before`（不包含）；Renderer不提交或推断这些参数。响应必须回显 `scope=user`、`granularity=day`、`timezone=Asia/Shanghai` 与精确查询边界；Host严格校验桶顺序、唯一性、`bucket_start`、Token恒等式与 `totals`。稀疏响应中缺失日期只在整段响应通过验证后由Renderer解释为零使用。`cost_mu` 是非负毫 U 整数并在Host中无损规范化为 U 十进制定点字符串；当前已发布响应允许省略 `unit` 与 `cost_complete`，若出现 `unit` 则必须为 `mU`，每日金额因此只具有 recorded cost语义，不承诺区间费用完整。服务端新增未知JSON字段可以忽略，但已消费字段类型必须严格；identity 的三个 best-effort资料字段是明确例外，字段自身不可用时只丢弃该投影。全部金额必须在Host中规范化为十进制定点字符串，不允许NaN、Infinity、指数形式或二进制浮点直接跨Bridge；Token计数必须规范化为十进制整数文本。history 的范围必须从周一开始并覆盖最近53个周列；范围、日期顺序、唯一性和上界必须整体通过验证后才可提交。失败或不完整响应不得清空旧值或伪造零使用。summary只描述整个Metask账户，不得暗示为MetaWork独占消耗。
 
 `/v1/models` 与 `/v1/messages` 的 request、decode、metadata、固定 provider endpoint 和目录规则属于 Models 的 Metask provider，不在 Account 合同中定义。Account 只通过 generation-bound lease 交付当前 OAuth access token；Models 将其作为目录与模型调用的 transient bearer credential，不建立 Metask API Key 选择。OAuth token、PKCE verifier、authorization code、access/refresh token、Authorization header 和 authorization lease 不得进入 Renderer、Bridge、日志、Snapshot 或产品历史。
 
@@ -122,7 +121,7 @@ none
 
 Account coordinator 必须先提交 Account Runtime，再把 canonical Account fact提交给 Product Control，最后通知 Application 的 Models observer。Models 的 refresh/clear/install 结果不得回写、回滚或补充 Account transaction。
 
-Account summary 使用独立于 identity transaction 的有界单飞 attempt。authenticated identity commit 或 authorization generation变化后，Application可启动一次自动同步；用户可用 `refresh_summary` 启动一次显式同步。两类触发都必须取得 generation-bound authorization lease，completion同时匹配 `account_id + authorization generation + summary attempt id` 才能提交。wallet、usage 与 history 独立提交：一项失败不能清除其他项成功，已有值在失败后转为 stale；初次无值则保持 unavailable。不得轮询、定时刷新或无界重试。logout、identity replacement、generation变化与 shutdown必须取消并 join旧 attempt，迟到 completion只能销毁owned token和数据。
+Account summary 使用独立于 identity transaction 的有界单飞 attempt。authenticated identity commit 或 authorization generation变化后，Application可启动一次自动同步；用户可用 `refresh_summary` 启动一次显式同步。两类触发都必须取得 generation-bound authorization lease，completion同时匹配 `account_id + authorization generation + summary attempt id` 才能提交。history 失败不能清除已有成功值，已有值在失败后转为 stale；初次无值则保持 unavailable。不得轮询、定时刷新或无界重试。logout、identity replacement、generation变化与 shutdown必须取消并 join旧 attempt，迟到 completion只能销毁owned token和数据。
 
 refresh timer 的 wall-clock 读取、首次 arm 和失败后的 retry arm 都必须有 Account-owned 可观察结果。无法安排刷新时保持已验证 identity，但发布 `refresh_schedule_failed`；hard expiry 后停止签发或接受 authorization generation。用户通过显式 `retry_refresh` 重新 arm，或在 token 已进入 refresh window 时立即启动 refresh；不得依赖 Renderer timer、每次任意 commit 自动重试或继续发放过期 token。
 
@@ -154,6 +153,6 @@ Account durable authority 只有系统安全存储中的 Metask refresh token：
 - 登录、refresh、restore、重新登录、取消、logout、明确 credential-store 失败、network/deadline failure、stale completion、mailbox collision 与 shutdown 都必须保持单一 terminal fact；
 - Userinfo 未验证时绝不发布 authenticated identity；
 - authorization generation 只随可用授权建立/替换，旧 generation 的 lease 和 completion不能再次生效；
-- wallet/usage/history summary 的 failure、partial success 和 stale 只改变 summary子投影，不回滚 identity、token rotation或 authorization generation；
+- history summary 的 failure 和 stale 只改变 summary子投影，不回滚 identity、token rotation或 authorization generation；
 - logout 后 Account 为 `signed_out`，Models 中 Metask provider 不可解析，custom source与已交付的 Task binding 不被改写；
 - Account 模块和构建图不得导入 Models contract/root/runtime/ports/provider；模型类型和能力不得重新定义在 Account 中。

@@ -40,6 +40,26 @@ pub const Decimal = struct {
         result.len = end;
         return result;
     }
+
+    pub fn fromMilliUnits(value: i64) ProtocolError!Decimal {
+        if (value < 0) return error.InvalidSummaryResponse;
+        var result: Decimal = .{};
+        const whole = @divTrunc(value, 1000);
+        const remainder = @mod(value, 1000);
+        const rendered = std.fmt.bufPrint(&result.bytes, "{d}", .{whole}) catch
+            return error.InvalidSummaryResponse;
+        result.len = rendered.len;
+        if (remainder == 0) return result;
+        if (result.len + 4 > result.bytes.len)
+            return error.InvalidSummaryResponse;
+        result.bytes[result.len] = '.';
+        result.bytes[result.len + 1] = digit(@divTrunc(remainder, 100));
+        result.bytes[result.len + 2] = digit(@divTrunc(@mod(remainder, 100), 10));
+        result.bytes[result.len + 3] = digit(@mod(remainder, 10));
+        result.len += 4;
+        while (result.bytes[result.len - 1] == '0') result.len -= 1;
+        return result;
+    }
 };
 
 pub const WalletData = struct {
@@ -133,6 +153,42 @@ pub const HistoryRange = struct {
             .end_date = try CalendarDate.fromDayNumber(end_day),
         };
     }
+
+    pub fn usageStatsRange(self: HistoryRange) ProtocolError!UsageStatsRange {
+        const start_day = try dayNumber(self.start_date.view());
+        const end_day = try dayNumber(self.end_date.view());
+        return .{
+            .since = try UtcInstant.fromShanghaiDay(start_day),
+            .before = try UtcInstant.fromShanghaiDay(
+                std.math.add(i64, end_day, 1) catch
+                    return error.InvalidSummaryResponse,
+            ),
+        };
+    }
+};
+
+pub const UtcInstant = struct {
+    bytes: [20]u8,
+
+    pub fn view(self: *const UtcInstant) []const u8 {
+        return &self.bytes;
+    }
+
+    fn fromShanghaiDay(day_number: i64) ProtocolError!UtcInstant {
+        const utc_date = try CalendarDate.fromDayNumber(
+            std.math.sub(i64, day_number, 1) catch
+                return error.InvalidSummaryResponse,
+        );
+        var result: UtcInstant = undefined;
+        @memcpy(result.bytes[0..10], utc_date.view());
+        @memcpy(result.bytes[10..], "T16:00:00Z");
+        return result;
+    }
+};
+
+pub const UsageStatsRange = struct {
+    since: UtcInstant,
+    before: UtcInstant,
 };
 
 pub const UsageHistoryDayData = struct {
@@ -240,25 +296,42 @@ pub fn parseUsage(body: []const u8) ProtocolError!UsageData {
     };
 }
 
-const UsageHistoryEnvelope = struct {
-    code: i64,
-    data: struct {
-        trend: []const struct {
-            date: []const u8,
-            input_tokens: i64,
-            output_tokens: i64,
-            cache_creation_tokens: i64,
-            cache_read_tokens: i64,
-            total_tokens: i64,
-            actual_cost: f64,
-        },
-        start_date: []const u8,
-        end_date: []const u8,
-        granularity: []const u8,
-    },
+const UsageStatsTotals = struct {
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+    total_tokens: i64,
+    cost_mu: i64,
 };
 
-pub fn parseUsageHistory(
+const UsageStatsBucket = struct {
+    bucket: []const u8,
+    bucket_start: []const u8,
+    requests: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+    total_tokens: i64,
+    cost_mu: i64,
+};
+
+const UsageStatsEnvelope = struct {
+    object: []const u8,
+    scope: []const u8,
+    granularity: []const u8,
+    timezone: []const u8,
+    unit: ?[]const u8 = null,
+    since: []const u8,
+    before: []const u8,
+    cost_complete: ?bool = null,
+    totals: UsageStatsTotals,
+    data: []const UsageStatsBucket,
+};
+
+pub fn parseUsageStats(
     body: []const u8,
     expected_range: HistoryRange,
 ) ProtocolError!UsageHistoryData {
@@ -268,26 +341,44 @@ pub fn parseUsageHistory(
     defer std.crypto.secureZero(u8, &scratch);
     var fixed = std.heap.FixedBufferAllocator.init(&scratch);
     var parsed = std.json.parseFromSlice(
-        UsageHistoryEnvelope,
+        UsageStatsEnvelope,
         fixed.allocator(),
         body,
         .{ .ignore_unknown_fields = true },
     ) catch return error.InvalidSummaryResponse;
     defer parsed.deinit();
     const raw = parsed.value;
-    if (raw.code != 0 or !std.mem.eql(u8, raw.data.granularity, "day") or
-        !std.mem.eql(u8, raw.data.start_date, expected_range.start_date.view()) or
-        !std.mem.eql(u8, raw.data.end_date, expected_range.end_date.view()) or
-        raw.data.trend.len > contract.Limits.usage_history_days)
+    const stats_range = try expected_range.usageStatsRange();
+    if (!std.mem.eql(u8, raw.object, "usage_stats") or
+        !std.mem.eql(u8, raw.scope, "user") or
+        !std.mem.eql(u8, raw.granularity, "day") or
+        !std.mem.eql(u8, raw.timezone, history_timezone) or
+        !std.mem.eql(u8, raw.since, stats_range.since.view()) or
+        !std.mem.eql(u8, raw.before, stats_range.before.view()) or
+        raw.data.len > contract.Limits.usage_history_days)
         return error.InvalidSummaryResponse;
+    if (raw.unit) |unit| {
+        if (!std.mem.eql(u8, unit, "mU"))
+            return error.InvalidSummaryResponse;
+    }
+    try validateUsageStatsTotals(raw.totals);
 
     var result: UsageHistoryData = .{
         .start_date = expected_range.start_date,
         .end_date = expected_range.end_date,
     };
     var previous_date: ?CalendarDate = null;
-    for (raw.data.trend, 0..) |raw_day, index| {
-        const date = try CalendarDate.parse(raw_day.date);
+    var sums: UsageStatsTotals = .{
+        .requests = 0,
+        .input_tokens = 0,
+        .output_tokens = 0,
+        .cache_creation_tokens = 0,
+        .cache_read_tokens = 0,
+        .total_tokens = 0,
+        .cost_mu = 0,
+    };
+    for (raw.data, 0..) |raw_day, index| {
+        const date = try CalendarDate.parse(raw_day.bucket);
         if (std.mem.order(u8, date.view(), expected_range.start_date.view()) == .lt or
             std.mem.order(u8, date.view(), expected_range.end_date.view()) == .gt)
             return error.InvalidSummaryResponse;
@@ -295,6 +386,18 @@ pub fn parseUsageHistory(
             if (std.mem.order(u8, previous.view(), date.view()) != .lt)
                 return error.InvalidSummaryResponse;
         }
+        const bucket_start = try UtcInstant.fromShanghaiDay(try dayNumber(date.view()));
+        if (!std.mem.eql(u8, raw_day.bucket_start, bucket_start.view()) or
+            raw_day.requests <= 0)
+            return error.InvalidSummaryResponse;
+        try validateUsageStatsBucket(raw_day);
+        sums.requests = try checkedAdd(sums.requests, raw_day.requests);
+        sums.input_tokens = try checkedAdd(sums.input_tokens, raw_day.input_tokens);
+        sums.output_tokens = try checkedAdd(sums.output_tokens, raw_day.output_tokens);
+        sums.cache_creation_tokens = try checkedAdd(sums.cache_creation_tokens, raw_day.cache_creation_tokens);
+        sums.cache_read_tokens = try checkedAdd(sums.cache_read_tokens, raw_day.cache_read_tokens);
+        sums.total_tokens = try checkedAdd(sums.total_tokens, raw_day.total_tokens);
+        sums.cost_mu = try checkedAdd(sums.cost_mu, raw_day.cost_mu);
         result.days[index] = .{
             .date = date,
             .input_tokens = try Decimal.fromInteger(raw_day.input_tokens, false),
@@ -302,12 +405,52 @@ pub fn parseUsageHistory(
             .cache_creation_tokens = try Decimal.fromInteger(raw_day.cache_creation_tokens, false),
             .cache_read_tokens = try Decimal.fromInteger(raw_day.cache_read_tokens, false),
             .total_tokens = try Decimal.fromInteger(raw_day.total_tokens, false),
-            .actual_cost_u = try Decimal.fromFloat(raw_day.actual_cost, false),
+            .actual_cost_u = try Decimal.fromMilliUnits(raw_day.cost_mu),
         };
         previous_date = date;
     }
-    result.days_len = raw.data.trend.len;
+    if (!std.meta.eql(sums, raw.totals))
+        return error.InvalidSummaryResponse;
+    result.days_len = raw.data.len;
     return result;
+}
+
+fn validateUsageStatsTotals(value: UsageStatsTotals) ProtocolError!void {
+    if (value.requests < 0 or value.input_tokens < 0 or
+        value.output_tokens < 0 or value.cache_creation_tokens < 0 or
+        value.cache_read_tokens < 0 or value.total_tokens < 0 or
+        value.cost_mu < 0 or
+        try tokenTotal(
+            value.input_tokens,
+            value.output_tokens,
+            value.cache_creation_tokens,
+            value.cache_read_tokens,
+        ) != value.total_tokens)
+        return error.InvalidSummaryResponse;
+}
+
+fn validateUsageStatsBucket(value: UsageStatsBucket) ProtocolError!void {
+    if (value.input_tokens < 0 or value.output_tokens < 0 or
+        value.cache_creation_tokens < 0 or value.cache_read_tokens < 0 or
+        value.total_tokens < 0 or value.cost_mu < 0 or
+        try tokenTotal(
+            value.input_tokens,
+            value.output_tokens,
+            value.cache_creation_tokens,
+            value.cache_read_tokens,
+        ) != value.total_tokens)
+        return error.InvalidSummaryResponse;
+}
+
+fn tokenTotal(input: i64, output: i64, cache_creation: i64, cache_read: i64) ProtocolError!i64 {
+    var total = try checkedAdd(input, output);
+    total = try checkedAdd(total, cache_creation);
+    return checkedAdd(total, cache_read);
+}
+
+fn checkedAdd(left: i64, right: i64) ProtocolError!i64 {
+    return std.math.add(i64, left, right) catch
+        return error.InvalidSummaryResponse;
 }
 
 fn dayNumber(value: []const u8) ProtocolError!i64 {
@@ -353,6 +496,12 @@ pub const UsageOutcome = union(enum) {
     failed: contract.ErrorCode,
 };
 
+pub const WalletOutcome = union(enum) {
+    not_requested,
+    succeeded: WalletData,
+    failed: contract.ErrorCode,
+};
+
 pub const HistoryOutcome = union(enum) {
     not_requested,
     succeeded: UsageHistoryData,
@@ -365,11 +514,8 @@ pub const Completion = struct {
     principal_ref: [contract.Limits.account_id_bytes]u8 = undefined,
     principal_ref_len: usize,
     synced_at_unix_ms: Decimal,
-    wallet: union(enum) {
-        succeeded: WalletData,
-        failed: contract.ErrorCode,
-    },
-    usage: UsageOutcome,
+    wallet: WalletOutcome = .not_requested,
+    usage: UsageOutcome = .not_requested,
     history: HistoryOutcome = .not_requested,
 
     pub fn principalRef(self: *const Completion) []const u8 {
@@ -582,14 +728,13 @@ pub const State = struct {
                 .next_attempt_id = next_attempt_id,
             };
         }
+        self.usage_eligibility = .enabled;
         const attempt_id = self.next_attempt_id;
         self.next_attempt_id +%= 1;
         if (self.next_attempt_id == 0) self.next_attempt_id = 1;
         self.active_attempt_id = attempt_id;
         self.operation = .refreshing;
-        self.wallet.begin();
-        self.usage.begin(self.usage_eligibility);
-        self.history.begin(self.usage_eligibility);
+        self.history.begin(.enabled);
         return .{ .attempt_id = attempt_id };
     }
 
@@ -601,9 +746,7 @@ pub const State = struct {
         if (self.active_attempt_id != attempt_id) return false;
         self.active_attempt_id = null;
         self.operation = .idle;
-        self.wallet.fail(error_code);
-        if (self.usage_eligibility != .disabled) self.usage.fail(error_code);
-        if (self.usage_eligibility != .disabled) self.history.fail(error_code);
+        self.history.fail(error_code);
         return true;
     }
 
@@ -617,35 +760,19 @@ pub const State = struct {
         switch (completion.wallet) {
             .succeeded => |wallet| {
                 self.wallet.succeed(wallet, completion.synced_at_unix_ms);
-                self.usage_eligibility = wallet.usage_eligibility;
-                switch (wallet.usage_eligibility) {
-                    .disabled => {
-                        self.usage = .{};
-                        self.history = .{};
-                    },
-                    .unknown => {
-                        self.usage.fail(.metask_protocol_invalid);
-                        self.history.fail(.metask_protocol_invalid);
-                    },
-                    .enabled => {
-                        switch (completion.usage) {
-                            .succeeded => |usage| self.usage.succeed(usage, completion.synced_at_unix_ms),
-                            .failed => |error_code| self.usage.fail(error_code),
-                            .not_requested => self.usage.fail(.metask_protocol_invalid),
-                        }
-                        switch (completion.history) {
-                            .succeeded => |history| self.history.succeed(history, completion.synced_at_unix_ms),
-                            .failed => |error_code| self.history.fail(error_code),
-                            .not_requested => self.history.fail(.metask_protocol_invalid),
-                        }
-                    },
-                }
             },
-            .failed => |error_code| {
-                self.wallet.fail(error_code);
-                if (self.usage_eligibility != .disabled) self.usage.fail(error_code);
-                if (self.usage_eligibility != .disabled) self.history.fail(error_code);
-            },
+            .failed => |error_code| self.wallet.fail(error_code),
+            .not_requested => {},
+        }
+        switch (completion.usage) {
+            .succeeded => |usage| self.usage.succeed(usage, completion.synced_at_unix_ms),
+            .failed => |error_code| self.usage.fail(error_code),
+            .not_requested => {},
+        }
+        switch (completion.history) {
+            .succeeded => |history| self.history.succeed(history, completion.synced_at_unix_ms),
+            .failed => |error_code| self.history.fail(error_code),
+            .not_requested => self.history.fail(.metask_protocol_invalid),
         }
         return true;
     }
@@ -724,13 +851,13 @@ test "history range rolls over at Asia Shanghai midnight" {
     try std.testing.expectEqualStrings("2026-09-15", at_midnight.end_date.view());
 }
 
-test "daily usage history strictly validates dates order range and values" {
+test "daily usage stats strictly validates contract range totals and values" {
     const range: HistoryRange = .{
         .start_date = try CalendarDate.parse("2025-09-15"),
         .end_date = try CalendarDate.parse("2026-09-15"),
     };
-    const history = try parseUsageHistory(
-        \\{"code":0,"data":{"trend":[{"date":"2026-09-14","requests":1,"input_tokens":10,"output_tokens":20,"cache_creation_tokens":0,"cache_read_tokens":30,"total_tokens":60,"cost":2,"actual_cost":1.25},{"date":"2026-09-15","requests":2,"input_tokens":40,"output_tokens":50,"cache_creation_tokens":60,"cache_read_tokens":70,"total_tokens":220,"cost":3,"actual_cost":2.5}],"start_date":"2025-09-15","end_date":"2026-09-15","granularity":"day"}}
+    const history = try parseUsageStats(
+        \\{"object":"usage_stats","scope":"user","granularity":"day","timezone":"Asia/Shanghai","since":"2025-09-14T16:00:00Z","before":"2026-09-15T16:00:00Z","totals":{"requests":3,"input_tokens":50,"output_tokens":70,"cache_creation_tokens":60,"cache_read_tokens":100,"total_tokens":280,"cost_mu":3750},"data":[{"bucket":"2026-09-14","bucket_start":"2026-09-13T16:00:00Z","requests":1,"input_tokens":10,"output_tokens":20,"cache_creation_tokens":0,"cache_read_tokens":30,"total_tokens":60,"cost_mu":1250},{"bucket":"2026-09-15","bucket_start":"2026-09-14T16:00:00Z","requests":2,"input_tokens":40,"output_tokens":50,"cache_creation_tokens":60,"cache_read_tokens":70,"total_tokens":220,"cost_mu":2500}]}
     , range);
     try std.testing.expectEqual(@as(usize, 2), history.days_len);
     try std.testing.expectEqualStrings("2026-09-14", history.days[0].date.view());
@@ -738,25 +865,33 @@ test "daily usage history strictly validates dates order range and values" {
     try std.testing.expectEqualStrings("2.5", history.days[1].actual_cost_u.view());
 
     const duplicate =
-        \\{"code":0,"data":{"trend":[{"date":"2026-09-15","input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"actual_cost":0},{"date":"2026-09-15","input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"actual_cost":0}],"start_date":"2025-09-15","end_date":"2026-09-15","granularity":"day"}}
+        \\{"object":"usage_stats","scope":"user","granularity":"day","timezone":"Asia/Shanghai","since":"2025-09-14T16:00:00Z","before":"2026-09-15T16:00:00Z","totals":{"requests":2,"input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"cost_mu":0},"data":[{"bucket":"2026-09-15","bucket_start":"2026-09-14T16:00:00Z","requests":1,"input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"cost_mu":0},{"bucket":"2026-09-15","bucket_start":"2026-09-14T16:00:00Z","requests":1,"input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"cost_mu":0}]}
     ;
     try std.testing.expectError(
         error.InvalidSummaryResponse,
-        parseUsageHistory(duplicate, range),
+        parseUsageStats(duplicate, range),
     );
     const invalid_value =
-        \\{"code":0,"data":{"trend":[{"date":"2026-02-30","input_tokens":-1,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"actual_cost":0}],"start_date":"2025-09-15","end_date":"2026-09-15","granularity":"day"}}
+        \\{"object":"usage_stats","scope":"user","granularity":"day","timezone":"Asia/Shanghai","since":"2025-09-14T16:00:00Z","before":"2026-09-15T16:00:00Z","totals":{"requests":1,"input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"cost_mu":0},"data":[{"bucket":"2026-02-30","bucket_start":"2026-02-28T16:00:00Z","requests":1,"input_tokens":-1,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"cost_mu":0}]}
     ;
     try std.testing.expectError(
         error.InvalidSummaryResponse,
-        parseUsageHistory(invalid_value, range),
+        parseUsageStats(invalid_value, range),
     );
     const mismatched_range =
-        \\{"code":0,"data":{"trend":[],"start_date":"2025-09-17","end_date":"2026-09-15","granularity":"day"}}
+        \\{"object":"usage_stats","scope":"user","granularity":"day","timezone":"Asia/Shanghai","since":"2025-09-16T16:00:00Z","before":"2026-09-15T16:00:00Z","totals":{"requests":0,"input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"cost_mu":0},"data":[]}
     ;
     try std.testing.expectError(
         error.InvalidSummaryResponse,
-        parseUsageHistory(mismatched_range, range),
+        parseUsageStats(mismatched_range, range),
+    );
+
+    const invalid_unit =
+        \\{"object":"usage_stats","scope":"user","granularity":"day","timezone":"Asia/Shanghai","unit":"U","since":"2025-09-14T16:00:00Z","before":"2026-09-15T16:00:00Z","cost_complete":false,"totals":{"requests":0,"input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0,"total_tokens":0,"cost_mu":0},"data":[]}
+    ;
+    try std.testing.expectError(
+        error.InvalidSummaryResponse,
+        parseUsageStats(invalid_unit, range),
     );
 }
 
@@ -775,8 +910,8 @@ test "summary state preserves partial success as stale and clears on authorizati
         .usage = .{ .succeeded = try parseUsage(
             \\{"code":0,"data":{"total_tokens":8,"total_actual_cost":2,"today_input_tokens":1,"today_output_tokens":2,"today_cache_creation_tokens":3,"today_cache_read_tokens":4,"today_tokens":10,"today_actual_cost":1}}
         ) },
-        .history = .{ .succeeded = try parseUsageHistory(
-            \\{"code":0,"data":{"trend":[{"date":"2026-09-15","input_tokens":1,"output_tokens":2,"cache_creation_tokens":3,"cache_read_tokens":4,"total_tokens":10,"actual_cost":1}],"start_date":"2025-09-15","end_date":"2026-09-15","granularity":"day"}}
+        .history = .{ .succeeded = try parseUsageStats(
+            \\{"object":"usage_stats","scope":"user","granularity":"day","timezone":"Asia/Shanghai","unit":"mU","since":"2025-09-14T16:00:00Z","before":"2026-09-15T16:00:00Z","cost_complete":false,"totals":{"requests":1,"input_tokens":1,"output_tokens":2,"cache_creation_tokens":3,"cache_read_tokens":4,"total_tokens":10,"cost_mu":1000},"data":[{"bucket":"2026-09-15","bucket_start":"2026-09-14T16:00:00Z","requests":1,"input_tokens":1,"output_tokens":2,"cache_creation_tokens":3,"cache_read_tokens":4,"total_tokens":10,"cost_mu":1000}]}
         , .{
             .start_date = try CalendarDate.parse("2025-09-15"),
             .end_date = try CalendarDate.parse("2026-09-15"),
@@ -787,15 +922,15 @@ test "summary state preserves partial success as stale and clears on authorizati
     const retry = try state.begin("42", 3);
     try std.testing.expect(state.fail(retry.attempt_id, .metask_service_unavailable));
     const stale = state.view();
-    try std.testing.expectEqual(contract.SummaryAvailability.stale, stale.wallet.availability);
-    try std.testing.expectEqual(contract.SummaryAvailability.stale, stale.usage.availability);
+    try std.testing.expectEqual(contract.SummaryAvailability.ready, stale.wallet.availability);
+    try std.testing.expectEqual(contract.SummaryAvailability.ready, stale.usage.availability);
     try std.testing.expectEqual(contract.SummaryAvailability.stale, stale.history.availability);
     try std.testing.expectEqualStrings("10.5", stale.wallet.balance_u);
     try std.testing.expect(state.clearAuthorization());
     try contract.validateView(.{ .state = .signed_out, .summary = state.view() });
 }
 
-test "summary state ignores stale generation completion and disables usage explicitly" {
+test "summary state ignores stale generation completion and enables gateway history" {
     var state: State = .{};
     const first = try state.begin("42", 1);
     try std.testing.expect(state.clearAuthorization());
@@ -810,21 +945,19 @@ test "summary state ignores stale generation completion and disables usage expli
     };
     @memcpy(stale.principal_ref[0..2], "42");
     try std.testing.expect(!state.complete(&stale));
-    var disabled: Completion = .{
+    var current: Completion = .{
         .attempt_id = second.attempt_id,
         .authorization_generation = 2,
         .principal_ref_len = 2,
         .synced_at_unix_ms = try Decimal.fromInteger(2000, false),
-        .wallet = .{ .succeeded = .{
-            .balance_u = try Decimal.fromFloat(5, true),
-            .usage_eligibility = .disabled,
-        } },
-        .usage = .not_requested,
+        .history = .{ .failed = .metask_service_unavailable },
     };
-    @memcpy(disabled.principal_ref[0..2], "42");
-    try std.testing.expect(state.complete(&disabled));
+    @memcpy(current.principal_ref[0..2], "42");
+    try std.testing.expect(state.complete(&current));
     const view = state.view();
-    try std.testing.expectEqual(contract.UsageEligibility.disabled, view.usage_eligibility);
+    try std.testing.expectEqual(contract.UsageEligibility.enabled, view.usage_eligibility);
     try std.testing.expectEqual(contract.SummaryAvailability.unavailable, view.usage.availability);
     try std.testing.expectEqual(contract.ErrorCode.none, view.usage.error_code);
+    try std.testing.expectEqual(contract.SummaryAvailability.unavailable, view.history.availability);
+    try std.testing.expectEqual(contract.ErrorCode.metask_service_unavailable, view.history.error_code);
 }

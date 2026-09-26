@@ -9,9 +9,7 @@ pub const RequestKind = enum {
     exchange_code,
     refresh_token,
     userinfo,
-    current_user,
-    usage_dashboard,
-    usage_history,
+    usage_stats,
     models,
 };
 
@@ -20,12 +18,12 @@ pub const Request = struct {
     body: []const u8 = "",
     bearer: ?[]const u8 = null,
     control: ?RequestControl = null,
-    usage_history_range: ?UsageHistoryRange = null,
+    usage_stats_range: ?UsageStatsRange = null,
 };
 
-pub const UsageHistoryRange = struct {
-    start_date: []const u8,
-    end_date: []const u8,
+pub const UsageStatsRange = struct {
+    since: []const u8,
+    before: []const u8,
 };
 
 pub const Response = struct {

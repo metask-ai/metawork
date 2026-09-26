@@ -883,7 +883,7 @@ export const zhCN: Record<MessageId, string> = {
   "settings.account_history_grid_label": "每日 Token 使用日历",
   "settings.account_history_day_label": "{date}，{tokens} Token",
   "settings.account_history_day_detail":
-    "输入 {input} · 输出 {output} · 缓存创建 {cacheCreation} · 缓存读取 {cacheRead} · {cost} U",
+    "输入 {input} · 输出 {output} · 缓存创建 {cacheCreation} · 缓存读取 {cacheRead} · 已记录费用 {cost} U",
   "settings.account_history_legend_label": "使用强度从少到多",
   "settings.account_history_less": "少",
   "settings.account_history_more": "多",

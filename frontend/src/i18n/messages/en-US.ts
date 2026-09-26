@@ -970,7 +970,7 @@ export const enUS = {
   "settings.account_history_grid_label": "Daily Token usage calendar",
   "settings.account_history_day_label": "{date}, {tokens} Token",
   "settings.account_history_day_detail":
-    "Input {input} · Output {output} · Cache created {cacheCreation} · Cache read {cacheRead} · {cost} U",
+    "Input {input} · Output {output} · Cache created {cacheCreation} · Cache read {cacheRead} · Recorded cost {cost} U",
   "settings.account_history_legend_label": "Usage intensity from less to more",
   "settings.account_history_less": "Less",
   "settings.account_history_more": "More",

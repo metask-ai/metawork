@@ -73,26 +73,22 @@ export function AccountBalance({
 
   return (
     <div className="settings-identity-wallet">
-      <div
-        className="settings-identity-balance"
-        data-availability={wallet.availability}
-      >
-        <span className="settings-identity-balance-label">
-          {t("settings.account_usage_balance")}
-        </span>
-        {ready ? (
+      {ready ? (
+        <div
+          className="settings-identity-balance"
+          data-availability={wallet.availability}
+        >
+          <span className="settings-identity-balance-label">
+            {t("settings.account_usage_balance")}
+          </span>
           <strong>
             {t("settings.account_usage_cost", {
               value: formatAccountDecimal(wallet.balanceU!),
             })}
           </strong>
-        ) : (
-          <strong aria-label={t("settings.account_usage_unavailable")}>
-            —
-          </strong>
-        )}
-        <SummaryState {...wallet} />
-      </div>
+          <SummaryState {...wallet} />
+        </div>
+      ) : null}
       <Button
         variant="primary"
         size="lg"
@@ -148,39 +144,43 @@ export function AccountUsageSummary({
           </div>
         ) : (
           <>
-            <div
-              className="settings-account-usage-row"
-              data-availability={summary.usage.availability}
-            >
-              <div className="settings-account-usage-copy">
-                <span>{t("settings.account_usage_total")}</span>
-                <SummaryState {...summary.usage} />
-              </div>
-              <div className="settings-account-usage-values">
-                {usageReady ? (
-                  <>
-                    <strong>
-                      {t("settings.account_usage_tokens", {
-                        value: formatAccountDecimal(
-                          summary.usage.total!.totalTokens,
-                        ),
-                      })}
+            {summary.usage.availability !== "unavailable" ? (
+              <div
+                className="settings-account-usage-row"
+                data-availability={summary.usage.availability}
+              >
+                <div className="settings-account-usage-copy">
+                  <span>{t("settings.account_usage_total")}</span>
+                  <SummaryState {...summary.usage} />
+                </div>
+                <div className="settings-account-usage-values">
+                  {usageReady ? (
+                    <>
+                      <strong>
+                        {t("settings.account_usage_tokens", {
+                          value: formatAccountDecimal(
+                            summary.usage.total!.totalTokens,
+                          ),
+                        })}
+                      </strong>
+                      <span>
+                        {t("settings.account_usage_cost", {
+                          value: formatAccountDecimal(
+                            summary.usage.total!.actualCostU,
+                          ),
+                        })}
+                      </span>
+                    </>
+                  ) : (
+                    <strong
+                      aria-label={t("settings.account_usage_unavailable")}
+                    >
+                      —
                     </strong>
-                    <span>
-                      {t("settings.account_usage_cost", {
-                        value: formatAccountDecimal(
-                          summary.usage.total!.actualCostU,
-                        ),
-                      })}
-                    </span>
-                  </>
-                ) : (
-                  <strong aria-label={t("settings.account_usage_unavailable")}>
-                    —
-                  </strong>
-                )}
+                  )}
+                </div>
               </div>
-            </div>
+            ) : null}
 
             <AccountUsageHeatmap history={summary.history} />
           </>
