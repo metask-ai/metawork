@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-26
+
+### Added
+
+- Metask OAuth 授权现在直接用于模型目录和模型调用；token 只通过绑定 authorization generation 的有界 lease 传递，并作为 transient execution credential 使用，不进入持久化或投影。
+- Account 设置新增最近 53 周的每日 Token 使用与已记录费用热力图，支持日期明细、显式刷新和 stale 数据保留；充值动作由 Host 打开固定 Metask 页面。
+
+### Changed
+
+- Metask OAuth authority、token 与 Userinfo 合同切换到 `app.metask-ai.com`、client `metawork` 和 `openid profile email` scope；登录 identity 改由严格校验的 Userinfo 建立。
+- 账户用量改用同一 OAuth gateway token 请求 `app.metask-ai.com/v1/usage/stats`；不再调用 `napi.metask-ai.com` 的旧 `/api/v1/auth/me` 与 `/api/v1/usage/dashboard/*`，也不展示当前合同无法取得的余额、今日或累计摘要。
+- Metask 模型调用固定使用 Anthropic Messages `/v1/messages`，模型目录与调用 credential 均来自当前 OAuth 授权。
+- 移除 Metask API Key 选择及对应 Bridge command；Models 设置统一为 `Provider → 默认模型` 流程，Custom Provider credential 继续由独立 Providers 设置管理。
+- 刷新 macOS 与 Windows 的 x64/ARM64 AgentCore bundles 至 revision `95980e10aadd`。
+- macOS 图标打包在既有 Xcode 26.6 基线外，新增对精确 Xcode 27.0 `actool` 的支持。
+
+### Fixed
+
+- 修复 OAuth 回调端口与 Metask 已注册 redirect 不一致的问题，固定使用 `http://localhost:13090/auth/metask/callback`。
+
 ## [0.1.12] - 2026-09-21
 
 ### Added
@@ -290,7 +310,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.1.12...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/metask-ai/metawork/compare/v0.1.12...v0.2.0
 [0.1.12]: https://github.com/metask-ai/metawork/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/metask-ai/metawork/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/metask-ai/metawork/compare/v0.1.9...v0.1.10
