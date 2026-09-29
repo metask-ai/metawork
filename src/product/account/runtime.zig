@@ -1454,7 +1454,7 @@ pub const TestSupport = if (builtin.is_test) struct {
             const self: *Loopback = @ptrCast(@alignCast(context));
             self.open_count += 1;
             if (self.open_fails) return error.BindFailed;
-            return login_attempt.registered_callback_port;
+            return login_attempt.TestSupport.callback_port;
         }
 
         fn wait(
@@ -1694,7 +1694,7 @@ pub const TestSupport = if (builtin.is_test) struct {
     }
 
     fn testLoopbackOpen(_: *anyopaque) loopback_impl.ServerError!u16 {
-        return login_attempt.registered_callback_port;
+        return login_attempt.TestSupport.callback_port;
     }
 
     fn testLoopbackWait(

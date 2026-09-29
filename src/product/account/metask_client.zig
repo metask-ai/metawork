@@ -262,6 +262,11 @@ const FakeTransport = struct {
                     request.body,
                     "client_id=metawork",
                 ) == null) return error.ProtocolFailed;
+                if (std.mem.indexOf(
+                    u8,
+                    request.body,
+                    "redirect_uri=http%3A%2F%2Flocalhost%3A49152%2Fauth%2Fmetask%2Fcallback",
+                ) == null) return error.ProtocolFailed;
                 break :blk
                 \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email"}
                 ;
@@ -295,7 +300,7 @@ test "login exchanges tokens before resolving a strict identity" {
         fake.transport(),
         &code,
         "verifier",
-        oauth.callback_port,
+        49152,
         100,
         null,
     );

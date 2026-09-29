@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Metask OAuth callback 改为每次登录绑定由 OS 分配的 loopback 动态端口，并在授权与 code exchange 中使用同一个 redirect URI。
+
 ## [0.2.0] - 2026-09-26
 
 ### Added

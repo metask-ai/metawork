@@ -276,11 +276,10 @@ pub const Server = struct {
 /// vtable. Exactly one Account login may own the adapter at a time.
 pub const Adapter = struct {
     io: std.Io,
-    port: u16,
     server: ?Server = null,
 
-    pub fn init(io: std.Io, port: u16) Adapter {
-        return .{ .io = io, .port = port };
+    pub fn init(io: std.Io) Adapter {
+        return .{ .io = io };
     }
 
     pub fn deinit(self: *Adapter) void {
@@ -301,7 +300,7 @@ pub const Adapter = struct {
     fn open(context: *anyopaque) loopback.ServerError!u16 {
         const self: *Adapter = @ptrCast(@alignCast(context));
         if (self.server != null) return error.BindFailed;
-        self.server = try Server.initOnPort(self.io, self.port);
+        self.server = try Server.init(self.io);
         return self.server.?.port();
     }
 
@@ -433,6 +432,24 @@ test "Application loopback pump composes with a caller-owned callback policy" {
     thread.join();
     try std.testing.expectEqual(@as(?loopback.ServerError, null), context.failure);
     try std.testing.expect(callback_policy.completed);
+}
+
+test "Account loopback adapters bind distinct OS-assigned ports" {
+    var first = Adapter.init(std.testing.io);
+    defer first.deinit();
+    const first_endpoint = first.endpoint();
+    const first_port = try first_endpoint.open();
+    defer first_endpoint.close();
+
+    var second = Adapter.init(std.testing.io);
+    defer second.deinit();
+    const second_endpoint = second.endpoint();
+    const second_port = try second_endpoint.open();
+    defer second_endpoint.close();
+
+    try std.testing.expect(first_port != 0);
+    try std.testing.expect(second_port != 0);
+    try std.testing.expect(first_port != second_port);
 }
 
 test "cancel closes the Application listener and wakes blocked accept" {

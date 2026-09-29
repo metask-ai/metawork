@@ -9,9 +9,7 @@ pub const token_url = authority ++ "/api/oauth/token";
 pub const userinfo_url = authority ++ "/api/oauth/userinfo";
 pub const client_id = "metawork";
 pub const scope = "openid profile email";
-pub const callback_port: u16 = 13090;
 pub const callback_path = "/auth/metask/callback";
-pub const redirect_uri = "http://localhost:13090" ++ callback_path;
 
 pub const Limits = struct {
     pub const secret_bytes: usize = 4096;
@@ -81,8 +79,8 @@ pub const Secret = struct {
 pub const AttemptMaterial = mechanics.AttemptMaterial;
 
 pub fn writeRedirectUri(writer: *std.Io.Writer, port: u16) !void {
-    if (port != callback_port) return error.InvalidCallback;
-    try writer.writeAll(redirect_uri);
+    if (port == 0) return error.InvalidCallback;
+    try writer.print("http://localhost:{d}{s}", .{ port, callback_path });
 }
 
 pub fn buildAuthorizeUrl(
@@ -510,7 +508,8 @@ fn percentEncode(writer: *std.Io.Writer, input: []const u8) !void {
     }
 }
 
-test "PKCE uses RFC 7636 S256 shape and authorize URL is fixed origin" {
+test "PKCE authorize URL carries the dynamically assigned loopback port" {
+    const callback_port: u16 = 49152;
     const material = AttemptMaterial.fromSeeds(
         @splat(0x11),
         @splat(0x22),
@@ -524,7 +523,7 @@ test "PKCE uses RFC 7636 S256 shape and authorize URL is fixed origin" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         url,
-        "redirect_uri=http%3A%2F%2Flocalhost%3A13090%2Fauth%2Fmetask%2Fcallback",
+        "redirect_uri=http%3A%2F%2Flocalhost%3A49152%2Fauth%2Fmetask%2Fcallback",
     ) != null);
     try std.testing.expect(std.mem.endsWith(
         u8,
@@ -533,8 +532,19 @@ test "PKCE uses RFC 7636 S256 shape and authorize URL is fixed origin" {
     ));
     try std.testing.expectError(
         error.InvalidCallback,
-        buildAuthorizeUrl(&buffer, callback_port + 1, &material),
+        buildAuthorizeUrl(&buffer, 0, &material),
     );
+
+    const another_url = try buildAuthorizeUrl(
+        &buffer,
+        callback_port + 1,
+        &material,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        another_url,
+        "redirect_uri=http%3A%2F%2Flocalhost%3A49153%2Fauth%2Fmetask%2Fcallback",
+    ) != null);
 }
 
 test "callback parser rejects wrong path duplicates and state mismatch" {
@@ -755,6 +765,7 @@ test "optional account summary fields never become identity gates" {
 }
 
 test "authorization code and refresh bodies do not widen client contract" {
+    const callback_port: u16 = 49152;
     var code = try Secret.init(std.testing.allocator, "abc /?");
     defer code.deinit();
     var body_storage: [1024]u8 = undefined;
@@ -773,7 +784,7 @@ test "authorization code and refresh bodies do not widen client contract" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         body,
-        "redirect_uri=http%3A%2F%2Flocalhost%3A13090%2Fauth%2Fmetask%2Fcallback",
+        "redirect_uri=http%3A%2F%2Flocalhost%3A49152%2Fauth%2Fmetask%2Fcallback",
     ) != null);
 
     var refresh = try Secret.init(std.testing.allocator, "refresh-token");

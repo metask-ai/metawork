@@ -90,10 +90,10 @@ Account 不知道 provider 当前是否为默认值、是否存在 custom source
 | Userinfo      | bearer `GET https://app.metask-ai.com/api/oauth/userinfo`            |
 | Client ID     | `metawork`，无 `client_secret`                                       |
 | Scope         | `openid profile email`                                               |
-| Redirect      | `http://localhost:13090/auth/metask/callback`                        |
+| Redirect      | `http://localhost:<dynamic-port>/auth/metask/callback`               |
 | Usage history | bearer `GET https://app.metask-ai.com/v1/usage/stats`               |
 
-Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。callback listener 固定绑定 IPv4 loopback `127.0.0.1:13090`，授权请求必须使用后台登记的精确 `localhost` redirect；端口被占用时登录明确失败，不改用动态端口或其他 URI。callback 只接受一次精确路径的 `GET`，严格解析 query、拒绝重复或 unknown 参数，并以 constant-time 比较 `state`。
+Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。每次登录由 Application callback listener 在 IPv4 loopback `127.0.0.1` 上绑定 OS 分配的动态端口；授权请求和 authorization-code exchange 必须使用同一个实际端口，并保持精确 `localhost` host 与 callback path。无法取得本地端口时登录明确失败，不改用非 loopback 地址或其他 URI。callback 只接受一次精确路径的 `GET`，严格解析 query、拒绝重复或 unknown 参数，并以 constant-time 比较 `state`。
 
 authorization-code token response 必须有界解码，包含非空 `access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in` 与精确 scope；refresh response 具有相同 token 与过期字段，允许省略 scope。token response 不提供 principal；refresh token 成功轮换并 durable commit 后不得恢复旧 token。
 

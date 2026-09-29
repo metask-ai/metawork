@@ -6,8 +6,6 @@ const oauth = @import("account_oauth");
 const loopback = @import("account_loopback");
 const metask = @import("metask_client");
 
-pub const registered_callback_port = oauth.callback_port;
-
 pub const WorkerResult = union(enum) {
     exchange: CallbackExchangeInput,
     failed: state.WorkerFailure,
@@ -282,6 +280,8 @@ fn loopbackFailure(failure: loopback.ServerError) contract.ErrorCode {
 }
 
 pub const TestSupport = if (@import("builtin").is_test) struct {
+    pub const callback_port: u16 = 49152;
+
     pub fn exchangeInput(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -298,7 +298,7 @@ pub const TestSupport = if (@import("builtin").is_test) struct {
         return CallbackExchangeInput.init(
             &code,
             &material.verifier,
-            registered_callback_port,
+            callback_port,
             std.Io.Clock.Timestamp.fromNow(io, remaining),
         );
     }
@@ -326,6 +326,7 @@ const CaptureSink = struct {
 };
 
 const FakeLoopback = struct {
+    port: u16 = 49152,
     io: std.Io,
     state: std.atomic.Value(u32) = .init(0),
     target: [oauth.Limits.callback_target_bytes]u8 = undefined,
@@ -352,8 +353,9 @@ const FakeLoopback = struct {
         self.io.futexWake(u32, &self.state.raw, std.math.maxInt(u32));
     }
 
-    fn open(_: *anyopaque) loopback.ServerError!u16 {
-        return registered_callback_port;
+    fn open(context: *anyopaque) loopback.ServerError!u16 {
+        const self: *FakeLoopback = @ptrCast(@alignCast(context));
+        return self.port;
     }
 
     fn wait(
@@ -397,7 +399,7 @@ test "rejected login result publication releases stale token ownership" {
     var input = CallbackExchangeInput.init(
         &code,
         &material.verifier,
-        registered_callback_port,
+        TestSupport.callback_port,
         std.Io.Clock.Timestamp.fromNow(std.testing.io, LoginAttempt.attempt_timeout),
     );
     var result: WorkerResult = .{ .exchange = input.take() };
@@ -438,13 +440,18 @@ test "login attempt publishes owned callback exchange input" {
         attempt.authorizationUrl(),
         oauth.authorize_url,
     ));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        attempt.authorizationUrl(),
+        "redirect_uri=http%3A%2F%2Flocalhost%3A49152%2Fauth%2Fmetask%2Fcallback",
+    ) != null);
     try fake_loopback.provideCode(&attempt.material.state);
     attempt.join();
     try std.testing.expectEqual(@as(u64, 7), capture.attempt_id);
     var result = capture.result orelse return error.TestUnexpectedResult;
     defer result.deinit();
     try std.testing.expectEqualStrings("code", result.exchange.code.view());
-    try std.testing.expectEqual(registered_callback_port, result.exchange.callback_port);
+    try std.testing.expectEqual(fake_loopback.port, result.exchange.callback_port);
     try std.testing.expectEqualSlices(
         u8,
         &attempt.material.verifier,
