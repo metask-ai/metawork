@@ -916,17 +916,6 @@ test "full-access successor clones exact Manual Task execution without conversat
     // A successor consumes the source Task's owned copy, not the mutable global
     // default. Replacing the default must not silently substitute generation 2.
     try installControlExecutionGeneration(&workbench, 2);
-    task_persistence.result = .failed;
-    try std.testing.expectError(
-        error.TaskPersistenceFailed,
-        workbench.createFullAccessSuccessor(source_task_id, source_binding_epoch),
-    );
-    try std.testing.expectEqual(
-        product_control.PermissionProfile.approval_required,
-        workbench.defaultPermissionProfile(),
-    );
-
-    task_persistence.result = .committed;
     const successor_task_id = try workbench.createFullAccessSuccessor(
         source_task_id,
         source_binding_epoch,
@@ -970,6 +959,89 @@ test "full-access successor clones exact Manual Task execution without conversat
     fake_core.unlock();
     try std.testing.expectEqual(@as(?u32, wire.PERMISSION_FULL_ACCESS), successor_mode);
     try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), successor_shell);
+}
+
+test "full-access successor preserves admitted tasks when history commit fails or is unknown" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 5,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const history = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(history);
+    var persistence: TaskPersistenceProbe = .{
+        .storage = history,
+        .store_on_outcome_unknown = true,
+    };
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = persistence.capability();
+    const limits: product_control.Limits = .{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_tasks = 4,
+        .max_workspaces = 2,
+        .max_runs_per_task = 2,
+        .max_tools_per_run = 1,
+    };
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        limits,
+        configuration,
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    const admission = workbench.newTaskAdmissionView();
+    const source_id = try workbench.createTaskInWorkspace(
+        workspace_id,
+        try workbench.workspaceEpoch(workspace_id),
+        admission.active_generation,
+        admission.active_selection_revision,
+        null,
+        null,
+        null,
+        .{ .interactive = .approval_required },
+    );
+    const epoch = try workbench.taskBindingEpoch(source_id);
+
+    persistence.result = .failed;
+    const first_id = try workbench.createFullAccessSuccessor(source_id, epoch);
+    try std.testing.expect(workbench.task_persistence_health == .write_failed);
+    try std.testing.expectEqual(.full_access, try workbench.taskPermissionProfile(first_id));
+    try std.testing.expectEqual(.full_access, workbench.defaultPermissionProfile());
+    try std.testing.expectEqual(.approval_required, try workbench.taskPermissionProfile(source_id));
+
+    persistence.result = .outcome_unknown;
+    const second_id = try workbench.createFullAccessSuccessor(source_id, epoch);
+    try std.testing.expect(first_id != second_id);
+    try std.testing.expect(workbench.task_persistence_health == .outcome_unknown);
+    try std.testing.expectEqual(.full_access, try workbench.taskPermissionProfile(first_id));
+    try std.testing.expectEqual(.full_access, try workbench.taskPermissionProfile(second_id));
+    try std.testing.expectEqual(.full_access, workbench.defaultPermissionProfile());
+
+    // An unknown result can already have installed the complete projection.
+    // Restore those exact bytes, without a clean-shutdown save masking rollback.
+    var restart_configuration = productControlConfiguration();
+    restart_configuration.task_persistence = persistence.capabilityRestored(history[0..persistence.len]);
+    var restored = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        limits,
+        restart_configuration,
+    );
+    defer restored.deinit();
+    try std.testing.expectEqual(.full_access, restored.defaultPermissionProfile());
+    try std.testing.expectEqual(.full_access, try restored.taskPermissionProfile(first_id));
+    try std.testing.expectEqual(.full_access, try restored.taskPermissionProfile(second_id));
+    try std.testing.expectEqual(.approval_required, try restored.taskPermissionProfile(source_id));
 }
 
 test "full-access successor rejects active and Automatic Workspace sources" {

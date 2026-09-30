@@ -4526,7 +4526,6 @@ fn taskSuccessorRejection(err: anyerror) ?[]const u8 {
         => "task_capacity",
         error.TaskPersistenceUnavailable,
         error.TaskPersistenceFailed,
-        error.TaskPersistenceOutcomeUnknown,
         => "persistence_failed",
         error.ExecutorShuttingDown => "source_unavailable",
         else => null,

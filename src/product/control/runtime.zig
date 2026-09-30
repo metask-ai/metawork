@@ -3727,7 +3727,7 @@ pub const Runtime = struct {
             source.execution,
         );
         self.default_permission_profile = .full_access;
-        self.commitTaskStateIfConfigured() catch |err| {
+        self.commitTaskStateBestEffort() catch |err| {
             self.default_permission_profile = previous_default_profile;
             prepared.rollback(self);
             return err;
