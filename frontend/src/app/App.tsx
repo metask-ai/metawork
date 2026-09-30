@@ -195,15 +195,18 @@ type MutationReason =
   | TaskRunReason
   | TaskModelSelectionReason;
 
-type FullAccessSuccessorState = {
+type FullAccessSuccessorRequest = {
   sourceTaskId: string;
   sourceBindingEpoch: string;
   sourceRunId: string;
-} & (
-  | { phase: "stopping"; reason: null }
-  | { phase: "creating"; reason: null }
+  generation: string;
+};
+
+type FullAccessSuccessorState = { request: FullAccessSuccessorRequest } & (
+  | { phase: "stopping" | "stop_failed" | "creating"; reason: null }
   | { phase: "failed"; reason: TaskFullAccessSuccessorReason }
   | { phase: "outcome_unknown"; reason: null }
+  | { phase: "syncing" | "sync_failed"; reason: null; taskId: string }
 );
 
 function mutationReasonMessageId(reason: MutationReason): MessageId {
@@ -316,8 +319,15 @@ export default function App() {
     Record<string, string>
   >({});
   const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
-  const [fullAccessSuccessor, setFullAccessSuccessor] =
-    useState<FullAccessSuccessorState | null>(null);
+  const [fullAccessSuccessors, setFullAccessSuccessors] = useState<
+    Record<string, FullAccessSuccessorState>
+  >({});
+  const fullAccessSuccessorsRef = useRef(
+    new Map<string, FullAccessSuccessorState>(),
+  );
+  const successorStopRequests = useRef(
+    new Map<string, FullAccessSuccessorRequest>(),
+  );
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [accountCancelBusy, setAccountCancelBusy] = useState(false);
   const [bridgeReady, setBridgeReady] = useState(false);
@@ -338,6 +348,7 @@ export default function App() {
   const client = useMemo(() => new BridgeClient(), []);
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
+  const observedTaskIds = useRef(new Set<string>());
   const pendingTaskDraftRetention = useRef(new Set<string>());
   const taskPendingScopes = useRef(new PendingScopes());
   const cancelPendingTasks = useRef(new PendingScopes());
@@ -981,6 +992,7 @@ export default function App() {
           conversationRecovery.current.observeSnapshot(next, generation);
           observeUiResponseSnapshot(next);
           const projectedTaskIds = next.tasks.map((task) => task.id);
+          observedTaskIds.current = new Set(projectedTaskIds);
           const discardedAttachments = taskDrafts.pruneDrafts([
             ...projectedTaskIds,
             ...pendingTaskDraftRetention.current,
@@ -1025,6 +1037,19 @@ export default function App() {
         if (!cancelled) {
           conversationRecovery.current.resetGeneration(generation);
           bridgeGenerationRef.current = generation;
+          observedTaskIds.current.clear();
+          for (const taskId of successorStopRequests.current.keys())
+            setCancelPendingForTask(taskId, false);
+          successorStopRequests.current.clear();
+          for (const state of fullAccessSuccessorsRef.current.values()) {
+            if (
+              "taskId" in state &&
+              pendingTaskSelection.current === state.taskId
+            )
+              pendingTaskSelection.current = null;
+          }
+          fullAccessSuccessorsRef.current.clear();
+          setFullAccessSuccessors({});
           if (attachmentOperation.current) {
             attachmentOperation.current.cancelled = true;
             void attachmentOperation.current.receive
@@ -2030,94 +2055,204 @@ export default function App() {
     }
   }
 
+  function successorRequestCurrent(request: FullAccessSuccessorRequest) {
+    return (
+      bridgeGenerationRef.current === request.generation &&
+      fullAccessSuccessorsRef.current.get(request.sourceTaskId)?.request ===
+        request
+    );
+  }
+
+  function publishFullAccessSuccessor(state: FullAccessSuccessorState) {
+    if (!successorRequestCurrent(state.request)) return;
+    const taskId = state.request.sourceTaskId;
+    fullAccessSuccessorsRef.current.set(taskId, state);
+    setFullAccessSuccessors((current) => ({ ...current, [taskId]: state }));
+  }
+
+  function dismissFullAccessSuccessor(taskId: string) {
+    const state = fullAccessSuccessorsRef.current.get(taskId);
+    if (
+      state &&
+      "taskId" in state &&
+      pendingTaskSelection.current === state.taskId
+    )
+      pendingTaskSelection.current = null;
+    fullAccessSuccessorsRef.current.delete(taskId);
+    setFullAccessSuccessors((current) => {
+      const next = { ...current };
+      delete next[taskId];
+      return next;
+    });
+  }
+
   async function beginFullAccessSuccessor(sourceTaskId: string) {
     const source = snapshot.tasks.find((task) => task.id === sourceTaskId);
     if (
+      viewSyncFailed ||
+      !bridgeReady ||
       !source ||
       !fullAccessSuccessorSource(source) ||
       cancelPendingTasks.current.has(sourceTaskId) ||
-      fullAccessSuccessor !== null
+      fullAccessSuccessorsRef.current.has(sourceTaskId)
     )
       return;
     const request = {
       sourceTaskId,
       sourceBindingEpoch: source.binding.epoch,
       sourceRunId: source.currentRunId,
+      generation: bridgeGenerationRef.current,
     };
-    setFullAccessSuccessor({ ...request, phase: "stopping", reason: null });
+    fullAccessSuccessorsRef.current.set(sourceTaskId, {
+      request,
+      phase: "stopping",
+      reason: null,
+    });
+    await stopFullAccessSuccessor(request);
+  }
+
+  async function stopFullAccessSuccessor(request: FullAccessSuccessorRequest) {
+    if (!successorRequestCurrent(request)) return;
+    const sourceTaskId = request.sourceTaskId;
+    publishFullAccessSuccessor({ request, phase: "stopping", reason: null });
+    successorStopRequests.current.set(sourceTaskId, request);
     setCancelPendingForTask(sourceTaskId, true);
     try {
-      await client.cancel(sourceTaskId, source.currentRunId);
-      await refreshAfterCommit("run.stop_requested", "operation.run_stop", {
-        scope: "task",
-        taskId: sourceTaskId,
-      });
+      await client.cancel(sourceTaskId, request.sourceRunId);
+      if (successorRequestCurrent(request)) await refreshSnapshot();
     } catch {
+      if (!successorRequestCurrent(request)) return;
       await refreshSnapshot().catch(() => undefined);
-      setFullAccessSuccessor({
-        ...request,
-        phase: "outcome_unknown",
-        reason: null,
-      });
+      if (
+        fullAccessSuccessorsRef.current.get(sourceTaskId)?.phase === "stopping"
+      )
+        publishFullAccessSuccessor({
+          request,
+          phase: "stop_failed",
+          reason: null,
+        });
     } finally {
-      setCancelPendingForTask(sourceTaskId, false);
+      if (successorStopRequests.current.get(sourceTaskId) === request) {
+        successorStopRequests.current.delete(sourceTaskId);
+        setCancelPendingForTask(sourceTaskId, false);
+      }
+    }
+  }
+
+  async function syncFullAccessSuccessor(
+    request: FullAccessSuccessorRequest,
+    taskId: string,
+    retry: boolean,
+  ) {
+    if (!successorRequestCurrent(request)) return;
+    publishFullAccessSuccessor({
+      request,
+      phase: "syncing",
+      reason: null,
+      taskId,
+    });
+    pendingTaskSelection.current = taskId;
+    try {
+      const current = connection.current;
+      if (!current) throw new Error("Workbench connection is not available");
+      if (retry) await current.retry();
+      else await current.refresh();
+      if (!successorRequestCurrent(request)) return;
+      if (!observedTaskIds.current.has(taskId))
+        throw new Error("Created task is not yet in the synchronized snapshot");
+      dismissFullAccessSuccessor(request.sourceTaskId);
+      window.requestAnimationFrame(() => composer.current?.focus());
+    } catch {
+      publishFullAccessSuccessor({
+        request,
+        phase: "sync_failed",
+        reason: null,
+        taskId,
+      });
     }
   }
 
   async function createFullAccessSuccessor(
-    request: Pick<
-      FullAccessSuccessorState,
-      "sourceTaskId" | "sourceBindingEpoch" | "sourceRunId"
-    >,
+    request: FullAccessSuccessorRequest,
   ) {
-    setFullAccessSuccessor({ ...request, phase: "creating", reason: null });
+    if (!successorRequestCurrent(request)) return;
+    publishFullAccessSuccessor({ request, phase: "creating", reason: null });
+    let result;
     try {
-      const result = await client.createFullAccessSuccessor(
+      result = await client.createFullAccessSuccessor(
         request.sourceTaskId,
         request.sourceBindingEpoch,
       );
-      if (!result.accepted) {
-        await refreshSnapshot().catch(() => undefined);
-        setFullAccessSuccessor({
-          ...request,
-          phase: "failed",
-          reason: result.reason,
-        });
-        return;
-      }
-      setNewTaskPermissionOverride(null);
-      pendingTaskSelection.current = result.taskId;
-      pendingTaskDraftRetention.current.add(result.taskId);
-      taskDrafts.setDraft(result.taskId, emptyComposerDraft());
-      await refreshSnapshot();
-      setFullAccessSuccessor(null);
-      window.requestAnimationFrame(() => composer.current?.focus());
     } catch {
+      if (!successorRequestCurrent(request)) return;
       await refreshSnapshot().catch(() => undefined);
-      setFullAccessSuccessor({
-        ...request,
+      publishFullAccessSuccessor({
+        request,
         phase: "outcome_unknown",
         reason: null,
       });
+      return;
     }
+    if (!successorRequestCurrent(request)) return;
+    if (!result.accepted) {
+      await refreshSnapshot().catch(() => undefined);
+      publishFullAccessSuccessor({
+        request,
+        phase: "failed",
+        reason: result.reason,
+      });
+      return;
+    }
+    setNewTaskPermissionOverride(null);
+    pendingTaskDraftRetention.current.add(result.taskId);
+    taskDrafts.setDraft(result.taskId, emptyComposerDraft());
+    await syncFullAccessSuccessor(request, result.taskId, false);
   }
 
-  function retryFullAccessSuccessor() {
-    const request = fullAccessSuccessor;
-    if (!request || request.phase !== "failed") return;
+  function retryFullAccessSuccessor(taskId: string) {
+    const state = fullAccessSuccessorsRef.current.get(taskId);
+    if (!state) return;
+    if (state.phase === "sync_failed") {
+      void syncFullAccessSuccessor(state.request, state.taskId, true);
+      return;
+    }
+    if (viewSyncFailed || !bridgeReady) return;
+    if (state.phase !== "failed" && state.phase !== "stop_failed") return;
+    const request = state.request;
     const source = snapshot.tasks.find(
       (task) => task.id === request.sourceTaskId,
     );
     if (
       !source ||
       source.binding.epoch !== request.sourceBindingEpoch ||
-      source.activeOperation !== null ||
-      source.currentRunPhase !== null
+      source.currentRunId !== request.sourceRunId
     ) {
-      setFullAccessSuccessor({
-        ...request,
+      publishFullAccessSuccessor({
+        request,
         phase: "failed",
         reason: "source_changed",
+      });
+      return;
+    }
+    if (
+      state.phase === "stop_failed" &&
+      source.activeOperation?.kind === "run"
+    ) {
+      if (!cancelPendingTasks.current.has(taskId))
+        void stopFullAccessSuccessor(request);
+      return;
+    }
+    if (
+      source.activeOperation !== null ||
+      source.currentRunPhase !== null ||
+      !source.runs.some(
+        (run) => run.id === request.sourceRunId && run.terminal !== null,
+      )
+    ) {
+      publishFullAccessSuccessor({
+        request,
+        phase: "failed",
+        reason: "source_busy",
       });
       return;
     }
@@ -2125,27 +2260,36 @@ export default function App() {
   }
 
   useEffect(() => {
-    const request = fullAccessSuccessor;
-    if (!request || request.phase !== "stopping") return;
-    const source = snapshot.tasks.find(
-      (task) => task.id === request.sourceTaskId,
-    );
-    if (!source || source.binding.epoch !== request.sourceBindingEpoch) {
-      setFullAccessSuccessor({
-        ...request,
-        phase: "failed",
-        reason: "source_changed",
-      });
-      return;
+    if (viewSyncFailed || !bridgeReady) return;
+    for (const state of fullAccessSuccessorsRef.current.values()) {
+      if (state.phase !== "stopping" && state.phase !== "stop_failed") continue;
+      const request = state.request;
+      const source = snapshot.tasks.find(
+        (task) => task.id === request.sourceTaskId,
+      );
+      if (
+        !source ||
+        source.binding.epoch !== request.sourceBindingEpoch ||
+        source.currentRunId !== request.sourceRunId
+      ) {
+        publishFullAccessSuccessor({
+          request,
+          phase: "failed",
+          reason: "source_changed",
+        });
+        continue;
+      }
+      if (
+        source.activeOperation !== null ||
+        source.currentRunPhase !== null ||
+        !source.runs.some(
+          (run) => run.id === request.sourceRunId && run.terminal !== null,
+        )
+      )
+        continue;
+      void createFullAccessSuccessor(request);
     }
-    if (source.activeOperation !== null || source.currentRunPhase !== null)
-      return;
-    void createFullAccessSuccessor(request);
-  }, [snapshot.revision, fullAccessSuccessor?.phase]);
-
-  useEffect(() => {
-    setFullAccessSuccessor(null);
-  }, [bridgeGeneration]);
+  }, [snapshot.revision, fullAccessSuccessors, viewSyncFailed, bridgeReady]);
 
   async function compactTask() {
     if (
@@ -3805,13 +3949,14 @@ export default function App() {
                 renderPendingUi={(props) => {
                   const { taskId, ...panelProps } = props;
                   const identity = uiRequestIdentity(taskId, props.pending);
-                  const successorForTask =
-                    fullAccessSuccessor?.sourceTaskId === taskId
-                      ? fullAccessSuccessor
-                      : null;
+                  const successorForTask = fullAccessSuccessors[taskId] ?? null;
                   return (
                     <ApprovalPanel
                       {...panelProps}
+                      busy={
+                        panelProps.busy ||
+                        successorForTask?.phase === "stopping"
+                      }
                       fullAccessSuccessor={
                         successorForTask?.phase === "stopping"
                           ? {
@@ -3838,23 +3983,33 @@ export default function App() {
                 }}
                 renderTaskFollowup={(task) => {
                   if (
-                    fullAccessSuccessor?.sourceTaskId !== task.id ||
-                    (fullAccessSuccessor.phase === "stopping" && task.pendingUi)
+                    !fullAccessSuccessors[task.id] ||
+                    (fullAccessSuccessors[task.id].phase === "stopping" &&
+                      task.pendingUi)
                   )
                     return null;
+                  const state = fullAccessSuccessors[task.id];
+                  const recoverable =
+                    state.phase === "failed" ||
+                    state.phase === "stop_failed" ||
+                    state.phase === "sync_failed";
                   return (
                     <FullAccessSuccessorNotice
-                      phase={fullAccessSuccessor.phase}
+                      phase={state.phase}
                       message={
-                        fullAccessSuccessor.reason
-                          ? t(
-                              `approval.full_access_${fullAccessSuccessor.reason}`,
-                            )
+                        state.reason
+                          ? t(`approval.full_access_${state.reason}`)
                           : null
                       }
                       retry={
-                        fullAccessSuccessor.phase === "failed"
-                          ? retryFullAccessSuccessor
+                        recoverable &&
+                        (!bridgeUnavailable || state.phase === "sync_failed")
+                          ? () => retryFullAccessSuccessor(task.id)
+                          : null
+                      }
+                      dismiss={
+                        recoverable || state.phase === "outcome_unknown"
+                          ? () => dismissFullAccessSuccessor(task.id)
                           : null
                       }
                     />

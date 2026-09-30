@@ -3443,6 +3443,7 @@ test("full-access successor failure offers only explicit safe retry", async () =
         phase: "failed",
         message: "There is no capacity for another task right now.",
         retry: () => retries++,
+        dismiss: null,
       }),
     ),
   );
@@ -3456,6 +3457,7 @@ test("full-access successor failure offers only explicit safe retry", async () =
         phase: "outcome_unknown",
         message: null,
         retry: null,
+        dismiss: null,
       }),
     ),
   );
@@ -4376,6 +4378,409 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   assert.equal(
     screen.getByRole("button", { name: "Stop task" }).disabled,
     true,
+  );
+});
+
+function setRepeatedPermissionSource(source) {
+  Object.assign(source.runs[0], {
+    phase: "waiting_ui",
+    terminal: null,
+    activity: { kind: "waiting_user" },
+  });
+  source.currentRunPhase = "waiting_ui";
+  source.activeOperation = { kind: "run", id: source.currentRunId };
+  source.pendingUi = {
+    requestId: "request-repeat",
+    runId: source.currentRunId,
+    order: "2",
+    redacted: false,
+    kind: "permission",
+    toolNamespace: "builtin",
+    tool: "Bash",
+    toolBinding: "builtin:Bash",
+    args: "npm test",
+    policyGeneration: "1",
+    canonicalArgumentsDigest: "digest-repeat",
+    candidate: { ruleId: "rule-repeat", scope: "exact_arguments" },
+    availableChoices: ["deny_once", "allow_once", "allow_session"],
+  };
+  source.uiHistory = [
+    {
+      requestId: "request-before",
+      runId: source.currentRunId,
+      order: "1",
+      kind: "permission",
+      state: "allowed_once",
+      agentRequestId: "agent-before",
+      permission: {
+        requestId: "request-before",
+        matchedRuleId: "rule-repeat",
+        toolNamespace: "builtin",
+        toolName: "Bash",
+        toolBinding: "builtin:Bash",
+        canonicalArgumentsDigest: "digest-repeat",
+        decision: "allow",
+        source: "callback",
+        policyGeneration: "1",
+        usedSessionRule: false,
+        callbackOutcome: "answered",
+      },
+      detail: "",
+      itemCount: 1,
+      detailTruncated: false,
+      redacted: false,
+    },
+  ];
+}
+
+async function publishAppFixture(fixture) {
+  fixture.snapshot.revision = String(BigInt(fixture.snapshot.revision) + 1n);
+  await act(async () => fixture.publish());
+}
+
+async function renderRepeatedPermissionFixture(ctx) {
+  const fixture = await renderAppFixture(ctx);
+  setRepeatedPermissionSource(fixture.snapshot.tasks[0]);
+  await publishAppFixture(fixture);
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  await screen.findByRole("button", {
+    name: "Continue in a new full-access task",
+  });
+  return fixture;
+}
+
+async function publishSourceTerminal(
+  fixture,
+  source = fixture.snapshot.tasks[0],
+) {
+  Object.assign(source.runs[0], {
+    phase: "stopped",
+    terminal: terminal("stopped"),
+    activity: null,
+  });
+  source.currentRunPhase = null;
+  source.activeOperation = null;
+  source.pendingUi = null;
+  await publishAppFixture(fixture);
+}
+
+function appendIdleSuccessor(snapshot, source, id = "5") {
+  snapshot.tasks.push({
+    ...structuredClone(source),
+    id,
+    recentOrder: id,
+    title: "",
+    permissionProfile: "full_access",
+    binding: { ...source.binding, epoch: "1" },
+    lifecycle: "open",
+    deletionStatus: "idle",
+    archived: false,
+    unreadCompletionRunId: null,
+    restorePermission: null,
+    activeOperation: null,
+    currentRunId: "0",
+    currentRunPhase: null,
+    context: { pressure: null, lastAutoCompact: null },
+    runs: [],
+    compacts: [],
+    pendingUi: null,
+    uiHistory: [],
+  });
+  snapshot.permissions.defaultProfile = "full_access";
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  return { accepted: true, sourceTaskId: source.id, taskId: id, reason: null };
+}
+
+test("successor stop timeout is recoverable and does not lock another Task", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient, BridgeCommandTimeoutError } = await vite.ssrLoadModule(
+    "/src/bridge/client.ts",
+  );
+  const cancels = [],
+    creates = [];
+  ctx.mock.method(BridgeClient.prototype, "cancel", async (...ids) => {
+    cancels.push(ids);
+    if (cancels.length === 1)
+      throw new BridgeCommandTimeoutError("cancel", 10000);
+  });
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async (...ids) => {
+      creates.push(ids);
+      return {
+        accepted: false,
+        sourceTaskId: ids[0],
+        taskId: null,
+        reason: "task_capacity",
+      };
+    },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await screen.findByText(/No new task has been requested yet/);
+  assert.equal(creates.length, 0);
+  assert.equal(
+    screen.queryByText(
+      /could not confirm whether the full-access task was created/,
+    ),
+    null,
+  );
+  assert.ok(screen.getByRole("button", { name: "Try stopping again" }));
+
+  setRepeatedPermissionSource(fixture.snapshot.tasks[1]);
+  await publishAppFixture(fixture);
+  fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Continue in a new full-access task",
+    }),
+  );
+  await waitFor(() => assert.equal(cancels.length, 2));
+  fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Try stopping again" }),
+  );
+  await waitFor(() => assert.equal(cancels.length, 3));
+  await publishSourceTerminal(fixture);
+  await screen.findByText("The full-access task was not created.");
+  assert.deepEqual(creates, [["3", fixture.snapshot.tasks[0].binding.epoch]]);
+});
+
+test("successor stop timeout still continues after the same Run really terminates", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let creates = 0;
+  ctx.mock.method(BridgeClient.prototype, "cancel", async () => {
+    throw new Error("stop acknowledgement lost");
+  });
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async () => {
+      creates++;
+      return appendIdleSuccessor(fixture.snapshot, fixture.snapshot.tasks[0]);
+    },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await screen.findByRole("button", { name: "Try stopping again" });
+  assert.equal(creates, 0);
+  await publishSourceTerminal(fixture);
+  await screen.findByText(
+    "This task is ready. Enter its first instruction to begin.",
+  );
+  assert.equal(creates, 1);
+});
+
+test("successor creation timeout offers dismissal without replay or cross-Task blocking", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const cancels = [];
+  let creates = 0;
+  ctx.mock.method(BridgeClient.prototype, "cancel", async (...ids) =>
+    cancels.push(ids),
+  );
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async () => {
+      creates++;
+      throw new Error("create acknowledgement lost");
+    },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await waitFor(() => assert.equal(cancels.length, 1));
+  await publishSourceTerminal(fixture);
+  await screen.findByText(
+    /could not confirm whether the full-access task was created/,
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Try creating the task again" }),
+    null,
+  );
+  await publishAppFixture(fixture);
+  assert.equal(creates, 1);
+  setRepeatedPermissionSource(fixture.snapshot.tasks[1]);
+  await publishAppFixture(fixture);
+  fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Continue in a new full-access task",
+    }),
+  );
+  await waitFor(() => assert.equal(cancels.length, 2));
+  fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Dismiss this notice" }),
+  );
+  assert.equal(
+    screen.queryByText(
+      /could not confirm whether the full-access task was created/,
+    ),
+    null,
+  );
+  assert.equal(creates, 1);
+});
+
+test("successor accepted identity survives snapshot failure and retry only synchronizes", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let resolveCreate,
+    creates = 0;
+  ctx.mock.method(BridgeClient.prototype, "cancel", async () => {});
+  ctx.mock.method(BridgeClient.prototype, "createFullAccessSuccessor", () => {
+    creates++;
+    return new Promise((resolve) => {
+      resolveCreate = resolve;
+    });
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await publishSourceTerminal(fixture);
+  await waitFor(() => assert.equal(creates, 1));
+  fixture.setSnapshotFailure(true);
+  await act(async () =>
+    resolveCreate(
+      appendIdleSuccessor(fixture.snapshot, fixture.snapshot.tasks[0]),
+    ),
+  );
+  await screen.findByText(
+    "The full-access task was created. Its view still needs to synchronize.",
+    {},
+    { timeout: 5000 },
+  );
+  assert.equal(
+    screen.queryByText(
+      /could not confirm whether the full-access task was created/,
+    ),
+    null,
+  );
+  const retrySync = await screen.findByRole(
+    "button",
+    { name: "Retry synchronization" },
+    { timeout: 5000 },
+  );
+  fixture.setSnapshotFailure(false);
+  fireEvent.click(retrySync);
+  await screen.findByText(
+    "This task is ready. Enter its first instruction to begin.",
+  );
+  assert.equal(creates, 1);
+  assert.equal(
+    fixture.snapshot.tasks.filter(
+      (task) => task.permissionProfile === "full_access",
+    ).length,
+    1,
+  );
+});
+
+test("successor ignores late cancel rejection after creation has already succeeded", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let rejectStop,
+    creates = 0;
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "cancel",
+    () =>
+      new Promise((_, reject) => {
+        rejectStop = reject;
+      }),
+  );
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async () => {
+      creates++;
+      return appendIdleSuccessor(fixture.snapshot, fixture.snapshot.tasks[0]);
+    },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await publishSourceTerminal(fixture);
+  await screen.findByText(
+    "This task is ready. Enter its first instruction to begin.",
+  );
+  await act(async () => rejectStop(new Error("late cancel timeout")));
+  fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  assert.equal(
+    screen.queryByText(
+      /No new task has been requested yet|could not confirm whether/,
+    ),
+    null,
+  );
+  assert.equal(creates, 1);
+  fixture.snapshot.tasks[0].currentRunId = "8";
+  fixture.snapshot.tasks[0].runs[0].id = "8";
+  setRepeatedPermissionSource(fixture.snapshot.tasks[0]);
+  await publishAppFixture(fixture);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Continue in a new full-access task",
+    }),
+  );
+  assert.ok(screen.getByText("Stopping the current run…"));
+  await act(async () => rejectStop(new Error("cleanup second stop")));
+});
+
+test("successor discards a late creation reply from a replaced Bridge generation", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const { WorkbenchConnection } = await vite.ssrLoadModule(
+    "/src/bridge/connection.ts",
+  );
+  const connection = WorkbenchConnection.prototype.refresh;
+  let activeConnection, resolveCreate;
+  ctx.mock.method(WorkbenchConnection.prototype, "refresh", function (...args) {
+    activeConnection = this;
+    return connection.apply(this, args);
+  });
+  ctx.mock.method(BridgeClient.prototype, "cancel", async () => {});
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    () =>
+      new Promise((resolve) => {
+        resolveCreate = resolve;
+      }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await publishSourceTerminal(fixture);
+  await screen.findByText("Creating a new full-access task…");
+  ctx.mock.method(BridgeClient.prototype, "connect", async () => "2");
+  await act(async () => activeConnection.retry({ replaceConnection: true }));
+  fireEvent.click(await screen.findByRole("button", { name: /Second task/ }));
+  const lateResult = appendIdleSuccessor(
+    fixture.snapshot,
+    fixture.snapshot.tasks[0],
+    "999",
+  );
+  await act(async () => resolveCreate(lateResult));
+  await publishAppFixture(fixture);
+  assert.equal(
+    screen.queryByText(/could not confirm whether|Creating a new full-access/),
+    null,
+  );
+  assert.equal(
+    screen.queryByText(
+      "This task is ready. Enter its first instruction to begin.",
+    ),
+    null,
+  );
+  assert.equal(
+    screen
+      .getByRole("button", { name: /Second task/ })
+      .getAttribute("aria-current"),
+    "page",
   );
 });
 

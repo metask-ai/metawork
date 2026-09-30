@@ -801,6 +801,11 @@ export const zhCN: Record<MessageId, string> = {
     "本次请求与上次会话规则相符，但 AgentCore 仍再次询问；先前授权可能未被应用。",
   "approval.full_access_continue": "在完全访问新任务中继续",
   "approval.full_access_stopping": "正在停止当前运行…",
+  "approval.full_access_stop_failed": "未能确认停止请求，尚未请求创建新任务。",
+  "approval.full_access_retry_stop": "重试停止",
+  "approval.full_access_sync_pending": "完全访问新任务已创建，界面仍需同步。",
+  "approval.full_access_retry_sync": "重试同步",
+  "approval.full_access_dismiss": "关闭此提示",
   "approval.full_access_creating": "正在创建完全访问新任务…",
   "approval.full_access_failed": "未能创建完全访问新任务。",
   "approval.full_access_outcome_unknown":

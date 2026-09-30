@@ -888,6 +888,13 @@ export const enUS = {
     "This request matches the previous session rule, but AgentCore asked again. The earlier grant may not have been applied.",
   "approval.full_access_continue": "Continue in a new full-access task",
   "approval.full_access_stopping": "Stopping the current run…",
+  "approval.full_access_stop_failed":
+    "The stop request could not be confirmed. No new task has been requested yet.",
+  "approval.full_access_retry_stop": "Try stopping again",
+  "approval.full_access_sync_pending":
+    "The full-access task was created. Its view still needs to synchronize.",
+  "approval.full_access_retry_sync": "Retry synchronization",
+  "approval.full_access_dismiss": "Dismiss this notice",
   "approval.full_access_creating": "Creating a new full-access task…",
   "approval.full_access_failed": "The full-access task was not created.",
   "approval.full_access_outcome_unknown":

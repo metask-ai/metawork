@@ -100,7 +100,9 @@ export function ApprovalPanel({
               <Button
                 variant="secondary"
                 size="lg"
-                disabled={fullAccessSuccessor.phase === "stopping"}
+                disabled={
+                  actionDisabled || fullAccessSuccessor.phase === "stopping"
+                }
                 onClick={fullAccessSuccessor.onContinue}
               >
                 {fullAccessSuccessor.phase === "stopping"
@@ -224,10 +226,19 @@ export function FullAccessSuccessorNotice({
   phase,
   message,
   retry,
+  dismiss,
 }: {
-  phase: "stopping" | "creating" | "failed" | "outcome_unknown";
+  phase:
+    | "stopping"
+    | "stop_failed"
+    | "creating"
+    | "failed"
+    | "outcome_unknown"
+    | "syncing"
+    | "sync_failed";
   message: string | null;
   retry: (() => void) | null;
+  dismiss: (() => void) | null;
 }) {
   const { t } = useI18n();
   return (
@@ -235,16 +246,29 @@ export function FullAccessSuccessorNotice({
       <strong>
         {phase === "stopping"
           ? t("approval.full_access_stopping")
-          : phase === "creating"
-            ? t("approval.full_access_creating")
-            : phase === "outcome_unknown"
-              ? t("approval.full_access_outcome_unknown")
-              : t("approval.full_access_failed")}
+          : phase === "stop_failed"
+            ? t("approval.full_access_stop_failed")
+            : phase === "creating"
+              ? t("approval.full_access_creating")
+              : phase === "syncing" || phase === "sync_failed"
+                ? t("approval.full_access_sync_pending")
+                : phase === "outcome_unknown"
+                  ? t("approval.full_access_outcome_unknown")
+                  : t("approval.full_access_failed")}
       </strong>
       {message && <span>{message}</span>}
       {retry && (
         <Button variant="secondary" size="lg" onClick={retry}>
-          {t("approval.full_access_retry")}
+          {phase === "stop_failed"
+            ? t("approval.full_access_retry_stop")
+            : phase === "sync_failed"
+              ? t("approval.full_access_retry_sync")
+              : t("approval.full_access_retry")}
+        </Button>
+      )}
+      {dismiss && (
+        <Button variant="secondary" size="lg" onClick={dismiss}>
+          {t("approval.full_access_dismiss")}
         </Button>
       )}
     </aside>
