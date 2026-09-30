@@ -4433,6 +4433,46 @@ function setRepeatedPermissionSource(source) {
   ];
 }
 
+test("permission restore counts remain a qualified supplement in both locales", () => {
+  const source = { runs: [run()], currentRunId: "7" };
+  setRepeatedPermissionSource(source);
+  source.uiHistory[0].state = "allowed_always";
+  source.restorePermission = { restoredRules: "0", invalidatedRules: "1" };
+  for (const locale of ["en-US", "zh-CN"]) {
+    render(
+      createElement(
+        I18nContext.Provider,
+        {
+          value: {
+            locale,
+            setLocale() {},
+            t: (id, values) => translate(locale, id, values),
+          },
+        },
+        createElement(ApprovalPanel, {
+          pending: source.pendingUi,
+          task: source,
+          busy: false,
+          responsePhase: "idle",
+          respond() {},
+        }),
+      ),
+    );
+    const note = screen.getByRole("note").textContent;
+    assert.ok(
+      note.includes(translate(locale, "approval.reason_session_grant_missed")),
+    );
+    assert.ok(
+      note.includes(translate(locale, "approval.restore_rules_invalidated")),
+    );
+    assert.doesNotMatch(
+      note,
+      /The previous session rule could not be restored|上次会话规则未能恢复/,
+    );
+    cleanup();
+  }
+});
+
 async function publishAppFixture(fixture) {
   fixture.snapshot.revision = String(BigInt(fixture.snapshot.revision) + 1n);
   await act(async () => fixture.publish());

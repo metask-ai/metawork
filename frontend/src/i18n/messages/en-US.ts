@@ -882,8 +882,8 @@ export const enUS = {
     "AgentCore issued a different session-rule identity for this request.",
   "approval.reason_session_choice_unavailable":
     "AgentCore did not offer a session-scoped choice for this request.",
-  "approval.reason_session_rule_invalidated":
-    "The previous session rule could not be restored.",
+  "approval.restore_rules_invalidated":
+    "Some session rules were invalidated during restoration. MetaWork cannot tell whether they relate to this request.",
   "approval.reason_session_grant_missed":
     "This request matches the previous session rule, but AgentCore asked again. The earlier grant may not have been applied.",
   "approval.full_access_continue": "Continue in a new full-access task",

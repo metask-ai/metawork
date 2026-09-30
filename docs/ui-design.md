@@ -829,6 +829,8 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
 
 审批卡片只能展示 AgentCore 当前 typed request 提供的 choice。`allow_once` 只批准本次请求；只有 request 带有精确 candidate 时才可展示 Session scope choice。Renderer 不得自行扩大 choice、持久化 grant、显示 `Always allow`，或从工具名称和命令文本推断作用域。
 
+重复请求说明只能依据可关联到该请求的诊断事实归因。restore 的规则失效总数只能作为“部分会话规则曾失效”的补充信息，并明确与当前请求的关系未知，不得宣称当前规则未能恢复或覆盖具体请求的诊断。
+
 在完全访问新任务中继续的流程按源 Task 隔离恢复状态，不冻结其他 Task。停止未确认必须与创建结果未知区分：停止可显式重试，且仍等待同一 Run 的真实 terminal；明确创建拒绝可显式重试，创建结果未知只能核对任务列表或关闭提示，不自动重发。已取得新 Task identity 后，视图同步失败只提供同步恢复，不得改判为创建未知或再次创建。关闭提示不撤销已发送的 Host 操作，旧连接或已退出流程的异步回复不得恢复提示或改变 Task 选择。
 
 ### 10.2 PermissionProfile

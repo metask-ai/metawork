@@ -796,7 +796,8 @@ export const zhCN: Record<MessageId, string> = {
     "AgentCore 为本次请求给出了不同的会话规则标识。",
   "approval.reason_session_choice_unavailable":
     "AgentCore 没有为本次请求提供会话范围选项。",
-  "approval.reason_session_rule_invalidated": "上次会话规则未能恢复。",
+  "approval.restore_rules_invalidated":
+    "恢复时有部分会话规则失效，MetaWork 无法确认它们是否与本次请求有关。",
   "approval.reason_session_grant_missed":
     "本次请求与上次会话规则相符，但 AgentCore 仍再次询问；先前授权可能未被应用。",
   "approval.full_access_continue": "在完全访问新任务中继续",

@@ -86,7 +86,7 @@ test("exact_arguments changes are not mislabeled as a repeated request", () => {
   );
 });
 
-test("candidate and restore changes explain why a Session grant is unavailable", () => {
+test("candidate changes and missing Session choices remain specific diagnostics", () => {
   assert.equal(
     diagnoseRepeatedPermission(task(), {
       ...pending,
@@ -95,11 +95,20 @@ test("candidate and restore changes explain why a Session grant is unavailable",
     "candidate_changed",
   );
   assert.equal(
-    diagnoseRepeatedPermission(task(record(), "1"), pending)?.reason,
-    "session_rule_invalidated",
-  );
-  assert.equal(
     diagnoseRepeatedPermission(task(), { ...pending, candidate: null })?.reason,
     "session_choice_unavailable",
   );
+});
+
+test("aggregate restore counts never replace a particular rule diagnostic", () => {
+  const previous = record("allowed_always", {
+    requestId: "new-grant-after-restore",
+  });
+  const withRestore = diagnoseRepeatedPermission(task(previous, "1"), pending);
+  const withoutRestore = diagnoseRepeatedPermission(task(previous), pending);
+  assert.equal(withRestore.reason, "session_grant_missed");
+  assert.equal(withRestore.reason, withoutRestore.reason);
+  assert.equal(withRestore.restoreRulesInvalidated, true);
+  assert.equal(withoutRestore.restoreRulesInvalidated, false);
+  assert.equal(withRestore.previous, previous);
 });

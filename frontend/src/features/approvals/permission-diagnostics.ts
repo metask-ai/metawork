@@ -6,12 +6,12 @@ export type RepeatedPermissionReason =
   | "policy_changed"
   | "candidate_changed"
   | "session_choice_unavailable"
-  | "session_rule_invalidated"
   | "session_grant_missed";
 
 export type RepeatedPermissionDiagnostic = {
   reason: RepeatedPermissionReason;
   previous: UiRecord;
+  restoreRulesInvalidated: boolean;
 };
 
 type PermissionDiagnosticTask = Pick<
@@ -50,26 +50,30 @@ export function diagnoseRepeatedPermission(
     break;
   }
   if (!previous?.permission) return null;
+  const diagnostic = (
+    reason: RepeatedPermissionReason,
+  ): RepeatedPermissionDiagnostic => ({
+    reason,
+    previous,
+    restoreRulesInvalidated: invalidatedRuleCount(task) > 0n,
+  });
 
-  if (previous.state === "allowed_once")
-    return { reason: "allowed_once", previous };
-  if (previous.state === "denied") return { reason: "denied_once", previous };
+  if (previous.state === "allowed_once") return diagnostic("allowed_once");
+  if (previous.state === "denied") return diagnostic("denied_once");
   if (previous.permission.policyGeneration !== pending.policyGeneration)
-    return { reason: "policy_changed", previous };
+    return diagnostic("policy_changed");
   if (pending.candidate === null)
-    return { reason: "session_choice_unavailable", previous };
+    return diagnostic("session_choice_unavailable");
   if (
     previous.permission.matchedRuleId.length > 0 &&
     previous.permission.matchedRuleId !== pending.candidate.ruleId
   )
-    return { reason: "candidate_changed", previous };
-  if (invalidatedRuleCount(task) > 0n)
-    return { reason: "session_rule_invalidated", previous };
+    return diagnostic("candidate_changed");
   if (
     previous.state === "allowed_always" &&
     previous.permission.matchedRuleId === pending.candidate.ruleId
   )
-    return { reason: "session_grant_missed", previous };
+    return diagnostic("session_grant_missed");
 
-  return { reason: "candidate_changed", previous };
+  return diagnostic("candidate_changed");
 }

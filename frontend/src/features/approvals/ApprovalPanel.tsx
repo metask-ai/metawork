@@ -95,6 +95,9 @@ export function ApprovalPanel({
         <aside className="approval-diagnostic" role="note">
           <strong>{t("approval.why_again")}</strong>
           <span>{t(`approval.reason_${diagnostic.reason}`)}</span>
+          {diagnostic.restoreRulesInvalidated && (
+            <span>{t("approval.restore_rules_invalidated")}</span>
+          )}
           {fullAccessSuccessor && (
             <div className="approval-successor-action">
               <Button
