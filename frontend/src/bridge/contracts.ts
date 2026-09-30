@@ -1341,6 +1341,29 @@ export type TaskCreateResult =
       reason: TaskCreateReason;
     };
 
+export type TaskFullAccessSuccessorReason =
+  | "source_changed"
+  | "source_busy"
+  | "source_unavailable"
+  | "workspace_unsupported"
+  | "execution_unavailable"
+  | "task_capacity"
+  | "persistence_failed";
+
+export type TaskFullAccessSuccessorResult =
+  | {
+      accepted: true;
+      sourceTaskId: string;
+      taskId: string;
+      reason: null;
+    }
+  | {
+      accepted: false;
+      sourceTaskId: string;
+      taskId: null;
+      reason: TaskFullAccessSuccessorReason;
+    };
+
 export type TaskWorkspaceIntent =
   | { kind: "automatic" }
   | {

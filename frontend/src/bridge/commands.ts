@@ -77,6 +77,7 @@ export const commands = {
   customModelRemove: "metawork.models.customModels.remove",
   accountLogout: "metawork.account.logout",
   createTask: "metawork.tasks.create",
+  createFullAccessSuccessor: "metawork.tasks.createFullAccessSuccessor",
   run: "metawork.tasks.run",
   selectTaskModel: "metawork.tasks.selectModel",
   restoreTask: "metawork.tasks.restore",

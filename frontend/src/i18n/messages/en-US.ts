@@ -886,6 +886,27 @@ export const enUS = {
     "The previous session rule could not be restored.",
   "approval.reason_session_grant_missed":
     "This request matches the previous session rule, but AgentCore asked again. The earlier grant may not have been applied.",
+  "approval.full_access_continue": "Continue in a new full-access task",
+  "approval.full_access_stopping": "Stopping the current run…",
+  "approval.full_access_creating": "Creating a new full-access task…",
+  "approval.full_access_failed": "The full-access task was not created.",
+  "approval.full_access_outcome_unknown":
+    "MetaWork could not confirm whether the full-access task was created. Check the task list before trying another path.",
+  "approval.full_access_retry": "Try creating the task again",
+  "approval.full_access_source_changed":
+    "The source task changed. Review its latest state before trying again.",
+  "approval.full_access_source_busy":
+    "The source task is still active. Wait for it to finish stopping.",
+  "approval.full_access_source_unavailable":
+    "The source task is no longer available for this action.",
+  "approval.full_access_workspace_unsupported":
+    "This action is available only for a Manual Workspace.",
+  "approval.full_access_execution_unavailable":
+    "The source task's execution configuration is no longer available.",
+  "approval.full_access_task_capacity":
+    "There is no capacity for another task right now.",
+  "approval.full_access_persistence_failed":
+    "MetaWork could not safely save the new task.",
   "approval.response_failed": "The response could not be sent. Try again.",
   "approval.response_sent": "Response sent.",
   "approval.sending": "Sending your response…",

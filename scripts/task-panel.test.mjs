@@ -102,7 +102,7 @@ const { RunProcess } = await vite.ssrLoadModule(
 const { deriveRunPresentation } = await vite.ssrLoadModule(
   "/src/features/tasks/run-presentation.ts",
 );
-const { ApprovalPanel } = await vite.ssrLoadModule(
+const { ApprovalPanel, FullAccessSuccessorNotice } = await vite.ssrLoadModule(
   "/src/features/approvals/ApprovalPanel.tsx",
 );
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
@@ -3434,6 +3434,42 @@ test("permission controls preserve 44px targets and stack at narrow width", asyn
   );
 });
 
+test("full-access successor failure offers only explicit safe retry", async () => {
+  let retries = 0;
+  const user = userEvent.setup({ document: dom.window.document });
+  const view = render(
+    localizedView(
+      createElement(FullAccessSuccessorNotice, {
+        phase: "failed",
+        message: "There is no capacity for another task right now.",
+        retry: () => retries++,
+      }),
+    ),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Try creating the task again" }),
+  );
+  assert.equal(retries, 1);
+  view.rerender(
+    localizedView(
+      createElement(FullAccessSuccessorNotice, {
+        phase: "outcome_unknown",
+        message: null,
+        retry: null,
+      }),
+    ),
+  );
+  assert.ok(
+    screen.getByText(
+      /could not confirm whether the full-access task was created/,
+    ),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Try creating the task again" }),
+    null,
+  );
+});
+
 test("Escape dismissal and focus return preserve the real Task Panel opener", () => {
   assert.equal(shouldDismissSidePanelForEscape(true, "Escape", false), true);
   assert.equal(shouldDismissSidePanelForEscape(false, "Escape", false), false);
@@ -4341,6 +4377,147 @@ test("App stop request remains bound to its Task and never fabricates a terminal
     screen.getByRole("button", { name: "Stop task" }).disabled,
     true,
   );
+});
+
+test("repeated permission can stop and open an idle full-access successor without replay", async (ctx) => {
+  const { snapshot, publish } = await renderAppFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const calls = [];
+  ctx.mock.method(BridgeClient.prototype, "cancel", async (...ids) => {
+    calls.push(["cancel", ...ids]);
+  });
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async (sourceTaskId, expectedBindingEpoch) => {
+      calls.push(["successor", sourceTaskId, expectedBindingEpoch]);
+      const source = snapshot.tasks.find((task) => task.id === sourceTaskId);
+      snapshot.tasks.push({
+        ...structuredClone(source),
+        id: "5",
+        recentOrder: "5",
+        title: "",
+        permissionProfile: "full_access",
+        binding: { ...source.binding, epoch: "1" },
+        lifecycle: "open",
+        deletionStatus: "idle",
+        archived: false,
+        unreadCompletionRunId: null,
+        restorePermission: null,
+        activeOperation: null,
+        currentRunId: "0",
+        currentRunPhase: null,
+        context: { pressure: null, lastAutoCompact: null },
+        runs: [],
+        compacts: [],
+        pendingUi: null,
+        uiHistory: [],
+      });
+      snapshot.permissions.defaultProfile = "full_access";
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return {
+        accepted: true,
+        sourceTaskId,
+        taskId: "5",
+        reason: null,
+      };
+    },
+  );
+  const runCalls = [];
+  ctx.mock.method(BridgeClient.prototype, "run", async (...args) => {
+    runCalls.push(args);
+    assert.fail("the successor flow must not replay an instruction");
+  });
+
+  const source = snapshot.tasks[0];
+  Object.assign(source.runs[0], {
+    phase: "waiting_ui",
+    terminal: null,
+    activity: { kind: "waiting_user" },
+  });
+  source.currentRunPhase = "waiting_ui";
+  source.activeOperation = { kind: "run", id: source.currentRunId };
+  source.pendingUi = {
+    requestId: "request-repeat",
+    runId: source.currentRunId,
+    order: "2",
+    redacted: false,
+    kind: "permission",
+    toolNamespace: "builtin",
+    tool: "Bash",
+    toolBinding: "builtin:Bash",
+    args: "npm test",
+    policyGeneration: "1",
+    canonicalArgumentsDigest: "digest-repeat",
+    candidate: { ruleId: "rule-repeat", scope: "exact_arguments" },
+    availableChoices: ["deny_once", "allow_once", "allow_session"],
+  };
+  source.uiHistory = [
+    {
+      requestId: "request-before",
+      runId: source.currentRunId,
+      order: "1",
+      kind: "permission",
+      state: "allowed_once",
+      agentRequestId: "agent-request-before",
+      permission: {
+        requestId: "request-before",
+        matchedRuleId: "rule-repeat",
+        toolNamespace: "builtin",
+        toolName: "Bash",
+        toolBinding: "builtin:Bash",
+        canonicalArgumentsDigest: "digest-repeat",
+        decision: "allow",
+        source: "callback",
+        policyGeneration: "1",
+        usedSessionRule: false,
+        callbackOutcome: "answered",
+      },
+      detail: "",
+      itemCount: 1,
+      detailTruncated: false,
+      redacted: false,
+    },
+  ];
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+
+  const continueButton = await screen.findByRole("button", {
+    name: "Continue in a new full-access task",
+  });
+  fireEvent.click(continueButton);
+  await waitFor(() =>
+    assert.deepEqual(calls, [["cancel", "3", source.currentRunId]]),
+  );
+  assert.ok(screen.getByText("Stopping the current run…"));
+  assert.equal(screen.queryByText("Creating a new full-access task…"), null);
+
+  Object.assign(source.runs[0], {
+    phase: "stopped",
+    terminal: terminal("stopped"),
+    activity: null,
+  });
+  source.currentRunPhase = null;
+  source.activeOperation = null;
+  source.pendingUi = null;
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+
+  await waitFor(() =>
+    assert.deepEqual(calls, [
+      ["cancel", "3", "7"],
+      ["successor", "3", source.binding.epoch],
+    ]),
+  );
+  assert.ok(
+    await screen.findByText(
+      "This task is ready. Enter its first instruction to begin.",
+    ),
+  );
+  assert.equal(runCalls.length, 0);
+  assert.equal(snapshot.tasks.at(-1).runs.length, 0);
+  assert.equal(snapshot.tasks.at(-1).permissionProfile, "full_access");
 });
 
 function filePreviewOpener(path) {

@@ -44,7 +44,10 @@ import {
   type SettingsFocusTarget,
 } from "../features/settings/SettingsPage.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
-import { ApprovalPanel } from "../features/approvals/ApprovalPanel.tsx";
+import {
+  ApprovalPanel,
+  FullAccessSuccessorNotice,
+} from "../features/approvals/ApprovalPanel.tsx";
 import {
   uiRequestIdentity,
   uiResponsePhase,
@@ -122,6 +125,7 @@ import {
 } from "../bridge/attachment-receive.ts";
 import type {
   TaskCreateReason,
+  TaskFullAccessSuccessorReason,
   TaskCompactReason,
   TaskRestoreReason,
   RunInputView,
@@ -190,6 +194,17 @@ type MutationReason =
   | TaskRestoreReason
   | TaskRunReason
   | TaskModelSelectionReason;
+
+type FullAccessSuccessorState = {
+  sourceTaskId: string;
+  sourceBindingEpoch: string;
+  sourceRunId: string;
+} & (
+  | { phase: "stopping"; reason: null }
+  | { phase: "creating"; reason: null }
+  | { phase: "failed"; reason: TaskFullAccessSuccessorReason }
+  | { phase: "outcome_unknown"; reason: null }
+);
 
 function mutationReasonMessageId(reason: MutationReason): MessageId {
   return `mutation.reason.${reason}`;
@@ -301,6 +316,8 @@ export default function App() {
     Record<string, string>
   >({});
   const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
+  const [fullAccessSuccessor, setFullAccessSuccessor] =
+    useState<FullAccessSuccessorState | null>(null);
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [accountCancelBusy, setAccountCancelBusy] = useState(false);
   const [bridgeReady, setBridgeReady] = useState(false);
@@ -361,6 +378,21 @@ export default function App() {
   }, [snapshot.tasks]);
   const activeTaskIdRef = useRef<string | null>(null);
   activeTaskIdRef.current = activeTask?.id ?? null;
+
+  function fullAccessSuccessorSource(task: TaskView) {
+    const workspace = snapshot.workspaces.find(
+      (candidate) => candidate.id === task.workspaceId,
+    );
+    return Boolean(
+      task.permissionProfile === "approval_required" &&
+      task.binding.availability === "available" &&
+      task.pendingUi !== null &&
+      task.activeOperation?.kind === "run" &&
+      task.currentRunPhase === "waiting_ui" &&
+      workspace?.kind === "manual" &&
+      workspace.authorization === "available",
+    );
+  }
 
   function focusTaskPanelTab(tabId: string) {
     window.requestAnimationFrame(() => {
@@ -1997,6 +2029,123 @@ export default function App() {
       setCancelPendingForTask(taskId, false);
     }
   }
+
+  async function beginFullAccessSuccessor(sourceTaskId: string) {
+    const source = snapshot.tasks.find((task) => task.id === sourceTaskId);
+    if (
+      !source ||
+      !fullAccessSuccessorSource(source) ||
+      cancelPendingTasks.current.has(sourceTaskId) ||
+      fullAccessSuccessor !== null
+    )
+      return;
+    const request = {
+      sourceTaskId,
+      sourceBindingEpoch: source.binding.epoch,
+      sourceRunId: source.currentRunId,
+    };
+    setFullAccessSuccessor({ ...request, phase: "stopping", reason: null });
+    setCancelPendingForTask(sourceTaskId, true);
+    try {
+      await client.cancel(sourceTaskId, source.currentRunId);
+      await refreshAfterCommit("run.stop_requested", "operation.run_stop", {
+        scope: "task",
+        taskId: sourceTaskId,
+      });
+    } catch {
+      await refreshSnapshot().catch(() => undefined);
+      setFullAccessSuccessor({
+        ...request,
+        phase: "outcome_unknown",
+        reason: null,
+      });
+    } finally {
+      setCancelPendingForTask(sourceTaskId, false);
+    }
+  }
+
+  async function createFullAccessSuccessor(
+    request: Pick<
+      FullAccessSuccessorState,
+      "sourceTaskId" | "sourceBindingEpoch" | "sourceRunId"
+    >,
+  ) {
+    setFullAccessSuccessor({ ...request, phase: "creating", reason: null });
+    try {
+      const result = await client.createFullAccessSuccessor(
+        request.sourceTaskId,
+        request.sourceBindingEpoch,
+      );
+      if (!result.accepted) {
+        await refreshSnapshot().catch(() => undefined);
+        setFullAccessSuccessor({
+          ...request,
+          phase: "failed",
+          reason: result.reason,
+        });
+        return;
+      }
+      setNewTaskPermissionOverride(null);
+      pendingTaskSelection.current = result.taskId;
+      pendingTaskDraftRetention.current.add(result.taskId);
+      taskDrafts.setDraft(result.taskId, emptyComposerDraft());
+      await refreshSnapshot();
+      setFullAccessSuccessor(null);
+      window.requestAnimationFrame(() => composer.current?.focus());
+    } catch {
+      await refreshSnapshot().catch(() => undefined);
+      setFullAccessSuccessor({
+        ...request,
+        phase: "outcome_unknown",
+        reason: null,
+      });
+    }
+  }
+
+  function retryFullAccessSuccessor() {
+    const request = fullAccessSuccessor;
+    if (!request || request.phase !== "failed") return;
+    const source = snapshot.tasks.find(
+      (task) => task.id === request.sourceTaskId,
+    );
+    if (
+      !source ||
+      source.binding.epoch !== request.sourceBindingEpoch ||
+      source.activeOperation !== null ||
+      source.currentRunPhase !== null
+    ) {
+      setFullAccessSuccessor({
+        ...request,
+        phase: "failed",
+        reason: "source_changed",
+      });
+      return;
+    }
+    void createFullAccessSuccessor(request);
+  }
+
+  useEffect(() => {
+    const request = fullAccessSuccessor;
+    if (!request || request.phase !== "stopping") return;
+    const source = snapshot.tasks.find(
+      (task) => task.id === request.sourceTaskId,
+    );
+    if (!source || source.binding.epoch !== request.sourceBindingEpoch) {
+      setFullAccessSuccessor({
+        ...request,
+        phase: "failed",
+        reason: "source_changed",
+      });
+      return;
+    }
+    if (source.activeOperation !== null || source.currentRunPhase !== null)
+      return;
+    void createFullAccessSuccessor(request);
+  }, [snapshot.revision, fullAccessSuccessor?.phase]);
+
+  useEffect(() => {
+    setFullAccessSuccessor(null);
+  }, [bridgeGeneration]);
 
   async function compactTask() {
     if (
@@ -3656,13 +3805,58 @@ export default function App() {
                 renderPendingUi={(props) => {
                   const { taskId, ...panelProps } = props;
                   const identity = uiRequestIdentity(taskId, props.pending);
+                  const successorForTask =
+                    fullAccessSuccessor?.sourceTaskId === taskId
+                      ? fullAccessSuccessor
+                      : null;
                   return (
                     <ApprovalPanel
                       {...panelProps}
+                      fullAccessSuccessor={
+                        successorForTask?.phase === "stopping"
+                          ? {
+                              phase: "stopping",
+                              message: null,
+                              onContinue() {},
+                            }
+                          : successorForTask === null &&
+                              fullAccessSuccessorSource(props.task)
+                            ? {
+                                phase: "ready",
+                                message: null,
+                                onContinue: () =>
+                                  void beginFullAccessSuccessor(taskId),
+                              }
+                            : null
+                      }
                       responsePhase={uiResponsePhase(
                         uiResponseStates,
                         identity,
                       )}
+                    />
+                  );
+                }}
+                renderTaskFollowup={(task) => {
+                  if (
+                    fullAccessSuccessor?.sourceTaskId !== task.id ||
+                    (fullAccessSuccessor.phase === "stopping" && task.pendingUi)
+                  )
+                    return null;
+                  return (
+                    <FullAccessSuccessorNotice
+                      phase={fullAccessSuccessor.phase}
+                      message={
+                        fullAccessSuccessor.reason
+                          ? t(
+                              `approval.full_access_${fullAccessSuccessor.reason}`,
+                            )
+                          : null
+                      }
+                      retry={
+                        fullAccessSuccessor.phase === "failed"
+                          ? retryFullAccessSuccessor
+                          : null
+                      }
                     />
                   );
                 }}

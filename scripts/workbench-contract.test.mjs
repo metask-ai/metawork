@@ -12,6 +12,7 @@ import {
   decodeHostSignalEvent,
   decodePingResponse,
   decodeTaskCreateResult,
+  decodeTaskFullAccessSuccessorResult,
   decodeTaskCompactResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
@@ -1625,6 +1626,66 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
     /cannot expose identities/,
   );
   assert.throws(() => decodeTaskCreateResult({ taskId: "3" }), /expected keys/);
+  assert.deepEqual(
+    decodeTaskFullAccessSuccessorResult(
+      {
+        accepted: true,
+        sourceTaskId: "3",
+        taskId: "5",
+        reason: null,
+      },
+      "3",
+    ),
+    {
+      accepted: true,
+      sourceTaskId: "3",
+      taskId: "5",
+      reason: null,
+    },
+  );
+  assert.deepEqual(
+    decodeTaskFullAccessSuccessorResult(
+      {
+        accepted: false,
+        sourceTaskId: "3",
+        taskId: null,
+        reason: "persistence_failed",
+      },
+      "3",
+    ),
+    {
+      accepted: false,
+      sourceTaskId: "3",
+      taskId: null,
+      reason: "persistence_failed",
+    },
+  );
+  assert.throws(
+    () =>
+      decodeTaskFullAccessSuccessorResult(
+        {
+          accepted: true,
+          sourceTaskId: "4",
+          taskId: "5",
+          reason: null,
+        },
+        "3",
+      ),
+    /identity mismatch/,
+  );
+  assert.throws(
+    () =>
+      decodeTaskFullAccessSuccessorResult(
+        {
+          accepted: false,
+          sourceTaskId: "3",
+          taskId: "5",
+          reason: "source_busy",
+        },
+        "3",
+      ),
+    /expected null/,
+  );
   assert.deepEqual(
     decodeTaskRunResult(
       {

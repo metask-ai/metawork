@@ -862,6 +862,196 @@ test "Task permission profile is immutable and successful interactive create rem
     );
 }
 
+test "full-access successor clones exact Manual Task execution without conversation authority" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 5,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var task_persistence: TaskPersistenceProbe = .{};
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = task_persistence.capability();
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 5,
+            .max_workspaces = 2,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        configuration,
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    const admission = workbench.newTaskAdmissionView();
+    const source_task_id = try workbench.createTaskInWorkspace(
+        workspace_id,
+        try workbench.workspaceEpoch(workspace_id),
+        admission.active_generation,
+        admission.active_selection_revision,
+        null,
+        null,
+        null,
+        .{ .interactive = .approval_required },
+    );
+    const source_binding_epoch = try workbench.taskBindingEpoch(source_task_id);
+    const source_execution = try workbench.taskExecutionIdentity(source_task_id);
+
+    try std.testing.expectError(
+        error.BindingEpochMismatch,
+        workbench.createFullAccessSuccessor(source_task_id, source_binding_epoch + 1),
+    );
+
+    // A successor consumes the source Task's owned copy, not the mutable global
+    // default. Replacing the default must not silently substitute generation 2.
+    try installControlExecutionGeneration(&workbench, 2);
+    task_persistence.result = .failed;
+    try std.testing.expectError(
+        error.TaskPersistenceFailed,
+        workbench.createFullAccessSuccessor(source_task_id, source_binding_epoch),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.approval_required,
+        workbench.defaultPermissionProfile(),
+    );
+
+    task_persistence.result = .committed;
+    const successor_task_id = try workbench.createFullAccessSuccessor(
+        source_task_id,
+        source_binding_epoch,
+    );
+    try std.testing.expect(successor_task_id != source_task_id);
+    try std.testing.expectEqual(
+        workspace_id,
+        try workbench.taskWorkspaceId(successor_task_id),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.approval_required,
+        try workbench.taskPermissionProfile(source_task_id),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        try workbench.taskPermissionProfile(successor_task_id),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionInteraction.interactive,
+        try workbench.taskPermissionInteraction(successor_task_id),
+    );
+    try std.testing.expectEqual(
+        product_control.PermissionProfile.full_access,
+        workbench.defaultPermissionProfile(),
+    );
+    const successor_execution = try workbench.taskExecutionIdentity(successor_task_id);
+    try std.testing.expectEqual(source_execution.generation, successor_execution.generation);
+    try std.testing.expectEqual(source_execution.protocol, successor_execution.protocol);
+    try std.testing.expectEqualStrings(source_execution.model, successor_execution.model);
+    try std.testing.expectError(
+        error.UnsupportedPermissionProfile,
+        workbench.createFullAccessSuccessor(
+            successor_task_id,
+            try workbench.taskBindingEpoch(successor_task_id),
+        ),
+    );
+
+    fake_core.lock();
+    const successor_mode = fake_core.last_permission_mode_code;
+    const successor_shell = fake_core.last_shell_policy_code;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(?u32, wire.PERMISSION_FULL_ACCESS), successor_mode);
+    try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), successor_shell);
+}
+
+test "full-access successor rejects active and Automatic Workspace sources" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_sessions = 3,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 1,
+            .max_tasks = 3,
+            .max_workspaces = 2,
+            .max_runs_per_task = 1,
+            .max_tools_per_run = 1,
+        },
+        .{
+            .directories = .{ .testing_automatic_workspace_root = &automatic_root },
+            .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+        },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const admission = workbench.newTaskAdmissionView();
+
+    const manual_workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    const manual_task_id = try workbench.createTaskInWorkspace(
+        manual_workspace_id,
+        try workbench.workspaceEpoch(manual_workspace_id),
+        admission.active_generation,
+        admission.active_selection_revision,
+        null,
+        null,
+        null,
+        .{ .interactive = .approval_required },
+    );
+    _ = try workbench.runTask(manual_task_id, .{ .text = "remain active" });
+    try std.testing.expectError(
+        error.TaskBusy,
+        workbench.createFullAccessSuccessor(
+            manual_task_id,
+            try workbench.taskBindingEpoch(manual_task_id),
+        ),
+    );
+
+    const automatic_task_id = try workbench.createTaskForWorkspace(
+        .automatic,
+        admission.active_generation,
+        admission.active_selection_revision,
+        null,
+        null,
+        null,
+        .{ .interactive = .approval_required },
+    );
+    try std.testing.expectError(
+        error.AutomaticWorkspaceUnsupported,
+        workbench.createFullAccessSuccessor(
+            automatic_task_id,
+            try workbench.taskBindingEpoch(automatic_task_id),
+        ),
+    );
+}
+
 test "Run checkpoint commits immutable blob before durable descriptor" {
     fake_core.reset();
     const runtime = try createTestComposition(.{

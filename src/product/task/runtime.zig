@@ -35,6 +35,12 @@ pub const ExecutionIdentity = struct {
     model: []const u8,
 };
 
+pub const FullAccessSuccessorSource = struct {
+    workspace_id: u64,
+    workspace_epoch: u64,
+    execution: models_contract.ConfigInput,
+};
+
 pub const FileLocatorKind = enum { workspace_path, absolute_path, uri };
 pub const FilePosition = struct { line: u64, column: u64 };
 pub const FileRange = struct { start: FilePosition, end: FilePosition };
@@ -1804,6 +1810,41 @@ pub const Runtime = struct {
             .generation = task.durable.execution_generation,
             .protocol = task.durable.execution_protocol,
             .model = task.durable.execution_model,
+        };
+    }
+
+    /// Borrows the exact live execution owned by an idle interactive
+    /// approval-required Task. The caller must consume the returned slices
+    /// synchronously; no Session, Conversation, Run, checkpoint, pending UI,
+    /// or permission rule is included in this source.
+    pub fn fullAccessSuccessorSource(
+        self: *const Runtime,
+        task_id: u64,
+        expected_binding_epoch: u64,
+    ) error{
+        UnknownTask,
+        BindingEpochMismatch,
+        TaskBusy,
+        TaskClosing,
+        UnsupportedPermissionProfile,
+        ExecutionUnavailable,
+        ExecutionGenerationMismatch,
+    }!FullAccessSuccessorSource {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        if (expected_binding_epoch == 0 or
+            task.durable.binding_epoch != expected_binding_epoch)
+            return error.BindingEpochMismatch;
+        if (task_policy.taskLifecycle(task) != .open or
+            task.durable.archived or task.deletion != .idle)
+            return error.TaskClosing;
+        if (task_policy.hasActiveOperation(task)) return error.TaskBusy;
+        if (task.durable.permission_profile != .approval_required or
+            task.durable.permission_interaction != .interactive)
+            return error.UnsupportedPermissionProfile;
+        return .{
+            .workspace_id = task.durable.workspace_id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .execution = try taskExecutionInput(task),
         };
     }
 
