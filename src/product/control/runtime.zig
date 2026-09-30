@@ -3649,50 +3649,6 @@ pub const Runtime = struct {
         return .{ .task = prepared, .order = order_preparation };
     }
 
-    /// Creates a new full-access Task from the exact live execution and Manual
-    /// Workspace authority of an idle approval-required source Task. Only
-    /// execution and Workspace binding are borrowed; Task conversation state
-    /// and Session permission rules remain owned by the source.
-    pub fn createFullAccessSuccessor(
-        self: *Runtime,
-        source_task_id: u64,
-        expected_binding_epoch: u64,
-    ) Error!u64 {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        self.syncLifecycle();
-        const source = try self.task_runtime.fullAccessSuccessorSource(
-            source_task_id,
-            expected_binding_epoch,
-        );
-        const workspace = self.workspace.facts(source.workspace_id) orelse
-            return error.UnknownWorkspace;
-        if (workspace.kind != .manual)
-            return error.AutomaticWorkspaceUnsupported;
-
-        const previous_default_profile = self.default_permission_profile;
-        var prepared = try self.prepareTaskInWorkspaceInternal(
-            source.workspace_id,
-            source.workspace_epoch,
-            0,
-            0,
-            null,
-            null,
-            null,
-            .{ .interactive = .full_access },
-            false,
-            source.execution,
-        );
-        self.default_permission_profile = .full_access;
-        self.commitTaskStateIfConfigured() catch |err| {
-            self.default_permission_profile = previous_default_profile;
-            prepared.rollback(self);
-            return err;
-        };
-        const task_id = prepared.complete(self);
-        self.bumpRevision();
-        return task_id;
-    }
-
     fn createAutomaticTask(
         self: *Runtime,
         expected_execution_generation: u64,
@@ -3734,6 +3690,50 @@ pub const Runtime = struct {
         );
         self.workspace.setAutomaticOwner(workspace.id, task_id);
         automatic.complete(self);
+        return task_id;
+    }
+
+    /// Creates a new full-access Task from the exact live execution and Manual
+    /// Workspace authority of an idle approval-required source Task. Only
+    /// execution and Workspace binding are borrowed; Task conversation state
+    /// and Session permission rules remain owned by the source.
+    pub fn createFullAccessSuccessor(
+        self: *Runtime,
+        source_task_id: u64,
+        expected_binding_epoch: u64,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const source = try self.task_runtime.fullAccessSuccessorSource(
+            source_task_id,
+            expected_binding_epoch,
+        );
+        const workspace = self.workspace.facts(source.workspace_id) orelse
+            return error.UnknownWorkspace;
+        if (workspace.kind != .manual)
+            return error.AutomaticWorkspaceUnsupported;
+
+        const previous_default_profile = self.default_permission_profile;
+        var prepared = try self.prepareTaskInWorkspaceInternal(
+            source.workspace_id,
+            source.workspace_epoch,
+            0,
+            0,
+            null,
+            null,
+            null,
+            .{ .interactive = .full_access },
+            false,
+            source.execution,
+        );
+        self.default_permission_profile = .full_access;
+        self.commitTaskStateIfConfigured() catch |err| {
+            self.default_permission_profile = previous_default_profile;
+            prepared.rollback(self);
+            return err;
+        };
+        const task_id = prepared.complete(self);
+        self.bumpRevision();
         return task_id;
     }
 
