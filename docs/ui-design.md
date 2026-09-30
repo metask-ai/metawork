@@ -1321,6 +1321,9 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 默认 profile 只影响新 Task；Task effective profile 不可变，Run provenance、same-profile fresh/restore、Task archive/delete 和 Scheduled noninteractive 语义一致；已有 Task 不显示伪切换；
 - `full_access` 文案明确保留 AgentCore 核心保护、操作系统权限、服务授权和进程身份边界，不宣称 root、Sandbox 或 Workspace trust；选择动作不再追加第二个确认 modal；
 - 权限卡片只显示当前 request 支持的 once/Session choice，不显示跨 Session 持久授权；
+- 权限卡每次只有一个智能紫主操作：默认为“允许一次”；仅当 request 提供 `allow_session` 时，在该主操作的分裂展开菜单中显示“本会话允许相同参数”。拒绝是视觉中性但语义清晰的独立操作，`deny_session` 如存在放在其自身展开选项中；不得并列多个紫色主按钮；
+- 同一 Task 内出现与已解决 occurrence 相同的 tool binding 和 canonical arguments digest 时，卡片显示简短的“为什么又请求”说明，优先区分上次只允许一次、policy generation/candidate 已变化、Session grant 未恢复或无 Session choice。不显示 digest/rule ID 原值，不声称已证明真实 effect；
+- 重复请求时，Manual Workspace 的 `approval_required` Task 可显示次级动作“在完全访问新任务中继续”。点击后先请求停止当前 Run，按钮进入有文字的处理状态；只在 snapshot 证明 Run terminal 后创建并选中新的 idle `full_access` Task，由用户编辑草稿并明确发送，不自动重放原指令。Automatic Workspace 或 execution 不可用时不显示可点的伪入口；若已向用户提出该路径，必须就地说明不可用原因；
 - stale、duplicate、expired 和错误 Task/Run/request 响应必须被拒绝；
 - Renderer reload 后当前请求状态从 Host 恢复，已响应或取消的请求不得重新可操作。
 

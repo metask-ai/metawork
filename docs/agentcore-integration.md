@@ -175,6 +175,8 @@ callback admission 只建立 lifetime 与当时的 identity 事实，不保证�
 
 Agent Session 的公开回答入口只有 choice-only `respondPermission`。调用方不能提交任意 SDK `UiResponse`：Permission 入口从 pending request 回填 request ID、policy generation 和 candidate rule ID；完整 SDK response 只在 Agent 私有 encoder 边界内构造并校验。AgentCore 独占 Session grant 匹配与 provenance，Workbench 只保存当前 permission occurrence 和有界审计摘要，不维护平行 grant cache 或规则 compiler。ABI decoder 仍识别 `ask_question`，但 Agent capability gate 在建立 pending UI 状态前返回 callback fatal，因此 Product Control、Bridge 与 Renderer 不拥有 answers 产品路径。
 
+为解释重复审批，该有界审计摘要可以保留 AgentCore typed request/provenance 已提供的 canonical arguments digest、policy generation 与 candidate/matched rule identity，但不保留原始参数、credential 或可重放 response。这些字段只是观测与解释事实；只有 AgentCore 当次 request 发布的 `responses[]` 与 candidate 决定可提交 choice，MetaWork 不用 digest 本地命中、延长、恢复或生成 grant。
+
 当前同步 request 是外部执行层的 compatibility surface，不等于 MetaWork 已拥有完整的 effect 或风险语义。`tool_name`、display text、命令字符串和 `exact_arguments` candidate 都不能单独证明操作的真实文件、进程、网络或系统 effect；Product Control 不得据此编译第二套 Bash allowlist、推断“安全命令”或承诺跨 Session 的持久权限。
 
 当前 `PermissionProfile` 由 MetaWork 产品层拥有，与 AgentCore `PermissionMode`、`ShellPolicy` 和 permission rule schema 分离：Settings 只持有新 Task 默认值，Product Task 持有不可变的 effective profile，每个 Run 保存 provenance。Agent 只接受 Product Control 在 fresh create 或 same-profile restore 边界提交的精确执行配置，不拥有默认值、持久化或 UI 选择。产品只定义并映射 `approval_required → accept_edits + unrestricted` 与 `full_access → full_access + unrestricted`；`auto` 和 `dont_ask` 等其他 AgentCore mode 不是 MetaWork 产品档位。
