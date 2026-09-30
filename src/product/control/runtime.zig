@@ -15122,6 +15122,31 @@ test "permission pending projection follows responses and candidate scope" {
     const candidate_json = candidate_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, candidate_json, "allow_session") != null);
     try std.testing.expect(std.mem.indexOf(u8, candidate_json, "deny_session") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"toolNamespace\":\"builtin\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"toolBinding\":\"0000000000000000000000000000000000000000000000000000000000000000\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"policyGeneration\":\"1\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"canonicalArgumentsDigest\":\"3333333333333333333333333333333333333333333333333333333333333333\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"candidate\":{\"ruleId\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\"}",
+    ) != null);
 
     const once_only = testPermissionRequest("Bash", "{}");
     var once_storage: [4096]u8 = undefined;
@@ -15137,6 +15162,7 @@ test "permission pending projection follows responses and candidate scope" {
     const once_json = once_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, once_json, "allow_session") == null);
     try std.testing.expect(std.mem.indexOf(u8, once_json, "deny_session") == null);
+    try std.testing.expect(std.mem.indexOf(u8, once_json, "\"candidate\":null") != null);
 }
 
 test "permission provenance projection keeps typed fields bounded and non-persistent" {
@@ -15165,6 +15191,10 @@ test "permission provenance projection keeps typed fields bounded and non-persis
     try std.testing.expectEqual(@as(u64, 7), projected.policy_generation);
     try std.testing.expect(projected.used_session_rule);
     try std.testing.expectEqualStrings("Bash", projected.toolName());
+    try std.testing.expectEqualStrings(
+        value.canonical_arguments_digest,
+        projected.canonicalArgumentsDigest(),
+    );
     try std.testing.expect(!@hasField(task_persistence.RunWire, "permission_provenance"));
 }
 

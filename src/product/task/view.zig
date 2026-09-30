@@ -311,9 +311,13 @@ pub fn writePendingUi(
         text.containsSensitive(permission.tool.name) or
             text.containsSensitive(permission.arguments_json),
     }) catch return error.SnapshotTooLarge;
-    writer.writeAll("\"kind\":\"permission\",\"tool\":") catch
+    writer.print("\"kind\":\"permission\",\"toolNamespace\":\"{s}\",\"tool\":", .{
+        @tagName(permission.tool.namespace),
+    }) catch
         return error.SnapshotTooLarge;
     try text.writeJson(writer, permission.tool.name);
+    writer.writeAll(",\"toolBinding\":") catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, permission.tool.binding);
     writer.writeAll(",\"args\":") catch return error.SnapshotTooLarge;
     try text.writeJson(writer, permission.arguments_json);
     writer.writeAll(",\"availableChoices\":[") catch return error.SnapshotTooLarge;
@@ -326,7 +330,18 @@ pub fn writePendingUi(
         jsonValue(writer, @tagName(choice)) catch return error.SnapshotTooLarge;
         wrote_choice = true;
     }
-    writer.writeAll("]}") catch return error.SnapshotTooLarge;
+    writer.print("],\"policyGeneration\":\"{d}\",\"canonicalArgumentsDigest\":", .{
+        permission.policy_generation,
+    }) catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, permission.canonical_arguments_digest);
+    writer.writeAll(",\"candidate\":") catch return error.SnapshotTooLarge;
+    if (permission.candidate) |candidate| {
+        writer.writeAll("{\"ruleId\":") catch return error.SnapshotTooLarge;
+        try text.writeJson(writer, candidate.rule_id);
+        writer.print(",\"scope\":\"{s}\"}}", .{@tagName(candidate.scope)}) catch
+            return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
 fn writeRun(
@@ -1059,6 +1074,8 @@ fn writeUiHistory(
             jsonValue(writer, permission.toolName()) catch return error.SnapshotTooLarge;
             writer.writeAll(",\"toolBinding\":") catch return error.SnapshotTooLarge;
             jsonValue(writer, permission.toolBinding()) catch return error.SnapshotTooLarge;
+            writer.writeAll(",\"canonicalArgumentsDigest\":") catch return error.SnapshotTooLarge;
+            jsonValue(writer, permission.canonicalArgumentsDigest()) catch return error.SnapshotTooLarge;
             writer.writeAll(",\"decision\":") catch return error.SnapshotTooLarge;
             jsonValue(writer, @tagName(permission.decision)) catch return error.SnapshotTooLarge;
             writer.writeAll(",\"source\":") catch return error.SnapshotTooLarge;

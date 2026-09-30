@@ -731,9 +731,17 @@ export type PendingUi = {
   order: string;
   redacted: boolean;
   kind: "permission";
+  toolNamespace: "builtin" | "host" | "mcp";
   tool: string;
+  toolBinding: string;
   args: string;
   availableChoices: PermissionChoice[];
+  policyGeneration: string;
+  canonicalArgumentsDigest: string;
+  candidate: {
+    ruleId: string;
+    scope: "exact_arguments";
+  } | null;
 };
 
 export type PermissionChoice =
@@ -764,6 +772,7 @@ export type PermissionHistory = {
   toolNamespace: "builtin" | "host" | "mcp";
   toolName: string;
   toolBinding: string;
+  canonicalArgumentsDigest: string;
   decision: "allow" | "ask" | "deny";
   source:
     | "core_safety"

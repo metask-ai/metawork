@@ -702,6 +702,7 @@ pub const PermissionSummaryWire = struct {
     tool_namespace: []const u8,
     tool_name: []const u8,
     tool_binding: []const u8,
+    canonical_arguments_digest: []const u8 = "",
     decision: []const u8,
     source: []const u8,
     policy_generation: u64,
@@ -1135,6 +1136,7 @@ fn permissionSummaryWire(permission: *const task_state.PermissionSummary) Permis
         .tool_namespace = @tagName(permission.tool_namespace),
         .tool_name = permission.toolName(),
         .tool_binding = permission.toolBinding(),
+        .canonical_arguments_digest = permission.canonicalArgumentsDigest(),
         .decision = @tagName(permission.decision),
         .source = @tagName(permission.source),
         .policy_generation = permission.policy_generation,
@@ -1889,6 +1891,11 @@ fn restoreUiRecord(wire: UiRecordWire) task_state.UiRecord {
         summary.tool_name_len = permission.tool_name.len;
         @memcpy(summary.tool_binding[0..permission.tool_binding.len], permission.tool_binding);
         summary.tool_binding_len = permission.tool_binding.len;
+        @memcpy(
+            summary.canonical_arguments_digest[0..permission.canonical_arguments_digest.len],
+            permission.canonical_arguments_digest,
+        );
+        summary.canonical_arguments_digest_len = permission.canonical_arguments_digest.len;
         result.permission = summary;
     }
     @memcpy(result.detail[0..wire.detail.len], wire.detail);
@@ -2845,6 +2852,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 !validText(permission.tool_namespace, 32, false) or
                 !validText(permission.tool_name, 128, false) or
                 !validText(permission.tool_binding, 128, false) or
+                !validText(permission.canonical_arguments_digest, 128, true) or
                 !validText(permission.decision, 16, false) or
                 !validText(permission.source, 64, false) or
                 !oneOf(permission.tool_namespace, &.{ "builtin", "host", "mcp" }) or
@@ -4115,6 +4123,17 @@ test "task file store ignores the retired pre-release file" {
     defer store.deinit();
 
     try std.testing.expectEqual(null, try store.loadAlloc(std.testing.allocator));
+}
+
+test "legacy permission summary without canonical digest remains readable" {
+    var parsed = try std.json.parseFromSlice(
+        PermissionSummaryWire,
+        std.testing.allocator,
+        "{\"request_id\":\"request-1\",\"matched_rule_id\":\"\",\"tool_namespace\":\"builtin\",\"tool_name\":\"Bash\",\"tool_binding\":\"binding-1\",\"decision\":\"allow\",\"source\":\"callback\",\"policy_generation\":1,\"used_session_rule\":false,\"callback_outcome\":\"answered\"}",
+        .{},
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("", parsed.value.canonical_arguments_digest);
 }
 
 fn testLimits() Limits {

@@ -2915,6 +2915,7 @@ function decodePermissionHistory(
     "toolNamespace",
     "toolName",
     "toolBinding",
+    "canonicalArgumentsDigest",
     "decision",
     "source",
     "policyGeneration",
@@ -2931,6 +2932,10 @@ function decodePermissionHistory(
     ] as const),
     toolName: nonEmptyString(item.toolName, `${path}.toolName`),
     toolBinding: nonEmptyString(item.toolBinding, `${path}.toolBinding`),
+    canonicalArgumentsDigest: stringValue(
+      item.canonicalArgumentsDigest,
+      `${path}.canonicalArgumentsDigest`,
+    ),
     decision: enumValue(item.decision, `${path}.decision`, [
       "allow",
       "ask",
@@ -3005,9 +3010,14 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
       "order",
       "redacted",
       "kind",
+      "toolNamespace",
       "tool",
+      "toolBinding",
       "args",
       "availableChoices",
+      "policyGeneration",
+      "canonicalArgumentsDigest",
+      "candidate",
     ]);
     const availableChoices = arrayValue(
       item.availableChoices,
@@ -3021,15 +3031,58 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
       );
     if (new Set(availableChoices).size !== availableChoices.length)
       fail(`${path}.availableChoices`, "permission choices must be unique");
+    const candidate =
+      item.candidate === null
+        ? null
+        : (() => {
+            const candidateItem = object(item.candidate, `${path}.candidate`, [
+              "ruleId",
+              "scope",
+            ]);
+            return {
+              ruleId: nonEmptyString(
+                candidateItem.ruleId,
+                `${path}.candidate.ruleId`,
+              ),
+              scope: enumValue(candidateItem.scope, `${path}.candidate.scope`, [
+                "exact_arguments",
+              ] as const),
+            };
+          })();
+    if (
+      candidate === null &&
+      availableChoices.some(
+        (choice) => choice === "allow_session" || choice === "deny_session",
+      )
+    )
+      fail(
+        `${path}.availableChoices`,
+        "Session choices require a permission candidate",
+      );
     return {
       requestId: positiveWireId(item.requestId, `${path}.requestId`),
       runId: positiveWireId(item.runId, `${path}.runId`),
       order: positiveWireId(item.order, `${path}.order`),
       redacted: booleanValue(item.redacted, `${path}.redacted`),
       kind,
+      toolNamespace: enumValue(item.toolNamespace, `${path}.toolNamespace`, [
+        "builtin",
+        "host",
+        "mcp",
+      ] as const),
       tool: stringValue(item.tool, `${path}.tool`),
+      toolBinding: nonEmptyString(item.toolBinding, `${path}.toolBinding`),
       args: stringValue(item.args, `${path}.args`),
       availableChoices,
+      policyGeneration: positiveWireId(
+        item.policyGeneration,
+        `${path}.policyGeneration`,
+      ),
+      canonicalArgumentsDigest: nonEmptyString(
+        item.canonicalArgumentsDigest,
+        `${path}.canonicalArgumentsDigest`,
+      ),
+      candidate,
     };
   }
   return fail(`${path}.kind`, `unexpected request kind ${kind}`);

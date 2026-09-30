@@ -653,5 +653,5 @@ comptime {
     if (std.meta.fields(wire.FileReferenceWire).len != 7) @compileError("Review history fixture coverage after FileReferenceWire changes");
     if (std.meta.fields(wire.FileChangeArtifactWire).len != 4) @compileError("Review history fixture coverage after FileChangeArtifactWire changes");
     if (std.meta.fields(wire.UsageWire).len != 4) @compileError("Review history fixture coverage after UsageWire changes");
-    if (std.meta.fields(wire.PermissionSummaryWire).len != 10) @compileError("Review history fixture coverage after PermissionSummaryWire changes");
+    if (std.meta.fields(wire.PermissionSummaryWire).len != 11) @compileError("Review history fixture coverage after PermissionSummaryWire changes");
 }
