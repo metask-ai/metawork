@@ -7078,6 +7078,110 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   gap: 8px;
 }
 
+.approval-scope-value,
+.approval-scope-expiry {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.approval-scope-value {
+  color: var(--ui-content-primary);
+}
+
+.approval-scope-expiry {
+  margin-top: 4px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+}
+
+.approval-diagnostic {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-surface-muted);
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+  line-height: 1.55;
+}
+
+.approval-diagnostic strong {
+  color: var(--ui-content-primary);
+  font-weight: 650;
+}
+
+.approval-action-cluster {
+  display: inline-flex;
+  min-height: 44px;
+  border-radius: 7px;
+}
+
+.approval-action-cluster .approval-split-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.approval-split-trigger {
+  display: inline-flex;
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0 7px 7px 0;
+}
+
+.approval-action-cluster[data-variant="primary"] .approval-split-trigger {
+  border-left: 1px solid
+    color-mix(in srgb, var(--ui-content-on-primary) 24%, transparent);
+  background: var(--ui-action-primary);
+  color: var(--ui-content-on-primary);
+}
+
+.approval-action-cluster[data-variant="primary"] .approval-split-trigger:hover {
+  background: var(--ui-action-primary-hover);
+}
+
+.approval-action-cluster[data-variant="secondary"] .approval-split-trigger {
+  border: 1px solid var(--ui-border);
+  border-left: 0;
+  background: var(--ui-surface-panel);
+  color: var(--ui-content-primary);
+}
+
+.approval-action-cluster[data-variant="secondary"]
+  .approval-split-trigger:hover {
+  background: var(--ui-action-hover-surface);
+}
+
+.approval-split-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.approval-choice-menu {
+  max-width: min(320px, calc(100vw - 24px));
+}
+
+.approval-choice-menu-item {
+  min-height: 44px;
+  white-space: normal;
+}
+
+@media (max-width: 480px) {
+  .ai-intervention-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .ai-intervention-actions > button,
+  .approval-action-cluster,
+  .approval-action-cluster .approval-split-main {
+    width: 100%;
+  }
+}
+
 .ai-intervention-status {
   margin-top: 12px;
   color: var(--ui-content-muted);

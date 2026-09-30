@@ -863,6 +863,29 @@ export const enUS = {
   "approval.allow_once": "Allow once",
   "approval.allow_session": "Allow same arguments for this session",
   "approval.deny_session": "Deny same arguments for this session",
+  "approval.more_allow_options": "More approval options",
+  "approval.more_deny_options": "More denial options",
+  "approval.scope": "Available scope",
+  "approval.scope_once": "This request only",
+  "approval.scope_session_available":
+    "This request, or the same exact arguments for this task session",
+  "approval.session_expiry":
+    "Session choices end with this task session and do not carry into a new task.",
+  "approval.why_again": "Why MetaWork is asking again",
+  "approval.reason_allowed_once":
+    "The previous approval applied only to that request.",
+  "approval.reason_denied_once":
+    "The previous denial applied only to that request.",
+  "approval.reason_policy_changed":
+    "The permission policy changed after the previous decision.",
+  "approval.reason_candidate_changed":
+    "AgentCore issued a different session-rule identity for this request.",
+  "approval.reason_session_choice_unavailable":
+    "AgentCore did not offer a session-scoped choice for this request.",
+  "approval.reason_session_rule_invalidated":
+    "The previous session rule could not be restored.",
+  "approval.reason_session_grant_missed":
+    "This request matches the previous session rule, but AgentCore asked again. The earlier grant may not have been applied.",
   "approval.response_failed": "The response could not be sent. Try again.",
   "approval.response_sent": "Response sent.",
   "approval.sending": "Sending your response…",

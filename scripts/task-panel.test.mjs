@@ -3296,10 +3296,16 @@ test("permission intervention never exposes internal Run identity", () => {
           order: "1",
           redacted: false,
           kind: "permission",
+          toolNamespace: "builtin",
           tool: "Bash",
+          toolBinding: "builtin:Bash",
           args: "npm test",
+          policyGeneration: "1",
+          canonicalArgumentsDigest: "digest-1",
+          candidate: null,
           availableChoices: ["deny_once", "allow_once"],
         },
+        task: { uiHistory: [], restorePermission: null },
         busy: false,
         responsePhase: "idle",
         respond() {},
@@ -3310,8 +3316,122 @@ test("permission intervention never exposes internal Run identity", () => {
   assert.match(markup, /data-kind="permission"/);
   assert.match(markup, />Response required</);
   assert.match(markup, /class="detail-field-label">Arguments<\/p>/);
+  assert.match(markup, /class="detail-field-label">Available scope<\/p>/);
+  assert.match(markup, />This request only<\/p>/);
   assert.match(markup, /class="code-block-preview"/);
+  assert.match(markup, /data-variant="primary"/);
+  assert.equal((markup.match(/data-variant="primary"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /8472|work item/i);
+});
+
+test("permission intervention keeps session choices in split menus and explains repeats", async () => {
+  const responses = [];
+  const user = userEvent.setup({ document: dom.window.document });
+  const pending = {
+    requestId: "request-2",
+    runId: "8480",
+    order: "2",
+    redacted: false,
+    kind: "permission",
+    toolNamespace: "builtin",
+    tool: "Bash",
+    toolBinding: "builtin:Bash",
+    args: "npm test",
+    policyGeneration: "1",
+    canonicalArgumentsDigest: "digest-1",
+    candidate: { ruleId: "rule-1", scope: "exact_arguments" },
+    availableChoices: [
+      "deny_once",
+      "deny_session",
+      "allow_once",
+      "allow_session",
+    ],
+  };
+  const previous = {
+    requestId: "request-1",
+    runId: "8472",
+    order: "1",
+    kind: "permission",
+    state: "allowed_always",
+    agentRequestId: "agent-request-1",
+    permission: {
+      requestId: "request-1",
+      matchedRuleId: "rule-1",
+      toolNamespace: "builtin",
+      toolName: "Bash",
+      toolBinding: "builtin:Bash",
+      canonicalArgumentsDigest: "digest-1",
+      decision: "allow",
+      source: "session_allow",
+      policyGeneration: "1",
+      usedSessionRule: true,
+      callbackOutcome: "answered",
+    },
+    detail: "",
+    itemCount: 1,
+    detailTruncated: false,
+    redacted: false,
+  };
+
+  render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(ApprovalPanel, {
+        pending,
+        task: { uiHistory: [previous], restorePermission: null },
+        busy: false,
+        responsePhase: "idle",
+        respond: (payload) => responses.push(payload),
+      }),
+    ),
+  );
+
+  assert.ok(screen.getByRole("button", { name: "Deny" }));
+  assert.ok(screen.getByRole("button", { name: "Allow once" }));
+  assert.equal(screen.queryByRole("button", { name: /same arguments/ }), null);
+  assert.match(
+    screen.getByRole("note").textContent,
+    /matches the previous session rule/,
+  );
+  assert.match(
+    screen.getByText(/same exact arguments for this task session/).textContent,
+    /same exact arguments/,
+  );
+
+  await user.click(
+    screen.getByRole("button", { name: "More approval options" }),
+  );
+  const sessionAllow = await screen.findByRole("menuitem", {
+    name: "Allow same arguments for this session",
+  });
+  await user.click(sessionAllow);
+  assert.deepEqual(responses, [
+    { kind: "permission", permission: "allow_session" },
+  ]);
+
+  cleanup();
+});
+
+test("permission controls preserve 44px targets and stack at narrow width", async () => {
+  const stylesheet = await readFile(
+    join(process.cwd(), "frontend", "src", "index.css"),
+    "utf8",
+  );
+  assert.match(
+    stylesheet,
+    /\.approval-split-trigger\s*\{[^}]*min-width:\s*44px;[^}]*min-height:\s*44px;/s,
+  );
+  assert.match(
+    stylesheet,
+    /@media \(max-width: 480px\)[\s\S]*?\.ai-intervention-actions\s*\{[^}]*grid-template-columns:\s*1fr;/,
+  );
 });
 
 test("Escape dismissal and focus return preserve the real Task Panel opener", () => {
@@ -4808,8 +4928,13 @@ test("App attention only locates the original approval in docked and overlay lay
       order: "1",
       redacted: false,
       kind: "permission",
+      toolNamespace: "builtin",
       tool: "Bash",
+      toolBinding: "builtin:Bash",
       args: "inspect",
+      policyGeneration: "1",
+      canonicalArgumentsDigest: "digest-attention",
+      candidate: null,
       availableChoices: ["deny_once", "allow_once"],
     };
     snapshot.tasks[0].currentRunPhase = "waiting_ui";

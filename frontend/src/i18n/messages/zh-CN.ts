@@ -781,6 +781,24 @@ export const zhCN: Record<MessageId, string> = {
   "approval.allow_once": "允许一次",
   "approval.allow_session": "本会话允许相同参数",
   "approval.deny_session": "本会话拒绝相同参数",
+  "approval.more_allow_options": "更多允许选项",
+  "approval.more_deny_options": "更多拒绝选项",
+  "approval.scope": "可用范围",
+  "approval.scope_once": "仅限本次请求",
+  "approval.scope_session_available":
+    "本次请求，或当前任务会话中参数完全相同的请求",
+  "approval.session_expiry": "会话选项随当前任务会话结束，不会带入新任务。",
+  "approval.why_again": "为什么 MetaWork 再次询问",
+  "approval.reason_allowed_once": "上次批准仅对当次请求有效。",
+  "approval.reason_denied_once": "上次拒绝仅对当次请求有效。",
+  "approval.reason_policy_changed": "上次决定后，权限策略发生了变化。",
+  "approval.reason_candidate_changed":
+    "AgentCore 为本次请求给出了不同的会话规则标识。",
+  "approval.reason_session_choice_unavailable":
+    "AgentCore 没有为本次请求提供会话范围选项。",
+  "approval.reason_session_rule_invalidated": "上次会话规则未能恢复。",
+  "approval.reason_session_grant_missed":
+    "本次请求与上次会话规则相符，但 AgentCore 仍再次询问；先前授权可能未被应用。",
   "approval.response_failed": "未能发送回复，请重试。",
   "approval.response_sent": "回复已发送。",
   "approval.sending": "正在发送回复…",

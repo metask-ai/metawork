@@ -248,6 +248,7 @@ export function TaskContent({
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     taskId: string;
+    task: TaskView;
     pending: PendingUi;
     busy: boolean;
     respond: (payload: UiResponsePayload) => void;
@@ -506,6 +507,7 @@ export function TaskContent({
               <div className="ai-exchange-intervention">
                 {renderPendingUi({
                   taskId: task.id,
+                  task,
                   pending: task.pendingUi,
                   busy: responseDisabled,
                   respond: onRespond,
