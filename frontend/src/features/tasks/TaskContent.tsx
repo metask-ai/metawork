@@ -221,6 +221,7 @@ export function TaskContent({
   onReviewFileChanges,
   onRespond,
   renderPendingUi,
+  renderTaskFollowup,
 }: {
   task: TaskView | null;
   snapshotReceivedAt: number | null;
@@ -248,10 +249,12 @@ export function TaskContent({
   onRespond: (payload: UiResponsePayload) => void;
   renderPendingUi: (props: {
     taskId: string;
+    task: TaskView;
     pending: PendingUi;
     busy: boolean;
     respond: (payload: UiResponsePayload) => void;
   }) => ReactNode;
+  renderTaskFollowup?: (task: TaskView) => ReactNode;
 }) {
   const { locale, t } = useI18n();
   const viewport = useRef<HTMLDivElement>(null);
@@ -506,6 +509,7 @@ export function TaskContent({
               <div className="ai-exchange-intervention">
                 {renderPendingUi({
                   taskId: task.id,
+                  task,
                   pending: task.pendingUi,
                   busy: responseDisabled,
                   respond: onRespond,
@@ -633,6 +637,7 @@ export function TaskContent({
           </section>
         );
       })}
+      {task && renderTaskFollowup?.(task)}
       {task && task.runs.length === 0 && (
         <div className="ai-conversation-empty">
           <h2>{t("task.empty_title")}</h2>

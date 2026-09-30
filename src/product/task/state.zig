@@ -211,6 +211,8 @@ pub const PermissionSummary = struct {
     tool_name_len: usize = 0,
     tool_binding: [permission_summary_field_capacity]u8 = undefined,
     tool_binding_len: usize = 0,
+    canonical_arguments_digest: [permission_summary_field_capacity]u8 = undefined,
+    canonical_arguments_digest_len: usize = 0,
 
     pub fn toolName(self: *const PermissionSummary) []const u8 {
         return self.tool_name[0..self.tool_name_len];
@@ -226,6 +228,10 @@ pub const PermissionSummary = struct {
 
     pub fn matchedRuleId(self: *const PermissionSummary) []const u8 {
         return self.matched_rule_id[0..self.matched_rule_id_len];
+    }
+
+    pub fn canonicalArgumentsDigest(self: *const PermissionSummary) []const u8 {
+        return self.canonical_arguments_digest[0..self.canonical_arguments_digest_len];
     }
 };
 
@@ -1497,6 +1503,7 @@ fn clearTrackedText(target: *TrackedText) void {
 pub fn permissionSummary(value: agent.PermissionProvenance) EventProjectionError!PermissionSummary {
     if (value.tool.name.len > permission_summary_field_capacity or
         value.tool.binding.len > permission_summary_field_capacity or
+        value.canonical_arguments_digest.len > permission_summary_field_capacity or
         (if (value.request_id) |request_id| request_id.len else 0) > permission_summary_field_capacity or
         (if (value.matched_rule_id) |rule_id| rule_id.len else 0) > permission_summary_field_capacity)
         return error.ProjectionCapacity;
@@ -1520,6 +1527,11 @@ pub fn permissionSummary(value: agent.PermissionProvenance) EventProjectionError
     summary.tool_name_len = value.tool.name.len;
     @memcpy(summary.tool_binding[0..value.tool.binding.len], value.tool.binding);
     summary.tool_binding_len = value.tool.binding.len;
+    @memcpy(
+        summary.canonical_arguments_digest[0..value.canonical_arguments_digest.len],
+        value.canonical_arguments_digest,
+    );
+    summary.canonical_arguments_digest_len = value.canonical_arguments_digest.len;
     return summary;
 }
 

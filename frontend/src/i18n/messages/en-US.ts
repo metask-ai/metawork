@@ -863,6 +863,57 @@ export const enUS = {
   "approval.allow_once": "Allow once",
   "approval.allow_session": "Allow same arguments for this session",
   "approval.deny_session": "Deny same arguments for this session",
+  "approval.more_allow_options": "More approval options",
+  "approval.more_deny_options": "More denial options",
+  "approval.scope": "Available scope",
+  "approval.scope_once": "This request only",
+  "approval.scope_session_available":
+    "This request, or the same exact arguments for this task session",
+  "approval.session_expiry":
+    "Session choices end with this task session and do not carry into a new task.",
+  "approval.why_again": "Why MetaWork is asking again",
+  "approval.reason_allowed_once":
+    "The previous approval applied only to that request.",
+  "approval.reason_denied_once":
+    "The previous denial applied only to that request.",
+  "approval.reason_policy_changed":
+    "The permission policy changed after the previous decision.",
+  "approval.reason_candidate_changed":
+    "AgentCore issued a different session-rule identity for this request.",
+  "approval.reason_session_choice_unavailable":
+    "AgentCore did not offer a session-scoped choice for this request.",
+  "approval.restore_rules_invalidated":
+    "Some session rules were invalidated during restoration. MetaWork cannot tell whether they relate to this request.",
+  "approval.reason_session_grant_missed":
+    "This request matches the previous session rule, but AgentCore asked again. The earlier grant may not have been applied.",
+  "approval.full_access_continue": "Continue in a new full-access task",
+  "approval.full_access_stopping": "Stopping the current run…",
+  "approval.full_access_stop_failed":
+    "The stop request could not be confirmed. No new task has been requested yet.",
+  "approval.full_access_retry_stop": "Try stopping again",
+  "approval.full_access_sync_pending":
+    "The full-access task was created. Its view still needs to synchronize.",
+  "approval.full_access_retry_sync": "Retry synchronization",
+  "approval.full_access_dismiss": "Dismiss this notice",
+  "approval.full_access_creating": "Creating a new full-access task…",
+  "approval.full_access_failed": "The full-access task was not created.",
+  "approval.full_access_outcome_unknown":
+    "MetaWork could not confirm whether the full-access task was created. Check the task list before trying another path.",
+  "approval.full_access_retry": "Try creating the task again",
+  "approval.full_access_source_changed":
+    "The source task changed. Review its latest state before trying again.",
+  "approval.full_access_source_busy":
+    "The source task is still active. Wait for it to finish stopping.",
+  "approval.full_access_source_unavailable":
+    "The source task is no longer available for this action.",
+  "approval.full_access_workspace_unsupported":
+    "This action is available only for a Manual Workspace.",
+  "approval.full_access_execution_unavailable":
+    "The source task's execution configuration is no longer available.",
+  "approval.full_access_task_capacity":
+    "There is no capacity for another task right now.",
+  "approval.full_access_persistence_failed":
+    "MetaWork could not safely save the new task.",
   "approval.response_failed": "The response could not be sent. Try again.",
   "approval.response_sent": "Response sent.",
   "approval.sending": "Sending your response…",

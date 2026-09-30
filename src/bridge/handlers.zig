@@ -286,6 +286,10 @@ pub const TaskCreate = struct {
     expectedSkillSelectionRevision: ?[]const u8,
     permissionProfile: []const u8,
 };
+pub const TaskCreateFullAccessSuccessor = struct {
+    sourceTaskId: []const u8,
+    expectedBindingEpoch: []const u8,
+};
 pub const TaskRun = struct {
     taskId: []const u8,
     expectedBindingEpoch: []const u8,

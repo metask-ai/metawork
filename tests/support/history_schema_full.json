@@ -181,6 +181,7 @@
             "tool_namespace": "builtin",
             "tool_name": "Read",
             "tool_binding": "read-route",
+            "canonical_arguments_digest": "digest-read-route",
             "decision": "allow",
             "source": "explicit_allow",
             "policy_generation": 9223372036854775817,

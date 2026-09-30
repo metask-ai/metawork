@@ -731,9 +731,17 @@ export type PendingUi = {
   order: string;
   redacted: boolean;
   kind: "permission";
+  toolNamespace: "builtin" | "host" | "mcp";
   tool: string;
+  toolBinding: string;
   args: string;
   availableChoices: PermissionChoice[];
+  policyGeneration: string;
+  canonicalArgumentsDigest: string;
+  candidate: {
+    ruleId: string;
+    scope: "exact_arguments";
+  } | null;
 };
 
 export type PermissionChoice =
@@ -764,6 +772,7 @@ export type PermissionHistory = {
   toolNamespace: "builtin" | "host" | "mcp";
   toolName: string;
   toolBinding: string;
+  canonicalArgumentsDigest: string;
   decision: "allow" | "ask" | "deny";
   source:
     | "core_safety"
@@ -1330,6 +1339,29 @@ export type TaskCreateResult =
       bindingEpoch: null;
       mcpAuthority: null;
       reason: TaskCreateReason;
+    };
+
+export type TaskFullAccessSuccessorReason =
+  | "source_changed"
+  | "source_busy"
+  | "source_unavailable"
+  | "workspace_unsupported"
+  | "execution_unavailable"
+  | "task_capacity"
+  | "persistence_failed";
+
+export type TaskFullAccessSuccessorResult =
+  | {
+      accepted: true;
+      sourceTaskId: string;
+      taskId: string;
+      reason: null;
+    }
+  | {
+      accepted: false;
+      sourceTaskId: string;
+      taskId: null;
+      reason: TaskFullAccessSuccessorReason;
     };
 
 export type TaskWorkspaceIntent =

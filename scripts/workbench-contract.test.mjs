@@ -12,6 +12,7 @@ import {
   decodeHostSignalEvent,
   decodePingResponse,
   decodeTaskCreateResult,
+  decodeTaskFullAccessSuccessorResult,
   decodeTaskCompactResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
@@ -1626,6 +1627,66 @@ test("Task metadata mutation acknowledgements are identity-checked and exact", (
   );
   assert.throws(() => decodeTaskCreateResult({ taskId: "3" }), /expected keys/);
   assert.deepEqual(
+    decodeTaskFullAccessSuccessorResult(
+      {
+        accepted: true,
+        sourceTaskId: "3",
+        taskId: "5",
+        reason: null,
+      },
+      "3",
+    ),
+    {
+      accepted: true,
+      sourceTaskId: "3",
+      taskId: "5",
+      reason: null,
+    },
+  );
+  assert.deepEqual(
+    decodeTaskFullAccessSuccessorResult(
+      {
+        accepted: false,
+        sourceTaskId: "3",
+        taskId: null,
+        reason: "persistence_failed",
+      },
+      "3",
+    ),
+    {
+      accepted: false,
+      sourceTaskId: "3",
+      taskId: null,
+      reason: "persistence_failed",
+    },
+  );
+  assert.throws(
+    () =>
+      decodeTaskFullAccessSuccessorResult(
+        {
+          accepted: true,
+          sourceTaskId: "4",
+          taskId: "5",
+          reason: null,
+        },
+        "3",
+      ),
+    /identity mismatch/,
+  );
+  assert.throws(
+    () =>
+      decodeTaskFullAccessSuccessorResult(
+        {
+          accepted: false,
+          sourceTaskId: "3",
+          taskId: "5",
+          reason: "source_busy",
+        },
+        "3",
+      ),
+    /expected null/,
+  );
+  assert.deepEqual(
     decodeTaskRunResult(
       {
         accepted: false,
@@ -2502,9 +2563,14 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     order: "1",
     redacted: true,
     kind: "permission",
+    toolNamespace: "builtin",
     tool: "Bash",
+    toolBinding: "binding-9",
     args: "***",
     availableChoices: ["deny_once", "allow_once"],
+    policyGeneration: "1",
+    canonicalArgumentsDigest: "digest-9",
+    candidate: null,
   };
   assert.throws(
     () => decodeWorkbenchSnapshot(closingWithRequest),
@@ -2560,11 +2626,35 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     order: "1",
     redacted: true,
     kind: "permission",
+    toolNamespace: "builtin",
     tool: "Bash",
+    toolBinding: "binding-9",
     args: "***",
     availableChoices: ["deny_once", "allow_once"],
+    policyGeneration: "1",
+    canonicalArgumentsDigest: "digest-9",
+    candidate: null,
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(pendingPermission));
+
+  const sessionPermission = clone(pendingPermission);
+  sessionPermission.tasks[0].pendingUi.availableChoices.push("allow_session");
+  assert.throws(
+    () => decodeWorkbenchSnapshot(sessionPermission),
+    /Session choices require a permission candidate/,
+  );
+  sessionPermission.tasks[0].pendingUi.candidate = {
+    ruleId: "rule-9",
+    scope: "exact_arguments",
+  };
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(sessionPermission));
+
+  const unsupportedScope = clone(sessionPermission);
+  unsupportedScope.tasks[0].pendingUi.candidate.scope = "workspace";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(unsupportedScope),
+    /unexpected value workspace/,
+  );
 
   const resolvedAndPending = clone(pendingPermission);
   resolvedAndPending.tasks[0].uiHistory.push({
@@ -2647,6 +2737,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
       toolNamespace: "builtin",
       toolName: "Bash",
       toolBinding: "binding-11",
+      canonicalArgumentsDigest: "digest-11",
       decision: "allow",
       source: "session_allow",
       policyGeneration: "7",

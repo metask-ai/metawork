@@ -107,6 +107,8 @@ pub const Error = lifecycle.Error || product_attachment.Error || product_schedul
     RecoveryUnavailable,
     RestoreAttemptExhausted,
     UnsupportedBuiltinProfile,
+    UnsupportedPermissionProfile,
+    AutomaticWorkspaceUnsupported,
 };
 
 pub const Limits = struct {
@@ -3468,6 +3470,7 @@ pub const Runtime = struct {
             expected_skill_selection_revision,
             permission,
             allow_unowned_automatic,
+            null,
         );
         if (remembered_profile) |profile| self.default_permission_profile = profile;
         self.commitTaskStateBestEffort() catch |err| {
@@ -3491,20 +3494,25 @@ pub const Runtime = struct {
         expected_skill_selection_revision: ?u64,
         permission: TaskPermissionRequest,
         allow_unowned_automatic: bool,
+        execution_override: ?models_contract.ConfigInput,
     ) Error!PreparedTaskCreate {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.executionReplacementPending())
-            return error.ExecutionInUse;
-        if (!self.canCreateTask())
-            return error.ExecutionUnavailable;
-        if (!self.validNewTaskAdmission(
-            expected_execution_generation,
-            expected_selection_revision,
-        ))
-            return error.ExecutionGenerationMismatch;
-        if (model_selection) |selection|
-            if (!self.newTaskModelSelectionAuthorized(selection))
-                return error.ModelSelectionChanged;
+        if (execution_override == null) {
+            if (self.executionReplacementPending())
+                return error.ExecutionInUse;
+            if (!self.canCreateTask())
+                return error.ExecutionUnavailable;
+            if (!self.validNewTaskAdmission(
+                expected_execution_generation,
+                expected_selection_revision,
+            ))
+                return error.ExecutionGenerationMismatch;
+            if (model_selection) |selection|
+                if (!self.newTaskModelSelectionAuthorized(selection))
+                    return error.ModelSelectionChanged;
+        } else if (model_selection != null) {
+            return error.ModelSelectionChanged;
+        }
         const workspace_view = try self.workspace.taskCreateAuthority(
             workspace_id,
             expected_workspace_epoch,
@@ -3554,7 +3562,8 @@ pub const Runtime = struct {
                 self.allocator,
                 skill.skill_id,
             );
-        var execution_input = self.execution_state.executionInput().?;
+        var execution_input = execution_override orelse
+            self.execution_state.executionInput().?;
         if (model_selection) |selection|
             execution_input.target.model = selection.target.model_id;
         const permission_profile: PermissionProfile = switch (permission) {
@@ -3684,6 +3693,50 @@ pub const Runtime = struct {
         return task_id;
     }
 
+    /// Creates a new full-access Task from the exact live execution and Manual
+    /// Workspace authority of an idle approval-required source Task. Only
+    /// execution and Workspace binding are borrowed; Task conversation state
+    /// and Session permission rules remain owned by the source.
+    pub fn createFullAccessSuccessor(
+        self: *Runtime,
+        source_task_id: u64,
+        expected_binding_epoch: u64,
+    ) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        self.syncLifecycle();
+        const source = try self.task_runtime.fullAccessSuccessorSource(
+            source_task_id,
+            expected_binding_epoch,
+        );
+        const workspace = self.workspace.facts(source.workspace_id) orelse
+            return error.UnknownWorkspace;
+        if (workspace.kind != .manual)
+            return error.AutomaticWorkspaceUnsupported;
+
+        const previous_default_profile = self.default_permission_profile;
+        var prepared = try self.prepareTaskInWorkspaceInternal(
+            source.workspace_id,
+            source.workspace_epoch,
+            0,
+            0,
+            null,
+            null,
+            null,
+            .{ .interactive = .full_access },
+            false,
+            source.execution,
+        );
+        self.default_permission_profile = .full_access;
+        self.commitTaskStateBestEffort() catch |err| {
+            self.default_permission_profile = previous_default_profile;
+            prepared.rollback(self);
+            return err;
+        };
+        const task_id = prepared.complete(self);
+        self.bumpRevision();
+        return task_id;
+    }
+
     fn prepareScheduledAdmission(
         self: *Runtime,
         input: product_schedule.TaskLaunch,
@@ -3705,6 +3758,7 @@ pub const Runtime = struct {
             null,
             .{ .noninteractive = taskProfileFromSchedule(input.permission_profile) },
             true,
+            null,
         );
         var task_live = true;
         errdefer if (task_live) task.rollback(self);
@@ -15122,6 +15176,31 @@ test "permission pending projection follows responses and candidate scope" {
     const candidate_json = candidate_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, candidate_json, "allow_session") != null);
     try std.testing.expect(std.mem.indexOf(u8, candidate_json, "deny_session") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"toolNamespace\":\"builtin\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"toolBinding\":\"0000000000000000000000000000000000000000000000000000000000000000\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"policyGeneration\":\"1\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"canonicalArgumentsDigest\":\"3333333333333333333333333333333333333333333333333333333333333333\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        candidate_json,
+        "\"candidate\":{\"ruleId\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\"}",
+    ) != null);
 
     const once_only = testPermissionRequest("Bash", "{}");
     var once_storage: [4096]u8 = undefined;
@@ -15137,6 +15216,7 @@ test "permission pending projection follows responses and candidate scope" {
     const once_json = once_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, once_json, "allow_session") == null);
     try std.testing.expect(std.mem.indexOf(u8, once_json, "deny_session") == null);
+    try std.testing.expect(std.mem.indexOf(u8, once_json, "\"candidate\":null") != null);
 }
 
 test "permission provenance projection keeps typed fields bounded and non-persistent" {
@@ -15165,6 +15245,10 @@ test "permission provenance projection keeps typed fields bounded and non-persis
     try std.testing.expectEqual(@as(u64, 7), projected.policy_generation);
     try std.testing.expect(projected.used_session_rule);
     try std.testing.expectEqualStrings("Bash", projected.toolName());
+    try std.testing.expectEqualStrings(
+        value.canonical_arguments_digest,
+        projected.canonicalArgumentsDigest(),
+    );
     try std.testing.expect(!@hasField(task_persistence.RunWire, "permission_provenance"));
 }
 

@@ -102,7 +102,7 @@ const { RunProcess } = await vite.ssrLoadModule(
 const { deriveRunPresentation } = await vite.ssrLoadModule(
   "/src/features/tasks/run-presentation.ts",
 );
-const { ApprovalPanel } = await vite.ssrLoadModule(
+const { ApprovalPanel, FullAccessSuccessorNotice } = await vite.ssrLoadModule(
   "/src/features/approvals/ApprovalPanel.tsx",
 );
 const { I18nContext } = await vite.ssrLoadModule("/src/i18n/context.ts");
@@ -3296,10 +3296,16 @@ test("permission intervention never exposes internal Run identity", () => {
           order: "1",
           redacted: false,
           kind: "permission",
+          toolNamespace: "builtin",
           tool: "Bash",
+          toolBinding: "builtin:Bash",
           args: "npm test",
+          policyGeneration: "1",
+          canonicalArgumentsDigest: "digest-1",
+          candidate: null,
           availableChoices: ["deny_once", "allow_once"],
         },
+        task: { uiHistory: [], restorePermission: null },
         busy: false,
         responsePhase: "idle",
         respond() {},
@@ -3310,8 +3316,160 @@ test("permission intervention never exposes internal Run identity", () => {
   assert.match(markup, /data-kind="permission"/);
   assert.match(markup, />Response required</);
   assert.match(markup, /class="detail-field-label">Arguments<\/p>/);
+  assert.match(markup, /class="detail-field-label">Available scope<\/p>/);
+  assert.match(markup, />This request only<\/p>/);
   assert.match(markup, /class="code-block-preview"/);
+  assert.match(markup, /data-variant="primary"/);
+  assert.equal((markup.match(/data-variant="primary"/g) ?? []).length, 1);
   assert.doesNotMatch(markup, /8472|work item/i);
+});
+
+test("permission intervention keeps session choices in split menus and explains repeats", async () => {
+  const responses = [];
+  const user = userEvent.setup({ document: dom.window.document });
+  const pending = {
+    requestId: "request-2",
+    runId: "8480",
+    order: "2",
+    redacted: false,
+    kind: "permission",
+    toolNamespace: "builtin",
+    tool: "Bash",
+    toolBinding: "builtin:Bash",
+    args: "npm test",
+    policyGeneration: "1",
+    canonicalArgumentsDigest: "digest-1",
+    candidate: { ruleId: "rule-1", scope: "exact_arguments" },
+    availableChoices: [
+      "deny_once",
+      "deny_session",
+      "allow_once",
+      "allow_session",
+    ],
+  };
+  const previous = {
+    requestId: "request-1",
+    runId: "8472",
+    order: "1",
+    kind: "permission",
+    state: "allowed_always",
+    agentRequestId: "agent-request-1",
+    permission: {
+      requestId: "request-1",
+      matchedRuleId: "rule-1",
+      toolNamespace: "builtin",
+      toolName: "Bash",
+      toolBinding: "builtin:Bash",
+      canonicalArgumentsDigest: "digest-1",
+      decision: "allow",
+      source: "session_allow",
+      policyGeneration: "1",
+      usedSessionRule: true,
+      callbackOutcome: "answered",
+    },
+    detail: "",
+    itemCount: 1,
+    detailTruncated: false,
+    redacted: false,
+  };
+
+  render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(ApprovalPanel, {
+        pending,
+        task: { uiHistory: [previous], restorePermission: null },
+        busy: false,
+        responsePhase: "idle",
+        respond: (payload) => responses.push(payload),
+      }),
+    ),
+  );
+
+  assert.ok(screen.getByRole("button", { name: "Deny" }));
+  assert.ok(screen.getByRole("button", { name: "Allow once" }));
+  assert.equal(screen.queryByRole("button", { name: /same arguments/ }), null);
+  assert.match(
+    screen.getByRole("note").textContent,
+    /matches the previous session rule/,
+  );
+  assert.match(
+    screen.getByText(/same exact arguments for this task session/).textContent,
+    /same exact arguments/,
+  );
+
+  await user.click(
+    screen.getByRole("button", { name: "More approval options" }),
+  );
+  const sessionAllow = await screen.findByRole("menuitem", {
+    name: "Allow same arguments for this session",
+  });
+  await user.click(sessionAllow);
+  assert.deepEqual(responses, [
+    { kind: "permission", permission: "allow_session" },
+  ]);
+
+  cleanup();
+});
+
+test("permission controls preserve 44px targets and stack at narrow width", async () => {
+  const stylesheet = await readFile(
+    join(process.cwd(), "frontend", "src", "index.css"),
+    "utf8",
+  );
+  assert.match(
+    stylesheet,
+    /\.approval-split-trigger\s*\{[^}]*min-width:\s*44px;[^}]*min-height:\s*44px;/s,
+  );
+  assert.match(
+    stylesheet,
+    /@media \(max-width: 480px\)[\s\S]*?\.ai-intervention-actions\s*\{[^}]*grid-template-columns:\s*1fr;/,
+  );
+});
+
+test("full-access successor failure offers only explicit safe retry", async () => {
+  let retries = 0;
+  const user = userEvent.setup({ document: dom.window.document });
+  const view = render(
+    localizedView(
+      createElement(FullAccessSuccessorNotice, {
+        phase: "failed",
+        message: "There is no capacity for another task right now.",
+        retry: () => retries++,
+        dismiss: null,
+      }),
+    ),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Try creating the task again" }),
+  );
+  assert.equal(retries, 1);
+  view.rerender(
+    localizedView(
+      createElement(FullAccessSuccessorNotice, {
+        phase: "outcome_unknown",
+        message: null,
+        retry: null,
+        dismiss: null,
+      }),
+    ),
+  );
+  assert.ok(
+    screen.getByText(
+      /could not confirm whether the full-access task was created/,
+    ),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Try creating the task again" }),
+    null,
+  );
 });
 
 test("Escape dismissal and focus return preserve the real Task Panel opener", () => {
@@ -4223,6 +4381,590 @@ test("App stop request remains bound to its Task and never fabricates a terminal
   );
 });
 
+function setRepeatedPermissionSource(source) {
+  Object.assign(source.runs[0], {
+    phase: "waiting_ui",
+    terminal: null,
+    activity: { kind: "waiting_user" },
+  });
+  source.currentRunPhase = "waiting_ui";
+  source.activeOperation = { kind: "run", id: source.currentRunId };
+  source.pendingUi = {
+    requestId: "request-repeat",
+    runId: source.currentRunId,
+    order: "2",
+    redacted: false,
+    kind: "permission",
+    toolNamespace: "builtin",
+    tool: "Bash",
+    toolBinding: "builtin:Bash",
+    args: "npm test",
+    policyGeneration: "1",
+    canonicalArgumentsDigest: "digest-repeat",
+    candidate: { ruleId: "rule-repeat", scope: "exact_arguments" },
+    availableChoices: ["deny_once", "allow_once", "allow_session"],
+  };
+  source.uiHistory = [
+    {
+      requestId: "request-before",
+      runId: source.currentRunId,
+      order: "1",
+      kind: "permission",
+      state: "allowed_once",
+      agentRequestId: "agent-before",
+      permission: {
+        requestId: "request-before",
+        matchedRuleId: "rule-repeat",
+        toolNamespace: "builtin",
+        toolName: "Bash",
+        toolBinding: "builtin:Bash",
+        canonicalArgumentsDigest: "digest-repeat",
+        decision: "allow",
+        source: "callback",
+        policyGeneration: "1",
+        usedSessionRule: false,
+        callbackOutcome: "answered",
+      },
+      detail: "",
+      itemCount: 1,
+      detailTruncated: false,
+      redacted: false,
+    },
+  ];
+}
+
+test("permission restore counts remain a qualified supplement in both locales", () => {
+  const source = { runs: [run()], currentRunId: "7" };
+  setRepeatedPermissionSource(source);
+  source.uiHistory[0].state = "allowed_always";
+  source.restorePermission = { restoredRules: "0", invalidatedRules: "1" };
+  for (const locale of ["en-US", "zh-CN"]) {
+    render(
+      createElement(
+        I18nContext.Provider,
+        {
+          value: {
+            locale,
+            setLocale() {},
+            t: (id, values) => translate(locale, id, values),
+          },
+        },
+        createElement(ApprovalPanel, {
+          pending: source.pendingUi,
+          task: source,
+          busy: false,
+          responsePhase: "idle",
+          respond() {},
+        }),
+      ),
+    );
+    const note = screen.getByRole("note").textContent;
+    assert.ok(
+      note.includes(translate(locale, "approval.reason_session_grant_missed")),
+    );
+    assert.ok(
+      note.includes(translate(locale, "approval.restore_rules_invalidated")),
+    );
+    assert.doesNotMatch(
+      note,
+      /The previous session rule could not be restored|上次会话规则未能恢复/,
+    );
+    cleanup();
+  }
+});
+
+async function publishAppFixture(fixture) {
+  fixture.snapshot.revision = String(BigInt(fixture.snapshot.revision) + 1n);
+  await act(async () => fixture.publish());
+}
+
+async function renderRepeatedPermissionFixture(ctx) {
+  const fixture = await renderAppFixture(ctx);
+  setRepeatedPermissionSource(fixture.snapshot.tasks[0]);
+  await publishAppFixture(fixture);
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+  await screen.findByRole("button", {
+    name: "Continue in a new full-access task",
+  });
+  return fixture;
+}
+
+async function publishSourceTerminal(
+  fixture,
+  source = fixture.snapshot.tasks[0],
+) {
+  Object.assign(source.runs[0], {
+    phase: "stopped",
+    terminal: terminal("stopped"),
+    activity: null,
+  });
+  source.currentRunPhase = null;
+  source.activeOperation = null;
+  source.pendingUi = null;
+  await publishAppFixture(fixture);
+}
+
+function appendIdleSuccessor(snapshot, source, id = "5") {
+  snapshot.tasks.push({
+    ...structuredClone(source),
+    id,
+    recentOrder: id,
+    title: "",
+    permissionProfile: "full_access",
+    binding: { ...source.binding, epoch: "1" },
+    lifecycle: "open",
+    deletionStatus: "idle",
+    archived: false,
+    unreadCompletionRunId: null,
+    restorePermission: null,
+    activeOperation: null,
+    currentRunId: "0",
+    currentRunPhase: null,
+    context: { pressure: null, lastAutoCompact: null },
+    runs: [],
+    compacts: [],
+    pendingUi: null,
+    uiHistory: [],
+  });
+  snapshot.permissions.defaultProfile = "full_access";
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  return { accepted: true, sourceTaskId: source.id, taskId: id, reason: null };
+}
+
+test("successor stop timeout is recoverable and does not lock another Task", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient, BridgeCommandTimeoutError } = await vite.ssrLoadModule(
+    "/src/bridge/client.ts",
+  );
+  const cancels = [],
+    creates = [];
+  ctx.mock.method(BridgeClient.prototype, "cancel", async (...ids) => {
+    cancels.push(ids);
+    if (cancels.length === 1)
+      throw new BridgeCommandTimeoutError("cancel", 10000);
+  });
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async (...ids) => {
+      creates.push(ids);
+      return {
+        accepted: false,
+        sourceTaskId: ids[0],
+        taskId: null,
+        reason: "task_capacity",
+      };
+    },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await screen.findByText(/No new task has been requested yet/);
+  assert.equal(creates.length, 0);
+  assert.equal(
+    screen.queryByText(
+      /could not confirm whether the full-access task was created/,
+    ),
+    null,
+  );
+  assert.ok(screen.getByRole("button", { name: "Try stopping again" }));
+
+  setRepeatedPermissionSource(fixture.snapshot.tasks[1]);
+  await publishAppFixture(fixture);
+  fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Continue in a new full-access task",
+    }),
+  );
+  await waitFor(() => assert.equal(cancels.length, 2));
+  fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Try stopping again" }),
+  );
+  await waitFor(() => assert.equal(cancels.length, 3));
+  await publishSourceTerminal(fixture);
+  await screen.findByText("The full-access task was not created.");
+  assert.deepEqual(creates, [["3", fixture.snapshot.tasks[0].binding.epoch]]);
+});
+
+test("successor stop timeout still continues after the same Run really terminates", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let creates = 0;
+  ctx.mock.method(BridgeClient.prototype, "cancel", async () => {
+    throw new Error("stop acknowledgement lost");
+  });
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async () => {
+      creates++;
+      return appendIdleSuccessor(fixture.snapshot, fixture.snapshot.tasks[0]);
+    },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await screen.findByRole("button", { name: "Try stopping again" });
+  assert.equal(creates, 0);
+  await publishSourceTerminal(fixture);
+  await screen.findByText(
+    "This task is ready. Enter its first instruction to begin.",
+  );
+  assert.equal(creates, 1);
+});
+
+test("successor creation timeout offers dismissal without replay or cross-Task blocking", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const cancels = [];
+  let creates = 0;
+  ctx.mock.method(BridgeClient.prototype, "cancel", async (...ids) =>
+    cancels.push(ids),
+  );
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async () => {
+      creates++;
+      throw new Error("create acknowledgement lost");
+    },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await waitFor(() => assert.equal(cancels.length, 1));
+  await publishSourceTerminal(fixture);
+  await screen.findByText(
+    /could not confirm whether the full-access task was created/,
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Try creating the task again" }),
+    null,
+  );
+  await publishAppFixture(fixture);
+  assert.equal(creates, 1);
+  setRepeatedPermissionSource(fixture.snapshot.tasks[1]);
+  await publishAppFixture(fixture);
+  fireEvent.click(screen.getByRole("button", { name: /Second task/ }));
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Continue in a new full-access task",
+    }),
+  );
+  await waitFor(() => assert.equal(cancels.length, 2));
+  fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Dismiss this notice" }),
+  );
+  assert.equal(
+    screen.queryByText(
+      /could not confirm whether the full-access task was created/,
+    ),
+    null,
+  );
+  assert.equal(creates, 1);
+});
+
+test("successor accepted identity survives snapshot failure and retry only synchronizes", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let resolveCreate,
+    creates = 0;
+  ctx.mock.method(BridgeClient.prototype, "cancel", async () => {});
+  ctx.mock.method(BridgeClient.prototype, "createFullAccessSuccessor", () => {
+    creates++;
+    return new Promise((resolve) => {
+      resolveCreate = resolve;
+    });
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await publishSourceTerminal(fixture);
+  await waitFor(() => assert.equal(creates, 1));
+  fixture.setSnapshotFailure(true);
+  await act(async () =>
+    resolveCreate(
+      appendIdleSuccessor(fixture.snapshot, fixture.snapshot.tasks[0]),
+    ),
+  );
+  await screen.findByText(
+    "The full-access task was created. Its view still needs to synchronize.",
+    {},
+    { timeout: 5000 },
+  );
+  assert.equal(
+    screen.queryByText(
+      /could not confirm whether the full-access task was created/,
+    ),
+    null,
+  );
+  const retrySync = await screen.findByRole(
+    "button",
+    { name: "Retry synchronization" },
+    { timeout: 5000 },
+  );
+  fixture.setSnapshotFailure(false);
+  fireEvent.click(retrySync);
+  await screen.findByText(
+    "This task is ready. Enter its first instruction to begin.",
+  );
+  assert.equal(creates, 1);
+  assert.equal(
+    fixture.snapshot.tasks.filter(
+      (task) => task.permissionProfile === "full_access",
+    ).length,
+    1,
+  );
+});
+
+test("successor ignores late cancel rejection after creation has already succeeded", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let rejectStop,
+    creates = 0;
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "cancel",
+    () =>
+      new Promise((_, reject) => {
+        rejectStop = reject;
+      }),
+  );
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async () => {
+      creates++;
+      return appendIdleSuccessor(fixture.snapshot, fixture.snapshot.tasks[0]);
+    },
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await publishSourceTerminal(fixture);
+  await screen.findByText(
+    "This task is ready. Enter its first instruction to begin.",
+  );
+  await act(async () => rejectStop(new Error("late cancel timeout")));
+  fireEvent.click(screen.getByRole("button", { name: /First task/ }));
+  assert.equal(
+    screen.queryByText(
+      /No new task has been requested yet|could not confirm whether/,
+    ),
+    null,
+  );
+  assert.equal(creates, 1);
+  fixture.snapshot.tasks[0].currentRunId = "8";
+  fixture.snapshot.tasks[0].runs[0].id = "8";
+  setRepeatedPermissionSource(fixture.snapshot.tasks[0]);
+  await publishAppFixture(fixture);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Continue in a new full-access task",
+    }),
+  );
+  assert.ok(screen.getByText("Stopping the current run…"));
+  await act(async () => rejectStop(new Error("cleanup second stop")));
+});
+
+test("successor discards a late creation reply from a replaced Bridge generation", async (ctx) => {
+  const fixture = await renderRepeatedPermissionFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const { WorkbenchConnection } = await vite.ssrLoadModule(
+    "/src/bridge/connection.ts",
+  );
+  const connection = WorkbenchConnection.prototype.refresh;
+  let activeConnection, resolveCreate;
+  ctx.mock.method(WorkbenchConnection.prototype, "refresh", function (...args) {
+    activeConnection = this;
+    return connection.apply(this, args);
+  });
+  ctx.mock.method(BridgeClient.prototype, "cancel", async () => {});
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    () =>
+      new Promise((resolve) => {
+        resolveCreate = resolve;
+      }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Continue in a new full-access task" }),
+  );
+  await publishSourceTerminal(fixture);
+  await screen.findByText("Creating a new full-access task…");
+  ctx.mock.method(BridgeClient.prototype, "connect", async () => "2");
+  await act(async () => activeConnection.retry({ replaceConnection: true }));
+  fireEvent.click(await screen.findByRole("button", { name: /Second task/ }));
+  const lateResult = appendIdleSuccessor(
+    fixture.snapshot,
+    fixture.snapshot.tasks[0],
+    "999",
+  );
+  await act(async () => resolveCreate(lateResult));
+  await publishAppFixture(fixture);
+  assert.equal(
+    screen.queryByText(/could not confirm whether|Creating a new full-access/),
+    null,
+  );
+  assert.equal(
+    screen.queryByText(
+      "This task is ready. Enter its first instruction to begin.",
+    ),
+    null,
+  );
+  assert.equal(
+    screen
+      .getByRole("button", { name: /Second task/ })
+      .getAttribute("aria-current"),
+    "page",
+  );
+});
+
+test("repeated permission can stop and open an idle full-access successor without replay", async (ctx) => {
+  const { snapshot, publish } = await renderAppFixture(ctx);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const calls = [];
+  ctx.mock.method(BridgeClient.prototype, "cancel", async (...ids) => {
+    calls.push(["cancel", ...ids]);
+  });
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "createFullAccessSuccessor",
+    async (sourceTaskId, expectedBindingEpoch) => {
+      calls.push(["successor", sourceTaskId, expectedBindingEpoch]);
+      const source = snapshot.tasks.find((task) => task.id === sourceTaskId);
+      snapshot.tasks.push({
+        ...structuredClone(source),
+        id: "5",
+        recentOrder: "5",
+        title: "",
+        permissionProfile: "full_access",
+        binding: { ...source.binding, epoch: "1" },
+        lifecycle: "open",
+        deletionStatus: "idle",
+        archived: false,
+        unreadCompletionRunId: null,
+        restorePermission: null,
+        activeOperation: null,
+        currentRunId: "0",
+        currentRunPhase: null,
+        context: { pressure: null, lastAutoCompact: null },
+        runs: [],
+        compacts: [],
+        pendingUi: null,
+        uiHistory: [],
+      });
+      snapshot.permissions.defaultProfile = "full_access";
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      return {
+        accepted: true,
+        sourceTaskId,
+        taskId: "5",
+        reason: null,
+      };
+    },
+  );
+  const runCalls = [];
+  ctx.mock.method(BridgeClient.prototype, "run", async (...args) => {
+    runCalls.push(args);
+    assert.fail("the successor flow must not replay an instruction");
+  });
+
+  const source = snapshot.tasks[0];
+  Object.assign(source.runs[0], {
+    phase: "waiting_ui",
+    terminal: null,
+    activity: { kind: "waiting_user" },
+  });
+  source.currentRunPhase = "waiting_ui";
+  source.activeOperation = { kind: "run", id: source.currentRunId };
+  source.pendingUi = {
+    requestId: "request-repeat",
+    runId: source.currentRunId,
+    order: "2",
+    redacted: false,
+    kind: "permission",
+    toolNamespace: "builtin",
+    tool: "Bash",
+    toolBinding: "builtin:Bash",
+    args: "npm test",
+    policyGeneration: "1",
+    canonicalArgumentsDigest: "digest-repeat",
+    candidate: { ruleId: "rule-repeat", scope: "exact_arguments" },
+    availableChoices: ["deny_once", "allow_once", "allow_session"],
+  };
+  source.uiHistory = [
+    {
+      requestId: "request-before",
+      runId: source.currentRunId,
+      order: "1",
+      kind: "permission",
+      state: "allowed_once",
+      agentRequestId: "agent-request-before",
+      permission: {
+        requestId: "request-before",
+        matchedRuleId: "rule-repeat",
+        toolNamespace: "builtin",
+        toolName: "Bash",
+        toolBinding: "builtin:Bash",
+        canonicalArgumentsDigest: "digest-repeat",
+        decision: "allow",
+        source: "callback",
+        policyGeneration: "1",
+        usedSessionRule: false,
+        callbackOutcome: "answered",
+      },
+      detail: "",
+      itemCount: 1,
+      detailTruncated: false,
+      redacted: false,
+    },
+  ];
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  fireEvent.click(await screen.findByRole("button", { name: /First task/ }));
+
+  const continueButton = await screen.findByRole("button", {
+    name: "Continue in a new full-access task",
+  });
+  fireEvent.click(continueButton);
+  await waitFor(() =>
+    assert.deepEqual(calls, [["cancel", "3", source.currentRunId]]),
+  );
+  assert.ok(screen.getByText("Stopping the current run…"));
+  assert.equal(screen.queryByText("Creating a new full-access task…"), null);
+
+  Object.assign(source.runs[0], {
+    phase: "stopped",
+    terminal: terminal("stopped"),
+    activity: null,
+  });
+  source.currentRunPhase = null;
+  source.activeOperation = null;
+  source.pendingUi = null;
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+
+  await waitFor(() =>
+    assert.deepEqual(calls, [
+      ["cancel", "3", "7"],
+      ["successor", "3", source.binding.epoch],
+    ]),
+  );
+  assert.ok(
+    await screen.findByText(
+      "This task is ready. Enter its first instruction to begin.",
+    ),
+  );
+  assert.equal(runCalls.length, 0);
+  assert.equal(snapshot.tasks.at(-1).runs.length, 0);
+  assert.equal(snapshot.tasks.at(-1).permissionProfile, "full_access");
+});
+
 function filePreviewOpener(path) {
   return screen.getByRole("button", { name: `Preview ${path}` });
 }
@@ -4808,8 +5550,13 @@ test("App attention only locates the original approval in docked and overlay lay
       order: "1",
       redacted: false,
       kind: "permission",
+      toolNamespace: "builtin",
       tool: "Bash",
+      toolBinding: "builtin:Bash",
       args: "inspect",
+      policyGeneration: "1",
+      canonicalArgumentsDigest: "digest-attention",
+      candidate: null,
       availableChoices: ["deny_once", "allow_once"],
     };
     snapshot.tasks[0].currentRunPhase = "waiting_ui";

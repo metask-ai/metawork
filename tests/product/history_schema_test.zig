@@ -441,6 +441,7 @@ test "merged history arrays preserve maximum counts escaped bytes order and unsi
         record.permission.?.matched_rule_id = "\x00" ** 128;
         record.permission.?.tool_name = "\x00" ** 128;
         record.permission.?.tool_binding = "\x00" ** 128;
+        record.permission.?.canonical_arguments_digest = "\x00" ** 128;
         record.permission.?.policy_generation = std.math.maxInt(u64);
     }
     state.failures = try allocator.alloc(history.wire.TaskFailureWire, history.wire.max_failure_records);

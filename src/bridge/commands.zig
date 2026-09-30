@@ -76,6 +76,7 @@ pub const custom_model_replace = "metawork.models.customModels.replace";
 pub const custom_model_remove = "metawork.models.customModels.remove";
 pub const account_logout = "metawork.account.logout";
 pub const create_task = "metawork.tasks.create";
+pub const create_full_access_successor = "metawork.tasks.createFullAccessSuccessor";
 pub const run = "metawork.tasks.run";
 pub const select_task_model = "metawork.tasks.selectModel";
 pub const restore_task = "metawork.tasks.restore";
@@ -170,6 +171,7 @@ pub const product = [_][]const u8{
     custom_model_remove,
     account_logout,
     create_task,
+    create_full_access_successor,
     run,
     select_task_model,
     restore_task,
