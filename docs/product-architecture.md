@@ -290,6 +290,8 @@ Product history 保存用户可观察且跨重启仍有意义的 Workspace、Tas
 
 Durable Task record 与 runtime attachment 必须分离。durable record 不保存 live Agent Session、catalog lease、pointer、atomic、worker/control payload、credential 或 `closed` 产品终态；runtime attachment 线性拥有 Agent Binding、ExecutionConfig 与必要 lease 的唯一使用和归还责任。Task detach 或 replacement 必须先关闭并归还 live Binding，不能丢弃或复制所有权。
 
+Task 的显式权限评审委托与不可变 PermissionProfile 分离，只适用于 interactive、`approval_required` Task，默认关闭。委托可以撤销，运行期 generation 与当前评审 identity 不进入 durable history；恢复不得重放待决评审或审批。UI 决定历史区分用户与受委托审核器，并只保存经过 Task projection 脱敏的有界评审理由，不保存原始评审输入或模型输出。既有 canonical Task 缺少委托字段时保持关闭，既有非取消 UI 决定缺少来源字段时按用户决定恢复；历史决定和理由不具有当前授权效力。
+
 Run/compact 的 terminal result 由 Agent 以自包含事实返回，Product 在预留 record 中 no-fail、write-once 提交后才能通知、释放 worker reference 或推进后续事务。queued-before-execute 由 Product 生成独立的 pre-execution terminal fact；Agent Session snapshot 只描述 live lifecycle，不承担历史 terminal truth。
 
 Run durable record 在 Product 接纳输入时至多一次记录 nullable wall-clock 提交时间。时钟不可用或旧 canonical record 缺少该字段时保持 null；恢复不得迁移、推断或用完成时间与加载时间补写。该事实只描述输入接纳，不承担 Agent 开始执行、排队耗时或事件时间线语义。

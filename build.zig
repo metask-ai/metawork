@@ -212,6 +212,16 @@ pub fn build(b: *std.Build) void {
     });
     b.step("test-permission-review", "Run the independent permission reviewer tests")
         .dependOn(&b.addRunArtifact(permission_review_tests).step);
+    const task_permission_step = b.step("test-task-permission", "Run Task permission state, history and approval tests");
+    for ([_]*std.Build.Module{
+        test_modules.product_task_attachment,
+        test_modules.product_task_state,
+        test_modules.product_task_persistence,
+        test_modules.product_task_runtime,
+    }) |module| {
+        const tests = b.addTest(.{ .root_module = module });
+        task_permission_step.dependOn(&b.addRunArtifact(tests).step);
+    }
     const account_test_step = b.step(
         "test-account",
         "Run Account owner and Application coordinator tests",

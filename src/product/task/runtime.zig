@@ -2003,6 +2003,31 @@ pub const Runtime = struct {
         return true;
     }
 
+    /// Explicit user delegation; never changes the immutable AgentCore profile.
+    /// Composition persists/publishes this mutation before admitting a review job.
+    pub fn setPermissionReviewDelegation(
+        self: *Runtime,
+        task_id: u64,
+        delegated: bool,
+    ) error{ UnknownTask, TaskBusy, UnsupportedPermissionProfile, ReviewGenerationExhausted }!bool {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (delegated) {
+            if (task.durable.permission_profile != .approval_required or
+                task.durable.permission_interaction != .interactive)
+                return error.UnsupportedPermissionProfile;
+            if (task.durable.archived or task.deletion != .idle or
+                task.runtime.close_requested or !task.runtime.hasAttachedSession())
+                return error.TaskBusy;
+            if (task.runtime.permission_review.exhausted or
+                task.runtime.permission_review.generation == std.math.maxInt(u64))
+                return error.ReviewGenerationExhausted;
+        }
+        if (task.durable.permission_review_delegated == delegated) return false;
+        task.runtime.permission_review.invalidate();
+        task.durable.permission_review_delegated = delegated;
+        return true;
+    }
+
     pub fn markCompletionSeen(self: *Runtime, task_id: u64, run_id: u64) bool {
         if (run_id == 0) return false;
         const task = self.find(task_id) orelse return false;
@@ -5741,6 +5766,7 @@ fn prepareUiRecord(
         .run_id = run_id,
         .kind = kindForResponse(response),
         .state = stateForResponse(response),
+        .answered_by = .user,
     };
     var pending = access.copyPendingUiRequest(self.allocator) catch return record;
     defer pending.deinit();
@@ -6066,6 +6092,56 @@ test "Runtime owns bounded Task collection and monotonic process facts" {
         runtime.takeTaskId(),
     );
     try std.testing.expectEqual(std.math.maxInt(u64), runtime.next_task_id);
+}
+
+test "permission review delegation defaults off is revocable and is independent of profile" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = .{
+        .durable = .{
+            .id = 1,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .openai_responses,
+            .execution_model = @constCast("m"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 1,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &.{},
+            .compacts = &.{},
+            .ui_history = &.{},
+        },
+        .runtime = .{ .attachment = .{ .attached = .{
+            .binding = task_agent_session.Binding.testFixture(1),
+            .execution = undefined,
+            .pinned_catalog = null,
+        } } },
+    };
+    defer runtime.tasks[0] = null;
+    const task = runtime.find(1).?;
+    try std.testing.expect(!task.durable.permission_review_delegated);
+    try std.testing.expect(try runtime.setPermissionReviewDelegation(1, true));
+    const generation = task.runtime.permission_review.generation;
+    try std.testing.expect(!try runtime.setPermissionReviewDelegation(1, true));
+    try std.testing.expectEqual(generation, task.runtime.permission_review.generation);
+    try std.testing.expect(try runtime.setPermissionReviewDelegation(1, false));
+    try std.testing.expect(try runtime.setPermissionReviewDelegation(1, true));
+    try std.testing.expect(task.runtime.permission_review.generation > generation);
+    try std.testing.expectEqual(.approval_required, task.durable.permission_profile);
+    task.runtime.close_requested = true;
+    try std.testing.expect(try runtime.setPermissionReviewDelegation(1, false));
+    try std.testing.expectError(error.TaskBusy, runtime.setPermissionReviewDelegation(1, true));
+    task.runtime.close_requested = false;
+    task.durable.permission_profile = .full_access;
+    try std.testing.expectError(error.UnsupportedPermissionProfile, runtime.setPermissionReviewDelegation(1, true));
+    task.durable.permission_profile = .approval_required;
+    task.durable.permission_interaction = .noninteractive;
+    try std.testing.expectError(error.UnsupportedPermissionProfile, runtime.setPermissionReviewDelegation(1, true));
+    task.durable.permission_interaction = .interactive;
+    task.runtime.permission_review.generation = std.math.maxInt(u64);
+    try std.testing.expectError(error.ReviewGenerationExhausted, runtime.setPermissionReviewDelegation(1, true));
 }
 
 test "UI history distinguishes idempotent settlement from cross-Run collision" {

@@ -487,6 +487,7 @@ pub const TaskWire = struct {
     archived: bool,
     permission_profile: []const u8,
     permission_interaction: []const u8,
+    permission_review_delegated: bool = false,
     binding: BindingWire,
     next_run_generation: u64,
     active_operation: ?OperationWire,
@@ -694,6 +695,8 @@ pub const UiRecordWire = struct {
     redacted: bool,
     agent_request_id: []const u8 = "",
     permission: ?PermissionSummaryWire = null,
+    answered_by: ?[]const u8 = null,
+    review_reason: ?[]const u8 = null,
 };
 
 pub const PermissionSummaryWire = struct {
@@ -855,6 +858,8 @@ pub fn projectTask(
             .order = record.order,
             .kind = @tagName(record.kind),
             .state = @tagName(record.state),
+            .answered_by = if (record.answered_by) |source| @tagName(source) else null,
+            .review_reason = record.reviewReason(),
             .detail = record.detailSlice(),
             .item_count = record.item_count,
             .detail_truncated = record.detail_truncated,
@@ -879,6 +884,7 @@ pub fn projectTask(
         .archived = task.durable.archived,
         .permission_profile = @tagName(task.durable.permission_profile),
         .permission_interaction = @tagName(task.durable.permission_interaction),
+        .permission_review_delegated = task.durable.permission_review_delegated,
         .binding = .{
             .epoch = task.durable.binding_epoch,
             .execution_generation = task.durable.execution_generation,
@@ -1331,6 +1337,7 @@ pub fn restoreTask(
             .execution_model = execution_model,
             .permission_profile = permission_profile,
             .permission_interaction = permission_interaction,
+            .permission_review_delegated = wire.permission_review_delegated,
             .binding_epoch = wire.binding.epoch,
             .workspace_id = wire.workspace_id,
             .workspace_epoch = wire.workspace_epoch,
@@ -1869,6 +1876,16 @@ fn restoreUiRecord(wire: UiRecordWire) task_state.UiRecord {
         .detail_truncated = wire.detail_truncated,
         .redacted = wire.redacted,
     };
+    if (wire.answered_by) |source| {
+        result.answered_by = if (std.mem.eql(u8, source, "reviewer")) .reviewer else .user;
+    } else if (result.state != .cancelled) {
+        // Previously supported history could only contain user answers.
+        result.answered_by = .user;
+    }
+    if (wire.review_reason) |reason| {
+        @memcpy(result.review_reason[0..reason.len], reason);
+        result.review_reason_len = reason.len;
+    }
     @memcpy(result.agent_request_id[0..wire.agent_request_id.len], wire.agent_request_id);
     result.agent_request_id_len = wire.agent_request_id.len;
     if (wire.permission) |permission| {
@@ -2622,6 +2639,10 @@ fn validate(state: *const StateWire, limits: Limits) !void {
 }
 
 fn validateTask(task: TaskWire, limits: Limits) !void {
+    if (task.permission_review_delegated and
+        (!std.mem.eql(u8, task.permission_profile, "approval_required") or
+            !std.mem.eql(u8, task.permission_interaction, "interactive")))
+        return error.Invalid;
     var max_generation: u64 = 0;
     var active_count: usize = 0;
     var completion_seen_valid = task.completion_seen_run_id == null or
@@ -2844,6 +2865,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !validText(record.detail, 512, true) or findRun(task.runs, record.run_id) == null)
             return error.Invalid;
         if (!validText(record.agent_request_id, 128, true)) return error.Invalid;
+        try validateReviewAudit(record, task);
         if (record.permission) |permission| {
             if (!std.mem.eql(u8, record.kind, "permission") or
                 !std.mem.eql(u8, record.agent_request_id, permission.request_id) or
@@ -2880,6 +2902,26 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         }
         if (run.next_activity_order <= max_activity_order) return error.Invalid;
     }
+}
+
+fn validateReviewAudit(record: UiRecordWire, task: TaskWire) error{Invalid}!void {
+    const source = record.answered_by orelse {
+        if (record.review_reason != null) return error.Invalid;
+        return;
+    };
+    if (std.mem.eql(u8, source, "user")) {
+        if (record.state.len == 0 or std.mem.eql(u8, record.state, "cancelled") or
+            record.review_reason != null) return error.Invalid;
+        return;
+    }
+    if (!std.mem.eql(u8, source, "reviewer") or
+        !oneOf(record.state, &.{ "allowed_once", "denied" }) or
+        !std.mem.eql(u8, task.permission_profile, "approval_required") or
+        !std.mem.eql(u8, task.permission_interaction, "interactive")) return error.Invalid;
+    const reason = record.review_reason orelse return error.Invalid;
+    if (!validText(reason, task_state.ui_record_detail_capacity, false) or
+        std.mem.trim(u8, reason, " \t\r\n").len == 0) return error.Invalid;
+    for (reason) |byte| if (byte < 0x20 or byte == 0x7f) return error.Invalid;
 }
 
 fn validPermissionProfile(value: []const u8) bool {
@@ -4134,6 +4176,110 @@ test "legacy permission summary without canonical digest remains readable" {
     );
     defer parsed.deinit();
     try std.testing.expectEqualStrings("", parsed.value.canonical_arguments_digest);
+}
+
+fn reviewTestTask() TaskWire {
+    return .{
+        .id = 1,
+        .recent_order = 1,
+        .workspace_id = 1,
+        .workspace_epoch = 1,
+        .workspace_root = "/tmp/repo",
+        .title = "",
+        .title_redacted = false,
+        .archived = false,
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
+        .binding = .{ .epoch = 1, .execution_generation = 1, .protocol = "openai_chat_completions", .model = "m" },
+        .next_run_generation = 0,
+        .active_operation = null,
+        .runs = &.{},
+        .compacts = &.{},
+        .ui_history = &.{},
+    };
+}
+
+test "permission review delegation persists only for interactive approval-required Tasks" {
+    var workspaces = [_]WorkspaceWire{.{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 }};
+    var tasks = [_]TaskWire{reviewTestTask()};
+    tasks[0].permission_review_delegated = true;
+    var output: [64 * 1024]u8 = undefined;
+    const bytes = try encode(&output, .{
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    }, testLimits());
+    var parsed = try decode(std.testing.allocator, bytes, testLimits());
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.tasks[0].permission_review_delegated);
+    tasks[0].permission_profile = "full_access";
+    try std.testing.expectError(error.Invalid, validateTask(tasks[0], testLimits()));
+    tasks[0].permission_profile = "approval_required";
+    tasks[0].permission_interaction = "noninteractive";
+    try std.testing.expectError(error.Invalid, validateTask(tasks[0], testLimits()));
+}
+
+test "permission review audit restores bounded reviewer reasons and rejects invalid attribution" {
+    const task = reviewTestTask();
+    var wire = UiRecordWire{
+        .request_id = 1,
+        .run_id = 1,
+        .order = 1,
+        .kind = "permission",
+        .state = "allowed_once",
+        .detail = "Bash",
+        .item_count = 0,
+        .detail_truncated = false,
+        .redacted = true,
+        .answered_by = "reviewer",
+        .review_reason = "Bounded *** operation.",
+    };
+    try validateReviewAudit(wire, task);
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, wire, .{});
+    defer std.testing.allocator.free(json);
+    var parsed = try std.json.parseFromSlice(UiRecordWire, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const record = restoreUiRecord(parsed.value);
+    try std.testing.expectEqual(.reviewer, record.answered_by.?);
+    try std.testing.expectEqualStrings(wire.review_reason.?, record.reviewReason().?);
+    for ([_][]const u8{ "allowed_always", "denied_session", "cancelled" }) |state| {
+        wire.state = state;
+        try std.testing.expectError(error.Invalid, validateReviewAudit(wire, task));
+    }
+    wire.state = "denied";
+    for ([_]?[]const u8{ null, "", " ", "line\nbreak", "\xff", "a" ** (task_state.ui_record_detail_capacity + 1) }) |reason| {
+        wire.review_reason = reason;
+        try std.testing.expectError(error.Invalid, validateReviewAudit(wire, task));
+    }
+    wire.review_reason = "ok";
+    for ([_]?[]const u8{ null, "user", "0", "unknown" }) |source| {
+        wire.answered_by = source;
+        try std.testing.expectError(error.Invalid, validateReviewAudit(wire, task));
+    }
+}
+
+test "permission review absent fields preserve previous user history without delegation" {
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, reviewTestTask(), .{});
+    defer std.testing.allocator.free(json);
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer value.deinit();
+    try std.testing.expect(value.value.object.swapRemove("permission_review_delegated"));
+    const previous = try std.json.Stringify.valueAlloc(std.testing.allocator, value.value, .{});
+    defer std.testing.allocator.free(previous);
+    var parsed_task = try std.json.parseFromSlice(TaskWire, std.testing.allocator, previous, .{});
+    defer parsed_task.deinit();
+    try std.testing.expect(!parsed_task.value.permission_review_delegated);
+    var parsed = try std.json.parseFromSlice(UiRecordWire, std.testing.allocator, "{\"request_id\":1,\"run_id\":1,\"order\":1,\"kind\":\"permission\",\"state\":\"allowed_once\",\"detail\":\"ok\",\"item_count\":0,\"detail_truncated\":false,\"redacted\":false}", .{});
+    defer parsed.deinit();
+    try validateReviewAudit(parsed.value, reviewTestTask());
+    const record = restoreUiRecord(parsed.value);
+    try std.testing.expectEqual(.user, record.answered_by.?);
+    try std.testing.expect(record.reviewReason() == null);
+    parsed.value.state = "cancelled";
+    try std.testing.expect(restoreUiRecord(parsed.value).answered_by == null);
 }
 
 fn testLimits() Limits {

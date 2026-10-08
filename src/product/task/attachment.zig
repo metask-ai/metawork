@@ -79,12 +79,50 @@ pub const CloseCompletion = enum(u8) {
     failed_closing,
 };
 
+/// Main-thread identity only. Review jobs must not retain Task/Run pointers or leases.
+pub const PermissionReviewIdentity = struct {
+    task_id: u64,
+    run_id: u64,
+    run_generation: u64,
+    execution_generation: u64,
+    binding_epoch: u64,
+    workspace_epoch: u64,
+    route_id: u64,
+    request_id: u64,
+    policy_generation: u64,
+    delegation_generation: u64,
+};
+
+pub const PermissionReviewState = struct {
+    generation: u64 = 1,
+    exhausted: bool = false,
+    phase: enum { idle, reviewing, needs_user } = .idle,
+    identity: ?PermissionReviewIdentity = null,
+
+    pub fn invalidate(self: *PermissionReviewState) void {
+        if (self.generation == std.math.maxInt(u64)) {
+            self.exhausted = true;
+        } else {
+            self.generation += 1;
+        }
+        self.phase = .idle;
+        self.identity = null;
+    }
+
+    pub fn matches(self: *const PermissionReviewState, identity: PermissionReviewIdentity) bool {
+        return !self.exhausted and self.phase == .reviewing and
+            self.identity != null and std.meta.eql(self.identity.?, identity) and
+            self.generation == identity.delegation_generation;
+    }
+};
+
 pub const State = struct {
     attachment: Attachment = .{ .detached = .cold_start },
     mcp_authority_at_creation: McpAuthorityAtCreation = .unavailable,
     worker_leases: worker_lease.WorkerLeaseSet = .{},
     pending_ui_request_id: u64 = 0,
     pending_ui_order: u64 = 0,
+    permission_review: PermissionReviewState = .{},
     active_run_id: u64 = 0,
     active_operation: ActiveOperation = .none,
     restore_job: ?*recovery_job.Job = null,
@@ -261,4 +299,18 @@ test "attachment and operation states exclude partial resource tuples" {
     try std.testing.expect(!state.hasAttachedSession());
     try std.testing.expect(state.execution() == null);
     try std.testing.expectEqual(@as(u64, 0), state.routeId());
+}
+
+test "permission review invalidation never reuses a delegation generation" {
+    var state = PermissionReviewState{};
+    state.invalidate();
+    try std.testing.expectEqual(@as(u64, 2), state.generation);
+    state.phase = .needs_user;
+    state.invalidate();
+    try std.testing.expectEqual(@as(u64, 3), state.generation);
+    try std.testing.expectEqual(.idle, state.phase);
+    state.generation = std.math.maxInt(u64);
+    state.invalidate();
+    try std.testing.expect(state.exhausted);
+    try std.testing.expect(state.identity == null);
 }

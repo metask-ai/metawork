@@ -127,10 +127,52 @@ test "history schema reopens the same identity and rejects changed or older migr
 }
 
 const upgrade = sql.Migration{
-    .version = 2,
+    .version = schema.migrations.len + 1,
     .name = "test_only_add_note",
     .sql = "ALTER TABLE tasks ADD COLUMN test_note BLOB; CREATE INDEX test_runs_phase ON runs(phase); UPDATE tasks SET test_note=X'6f6b';",
 };
+
+test "history schema preserves permission review delegation and reviewer audit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const state = try history.fixture(allocator);
+    const task = &state.tasks[0];
+    task.permission_profile = "approval_required";
+    task.permission_review_delegated = true;
+    for (task.runs) |*run| run.permission_profile = "approval_required";
+    task.ui_history[0].state = "allowed_once";
+    task.ui_history[0].answered_by = "reviewer";
+    task.ui_history[0].review_reason = "Bounded *** operation.";
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    _ = try save(allocator, database.capability(), state);
+    try expectSame(allocator, database.capability(), state);
+}
+
+test "history schema upgrades existing tasks with review delegation disabled" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try temporaryPath(allocator, temporary.dir);
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..1]);
+        defer database.destroy() catch unreachable;
+        var statements = std.mem.splitScalar(u8, @embedFile("history_schema_minimal.sql"), ';');
+        while (statements.next()) |raw| {
+            const statement = std.mem.trim(u8, raw, " \r\n\t");
+            if (statement.len == 0) continue;
+            try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = statement } }}));
+        }
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer database.destroy() catch unreachable;
+    var count: Count = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT COUNT(*) FROM tasks WHERE permission_review_delegated=0", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(?i64, 1), count.value);
+}
 
 test "history schema rejects structural counterexamples and rolls back the preceding write" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -574,11 +616,11 @@ test "history schema upgrades populated data and old readers reject the newer ve
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
     }
-    const migrations = [_]sql.Migration{ schema.migrations[0], upgrade };
+    const migrations = schema.migrations[0..schema.migrations.len].* ++ [_]sql.Migration{upgrade};
     {
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations);
         defer database.destroy() catch unreachable;
-        try std.testing.expectEqual(@as(u32, 2), database.schemaVersion());
+        try std.testing.expectEqual(upgrade.version, database.schemaVersion());
         var count: Count = .{};
         try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT COUNT(*) FROM tasks WHERE test_note=X'6f6b'", &.{}, count.receiver()));
         try std.testing.expectEqual(@as(?i64, 1), count.value);
@@ -600,15 +642,15 @@ test "history schema rolls back every pending migration including schema and bac
         defer database.destroy() catch unreachable;
         _ = try save(allocator, database.capability(), state);
     }
-    const migrations = [_]sql.Migration{ schema.migrations[0], upgrade, .{
-        .version = 3,
+    const migrations = schema.migrations[0..schema.migrations.len].* ++ [_]sql.Migration{ upgrade, .{
+        .version = schema.migrations.len + 2,
         .name = "test_only_failure",
         .sql = "CREATE TABLE test_marker(id INTEGER); UPDATE tasks SET title=X'6368616e676564'; UPDATE runs SET generation=NULL;",
     } };
     try std.testing.expectError(error.MigrationFailed, storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, &migrations));
     const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
     defer database.destroy() catch unreachable;
-    try std.testing.expectEqual(@as(u32, 1), database.schemaVersion());
+    try std.testing.expectEqual(@as(u32, schema.migrations.len), database.schemaVersion());
     try expectSame(allocator, database.capability(), state);
     var count: Count = .{};
     try std.testing.expectEqual(sql.QueryOutcome.rejected, database.capability().query("SELECT test_note FROM tasks", &.{}, count.receiver()));
