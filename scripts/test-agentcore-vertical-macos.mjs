@@ -2139,7 +2139,6 @@ async function probeWindowsClipboard({
 }) {
   if (process.platform !== "win32") return;
   const webview = await connectTestWebView(chromeProbePort);
-  let point;
   try {
     await poll(
       async () => {
@@ -2157,69 +2156,80 @@ async function probeWindowsClipboard({
       commandTimeoutMs,
       `Renderer Task ${taskId} selection`,
     );
-    // Earlier code-copy checks scroll to an older exchange. UIA screen-order
-    // sorting cannot identify the latest reply because offscreen bounds collapse.
-    // data-latest binds the control to the canonical latest copyable Run; the
-    // clipboard assertions below verify the complete fixture and its marker.
-    point = await poll(
-      async () => {
-        const observation = await webview.evaluate(`(() => {
-          const buttons = document.querySelectorAll('.response-copy-action[data-latest="true"]');
-          if (buttons.length !== 1) return {point:null, buttonCount:buttons.length};
-          const button = buttons[0];
-          const markerPresent = button.closest('.ai-exchange')?.textContent.includes(${JSON.stringify(marker)}) === true;
-          if (!markerPresent)
-            return {point:null, buttonCount:buttons.length, markerPresent};
-          button.scrollIntoView({block:'center', behavior:'instant'});
-          const r = button.getBoundingClientRect();
-          const x = r.x + r.width / 2, y = r.y + r.height / 2;
-          const hit = document.elementFromPoint(x,y);
-          if (!r.width || !r.height || button.disabled || !button.contains(hit))
-            return {
-              point:null,
-              buttonCount:buttons.length,
-              bounds:{x:r.x,y:r.y,width:r.width,height:r.height},
-              disabled:button.disabled,
-              hit:hit?.tagName ?? null,
-            };
-          return {point:{x:Math.round(x * devicePixelRatio), y:Math.round(y * devicePixelRatio)}};
-        })()`);
-        if (observation?.point) return observation.point;
-        throw new Error(JSON.stringify(observation));
-      },
-      commandTimeoutMs,
-      "Latest response copy action",
-    );
+    // Bind both controls to the same latest exchange. Measuring the code
+    // control after response copying avoids stale points and older Run buttons.
+    for (const kind of expectedCode === null
+      ? ["response"]
+      : ["response", "code"]) {
+      const point = await poll(
+        async () => {
+          const observation = await webview.evaluate(`(() => {
+            const buttons = document.querySelectorAll('.response-copy-action[data-latest="true"]');
+            if (buttons.length !== 1) return {point:null, buttonCount:buttons.length};
+            const response = buttons[0];
+            const exchange = response.closest('.ai-exchange');
+            const markerPresent = exchange?.textContent.includes(${JSON.stringify(marker)}) === true;
+            if (!markerPresent) return {point:null, markerPresent};
+            let button = response;
+            if (${JSON.stringify(kind)} === 'code') {
+              const codeButtons = [...exchange.querySelectorAll('.code-block-copy-action')]
+                .filter(candidate => candidate.closest('.code-block-copyable')?.querySelector('pre')?.textContent.trimEnd() === ${JSON.stringify(expectedCode)});
+              if (codeButtons.length !== 1) return {point:null, codeButtonCount:codeButtons.length};
+              button = codeButtons[0];
+            }
+            button.scrollIntoView({block:'center', behavior:'instant'});
+            const r = button.getBoundingClientRect();
+            const x = r.x + r.width / 2, y = r.y + r.height / 2;
+            const hit = document.elementFromPoint(x,y);
+            // Code controls activate on native hover/focus. The wrapper must
+            // be exposed here; UIA still requires an exact button hit after hover.
+            const hitOwner = ${JSON.stringify(kind)} === 'code' ? button.closest('.code-block-copyable') : button;
+            if (!r.width || !r.height || button.disabled || !hitOwner?.contains(hit))
+              return {point:null, bounds:{x:r.x,y:r.y,width:r.width,height:r.height}, disabled:button.disabled, hit:hit?.tagName ?? null};
+            return {point:{x, y, width:innerWidth, height:innerHeight}};
+          })()`);
+          if (observation?.point) return observation.point;
+          throw new Error(JSON.stringify(observation));
+        },
+        commandTimeoutMs,
+        `Latest ${kind} copy action`,
+      );
+      const args = [
+        "-NoProfile",
+        "-Sta",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        windowsClipboardProbeScript,
+        "-ProcessId",
+        String(app.pid),
+        "-ExpectedPlainPath",
+        expectedPath,
+        "-ExpectedBytes",
+        String(expectedBytes),
+        "-Marker",
+        marker,
+        "-TargetClientX",
+        String(point.x),
+        "-TargetClientY",
+        String(point.y),
+        "-ViewportWidth",
+        String(point.width),
+        "-ViewportHeight",
+        String(point.height),
+      ];
+      if (kind === "code")
+        args.push("-CodeOnly", "-ExpectedCode", expectedCode);
+      const { stdout } = await execFileAsync(
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        args,
+        { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
+      );
+      process.stdout.write(`Windows clipboard evidence: ${stdout.trim()}\n`);
+    }
   } finally {
     webview.close();
   }
-  const args = [
-    "-NoProfile",
-    "-Sta",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    windowsClipboardProbeScript,
-    "-ProcessId",
-    String(app.pid),
-    "-ExpectedPlainPath",
-    expectedPath,
-    "-ExpectedBytes",
-    String(expectedBytes),
-    "-Marker",
-    marker,
-    "-ResponseClientX",
-    String(point.x),
-    "-ResponseClientY",
-    String(point.y),
-  ];
-  if (expectedCode !== null) args.push("-ExpectedCode", expectedCode);
-  const { stdout } = await execFileAsync(
-    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    args,
-    { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
-  );
-  process.stdout.write(`Windows clipboard evidence: ${stdout.trim()}\n`);
 }
 
 async function captureVisual(
@@ -2275,7 +2285,33 @@ async function captureVisual(
     String(height),
   ];
   if (openSettings) args.push("-OpenSettings");
-  if (selectFirstTask) args.push("-SelectFirstTask");
+  if (selectFirstTask) {
+    const webview = await connectTestWebView(chromeProbePort);
+    let taskPoint;
+    try {
+      taskPoint = await webview.evaluate(`(() => {
+        const row = document.querySelector('.task-list-item');
+        if (!row) throw new Error('Task row missing during capture');
+        const rect = row.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0 || rect.left < 0 || rect.right > innerWidth)
+          throw new Error('Task row is not visible during capture');
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: innerWidth, height: innerHeight };
+      })()`);
+    } finally {
+      webview.close();
+    }
+    args.push(
+      "-SelectFirstTask",
+      "-TaskClientX",
+      String(taskPoint.x),
+      "-TaskClientY",
+      String(taskPoint.y),
+      "-ViewportWidth",
+      String(taskPoint.width),
+      "-ViewportHeight",
+      String(taskPoint.height),
+    );
+  }
   if (openSearch) args.push("-OpenSearch");
   if (openBashDetail) args.push("-OpenBashDetail");
   await execFileAsync(
@@ -2287,6 +2323,19 @@ async function captureVisual(
 
 async function probeWindowsWebViewFocus() {
   if (process.platform !== "win32") return;
+  const webview = await connectTestWebView(chromeProbePort);
+  let composerName;
+  try {
+    composerName = await webview.evaluate(`(() => {
+      const inputs = [...document.querySelectorAll('textarea[role="combobox"]')]
+        .filter((input) => !input.disabled && input.getClientRects().length !== 0);
+      if (inputs.length !== 1) throw new Error('Expected one editable Composer');
+      return inputs[0].getAttribute('aria-label') || inputs[0].placeholder;
+    })()`);
+  } finally {
+    webview.close();
+  }
+  if (!composerName) throw new Error("Composer has no accessible name");
   await new Promise((resolve, reject) => {
     const args = [
       "-NoProfile",
@@ -2296,6 +2345,8 @@ async function probeWindowsWebViewFocus() {
       windowsWebViewFocusProbeScript,
       "-ProcessId",
       String(app.pid),
+      "-ComposerName",
+      composerName,
     ];
     const child = spawn(
       "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
