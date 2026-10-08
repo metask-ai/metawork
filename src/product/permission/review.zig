@@ -160,13 +160,17 @@ fn encodeInput(allocator: std.mem.Allocator, input: Input) EncodeError!EncodedIn
 const DecodeError = error{ InvalidOutput, OutputLimit, OutOfMemory };
 fn decodeSuggestion(allocator: std.mem.Allocator, text: []const u8, usage: completion.Usage) DecodeError!Suggestion {
     if (text.len > max_result_bytes) return error.OutputLimit;
-    const Wire = struct { decision: Decision, reason: []const u8 };
-    var parsed = std.json.parseFromSlice(Wire, allocator, text, .{
+    // Typed enum/slice decoding permits numeric and byte-array coercions.
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, text, .{
         .duplicate_field_behavior = .@"error",
-        .ignore_unknown_fields = false,
     }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidOutput;
     defer parsed.deinit();
-    const reason = parsed.value.reason;
+    if (parsed.value != .object or parsed.value.object.count() != 2) return error.InvalidOutput;
+    const decision_value = parsed.value.object.get("decision") orelse return error.InvalidOutput;
+    const reason_value = parsed.value.object.get("reason") orelse return error.InvalidOutput;
+    if (decision_value != .string or reason_value != .string) return error.InvalidOutput;
+    const decision = std.meta.stringToEnum(Decision, decision_value.string) orelse return error.InvalidOutput;
+    const reason = reason_value.string;
     if (reason.len > max_reason_bytes) return error.OutputLimit;
     if (std.mem.trim(u8, reason, " \t\r\n").len == 0 or
         !std.unicode.utf8ValidateSlice(reason)) return error.InvalidOutput;
@@ -174,7 +178,7 @@ fn decodeSuggestion(allocator: std.mem.Allocator, text: []const u8, usage: compl
     const count = std.unicode.utf8CountCodepoints(reason) catch return error.InvalidOutput;
     if (count > max_reason_characters) return error.OutputLimit;
     var suggestion = Suggestion{
-        .decision = parsed.value.decision,
+        .decision = decision,
         .reason = .{ .len = reason.len },
         .usage = usage,
     };
@@ -446,13 +450,34 @@ test "decoder rejects extra missing duplicate malformed or nonterminal JSON" {
         "{\"decision\":\"allow_session\",\"reason\":\"ok\"}",            "{\"decision\":\"allow_once\",\"reason\":\"ok\",\"extra\":true}", "{\"decision\":\"deny\",\"decision\":\"allow_once\",\"reason\":\"ok\"}",
         "{\"decision\":\"deny\",\"reason\":\"a\",\"reason\":\"b\"}",     "{\"decision\":\"allow_once\",\"reason\":null}",                  "{\"decision\":\"allow_once\",\"reason\":\" \"}",
         "{\"decision\":\"allow_once\",\"reason\":\"line\\nbreak\"}",     "{\"decision\":\"allow_once\",\"reason\":\"\xff\"}",              "{\"decision\":\"allow_once\",\"reason\":\"ok\"} {}",
-        "```json\n{\"decision\":\"allow_once\",\"reason\":\"ok\"}\n```",
+        "```json\n{\"decision\":\"allow_once\",\"reason\":\"ok\"}\n```", "{\"decision\":\"allow_once\",\"other\":\"ok\"}",                 "{\"other\":\"allow_once\",\"reason\":\"ok\"}",
     }) |bad| try std.testing.expectError(error.InvalidOutput, decodeSuggestion(std.testing.allocator, bad, .{}));
     const long = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .decision = "allow_once", .reason = "界" ** (max_reason_characters + 1) }, .{});
     defer std.testing.allocator.free(long);
     try std.testing.expectError(error.OutputLimit, decodeSuggestion(std.testing.allocator, long, .{}));
     const oversized = [_]u8{' '} ** (max_result_bytes + 1);
     try std.testing.expectError(error.OutputLimit, decodeSuggestion(std.testing.allocator, &oversized, .{}));
+}
+
+test "decision requires a JSON string containing an exact decision name" {
+    for ([_][]const u8{
+        "0",     "1",     "2",     "-1",             "0.0",             "true",            "null",                                   "{}", "[]",
+        "\"0\"", "\"1\"", "\"2\"", "\"ALLOW_ONCE\"", "\"allow_once \"", "\" allow_once\"", "[97,108,108,111,119,95,111,110,99,101]",
+    }) |decision| {
+        const text = try std.fmt.allocPrint(std.testing.allocator, "{{\"decision\":{s},\"reason\":\"ok\"}}", .{decision});
+        defer std.testing.allocator.free(text);
+        try std.testing.expectError(error.InvalidOutput, decodeSuggestion(std.testing.allocator, text, .{}));
+    }
+}
+
+test "reason requires a JSON string without byte array coercion" {
+    for ([_][]const u8{
+        "[111,107]", "[\"111\",\"107\"]", "[]", "{}", "0", "true", "null",
+    }) |reason| {
+        const text = try std.fmt.allocPrint(std.testing.allocator, "{{\"decision\":\"allow_once\",\"reason\":{s}}}", .{reason});
+        defer std.testing.allocator.free(text);
+        try std.testing.expectError(error.InvalidOutput, decodeSuggestion(std.testing.allocator, text, .{}));
+    }
 }
 
 test "one-shot review uses frozen Completion and returns advice without granting" {
@@ -494,6 +519,9 @@ test "review preflight rejects cancellation expired deadline missing delegation 
 test "invalid model output and incomplete output are failures not deny or needs_user" {
     for ([_]struct { text: []const u8, stop: []const u8, failure: Failure }{
         .{ .text = "allow", .stop = "end_turn", .failure = .invalid_output },
+        .{ .text = "{\"decision\":0,\"reason\":\"ok\"}", .stop = "end_turn", .failure = .invalid_output },
+        .{ .text = "{\"decision\":\"0\",\"reason\":\"ok\"}", .stop = "end_turn", .failure = .invalid_output },
+        .{ .text = "{\"decision\":\"allow_once\",\"reason\":[111,107]}", .stop = "end_turn", .failure = .invalid_output },
         .{ .text = "{\"decision\":\"allow_once\",\"reason\":\"ok\"}", .stop = "max_tokens", .failure = .incomplete_output },
         .{ .text = "{\"decision\":\"deny\",\"reason\":\"ok\"}", .stop = "stop_sequence", .failure = .incomplete_output },
     }) |fixture| {
@@ -503,7 +531,9 @@ test "invalid model output and incomplete output are failures not deny or needs_
         const owner = try fake.owner();
         defer owner.deinit();
         var token = owner.newCancellation();
-        try std.testing.expectEqual(fixture.failure, review(std.testing.allocator, std.testing.io, owner, test_input, &token, testDeadline(2000)).failure);
+        const outcome = review(std.testing.allocator, std.testing.io, owner, test_input, &token, testDeadline(2000));
+        try std.testing.expect(outcome == .failure);
+        try std.testing.expectEqual(fixture.failure, outcome.failure);
         try std.testing.expectEqual(@as(usize, 1), fake.calls);
     }
 }
