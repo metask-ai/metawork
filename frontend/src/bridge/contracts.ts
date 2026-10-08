@@ -87,6 +87,8 @@ export type BuiltinProviderPresetView = {
 
 export const permissionProfiles = ["approval_required", "full_access"] as const;
 export type PermissionProfile = (typeof permissionProfiles)[number];
+export const approvalModes = ["manual", "auto_review", "full_access"] as const;
+export type ApprovalMode = (typeof approvalModes)[number];
 export type PermissionInteraction = "interactive" | "noninteractive";
 
 export type CustomProviderState = "configuring" | "ready" | "disabled";
@@ -748,6 +750,8 @@ export type PermissionChoice =
   "deny_once" | "deny_session" | "allow_once" | "allow_session";
 
 export type UiRecord = {
+  answeredBy: "user" | "reviewer" | null;
+  reviewReason: string | null;
   requestId: string;
   runId: string;
   order: string;
@@ -805,6 +809,8 @@ export type TaskModelSelectionAvailability =
   | "authority_changed";
 
 export type TaskView = {
+  approvalMode: ApprovalMode;
+  permissionReviewState: "idle" | "reviewing" | "needs_user";
   id: string;
   recentOrder: string;
   title: string;
@@ -929,6 +935,8 @@ export type WorkbenchSnapshot = {
     };
   };
   permissions: {
+    availableModes: ApprovalMode[];
+    defaultMode: ApprovalMode;
     availableProfiles: PermissionProfile[];
     defaultProfile: PermissionProfile;
   };

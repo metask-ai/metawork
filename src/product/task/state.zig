@@ -32,6 +32,21 @@ pub const PermissionProfile = enum {
     full_access,
 };
 
+/// User-facing approval choice, distinct from the Core execution profile.
+pub const ApprovalMode = enum {
+    manual,
+    auto_review,
+    full_access,
+
+    pub fn profile(self: ApprovalMode) PermissionProfile {
+        return if (self == .full_access) .full_access else .approval_required;
+    }
+
+    pub fn fromFacts(profile_value: PermissionProfile, reviewed: bool) ApprovalMode {
+        return if (profile_value == .full_access) .full_access else if (reviewed) .auto_review else .manual;
+    }
+};
+
 /// Whether an uncovered permission may suspend this Task for a local user
 /// decision. The fact is immutable for the Task lifetime.
 pub const PermissionInteraction = enum {
@@ -613,6 +628,9 @@ pub const UiRecord = struct {
     order: u64 = 0,
     kind: UiRecordKind,
     state: UiRecordState,
+    answered_by: ?enum { user, reviewer } = null,
+    review_reason: [ui_record_detail_capacity]u8 = undefined,
+    review_reason_len: usize = 0,
     agent_request_id: [permission_summary_field_capacity]u8 = undefined,
     agent_request_id_len: usize = 0,
     permission: ?PermissionSummary = null,
@@ -624,6 +642,10 @@ pub const UiRecord = struct {
 
     pub fn detailSlice(self: *const UiRecord) []const u8 {
         return self.detail[0..self.detail_len];
+    }
+
+    pub fn reviewReason(self: *const UiRecord) ?[]const u8 {
+        return if (self.review_reason_len == 0) null else self.review_reason[0..self.review_reason_len];
     }
 };
 
@@ -637,6 +659,9 @@ pub const DurableTaskRecord = struct {
     permission_profile: PermissionProfile,
     permission_interaction: PermissionInteraction,
     binding_epoch: u64 = 1,
+    /// Persisted session fact: true means auto_review was adopted at creation.
+    /// Not an independent preference or a live user toggle.
+    permission_review_delegated: bool = false,
     workspace_id: u64,
     workspace_epoch: u64 = 1,
     workspace_root: []u8,
@@ -661,6 +686,11 @@ pub const Task = struct {
     runtime: RuntimeAttachment,
     conversation_observation: ConversationObservation = .{},
     deletion: task_deletion.State = .idle,
+
+    pub fn permissionReviewPhase(self: *const Task) task_attachment.PermissionReviewState.Phase {
+        if (ApprovalMode.fromFacts(self.durable.permission_profile, self.durable.permission_review_delegated) != .auto_review) return .idle;
+        return self.runtime.permission_review.phaseForRequest(self.runtime.active_run_id, self.runtime.pending_ui_request_id);
+    }
 };
 
 pub const ProductTerminalFacts = struct {

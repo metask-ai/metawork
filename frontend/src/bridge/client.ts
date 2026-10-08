@@ -10,7 +10,7 @@ import type {
   McpHttpConnectionInput,
   McpSecretSlot,
   McpStdioConnectionInput,
-  PermissionProfile,
+  ApprovalMode,
   Protocol,
   NewTaskModelSelectionIntent,
   ScheduledTaskMutation,
@@ -795,7 +795,7 @@ export class BridgeClient {
     modelSelection: NewTaskModelSelectionIntent | null,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
-    permissionProfile: PermissionProfile,
+    approvalMode: ApprovalMode,
   ) {
     return decodeTaskCreateResult(
       await this.invoke(commands.createTask, {
@@ -805,7 +805,7 @@ export class BridgeClient {
         modelSelection,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,
-        permissionProfile,
+        approvalMode,
       }),
     );
   }

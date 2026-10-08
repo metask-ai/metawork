@@ -316,9 +316,9 @@ function renderNewTaskView(composer = null, overrides = {}) {
       createElement(NewTaskView, {
         hasWorkspace: true,
         composer,
-        permissionProfiles: [],
-        permissionProfile: "approval_required",
-        onPermissionProfileChange() {},
+        approvalModes: [],
+        approvalMode: "manual",
+        onApprovalModeChange() {},
         ...overrides,
       }),
     ),
@@ -701,21 +701,21 @@ test("new Task places the Composer after the outcome prompt", () => {
   assert.doesNotMatch(markup, /task-examples|task-example/);
 });
 
-test("new Task exposes and remembers one immutable permission choice", () => {
+test("new Task exposes and remembers the remembered three-mode approval choice", () => {
   const markup = renderNewTaskView(null, {
-    permissionProfiles: ["approval_required", "full_access"],
-    permissionProfile: "approval_required",
+    approvalModes: ["manual", "auto_review", "full_access"],
+    approvalMode: "manual",
   });
-  assert.match(markup, /Permission policy/);
-  assert.match(markup, /Request approval/);
-  assert.match(markup, /used as the default for your next new Task/);
+  assert.match(markup, /Approval mode/);
+  assert.match(markup, /Manual approval/);
+  assert.match(markup, /Remembered across restarts/);
   assert.doesNotMatch(markup, /trust this workspace|alertdialog/i);
 });
 
 test("new Task explains full access without claiming to bypass core protections", () => {
   const markup = renderNewTaskView(null, {
-    permissionProfiles: ["approval_required", "full_access"],
-    permissionProfile: "full_access",
+    approvalModes: ["manual", "auto_review", "full_access"],
+    approvalMode: "full_access",
   });
   assert.match(markup, /AgentCore protections/);
   assert.match(markup, /permission-profile-risk/);
@@ -723,6 +723,46 @@ test("new Task explains full access without claiming to bypass core protections"
   assert.doesNotMatch(
     markup,
     /grants root|bypasses AgentCore|trust this workspace/i,
+  );
+});
+
+test("new Task explains automatic review cost, uncertainty and MCP fallback", () => {
+  const markup = renderNewTaskView(null, {
+    approvalModes: ["manual", "auto_review", "full_access"],
+    approvalMode: "auto_review",
+  });
+  assert.match(markup, /Automatic review/);
+  assert.match(markup, /task model/);
+  assert.match(markup, /additional.*cost|additional.*charge/);
+  assert.match(markup, /MCP/);
+  assert.match(markup, /not a safety guarantee/);
+  const note = markup.match(
+    /<p class="permission-policy-boundary" role="note">([^<]+)<\/p>/,
+  )?.[1];
+  assert.match(note ?? "", /additional usage charges/);
+});
+
+test("approval surfaces keep a usable narrow mode selector and dark parameter contrast", async () => {
+  const css = await readFile(
+    join(process.cwd(), "frontend/src/index.css"),
+    "utf8",
+  );
+  const narrow = css.slice(css.lastIndexOf("@media (max-width: 619px)"));
+  assert.match(
+    narrow,
+    /\.new-task-permission\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/,
+  );
+  assert.match(
+    css,
+    /\.new-task-permission \.permission-profile-trigger\s*\{[^}]*min-height:\s*44px/,
+  );
+  assert.match(
+    css,
+    /\.dark \.ai-intervention \.code-block-preview\s*\{[^}]*color:\s*var\(--ui-content-primary\);[^}]*background:\s*var\(--ui-surface-panel-2\)/,
+  );
+  assert.match(
+    css,
+    /\.ai-intervention button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--ui-focus-ring\)/,
   );
 });
 

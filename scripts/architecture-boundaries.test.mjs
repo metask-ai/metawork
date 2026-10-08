@@ -64,6 +64,38 @@ function externSymbols(source, libraries) {
     .sort();
 }
 
+test("permission reviewer is an isolated Completion consumer without approval authority", () => {
+  const build = read("build.zig");
+  const source = read("src/product/permission/review.zig");
+  assert.deepEqual(
+    moduleImportEdges(build).filter(
+      (edge) => edge.owner === "product_permission_review",
+    ),
+    [
+      {
+        owner: "product_permission_review",
+        name: "agent_completion",
+        target: "agent_completion",
+      },
+    ],
+  );
+  assert.match(build, /src\/product\/permission\/review\.zig/);
+  assert.match(
+    build,
+    /name = "metawork-product-permission-review", .root_module = test_modules\.product_permission_review/,
+  );
+  assert.match(build, /"test-permission-review"/);
+  const imports = [...source.matchAll(/@import\("([^"]+)"\)/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual(imports, ["std", "agent_completion"]);
+  assert.doesNotMatch(
+    source,
+    /respondPermission|WorkerLease|@import\(".*(?:task|control|app|metask_agentcore)/,
+  );
+  assert.equal(existsSync(new URL("src/product/permission.zig", root)), false);
+});
+
 test("release version has one manifest owner and exact package mirrors", () => {
   const appVersion = read("app.zon").match(/\.version = "([^"]+)"/)?.[1];
   const zigVersion = read("build.zig.zon").match(/\.version = "([^"]+)"/)?.[1];
@@ -1536,6 +1568,24 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   assert.doesNotMatch(
     build,
     /src\/workbench\/skill_(?:package|enablement|management)\.zig|workbench_skill_(?:package|enablement|management)|metawork-skill-(?:package|enablement|management)/,
+  );
+});
+
+test("Control review jobs own their data without holding Task lifecycle leases", () => {
+  const job = read("src/product/control/permission_job.zig");
+  assert.doesNotMatch(
+    job,
+    /\*(?:const )?(?:Task|Run|Runtime)|WorkerLease|SessionAccess/,
+  );
+  assert.match(job, /thread\.join\(\)/);
+  const task = read("src/product/task/runtime.zig");
+  const preparation = task
+    .split("pub const PreparedPermissionReview = struct {")[1]
+    ?.split("pub fn deinit")[0];
+  assert.ok(preparation);
+  assert.doesNotMatch(
+    preparation,
+    /\*(?:const )?(?:Task|Run|Runtime)|WorkerLease|SessionAccess/,
   );
 });
 

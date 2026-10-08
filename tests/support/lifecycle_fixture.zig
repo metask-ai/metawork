@@ -54,6 +54,7 @@ pub const Plan = enum {
     controlled,
     ui_wait,
     ui_wait_twice,
+    ui_wait_repeated,
     ask_question,
     callback_failed,
     controlled_callback_failed,
@@ -301,6 +302,9 @@ pub const FakeCore = struct {
     allow_checkpoint_export: bool = false,
     ui_answered_callbacks: usize = 0,
     permission_callback_count: usize = 0,
+    permission_arguments_json: []const u8 = "{}",
+    permission_tool_namespace: []const u8 = "builtin",
+    permission_session_choices: bool = true,
     ui_unavailable_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
     permission_response_valid: bool = false,
@@ -1891,125 +1895,127 @@ pub fn sessionRunInput(
         }
     }
 
-    if ((plan == .ui_wait or plan == .ui_wait_twice) and
-        !(plan == .ui_wait_twice and session.permission_session_granted) or
-        plan == .malformed_ui_callback or
-        plan == .wrong_ui_request_run_id or plan == .wrong_ui_request_session_id or
-        plan == .ask_question)
-    {
-        var response = wire.OwnedBytesV1{ .ptr = null, .len = 0 };
-        const callback = session.callbacks.on_ui_request orelse {
-            diagnostic(out_error);
-            return wire.STATUS_CALLBACK_FAILED;
-        };
-        var request_storage: [2048]u8 = undefined;
-        const request_json = if (plan == .ask_question)
-            "{\"ask_question\":[{\"question\":\"Choose?\",\"header\":\"Choice\",\"multi\":false,\"options\":[]}]}"
-        else if (plan != .malformed_ui_callback)
-            permissionRequestJson(
-                &request_storage,
-                if (plan == .wrong_ui_request_session_id)
-                    "999999999999999999999999"
-                else
-                    session.session_id[0..session.session_id_len],
-                if (plan == .wrong_ui_request_run_id) run_id + 1 else run_id,
-            ) catch {
-                diagnostic(out_error);
-                return wire.STATUS_OUT_OF_MEMORY;
-            }
-        else
-            "{}";
-        const callback_status = callback(
-            session.callbacks.ctx,
-            &wire.RunContextV1{
-                .struct_size = @sizeOf(wire.RunContextV1),
-                .reserved0 = 0,
-                .session = handle,
-                .run_id = run_id,
-                .session_id = sdk.bytesView(session.session_id[0..session.session_id_len]),
-                .reserved = [_]u64{0} ** 2,
-            },
-            sdk.bytesView(request_json),
-            &response,
-        );
-        fake_core.lock();
-        if (callback_status == wire.UI_ANSWERED)
-            fake_core.ui_answered_callbacks += 1;
-        if (callback_status == wire.UI_ANSWERED)
-            fake_core.permission_callback_count += 1;
-        if (callback_status == wire.UI_UNAVAILABLE)
-            fake_core.ui_unavailable_callbacks += 1;
-        if (callback_status == wire.UI_FATAL)
-            fake_core.ui_fatal_callbacks += 1;
-        fake_core.unlock();
-        if (callback_status == wire.UI_ANSWERED) {
-            const response_ptr = response.ptr orelse {
+    const ui_request_count: usize = if (plan == .ui_wait_repeated) 2 else 1;
+    for (0..ui_request_count) |_| {
+        if ((plan == .ui_wait or plan == .ui_wait_twice or plan == .ui_wait_repeated) and
+            !(plan == .ui_wait_twice and session.permission_session_granted) or
+            plan == .malformed_ui_callback or
+            plan == .wrong_ui_request_run_id or plan == .wrong_ui_request_session_id or
+            plan == .ask_question)
+        {
+            var response = wire.OwnedBytesV1{ .ptr = null, .len = 0 };
+            const callback = session.callbacks.on_ui_request orelse {
                 diagnostic(out_error);
                 return wire.STATUS_CALLBACK_FAILED;
             };
-            const response_len = std.math.cast(usize, response.len) orelse {
-                diagnostic(out_error);
-                return wire.STATUS_CALLBACK_FAILED;
-            };
-            const encoded_response = response_ptr[0..response_len];
-            var decoded_response = sdk.protocol.decodeUiResponse(
-                std.testing.allocator,
-                encoded_response,
-            ) catch {
-                diagnostic(out_error);
-                return wire.STATUS_CALLBACK_FAILED;
-            };
-            defer decoded_response.deinit();
-            const response_valid = switch (decoded_response.value) {
-                .permission => |permission| blk: {
-                    const valid = std.mem.eql(
-                        u8,
-                        permission.request_id,
-                        "1111111111111111111111111111111111111111111111111111111111111111",
-                    ) and permission.policy_generation == 1 and
-                        switch (permission.permission) {
-                            .allow_session, .deny_session => if (permission.rule_id) |rule_id|
-                                std.mem.eql(
-                                    u8,
-                                    rule_id,
-                                    "2222222222222222222222222222222222222222222222222222222222222222",
-                                )
-                            else
-                                false,
-                            .allow_once, .deny_once => permission.rule_id == null,
-                        };
-                    if (valid and plan == .ui_wait_twice) switch (permission.permission) {
-                        .allow_session, .deny_session => session.permission_session_granted = true,
-                        .allow_once, .deny_once => {},
-                    };
-                    break :blk valid;
+            var request_storage: [2048]u8 = undefined;
+            const request_json = if (plan == .ask_question)
+                "{\"ask_question\":[{\"question\":\"Choose?\",\"header\":\"Choice\",\"multi\":false,\"options\":[]}]}"
+            else if (plan != .malformed_ui_callback)
+                permissionRequestJson(
+                    &request_storage,
+                    if (plan == .wrong_ui_request_session_id)
+                        "999999999999999999999999"
+                    else
+                        session.session_id[0..session.session_id_len],
+                    if (plan == .wrong_ui_request_run_id) run_id + 1 else run_id,
+                ) catch {
+                    diagnostic(out_error);
+                    return wire.STATUS_OUT_OF_MEMORY;
+                }
+            else
+                "{}";
+            const callback_status = callback(
+                session.callbacks.ctx,
+                &wire.RunContextV1{
+                    .struct_size = @sizeOf(wire.RunContextV1),
+                    .reserved0 = 0,
+                    .session = handle,
+                    .run_id = run_id,
+                    .session_id = sdk.bytesView(session.session_id[0..session.session_id_len]),
+                    .reserved = [_]u64{0} ** 2,
                 },
-                .answers => false,
-            };
+                sdk.bytesView(request_json),
+                &response,
+            );
             fake_core.lock();
-            fake_core.permission_response_valid = response_valid;
+            if (callback_status == wire.UI_ANSWERED)
+                fake_core.ui_answered_callbacks += 1;
+            if (callback_status == wire.UI_ANSWERED)
+                fake_core.permission_callback_count += 1;
+            if (callback_status == wire.UI_UNAVAILABLE)
+                fake_core.ui_unavailable_callbacks += 1;
+            if (callback_status == wire.UI_FATAL)
+                fake_core.ui_fatal_callbacks += 1;
             fake_core.unlock();
-            const release = session.callbacks.release_response orelse {
-                diagnostic(out_error);
-                return wire.STATUS_CALLBACK_FAILED;
-            };
-            release(session.callbacks.ctx, &response);
-            if (response.ptr != null or response.len != 0) {
+            if (callback_status == wire.UI_ANSWERED) {
+                const response_ptr = response.ptr orelse {
+                    diagnostic(out_error);
+                    return wire.STATUS_CALLBACK_FAILED;
+                };
+                const response_len = std.math.cast(usize, response.len) orelse {
+                    diagnostic(out_error);
+                    return wire.STATUS_CALLBACK_FAILED;
+                };
+                const encoded_response = response_ptr[0..response_len];
+                var decoded_response = sdk.protocol.decodeUiResponse(
+                    std.testing.allocator,
+                    encoded_response,
+                ) catch {
+                    diagnostic(out_error);
+                    return wire.STATUS_CALLBACK_FAILED;
+                };
+                defer decoded_response.deinit();
+                const response_valid = switch (decoded_response.value) {
+                    .permission => |permission| blk: {
+                        const valid = std.mem.eql(
+                            u8,
+                            permission.request_id,
+                            "1111111111111111111111111111111111111111111111111111111111111111",
+                        ) and permission.policy_generation == 1 and
+                            switch (permission.permission) {
+                                .allow_session, .deny_session => if (permission.rule_id) |rule_id|
+                                    std.mem.eql(
+                                        u8,
+                                        rule_id,
+                                        "2222222222222222222222222222222222222222222222222222222222222222",
+                                    )
+                                else
+                                    false,
+                                .allow_once, .deny_once => permission.rule_id == null,
+                            };
+                        if (valid and plan == .ui_wait_twice) switch (permission.permission) {
+                            .allow_session, .deny_session => session.permission_session_granted = true,
+                            .allow_once, .deny_once => {},
+                        };
+                        break :blk valid;
+                    },
+                    .answers => false,
+                };
+                fake_core.lock();
+                fake_core.permission_response_valid = response_valid;
+                fake_core.unlock();
+                const release = session.callbacks.release_response orelse {
+                    diagnostic(out_error);
+                    return wire.STATUS_CALLBACK_FAILED;
+                };
+                release(session.callbacks.ctx, &response);
+                if (response.ptr != null or response.len != 0) {
+                    diagnostic(out_error);
+                    return wire.STATUS_CALLBACK_FAILED;
+                }
+            } else if (callback_status == wire.UI_FATAL) {
+                session.lock();
+                session.running = false;
+                session.broadcast();
+                session.unlock();
                 diagnostic(out_error);
                 return wire.STATUS_CALLBACK_FAILED;
             }
-        } else if (callback_status == wire.UI_FATAL) {
-            session.lock();
-            session.running = false;
-            session.broadcast();
-            session.unlock();
-            diagnostic(out_error);
-            return wire.STATUS_CALLBACK_FAILED;
         }
     }
-
     session.lock();
-    while ((plan == .controlled or plan == .controlled_callback_failed or plan == .ui_wait or plan == .ui_wait_twice) and
+    while ((plan == .controlled or plan == .controlled_callback_failed or plan == .ui_wait or plan == .ui_wait_twice or plan == .ui_wait_repeated) and
         !session.allow_finish and !session.abort_requested)
         session.wait();
     const aborted = session.abort_requested;
@@ -2349,10 +2355,22 @@ fn permissionRequestJson(
     session_id: []const u8,
     run_id: u64,
 ) std.fmt.BufPrintError![]const u8 {
+    fake_core.lock();
+    const arguments = fake_core.permission_arguments_json;
+    const namespace = fake_core.permission_tool_namespace;
+    const session_choices = fake_core.permission_session_choices;
+    fake_core.unlock();
+    const binding = if (std.mem.eql(u8, namespace, "builtin"))
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    else
+        "5555555555555555555555555555555555555555555555555555555555555555";
+    var encoded_arguments: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_arguments);
+    std.json.Stringify.value(arguments, .{}, &writer) catch return error.NoSpaceLeft;
     return std.fmt.bufPrint(
         storage,
-        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"builtin\",\"name\":\"Bash\",\"binding\":\"0000000000000000000000000000000000000000000000000000000000000000\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":1,\"arguments_json\":\"{{}}\",\"responses\":[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"],\"candidate\":{{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\"}}}}",
-        .{ session_id, run_id },
+        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"{s}\",\"name\":\"Bash\",\"binding\":\"{s}\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":1,\"arguments_json\":{s},\"responses\":{s},\"candidate\":{s}}}",
+        .{ session_id, run_id, namespace, binding, writer.buffered(), if (session_choices) "[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"]" else "[\"deny_once\",\"allow_once\"]", if (session_choices) "{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\"}" else "null" },
     );
 }
 

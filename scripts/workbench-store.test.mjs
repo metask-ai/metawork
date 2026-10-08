@@ -51,6 +51,34 @@ function snapshot(revision, tasks, workspaceIds = null) {
   };
 }
 
+test("Workbench starts with automatic review but defers to the remembered Host mode", () => {
+  assert.equal(
+    initialWorkbenchState.snapshot.permissions.defaultMode,
+    "auto_review",
+  );
+  assert.equal(
+    initialWorkbenchState.snapshot.permissions.defaultProfile,
+    "approval_required",
+  );
+  for (const mode of ["manual", "auto_review", "full_access"]) {
+    const accepted = workbenchReducer(initialWorkbenchState, {
+      type: "snapshot.accepted",
+      receivedAt: 1000,
+      snapshot: {
+        ...initialWorkbenchState.snapshot,
+        revision: "1",
+        permissions: {
+          ...initialWorkbenchState.snapshot.permissions,
+          defaultMode: mode,
+          defaultProfile:
+            mode === "full_access" ? "full_access" : "approval_required",
+        },
+      },
+    });
+    assert.equal(accepted.snapshot.permissions.defaultMode, mode);
+  }
+});
+
 test("pending scopes isolate unrelated mutations and reject duplicate admission", () => {
   const pending = new PendingScopes();
   assert.equal(pending.begin("task:2"), true);

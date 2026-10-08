@@ -79,12 +79,74 @@ pub const CloseCompletion = enum(u8) {
     failed_closing,
 };
 
+/// Main-thread identity only. Review jobs must not retain Task/Run pointers or leases.
+pub const PermissionReviewIdentity = struct {
+    task_id: u64,
+    run_id: u64,
+    run_generation: u64,
+    execution_generation: u64,
+    binding_epoch: u64,
+    workspace_epoch: u64,
+    route_id: u64,
+    request_id: u64,
+    policy_generation: u64,
+    delegation_generation: u64,
+};
+
+pub const PermissionReviewState = struct {
+    pub const Phase = enum { idle, reviewing, needs_user };
+
+    generation: u64 = 1,
+    exhausted: bool = false,
+    phase: Phase = .idle,
+    identity: ?PermissionReviewIdentity = null,
+    settled_request_id: u64 = 0,
+
+    pub fn invalidate(self: *PermissionReviewState) void {
+        if (self.generation == std.math.maxInt(u64)) {
+            self.exhausted = true;
+        } else {
+            self.generation += 1;
+        }
+        self.phase = .idle;
+        self.identity = null;
+        self.settled_request_id = 0;
+    }
+
+    pub fn settle(self: *PermissionReviewState, request_id: u64) void {
+        self.invalidate();
+        self.phase = .needs_user;
+        self.settled_request_id = request_id;
+    }
+
+    pub fn matches(self: *const PermissionReviewState, identity: PermissionReviewIdentity) bool {
+        return !self.exhausted and self.phase == .reviewing and
+            self.identity != null and std.meta.eql(self.identity.?, identity) and
+            self.generation == identity.delegation_generation;
+    }
+
+    /// Product UI request IDs are Task-wide and remain unique across Runs.
+    /// A previous request's settled phase is never a status for a new card.
+    pub fn phaseForRequest(self: *const PermissionReviewState, run_id: u64, request_id: u64) Phase {
+        if (run_id == 0 or request_id == 0) return .idle;
+        return switch (self.phase) {
+            .idle => .idle,
+            .reviewing => if (self.identity) |identity|
+                if (identity.run_id == run_id and identity.request_id == request_id and self.matches(identity)) .reviewing else .idle
+            else
+                .idle,
+            .needs_user => if (self.settled_request_id == request_id) .needs_user else .idle,
+        };
+    }
+};
+
 pub const State = struct {
     attachment: Attachment = .{ .detached = .cold_start },
     mcp_authority_at_creation: McpAuthorityAtCreation = .unavailable,
     worker_leases: worker_lease.WorkerLeaseSet = .{},
     pending_ui_request_id: u64 = 0,
     pending_ui_order: u64 = 0,
+    permission_review: PermissionReviewState = .{},
     active_run_id: u64 = 0,
     active_operation: ActiveOperation = .none,
     restore_job: ?*recovery_job.Job = null,
@@ -189,6 +251,7 @@ pub const State = struct {
             .route_id = route_id,
             .worker_binding = worker_binding,
         } };
+        self.permission_review.invalidate();
         return true;
     }
 
@@ -250,6 +313,7 @@ pub const State = struct {
             .detached => unreachable,
         };
         self.attachment = .{ .detached = cause };
+        self.permission_review.invalidate();
         return value;
     }
 };
@@ -261,4 +325,38 @@ test "attachment and operation states exclude partial resource tuples" {
     try std.testing.expect(!state.hasAttachedSession());
     try std.testing.expect(state.execution() == null);
     try std.testing.expectEqual(@as(u64, 0), state.routeId());
+}
+
+test "permission review invalidation never reuses a delegation generation" {
+    var state = PermissionReviewState{};
+    state.invalidate();
+    try std.testing.expectEqual(@as(u64, 2), state.generation);
+    state.phase = .needs_user;
+    state.invalidate();
+    try std.testing.expectEqual(@as(u64, 3), state.generation);
+    try std.testing.expectEqual(.idle, state.phase);
+    state.generation = std.math.maxInt(u64);
+    state.invalidate();
+    try std.testing.expect(state.exhausted);
+    try std.testing.expect(state.identity == null);
+}
+
+test "permission review projection is bound to the current request and live identity" {
+    var state = PermissionReviewState{};
+    try std.testing.expectEqual(.idle, state.phaseForRequest(7, 1));
+    state.phase = .reviewing;
+    try std.testing.expectEqual(.idle, state.phaseForRequest(7, 1));
+    state.identity = .{ .task_id = 1, .run_id = 7, .run_generation = 1, .execution_generation = 1, .binding_epoch = 1, .workspace_epoch = 1, .route_id = 1, .request_id = 1, .policy_generation = 1, .delegation_generation = state.generation };
+    try std.testing.expectEqual(.reviewing, state.phaseForRequest(7, 1));
+    try std.testing.expectEqual(.idle, state.phaseForRequest(8, 1));
+    try std.testing.expectEqual(.idle, state.phaseForRequest(7, 2));
+    state.generation += 1;
+    try std.testing.expectEqual(.idle, state.phaseForRequest(7, 1));
+    state.settle(1);
+    try std.testing.expectEqual(.needs_user, state.phaseForRequest(7, 1));
+    try std.testing.expectEqual(.idle, state.phaseForRequest(7, 2));
+    try std.testing.expectEqual(.idle, state.phaseForRequest(7, 0));
+    try std.testing.expectEqual(.idle, state.phaseForRequest(0, 1));
+    state.invalidate();
+    try std.testing.expectEqual(.idle, state.phaseForRequest(7, 1));
 }

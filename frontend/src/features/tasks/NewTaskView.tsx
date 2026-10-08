@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { PermissionProfile } from "../../bridge/contracts.ts";
+import type { ApprovalMode } from "../../bridge/contracts.ts";
 import {
   SelectionMenu,
   type SelectionMenuOption,
@@ -11,22 +11,22 @@ import { useI18n } from "../../i18n/context.ts";
 export function NewTaskView({
   hasWorkspace,
   composer,
-  permissionProfiles,
-  permissionProfile,
-  onPermissionProfileChange,
+  approvalModes,
+  approvalMode,
+  onApprovalModeChange,
 }: {
   hasWorkspace: boolean;
   composer: ReactNode;
-  permissionProfiles: PermissionProfile[];
-  permissionProfile: PermissionProfile;
-  onPermissionProfileChange: (profile: PermissionProfile) => void;
+  approvalModes: ApprovalMode[];
+  approvalMode: ApprovalMode;
+  onApprovalModeChange: (profile: ApprovalMode) => void;
 }) {
   const { t } = useI18n();
-  const permissionOptions: SelectionMenuOption[] = permissionProfiles.map(
+  const permissionOptions: SelectionMenuOption[] = approvalModes.map(
     (profile) => ({
       value: profile,
-      label: t(`permission.profile.${profile}`),
-      description: t(`permission.profile.${profile}.help`),
+      label: t(`permission.mode.${profile}`),
+      description: t(`permission.mode.${profile}.help`),
       descriptionKind: "text",
       trailing:
         profile === "full_access" ? (
@@ -57,7 +57,7 @@ export function NewTaskView({
               </div>
               <SelectionMenu
                 triggerId="new-task-permission-profile"
-                value={permissionProfile}
+                value={approvalMode}
                 options={permissionOptions}
                 placeholder={t("permission.new_task.label")}
                 ariaLabel={t("permission.new_task.label")}
@@ -67,13 +67,18 @@ export function NewTaskView({
                 triggerClassName="permission-profile-trigger"
                 contentClassName="permission-profile-menu"
                 onValueChange={(value) =>
-                  onPermissionProfileChange(value as PermissionProfile)
+                  onApprovalModeChange(value as ApprovalMode)
                 }
               />
-              {permissionProfile === "full_access" && (
+              {approvalMode === "full_access" && (
                 <p className="permission-policy-boundary">
                   <Icon name="warning" />
                   {t("permission.full_access.boundary")}
+                </p>
+              )}
+              {approvalMode === "auto_review" && (
+                <p className="permission-policy-boundary" role="note">
+                  {t("permission.auto_review.boundary")}
                 </p>
               )}
             </div>

@@ -9,6 +9,8 @@ const account_projection = @import("product_control_account_projection");
 const execution_state = @import("product_control_execution_state");
 const executor_impl = @import("product_control_executor");
 const file_preview = @import("product_control_file_preview");
+const permission_job = @import("permission_job.zig");
+const agent_protocol = @import("product_agent_protocol_adapter");
 const attachment_staging = @import("product_control_attachment_staging");
 const file_change_io = @import("product_control_file_change_io");
 const product_attachment = @import("metawork_product_attachment");
@@ -169,6 +171,7 @@ const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
 
 pub const Protocol = product_task.Protocol;
 pub const PermissionProfile = product_task.PermissionProfile;
+pub const ApprovalMode = product_task.ApprovalMode;
 pub const PermissionInteraction = product_task.PermissionInteraction;
 // Flipped only when every admitted profile is complete across manual and
 // Scheduled Task execution. Bridge mutations and snapshot publication consume
@@ -183,11 +186,11 @@ pub const TaskWorkspaceTrust = union(enum) {
 pub const TaskCreateInput = struct {
     workspace_root: []const u8,
     trust: TaskWorkspaceTrust,
-    permission_profile: ?PermissionProfile = null,
+    approval_mode: ?ApprovalMode = null,
 };
 
 pub const TaskPermissionRequest = union(enum) {
-    interactive: ?PermissionProfile,
+    interactive: ?ApprovalMode,
     noninteractive: PermissionProfile,
 };
 
@@ -1097,13 +1100,14 @@ pub const Runtime = struct {
     file_change_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
-    default_permission_profile: PermissionProfile = .approval_required,
+    default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_state: execution_state.State,
     custom_providers: models_aggregate.Runtime,
     canonical_user_home: ?[]u8,
     custom_provider_capabilities: CustomProviderCapabilities,
     completion_factory: CompletionFactory,
+    permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
     pub fn init(
@@ -3377,7 +3381,7 @@ pub const Runtime = struct {
             null,
             null,
             null,
-            .{ .interactive = input.permission_profile },
+            .{ .interactive = input.approval_mode },
             false,
         );
     }
@@ -3455,11 +3459,11 @@ pub const Runtime = struct {
         permission: TaskPermissionRequest,
         allow_unowned_automatic: bool,
     ) Error!u64 {
-        const remembered_profile: ?PermissionProfile = switch (permission) {
-            .interactive => |profile| profile orelse self.default_permission_profile,
+        const remembered_mode: ?ApprovalMode = switch (permission) {
+            .interactive => |mode| mode orelse self.default_approval_mode,
             .noninteractive => null,
         };
-        const previous_default_profile = self.default_permission_profile;
+        const previous_default_mode = self.default_approval_mode;
         var prepared = try self.prepareTaskInWorkspaceInternal(
             workspace_id,
             expected_workspace_epoch,
@@ -3472,9 +3476,9 @@ pub const Runtime = struct {
             allow_unowned_automatic,
             null,
         );
-        if (remembered_profile) |profile| self.default_permission_profile = profile;
+        if (remembered_mode) |mode| self.default_approval_mode = mode;
         self.commitTaskStateBestEffort() catch |err| {
-            self.default_permission_profile = previous_default_profile;
+            self.default_approval_mode = previous_default_mode;
             prepared.rollback(self);
             return err;
         };
@@ -3567,7 +3571,7 @@ pub const Runtime = struct {
         if (model_selection) |selection|
             execution_input.target.model = selection.target.model_id;
         const permission_profile: PermissionProfile = switch (permission) {
-            .interactive => |profile| profile orelse self.default_permission_profile,
+            .interactive => |mode| (mode orelse self.default_approval_mode).profile(),
             .noninteractive => |profile| profile,
         };
         const permission_interaction: PermissionInteraction = switch (permission) {
@@ -3601,6 +3605,10 @@ pub const Runtime = struct {
             .protocol = execution_input.target.protocol,
             .model = execution_input.target.model,
             .permission_profile = permission_profile,
+            .permission_review_delegated = switch (permission) {
+                .interactive => |mode| (mode orelse self.default_approval_mode) == .auto_review,
+                .noninteractive => false,
+            },
             .permission_interaction = permission_interaction,
             .workspace_id = workspace_id,
             .workspace_epoch = workspace_view.epoch,
@@ -3713,7 +3721,7 @@ pub const Runtime = struct {
         if (workspace.kind != .manual)
             return error.AutomaticWorkspaceUnsupported;
 
-        const previous_default_profile = self.default_permission_profile;
+        const previous_default_mode = self.default_approval_mode;
         var prepared = try self.prepareTaskInWorkspaceInternal(
             source.workspace_id,
             source.workspace_epoch,
@@ -3726,9 +3734,9 @@ pub const Runtime = struct {
             false,
             source.execution,
         );
-        self.default_permission_profile = .full_access;
+        self.default_approval_mode = .full_access;
         self.commitTaskStateBestEffort() catch |err| {
-            self.default_permission_profile = previous_default_profile;
+            self.default_approval_mode = previous_default_mode;
             prepared.rollback(self);
             return err;
         };
@@ -4183,7 +4191,10 @@ pub const Runtime = struct {
         request_id: u64,
         response: UiResponse,
     ) Error!void {
-        self.syncLifecycle();
+        // An entered manual command arbitrates before queued review results.
+        // Task validates the exact pending request/choice before invalidation.
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         var prepared = self.task_runtime.respondUi(
             task_id,
             run_id,
@@ -4452,7 +4463,162 @@ pub const Runtime = struct {
     }
 
     pub fn defaultPermissionProfile(self: *const Runtime) PermissionProfile {
-        return self.default_permission_profile;
+        return self.default_approval_mode.profile();
+    }
+
+    pub fn defaultApprovalMode(self: *const Runtime) ApprovalMode {
+        return self.default_approval_mode;
+    }
+
+    pub fn taskApprovalMode(self: *Runtime, task_id: u64) Error!ApprovalMode {
+        return self.task_runtime.taskApprovalMode(task_id) orelse error.UnknownTask;
+    }
+
+    fn permissionReviewAuthorized(self: *Runtime, identity: task_runtime.PermissionReviewIdentity) bool {
+        if (self.shutting_down or !self.task_runtime.permissionReviewCurrent(identity)) return false;
+        const workspace_id = self.task_runtime.taskWorkspaceId(identity.task_id) orelse return false;
+        const workspace = self.workspace.facts(workspace_id) orelse return false;
+        return workspace.epoch == identity.workspace_epoch and workspace.authorization == .available;
+    }
+
+    fn syncPermissionReviews(self: *Runtime) void {
+        for (&self.permission_jobs) |*slot| {
+            const job = slot.* orelse continue;
+            if (!self.permissionReviewAuthorized(job.prepared.identity)) job.cancel();
+            if (!job.done.load(.acquire)) continue;
+            job.thread.?.join();
+            job.thread = null;
+            if (!job.cancellation.isRequested() and self.permissionReviewAuthorized(job.prepared.identity)) {
+                // A credential may have become known while the review ran.
+                switch (job.outcome) {
+                    .suggestion => |*suggestion| _ = self.redactWithKnownCredentialsNoFail(suggestion.reason.bytes[0..suggestion.reason.len]),
+                    .failure => {},
+                }
+                _ = self.task_runtime.acceptPermissionReview(job.prepared.identity, job.outcome, .{
+                    .context = self,
+                    .commit_fn = commitPermissionReviewCandidate,
+                    .text = self.taskRuntimeTextProjection(),
+                }) catch false;
+            }
+            _ = self.task_runtime.finishPermissionReview(job.prepared.identity);
+            job.deinit();
+            slot.* = null;
+            self.bumpRevision();
+        }
+        if (self.shutting_down) return;
+        while (true) {
+            const deadline = std.Io.Clock.Timestamp.now(self.io, .awake).addDuration(.{
+                .raw = std.Io.Duration.fromMilliseconds(permission_job.timeout_ms),
+                .clock = .awake,
+            });
+            var prepared = self.task_runtime.prepareNextPermissionReview(self.taskRuntimeTextProjection()) orelse break;
+            var vacant: ?*?*permission_job.Job = null;
+            for (&self.permission_jobs) |*slot| if (slot.* == null) {
+                vacant = slot;
+                break;
+            };
+            // MCP has no trusted secret-field projection in the current SDK.
+            // Do not send opaque MCP arguments to another model by guessing.
+            if (vacant == null or prepared.tool_namespace != .builtin or
+                !self.permissionReviewAuthorized(prepared.identity))
+            {
+                _ = self.task_runtime.finishPermissionReview(prepared.identity);
+                prepared.deinit();
+                self.bumpRevision();
+                continue;
+            }
+            self.startPermissionReview(prepared, deadline, vacant.?) catch {
+                _ = self.task_runtime.finishPermissionReview(prepared.identity);
+                self.bumpRevision();
+            };
+        }
+    }
+
+    fn startPermissionReview(self: *Runtime, value: task_runtime.PreparedPermissionReview, deadline: std.Io.Clock.Timestamp, slot: *?*permission_job.Job) !void {
+        var prepared = value;
+        errdefer prepared.deinit();
+        for ([_][]const u8{ prepared.input.user_intent, prepared.input.context, prepared.input.request.tool_name, prepared.input.request.working_directory }) |field|
+            _ = self.redactWithKnownCredentialsNoFail(@constCast(field));
+        var scanner = std.json.Scanner.initCompleteInput(self.allocator, prepared.input.request.arguments_json);
+        defer scanner.deinit();
+        while (try scanner.next() != .end_of_document) if (scanner.stackHeight() > 64) return error.ReviewInputLimit;
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, prepared.input.request.arguments_json, .{ .duplicate_field_behavior = .@"error", .parse_numbers = false });
+        defer {
+            clearPermissionArguments(&parsed.value);
+            parsed.deinit();
+        }
+        try self.scrubPermissionArguments(&parsed.value);
+        const arguments = try self.allocator.alloc(u8, 16 * 1024);
+        errdefer {
+            std.crypto.secureZero(u8, arguments);
+            self.allocator.free(arguments);
+        }
+        var writer = std.Io.Writer.fixed(arguments);
+        try std.json.Stringify.value(parsed.value, .{}, &writer);
+        prepared.input.request.arguments_json = writer.buffered();
+        const config = prepared.execution.input();
+        const owner = try self.completion_factory.create(self.allocator, .{
+            .target = .{ .provider_id = config.target.provider_id, .protocol = agent_protocol.toAgent(config.target.protocol), .base_url = config.target.base_url, .model = config.target.model },
+            .credential = config.api_key,
+        });
+        errdefer owner.deinit();
+        const job = try self.allocator.create(permission_job.Job);
+        errdefer self.allocator.destroy(job);
+        job.* = .{ .allocator = self.allocator, .io = self.io, .prepared = prepared, .arguments = arguments, .owner = owner, .cancellation = owner.newCancellation(), .deadline = deadline, .notify_context = self.change_notifier.context, .notify_fn = self.change_notifier.wake };
+        try job.start();
+        slot.* = job;
+        self.bumpRevision();
+    }
+
+    fn scrubPermissionArguments(self: *Runtime, value: *std.json.Value) !void {
+        switch (value.*) {
+            .string => |string| _ = self.redactWithKnownCredentialsNoFail(@constCast(string)),
+            .number_string => |number| if (self.containsKnownCredential(number)) {
+                return error.SensitiveArgumentNumber;
+            },
+            .array => |*array| for (array.items) |*item| try self.scrubPermissionArguments(item),
+            .object => |*object| {
+                var iterator = object.iterator();
+                while (iterator.next()) |entry| {
+                    if (self.containsKnownCredential(entry.key_ptr.*)) return error.SensitiveArgumentKey;
+                    try self.scrubPermissionArguments(entry.value_ptr);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn clearPermissionArguments(value: *std.json.Value) void {
+        switch (value.*) {
+            .string, .number_string => |string| std.crypto.secureZero(u8, @constCast(string)),
+            .array => |*array| for (array.items) |*item| clearPermissionArguments(item),
+            .object => |*object| {
+                var iterator = object.iterator();
+                while (iterator.next()) |entry| {
+                    std.crypto.secureZero(u8, @constCast(entry.key_ptr.*));
+                    clearPermissionArguments(entry.value_ptr);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn commitPermissionReviewCandidate(context: *anyopaque) task_runtime.DurableCommit {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.commitTaskState() catch |err| return switch (err) {
+            error.TaskPersistenceOutcomeUnknown => .outcome_unknown,
+            else => .failed,
+        };
+        return .committed;
+    }
+
+    fn shutdownPermissionReviews(self: *Runtime) void {
+        for (self.permission_jobs) |entry| if (entry) |job| job.cancel();
+        for (&self.permission_jobs) |*slot| if (slot.*) |job| {
+            _ = self.task_runtime.finishPermissionReview(job.prepared.identity);
+            job.deinit();
+            slot.* = null;
+        };
     }
 
     pub fn checkpointStoreHealth(self: *const Runtime) checkpoint_store.Health {
@@ -4460,9 +4626,16 @@ pub const Runtime = struct {
     }
 
     /// Reconciles worker-owned lifecycle state into the main-thread product
-    /// projection. It never allocates, so an effects wake cannot fail merely
-    /// while publishing a terminal state.
+    /// projection, then schedules/reaps independently owned permission reviews.
     pub fn syncLifecycle(self: *Runtime) void {
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        self.syncPermissionReviews();
+        if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+    }
+
+    /// Lifecycle facts alone never accept or start a reviewer decision. The
+    /// manual-response entry point uses this before Task's acceptance boundary.
+    fn syncLifecycleFacts(self: *Runtime) bool {
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
         changed = self.syncMcpHealthNoFail() or changed;
@@ -4495,7 +4668,7 @@ pub const Runtime = struct {
             self.taskRuntimeDeletionEffects(),
         ).changed) changed = true;
         if (changed) self.bumpRevision();
-        if (task_sync.mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        return task_sync.mcp_refresh_needed;
     }
 
     /// Consumes the canonical Agent event stream and owns the complete product
@@ -5159,8 +5332,9 @@ pub const Runtime = struct {
                 return error.SnapshotTooLarge
         else
             writer.writeAll("[]") catch return error.SnapshotTooLarge;
-        writer.print(",\"defaultProfile\":\"{s}\"}},\"account\":", .{
-            @tagName(self.default_permission_profile),
+        writer.print(",\"defaultProfile\":\"{s}\",\"availableModes\":[\"manual\",\"auto_review\",\"full_access\"],\"defaultMode\":\"{s}\"}},\"account\":", .{
+            @tagName(self.default_approval_mode.profile()),
+            @tagName(self.default_approval_mode),
         }) catch return error.SnapshotTooLarge;
         try self.writeAccount(&writer);
         writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
@@ -5677,6 +5851,7 @@ pub const Runtime = struct {
     }
 
     pub fn shutdownExecutor(self: *Runtime) void {
+        self.shutdownPermissionReviews();
         self.shutdownAttachmentStagingExecutor();
         self.shutdownFilePreviewExecutor();
         self.shutdownFileChangeExecutor();
@@ -6449,10 +6624,10 @@ pub const Runtime = struct {
             self.taskPersistenceLimits(),
         );
         defer recovered.deinit();
-        self.default_permission_profile = task_persistence.parseEnum(
-            PermissionProfile,
-            recovered.value.default_permission_profile,
-        ) orelse return error.TaskStoreCorrupt;
+        self.default_approval_mode = if (recovered.value.default_approval_mode) |mode|
+            task_persistence.parseEnum(ApprovalMode, mode) orelse return error.TaskStoreCorrupt
+        else
+            ApprovalMode.fromFacts(task_persistence.parseEnum(PermissionProfile, recovered.value.default_permission_profile) orelse return error.TaskStoreCorrupt, false);
         for (recovered.value.failures) |failure|
             try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
         for (recovered.value.workspaces) |workspace| {
@@ -6598,7 +6773,8 @@ pub const Runtime = struct {
             .allocated_tasks = task_frames.tasks,
             .allocated_failures = task_frames.failures,
             .state = .{
-                .default_permission_profile = @tagName(self.default_permission_profile),
+                .default_permission_profile = @tagName(self.default_approval_mode.profile()),
+                .default_approval_mode = @tagName(self.default_approval_mode),
                 .next_workspace_id = identity.next_id,
                 .next_workspace_recent_order = identity.next_recent_order,
                 .next_task_id = task_frames.next_task_id,
@@ -7885,6 +8061,10 @@ pub const Runtime = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn taskPermissionReviewText(control: *Runtime) task_runtime.TextProjection {
+        return control.taskRuntimeTextProjection();
+    }
+
     pub fn scheduledBinding(control: *Runtime) ScheduledTaskBindingInput {
         const authority = control.custom_providers.defaultAuthority() orelse
             unreachable;

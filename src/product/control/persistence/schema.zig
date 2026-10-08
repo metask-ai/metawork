@@ -2,11 +2,19 @@
 const std = @import("std");
 const sql = @import("metawork_storage_sql");
 
-pub const migrations: []const sql.Migration = &.{.{
+pub const migrations: []const sql.Migration = &.{ .{
     .version = 1,
     .name = "task_history",
     .sql = @embedFile("migrations/0001_task_history.sql"),
-}};
+}, .{
+    .version = 2,
+    .name = "permission_review_delegation",
+    .sql = @embedFile("migrations/0002_permission_review_delegation.sql"),
+}, .{
+    .version = 3,
+    .name = "approval_mode",
+    .sql = @embedFile("migrations/0003_approval_mode.sql"),
+} };
 
 comptime {
     @setEvalBranchQuota(4_000_000);

@@ -55,6 +55,61 @@ function clone(value) {
   return structuredClone(value);
 }
 
+test("approval mode defaults and captured Task mode remain separate strict facts", () => {
+  const value = clone(fixture);
+  value.permissions.defaultMode = "auto_review";
+  assert.equal(decodeWorkbenchSnapshot(value).tasks[0].approvalMode, "manual");
+  value.tasks[0].approvalMode = "auto_review";
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  for (const invalid of [0, "0", ["auto_review"], "auto"]) {
+    const bad = clone(value);
+    bad.tasks[0].approvalMode = invalid;
+    assert.throws(() => decodeWorkbenchSnapshot(bad));
+  }
+  const wrongProfile = clone(value);
+  wrongProfile.tasks[0].approvalMode = "full_access";
+  assert.throws(() => decodeWorkbenchSnapshot(wrongProfile));
+  const wrongDefault = clone(value);
+  wrongDefault.permissions.defaultMode = "full_access";
+  assert.throws(() => decodeWorkbenchSnapshot(wrongDefault));
+});
+
+test("review audit only describes once-only reviewer decisions and keeps legal old reasons", () => {
+  const value = clone(fixture);
+  const record = {
+    requestId: "8",
+    runId: "7",
+    order: "1",
+    kind: "permission",
+    state: "allowed_once",
+    detail: "",
+    itemCount: 0,
+    detailTruncated: false,
+    redacted: false,
+    answeredBy: "reviewer",
+    reviewReason: "Matches the user request",
+    agentRequestId: "",
+    permission: null,
+  };
+  value.tasks[0].uiHistory.push(record);
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  record.reviewReason = "a".repeat(512);
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  for (const reason of [null, " ", "a".repeat(513), "bad\nreason"]) {
+    record.reviewReason = reason;
+    assert.throws(() => decodeWorkbenchSnapshot(value));
+  }
+  record.reviewReason = "ok";
+  for (const state of ["allowed_always", "denied_always", "cancelled"]) {
+    record.state = state;
+    assert.throws(() => decodeWorkbenchSnapshot(value));
+  }
+  record.state = "denied";
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  record.answeredBy = "user";
+  assert.throws(() => decodeWorkbenchSnapshot(value));
+});
+
 const emptyAccountSummary = {
   operation: "idle",
   usageEligibility: "unknown",
@@ -2588,6 +2643,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     itemCount: 0,
     detailTruncated: false,
     redacted: false,
+    answeredBy: "user",
+    reviewReason: null,
     agentRequestId: "",
     permission: null,
   });
@@ -2607,6 +2664,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     itemCount: 0,
     detailTruncated: false,
     redacted: false,
+    answeredBy: "user",
+    reviewReason: null,
     agentRequestId: "",
     permission: null,
   };
@@ -2667,6 +2726,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     itemCount: 0,
     detailTruncated: false,
     redacted: false,
+    answeredBy: "user",
+    reviewReason: null,
     agentRequestId: "",
     permission: null,
   });
@@ -2711,6 +2772,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     itemCount: 0,
     detailTruncated: false,
     redacted: false,
+    answeredBy: "user",
+    reviewReason: null,
     agentRequestId: "",
     permission: null,
   });
@@ -2730,6 +2793,8 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
     itemCount: 0,
     detailTruncated: false,
     redacted: false,
+    answeredBy: "user",
+    reviewReason: null,
     agentRequestId: "agent-request-11",
     permission: {
       requestId: "agent-request-11",

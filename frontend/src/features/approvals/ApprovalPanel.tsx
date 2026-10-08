@@ -28,13 +28,18 @@ export function ApprovalPanel({
   respond,
 }: {
   pending: PendingUi;
-  task: Pick<TaskView, "uiHistory" | "restorePermission">;
+  task: Pick<
+    TaskView,
+    "uiHistory" | "restorePermission" | "permissionReviewState"
+  >;
   busy: boolean;
   responsePhase: UiResponsePhase;
   fullAccessSuccessor?: FullAccessSuccessorAction | null;
   respond: (payload: UiResponsePayload) => void;
 }) {
   const { t } = useI18n();
+  if (task.permissionReviewState === "reviewing") return null;
+
   const responseInFlight =
     responsePhase === "sending" || responsePhase === "awaiting_snapshot";
   const actionDisabled = busy || responseInFlight;
@@ -47,7 +52,13 @@ export function ApprovalPanel({
     respond({ kind: "permission", permission });
 
   const status =
-    responsePhase === "idle" ? null : (
+    responsePhase === "idle" ? (
+      task.permissionReviewState === "needs_user" ? (
+        <p role="status" aria-live="polite">
+          {t("approval.review_needs_user")}
+        </p>
+      ) : null
+    ) : (
       <p
         data-phase={responsePhase}
         role={responsePhase === "failed" ? "alert" : "status"}

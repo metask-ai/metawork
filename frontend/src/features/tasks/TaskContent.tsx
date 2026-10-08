@@ -491,6 +491,9 @@ export function TaskContent({
             {presentation.active && (
               <RunProcess
                 presentation={presentation}
+                reviewingPermission={
+                  isCurrent && task.permissionReviewState === "reviewing"
+                }
                 fileChanges={fileChangesEnabled ? run.fileChanges : null}
                 elapsedMs={run.elapsedMs}
                 snapshotReceivedAt={snapshotReceivedAt}
@@ -505,17 +508,39 @@ export function TaskContent({
                 }
               />
             )}
-            {isCurrent && task.pendingUi && (
-              <div className="ai-exchange-intervention">
-                {renderPendingUi({
-                  taskId: task.id,
-                  task,
-                  pending: task.pendingUi,
-                  busy: responseDisabled,
-                  respond: onRespond,
-                })}
-              </div>
-            )}
+            {isCurrent &&
+              task.pendingUi &&
+              task.permissionReviewState !== "reviewing" && (
+                <div className="ai-exchange-intervention">
+                  {renderPendingUi({
+                    taskId: task.id,
+                    task,
+                    pending: task.pendingUi,
+                    busy: responseDisabled,
+                    respond: onRespond,
+                  })}
+                </div>
+              )}
+            {task.uiHistory
+              .filter(
+                (record) =>
+                  record.runId === run.id && record.answeredBy === "reviewer",
+              )
+              .map((record) => (
+                <details
+                  className="projection-note"
+                  key={`review-${record.requestId}`}
+                >
+                  <summary>
+                    {t("approval.answered_by_reviewer")}
+                    {record.permission?.toolName && (
+                      <> · {record.permission.toolName}</>
+                    )}{" "}
+                    · {t(`ui.state.${record.state}`)}
+                  </summary>
+                  <p>{record.reviewReason}</p>
+                </details>
+              ))}
             {fileChangesEnabled && run.fileChanges && (
               <RunFileChangesSummary
                 fileChanges={run.fileChanges}
@@ -527,6 +552,7 @@ export function TaskContent({
             {!presentation.active && presentation.processVisible && (
               <RunProcess
                 presentation={presentation}
+                reviewingPermission={false}
                 fileChanges={fileChangesEnabled ? run.fileChanges : null}
                 elapsedMs={run.elapsedMs}
                 synchronized={synchronized}

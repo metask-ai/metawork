@@ -49,7 +49,7 @@ export function TaskInformation({
                       {task.permissionProfile === "full_access" && (
                         <Icon name="warning" />
                       )}
-                      {t(`permission.profile.${task.permissionProfile}`)}
+                      {t(`permission.mode.${task.approvalMode}`)}
                     </span>
                     <small>
                       {t(

@@ -147,6 +147,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-agent-mcp-connector", .root_module = test_modules.agent_mcp_connector },
         .{ .name = "metawork-agent-model-binding", .root_module = test_modules.agent_model_binding },
         .{ .name = "metawork-agent-completion", .root_module = test_modules.agent_completion },
+        .{ .name = "metawork-product-permission-review", .root_module = test_modules.product_permission_review },
         .{ .name = "metawork-agent-provider-probe", .root_module = test_modules.agent_provider_probe },
         .{ .name = "metawork-agent-mcp-catalog", .root_module = test_modules.agent_mcp_catalog },
         .{ .name = "metawork-agent-mcp-http", .root_module = test_modules.agent_mcp_http },
@@ -208,6 +209,22 @@ pub fn build(b: *std.Build) void {
         spec.root_module.link_libc = bundle.link_libc;
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
+    }
+    const permission_review_tests = b.addTest(.{
+        .name = "metawork-product-permission-review-focused",
+        .root_module = test_modules.product_permission_review,
+    });
+    b.step("test-permission-review", "Run the independent permission reviewer tests")
+        .dependOn(&b.addRunArtifact(permission_review_tests).step);
+    const task_permission_step = b.step("test-task-permission", "Run Task permission state, history and approval tests");
+    for ([_]*std.Build.Module{
+        test_modules.product_task_attachment,
+        test_modules.product_task_state,
+        test_modules.product_task_persistence,
+        test_modules.product_task_runtime,
+    }) |module| {
+        const tests = b.addTest(.{ .root_module = module });
+        task_permission_step.dependOn(&b.addRunArtifact(tests).step);
     }
     const account_test_step = b.step(
         "test-account",
@@ -418,6 +435,7 @@ const WiredModules = struct {
     agent: *std.Build.Module,
     agent_model_binding: *std.Build.Module,
     agent_completion: *std.Build.Module,
+    product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
     agent_catalog: *std.Build.Module,
     agent_checkpoint: *std.Build.Module,
@@ -898,6 +916,12 @@ fn wireAgentCore(
     });
     agent_completion.addImport("agent_protocol", agent_protocol);
     agent_completion.addImport("agent_model_binding", agent_model_binding);
+    const product_permission_review = b.createModule(.{
+        .root_source_file = b.path("src/product/permission/review.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    product_permission_review.addImport("agent_completion", agent_completion);
     const event_sink = b.createModule(.{
         .root_source_file = b.path("src/agent/event_sink.zig"),
         .target = target,
@@ -1497,6 +1521,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_runtime.addImport("product_task_state", task_state);
+    task_runtime.addImport("product_permission_review", product_permission_review);
     task_runtime.addImport("product_task_persistence", task_persistence);
     task_runtime.addImport("metawork_agent", agent);
     task_runtime.addImport("metawork_product_models_contract", models_contract);
@@ -1704,6 +1729,8 @@ fn wireAgentCore(
     product_control_runtime.addImport("metawork_product_attachment", product_attachment);
     product_control_runtime.addImport("product_control_attachment_staging", attachment_staging);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
+    product_control_runtime.addImport("product_permission_review", product_permission_review);
+    product_control_runtime.addImport("product_agent_protocol_adapter", product_agent_protocol_adapter);
     product_control_runtime.addImport("product_control_file_change_io", file_change_io);
     product_control_runtime.addImport("metawork_product_schedule", product_schedule);
     product_control_runtime.addImport("metawork_product_workspace", product_workspace);
@@ -1884,6 +1911,7 @@ fn wireAgentCore(
         .agent = agent,
         .agent_model_binding = agent_model_binding,
         .agent_completion = agent_completion,
+        .product_permission_review = product_permission_review,
         .agent_session = session,
         .agent_catalog = agent_catalog,
         .agent_checkpoint = agent_checkpoint,

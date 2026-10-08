@@ -143,6 +143,47 @@ test("Task list stays flat while ordering action before recency", () => {
   );
 });
 
+test("automatic review is processing until the current request needs a user", () => {
+  const reviewing = task({
+    id: "reviewing",
+    approvalMode: "auto_review",
+    permissionReviewState: "reviewing",
+    currentRunId: "9",
+    currentRunPhase: "waiting_ui",
+    recentOrder: "10",
+  });
+  const manual = task({ id: "manual", currentRunPhase: "waiting_ui" });
+  const working = task({
+    id: "working",
+    currentRunPhase: "running",
+    recentOrder: "11",
+  });
+  assert.deepEqual(taskSignals(reviewing), {
+    running: true,
+    attention: false,
+    failed: false,
+  });
+  assert.deepEqual(taskDisplayState(reviewing), { kind: "permission_review" });
+  assert.deepEqual(
+    orderedTasks([reviewing, working, manual], false).map((item) => item.id),
+    ["manual", "working", "reviewing"],
+  );
+  reviewing.permissionReviewState = "needs_user";
+  assert.deepEqual(taskSignals(reviewing), {
+    running: false,
+    attention: true,
+    failed: false,
+  });
+  assert.deepEqual(taskDisplayState(reviewing), {
+    kind: "phase",
+    value: "waiting_ui",
+  });
+  assert.deepEqual(
+    orderedTasks([working, reviewing], false).map((item) => item.id),
+    ["reviewing", "working"],
+  );
+});
+
 test("Task signals and Workspace path labels preserve their independent semantics", () => {
   const tasks = [
     task({ id: "1", currentRunId: "9", currentRunPhase: "running" }),

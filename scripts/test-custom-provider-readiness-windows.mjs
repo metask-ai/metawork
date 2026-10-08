@@ -278,7 +278,7 @@ try {
     modelSelection: null,
     expectedSkillCatalogRevision: workspaceReady.catalog.revision,
     expectedSkillSelectionRevision: workspaceReady.catalog.selectionRevision,
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
   });
   if (
     createTaskResponse !== null &&

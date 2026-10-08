@@ -2,7 +2,7 @@ import type {
   TaskCreateReason,
   TaskCreateResult,
   NewTaskModelSelectionIntent,
-  PermissionProfile,
+  ApprovalMode,
   TaskRestoreReason,
   TaskRunInput,
   TaskRunReason,
@@ -18,7 +18,7 @@ export type TaskSubmissionClient = {
     modelSelection: NewTaskModelSelectionIntent | null,
     expectedSkillCatalogRevision: string | null,
     expectedSkillSelectionRevision: string | null,
-    permissionProfile: PermissionProfile,
+    approvalMode: ApprovalMode,
   ) => Promise<TaskCreateResult>;
   run: (
     taskId: string,
@@ -64,7 +64,7 @@ export async function submitTaskInstruction({
   expectedSelectionRevision,
   modelSelection,
   expectedBindingEpoch,
-  permissionProfile,
+  approvalMode,
   input,
   continuationRecoveryAvailable = false,
   ensureContinuation,
@@ -77,7 +77,7 @@ export async function submitTaskInstruction({
   expectedSelectionRevision: string;
   modelSelection: NewTaskModelSelectionIntent | null;
   expectedBindingEpoch: string | null;
-  permissionProfile: PermissionProfile;
+  approvalMode: ApprovalMode;
   input: TaskRunInput;
   continuationRecoveryAvailable?: boolean;
   ensureContinuation?: (
@@ -98,7 +98,7 @@ export async function submitTaskInstruction({
         modelSelection,
         input.kind === "skill" ? input.catalogRevision : null,
         input.kind === "skill" ? input.selectionRevision : null,
-        permissionProfile,
+        approvalMode,
       );
       if (!createdTask.accepted)
         return { kind: "create_rejected", reason: createdTask.reason };
