@@ -35,6 +35,10 @@ pub fn build(b: *std.Build) void {
     });
     b.getInstallStep().dependOn(&frontend_assets.step);
     const app_target = (artifacts.exe.root_module.resolved_target orelse @panic("Native SDK app target is unresolved")).result;
+    // codesign adds LC_CODE_SIGNATURE to unsigned x86_64 executables.
+    // Reserve space so that the new load command cannot overwrite __text.
+    if (app_target.os.tag == .macos and app_target.cpu.arch == .x86_64)
+        artifacts.exe.headerpad_size = 0x1000;
     const target_id = agentCoreTargetId(app_target);
     const root = b.pathFromRoot(b.pathJoin(&.{ ".agentcore/bundles", target_id }));
     const bundle = agentcore_bundle.verify(b, root);

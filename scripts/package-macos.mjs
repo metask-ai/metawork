@@ -29,6 +29,11 @@ import {
 } from "./native-sdk-compat/macos-icon-composer.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import {
+  macosExecutableMinimumSystemVersion,
+  macosExecutableSections,
+  verifyMacosExecutableSections,
+} from "./macos-executable-integrity.mjs";
+import {
   stageAgentCoreRuntimeAssets,
   verifyAgentCoreRuntimeAssets,
 } from "./agentcore-runtime-assets.mjs";
@@ -482,6 +487,52 @@ function verifyPackagedMacosExecutableArchitecture(expectedArchitecture) {
   );
 }
 
+function packagedMinimumSystemVersion(appPath) {
+  return macosExecutableMinimumSystemVersion(
+    readFileSync(
+      path.join(
+        appPath,
+        "Contents",
+        "MacOS",
+        localProductIdentity.executableName,
+      ),
+    ),
+  );
+}
+
+export function stageMacosMinimumSystemVersion(appPath) {
+  const version = packagedMinimumSystemVersion(appPath);
+  run("/usr/bin/plutil", [
+    "-replace",
+    "LSMinimumSystemVersion",
+    "-string",
+    version,
+    path.join(appPath, "Contents", "Info.plist"),
+  ]);
+  return verifyMacosMinimumSystemVersion(appPath);
+}
+
+export function verifyMacosMinimumSystemVersion(appPath) {
+  const expected = packagedMinimumSystemVersion(appPath);
+  const actual = run(
+    "/usr/bin/plutil",
+    [
+      "-extract",
+      "LSMinimumSystemVersion",
+      "raw",
+      "-o",
+      "-",
+      path.join(appPath, "Contents", "Info.plist"),
+    ],
+    { capture: true },
+  ).stdout.trim();
+  if (actual !== expected)
+    throw new Error(
+      `Info.plist LSMinimumSystemVersion is ${actual}, expected ${expected}`,
+    );
+  return expected;
+}
+
 function verifyPackagedMacosApp(identity, appIconArtifact) {
   const sourceAssets = path.join(repositoryRoot, "frontend", "dist");
   const packagedAssets = path.join(
@@ -533,6 +584,7 @@ function verifyPackagedMacosApp(identity, appIconArtifact) {
       throw new Error(`Info.plist ${key} is ${actual}, expected ${expected}`);
     }
   }
+  verifyMacosMinimumSystemVersion(packagedAppPath);
   verifyStagedMacosAppIcon(appIconArtifact, packagedAppPath);
   return verifyDeveloperIdSignature(
     packagedAppPath,
@@ -698,7 +750,7 @@ function createDistributionDiskImage(identity, targetPath) {
   });
 }
 
-function verifyDistributionDiskImage(identity, targetPath) {
+function verifyDistributionDiskImage(identity, targetPath, executableSections) {
   const mountPoint = mkdtempSync(path.join(tmpdir(), "metawork-dmg-mount-"));
   let attached = false;
   try {
@@ -738,6 +790,19 @@ function verifyDistributionDiskImage(identity, targetPath) {
       undefined,
       { deep: true },
     );
+    verifyMacosExecutableSections(
+      executableSections,
+      readFileSync(
+        path.join(
+          mountPoint,
+          expectedAppName,
+          "Contents",
+          "MacOS",
+          localProductIdentity.executableName,
+        ),
+      ),
+    );
+    verifyMacosMinimumSystemVersion(path.join(mountPoint, expectedAppName));
   } finally {
     if (attached) {
       run("/usr/bin/hdiutil", ["detach", mountPoint], { capture: true });
@@ -746,7 +811,11 @@ function verifyDistributionDiskImage(identity, targetPath) {
   }
 }
 
-function notarizeDiskImage(identity, distributionDiskImagePath) {
+function notarizeDiskImage(
+  identity,
+  distributionDiskImagePath,
+  executableSections,
+) {
   const result = run(
     "/usr/bin/xcrun",
     [
@@ -791,7 +860,11 @@ function notarizeDiskImage(identity, distributionDiskImagePath) {
     capture: true,
   });
   verifyDeveloperIdDiskImageSignature(distributionDiskImagePath, identity);
-  verifyDistributionDiskImage(identity, distributionDiskImagePath);
+  verifyDistributionDiskImage(
+    identity,
+    distributionDiskImagePath,
+    executableSections,
+  );
 
   const digest = createHash("sha256")
     .update(readFileSync(distributionDiskImagePath))
@@ -806,6 +879,16 @@ async function buildPackagedMacosApp(
   agentCoreBundle,
 ) {
   runNode("scripts/build.mjs", ["release", distribution.targetId]);
+  const executableSections = macosExecutableSections(
+    readFileSync(
+      path.join(
+        repositoryRoot,
+        "zig-out",
+        "bin",
+        localProductIdentity.executableName,
+      ),
+    ),
+  );
   rmSync(packagedAppPath, { recursive: true, force: true });
   runNative([
     "package",
@@ -817,6 +900,7 @@ async function buildPackagedMacosApp(
     "none",
   ]);
   stageMacosAppIcon(appIconArtifact, packagedAppPath);
+  stageMacosMinimumSystemVersion(packagedAppPath);
   stageMacosTrayIcon();
   const executableDirectory = path.join(packagedAppPath, "Contents", "MacOS");
   const runtimeAssetOptions = {
@@ -850,7 +934,16 @@ async function buildPackagedMacosApp(
   signWithDeveloperId(packagedAppPath, identity, {
     preserveEntitlements: true,
   });
-  return verifyPackagedMacosApp(identity, appIconArtifact);
+  verifyMacosExecutableSections(
+    executableSections,
+    readFileSync(
+      path.join(executableDirectory, localProductIdentity.executableName),
+    ),
+  );
+  return {
+    ...verifyPackagedMacosApp(identity, appIconArtifact),
+    executableSections,
+  };
 }
 
 async function packageMacos(selection) {
@@ -881,7 +974,11 @@ async function packageMacos(selection) {
         agentCoreBundles.get(distribution.targetId),
       );
       createDistributionDiskImage(identity, distribution.diskImagePath);
-      const notarized = notarizeDiskImage(identity, distribution.diskImagePath);
+      const notarized = notarizeDiskImage(
+        identity,
+        distribution.diskImagePath,
+        signature.executableSections,
+      );
       console.log(
         `built Developer ID signed and notarized ${distribution.artifact} package ${packagedAppPath} (${signature.policy})`,
       );

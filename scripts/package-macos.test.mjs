@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,6 +22,8 @@ import {
   requireSingleMacosExecutableArchitecture,
   selectDistributionCodeSigningIdentity,
   stageMacosTrayIcon,
+  stageMacosMinimumSystemVersion,
+  verifyMacosMinimumSystemVersion,
 } from "./package-macos.mjs";
 
 const fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567";
@@ -81,6 +84,64 @@ test("macOS package selection is explicit and defaults to both architectures", (
     /expected arm64, x64, or all/u,
   );
 });
+
+test(
+  "packaged minimum macOS version replaces the SDK default and rejects drift",
+  {
+    skip: process.platform !== "darwin",
+  },
+  async () => {
+    const appPath = await mkdtemp(path.join(tmpdir(), "metawork-minimum-os-"));
+    try {
+      mkdirSync(path.join(appPath, "Contents", "MacOS"), { recursive: true });
+      const executable = Buffer.alloc(56);
+      executable.writeUInt32LE(0xfeedfacf, 0);
+      executable.writeUInt32LE(1, 16);
+      executable.writeUInt32LE(24, 20);
+      executable.writeUInt32LE(0x32, 32);
+      executable.writeUInt32LE(24, 36);
+      executable.writeUInt32LE(1, 40);
+      executable.writeUInt32LE(13 << 16, 44);
+      writeFileSync(
+        path.join(
+          appPath,
+          "Contents",
+          "MacOS",
+          localProductIdentity.executableName,
+        ),
+        executable,
+      );
+      const plistPath = path.join(appPath, "Contents", "Info.plist");
+      writeFileSync(
+        plistPath,
+        '<?xml version="1.0"?><plist version="1.0"><dict><key>LSMinimumSystemVersion</key><string>11.0</string><key>CFBundleName</key><string>MetaWork</string></dict></plist>',
+      );
+      assert.equal(stageMacosMinimumSystemVersion(appPath), "13.0");
+      assert.equal(verifyMacosMinimumSystemVersion(appPath), "13.0");
+      assert.equal(
+        execFileSync(
+          "/usr/bin/plutil",
+          ["-extract", "CFBundleName", "raw", "-o", "-", plistPath],
+          { encoding: "utf8" },
+        ).trim(),
+        "MetaWork",
+      );
+      execFileSync("/usr/bin/plutil", [
+        "-replace",
+        "LSMinimumSystemVersion",
+        "-string",
+        "11.0",
+        plistPath,
+      ]);
+      assert.throws(
+        () => verifyMacosMinimumSystemVersion(appPath),
+        /LSMinimumSystemVersion is 11\.0, expected 13\.0/u,
+      );
+    } finally {
+      rmSync(appPath, { recursive: true, force: true });
+    }
+  },
+);
 
 test("macOS package architecture gate rejects mislabeled and universal executables", () => {
   assert.equal(
@@ -155,6 +216,9 @@ test("macOS packaging has one public owner and signs only after resource staging
   const appIconStagingIndex = packageScript.indexOf(
     "stageMacosAppIcon(appIconArtifact, packagedAppPath);",
   );
+  const minimumVersionStagingIndex = packageScript.indexOf(
+    "stageMacosMinimumSystemVersion(packagedAppPath);",
+  );
   const stagingIndex = packageScript.indexOf("stageMacosTrayIcon();");
   const agentCoreStagingIndex = packageScript.indexOf(
     "await stageAgentCoreRuntimeAssets(",
@@ -174,6 +238,13 @@ test("macOS packaging has one public owner and signs only after resource staging
   const signingIndex = packageScript.indexOf(
     "signWithDeveloperId(packagedAppPath",
   );
+  const sectionCaptureIndex = packageScript.indexOf(
+    "const executableSections = macosExecutableSections(",
+  );
+  const sectionVerificationIndex = packageScript.indexOf(
+    "  verifyMacosExecutableSections(",
+    signingIndex,
+  );
   assert.notEqual(appIconStagingIndex, -1);
   assert.notEqual(stagingIndex, -1);
   assert.notEqual(agentCoreStagingIndex, -1);
@@ -182,6 +253,16 @@ test("macOS packaging has one public owner and signs only after resource staging
   assert.notEqual(ripgrepSigningIndex, -1);
   assert.notEqual(architectureIndex, -1);
   assert.notEqual(signingIndex, -1);
+  assert.notEqual(minimumVersionStagingIndex, -1);
+  assert.ok(minimumVersionStagingIndex < signingIndex);
+  assert.notEqual(sectionCaptureIndex, -1);
+  assert.notEqual(sectionVerificationIndex, -1);
+  assert.ok(sectionCaptureIndex < appIconStagingIndex);
+  assert.ok(signingIndex < sectionVerificationIndex);
+  assert.ok(
+    sectionVerificationIndex <
+      packageScript.indexOf("    ...verifyPackagedMacosApp("),
+  );
   assert.ok(appIconStagingIndex < stagingIndex);
   assert.ok(stagingIndex < agentCoreStagingIndex);
   assert.ok(licenseResourceIndex < agentCoreStagingIndex);
@@ -194,6 +275,34 @@ test("macOS packaging has one public owner and signs only after resource staging
   assert.ok(stagingIndex < architectureIndex);
   assert.ok(architectureIndex < signingIndex);
   assert.doesNotMatch(packageScript, /previewMacosPackage|legacyPackage/u);
+});
+
+test("final DMG verification preserves the original build section baseline", () => {
+  const packageScript = readFileSync(
+    new URL("./package-macos.mjs", import.meta.url),
+    "utf8",
+  );
+  const diskImageVerification = packageScript.slice(
+    packageScript.indexOf("function verifyDistributionDiskImage("),
+    packageScript.indexOf("function notarizeDiskImage("),
+  );
+  assert.match(diskImageVerification, /"attach",\s*"-readonly"/u);
+  assert.match(
+    diskImageVerification,
+    /verifyMacosExecutableSections\(\s*executableSections,\s*readFileSync\(\s*path\.join\(\s*mountPoint,/u,
+  );
+  assert.match(
+    diskImageVerification,
+    /verifyMacosMinimumSystemVersion\(path\.join\(mountPoint, expectedAppName\)\)/u,
+  );
+  assert.match(
+    packageScript,
+    /verifyDistributionDiskImage\(\s*identity,\s*distributionDiskImagePath,\s*executableSections,/u,
+  );
+  assert.match(
+    packageScript,
+    /notarizeDiskImage\(\s*identity,\s*distribution\.diskImagePath,\s*signature\.executableSections,/u,
+  );
 });
 
 test("distribution DMG Finder layout presents left-to-right installation", () => {
