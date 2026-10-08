@@ -340,6 +340,7 @@ fn writeState(batch: *Batch, v: wire.StateWire) !void {
     try batch.add("history_state", .{
         .singleton = try integer(1),
         .default_permission_profile = t(v.default_permission_profile),
+        .default_approval_mode = ot(v.default_approval_mode),
         .next_workspace_id = try batch.u(v.next_workspace_id),
         .next_workspace_recent_order = try batch.u(v.next_workspace_recent_order),
         .next_task_id = try batch.u(v.next_task_id),
@@ -351,6 +352,7 @@ fn writeState(batch: *Batch, v: wire.StateWire) !void {
 fn readState(row: Record) !wire.StateWire {
     var v: wire.StateWire = undefined;
     v.default_permission_profile = try row.t("default_permission_profile");
+    v.default_approval_mode = try row.ot("default_approval_mode");
     v.next_workspace_id = try row.u("next_workspace_id");
     v.next_workspace_recent_order = try row.u("next_workspace_recent_order");
     v.next_task_id = try row.u("next_task_id");
@@ -632,7 +634,7 @@ fn readCheckpoint(row: Record) !?wire.CheckpointWire {
 }
 
 comptime {
-    if (std.meta.fields(wire.StateWire).len != 8) @compileError("Review every history SQL field mapping after StateWire changes");
+    if (std.meta.fields(wire.StateWire).len != 9) @compileError("Review every history SQL field mapping after StateWire changes");
     if (std.meta.fields(wire.TaskFailureWire).len != 3) @compileError("Review every history SQL field mapping after TaskFailureWire changes");
     if (std.meta.fields(wire.WorkspaceWire).len != 7) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
     if (std.meta.fields(wire.TaskWire).len != 21) @compileError("Review every history SQL field mapping after TaskWire changes");

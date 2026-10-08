@@ -765,7 +765,7 @@ export const zhCN: Record<MessageId, string> = {
     "当前 {current} tokens · {compact} 时自动压缩 · 上限 {limit}",
   "task.information": "任务信息",
   "task.information_scope":
-    "MCP 表示创建任务时的工具选择，不代表当前连接状态；权限策略在创建后固定。",
+    "MCP 表示创建任务时的工具选择，不代表当前连接状态；已有会话暂不支持切换审批模式。",
   "conversation.context_observed": "当前会话最近一次观测，不是实时用量。",
   "task_panel.title": "右侧栏",
   "task_panel.empty": "从对话中打开文件或审查更改。",
@@ -775,6 +775,9 @@ export const zhCN: Record<MessageId, string> = {
   "task_panel.open": "打开右侧栏",
   "task_panel.close": "关闭右侧栏",
   "approval.response_required": "需要回复",
+  "approval.reviewing": "自动评审中，你仍可直接决定。",
+  "approval.review_needs_user": "自动评审未作决定，请手动处理。",
+  "approval.answered_by_reviewer": "自动评审",
   "approval.allow_tool": "允许 {tool}？",
   "approval.arguments": "参数",
   "approval.deny": "拒绝",
@@ -965,18 +968,30 @@ export const zhCN: Record<MessageId, string> = {
   "settings.models_reset_pending": "正在恢复…",
   "settings.models_reset_failed": "模型配置恢复失败，请重试。",
   "permission.profile.approval_required": "请求批准",
+  "permission.mode.manual": "人工审批",
+  "permission.mode.manual.help":
+    "未覆盖的操作由你审批，常规工作区编辑自动执行。",
+  "permission.mode.auto_review": "自动评审",
+  "permission.mode.auto_review.help":
+    "按任务意图评审本次操作；不确定时请你处理。使用任务模型，产生额外调用费用。",
+  "permission.mode.full_access": "完全访问",
+  "permission.mode.full_access.help":
+    "常规操作不请求批准；系统和执行层保护仍然有效。",
+  "permission.auto_review.boundary":
+    "自动评审使用任务模型，产生额外调用费用；不是安全保证，仅决定本次操作。评审失败转人工，MCP 请求暂由你处理。",
   "permission.profile.approval_required.help":
     "常规工作区编辑自动执行；当前策略之外的其他操作需要批准。",
   "permission.profile.full_access": "完全访问",
   "permission.profile.full_access.help":
     "MetaWork 跳过常规工具操作的批准；AgentCore 核心保护及系统或服务权限仍可阻止操作。",
-  "permission.new_task.label": "权限策略",
-  "permission.new_task.help": "创建后固定，并作为下次新任务的默认选择。",
-  "permission.task.label": "权限策略",
+  "permission.new_task.label": "审批模式",
+  "permission.new_task.help":
+    "记住本次选择，重启后用于新任务。已有会话暂不支持切换。",
+  "permission.task.label": "审批模式",
   "permission.task.help":
-    "创建此 Task 时已固定；之后新建 Task 的选择不会影响它。",
+    "显示此会话实际采用的审批模式；暂不支持在已有会话中切换。",
   "permission.task.full_access.help":
-    "创建时已固定；跳过常规批准，但 AgentCore 与系统保护仍然有效。",
+    "此会话采用完全访问；跳过常规批准，但 AgentCore 与系统保护仍然有效。",
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
     "完全访问会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",

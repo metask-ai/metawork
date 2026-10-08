@@ -846,7 +846,7 @@ export const enUS = {
     "{current} tokens now · auto-compact at {compact} · limit {limit}",
   "task.information": "Task information",
   "task.information_scope":
-    "MCP describes tool selection at task creation, not current connection status. The permission policy is fixed at creation.",
+    "MCP describes tool selection at task creation, not current connection status. Switching existing sessions is not supported yet.",
   "conversation.context_observed":
     "Latest observation for this conversation, not a live usage meter.",
   "task_panel.title": "Side panel",
@@ -857,6 +857,11 @@ export const enUS = {
   "task_panel.open": "Open side panel",
   "task_panel.close": "Close side panel",
   "approval.response_required": "Response required",
+  "approval.reviewing":
+    "Automatic review in progress. You can still decide now.",
+  "approval.review_needs_user":
+    "Automatic review made no decision. Please respond manually.",
+  "approval.answered_by_reviewer": "Automatic review",
   "approval.allow_tool": "Allow {tool}?",
   "approval.arguments": "Arguments",
   "approval.deny": "Deny",
@@ -1065,19 +1070,30 @@ export const enUS = {
   "settings.models_reset_failed":
     "Could not recover model configuration. Try again.",
   "permission.profile.approval_required": "Request approval",
+  "permission.mode.manual": "Manual approval",
+  "permission.mode.manual.help":
+    "You approve uncovered operations; routine workspace edits proceed automatically.",
+  "permission.mode.auto_review": "Automatic review",
+  "permission.mode.auto_review.help":
+    "Review this operation against task intent; ask you when uncertain. Uses the task model and incurs additional usage charges.",
+  "permission.mode.full_access": "Full access",
+  "permission.mode.full_access.help":
+    "Routine operations proceed without approval; system and execution-layer protections still apply.",
+  "permission.auto_review.boundary":
+    "Automatic review uses the task model and incurs additional usage charges. It is not a safety guarantee and decides only this operation. Failure returns to manual approval. MCP requests remain manual.",
   "permission.profile.approval_required.help":
     "Routine workspace edits run automatically. Other operations outside this policy require approval.",
   "permission.profile.full_access": "Full access",
   "permission.profile.full_access.help":
     "MetaWork skips approval for routine tool operations. AgentCore protections and system or service permissions can still block them.",
-  "permission.new_task.label": "Permission policy",
+  "permission.new_task.label": "Approval mode",
   "permission.new_task.help":
-    "Fixed at creation and used as the default for your next new Task.",
-  "permission.task.label": "Permission policy",
+    "Remembered across restarts for new Tasks. Existing sessions cannot switch modes yet.",
+  "permission.task.label": "Approval mode",
   "permission.task.help":
-    "Fixed when this Task was created. Choices for later Tasks do not affect it.",
+    "Shows the mode this session actually adopted. Switching existing sessions is not supported yet.",
   "permission.task.full_access.help":
-    "Fixed at creation. Routine approval is skipped; AgentCore and system protections still apply.",
+    "This session uses full access. Routine approval is skipped; AgentCore and system protections still apply.",
   "permission.menu_help":
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":

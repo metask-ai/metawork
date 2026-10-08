@@ -1725,6 +1725,8 @@ fn wireAgentCore(
     product_control_runtime.addImport("metawork_product_attachment", product_attachment);
     product_control_runtime.addImport("product_control_attachment_staging", attachment_staging);
     product_control_runtime.addImport("product_control_file_preview", file_preview);
+    product_control_runtime.addImport("product_permission_review", product_permission_review);
+    product_control_runtime.addImport("product_agent_protocol_adapter", product_agent_protocol_adapter);
     product_control_runtime.addImport("product_control_file_change_io", file_change_io);
     product_control_runtime.addImport("metawork_product_schedule", product_schedule);
     product_control_runtime.addImport("metawork_product_workspace", product_workspace);

@@ -516,6 +516,23 @@ export function TaskContent({
                 })}
               </div>
             )}
+            {task.uiHistory
+              .filter(
+                (record) =>
+                  record.runId === run.id && record.answeredBy === "reviewer",
+              )
+              .map((record) => (
+                <details
+                  className="projection-note"
+                  key={`review-${record.requestId}`}
+                >
+                  <summary>
+                    {t("approval.answered_by_reviewer")} · {record.detail} ·{" "}
+                    {t(`ui.state.${record.state}`)}
+                  </summary>
+                  <p>{record.reviewReason}</p>
+                </details>
+              ))}
             {fileChangesEnabled && run.fileChanges && (
               <RunFileChangesSummary
                 fileChanges={run.fileChanges}

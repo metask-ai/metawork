@@ -32,6 +32,21 @@ pub const PermissionProfile = enum {
     full_access,
 };
 
+/// User-facing approval choice, distinct from the Core execution profile.
+pub const ApprovalMode = enum {
+    manual,
+    auto_review,
+    full_access,
+
+    pub fn profile(self: ApprovalMode) PermissionProfile {
+        return if (self == .full_access) .full_access else .approval_required;
+    }
+
+    pub fn fromFacts(profile_value: PermissionProfile, reviewed: bool) ApprovalMode {
+        return if (profile_value == .full_access) .full_access else if (reviewed) .auto_review else .manual;
+    }
+};
+
 /// Whether an uncovered permission may suspend this Task for a local user
 /// decision. The fact is immutable for the Task lifetime.
 pub const PermissionInteraction = enum {
@@ -644,6 +659,8 @@ pub const DurableTaskRecord = struct {
     permission_profile: PermissionProfile,
     permission_interaction: PermissionInteraction,
     binding_epoch: u64 = 1,
+    /// Persisted session fact: true means auto_review was adopted at creation.
+    /// Not an independent preference or a live user toggle.
     permission_review_delegated: bool = false,
     workspace_id: u64,
     workspace_epoch: u64 = 1,

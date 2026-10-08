@@ -435,6 +435,7 @@ pub const Limits = struct {
 
 pub const StateWire = struct {
     default_permission_profile: []const u8 = "approval_required",
+    default_approval_mode: ?[]const u8 = null,
     next_workspace_id: u64,
     next_workspace_recent_order: u64,
     next_task_id: u64,
@@ -2031,13 +2032,46 @@ fn deinitRestoredCompact(
     compact.* = undefined;
 }
 
+// std.json also accepts byte arrays for slices. The new authorization setting
+// must be a JSON string, never a coercion from an array or numeric token.
+const ApprovalModeText = struct {
+    value: []const u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ApprovalModeText {
+        if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
+        return .{ .value = try std.json.innerParse([]const u8, allocator, source, options) };
+    }
+
+    pub fn jsonStringify(self: ApprovalModeText, writer: anytype) !void {
+        try writer.write(self.value);
+    }
+};
+
 const MetaWire = struct {
     default_permission_profile: []const u8,
+    default_approval_mode: ?ApprovalModeText = null,
     next_workspace_id: u64,
     next_workspace_recent_order: u64,
     next_task_id: u64,
     next_task_recent_order: u64,
 };
+
+test "approval mode metadata only accepts JSON strings" {
+    for ([_][]const u8{ "0", "\"0\"", "[97,117,116,111,95,114,101,118,105,101,119]" }) |invalid| {
+        const json = try std.fmt.allocPrint(std.testing.allocator, "{{\"default_permission_profile\":\"approval_required\",\"default_approval_mode\":{s},\"next_workspace_id\":1,\"next_workspace_recent_order\":1,\"next_task_id\":1,\"next_task_recent_order\":1}}", .{invalid});
+        defer std.testing.allocator.free(json);
+        if (std.json.parseFromSlice(MetaWire, std.testing.allocator, json, .{})) |parsed_value| {
+            var parsed = parsed_value;
+            defer parsed.deinit();
+            try std.testing.expect(parseEnum(task_state.ApprovalMode, parsed.value.default_approval_mode.?.value) == null);
+        } else |err| {
+            try std.testing.expectEqual(error.UnexpectedToken, err);
+        }
+    }
+    var valid = try std.json.parseFromSlice(ApprovalModeText, std.testing.allocator, "\"auto_review\"", .{});
+    defer valid.deinit();
+    try std.testing.expectEqualStrings("auto_review", valid.value.value);
+}
 
 pub fn validateCandidate(state: *const StateWire, limits: Limits) ?ValidationFailure {
     for (state.tasks) |task| {
@@ -2066,6 +2100,7 @@ fn encodeUncheckedImpl(output: []u8, state: StateWire) Error![]const u8 {
     var offset: usize = 0;
     appendRecord(output, &offset, record_meta, 0, 0, MetaWire{
         .default_permission_profile = state.default_permission_profile,
+        .default_approval_mode = if (state.default_approval_mode) |mode| .{ .value = mode } else null,
         .next_workspace_id = state.next_workspace_id,
         .next_workspace_recent_order = state.next_workspace_recent_order,
         .next_task_id = state.next_task_id,
@@ -2139,6 +2174,7 @@ pub fn decodeRecovering(
     var next_task_id: u64 = 1;
     var next_task_recent_order: u64 = 1;
     var default_permission_profile: []const u8 = "approval_required";
+    var default_approval_mode: ?[]const u8 = null;
     var max_workspace_id: u64 = 0;
     var max_workspace_recent_order: u64 = 0;
     var max_task_id: u64 = 0;
@@ -2245,6 +2281,7 @@ pub fn decodeRecovering(
                 }
                 metadata_seen = true;
                 default_permission_profile = meta.default_permission_profile;
+                default_approval_mode = if (meta.default_approval_mode) |mode| mode.value else null;
                 next_workspace_id = meta.next_workspace_id;
                 next_workspace_recent_order = meta.next_workspace_recent_order;
                 next_task_id = meta.next_task_id;
@@ -2423,6 +2460,7 @@ pub fn decodeRecovering(
 
     const state = StateWire{
         .default_permission_profile = default_permission_profile,
+        .default_approval_mode = default_approval_mode,
         .next_workspace_id = try nextFromHighWater(next_workspace_id, max_workspace_id),
         .next_workspace_recent_order = try nextFromHighWater(next_workspace_recent_order, max_workspace_recent_order),
         .next_task_id = try nextFromHighWater(next_task_id, max_task_id),
@@ -2572,6 +2610,10 @@ fn nextAfterTask(current: u64, tasks: []const TaskWire, ids: bool) u64 {
 }
 
 fn validate(state: *const StateWire, limits: Limits) !void {
+    if (state.default_approval_mode) |mode| {
+        const parsed = parseEnum(task_state.ApprovalMode, mode) orelse return error.Invalid;
+        if (!std.mem.eql(u8, @tagName(parsed.profile()), state.default_permission_profile)) return error.Invalid;
+    }
     if (!validPermissionProfile(state.default_permission_profile) or
         state.next_workspace_id == 0 or state.next_workspace_recent_order == 0 or state.next_task_id == 0 or
         state.next_task_recent_order == 0 or state.workspaces.len > limits.max_workspaces or

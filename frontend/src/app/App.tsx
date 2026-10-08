@@ -144,7 +144,7 @@ import type {
   FileChangeDiffResult,
   FileChangeView,
   RunFileChanges,
-  PermissionProfile,
+  ApprovalMode,
   UiResponsePayload,
 } from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
@@ -291,8 +291,8 @@ export default function App() {
   const [accountBusy, setAccountBusy] = useState(false);
   const [executionBusy, setExecutionBusy] = useState(false);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
-  const [newTaskPermissionOverride, setNewTaskPermissionOverride] =
-    useState<PermissionProfile | null>(null);
+  const [newTaskApprovalOverride, setNewTaskApprovalOverride] =
+    useState<ApprovalMode | null>(null);
   const [newTaskRequestedModel, setNewTaskRequestedModel] =
     useState<ModelRef | null>(null);
   const [skillCatalogBusy, setSkillCatalogBusy] = useState(false);
@@ -368,8 +368,8 @@ export default function App() {
   }
 
   const snapshot = workbench.snapshot;
-  const newTaskPermissionProfile =
-    newTaskPermissionOverride ?? snapshot.permissions.defaultProfile;
+  const newTaskApprovalMode =
+    newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
   useEffect(() => {
     setPendingTaskModels((current) => {
@@ -1628,7 +1628,7 @@ export default function App() {
 
   function beginNewTask() {
     pendingTaskSelection.current = null;
-    setNewTaskPermissionOverride(null);
+    setNewTaskApprovalOverride(null);
     setNewTaskRequestedModel(null);
     setRoute("workbench");
     dispatchWorkbench({
@@ -1768,14 +1768,14 @@ export default function App() {
           snapshot.newTaskAdmission.activeSelectionRevision,
         modelSelection: newTaskDraftActive ? newTaskModelState.intent : null,
         expectedBindingEpoch: activeTask?.binding.epoch ?? null,
-        permissionProfile: newTaskPermissionProfile,
+        approvalMode: newTaskApprovalMode,
         input,
         continuationRecoveryAvailable: Boolean(
           activeTask?.continuationRecoveryAvailable,
         ),
         ensureContinuation: ensureTaskContinuation,
         onTaskCreated: (taskId) => {
-          setNewTaskPermissionOverride(null);
+          setNewTaskApprovalOverride(null);
           setNewTaskRequestedModel(null);
           pendingTaskSelection.current = taskId;
           pendingTaskDraftRetention.current.add(taskId);
@@ -2203,7 +2203,7 @@ export default function App() {
       });
       return;
     }
-    setNewTaskPermissionOverride(null);
+    setNewTaskApprovalOverride(null);
     pendingTaskDraftRetention.current.add(result.taskId);
     taskDrafts.setDraft(result.taskId, emptyComposerDraft());
     await syncFullAccessSuccessor(request, result.taskId, false);
@@ -3919,13 +3919,13 @@ export default function App() {
             <NewTaskView
               hasWorkspace={Boolean(composerWorkspace)}
               composer={composerFooter}
-              permissionProfiles={
+              approvalModes={
                 snapshot.capabilities.permissionProfiles
-                  ? snapshot.permissions.availableProfiles
+                  ? snapshot.permissions.availableModes
                   : []
               }
-              permissionProfile={newTaskPermissionProfile}
-              onPermissionProfileChange={setNewTaskPermissionOverride}
+              approvalMode={newTaskApprovalMode}
+              onApprovalModeChange={setNewTaskApprovalOverride}
             />
           ) : (
             <>

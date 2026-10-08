@@ -10,6 +10,10 @@ pub const migrations: []const sql.Migration = &.{ .{
     .version = 2,
     .name = "permission_review_delegation",
     .sql = @embedFile("migrations/0002_permission_review_delegation.sql"),
+}, .{
+    .version = 3,
+    .name = "approval_mode",
+    .sql = @embedFile("migrations/0003_approval_mode.sql"),
 } };
 
 comptime {

@@ -481,7 +481,7 @@ try {
     modelSelection: null,
     expectedSkillCatalogRevision: catalogSnapshot.catalog.revision,
     expectedSkillSelectionRevision: catalogSnapshot.catalog.selectionRevision,
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
   });
   if (
     createResult !== null &&

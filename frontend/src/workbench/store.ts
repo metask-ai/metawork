@@ -79,6 +79,8 @@ export const initialWorkbenchState: WorkbenchState = {
     permissions: {
       availableProfiles: [],
       defaultProfile: "approval_required",
+      availableModes: [],
+      defaultMode: "manual",
     },
     account: {
       state: "checking",

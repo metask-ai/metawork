@@ -316,9 +316,9 @@ function renderNewTaskView(composer = null, overrides = {}) {
       createElement(NewTaskView, {
         hasWorkspace: true,
         composer,
-        permissionProfiles: [],
-        permissionProfile: "approval_required",
-        onPermissionProfileChange() {},
+        approvalModes: [],
+        approvalMode: "manual",
+        onApprovalModeChange() {},
         ...overrides,
       }),
     ),
@@ -701,21 +701,21 @@ test("new Task places the Composer after the outcome prompt", () => {
   assert.doesNotMatch(markup, /task-examples|task-example/);
 });
 
-test("new Task exposes and remembers one immutable permission choice", () => {
+test("new Task exposes and remembers the remembered three-mode approval choice", () => {
   const markup = renderNewTaskView(null, {
-    permissionProfiles: ["approval_required", "full_access"],
-    permissionProfile: "approval_required",
+    approvalModes: ["manual", "auto_review", "full_access"],
+    approvalMode: "manual",
   });
-  assert.match(markup, /Permission policy/);
-  assert.match(markup, /Request approval/);
-  assert.match(markup, /used as the default for your next new Task/);
+  assert.match(markup, /Approval mode/);
+  assert.match(markup, /Manual approval/);
+  assert.match(markup, /Remembered across restarts/);
   assert.doesNotMatch(markup, /trust this workspace|alertdialog/i);
 });
 
 test("new Task explains full access without claiming to bypass core protections", () => {
   const markup = renderNewTaskView(null, {
-    permissionProfiles: ["approval_required", "full_access"],
-    permissionProfile: "full_access",
+    approvalModes: ["manual", "auto_review", "full_access"],
+    approvalMode: "full_access",
   });
   assert.match(markup, /AgentCore protections/);
   assert.match(markup, /permission-profile-risk/);
@@ -724,6 +724,22 @@ test("new Task explains full access without claiming to bypass core protections"
     markup,
     /grants root|bypasses AgentCore|trust this workspace/i,
   );
+});
+
+test("new Task explains automatic review cost, uncertainty and MCP fallback", () => {
+  const markup = renderNewTaskView(null, {
+    approvalModes: ["manual", "auto_review", "full_access"],
+    approvalMode: "auto_review",
+  });
+  assert.match(markup, /Automatic review/);
+  assert.match(markup, /task model/);
+  assert.match(markup, /additional.*cost|additional.*charge/);
+  assert.match(markup, /MCP/);
+  assert.match(markup, /not a safety guarantee/);
+  const note = markup.match(
+    /<p class="permission-policy-boundary" role="note">([^<]+)<\/p>/,
+  )?.[1];
+  assert.match(note ?? "", /additional usage charges/);
 });
 
 test("New task keeps the titlebar quiet while a real Task retains context", () => {

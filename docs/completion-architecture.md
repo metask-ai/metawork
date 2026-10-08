@@ -1,6 +1,6 @@
 # MetaWork Completion 架构
 
-> 状态：Agent-owned one-shot Completion 的 source of truth；当前消费者为 Custom Provider Probe 与首个 Run 自动标题
+> 状态：Agent-owned one-shot Completion 的 source of truth
 
 本文定义 MetaWork 自有的无 Tool、非流式 Completion 边界。它不属于 Metask AgentCore Run/Event 协议，也不建立第二套 AgentLoop；测试归属和持续回归入口见[验证规范](validation.md)。
 
@@ -15,9 +15,10 @@ Completion.complete(request, cancellation) -> Result | Failure
 当前消费者只有：
 
 - Custom Model Probe；每次 preparation 精确绑定 `ModelRef + provider revision + source generation + catalog generation`，完成时任一 token 过期都只销毁结果，不提交 Models 状态；
-- 首个 Run 的自动标题生成。
+- 首个 Run 的自动标题生成；
+- 用户选择自动评审后的本次 permission 建议；接纳、授权与历史仍归 Product Task，见 [Product 架构](product-architecture.md#22-workspace-与-task-admission)。
 
-两者都只消费最终文本，不消费 token delta、thinking delta 或其他流式事件。因此 Completion 使用 Provider 的非流式 JSON 接口，不提供 `Stream`、`next()` 或 SSE。
+这些消费者都只消费最终文本，不消费 token delta、thinking delta 或其他流式事件。因此 Completion 使用 Provider 的非流式 JSON 接口，不提供 `Stream`、`next()` 或 SSE。
 
 ## 2. Owner 与配置
 
@@ -73,7 +74,7 @@ Responses Completion 固定 `stream: false`、`store: false`，仅返回最终�
 | `anthropic_messages` | `max_tokens` |
 | `gemini_native` | `generationConfig.maxOutputTokens` |
 
-Completion 不为某个 codec 私设默认预算；当前 Probe 与自动标题消费者都显式请求 4096。
+Completion 不为某个 codec 私设默认预算；每个消费者显式提供自己的有界预算，不从 Provider 或主 Agent 请求继承预算。
 
 Agent 不建立另一套 Provider registry、动态发现、fallback、通用插件框架或第二套 AgentLoop。
 
@@ -152,7 +153,7 @@ MetaWork 产品代码不调用或 re-export AgentCore Completion API，也不保
 - model binding 单字段边界、两种 endpoint policy，以及所有 Session/Completion/Probe 入口在外部调用前的一致拒绝；
 - 四种 codec 精确编码调用方的输出预算，零值与超限在 Transport 前拒绝；
 - Transport cancellation、response limit、allocation failure 与 unknown failure 保持各自的 typed 结果；
-- Provider Probe 与自动标题使用同一冻结模型执行绑定；
+- Provider Probe、自动标题与 permission 审核器使用各自对应的冻结模型执行绑定；
 - architecture guard 证明 Completion/Protocol 不导入 AgentCore SDK；
 - lifecycle 与 shutdown 验证。
 

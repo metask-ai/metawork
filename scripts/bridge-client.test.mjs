@@ -822,7 +822,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
       },
       null,
       null,
-      "approval_required",
+      "manual",
     ),
     {
       accepted: true,
@@ -921,7 +921,7 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
         },
         expectedSkillCatalogRevision: null,
         expectedSkillSelectionRevision: null,
-        permissionProfile: "approval_required",
+        approvalMode: "manual",
       },
     },
     {

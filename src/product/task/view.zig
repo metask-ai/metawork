@@ -142,9 +142,11 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         task.durable.recent_order,
     }) catch return error.SnapshotTooLarge;
     try input.text.writeJson(writer, task.durable.title);
-    writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"protocol\":\"{s}\",\"model\":", .{
+    writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"approvalMode\":\"{s}\",\"permissionReviewState\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"protocol\":\"{s}\",\"model\":", .{
         task.durable.workspace_id,
         @tagName(task.durable.permission_profile),
+        @tagName(task_state.ApprovalMode.fromFacts(task.durable.permission_profile, task.durable.permission_review_delegated)),
+        if (task.runtime.pending_ui_request_id == 0) "idle" else @tagName(task.runtime.permission_review.phase),
         task.durable.binding_epoch,
         if (task.runtime.executionConst() == null) "unavailable" else "available",
         @tagName(task.durable.execution_protocol),
@@ -1053,6 +1055,10 @@ fn writeUiHistory(
             @tagName(record.state),
         }) catch return error.SnapshotTooLarge;
         try text.writeJson(writer, record.detailSlice());
+        writer.writeAll(",\"answeredBy\":") catch return error.SnapshotTooLarge;
+        if (record.answered_by) |source| jsonValue(writer, @tagName(source)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"reviewReason\":") catch return error.SnapshotTooLarge;
+        if (record.review_reason_len != 0) try text.writeJson(writer, record.review_reason[0..record.review_reason_len]) else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.print(",\"itemCount\":{d},\"detailTruncated\":{},\"redacted\":{},\"agentRequestId\":", .{
             record.item_count,
             record.detail_truncated,

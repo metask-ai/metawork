@@ -2,6 +2,7 @@ import {
   compactCauses,
   builtinProviderIds,
   permissionProfiles,
+  approvalModes,
   runCauses,
   type AccountCommandResult,
   type BuiltinProviderId,
@@ -2978,6 +2979,8 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
     "itemCount",
     "detailTruncated",
     "redacted",
+    "answeredBy",
+    "reviewReason",
   ]);
   const kind = enumValue(item.kind, `${path}.kind`, uiRecordKinds);
   const agentRequestId = stringValue(
@@ -2990,12 +2993,35 @@ function decodeUiRecord(value: unknown, path: string): UiRecord {
       : decodePermissionHistory(item.permission, `${path}.permission`);
   if (permission !== null && permission.requestId !== agentRequestId)
     fail(`${path}.permission`, "permission request identity must match record");
+  const state = enumValue(item.state, `${path}.state`, uiRecordStates);
+  const answeredBy = nullableEnum(item.answeredBy, `${path}.answeredBy`, [
+    "user",
+    "reviewer",
+  ] as const);
+  const reviewReason =
+    item.reviewReason === null
+      ? null
+      : nonEmptyString(item.reviewReason, `${path}.reviewReason`);
+  if (
+    (state === "cancelled") !== (answeredBy === null) ||
+    (answeredBy === "reviewer") !== (reviewReason !== null) ||
+    (answeredBy === "reviewer" &&
+      state !== "allowed_once" &&
+      state !== "denied") ||
+    (reviewReason !== null &&
+      (new TextEncoder().encode(reviewReason).length > 512 ||
+        reviewReason.trim().length === 0 ||
+        /[\u0000-\u001f\u007f]/u.test(reviewReason)))
+  )
+    fail(path, "invalid permission review audit");
   return {
     requestId: positiveWireId(item.requestId, `${path}.requestId`),
     runId: positiveWireId(item.runId, `${path}.runId`),
     order: positiveWireId(item.order, `${path}.order`),
     kind,
-    state: enumValue(item.state, `${path}.state`, uiRecordStates),
+    state,
+    answeredBy,
+    reviewReason,
     agentRequestId,
     permission,
     detail: stringValue(item.detail, `${path}.detail`),
@@ -3128,6 +3154,8 @@ function decodeTask(value: unknown, path: string): TaskView {
     "title",
     "workspaceId",
     "permissionProfile",
+    "approvalMode",
+    "permissionReviewState",
     "binding",
     "modelSelectionAvailability",
     "mcpAuthority",
@@ -3210,6 +3238,22 @@ function decodeTask(value: unknown, path: string): TaskView {
     `${path}.permissionProfile`,
     permissionProfiles,
   );
+  const approvalMode = enumValue(
+    item.approvalMode,
+    `${path}.approvalMode`,
+    approvalModes,
+  );
+  const permissionReviewState = enumValue(
+    item.permissionReviewState,
+    `${path}.permissionReviewState`,
+    ["idle", "reviewing", "needs_user"] as const,
+  );
+  if (
+    (approvalMode === "full_access") !==
+      (permissionProfile === "full_access") ||
+    (approvalMode !== "auto_review" && permissionReviewState !== "idle")
+  )
+    fail(path, "approval mode must match session execution facts");
   if (runs.some((run) => run.permissionProfile !== permissionProfile))
     fail(
       path,
@@ -3419,6 +3463,13 @@ function decodeTask(value: unknown, path: string): TaskView {
   for (const record of uiHistory) {
     if (!runIds.has(record.runId))
       fail(path, "UI history must reference a projected Run");
+    if (
+      record.answeredBy === "reviewer" &&
+      (permissionProfile !== "approval_required" ||
+        runs.find((run) => run.id === record.runId)?.permissionInteraction !==
+          "interactive")
+    )
+      fail(path, "reviewer decisions require an interactive approval session");
     if (requestIds.has(record.requestId))
       fail(path, "UI history request identities must be unique");
     requestIds.add(record.requestId);
@@ -3473,6 +3524,8 @@ function decodeTask(value: unknown, path: string): TaskView {
     title: stringValue(item.title, `${path}.title`),
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
     permissionProfile,
+    approvalMode,
+    permissionReviewState,
     binding,
     modelSelectionAvailability,
     mcpAuthority,
@@ -4612,6 +4665,8 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
   const permissionItem = object(root.permissions, "$.permissions", [
     "availableProfiles",
     "defaultProfile",
+    "availableModes",
+    "defaultMode",
   ]);
   const availableProfiles = arrayValue(
     permissionItem.availableProfiles,
@@ -4639,6 +4694,16 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       "enabled profile capability must expose the complete admitted set",
     );
   const permissions = {
+    availableModes: arrayValue(
+      permissionItem.availableModes,
+      "$.permissions.availableModes",
+      (mode, modePath) => enumValue(mode, modePath, approvalModes),
+    ),
+    defaultMode: enumValue(
+      permissionItem.defaultMode,
+      "$.permissions.defaultMode",
+      approvalModes,
+    ),
     availableProfiles,
     defaultProfile: enumValue(
       permissionItem.defaultProfile,
@@ -4646,6 +4711,16 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
       permissionProfiles,
     ),
   };
+  if (
+    new Set(permissions.availableModes).size !==
+      permissions.availableModes.length ||
+    (capabilities.permissionProfiles
+      ? approvalModes.some((mode) => !permissions.availableModes.includes(mode))
+      : permissions.availableModes.length !== 0) ||
+    (permissions.defaultMode === "full_access") !==
+      (permissions.defaultProfile === "full_access")
+  )
+    fail("$.permissions", "approval modes and execution profiles must agree");
   const workspaces = arrayValue(
     root.workspaces,
     "$.workspaces",

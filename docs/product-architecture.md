@@ -141,7 +141,9 @@ Automatic admission 在完成上述证明后才创建候选目录、临时 Works
 
 Product Task 还拥有绑定 Run identity 的 completion receipt。durable `completion_seen_run_id` 只记录 Renderer 已明确观察的当前最新 terminal `completed` Run；Product projection 只在该 Run identity 与 receipt 不同且它仍是最新 terminal outcome 时发布未读 identity。acknowledgement 必须同时携带 Task/Run identity，迟到、重复、其他 outcome、已删除 Task 或已被新 terminal Run 取代的请求无副作用；它不改变 Task `recent_order`。归档在同一 Task mutation 中确认当前 completion。Renderer 只报告中央 Task 工作面是否真正暴露，不从本地缓存、选择状态或时间推断 canonical receipt。
 
-PermissionProfile 与 ExecutionConfig 分别拥有自己的产品事实：Product Control 持有后续新 Task 的默认值，并在 Task create admission 时复制；成功提交交互式 Task 时，同一 canonical mutation 把其 effective profile 记为后续默认，并随 Task 历史进行同一次 best-effort projection commit，admission 拒绝、回滚和 noninteractive Scheduled occurrence 均不得改变。历史写入失败不回滚已发布的交互式 Task 或进程内默认值，后续完整 snapshot 按现有恢复规则重试持久化。Product Task 持有创建后不可变的 effective profile、interaction fact 与逐 Run provenance。当前开放 `approval_required | full_access`，两者分别映射 AgentCore `accept_edits | full_access`，ShellPolicy 均保持 `unrestricted`；该映射不创建 Sandbox、Workspace trust 或持久 permission rule。默认值变化不改写已有 Task，fresh create 与 checkpoint restore 必须提交同一 profile；当前 ABI 没有可消费的 idle mode mutation，不能用规则拼装、Renderer preference 或跨 profile restore 模拟。
+Product Control 拥有全局的新 Task 默认 `ApprovalMode`，在 create admission 时复制；成功提交交互式 Task 时，同一 canonical mutation 记住其模式，并随 Task 历史进行同一次 best-effort projection commit，admission 拒绝、回滚和 noninteractive Scheduled occurrence 均不得改变。历史写入失败不回滚已发布的交互式 Task 或进程内默认值，后续完整 snapshot 按现有恢复规则重试持久化。旧合法历史缺少模式默认值时，从原默认 profile 恢复人工审批或完全访问；不得把新默认值覆盖到已有 Task。
+
+Product Task 持有创建时捕获的 effective profile、是否采用自动评审、interaction fact 与逐 Run provenance。`ApprovalMode` 从这组唯一事实派生，不建立平行的模式或委托真源；自动评审是 Session 选择，不是重启失效的临时开关。fresh create 与 checkpoint restore 必须使用同一 profile，恢复后保留原 Task 的模式；当前不开放会话中切换。模式的产品语义及 Core profile 映射见[产品需求](requirements.md#55-审批与输入)。当前 ABI 没有可消费的 mode mutation，不能用规则拼装、Renderer preference 或跨 profile restore 模拟。
 
 权限诊断是 Product Task history 的有界审计投影，不是第二个 policy engine。Pending request 与 resolved occurrence 可以投影 AgentCore 已提供的 canonical arguments digest、policy generation 和 candidate/rule identity，并与既有 tool identity、decision source、Session rule 命中和 restore 结果共同用于解释重复请求。Product 不记录原始参数、credential 或可重放 response，不从 digest/tool text 推断 effect，也不自行匹配或生成 grant。
 
@@ -255,11 +257,14 @@ Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 co
 - async completion 必须按开始时冻结的 attempt、object identity、epoch/generation、attachment 与 shutdown token 全量重新校验。任一 token stale 都只销毁 candidate，不安装、不自动重放原请求；
 - capability 只在同步调用或明确的 worker lifetime 内借用；关闭开始后不得建立新的 job、timer、callback 或 responder 对 owner 的引用。
 
-Task 拥有权限评审委托、当前请求的评审状态、结果接纳与审批历史。评审 preparation 只转移有界 owned 输入、该 Run 冻结的 owned ExecutionConfig 和完整身份令牌，不携带 Task/Run 指针、Session access、worker lease 或主线程 effect port；原始参数和准备缓冲只在内存中存在，用后清零。用户文本或明确选择的 Skill/附件 metadata 可解释意图；未提供的 Skill 指令、附件内容和脚本效果不得被猜测为授权。输入不静默截断，超限或准备失败保留原人工等待；当前请求失败后不因轮询自动重试，只有新的请求或显式撤销后重新委托才重新准备。
+自动评审的审批权与历史仍由 Task 拥有；独立 `permission/review` leaf 只构造有界输入、发送固定策略并严格解码一次无 Tool Completion 的建议。Product Control 拥有独立、有界的 job 执行与回收，不借用被同步 callback 占用的 Run executor。job 只持有深拷贝输入、冻结 execution binding、独立取消 token 与身份令牌，不持有 Task/Run 指针、Session access 或 Task worker lease。取消中和尚未回收的 job 仍占容量；shutdown 必须先取消并 join 全部审核 job，再释放 Completion、execution binding 及其依赖的 transport owner。删除 Task 不等待审核 job 的 Task lease，迟到结果由身份重新校验丢弃。
 
-评审 execution owner 必须在调用 Completion 前完成其他 Host credential 与 schema-marked secret 的清洗，并验证 Workspace authority 与 shutdown freshness；Task 本身不查询其他 aggregate 来拼接 authority。Task 结果接纳在主线程重新核对 Task/Run/generation、execution/binding/workspace/route、request/policy 和委托 identity，且只映射为当次 `responses[]` 中的 `allow_once` 或 `deny_once`。失败和 `needs_user` 都不提交回答，也不让原请求过期。用户或评审决定谁先被 Host 接纳谁生效；已接纳人工决定先使评审失效，撤销、取消、关闭、删除和 shutdown 后的旧结果不能复用。
+Task 拥有捕获的自动评审模式、当前请求状态、结果接纳与审批历史。preparation 只转移有界 owned 输入和完整身份令牌，用户文本或明确选择的 Skill/附件 metadata 可解释意图；未提供的 Skill 指令、附件内容和脚本效果不得被猜测为授权。超限或准备失败保留原人工等待，同一请求不因轮询重试，只在新的请求重新准备。
 
-受委托自动决定必须先将来源和脱敏有界理由随审批 candidate 确认 durable commit，再沿同一 prepare → deliver 入口投递 Agent。明确保存失败或结果不确定时回滚内存 candidate、保留人工等待且不重用旧评审；投递失败后按现有事务回滚并重新提交该观察。人工审批保持原有 best-effort 历史写入语义。Task 状态失效不等于 worker 已静止：独立执行 owner 仍必须取消、等待 Completion/watchdog 与 worker 收口后才能释放准备数据和 credential，不能用 Task 删除阻塞或遗留 worker lease 代替该责任。
+审核上下文仅包含当次用户意图、最近一段 Agent 文字、工具名、参数和工作目录；超限拒绝而不截断。Product 在发送前脱敏已知 credential，并按 JSON 解码后的字符串处理转义值；敏感 key、无法可靠投影的 MCP/host 参数及其他缺失证据回到人工。上下文和原始参数仅存在于有界内存，用完清零，不进入日志或历史。策略引用、lifecycle 注释不进入模型请求。建议理由经过 projector 脱敏后才进入 `answered_by=user|reviewer` 和 nullable `review_reason` 审计，取消记录没有决定来源；旧合法历史未带来源时仍按原用户决定恢复。Completion 生命周期由[Completion 架构](completion-architecture.md#6-取消与生命周期)定义；模型判断不是安全边界。
+
+准备与提交均在 Host 主线程经过 Task authority。结果接纳必须精确匹配 Task、Run、generation、binding、Workspace epoch、route、request、policy 与评审 generation，并重新确认当前 Workspace authorization 和当次 `responses[]`。`allow_once` 只映射 `allow_once`，`deny` 只映射 `deny_once`；其他建议、失败、取消、超时、容量或准备不足均 settle 为人工，不重试同一请求，不使原 Core request 过期。人工与自动共用既有 prepare/deliver 入口，谁先被 Host 接纳谁生效；人工 prepare 立即使旧评审失效。自动 candidate 必须 confirmed durable commit 后才能 deliver，失败或 outcome unknown 回滚并保留人工等待，不沿用人工决定的 best-effort 保存路径。
+投递失败后按现有事务回滚并重新提交该观察。Task 状态失效不等于 worker 已静止：Control 必须取消、等待 Completion/watchdog 与 worker 收口后才能释放准备数据和 credential，不能用 Task 删除阻塞或遗留 lease 代替该责任。
 
 Application 关闭 Product 路径时必须遵守以下顺序：
 
@@ -296,7 +301,7 @@ Product history 保存用户可观察且跨重启仍有意义的 Workspace、Tas
 
 Durable Task record 与 runtime attachment 必须分离。durable record 不保存 live Agent Session、catalog lease、pointer、atomic、worker/control payload、credential 或 `closed` 产品终态；runtime attachment 线性拥有 Agent Binding、ExecutionConfig 与必要 lease 的唯一使用和归还责任。Task detach 或 replacement 必须先关闭并归还 live Binding，不能丢弃或复制所有权。
 
-Task 的显式权限评审委托与不可变 PermissionProfile 分离，只适用于 interactive、`approval_required` Task，默认关闭。委托可以撤销，运行期 generation 与当前评审 identity 不进入 durable history；恢复不得重放待决评审或审批。UI 决定历史区分用户与受委托审核器，并只保存经过 Task projection 脱敏的有界评审理由，不保存原始评审输入或模型输出。既有 canonical Task 缺少委托字段时保持关闭，既有非取消 UI 决定缺少来源字段时按用户决定恢复；历史决定和理由不具有当前授权效力。
+审批模式由 Task 捕获的 profile 与自动评审事实派生，二者随 Task 恢复；全局 default mode 独立持久化，缺少新字段的合法旧 metadata 从原 default profile 派生，缺少 Task 自动评审事实时保持人工。运行期 generation、当前评审 identity 和 in-flight job 不进入 durable history，恢复不得重放待决评审或审批。UI 历史只保存来源与脱敏有界理由，不保存原始输入或模型输出；旧非取消 UI 决定缺少来源时按用户恢复，取消保持无来源。历史决定、理由和摘要本身不具有当前授权效力。
 
 Run/compact 的 terminal result 由 Agent 以自包含事实返回，Product 在预留 record 中 no-fail、write-once 提交后才能通知、释放 worker reference 或推进后续事务。queued-before-execute 由 Product 生成独立的 pre-execution terminal fact；Agent Session snapshot 只描述 live lifecycle，不承担历史 terminal truth。
 

@@ -50,6 +50,7 @@ pub const LifecycleEffects = runtime.LifecycleEffects;
 
 pub const Protocol = state.Protocol;
 pub const PermissionProfile = state.PermissionProfile;
+pub const ApprovalMode = state.ApprovalMode;
 pub const PermissionInteraction = state.PermissionInteraction;
 pub const McpAuthorityAtCreation = attachment.McpAuthorityAtCreation;
 pub const RunOutcome = state.RunOutcome;

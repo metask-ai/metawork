@@ -136,8 +136,10 @@ test "history schema preserves permission review delegation and reviewer audit" 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const state = try history.fixture(allocator);
+    var state = try history.fixture(allocator);
     const task = &state.tasks[0];
+    state.default_permission_profile = "approval_required";
+    state.default_approval_mode = "auto_review";
     task.permission_profile = "approval_required";
     task.permission_review_delegated = true;
     for (task.runs) |*run| run.permission_profile = "approval_required";
@@ -172,6 +174,10 @@ test "history schema upgrades existing tasks with review delegation disabled" {
     var count: Count = .{};
     try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT COUNT(*) FROM tasks WHERE permission_review_delegated=0", &.{}, count.receiver()));
     try std.testing.expectEqual(@as(?i64, 1), count.value);
+    count = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT COUNT(*) FROM history_state WHERE default_approval_mode IS NULL", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(?i64, 1), count.value);
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE history_state SET default_approval_mode='invalid'" } }}));
 }
 
 test "history schema rejects structural counterexamples and rolls back the preceding write" {

@@ -744,7 +744,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
 
-输入区中的模式选择只有在语义明确时才出现。PermissionProfile 可以在 New task 发送前作为独立、明确标注的策略选择出现，但不得与模型、执行强度或显示密度混成一个“模式”；已有 Task 只读显示 Task-owned effective profile，不提供切换入口，也不显示第三档装饰或 disabled 预告。
+输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 发送前作为独立、明确标注的选择出现，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
 
 运行中的输入不会发送给当前 Run，也不使用未验证的 `UiBackend.poll()` 模拟实时 steering。首版 Composer 只保存 Renderer 本地草稿，发送动作保持禁用并显示 `当前任务结束后发送`；当前 Run terminal 后由用户明确发送。不得自动提交、自动启动下一次 Run，或把草稿伪装成已排队状态。`queued` 只表示唯一已提交 Run 正在等待 Host executor，不表示当前 Run 后面还有另一条队列。未来只有在 AgentCore 发布 typed steering capability 后，才设计 `排队补充` 与 `立即打断` 的不同操作。
 
@@ -823,7 +823,7 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
 
 ## 10. 权限策略
 
-> Capability：**当前**。PermissionProfile 由 MetaWork 拥有，审批 occurrence 与 Session scope choice 由 AgentCore 拥有；当前产品不定义第三档或跨 Session 持久权限规则。
+> Capability：**当前**。审批模式由 MetaWork 拥有，审批 occurrence 与 Session scope choice 由 AgentCore 拥有；自动评审不建立第三个 Core profile 或跨 Session 持久权限规则。
 
 ### 10.1 Permission request
 
@@ -831,23 +831,27 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
 
 重复请求说明只能依据可关联到该请求的诊断事实归因。restore 的规则失效总数只能作为“部分会话规则曾失效”的补充信息，并明确与当前请求的关系未知，不得宣称当前规则未能恢复或覆盖具体请求的诊断。
 
+自动评审期间同一审批卡立即可见，以 `aria-live` 状态说明“自动评审中”；批准与拒绝按钮保持可用，不让评审挡住人工。转人工后说明需要用户处理；不显示伪倒计时、自动重试或“已验证安全”。用户与审核器谁先被 Host 接纳谁生效，后来的回答按过期处理。审核器已回答的记录在所属 Run 中以默认折叠的理由展示来源和本次结果，使用 Host 脱敏理由，不重放参数。
+
 在完全访问新任务中继续的流程按源 Task 隔离恢复状态，不冻结其他 Task。停止未确认必须与创建结果未知区分：停止可显式重试，且仍等待同一 Run 的真实 terminal；明确创建拒绝可显式重试，创建结果未知只能核对任务列表或关闭提示，不自动重发。已取得新 Task identity 后，视图同步失败只提供同步恢复，不得改判为创建未知或再次创建。关闭提示不撤销已发送的 Host 操作，旧连接或已退出流程的异步回复不得恢复提示或改变 Task 选择。
 
-### 10.2 PermissionProfile
+### 10.2 审批模式
 
-当前产品策略只有两档：
+New task 的模式菜单只展示三个真实选项：
 
 ```text
-请求批准
+人工审批
+自动评审
 完全访问
 ```
 
-- `请求批准`：常规 Workspace 编辑自动执行，当前策略未覆盖的操作请求用户决定；映射为 `accept_edits + unrestricted`；
+- `人工审批`：常规 Workspace 编辑自动执行，当前策略未覆盖的操作请求用户决定；
+- `自动评审`：按任务意图评审本次内置工具请求，不确定或失败时转人工；菜单明确使用 Task 模型并产生额外 usage 费用，同时说明不是安全保证、MCP 请求仍需人工；
 - `完全访问`：MetaWork 不再为常规工具操作请求批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。它不是 root、Sandbox 或“信任 Workspace”。
 
-首次默认使用 `请求批准`。New task 直接显示并允许修改本次选择；Task 成功创建后记住其 effective profile，作为下一次新建 Task 的默认值，创建失败或放弃草稿不改变默认值。选择 `完全访问` 的同一菜单动作就是该 Task 的明确授权，不再叠加第二个确认 modal。Task 创建后只读显示自己的 effective profile，Run history 保存 provenance；默认值变化不改写既有 Task，归档 Task 立即禁止新 Run，删除 Task 永久移除其 profile authority。已有 Task 不显示切换入口，Settings 不提供权限入口。
+首次默认使用人工审批。New task 直接显示并允许修改本次选择；Task 成功创建后全局记住该模式，跨重启作为下一次新建 Task 的默认值，创建失败或放弃草稿不改变默认值。菜单选择动作构成本次授权，不再叠加第二个确认 modal 或独立委托开关。帮助文字明确“已有会话暂不支持切换”；Task 信息只读显示原模式，不受新默认值影响。Settings 不提供权限入口。持久化与恢复边界见[产品需求](requirements.md#55-审批与输入)。
 
-Renderer 只能显示 Host capability projection 声明已端到端支持的两档。两档都必须覆盖 Task-create authority、same-profile fresh/restore、Task persistence、Run provenance、Task archive/delete 和 Scheduled noninteractive；不得用 Renderer preference、AgentCore enum 名称或 mode-change restore 模拟。
+Renderer 只显示 Host capability projection 声明的模式，不独立审核或更改 authority。Scheduled Task 继续采用其固定非交互 PermissionProfile，不显示自动评审选择；对应映射及授权语义由[产品需求](requirements.md#55-审批与输入)唯一拥有。
 
 ## 11. 按需详情与信息归属
 
@@ -996,7 +1000,7 @@ Providers（capability-gated）
 
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
 
-设置树不提供权限分区或权限设置项。只有 Host capability projection 支持 PermissionProfile 时，New task 才显示两个真实选项并记住成功创建 Task 时的选择；不得显示第三档、假开关或“即将推出”。已有 Task 的 effective profile 只在 Task 自身 surface 只读展示。
+设置树不提供权限分区或权限设置项。New task 只显示 Host 声明的审批模式并记住成功创建 Task 时的选择，既有 Task 只读展示其已采用模式；具体交互见[审批模式](#102-审批模式)。
 
 `Providers` 只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才整体进入设置树；它与 `Models` 平级，不是 Models 的下一级。不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 
@@ -1321,7 +1325,7 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 
 ### 19.7 权限策略
 
-- Host 未发布 PermissionProfile capability 时不显示策略入口；当前只允许 `请求批准` 与 `完全访问` 两档；
+- Host 未发布 permission capability 时不显示模式入口；选择、费用与边界说明、评审状态、只读旧会话以及人工响应符合 §10；
 - 默认 profile 只影响新 Task；Task effective profile 不可变，Run provenance、same-profile fresh/restore、Task archive/delete 和 Scheduled noninteractive 语义一致；已有 Task 不显示伪切换；
 - `full_access` 文案明确保留 AgentCore 核心保护、操作系统权限、服务授权和进程身份边界，不宣称 root、Sandbox 或 Workspace trust；选择动作不再追加第二个确认 modal；
 - 权限卡片只显示当前 request 支持的 once/Session choice，不显示跨 Session 持久授权；

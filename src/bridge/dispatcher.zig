@@ -2429,8 +2429,8 @@ pub const Dispatcher = struct {
         else
             null;
         const workbench = try self.requireProductControl();
-        const permission_profile = handlers.permissionProfile(
-            parsed.value.permissionProfile,
+        const approval_mode = handlers.approvalMode(
+            parsed.value.approvalMode,
         ) orelse return error.InvalidBridgePayload;
         const task_id = workbench.createTaskForWorkspace(
             workspace_request,
@@ -2439,7 +2439,7 @@ pub const Dispatcher = struct {
             model_selection,
             parsed.value.expectedSkillCatalogRevision,
             skill_selection_revision,
-            .{ .interactive = permission_profile },
+            .{ .interactive = approval_mode },
         ) catch |err| {
             if (taskCreateRejection(err)) |reason|
                 return encodeTaskCreateResult(output, false, null, null, null, reason);
@@ -6537,7 +6537,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
 
     const stale_create = try std.fmt.bufPrint(
         &workspace_request_storage,
-        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
+        "{{\"id\":\"stale-create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"99\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
         .{workspace_id},
     );
     const rejected_create = native_dispatcher.dispatch(
@@ -6552,7 +6552,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     ) != null);
 
     const automatic_create = native_dispatcher.dispatch(
-        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}",
+        "{\"id\":\"automatic-create\",\"command\":\"metawork.tasks.create\",\"payload\":{\"workspace\":{\"kind\":\"automatic\"},\"expectedExecutionGeneration\":\"1\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}",
         source,
         &response,
     );
@@ -6565,7 +6565,7 @@ test "Dispatcher validates authority before domain calls and preserves committed
     var request_storage: [512]u8 = undefined;
     const request = try std.fmt.bufPrint(
         &request_storage,
-        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"permissionProfile\":\"approval_required\"}}}}",
+        "{{\"id\":\"create\",\"command\":\"metawork.tasks.create\",\"payload\":{{\"workspace\":{{\"kind\":\"manual\",\"workspaceId\":\"{d}\",\"expectedWorkspaceEpoch\":\"1\"}},\"expectedExecutionGeneration\":\"1\",\"expectedSelectionRevision\":\"3\",\"modelSelection\":null,\"expectedSkillCatalogRevision\":null,\"expectedSkillSelectionRevision\":null,\"approvalMode\":\"manual\"}}}}",
         .{workspace_id},
     );
     var lost_response: [32]u8 = undefined;

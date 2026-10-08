@@ -301,6 +301,8 @@ pub const FakeCore = struct {
     allow_checkpoint_export: bool = false,
     ui_answered_callbacks: usize = 0,
     permission_callback_count: usize = 0,
+    permission_arguments_json: []const u8 = "{}",
+    permission_tool_namespace: []const u8 = "builtin",
     ui_unavailable_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
     permission_response_valid: bool = false,
@@ -2349,10 +2351,21 @@ fn permissionRequestJson(
     session_id: []const u8,
     run_id: u64,
 ) std.fmt.BufPrintError![]const u8 {
+    fake_core.lock();
+    const arguments = fake_core.permission_arguments_json;
+    const namespace = fake_core.permission_tool_namespace;
+    fake_core.unlock();
+    const binding = if (std.mem.eql(u8, namespace, "builtin"))
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    else
+        "5555555555555555555555555555555555555555555555555555555555555555";
+    var encoded_arguments: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_arguments);
+    std.json.Stringify.value(arguments, .{}, &writer) catch return error.NoSpaceLeft;
     return std.fmt.bufPrint(
         storage,
-        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"builtin\",\"name\":\"Bash\",\"binding\":\"0000000000000000000000000000000000000000000000000000000000000000\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":1,\"arguments_json\":\"{{}}\",\"responses\":[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"],\"candidate\":{{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\"}}}}",
-        .{ session_id, run_id },
+        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"{s}\",\"name\":\"Bash\",\"binding\":\"{s}\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":1,\"arguments_json\":{s},\"responses\":[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"],\"candidate\":{{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\"}}}}",
+        .{ session_id, run_id, namespace, binding, writer.buffered() },
     );
 }
 

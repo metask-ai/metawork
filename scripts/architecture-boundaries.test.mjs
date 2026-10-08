@@ -1571,6 +1571,24 @@ test("Product Skill has one live owner behind narrow composition ports", () => {
   );
 });
 
+test("Control review jobs own their data without holding Task lifecycle leases", () => {
+  const job = read("src/product/control/permission_job.zig");
+  assert.doesNotMatch(
+    job,
+    /\*(?:const )?(?:Task|Run|Runtime)|WorkerLease|SessionAccess/,
+  );
+  assert.match(job, /thread\.join\(\)/);
+  const task = read("src/product/task/runtime.zig");
+  const preparation = task
+    .split("pub const PreparedPermissionReview = struct {")[1]
+    ?.split("pub fn deinit")[0];
+  assert.ok(preparation);
+  assert.doesNotMatch(
+    preparation,
+    /\*(?:const )?(?:Task|Run|Runtime)|WorkerLease|SessionAccess/,
+  );
+});
+
 test("Product Task kernels have one physical home without taking the executor", () => {
   const build = read("build.zig");
   const productTask = read("src/product/task.zig");

@@ -65,7 +65,7 @@ File Changes 是一次 Run 内由 AgentCore typed `file_changes` observation 记
 
 ### Approval / UI Request
 
-代表 Agent 继续工作前仍缺少的用户决定，不是 Tool 名称、Shell 语法或产品安全感的可视化。一个正式权限请求必须对应当前 authority 尚未覆盖、值得中断、可准确描述且执行层能兑现的具体能力或 effect；已由 Workspace picker、当前 Task authority、已配置服务或系统原生授权覆盖的决定不得重复询问。当前 MetaWork Agent 只开放 AgentCore 同步工具 permission；该请求仍是 compatibility baseline，不表示现有 payload 已具备上述完整 effect 语义。AgentCore ABI v1 虽支持结构化问题回答，但该 built-in 不进入 MetaWork Agent 能力集合。需要补充信息时，Agent 以普通 Assistant 回复结束当前 Run，用户通过 Composer 继续。同步等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批、自定义结构化交互和 typed effect confirmation 只有在 AgentCore 发布相应控制协议并通过 MetaWork 产品验收后才进入产品范围。
+代表 Agent 继续工作前仍缺少的授权决定；由用户回答，或在用户选择自动评审后由 Host 接纳审核器的本次建议。它不是 Tool 名称、Shell 语法或产品安全感的可视化。一个正式权限请求必须对应当前 authority 尚未覆盖、值得中断、可准确描述且执行层能兑现的具体能力或 effect；已由 Workspace picker、当前 Task authority、已配置服务或系统原生授权覆盖的决定不得重复询问。当前 MetaWork Agent 只开放 AgentCore 同步工具 permission；该请求仍是 compatibility baseline，不表示现有 payload 已具备上述完整 effect 语义。AgentCore ABI v1 虽支持结构化问题回答，但该 built-in 不进入 MetaWork Agent 能力集合。需要补充信息时，Agent 以普通 Assistant 回复结束当前 Run，用户通过 Composer 继续。同步等待期间 Run 仍占用 executor slot，不形成可持久化挂起点。计划审批、自定义结构化交互和 typed effect confirmation 只有在 AgentCore 发布相应控制协议并通过 MetaWork 产品验收后才进入产品范围。
 
 ### Account、Models 与 ExecutionConfig
 
@@ -191,10 +191,12 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Authority、Interaction Policy 与 Sandbox 是三个独立维度：Authority 决定 Task 已取得的 Workspace、Shell、Skill、MCP 与系统能力；Interaction Policy 决定未覆盖操作是否询问；Sandbox 只描述执行时的物理约束。产品、UI 和验证不得把三者合并成一个“安全模式”；
 - `PermissionProfile` 是 MetaWork-owned 的产品策略，当前只定义 `approval_required | full_access`。`approval_required` 表示常规 Workspace 编辑自动、其他当前策略未覆盖操作请求批准；`full_access` 表示 MetaWork 不再为常规工具操作请求批准，但 AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。内部 AgentCore enum、ShellPolicy 和 rule schema 不得成为 Renderer 产品词汇；
 - 正式 Session 按 Task-owned profile 使用 `approval_required → accept_edits + unrestricted` 或 `full_access → full_access + unrestricted`；前者会自动执行 Workspace 内 Write/Edit，并对 Workspace 外 Write 与明确有副作用的 Bash 发布同步 permission request。两档都不是 Sandbox、root 或运行不可信 Workspace 的安全保证；
-- 首次默认保持 `approval_required`。New task 直接显示并允许修改本次 Task 的 profile；交互式 Task 成功创建后，其 effective profile 成为后续新 Task 的默认值，创建失败或放弃草稿不得改变默认值。选择 `full_access` 的同一动作就是该 Task 的明确授权，不追加确认 modal。Settings 不提供独立权限入口，产品不得显示第三档、disabled 空壳或额外的启用开关；
+- 用户选择的 `ApprovalMode` 为 `manual | auto_review | full_access`，分别呈现为人工审批、自动评审、完全访问。人工与自动评审都使用 `approval_required`，完全访问使用 `full_access`；自动评审不是第三个 AgentCore profile，也不是 Sandbox 或安全保证。首次默认为人工审批。New task 发送前选择本次模式；交互式 Task 成功创建后，MetaWork 全局记住该模式并随历史持久化，供重启后的新 Task 使用；创建失败或放弃草稿不改变默认值。选择动作本身构成本次授权，不追加确认 modal、独立委托开关或 Settings 权限入口；
 - profile 在 Task 创建后不可变：Task 保存 effective profile，每个 Run 保存 provenance，checkpoint restore 必须使用同一 profile；归档 Task 阻止新 Run，删除 Task 收口 Session 并永久移除该 profile authority。已有 Task 只读显示自己的 profile，不得用 Session-local shadow state、规则拼装或 checkpoint replacement 模拟切换；
 - Shell 是广泛执行 authority。`unrestricted` 只表示获准 Bash 不经过 AgentCore file sandbox，不等于 root，也不决定是否询问；产品不得以 Bash 前缀、命令字符串分类或 `exact_arguments` Session grant 宣称可靠 effect 边界；
-- 用户在 New task 选择更宽松 profile 的动作本身构成本次 Task 授权，不追加第二个确认 modal；成功创建后记住的 profile 只影响后续 Task，既有 Task 可以归档以立即禁止新 Run，并通过删除永久撤销。当前 Task 不提供伪切换；
+- 当前过渡边界下，Task 捕获的审批模式与 profile 一同恢复，不因全局默认值或重启改变；已有 Task 只读展示模式，不开放会话中切换，也不能用 Session shadow、规则拼装或跨 profile restore 模拟。归档立即禁止新 Run，删除永久移除该 Task authority；
+- 自动评审只适用于交互式 `approval_required` Task 的内置工具 permission。Host 使用该 Run 冻结的模型，额外发一次无 Tool Completion；只接纳当次 request 允许的 `allow_once` 或 `deny_once`，不生成 Session grant、不缓存“安全命令”。失败、超时、资源不足、证据缺失和 MCP 等不透明参数请求回到人工，不使原请求过期、不自动重试。模型判断不保证真实 effect；主 Agent 与审核器共享模型可能发生相关错误，额外 usage 计入用户账户；
+- 审批卡立即出现并呈现自动评审状态，用户随时可手动回答。谁先被 Host 接纳谁生效，后来的结果按过期处理；历史区分用户与审核器，并保存有界脱敏理由。取消、删除、关闭和 shutdown 后的迟到结果不得生效；
 - 用户可以响应当前 typed permission；结构化 Agent 问答、计划批准或拒绝只有在对应 built-in/control capability 进入 MetaWork 产品集合并通过验收后才显示；
 - 当前 permission 卡只能提交 AgentCore 当次 request 真实发布的 choice。主操作固定为“允许一次”；当 request 提供 Session scope candidate 时，“本会话允许相同参数”放在同一批准操作的展开选项中，拒绝保持独立操作。不得为了减少点击而伪造 request 未提供的 Session 或跨 Session 范围；
 - Product 必须保留足以解释重复请求的有界诊断事实：Task/Run/request identity、tool identity/binding、canonical arguments digest、policy generation、candidate/rule identity、decision source、Session rule 命中与 restore 结果。它们只能来自 AgentCore typed request/provenance，不得记录原始参数、credential 或可重放 response，也不得用 tool 文本推断 effect；

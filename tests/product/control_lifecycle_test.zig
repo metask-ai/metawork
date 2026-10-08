@@ -57,7 +57,7 @@ const ReviewScenario = struct {
         errdefer self.control.deinit();
         try installControlExecution(&self.control);
         var input = productControlTaskInput();
-        input.permission_profile = .approval_required;
+        input.approval_mode = .manual;
         self.task_id = try self.control.createTask(input);
         _ = try self.control.runTask(self.task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
         try waitControlSnapshot(&self.control, "\"currentRunPhase\":\"waiting_ui\"");
@@ -69,7 +69,7 @@ const ReviewScenario = struct {
     }
 
     fn prepare(self: *@This()) !product_task.PreparedPermissionReview {
-        _ = try self.control.task_runtime.setPermissionReviewDelegation(self.task_id, true);
+        _ = try self.control.task_runtime.testSetPermissionReviewDelegation(self.task_id, true);
         return (try self.control.task_runtime.preparePermissionReview(self.task_id, self.text())).?;
     }
 
@@ -80,6 +80,44 @@ const ReviewScenario = struct {
         std.testing.allocator.destroy(self);
     }
 };
+
+test "approval modes remember the global choice while restoring original session facts" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 4 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const history = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(history);
+    var persistence = TaskPersistenceProbe{ .storage = history };
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = persistence.capability();
+    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 3, .max_workspaces = 1 };
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+    defer control.deinit();
+    try installControlExecution(&control);
+    try std.testing.expectEqual(.manual, control.defaultApprovalMode());
+    var input = productControlTaskInput();
+    input.approval_mode = .auto_review;
+    const reviewed = try control.createTask(input);
+    try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(reviewed));
+    try std.testing.expectEqual(.approval_required, try control.taskPermissionProfile(reviewed));
+    const inherited = try control.createTask(productControlTaskInput());
+    try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(inherited));
+    input.approval_mode = .full_access;
+    const full = try control.createTask(input);
+    try std.testing.expectEqual(.full_access, control.defaultApprovalMode());
+    try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(reviewed));
+    var restart = productControlConfiguration();
+    restart.task_persistence = persistence.capabilityRestored(history[0..persistence.len]);
+    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, restart);
+    defer restored.deinit();
+    try std.testing.expectEqual(.full_access, restored.defaultApprovalMode());
+    try std.testing.expectEqual(.auto_review, try restored.taskApprovalMode(reviewed));
+    try std.testing.expectEqual(.auto_review, try restored.taskApprovalMode(inherited));
+    try std.testing.expectEqual(.full_access, try restored.taskApprovalMode(full));
+}
 
 const ReviewCommit = struct {
     calls: usize = 0,
@@ -95,6 +133,266 @@ const ReviewCommit = struct {
         return .{ .context = self, .commit_fn = commit, .text = scenario.text() };
     }
 };
+
+const ReviewerTransport = struct {
+    released: std.atomic.Value(bool) = .init(false),
+    entered: std.atomic.Value(bool) = .init(false),
+    exited: std.atomic.Value(bool) = .init(false),
+    calls: std.atomic.Value(usize) = .init(0),
+    invalid: std.atomic.Value(bool) = .init(false),
+    hold_cancel_cleanup: bool = false,
+    result: []const u8 = "{\"decision\":\"allow_once\",\"reason\":\"Matches the user request\"}",
+
+    fn create(context: ?*anyopaque, allocator: std.mem.Allocator, binding: lifecycle.ModelBinding) anyerror!*lifecycle.Completion {
+        return lifecycle.Completion.init(allocator, .{ .context = context, .perform_fn = perform }, binding);
+    }
+
+    fn perform(context: ?*anyopaque, request: lifecycle.CompletionHttpRequest, cancellation: *const lifecycle.CompletionCancellation, buffer: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const is_review = std.mem.indexOf(u8, request.body, "allow_once") != null;
+        if (is_review) {
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            if (std.mem.indexOf(u8, request.body, "fixture-secret") != null or
+                std.mem.indexOf(u8, request.body, "unrelated-secret") != null or
+                std.mem.indexOf(u8, request.body, "\\\"tools\\\"") != null)
+                self.invalid.store(true, .release);
+            self.entered.store(true, .release);
+            defer self.exited.store(true, .release);
+            while (!self.released.load(.acquire)) {
+                if (cancellation.isRequested() and !self.hold_cancel_cleanup) return error.Cancelled;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch return error.Cancelled;
+            }
+            if (cancellation.isRequested()) return error.Cancelled;
+        }
+        var writer = std.Io.Writer.fixed(buffer);
+        std.json.Stringify.value(.{
+            .type = "message",
+            .content = .{.{ .type = "text", .text = if (is_review) self.result else "Task title" }},
+            .stop_reason = "end_turn",
+            .usage = .{ .input_tokens = 1, .output_tokens = 1 },
+        }, .{}, &writer) catch return error.ResponseTooLarge;
+        return .{ .status = 200, .body = writer.buffered() };
+    }
+
+    fn awaitEntered(self: *@This(), control: *product_control.Runtime) !void {
+        for (0..1000) |_| {
+            control.syncLifecycle();
+            if (self.entered.load(.acquire)) return;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch return error.TestUnexpectedResult;
+        }
+        return error.TestUnexpectedResult;
+    }
+};
+
+test "Control permission reviewer commits once-only decisions and projects audit" {
+    for ([_][]const u8{
+        "{\"decision\":\"allow_once\",\"reason\":\"Matches the user request\"}",
+        "{\"decision\":\"deny\",\"reason\":\"Outside the user request\"}",
+        "{\"decision\":\"needs_user\",\"reason\":\"Insufficient evidence\"}",
+        "{\"decision\":0,\"reason\":\"invalid\"}",
+    }, 0..) |result, index| {
+        fake_core.reset();
+        fake_core.setNextPlan(.ui_wait);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var transport: ReviewerTransport = .{ .result = result };
+        var persistence: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.task_persistence = persistence.capability();
+        configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.approval_mode = .auto_review;
+        const task_id = try control.createTask(input);
+        _ = try control.runTask(task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
+        try transport.awaitEntered(&control);
+        try waitControlSnapshot(&control, "\"permissionReviewState\":\"reviewing\"");
+        const before = persistence.commits;
+        transport.released.store(true, .release);
+        if (index < 2) {
+            try waitControlSnapshot(&control, "\"answeredBy\":\"reviewer\"");
+            const task = control.task_runtime.find(task_id).?;
+            try std.testing.expectEqual(@as(usize, 1), task.durable.ui_history_count);
+            try std.testing.expectEqualStrings(if (index == 0) "allowed_once" else "denied", @tagName(task.durable.ui_history[0].?.state));
+            try std.testing.expect(persistence.commits > before);
+        } else {
+            try waitControlSnapshot(&control, "\"permissionReviewState\":\"needs_user\"");
+            try std.testing.expectEqual(@as(usize, 0), control.task_runtime.find(task_id).?.durable.ui_history_count);
+            for (0..5) |_| control.syncLifecycle();
+        }
+        try std.testing.expectEqual(@as(usize, 1), transport.calls.load(.acquire));
+        try std.testing.expect(!transport.invalid.load(.acquire));
+    }
+}
+
+test "Control permission reviewer scrubs decoded arguments and leaves opaque MCP requests manual" {
+    for (0..2) |case| {
+        fake_core.reset();
+        fake_core.permission_arguments_json = "{\"api_key\":\"fixture\\u002dsecret\",\"nested\":[\"fixture-secret\"]}";
+        fake_core.permission_tool_namespace = if (case == 0) "builtin" else "mcp";
+        fake_core.setNextPlan(.ui_wait);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var transport: ReviewerTransport = .{};
+        var persistence: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.task_persistence = persistence.capability();
+        configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.approval_mode = .auto_review;
+        const task_id = try control.createTask(input);
+        _ = try control.runTask(task_id, .{ .text = "Inspect the local operation" });
+        if (case == 0) {
+            try transport.awaitEntered(&control);
+            try std.testing.expect(!transport.invalid.load(.acquire));
+            transport.released.store(true, .release);
+            try waitControlSnapshot(&control, "\"answeredBy\":\"reviewer\"");
+        } else {
+            try waitControlSnapshot(&control, "\"permissionReviewState\":\"needs_user\"");
+            try std.testing.expectEqual(@as(usize, 0), transport.calls.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 0), control.task_runtime.find(task_id).?.durable.ui_history_count);
+        }
+    }
+}
+
+test "Control permission reviewer cancellation survives manual response delete and shutdown" {
+    for (0..3) |case| {
+        fake_core.reset();
+        fake_core.setNextPlan(.ui_wait);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var transport: ReviewerTransport = .{};
+        transport.hold_cancel_cleanup = case == 1;
+        var configuration = productControlConfiguration();
+        configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        defer control.deinit();
+        defer transport.released.store(true, .release);
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.approval_mode = .auto_review;
+        const task_id = try control.createTask(input);
+        _ = try control.runTask(task_id, .{ .text = "Perform the bounded operation" });
+        try transport.awaitEntered(&control);
+        switch (case) {
+            0 => {
+                const task = control.task_runtime.find(task_id).?;
+                try control.respondUi(task_id, task.runtime.active_run_id, task.runtime.pending_ui_request_id, .{ .permission = .deny_once });
+                control.syncLifecycle();
+            },
+            1 => {
+                try control.cancel(task_id, control.task_runtime.find(task_id).?.runtime.active_run_id);
+                try waitSetTaskArchived(&control, task_id);
+                try control.deleteTask(task_id);
+                try waitTaskDeleted(&control, task_id);
+                try std.testing.expect(!transport.exited.load(.acquire));
+                transport.released.store(true, .release);
+            },
+            2 => control.shutdownExecutor(),
+            else => unreachable,
+        }
+        for (0..1000) |_| {
+            control.syncLifecycle();
+            if (transport.exited.load(.acquire)) break;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch break;
+        }
+        try std.testing.expect(transport.exited.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), transport.calls.load(.acquire));
+    }
+}
+
+test "Control permission reviewer requires confirmed persistence and never retries the request" {
+    for ([_]product_task.history.Commit{ .failed, .outcome_unknown }) |failure| {
+        fake_core.reset();
+        fake_core.setNextPlan(.ui_wait);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var transport: ReviewerTransport = .{};
+        var persistence: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.task_persistence = persistence.capability();
+        configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.approval_mode = .auto_review;
+        const task_id = try control.createTask(input);
+        _ = try control.runTask(task_id, .{ .text = "Perform the bounded operation" });
+        try transport.awaitEntered(&control);
+        persistence.result = failure;
+        transport.released.store(true, .release);
+        try waitControlSnapshot(&control, "\"permissionReviewState\":\"needs_user\"");
+        const task = control.task_runtime.find(task_id).?;
+        try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
+        for (0..10) |_| control.syncLifecycle();
+        try std.testing.expectEqual(@as(usize, 1), transport.calls.load(.acquire));
+        try control.respondUi(task_id, task.runtime.active_run_id, task.runtime.pending_ui_request_id, .{ .permission = .deny_once });
+        try std.testing.expectEqual(.user, task.durable.ui_history[0].?.answered_by.?);
+    }
+}
+
+test "Control permission reviewer capacity includes cancelled workers until they are reaped" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 9, .queue_capacity = 9, .max_sessions = 9 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var transport: ReviewerTransport = .{ .hold_cancel_cleanup = true };
+    var configuration = productControlConfiguration();
+    configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 9, .queue_capacity = 9, .max_tasks = 9, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+    defer control.deinit();
+    defer transport.released.store(true, .release);
+    try installControlExecution(&control);
+    var ids: [9]u64 = undefined;
+    for (&ids, 0..) |*id, index| {
+        fake_core.setNextPlan(.ui_wait);
+        var input = productControlTaskInput();
+        input.approval_mode = .auto_review;
+        id.* = try control.createTask(input);
+        _ = try control.runTask(id.*, .{ .text = "Perform the bounded operation" });
+        for (0..1000) |_| {
+            control.syncLifecycle();
+            const task = control.task_runtime.find(id.*).?;
+            if (if (index < 8) task.runtime.permission_review.phase == .reviewing else task.runtime.permission_review.phase == .needs_user) break;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch return error.TestUnexpectedResult;
+        }
+    }
+    const first = control.task_runtime.find(ids[0]).?;
+    try control.cancel(ids[0], first.runtime.active_run_id);
+    try waitSetTaskArchived(&control, ids[0]);
+    try control.setTaskArchived(ids[0], false);
+    fake_core.setNextPlan(.ui_wait);
+    _ = try control.runTask(ids[0], .{ .text = "A new bounded operation" });
+    for (0..1000) |_| {
+        control.syncLifecycle();
+        if (first.runtime.permission_review.phase == .needs_user) break;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(.needs_user, first.runtime.permission_review.phase);
+    try std.testing.expectEqual(.needs_user, control.task_runtime.find(ids[8]).?.runtime.permission_review.phase);
+    try std.testing.expect(transport.calls.load(.acquire) <= 8);
+    try std.testing.expect(!transport.exited.load(.acquire));
+}
 
 fn reviewSuggestion(decision: enum { allow_once, needs_user, deny }, reason: []const u8) product_task.PermissionReviewOutcome {
     var outcome: product_task.PermissionReviewOutcome = .{ .suggestion = .{
@@ -112,8 +410,8 @@ fn reviewSuggestion(decision: enum { allow_once, needs_user, deny }, reason: []c
 
 fn reviewPreparationAllocationFailure(allocator: std.mem.Allocator, scenario: *ReviewScenario) !void {
     const runtime = &scenario.control.task_runtime;
-    _ = try runtime.setPermissionReviewDelegation(scenario.task_id, false);
-    _ = try runtime.setPermissionReviewDelegation(scenario.task_id, true);
+    _ = try runtime.testSetPermissionReviewDelegation(scenario.task_id, false);
+    _ = try runtime.testSetPermissionReviewDelegation(scenario.task_id, true);
     const previous = runtime.allocator;
     runtime.allocator = allocator;
     defer runtime.allocator = previous;
@@ -156,7 +454,7 @@ test "Task permission review prepares detached owned data using the Run model an
     try std.testing.expectEqualStrings(task.durable.runs[0].?.execution_model, preparation.execution.model);
     try std.testing.expectEqualStrings("fixture-secret", preparation.execution.secret);
     try std.testing.expectEqual(task.durable.id, preparation.identity.task_id);
-    try std.testing.expect(try scenario.control.task_runtime.setPermissionReviewDelegation(scenario.task_id, false));
+    try std.testing.expect(try scenario.control.task_runtime.testSetPermissionReviewDelegation(scenario.task_id, false));
     try std.testing.expect(std.mem.indexOf(u8, preparation.input.user_intent, "bounded operation") != null);
     var commit = ReviewCommit{};
     try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, "ok"), commit.effects(scenario)));
@@ -248,7 +546,7 @@ test "Task permission review redelegation never reuses an earlier result" {
     defer scenario.deinit();
     var previous = try scenario.prepare();
     defer previous.deinit();
-    _ = try scenario.control.task_runtime.setPermissionReviewDelegation(scenario.task_id, false);
+    _ = try scenario.control.task_runtime.testSetPermissionReviewDelegation(scenario.task_id, false);
     var current = try scenario.prepare();
     defer current.deinit();
     try std.testing.expect(current.identity.delegation_generation > previous.identity.delegation_generation);
@@ -1074,7 +1372,7 @@ test "Task permission profile is immutable and successful interactive create rem
     try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), default_shell);
 
     var full_access_input = productControlTaskInput();
-    full_access_input.permission_profile = .full_access;
+    full_access_input.approval_mode = .full_access;
     const explicit_full_access = try workbench.createTask(full_access_input);
     try std.testing.expectEqual(
         product_control.PermissionProfile.full_access,
@@ -1101,7 +1399,7 @@ test "Task permission profile is immutable and successful interactive create rem
     try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), full_access_shell);
 
     var explicit_input = productControlTaskInput();
-    explicit_input.permission_profile = .approval_required;
+    explicit_input.approval_mode = .manual;
     const explicit_task = try workbench.createTask(explicit_input);
     try std.testing.expectEqual(
         product_control.PermissionProfile.approval_required,
@@ -1119,7 +1417,7 @@ test "Task permission profile is immutable and successful interactive create rem
     try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), explicit_shell);
 
     var rejected_input = productControlTaskInput();
-    rejected_input.permission_profile = .full_access;
+    rejected_input.approval_mode = .full_access;
     task_persistence.result = .failed;
     const degraded_task = try workbench.createTask(rejected_input);
     try std.testing.expectEqual(
@@ -1132,7 +1430,7 @@ test "Task permission profile is immutable and successful interactive create rem
     );
 
     var capacity_rejected_input = productControlTaskInput();
-    capacity_rejected_input.permission_profile = .approval_required;
+    capacity_rejected_input.approval_mode = .manual;
     try std.testing.expectError(
         error.TaskCapacity,
         workbench.createTask(capacity_rejected_input),
@@ -1184,7 +1482,7 @@ test "full-access successor clones exact Manual Task execution without conversat
         null,
         null,
         null,
-        .{ .interactive = .approval_required },
+        .{ .interactive = .manual },
     );
     const source_binding_epoch = try workbench.taskBindingEpoch(source_task_id);
     const source_execution = try workbench.taskExecutionIdentity(source_task_id);
@@ -1288,7 +1586,7 @@ test "full-access successor preserves admitted tasks when history commit fails o
         null,
         null,
         null,
-        .{ .interactive = .approval_required },
+        .{ .interactive = .manual },
     );
     const epoch = try workbench.taskBindingEpoch(source_id);
 
@@ -1376,7 +1674,7 @@ test "full-access successor rejects active and Automatic Workspace sources" {
         null,
         null,
         null,
-        .{ .interactive = .approval_required },
+        .{ .interactive = .manual },
     );
     _ = try workbench.runTask(manual_task_id, .{ .text = "remain active" });
     try std.testing.expectError(
@@ -1394,7 +1692,7 @@ test "full-access successor rejects active and Automatic Workspace sources" {
         null,
         null,
         null,
-        .{ .interactive = .approval_required },
+        .{ .interactive = .manual },
     );
     try std.testing.expectError(
         error.AutomaticWorkspaceUnsupported,

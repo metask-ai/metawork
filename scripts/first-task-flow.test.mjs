@@ -65,7 +65,7 @@ test("the first send uses Host generations and creates one Task before its Run",
         selectedModel,
         expectedSkillCatalogRevision,
         expectedSkillSelectionRevision,
-        permissionProfile,
+        approvalMode,
       ) {
         calls.push([
           "create",
@@ -75,7 +75,7 @@ test("the first send uses Host generations and creates one Task before its Run",
           selectedModel,
           expectedSkillCatalogRevision,
           expectedSkillSelectionRevision,
-          permissionProfile,
+          approvalMode,
         ]);
         return {
           accepted: true,
@@ -99,7 +99,7 @@ test("the first send uses Host generations and creates one Task before its Run",
     expectedSelectionRevision: "23",
     modelSelection,
     expectedBindingEpoch: null,
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Ship a working product" },
     onTaskCreated: (taskId) => created.push(taskId),
   });
@@ -112,7 +112,7 @@ test("the first send uses Host generations and creates one Task before its Run",
       modelSelection,
       null,
       null,
-      "approval_required",
+      "manual",
     ],
     ["run", "41", "8", { kind: "text", text: "Ship a working product" }],
   ]);
@@ -155,7 +155,7 @@ test("the first Skill send pins its selected catalog before typed execution", as
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: null,
-    permissionProfile: "full_access",
+    approvalMode: "full_access",
     input,
     onTaskCreated() {},
   });
@@ -194,7 +194,7 @@ test("a creation failure never starts a Run or invents a Task", async () => {
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: null,
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Keep this text" },
     onTaskCreated: () => {
       createdCalled = true;
@@ -226,7 +226,7 @@ test("a Host-rejected creation preserves the structured product reason", async (
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: null,
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Keep this text" },
     onTaskCreated: () => assert.fail("a rejected creation has no Task"),
   });
@@ -255,21 +255,12 @@ test("the first send can request an Automatic Workspace without a prior identity
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: null,
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Do not bypass trust" },
     onTaskCreated: (taskId) => calls.push(["created", taskId]),
   });
   assert.deepEqual(calls, [
-    [
-      "create",
-      { kind: "automatic" },
-      "19",
-      "23",
-      null,
-      null,
-      null,
-      "approval_required",
-    ],
+    ["create", { kind: "automatic" }, "19", "23", null, null, null, "manual"],
     ["created", "1"],
     ["run", "1", "1", { kind: "text", text: "Do not bypass trust" }],
   ]);
@@ -298,7 +289,7 @@ test("a Run failure reports the real created Task for draft recovery", async () 
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: null,
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Recover me" },
     onTaskCreated() {},
   });
@@ -336,7 +327,7 @@ test("sending on an existing Task uses its binding epoch and never creates", asy
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: "12",
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Continue" },
     onTaskCreated() {
       assert.fail("existing Task must not create a Task");
@@ -364,7 +355,7 @@ test("a detached Task restores before its first continued Run", async () => {
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: "12",
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Continue after restart" },
     continuationRecoveryAvailable: true,
     ensureContinuation: async (taskId, bindingEpoch) => {
@@ -401,7 +392,7 @@ test("a failed detached restore never sends the pending Run", async () => {
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: "12",
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Keep this draft" },
     continuationRecoveryAvailable: true,
     ensureContinuation: async () => ({ kind: "failed", error: failure }),
@@ -439,7 +430,7 @@ test("a recovered Run CAS rejection uses the adopted epoch once and never retrie
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: "12",
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Keep this draft after CAS rejection" },
     continuationRecoveryAvailable: true,
     ensureContinuation: async () => ({
@@ -485,7 +476,7 @@ test("a Host-rejected Run preserves the structured product reason", async () => 
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: "12",
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Continue" },
     onTaskCreated() {},
   });
@@ -514,7 +505,7 @@ test("an existing Task without a binding epoch fails closed", async () => {
     expectedSelectionRevision: "23",
     modelSelection: null,
     expectedBindingEpoch: null,
-    permissionProfile: "approval_required",
+    approvalMode: "manual",
     input: { kind: "text", text: "Continue" },
     onTaskCreated() {},
   });
