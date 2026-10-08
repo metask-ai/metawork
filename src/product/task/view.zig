@@ -132,6 +132,8 @@ pub const Input = struct {
 
 pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     const task = input.task;
+    const approval_mode = task_state.ApprovalMode.fromFacts(task.durable.permission_profile, task.durable.permission_review_delegated);
+    const review_phase = task.permissionReviewPhase();
     const current_run_projection = task_policy.currentRunProjection(task);
     const current_run_phase = if (current_run_projection) |projection|
         projection.phase
@@ -145,8 +147,8 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"approvalMode\":\"{s}\",\"permissionReviewState\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"protocol\":\"{s}\",\"model\":", .{
         task.durable.workspace_id,
         @tagName(task.durable.permission_profile),
-        @tagName(task_state.ApprovalMode.fromFacts(task.durable.permission_profile, task.durable.permission_review_delegated)),
-        if (task.runtime.pending_ui_request_id == 0) "idle" else @tagName(task.runtime.permission_review.phase),
+        @tagName(approval_mode),
+        @tagName(review_phase),
         task.durable.binding_epoch,
         if (task.runtime.executionConst() == null) "unavailable" else "available",
         @tagName(task.durable.execution_protocol),

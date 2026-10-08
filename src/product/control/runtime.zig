@@ -4191,7 +4191,10 @@ pub const Runtime = struct {
         request_id: u64,
         response: UiResponse,
     ) Error!void {
-        self.syncLifecycle();
+        // An entered manual command arbitrates before queued review results.
+        // Task validates the exact pending request/choice before invalidation.
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         var prepared = self.task_runtime.respondUi(
             task_id,
             run_id,
@@ -4623,9 +4626,16 @@ pub const Runtime = struct {
     }
 
     /// Reconciles worker-owned lifecycle state into the main-thread product
-    /// projection. It never allocates, so an effects wake cannot fail merely
-    /// while publishing a terminal state.
+    /// projection, then schedules/reaps independently owned permission reviews.
     pub fn syncLifecycle(self: *Runtime) void {
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        self.syncPermissionReviews();
+        if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+    }
+
+    /// Lifecycle facts alone never accept or start a reviewer decision. The
+    /// manual-response entry point uses this before Task's acceptance boundary.
+    fn syncLifecycleFacts(self: *Runtime) bool {
         var changed = self.syncSkillCatalogsNoFail();
         changed = self.commitMcpRefreshJobNoFail() or changed;
         changed = self.syncMcpHealthNoFail() or changed;
@@ -4658,8 +4668,7 @@ pub const Runtime = struct {
             self.taskRuntimeDeletionEffects(),
         ).changed) changed = true;
         if (changed) self.bumpRevision();
-        self.syncPermissionReviews();
-        if (task_sync.mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        return task_sync.mcp_refresh_needed;
     }
 
     /// Consumes the canonical Agent event stream and owns the complete product

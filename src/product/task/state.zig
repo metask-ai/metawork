@@ -686,6 +686,11 @@ pub const Task = struct {
     runtime: RuntimeAttachment,
     conversation_observation: ConversationObservation = .{},
     deletion: task_deletion.State = .idle,
+
+    pub fn permissionReviewPhase(self: *const Task) task_attachment.PermissionReviewState.Phase {
+        if (ApprovalMode.fromFacts(self.durable.permission_profile, self.durable.permission_review_delegated) != .auto_review) return .idle;
+        return self.runtime.permission_review.phaseForRequest(self.runtime.active_run_id, self.runtime.pending_ui_request_id);
+    }
 };
 
 pub const ProductTerminalFacts = struct {

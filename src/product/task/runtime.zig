@@ -1621,7 +1621,7 @@ pub const Runtime = struct {
             return error.NoPendingUiRequest;
         if (pending.run_id != run_id or pending.request_id != request_id)
             return error.StaleUiResponse;
-        const record = prepareUiRecord(
+        const record = try prepareUiRecord(
             self,
             &access,
             run_id,
@@ -6078,7 +6078,7 @@ fn prepareUiRecord(
     request_id: u64,
     response: UiResponse,
     credential: []const u8,
-) task_state.UiRecord {
+) ControlError!task_state.UiRecord {
     var record = task_state.UiRecord{
         .request_id = request_id,
         .run_id = run_id,
@@ -6086,13 +6086,31 @@ fn prepareUiRecord(
         .state = stateForResponse(response),
         .answered_by = .user,
     };
-    var pending = access.copyPendingUiRequest(self.allocator) catch return record;
-    defer pending.deinit();
-    if (pending.run_id != run_id or pending.request_id != request_id) return record;
-    var parsed = agent.decodePermissionRequest(self.allocator, pending.json) catch
-        return record;
-    defer parsed.deinit();
-    fillUiRecord(&record, parsed.value(), credential);
+    var pending = try access.copyPendingUiRequest(self.allocator);
+    defer {
+        std.crypto.secureZero(u8, pending.json);
+        pending.deinit();
+    }
+    if (pending.run_id != run_id or pending.request_id != request_id) return error.StaleUiResponse;
+    var parsed = agent.decodePermissionRequest(self.allocator, pending.json) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidUiResponse,
+    };
+    defer {
+        std.crypto.secureZero(u8, @constCast(parsed.value().arguments_json));
+        parsed.deinit();
+    }
+    const request = parsed.value();
+    // Validate before inserting the history candidate and invalidating review.
+    // Session delivery still rechecks freshness and encodes the actual response.
+    if (request.run_id != run_id or
+        std.mem.indexOfScalar(agent.PermissionChoice, request.responses, permissionChoice(response.permission)) == null)
+        return error.InvalidUiResponse;
+    switch (response.permission) {
+        .allow_session, .deny_session => if (request.candidate == null) return error.InvalidUiResponse,
+        .allow_once, .deny_once => {},
+    }
+    fillUiRecord(&record, request, credential);
     return record;
 }
 
