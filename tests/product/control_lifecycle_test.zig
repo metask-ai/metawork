@@ -81,7 +81,7 @@ const ReviewScenario = struct {
     }
 };
 
-test "approval modes remember the global choice while restoring original session facts" {
+test "approval modes start with automatic review and restore the global choice with original session facts" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 4 });
     defer {
@@ -97,9 +97,15 @@ test "approval modes remember the global choice while restoring original session
     var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
     defer control.deinit();
     try installControlExecution(&control);
-    try std.testing.expectEqual(.manual, control.defaultApprovalMode());
+    try std.testing.expectEqual(.auto_review, control.defaultApprovalMode());
+    var snapshot_buffer: [128 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&snapshot_buffer);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer parsed.deinit();
+    const permissions = parsed.value.object.get("permissions").?.object;
+    try std.testing.expectEqualStrings("auto_review", permissions.get("defaultMode").?.string);
+    try std.testing.expectEqualStrings("approval_required", permissions.get("defaultProfile").?.string);
     var input = productControlTaskInput();
-    input.approval_mode = .auto_review;
     const reviewed = try control.createTask(input);
     try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(reviewed));
     try std.testing.expectEqual(.approval_required, try control.taskPermissionProfile(reviewed));
@@ -117,6 +123,37 @@ test "approval modes remember the global choice while restoring original session
     try std.testing.expectEqual(.auto_review, try restored.taskApprovalMode(reviewed));
     try std.testing.expectEqual(.auto_review, try restored.taskApprovalMode(inherited));
     try std.testing.expectEqual(.full_access, try restored.taskApprovalMode(full));
+}
+
+test "approval modes restore each saved choice instead of applying the fresh-install default" {
+    for ([_]product_control.ApprovalMode{ .manual, .auto_review, .full_access }) |mode| {
+        fake_core.reset();
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        const history = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(history);
+        var persistence = TaskPersistenceProbe{ .storage = history };
+        var configuration = productControlConfiguration();
+        configuration.task_persistence = persistence.capability();
+        const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_workspaces = 1 };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.approval_mode = mode;
+        const task_id = try control.createTask(input);
+        try std.testing.expectEqual(mode, control.defaultApprovalMode());
+        var restart = productControlConfiguration();
+        restart.task_persistence = persistence.capabilityRestored(history[0..persistence.len]);
+        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, restart);
+        defer restored.deinit();
+        try std.testing.expectEqual(mode, restored.defaultApprovalMode());
+        try std.testing.expectEqual(mode, try restored.taskApprovalMode(task_id));
+        try std.testing.expectEqual(mode.profile(), restored.defaultPermissionProfile());
+    }
 }
 
 const ReviewCommit = struct {

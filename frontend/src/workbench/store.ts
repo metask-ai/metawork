@@ -80,7 +80,7 @@ export const initialWorkbenchState: WorkbenchState = {
       availableProfiles: [],
       defaultProfile: "approval_required",
       availableModes: [],
-      defaultMode: "manual",
+      defaultMode: "auto_review",
     },
     account: {
       state: "checking",

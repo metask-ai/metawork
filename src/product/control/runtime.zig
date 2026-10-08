@@ -1100,7 +1100,7 @@ pub const Runtime = struct {
     file_change_executor_shutdown: bool = false,
     projection_bytes: usize = 0,
     revision: u64 = 0,
-    default_approval_mode: ApprovalMode = .manual,
+    default_approval_mode: ApprovalMode = .auto_review,
     account_projection: account_projection.Projection,
     execution_state: execution_state.State,
     custom_providers: models_aggregate.Runtime,
