@@ -7071,6 +7071,17 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin-left: 0;
 }
 
+.ai-intervention button:focus-visible {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: 2px;
+}
+
+[data-theme="dark"] .ai-intervention .code-block-preview,
+.dark .ai-intervention .code-block-preview {
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel-2);
+}
+
 .ai-intervention-actions {
   display: flex;
   flex-wrap: wrap;
@@ -7749,6 +7760,10 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .new-task-permission > div {
   display: grid;
   gap: 4px;
+}
+
+.new-task-permission .permission-profile-trigger {
+  min-height: 44px;
 }
 
 .new-task-permission small {
@@ -9645,6 +9660,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
   .new-task-view {
     padding: 36px 16px;
+  }
+
+  .new-task-permission {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
   }
 }
 

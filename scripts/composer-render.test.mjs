@@ -742,6 +742,30 @@ test("new Task explains automatic review cost, uncertainty and MCP fallback", ()
   assert.match(note ?? "", /additional usage charges/);
 });
 
+test("approval surfaces keep a usable narrow mode selector and dark parameter contrast", async () => {
+  const css = await readFile(
+    join(process.cwd(), "frontend/src/index.css"),
+    "utf8",
+  );
+  const narrow = css.slice(css.lastIndexOf("@media (max-width: 619px)"));
+  assert.match(
+    narrow,
+    /\.new-task-permission\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/,
+  );
+  assert.match(
+    css,
+    /\.new-task-permission \.permission-profile-trigger\s*\{[^}]*min-height:\s*44px/,
+  );
+  assert.match(
+    css,
+    /\.dark \.ai-intervention \.code-block-preview\s*\{[^}]*color:\s*var\(--ui-content-primary\);[^}]*background:\s*var\(--ui-surface-panel-2\)/,
+  );
+  assert.match(
+    css,
+    /\.ai-intervention button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--ui-focus-ring\)/,
+  );
+});
+
 test("New task keeps the titlebar quiet while a real Task retains context", () => {
   const quiet = renderShell(null, false, undefined, false);
   assert.doesNotMatch(quiet, /No workspace|New task/);
