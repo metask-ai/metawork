@@ -98,6 +98,7 @@ pub const PermissionReviewState = struct {
     exhausted: bool = false,
     phase: enum { idle, reviewing, needs_user } = .idle,
     identity: ?PermissionReviewIdentity = null,
+    settled_request_id: u64 = 0,
 
     pub fn invalidate(self: *PermissionReviewState) void {
         if (self.generation == std.math.maxInt(u64)) {
@@ -107,6 +108,13 @@ pub const PermissionReviewState = struct {
         }
         self.phase = .idle;
         self.identity = null;
+        self.settled_request_id = 0;
+    }
+
+    pub fn settle(self: *PermissionReviewState, request_id: u64) void {
+        self.invalidate();
+        self.phase = .needs_user;
+        self.settled_request_id = request_id;
     }
 
     pub fn matches(self: *const PermissionReviewState, identity: PermissionReviewIdentity) bool {
@@ -227,6 +235,7 @@ pub const State = struct {
             .route_id = route_id,
             .worker_binding = worker_binding,
         } };
+        self.permission_review.invalidate();
         return true;
     }
 
@@ -288,6 +297,7 @@ pub const State = struct {
             .detached => unreachable,
         };
         self.attachment = .{ .detached = cause };
+        self.permission_review.invalidate();
         return value;
     }
 };

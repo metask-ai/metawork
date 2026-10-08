@@ -1517,6 +1517,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     task_runtime.addImport("product_task_state", task_state);
+    task_runtime.addImport("product_permission_review", product_permission_review);
     task_runtime.addImport("product_task_persistence", task_persistence);
     task_runtime.addImport("metawork_agent", agent);
     task_runtime.addImport("metawork_product_models_contract", models_contract);

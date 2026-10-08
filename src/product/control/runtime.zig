@@ -7885,6 +7885,10 @@ pub const Runtime = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn taskPermissionReviewText(control: *Runtime) task_runtime.TextProjection {
+        return control.taskRuntimeTextProjection();
+    }
+
     pub fn scheduledBinding(control: *Runtime) ScheduledTaskBindingInput {
         const authority = control.custom_providers.defaultAuthority() orelse
             unreachable;

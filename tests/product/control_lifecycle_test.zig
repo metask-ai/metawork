@@ -34,6 +34,287 @@ const ShutdownContext = struct {
     }
 };
 
+const ReviewScenario = struct {
+    runtime: *lifecycle.Runtime,
+    control: product_control.Runtime,
+    task_id: u64,
+
+    fn init() !*@This() {
+        fake_core.reset();
+        fake_core.setNextPlan(.ui_wait);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        errdefer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        const self = try std.testing.allocator.create(@This());
+        errdefer std.testing.allocator.destroy(self);
+        self.* = .{
+            .runtime = runtime,
+            .control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, productControlConfiguration()),
+            .task_id = 0,
+        };
+        errdefer self.control.deinit();
+        try installControlExecution(&self.control);
+        var input = productControlTaskInput();
+        input.permission_profile = .approval_required;
+        self.task_id = try self.control.createTask(input);
+        _ = try self.control.runTask(self.task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
+        try waitControlSnapshot(&self.control, "\"currentRunPhase\":\"waiting_ui\"");
+        return self;
+    }
+
+    fn text(self: *@This()) product_task.TextProjection {
+        return product_control.TestSupport.taskPermissionReviewText(&self.control);
+    }
+
+    fn prepare(self: *@This()) !product_task.PreparedPermissionReview {
+        _ = try self.control.task_runtime.setPermissionReviewDelegation(self.task_id, true);
+        return (try self.control.task_runtime.preparePermissionReview(self.task_id, self.text())).?;
+    }
+
+    fn deinit(self: *@This()) void {
+        self.control.deinit();
+        shutdownTestComposition(self.runtime) catch unreachable;
+        deinitTestComposition(self.runtime);
+        std.testing.allocator.destroy(self);
+    }
+};
+
+const ReviewCommit = struct {
+    calls: usize = 0,
+    outcome: product_task.DurableCommit = .committed,
+
+    fn commit(context: *anyopaque) product_task.DurableCommit {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        return self.outcome;
+    }
+
+    fn effects(self: *@This(), scenario: *ReviewScenario) product_task.PermissionReviewEffects {
+        return .{ .context = self, .commit_fn = commit, .text = scenario.text() };
+    }
+};
+
+fn reviewSuggestion(decision: enum { allow_once, needs_user, deny }, reason: []const u8) product_task.PermissionReviewOutcome {
+    var outcome: product_task.PermissionReviewOutcome = .{ .suggestion = .{
+        .decision = switch (decision) {
+            .allow_once => .allow_once,
+            .needs_user => .needs_user,
+            .deny => .deny,
+        },
+        .reason = .{ .len = reason.len },
+        .usage = .{},
+    } };
+    @memcpy(outcome.suggestion.reason.bytes[0..reason.len], reason);
+    return outcome;
+}
+
+fn reviewPreparationAllocationFailure(allocator: std.mem.Allocator, scenario: *ReviewScenario) !void {
+    const runtime = &scenario.control.task_runtime;
+    _ = try runtime.setPermissionReviewDelegation(scenario.task_id, false);
+    _ = try runtime.setPermissionReviewDelegation(scenario.task_id, true);
+    const previous = runtime.allocator;
+    runtime.allocator = allocator;
+    defer runtime.allocator = previous;
+    var preparation = (runtime.preparePermissionReview(scenario.task_id, scenario.text()) catch |err| {
+        const task = runtime.find(scenario.task_id).?;
+        try std.testing.expectEqual(.needs_user, task.runtime.permission_review.phase);
+        try std.testing.expect((try runtime.preparePermissionReview(scenario.task_id, scenario.text())) == null);
+        try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
+        return err;
+    }).?;
+    defer preparation.deinit();
+    try std.testing.expect(runtime.finishPermissionReview(preparation.identity));
+}
+
+test "Task permission review preparation cleans up every allocation failure without expiring the request" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const request_id = task.runtime.pending_ui_request_id;
+    const leases = task.runtime.worker_leases.liveCount();
+    const projected_bytes = scenario.control.projection_bytes;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, reviewPreparationAllocationFailure, .{scenario});
+    try std.testing.expectEqual(leases, task.runtime.worker_leases.liveCount());
+    try std.testing.expectEqual(projected_bytes, scenario.control.projection_bytes);
+    try std.testing.expectEqual(request_id, task.runtime.pending_ui_request_id);
+    try scenario.control.respondUi(scenario.task_id, task.runtime.active_run_id, request_id, .{ .permission = .deny_once });
+}
+
+test "Task permission review prepares detached owned data using the Run model and no worker lease" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const lease_count = task.runtime.worker_leases.liveCount();
+    const projection_bytes = scenario.control.projection_bytes;
+    var preparation = try scenario.prepare();
+    defer preparation.deinit();
+    try std.testing.expectEqual(lease_count, task.runtime.worker_leases.liveCount());
+    try std.testing.expectEqual(projection_bytes, scenario.control.projection_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, preparation.input.user_intent, "fixture-secret") == null);
+    try std.testing.expectEqualStrings(task.durable.runs[0].?.execution_model, preparation.execution.model);
+    try std.testing.expectEqualStrings("fixture-secret", preparation.execution.secret);
+    try std.testing.expectEqual(task.durable.id, preparation.identity.task_id);
+    try std.testing.expect(try scenario.control.task_runtime.setPermissionReviewDelegation(scenario.task_id, false));
+    try std.testing.expect(std.mem.indexOf(u8, preparation.input.user_intent, "bounded operation") != null);
+    var commit = ReviewCommit{};
+    try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, "ok"), commit.effects(scenario)));
+    try std.testing.expectEqual(@as(usize, 0), commit.calls);
+}
+
+test "Task permission review submits only once decisions and sanitizes reviewer attribution" {
+    for ([_]bool{ false, true }) |denied| {
+        const scenario = try ReviewScenario.init();
+        defer scenario.deinit();
+        var preparation = try scenario.prepare();
+        defer preparation.deinit();
+        var commit = ReviewCommit{};
+        try std.testing.expect(try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(if (denied) .deny else .allow_once, "bounded fixture-secret operation"), commit.effects(scenario)));
+        try std.testing.expectEqual(@as(usize, 1), commit.calls);
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const record = &task.durable.ui_history[0].?;
+        try std.testing.expectEqual(.reviewer, record.answered_by.?);
+        try std.testing.expectEqual(@as(product_task.testing.state_module.UiRecordState, if (denied) .denied else .allowed_once), record.state);
+        try std.testing.expectEqualStrings("bounded *** operation", record.reviewReason().?);
+        try std.testing.expect(record.redacted);
+        try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, "late"), commit.effects(scenario)));
+        try std.testing.expectEqual(@as(usize, 1), commit.calls);
+    }
+}
+
+test "Task permission review failures and needs-user retain the original manual wait without retry" {
+    for ([_]product_task.PermissionReviewOutcome{ .{ .failure = .timeout }, reviewSuggestion(.needs_user, "Evidence is missing.") }) |outcome| {
+        const scenario = try ReviewScenario.init();
+        defer scenario.deinit();
+        var preparation = try scenario.prepare();
+        defer preparation.deinit();
+        var commit = ReviewCommit{};
+        try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, outcome, commit.effects(scenario)));
+        try std.testing.expectEqual(@as(usize, 0), commit.calls);
+        try std.testing.expect((try scenario.control.task_runtime.preparePermissionReview(scenario.task_id, scenario.text())) == null);
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
+        try std.testing.expectEqual(preparation.identity.request_id, task.runtime.pending_ui_request_id);
+        try scenario.control.respondUi(scenario.task_id, preparation.identity.run_id, preparation.identity.request_id, .{ .permission = .allow_once });
+        try std.testing.expectEqual(.user, task.durable.ui_history[0].?.answered_by.?);
+    }
+}
+
+test "Task permission review rejects persistence failure before delivering and preserves manual authority" {
+    for ([_]product_task.DurableCommit{ .failed, .outcome_unknown }) |failure| {
+        const scenario = try ReviewScenario.init();
+        defer scenario.deinit();
+        var preparation = try scenario.prepare();
+        defer preparation.deinit();
+        var commit = ReviewCommit{ .outcome = failure };
+        try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, "ok"), commit.effects(scenario)));
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
+        try std.testing.expectEqual(preparation.identity.request_id, task.runtime.pending_ui_request_id);
+        try std.testing.expect((try scenario.control.task_runtime.preparePermissionReview(scenario.task_id, scenario.text())) == null);
+        try scenario.control.respondUi(scenario.task_id, preparation.identity.run_id, preparation.identity.request_id, .{ .permission = .deny_once });
+        try std.testing.expectEqual(.user, task.durable.ui_history[0].?.answered_by.?);
+    }
+}
+
+test "Task permission review preserves the first Host-accepted decision" {
+    for ([_]bool{ false, true }) |automatic_first| {
+        const scenario = try ReviewScenario.init();
+        defer scenario.deinit();
+        var preparation = try scenario.prepare();
+        defer preparation.deinit();
+        var commit = ReviewCommit{};
+        if (automatic_first) {
+            try std.testing.expect(try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, "ok"), commit.effects(scenario)));
+            if (scenario.control.respondUi(scenario.task_id, preparation.identity.run_id, preparation.identity.request_id, .{ .permission = .deny_once })) |_| {
+                return error.TestUnexpectedResult;
+            } else |err| {
+                try std.testing.expect(err == error.NoPendingUiRequest or err == error.StaleUiResponse);
+            }
+        } else {
+            try scenario.control.respondUi(scenario.task_id, preparation.identity.run_id, preparation.identity.request_id, .{ .permission = .deny_session });
+            try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, "late"), commit.effects(scenario)));
+        }
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        try std.testing.expectEqual(@as(usize, 1), task.durable.ui_history_count);
+        try std.testing.expectEqual(if (automatic_first) @as(usize, 1) else 0, commit.calls);
+        try std.testing.expectEqual(@as(@TypeOf(task.durable.ui_history[0].?.answered_by.?), if (automatic_first) .reviewer else .user), task.durable.ui_history[0].?.answered_by.?);
+    }
+}
+
+test "Task permission review redelegation never reuses an earlier result" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    var previous = try scenario.prepare();
+    defer previous.deinit();
+    _ = try scenario.control.task_runtime.setPermissionReviewDelegation(scenario.task_id, false);
+    var current = try scenario.prepare();
+    defer current.deinit();
+    try std.testing.expect(current.identity.delegation_generation > previous.identity.delegation_generation);
+    var commit = ReviewCommit{};
+    try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(previous.identity, reviewSuggestion(.allow_once, "old"), commit.effects(scenario)));
+    try std.testing.expect(try scenario.control.task_runtime.acceptPermissionReview(current.identity, reviewSuggestion(.allow_once, "new"), commit.effects(scenario)));
+    try std.testing.expectEqual(@as(usize, 1), commit.calls);
+}
+
+test "Task permission review rejects every mismatched identity field without disturbing the live review" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    var preparation = try scenario.prepare();
+    defer preparation.deinit();
+    var commit = ReviewCommit{};
+    inline for (std.meta.fields(product_task.PermissionReviewIdentity)) |field| {
+        var stale = preparation.identity;
+        @field(stale, field.name) += 1;
+        try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(stale, reviewSuggestion(.allow_once, "stale"), commit.effects(scenario)));
+    }
+    try std.testing.expectEqual(@as(usize, 0), commit.calls);
+    try std.testing.expect(try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, "current"), commit.effects(scenario)));
+}
+
+test "Task permission review capacity rejection and invalid reasons leave a manual wait" {
+    for ([_]?[]const u8{ null, "", " ", "bad\nreason", "\xff" }) |reason| {
+        const scenario = try ReviewScenario.init();
+        defer scenario.deinit();
+        var preparation = try scenario.prepare();
+        defer preparation.deinit();
+        var commit = ReviewCommit{};
+        if (reason) |value| {
+            try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, value), commit.effects(scenario)));
+        } else {
+            try std.testing.expect(scenario.control.task_runtime.finishPermissionReview(preparation.identity));
+        }
+        try std.testing.expect((try scenario.control.task_runtime.preparePermissionReview(scenario.task_id, scenario.text())) == null);
+        try std.testing.expectEqual(@as(usize, 0), commit.calls);
+        try scenario.control.respondUi(scenario.task_id, preparation.identity.run_id, preparation.identity.request_id, .{ .permission = .deny_once });
+    }
+}
+
+test "Task permission review prepared data survives cancellation deletion and shutdown" {
+    for ([_]enum { cancel, delete, shutdown }{ .cancel, .delete, .shutdown }) |operation| {
+        const scenario = try ReviewScenario.init();
+        defer scenario.deinit();
+        var preparation = try scenario.prepare();
+        defer preparation.deinit();
+        switch (operation) {
+            .cancel => try scenario.control.cancel(scenario.task_id, preparation.identity.run_id),
+            .delete => {
+                try scenario.control.cancel(scenario.task_id, preparation.identity.run_id);
+                try waitSetTaskArchived(&scenario.control, scenario.task_id);
+                try scenario.control.deleteTask(scenario.task_id);
+                try waitTaskDeleted(&scenario.control, scenario.task_id);
+            },
+            .shutdown => scenario.control.shutdownExecutor(),
+        }
+        try std.testing.expectEqualStrings("fixture-secret", preparation.execution.secret);
+        try std.testing.expect(std.mem.indexOf(u8, preparation.input.user_intent, "bounded operation") != null);
+        var commit = ReviewCommit{};
+        try std.testing.expect(!try scenario.control.task_runtime.acceptPermissionReview(preparation.identity, reviewSuggestion(.allow_once, "late"), commit.effects(scenario)));
+        try std.testing.expectEqual(@as(usize, 0), commit.calls);
+    }
+}
+
 const BindingCloseContext = struct {
     binding: *product_task.testing.SessionBinding,
     finished: std.atomic.Value(bool) = .init(false),

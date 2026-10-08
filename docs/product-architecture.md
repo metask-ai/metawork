@@ -255,6 +255,12 @@ Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 co
 - async completion 必须按开始时冻结的 attempt、object identity、epoch/generation、attachment 与 shutdown token 全量重新校验。任一 token stale 都只销毁 candidate，不安装、不自动重放原请求；
 - capability 只在同步调用或明确的 worker lifetime 内借用；关闭开始后不得建立新的 job、timer、callback 或 responder 对 owner 的引用。
 
+Task 拥有权限评审委托、当前请求的评审状态、结果接纳与审批历史。评审 preparation 只转移有界 owned 输入、该 Run 冻结的 owned ExecutionConfig 和完整身份令牌，不携带 Task/Run 指针、Session access、worker lease 或主线程 effect port；原始参数和准备缓冲只在内存中存在，用后清零。用户文本或明确选择的 Skill/附件 metadata 可解释意图；未提供的 Skill 指令、附件内容和脚本效果不得被猜测为授权。输入不静默截断，超限或准备失败保留原人工等待；当前请求失败后不因轮询自动重试，只有新的请求或显式撤销后重新委托才重新准备。
+
+评审 execution owner 必须在调用 Completion 前完成其他 Host credential 与 schema-marked secret 的清洗，并验证 Workspace authority 与 shutdown freshness；Task 本身不查询其他 aggregate 来拼接 authority。Task 结果接纳在主线程重新核对 Task/Run/generation、execution/binding/workspace/route、request/policy 和委托 identity，且只映射为当次 `responses[]` 中的 `allow_once` 或 `deny_once`。失败和 `needs_user` 都不提交回答，也不让原请求过期。用户或评审决定谁先被 Host 接纳谁生效；已接纳人工决定先使评审失效，撤销、取消、关闭、删除和 shutdown 后的旧结果不能复用。
+
+受委托自动决定必须先将来源和脱敏有界理由随审批 candidate 确认 durable commit，再沿同一 prepare → deliver 入口投递 Agent。明确保存失败或结果不确定时回滚内存 candidate、保留人工等待且不重用旧评审；投递失败后按现有事务回滚并重新提交该观察。人工审批保持原有 best-effort 历史写入语义。Task 状态失效不等于 worker 已静止：独立执行 owner 仍必须取消、等待 Completion/watchdog 与 worker 收口后才能释放准备数据和 credential，不能用 Task 删除阻塞或遗留 worker lease 代替该责任。
+
 Application 关闭 Product 路径时必须遵守以下顺序：
 
 1. 停止 Bridge ingress、新 Product admission、Schedule/MCP timer 与会产生新工作的 coordinator；
