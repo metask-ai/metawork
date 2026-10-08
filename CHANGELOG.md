@@ -6,9 +6,21 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-08
+
+### Added
+
+- 新增“人工审批 / 自动评审 / 完全访问”三档 Task 审批模式；自动评审对当前内置工具请求给出一次性建议，失败、超时、证据不足或参数不透明时回到人工处理，并随 Task 和默认设置跨重启恢复。
+- 新增权限请求诊断与审批来源记录；Manual Workspace 可在当前 Run 终止后创建独立的“以完全访问继续”Task，不继承 Conversation、待处理请求或 Session grant。
+
 ### Changed
 
+- 新安装默认使用自动评审；审批卡仅在仍需人工决定时显示，自动处理结果保留为可追溯记录，并完善窄窗口与键盘操作。
 - Metask OAuth callback 改为每次登录绑定由 OS 分配的 loopback 动态端口，并在授权与 code exchange 中使用同一个 redirect URI。
+
+### Fixed
+
+- 修复 macOS x64 应用签名可能破坏主程序内容的问题，并新增 deployment target、Mach-O section 与最终 DMG 内应用的一致性验证。
 
 ## [0.2.0] - 2026-09-26
 
@@ -314,7 +326,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/metask-ai/metawork/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/metask-ai/metawork/compare/v0.1.12...v0.2.0
 [0.1.12]: https://github.com/metask-ai/metawork/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/metask-ai/metawork/compare/v0.1.10...v0.1.11
