@@ -32,6 +32,13 @@ export type TaskSignals = {
   failed: boolean;
 };
 
+function permissionReviewInProgress(task: TaskView): boolean {
+  return (
+    task.currentRunPhase === "waiting_ui" &&
+    task.permissionReviewState === "reviewing"
+  );
+}
+
 export function orderedTasks(
   tasks: TaskView[],
   showArchived: boolean,
@@ -43,11 +50,16 @@ export function orderedTasks(
   };
   const priority = (task: TaskView) => {
     if (task.archived) return 4;
-    if (task.currentRunPhase === "waiting_ui") return 0;
+    if (
+      task.currentRunPhase === "waiting_ui" &&
+      !permissionReviewInProgress(task)
+    )
+      return 0;
     const compact = activeCompact(task);
     if (
       task.currentRunPhase === "running" ||
       task.currentRunPhase === "stopping" ||
+      permissionReviewInProgress(task) ||
       compact?.phase === "compacting" ||
       compact?.phase === "stopping" ||
       task.activeOperation?.kind === "restore"
@@ -67,6 +79,7 @@ export function orderedTasks(
 }
 
 export type TaskDisplayState =
+  | { kind: "permission_review" }
   | {
       kind: "phase";
       value: NonNullable<TaskView["currentRunPhase"]>;
@@ -90,6 +103,7 @@ export function lastTerminalRun(task: TaskView): RunView | null {
 }
 
 export function taskDisplayState(task: TaskView): TaskDisplayState {
+  if (permissionReviewInProgress(task)) return { kind: "permission_review" };
   if (task.currentRunPhase)
     return { kind: "phase", value: task.currentRunPhase };
   const compact = activeCompact(task);
@@ -117,11 +131,14 @@ export function taskSignals(task: TaskView): TaskSignals {
       task.currentRunPhase === "queued" ||
       task.currentRunPhase === "running" ||
       task.currentRunPhase === "stopping" ||
+      permissionReviewInProgress(task) ||
       compact?.phase === "queued" ||
       compact?.phase === "compacting" ||
       compact?.phase === "stopping" ||
       task.activeOperation?.kind === "restore",
-    attention: task.currentRunPhase === "waiting_ui",
+    attention:
+      task.currentRunPhase === "waiting_ui" &&
+      !permissionReviewInProgress(task),
     failed:
       task.deletionStatus === "failed" ||
       terminal?.outcome === "failed" ||

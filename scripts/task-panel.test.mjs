@@ -697,6 +697,40 @@ function renderTaskContent(value, locale = "en-US") {
   );
 }
 
+test("Run process distinguishes automatic review from manual attention in both locales", () => {
+  const waiting = run({
+    phase: "waiting_ui",
+    activity: { kind: "waiting_user" },
+    terminal: null,
+  });
+  const value = task({
+    approvalMode: "auto_review",
+    permissionReviewState: "reviewing",
+    currentRunId: waiting.id,
+    currentRunPhase: "waiting_ui",
+    runs: [waiting],
+  });
+  for (const [locale, automatic, manual] of [
+    ["en-US", "Automatic review", "Needs attention"],
+    ["zh-CN", "自动评审中", "需要处理"],
+  ]) {
+    const reviewing = renderTaskContent(value, locale);
+    assert.ok(reviewing.includes(automatic));
+    assert.ok(!reviewing.includes(manual));
+    const fallback = renderTaskContent(
+      { ...value, permissionReviewState: "needs_user" },
+      locale,
+    );
+    assert.ok(fallback.includes(manual));
+    assert.ok(!fallback.includes(automatic));
+    const ordinary = renderTaskContent(
+      { ...value, approvalMode: "manual", permissionReviewState: "idle" },
+      locale,
+    );
+    assert.ok(ordinary.includes(manual));
+  }
+});
+
 function localizedView(component, locale = "en-US") {
   return createElement(
     I18nContext.Provider,
@@ -741,6 +775,7 @@ function runProcessElement(
     const [expandedToolIds, setExpandedToolIds] = useState(new Set());
     return createElement(RunProcess, {
       presentation: deriveRunPresentation(value),
+      reviewingPermission: false,
       fileChanges: value.fileChanges ?? null,
       elapsedMs: value.elapsedMs,
       expanded,
@@ -5685,6 +5720,25 @@ test("App attention only locates the original approval in docked and overlay lay
     };
     snapshot.tasks[0].currentRunPhase = "waiting_ui";
     snapshot.tasks[0].runs[0].phase = "waiting_ui";
+    snapshot.tasks[0].runs[0].activity = { kind: "waiting_user" };
+    snapshot.tasks[0].approvalMode = "auto_review";
+    snapshot.tasks[0].permissionReviewState = "reviewing";
+    snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+    await act(async () => publish());
+    await screen.findAllByText("Automatic review");
+    assert.equal(screen.queryByText("Response required"), null);
+    assert.equal(
+      screen.queryByRole("button", { name: "Needs your attention" }),
+      null,
+    );
+    assert.equal(screen.getByRole("button", { name: "Deny" }).disabled, false);
+    assert.equal(
+      screen.getByRole("button", { name: "Allow once" }).disabled,
+      false,
+    );
+    assertTaskPanelShellHidden();
+    assert.ok(document.activeElement === info);
+    snapshot.tasks[0].permissionReviewState = "needs_user";
     snapshot.revision = String(BigInt(snapshot.revision) + 1n);
     await act(async () => publish());
     await screen.findByRole("button", { name: "Needs your attention" });

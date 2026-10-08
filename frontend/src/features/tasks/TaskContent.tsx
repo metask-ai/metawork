@@ -491,6 +491,9 @@ export function TaskContent({
             {presentation.active && (
               <RunProcess
                 presentation={presentation}
+                reviewingPermission={
+                  isCurrent && task.permissionReviewState === "reviewing"
+                }
                 fileChanges={fileChangesEnabled ? run.fileChanges : null}
                 elapsedMs={run.elapsedMs}
                 snapshotReceivedAt={snapshotReceivedAt}
@@ -544,6 +547,7 @@ export function TaskContent({
             {!presentation.active && presentation.processVisible && (
               <RunProcess
                 presentation={presentation}
+                reviewingPermission={false}
                 fileChanges={fileChangesEnabled ? run.fileChanges : null}
                 elapsedMs={run.elapsedMs}
                 synchronized={synchronized}

@@ -376,6 +376,7 @@ function ProcessTool({
 
 export function RunProcess({
   presentation,
+  reviewingPermission,
   fileChanges = null,
   elapsedMs = null,
   snapshotReceivedAt = null,
@@ -388,6 +389,7 @@ export function RunProcess({
   onReviewFileChanges,
 }: {
   presentation: RunPresentation;
+  reviewingPermission: boolean;
   fileChanges?: RunFileChanges | null;
   elapsedMs?: string | null;
   snapshotReceivedAt?: number | null;
@@ -414,9 +416,11 @@ export function RunProcess({
     ? t("run.activity.unsynchronized")
     : stopPending
       ? t("run.activity.requesting_stop")
-      : activity
-        ? t(activityMessage(activity, presentation.runningToolName))
-        : t("run.process.title");
+      : activity?.kind === "waiting_user" && reviewingPermission
+        ? t("task.phase.reviewing")
+        : activity
+          ? t(activityMessage(activity, presentation.runningToolName))
+          : t("run.process.title");
   const detail =
     unsynchronized || stopPending
       ? null

@@ -80,7 +80,11 @@ export function ApprovalPanel({
       tabIndex={-1}
       kind="permission"
       busy={responseInFlight}
-      label={t("approval.response_required")}
+      label={t(
+        task.permissionReviewState === "reviewing"
+          ? "task.phase.reviewing"
+          : "approval.response_required",
+      )}
       title={t("approval.allow_tool", { tool: pending.tool })}
       status={status}
     >

@@ -152,6 +152,7 @@ import {
   searchWorkbench,
   selectActiveTask,
   taskDisplayState,
+  taskSignals,
   workspaceDirectoryLabel,
   type SearchResult,
 } from "../workbench/selectors.ts";
@@ -2975,19 +2976,21 @@ export default function App() {
   const currentTaskState = activeTask ? taskDisplayState(activeTask) : null;
   const currentTaskStatus = !currentTaskState
     ? t(newTaskDraftActive ? "task.new" : "task.open")
-    : currentTaskState.kind === "phase"
-      ? t(`task.phase.${currentTaskState.value}`)
-      : currentTaskState.kind === "compact_phase"
-        ? t(`compact.phase.${currentTaskState.value}`)
-        : currentTaskState.kind === "recovery"
-          ? t("run.preparing")
-          : currentTaskState.kind === "lifecycle"
-            ? t(`task.lifecycle.${currentTaskState.value}`)
-            : currentTaskState.kind === "archived"
-              ? t("task.archived")
-              : currentTaskState.kind === "outcome"
-                ? t(`outcome.${currentTaskState.value}`)
-                : t("task.ready");
+    : currentTaskState.kind === "permission_review"
+      ? t("task.phase.reviewing")
+      : currentTaskState.kind === "phase"
+        ? t(`task.phase.${currentTaskState.value}`)
+        : currentTaskState.kind === "compact_phase"
+          ? t(`compact.phase.${currentTaskState.value}`)
+          : currentTaskState.kind === "recovery"
+            ? t("run.preparing")
+            : currentTaskState.kind === "lifecycle"
+              ? t(`task.lifecycle.${currentTaskState.value}`)
+              : currentTaskState.kind === "archived"
+                ? t("task.archived")
+                : currentTaskState.kind === "outcome"
+                  ? t(`outcome.${currentTaskState.value}`)
+                  : t("task.ready");
   const activeTaskTitle = activeTask
     ? activeTask.title || t("task.item", { id: activeTask.id })
     : t(newTaskDraftActive ? "task.new" : "task.open");
@@ -3228,18 +3231,19 @@ export default function App() {
     fileChanges.kind !== "closed" &&
     panelTarget.taskId === fileChanges.taskId &&
     panelTarget.runId === fileChanges.runId;
-  const pendingLocator = panelTask?.pendingUi ? (
-    <button
-      type="button"
-      className="task-attention-locator focus-ring"
-      aria-label={t("inspector.needs_attention")}
-      title={t("inspector.needs_attention")}
-      onClick={focusPendingFromTaskPanel}
-    >
-      <Icon name="warning" />
-      <span>{t("inspector.needs_attention")}</span>
-    </button>
-  ) : null;
+  const pendingLocator =
+    panelTask?.pendingUi && taskSignals(panelTask).attention ? (
+      <button
+        type="button"
+        className="task-attention-locator focus-ring"
+        aria-label={t("inspector.needs_attention")}
+        title={t("inspector.needs_attention")}
+        onClick={focusPendingFromTaskPanel}
+      >
+        <Icon name="warning" />
+        <span>{t("inspector.needs_attention")}</span>
+      </button>
+    ) : null;
   const panelTitle =
     panelTarget.kind === "empty"
       ? t("task_panel.title")

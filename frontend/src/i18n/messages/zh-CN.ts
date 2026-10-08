@@ -491,6 +491,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.phase.queued": "排队中",
   "task.phase.running": "正在工作",
   "task.phase.waiting_ui": "需要处理",
+  "task.phase.reviewing": "自动评审中",
   "task.phase.stopping": "正在停止",
   "task.phase.completed": "已完成",
   "task.phase.stopped": "已停止",

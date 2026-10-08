@@ -346,6 +346,9 @@ test "Control permission reviewer commits once-only decisions and projects audit
         _ = try control.runTask(task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
         try transport.awaitEntered(&control);
         try waitControlSnapshot(&control, "\"permissionReviewState\":\"reviewing\"");
+        const reviewing_signals = control.task_runtime.workspaceSignals(control.task_runtime.find(task_id).?.durable.workspace_id);
+        try std.testing.expectEqual(@as(u32, 1), reviewing_signals.running);
+        try std.testing.expectEqual(@as(u32, 0), reviewing_signals.attention);
         const before = persistence.commits;
         transport.released.store(true, .release);
         if (index < 2) {
@@ -356,6 +359,9 @@ test "Control permission reviewer commits once-only decisions and projects audit
             try std.testing.expect(persistence.commits > before);
         } else {
             try waitControlSnapshot(&control, "\"permissionReviewState\":\"needs_user\"");
+            const manual_signals = control.task_runtime.workspaceSignals(control.task_runtime.find(task_id).?.durable.workspace_id);
+            try std.testing.expectEqual(@as(u32, 0), manual_signals.running);
+            try std.testing.expectEqual(@as(u32, 1), manual_signals.attention);
             try std.testing.expectEqual(@as(usize, 0), control.task_runtime.find(task_id).?.durable.ui_history_count);
             for (0..5) |_| control.syncLifecycle();
         }

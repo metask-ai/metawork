@@ -2425,7 +2425,11 @@ pub const Runtime = struct {
             if (task.durable.workspace_id != workspace_id or task.durable.archived) continue;
             if (task_policy.currentRunPhase(task)) |phase| {
                 switch (phase) {
-                    .waiting_ui => signals.attention +|= 1,
+                    .waiting_ui => if (task.permissionReviewPhase() == .reviewing) {
+                        signals.running +|= 1;
+                    } else {
+                        signals.attention +|= 1;
+                    },
                     .queued, .running, .stopping => signals.running +|= 1,
                     else => unreachable,
                 }

@@ -538,6 +538,7 @@ export const enUS = {
   "task.phase.queued": "Queued",
   "task.phase.running": "Working",
   "task.phase.waiting_ui": "Needs attention",
+  "task.phase.reviewing": "Automatic review",
   "task.phase.stopping": "Stopping",
   "task.phase.completed": "Completed",
   "task.phase.stopped": "Stopped",
