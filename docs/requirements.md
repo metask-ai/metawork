@@ -196,7 +196,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - Shell 是广泛执行 authority。`unrestricted` 只表示获准 Bash 不经过 AgentCore file sandbox，不等于 root，也不决定是否询问；产品不得以 Bash 前缀、命令字符串分类或 `exact_arguments` Session grant 宣称可靠 effect 边界；
 - 当前过渡边界下，Task 捕获的审批模式与 profile 一同恢复，不因全局默认值或重启改变；已有 Task 只读展示模式，不开放会话中切换，也不能用 Session shadow、规则拼装或跨 profile restore 模拟。归档立即禁止新 Run，删除永久移除该 Task authority；
 - 自动评审只适用于交互式 `approval_required` Task 的内置工具 permission。Host 使用该 Run 冻结的模型，额外发一次无 Tool Completion；只接纳当次 request 允许的 `allow_once` 或 `deny_once`，不生成 Session grant、不缓存“安全命令”。失败、超时、资源不足、证据缺失和 MCP 等不透明参数请求回到人工，不使原请求过期、不自动重试。模型判断不保证真实 effect；主 Agent 与审核器共享模型可能发生相关错误，额外 usage 计入用户账户；
-- 审批卡立即出现并呈现自动评审状态，用户随时可手动回答。谁先被 Host 接纳谁生效，后来的结果按过期处理；历史区分用户与审核器，并保存有界脱敏理由。取消、删除、关闭和 shutdown 后的迟到结果不得生效；
+- 审批卡的显示时机和自动评审呈现由 [UI 设计规范](ui-design.md#101-permission-request) 定义。有效人工决定与自动结果仍由谁先被 Host 接纳谁生效，后来的结果按过期处理；历史区分用户与审核器，并保存有界脱敏理由。取消、删除、关闭和 shutdown 后的迟到结果不得生效；
 - 用户可以响应当前 typed permission；结构化 Agent 问答、计划批准或拒绝只有在对应 built-in/control capability 进入 MetaWork 产品集合并通过验收后才显示；
 - 当前 permission 卡只能提交 AgentCore 当次 request 真实发布的 choice。主操作固定为“允许一次”；当 request 提供 Session scope candidate 时，“本会话允许相同参数”放在同一批准操作的展开选项中，拒绝保持独立操作。不得为了减少点击而伪造 request 未提供的 Session 或跨 Session 范围；
 - Product 必须保留足以解释重复请求的有界诊断事实：Task/Run/request identity、tool identity/binding、canonical arguments digest、policy generation、candidate/rule identity、decision source、Session rule 命中与 restore 结果。它们只能来自 AgentCore typed request/provenance，不得记录原始参数、credential 或可重放 response，也不得用 tool 文本推断 effect；

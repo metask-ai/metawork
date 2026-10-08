@@ -731,6 +731,146 @@ test("Run process distinguishes automatic review from manual attention in both l
   }
 });
 
+test("Task only renders a permission card when the current request needs a user", () => {
+  const waiting = run({
+    phase: "waiting_ui",
+    activity: { kind: "waiting_user" },
+    terminal: null,
+  });
+  const pendingUi = {
+    requestId: "request-card",
+    runId: waiting.id,
+    order: "1",
+    redacted: false,
+    kind: "permission",
+    toolNamespace: "builtin",
+    tool: "Bash",
+    toolBinding: "builtin:Bash",
+    args: "permission-arguments-only-visible-to-human",
+    policyGeneration: "1",
+    canonicalArgumentsDigest: "digest-card",
+    candidate: null,
+    availableChoices: ["deny_once", "allow_once"],
+  };
+  for (const [approvalMode, permissionReviewState, visible] of [
+    ["auto_review", "reviewing", false],
+    ["auto_review", "needs_user", true],
+    ["manual", "idle", true],
+    ["full_access", "idle", true],
+  ]) {
+    let renderCount = 0;
+    render(
+      taskContentElement(
+        task({
+          approvalMode,
+          permissionReviewState,
+          currentRunId: waiting.id,
+          currentRunPhase: "waiting_ui",
+          runs: [waiting],
+          pendingUi,
+        }),
+        "1",
+        {
+          renderPendingUi(props) {
+            renderCount++;
+            return createElement(ApprovalPanel, {
+              ...props,
+              responsePhase: "idle",
+            });
+          },
+        },
+      ),
+    );
+    assert.equal(renderCount, visible ? 1 : 0);
+    assert.equal(
+      document.querySelector(".ai-exchange-intervention") !== null,
+      visible,
+    );
+    assert.equal(
+      screen.queryByRole("button", { name: "Allow once" }) !== null,
+      visible,
+    );
+    assert.equal(
+      screen.queryByRole("button", { name: "Deny" }) !== null,
+      visible,
+    );
+    assert.equal(document.body.textContent.includes(pendingUi.args), visible);
+    if (!visible) {
+      assert.ok(screen.getByText("Automatic review"));
+      assert.equal(
+        document
+          .querySelector(".run-process-heading")
+          .getAttribute("aria-live"),
+        "polite",
+      );
+    }
+    cleanup();
+  }
+});
+
+test("automatic permission decisions keep collapsed audit records without replaying arguments", () => {
+  const waiting = run({ phase: "running", terminal: null });
+  const records = ["allowed_once", "denied"].map((state, index) => ({
+    requestId: `request-history-${index}`,
+    runId: waiting.id,
+    order: String(index + 1),
+    kind: "permission",
+    state,
+    answeredBy: "reviewer",
+    reviewReason:
+      index === 0
+        ? "Only reads the workspace."
+        : "Outside the requested scope.",
+    agentRequestId: `agent-request-${index}`,
+    permission: index === 0 ? { toolName: "Bash" } : null,
+    detail: '{"command":"permission-arguments-must-not-be-replayed"}',
+    itemCount: 1,
+    detailTruncated: false,
+    redacted: false,
+  }));
+  for (const locale of ["en-US", "zh-CN"]) {
+    const container = document.createElement("div");
+    container.innerHTML = renderTaskContent(
+      task({
+        approvalMode: "auto_review",
+        currentRunId: waiting.id,
+        currentRunPhase: "running",
+        runs: [waiting],
+        uiHistory: [
+          ...records,
+          { ...records[0], requestId: "user-history", answeredBy: "user" },
+          { ...records[1], requestId: "other-run-history", runId: "other-run" },
+        ],
+      }),
+      locale,
+    );
+    const reviews = container.querySelectorAll("details.projection-note");
+    assert.equal(reviews.length, 2);
+    for (const [index, review] of reviews.entries()) {
+      assert.equal(review.hasAttribute("open"), false);
+      const summary = review.querySelector("summary").textContent;
+      assert.ok(
+        summary.includes(translate(locale, "approval.answered_by_reviewer")),
+      );
+      assert.ok(
+        summary.includes(translate(locale, `ui.state.${records[index].state}`)),
+      );
+      assert.equal(summary.includes("Bash"), index === 0);
+      assert.equal(
+        review.querySelector("p").textContent,
+        records[index].reviewReason,
+      );
+      assert.ok(!summary.includes(records[index].reviewReason));
+    }
+    assert.equal(container.querySelector(".ai-intervention"), null);
+    assert.ok(
+      !container.textContent.includes(
+        "permission-arguments-must-not-be-replayed",
+      ),
+    );
+  }
+});
+
 function localizedView(component, locale = "en-US") {
   return createElement(
     I18nContext.Provider,
@@ -3366,8 +3506,8 @@ test("new Task approval menu selects all three real modes without another confir
   assert.deepEqual(selected, ["auto_review", "full_access"]);
 });
 
-test("permission review status never blocks a keyboard-driven manual decision", async () => {
-  for (const state of ["reviewing", "needs_user"]) {
+test("manual and fallback permission cards keep keyboard-driven decisions usable", async () => {
+  for (const state of ["idle", "needs_user"]) {
     const responses = [];
     render(
       createElement(
@@ -3406,7 +3546,11 @@ test("permission review status never blocks a keyboard-driven manual decision", 
         }),
       ),
     );
-    assert.ok(screen.getByRole("status").textContent);
+    if (state === "needs_user") {
+      assert.match(screen.getByRole("status").textContent, /respond manually/);
+    } else {
+      assert.equal(screen.queryByRole("status"), null);
+    }
     assert.equal(screen.getByRole("button", { name: "Deny" }).disabled, false);
     assert.equal(
       screen.getByRole("button", { name: "Allow once" }).disabled,
@@ -3423,6 +3567,27 @@ test("permission review status never blocks a keyboard-driven manual decision", 
     ]);
     cleanup();
   }
+});
+
+test("ApprovalPanel does not expose an intervention during automatic review", () => {
+  const markup = renderToStaticMarkup(
+    localizedView(
+      createElement(ApprovalPanel, {
+        pending: {},
+        task: {
+          uiHistory: [],
+          restorePermission: null,
+          permissionReviewState: "reviewing",
+        },
+        busy: false,
+        responsePhase: "idle",
+        respond() {
+          assert.fail("automatic review must not render manual actions");
+        },
+      }),
+    ),
+  );
+  assert.equal(markup, "");
 });
 
 test("permission intervention never exposes internal Run identity", () => {
@@ -5691,7 +5856,7 @@ test("App previews exact operation references, rejects superseded reads, and ref
 });
 
 test("App attention only locates the original approval in docked and overlay layouts", async (ctx) => {
-  for (const width of [1440, 600]) {
+  for (const width of [1440, 390]) {
     const { snapshot, previews, publish } = await renderAppFixture(ctx, width);
     // A small-window sidebar is explicitly opened only to select the Task.
     if (width < 820)
@@ -5731,17 +5896,22 @@ test("App attention only locates the original approval in docked and overlay lay
       screen.queryByRole("button", { name: "Needs your attention" }),
       null,
     );
-    assert.equal(screen.getByRole("button", { name: "Deny" }).disabled, false);
-    assert.equal(
-      screen.getByRole("button", { name: "Allow once" }).disabled,
-      false,
-    );
+    assert.equal(document.querySelector("#ui-request-request-1"), null);
+    assert.equal(document.querySelector(".ai-exchange-intervention"), null);
+    assert.equal(screen.queryByRole("button", { name: "Deny" }), null);
+    assert.equal(screen.queryByRole("button", { name: "Allow once" }), null);
     assertTaskPanelShellHidden();
     assert.ok(document.activeElement === info);
     snapshot.tasks[0].permissionReviewState = "needs_user";
     snapshot.revision = String(BigInt(snapshot.revision) + 1n);
     await act(async () => publish());
     await screen.findByRole("button", { name: "Needs your attention" });
+    assert.ok(document.querySelector("#ui-request-request-1"));
+    assert.equal(screen.getByRole("button", { name: "Deny" }).disabled, false);
+    assert.equal(
+      screen.getByRole("button", { name: "Allow once" }).disabled,
+      false,
+    );
     assertTaskPanelShellHidden();
     assert.ok(document.activeElement === info);
     fireEvent.click(filePreviewOpener("a.txt"));

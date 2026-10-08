@@ -508,17 +508,19 @@ export function TaskContent({
                 }
               />
             )}
-            {isCurrent && task.pendingUi && (
-              <div className="ai-exchange-intervention">
-                {renderPendingUi({
-                  taskId: task.id,
-                  task,
-                  pending: task.pendingUi,
-                  busy: responseDisabled,
-                  respond: onRespond,
-                })}
-              </div>
-            )}
+            {isCurrent &&
+              task.pendingUi &&
+              task.permissionReviewState !== "reviewing" && (
+                <div className="ai-exchange-intervention">
+                  {renderPendingUi({
+                    taskId: task.id,
+                    task,
+                    pending: task.pendingUi,
+                    busy: responseDisabled,
+                    respond: onRespond,
+                  })}
+                </div>
+              )}
             {task.uiHistory
               .filter(
                 (record) =>
@@ -530,8 +532,11 @@ export function TaskContent({
                   key={`review-${record.requestId}`}
                 >
                   <summary>
-                    {t("approval.answered_by_reviewer")} · {record.detail} ·{" "}
-                    {t(`ui.state.${record.state}`)}
+                    {t("approval.answered_by_reviewer")}
+                    {record.permission?.toolName && (
+                      <> · {record.permission.toolName}</>
+                    )}{" "}
+                    · {t(`ui.state.${record.state}`)}
                   </summary>
                   <p>{record.reviewReason}</p>
                 </details>

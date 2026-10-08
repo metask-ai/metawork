@@ -858,8 +858,6 @@ export const enUS = {
   "task_panel.open": "Open side panel",
   "task_panel.close": "Close side panel",
   "approval.response_required": "Response required",
-  "approval.reviewing":
-    "Automatic review in progress. You can still decide now.",
   "approval.review_needs_user":
     "Automatic review made no decision. Please respond manually.",
   "approval.answered_by_reviewer": "Automatic review",

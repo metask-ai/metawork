@@ -776,7 +776,6 @@ export const zhCN: Record<MessageId, string> = {
   "task_panel.open": "打开右侧栏",
   "task_panel.close": "关闭右侧栏",
   "approval.response_required": "需要回复",
-  "approval.reviewing": "自动评审中，你仍可直接决定。",
   "approval.review_needs_user": "自动评审未作决定，请手动处理。",
   "approval.answered_by_reviewer": "自动评审",
   "approval.allow_tool": "允许 {tool}？",

@@ -38,6 +38,8 @@ export function ApprovalPanel({
   respond: (payload: UiResponsePayload) => void;
 }) {
   const { t } = useI18n();
+  if (task.permissionReviewState === "reviewing") return null;
+
   const responseInFlight =
     responsePhase === "sending" || responsePhase === "awaiting_snapshot";
   const actionDisabled = busy || responseInFlight;
@@ -51,15 +53,11 @@ export function ApprovalPanel({
 
   const status =
     responsePhase === "idle" ? (
-      task.permissionReviewState === "idle" ? null : (
+      task.permissionReviewState === "needs_user" ? (
         <p role="status" aria-live="polite">
-          {t(
-            task.permissionReviewState === "reviewing"
-              ? "approval.reviewing"
-              : "approval.review_needs_user",
-          )}
+          {t("approval.review_needs_user")}
         </p>
-      )
+      ) : null
     ) : (
       <p
         data-phase={responsePhase}
@@ -80,11 +78,7 @@ export function ApprovalPanel({
       tabIndex={-1}
       kind="permission"
       busy={responseInFlight}
-      label={t(
-        task.permissionReviewState === "reviewing"
-          ? "task.phase.reviewing"
-          : "approval.response_required",
-      )}
+      label={t("approval.response_required")}
       title={t("approval.allow_tool", { tool: pending.tool })}
       status={status}
     >
