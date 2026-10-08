@@ -7097,6 +7097,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .approval-scope-value {
   color: var(--ui-content-primary);
+  overflow-wrap: anywhere;
 }
 
 .approval-scope-expiry {

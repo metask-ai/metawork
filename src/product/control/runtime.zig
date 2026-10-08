@@ -15341,6 +15341,7 @@ test "permission pending projection follows responses and candidate scope" {
         .candidate = .{
             .rule_id = "2222222222222222222222222222222222222222222222222222222222222222",
             .scope = .exact_arguments,
+            .target = null,
         },
     };
     var candidate_storage: [4096]u8 = undefined;
@@ -15381,6 +15382,28 @@ test "permission pending projection follows responses and candidate scope" {
         candidate_json,
         "\"candidate\":{\"ruleId\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\"}",
     ) != null);
+
+    var file_request = with_candidate;
+    file_request.tool.name = "Write";
+    file_request.candidate.?.scope = .file_target;
+    file_request.candidate.?.target = "C:/work/output.txt";
+    var file_storage: [4096]u8 = undefined;
+    var file_writer = std.Io.Writer.fixed(&file_storage);
+    try task_test_view.writePendingUi(&file_writer, control.taskTextProjection(), 1, 7, 1, file_request);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.permission_file_target, "\r\n"), file_writer.buffered());
+    try std.testing.expect(std.mem.indexOf(u8, file_writer.buffered(), "\"scope\":\"file_target\",\"target\":\"C:/work/output.txt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, file_writer.buffered(), "allow_session") != null);
+
+    file_request.candidate.?.target = "C:/work/SECRET-KEY/output.txt";
+    var private_storage: [4096]u8 = undefined;
+    var private_writer = std.Io.Writer.fixed(&private_storage);
+    try task_test_view.writePendingUi(&private_writer, control.taskTextProjection(), 1, 1, 1, file_request);
+    const private_json = private_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, private_json, "SECRET-KEY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, private_json, "allow_session") == null);
+    try std.testing.expect(std.mem.indexOf(u8, private_json, "deny_session") == null);
+    try std.testing.expect(std.mem.indexOf(u8, private_json, "\"candidate\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, private_json, "\"redacted\":true") != null);
 
     const once_only = testPermissionRequest("Bash", "{}");
     var once_storage: [4096]u8 = undefined;

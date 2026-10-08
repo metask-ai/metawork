@@ -6021,3 +6021,87 @@ test("App Escape returns to the opener, or the permanent toggle when that opener
   });
   cleanup();
 });
+
+test("file Session approval names the tool and target in both locales and submits only a choice", async () => {
+  for (const locale of ["en-US", "zh-CN"]) {
+    const source = {
+      runs: [run()],
+      currentRunId: "7",
+      permissionReviewState: "needs_user",
+    };
+    setRepeatedPermissionSource(source);
+    source.uiHistory = [];
+    Object.assign(source.pendingUi, {
+      tool: "Write",
+      candidate: {
+        ruleId: "file-rule",
+        scope: "file_target",
+        target: "C:/work/long-folder/output.txt",
+      },
+      availableChoices: [
+        "deny_once",
+        "deny_session",
+        "allow_once",
+        "allow_session",
+      ],
+    });
+    const decisions = [];
+    render(
+      createElement(
+        I18nContext.Provider,
+        {
+          value: {
+            locale,
+            setLocale() {},
+            t: (id, values) => translate(locale, id, values),
+          },
+        },
+        createElement(ApprovalPanel, {
+          pending: source.pendingUi,
+          task: source,
+          busy: false,
+          responsePhase: "idle",
+          respond: (payload) => decisions.push(payload),
+        }),
+      ),
+    );
+    assert.ok(screen.getByText(source.pendingUi.candidate.target));
+    assert.ok(
+      screen.getByText(
+        translate(locale, "approval.scope_file_session", { tool: "Write" }),
+      ),
+    );
+    assert.equal(
+      screen.queryByText(translate(locale, "approval.scope_session_available")),
+      null,
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: translate(locale, "approval.more_allow_options"),
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", {
+        name: translate(locale, "approval.allow_session_file"),
+      }),
+    );
+    assert.deepEqual(decisions, [
+      { kind: "permission", permission: "allow_session" },
+    ]);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: translate(locale, "approval.more_deny_options"),
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", {
+        name: translate(locale, "approval.deny_session_file"),
+      }),
+    );
+    assert.deepEqual(decisions[1], {
+      kind: "permission",
+      permission: "deny_session",
+    });
+    cleanup();
+  }
+});

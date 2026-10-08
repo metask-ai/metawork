@@ -11,6 +11,7 @@ const UiBehavior = enum {
     allow_once,
     allow_session,
     deny_once,
+    deny_session,
     unavailable,
 };
 
@@ -32,6 +33,7 @@ const Probe = struct {
     explicit_allow: u32 = 0,
     explicit_deny: u32 = 0,
     session_allow: u32 = 0,
+    session_deny: u32 = 0,
     core_safety: u32 = 0,
     builtin_classification: u32 = 0,
     mode_fallback: u32 = 0,
@@ -44,6 +46,7 @@ const Probe = struct {
             .explicit_allow => self.explicit_allow,
             .explicit_deny => self.explicit_deny,
             .session_allow => self.session_allow,
+            .session_deny => self.session_deny,
             .core_safety => self.core_safety,
             .builtin_classification => self.builtin_classification,
             .mode_fallback => self.mode_fallback,
@@ -74,6 +77,7 @@ const Probe = struct {
                     .explicit_allow => self.explicit_allow += 1,
                     .explicit_deny => self.explicit_deny += 1,
                     .session_allow => self.session_allow += 1,
+                    .session_deny => self.session_deny += 1,
                     .core_safety => self.core_safety += 1,
                     .builtin_classification => self.builtin_classification += 1,
                     .mode_fallback => self.mode_fallback += 1,
@@ -111,8 +115,16 @@ const Probe = struct {
             .allow_once => .allow_once,
             .allow_session => .allow_session,
             .deny_once => .deny_once,
+            .deny_session => .deny_session,
             .unavailable => unreachable,
         };
+        if ((choice == .allow_session or choice == .deny_session) and
+            (std.mem.eql(u8, request.tool.name, "Write") or std.mem.eql(u8, request.tool.name, "Edit")))
+        {
+            const candidate = request.candidate orelse return wire.UI_FATAL;
+            if (candidate.scope != .file_target or candidate.target == null)
+                return wire.UI_FATAL;
+        }
         const rule_id = switch (choice) {
             .allow_session, .deny_session => if (request.candidate) |candidate|
                 candidate.rule_id
@@ -496,10 +508,24 @@ fn runSessionGrant(
     const session = try createSession(api, runtime, &host, &callbacks, &diagnostic);
     defer _ = api.session().destroy()(session, null);
     _ = try run(api, session, 1, "session_grant", &diagnostic);
-    _ = try run(api, session, 2, "session_grant", &diagnostic);
+    _ = try run(api, session, 2, "session_grant_changed", &diagnostic);
     if (probe.ui_calls != 1 or probe.ui_releases != 1 or probe.provenance != 2 or probe.callback_sources != 1 or probe.session_allow != 1)
         return error.SessionGrantNotReused;
     std.debug.print("scenario=session_grant ui={d} session_allow={d}\n", .{ probe.ui_calls, probe.session_allow });
+    probe.behavior = .deny_once;
+    _ = try run(api, session, 3, "session_grant_other_file", &diagnostic);
+    _ = try run(api, session, 4, "session_grant_other_tool", &diagnostic);
+    if (probe.ui_calls != 3 or probe.ui_releases != 3 or probe.session_allow != 1)
+        return error.SessionGrantScopeExpanded;
+
+    var denied_probe = Probe{ .behavior = .deny_session };
+    const denied_callbacks = makeCallbacks(&denied_probe);
+    const denied_session = try createSession(api, runtime, &host, &denied_callbacks, &diagnostic);
+    defer _ = api.session().destroy()(denied_session, null);
+    _ = try run(api, denied_session, 1, "session_grant_denied", &diagnostic);
+    _ = try run(api, denied_session, 2, "session_grant_denied_changed", &diagnostic);
+    if (denied_probe.ui_calls != 1 or denied_probe.provenance != 2 or denied_probe.last_source != .session_deny)
+        return error.SessionDenyNotReused;
 }
 
 fn runRestore(
@@ -545,7 +571,12 @@ fn runRestore(
     );
     defer _ = api.session().destroy()(restored, null);
     _ = try run(api, restored, 2, after_scenario, &diagnostic);
-    try expectProbe(&restored_probe, restored_behavior, expected_restored_ui, 1, expected_restored_source);
+    if (std.mem.eql(u8, after_scenario, "restore_grant_changed")) {
+        if (restored_probe.ui_calls != 0 or restored_probe.ui_releases != 0 or
+            restored_probe.provenance != 2 or restored_probe.session_allow != 1 or
+            restored_probe.builtin_classification != 1)
+            return error.UnexpectedPermissionRestore;
+    } else try expectProbe(&restored_probe, restored_behavior, expected_restored_ui, 1, expected_restored_source);
     std.debug.print(
         "scenario=restore seed={s} after={s} restored_rules={d} ui_after={d}\n",
         .{ seed_scenario, after_scenario, expected_restored_rules, expected_restored_ui },
@@ -671,7 +702,8 @@ pub fn main() !void {
         try runFresh(api, core_runtime, &builtin_tools, "sandbox_outside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_SANDBOXED, .none, .unavailable, 0, 1, .builtin_classification);
     }
     try runFresh(api, core_runtime, &builtin_tools, "unrestricted_outside", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 0, 1, .builtin_classification);
-    try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_ACCEPT_EDITS, "restore_grant", "restore_grant", .allow_session, 1, 1, .unavailable, 0, .callback, .session_allow);
+    try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_ACCEPT_EDITS, "restore_grant", "restore_grant_changed", .allow_session, 1, 1, .unavailable, 0, .callback, .session_allow);
+    try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_ACCEPT_EDITS, "restore_deny_seed", "restore_deny_changed", .deny_session, 1, 1, .unavailable, 0, .callback, .session_deny);
     try runRestore(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_FULL_ACCESS, "restore_full_seed", "restore_full_after", .unavailable, 0, 0, .unavailable, 0, .builtin_classification, .builtin_classification);
     try expectModeChangeRestoreUnsupported(api, core_runtime, &builtin_tools, wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_ACCEPT_EDITS, "restore_full_to_accept_seed", .unavailable, 0, .builtin_classification);
     try expectModeChangeRestoreUnsupported(api, core_runtime, &builtin_tools, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_FULL_ACCESS, "restore_accept_to_full_seed", .unavailable, 0, .builtin_classification);

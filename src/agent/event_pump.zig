@@ -258,6 +258,7 @@ pub fn classify(event: sdk.DecodedCoreEvent) EventClass {
         .known => |known| switch (known) {
             .text_chunk,
             .thinking_chunk,
+            .prompt_manifest,
             .tool_progress,
             .file_changes,
             .usage,

@@ -9,7 +9,7 @@ const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
 const supportedAbiVersion = 1;
-const supportedAbiRevision = 15;
+const supportedAbiRevision = 18;
 
 const targetPolicies = [
   {
@@ -21,6 +21,8 @@ const targetPolicies = [
     rustTarget: "aarch64-pc-windows-gnullvm",
     zigTarget: /^aarch64-windows\.[a-z0-9_]+\.\.\.[a-z0-9_]+-gnu$/,
     library: "lib/metask_agentcore.lib",
+    sharedLibrary: "lib/metask_agentcore.dll",
+    installName: null,
     optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
     abiRevision: supportedAbiRevision,
@@ -39,6 +41,8 @@ const targetPolicies = [
     rustTarget: "x86_64-pc-windows-gnu",
     zigTarget: /^x86_64-windows\.[a-z0-9_]+\.\.\.[a-z0-9_]+-gnu$/,
     library: "lib/metask_agentcore.lib",
+    sharedLibrary: "lib/metask_agentcore.dll",
+    installName: null,
     optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
     abiRevision: supportedAbiRevision,
@@ -57,6 +61,8 @@ const targetPolicies = [
     rustTarget: "aarch64-apple-darwin",
     zigTarget: /^aarch64-macos\.([0-9]+\.[0-9]+)\.\.\.[0-9]+\.[0-9]+-none$/,
     library: "lib/libmetask_agentcore.a",
+    sharedLibrary: "lib/libmetask_agentcore.dylib",
+    installName: "@rpath/libmetask_agentcore.dylib",
     optimize: "ReleaseSafe",
     systemLibraries: [],
     abiRevision: supportedAbiRevision,
@@ -75,6 +81,8 @@ const targetPolicies = [
     rustTarget: "x86_64-apple-darwin",
     zigTarget: /^x86_64-macos\.([0-9]+\.[0-9]+)\.\.\.[0-9]+\.[0-9]+-none$/,
     library: "lib/libmetask_agentcore.a",
+    sharedLibrary: "lib/libmetask_agentcore.dylib",
+    installName: "@rpath/libmetask_agentcore.dylib",
     optimize: "ReleaseSafe",
     systemLibraries: [],
     abiRevision: supportedAbiRevision,
@@ -290,6 +298,7 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
       "build",
       "link",
       "contract",
+      "shared_library",
       "runtime_assets",
       "files",
     ],
@@ -464,6 +473,29 @@ export async function validateAgentCoreBundle(bundleRoot, options = {}) {
       .size === declaredFiles.length,
     "AgentCore manifest contains a case-colliding payload path",
   );
+
+  requireExactKeys(
+    manifest.shared_library,
+    ["path", "entry_point", "install_name", "needed"],
+    "shared_library",
+  );
+  requireValue(
+    manifest.shared_library.path === policy.sharedLibrary &&
+      manifest.shared_library.entry_point === "metask_agentcore_get_api" &&
+      manifest.shared_library.install_name === policy.installName,
+    "unsupported AgentCore shared library identity",
+  );
+  requireStringArray(manifest.shared_library.needed, "shared_library.needed");
+  requireValue(
+    new Set(manifest.shared_library.needed).size ===
+      manifest.shared_library.needed.length,
+    "AgentCore shared library contains duplicate loader dependencies",
+  );
+  for (const library of [policy.library, policy.sharedLibrary])
+    requireValue(
+      declaredFiles.includes(library),
+      `AgentCore library must be checksum-pinned in files: ${library}`,
+    );
 
   requireValue(
     Array.isArray(manifest.runtime_assets) &&

@@ -865,6 +865,11 @@ export const enUS = {
   "approval.arguments": "Arguments",
   "approval.deny": "Deny",
   "approval.allow_once": "Allow once",
+  "approval.allow_session_file":
+    "Allow this tool on this file for this session",
+  "approval.deny_session_file": "Deny this tool on this file for this session",
+  "approval.scope_file_session":
+    "Once, or {tool} on the same file for this session, including different content.",
   "approval.allow_session": "Allow same arguments for this session",
   "approval.deny_session": "Deny same arguments for this session",
   "approval.more_allow_options": "More approval options",

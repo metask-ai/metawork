@@ -2708,6 +2708,41 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   };
   assert.doesNotThrow(() => decodeWorkbenchSnapshot(sessionPermission));
 
+  const filePermission = clone(sessionPermission);
+  Object.assign(filePermission.tasks[0].pendingUi, {
+    tool: "Write",
+    candidate: {
+      ruleId: "file-rule",
+      scope: "file_target",
+      target: "C:/work/output.txt",
+    },
+  });
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(filePermission));
+  for (const mutate of [
+    (p) => {
+      p.tool = "Bash";
+    },
+    (p) => {
+      p.toolNamespace = "mcp";
+    },
+    (p) => {
+      delete p.candidate.target;
+    },
+    (p) => {
+      p.candidate.target = "";
+    },
+    (p) => {
+      p.candidate.extra = true;
+    },
+  ]) {
+    const invalid = clone(filePermission);
+    mutate(invalid.tasks[0].pendingUi);
+    assert.throws(() => decodeWorkbenchSnapshot(invalid));
+  }
+  const unexpectedTarget = clone(sessionPermission);
+  unexpectedTarget.tasks[0].pendingUi.candidate.target = "C:/work/output.txt";
+  assert.throws(() => decodeWorkbenchSnapshot(unexpectedTarget));
+
   const unsupportedScope = clone(sessionPermission);
   unsupportedScope.tasks[0].pendingUi.candidate.scope = "workspace";
   assert.throws(
@@ -3025,4 +3060,21 @@ test("Skill management responses keep mutations and file access explicit", () =>
       }),
     /cannot expose file metadata/,
   );
+});
+
+test("file Session candidate fixture matches the Host pending serializer", () => {
+  const candidate = clone(fixture);
+  candidate.tasks[0].currentRunPhase = "waiting_ui";
+  candidate.tasks[0].runs[0].phase = "waiting_ui";
+  candidate.tasks[0].runs[0].activity = { kind: "waiting_user" };
+  candidate.tasks[0].pendingUi = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/permission-file-target.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
 });

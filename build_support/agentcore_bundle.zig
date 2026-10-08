@@ -38,6 +38,12 @@ const Manifest = struct {
         binary_abi_revision: u32,
         binary_abi_table_size: u32,
     },
+    shared_library: struct {
+        path: []const u8,
+        entry_point: []const u8,
+        install_name: ?[]const u8,
+        needed: []const []const u8,
+    },
     runtime_assets: []const struct {
         name: []const u8,
         version: []const u8,
@@ -93,9 +99,9 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
         lock.contract.binary_abi_version != 1 or
         !std.mem.eql(u8, lock.contract.binary_abi_status, "experimental"))
         @panic("unsupported locked AgentCore bundle contract");
-    if (lock.contract.binary_abi_revision != 15 or
+    if (lock.contract.binary_abi_revision != 18 or
         lock.contract.binary_abi_table_size != 64)
-        @panic("AgentCore requires a clean revision 15 bundle and matching repository lock");
+        @panic("AgentCore requires a clean revision 18 bundle and matching repository lock");
     if (!std.mem.eql(u8, lock.build.optimize, "ReleaseSafe") or !lock.build.strip)
         @panic("unsupported locked AgentCore build identity");
     const target = validateTarget(lock);
@@ -105,6 +111,30 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
     for (lock.files) |file| {
         verifyPayloadPath(file.path);
         verifySha256(b, b.pathJoin(&.{ root, file.path }), file.sha256);
+    }
+
+    const windows = std.mem.eql(u8, lock.target.os, "windows");
+    const static_library = if (windows) "lib/metask_agentcore.lib" else "lib/libmetask_agentcore.a";
+    const shared_library = if (windows) "lib/metask_agentcore.dll" else "lib/libmetask_agentcore.dylib";
+    if (!std.mem.eql(u8, lock.shared_library.path, shared_library) or
+        !std.mem.eql(u8, lock.shared_library.entry_point, "metask_agentcore_get_api"))
+        @panic("unsupported AgentCore shared library identity");
+    if (windows) {
+        if (lock.shared_library.install_name != null) @panic("Windows AgentCore shared library must not have an install name");
+    } else if (lock.shared_library.install_name == null or
+        !std.mem.eql(u8, lock.shared_library.install_name.?, "@rpath/libmetask_agentcore.dylib"))
+        @panic("unsupported AgentCore shared library install name");
+    for (lock.shared_library.needed, 0..) |needed, index| {
+        if (needed.len == 0) @panic("empty AgentCore loader dependency");
+        for (lock.shared_library.needed[0..index]) |previous|
+            if (std.mem.eql(u8, previous, needed)) @panic("duplicate AgentCore loader dependency");
+    }
+    for ([_][]const u8{ static_library, shared_library }) |library| {
+        var count: usize = 0;
+        for (lock.files) |file| if (std.mem.eql(u8, file.path, library)) {
+            count += 1;
+        };
+        if (count != 1) @panic("AgentCore library must be checksum-pinned exactly once");
     }
 
     if (lock.runtime_assets.len != 1)
