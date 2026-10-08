@@ -64,6 +64,38 @@ function externSymbols(source, libraries) {
     .sort();
 }
 
+test("permission reviewer is an isolated Completion consumer without approval authority", () => {
+  const build = read("build.zig");
+  const source = read("src/product/permission/review.zig");
+  assert.deepEqual(
+    moduleImportEdges(build).filter(
+      (edge) => edge.owner === "product_permission_review",
+    ),
+    [
+      {
+        owner: "product_permission_review",
+        name: "agent_completion",
+        target: "agent_completion",
+      },
+    ],
+  );
+  assert.match(build, /src\/product\/permission\/review\.zig/);
+  assert.match(
+    build,
+    /name = "metawork-product-permission-review", .root_module = test_modules\.product_permission_review/,
+  );
+  assert.match(build, /"test-permission-review"/);
+  const imports = [...source.matchAll(/@import\("([^"]+)"\)/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual(imports, ["std", "agent_completion"]);
+  assert.doesNotMatch(
+    source,
+    /respondPermission|WorkerLease|@import\(".*(?:task|control|app|metask_agentcore)/,
+  );
+  assert.equal(existsSync(new URL("src/product/permission.zig", root)), false);
+});
+
 test("release version has one manifest owner and exact package mirrors", () => {
   const appVersion = read("app.zon").match(/\.version = "([^"]+)"/)?.[1];
   const zigVersion = read("build.zig.zon").match(/\.version = "([^"]+)"/)?.[1];
