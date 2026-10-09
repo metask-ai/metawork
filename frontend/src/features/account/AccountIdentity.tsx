@@ -74,7 +74,10 @@ export function AccountIdentity({
                     <strong title={identityName}>{identityName}</strong>
                   </div>
                 )}
-                {account.state === "signed_out" && (
+                {(account.state === "signed_out" ||
+                  (authenticated &&
+                    account.errorCode !== "none" &&
+                    account.errorCode !== "refresh_schedule_failed")) && (
                   <Menu.Item
                     className="account-menu-item focus-ring"
                     disabled={disabled}
@@ -95,6 +98,9 @@ export function AccountIdentity({
                   </Menu.Item>
                 )}
                 {(account.state === "signed_out" ||
+                  (authenticated &&
+                    account.errorCode !== "none" &&
+                    account.errorCode !== "refresh_schedule_failed") ||
                   (account.state === "authorizing" && account.canCancel)) && (
                   <Menu.Separator />
                 )}

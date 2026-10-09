@@ -1268,8 +1268,11 @@ export function SettingsPage({
                     >
                       {t("common.cancel")}
                     </Button>
-                  ) : !authenticated ? (
+                  ) : !authenticated ||
+                    (account.errorCode !== "none" &&
+                      account.errorCode !== "refresh_schedule_failed") ? (
                     <Button
+                      className="settings-identity-login"
                       variant="secondary"
                       size="sm"
                       disabled={disabled || accountDisabled}

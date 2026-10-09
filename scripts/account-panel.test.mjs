@@ -656,3 +656,30 @@ test("cold connection failure exposes reconnect and bounded diagnostics", () => 
   assert.match(markup, /Reconnect/);
   assert.match(markup, /transport unavailable/);
 });
+
+test("refresh errors retain identity and expose sign-in without claiming expiry or revocation", () => {
+  for (const errorCode of [
+    "token_refresh_failed",
+    "metask_service_unavailable",
+    "credential_store_write_failed",
+    "user_cancelled",
+  ]) {
+    const markup = renderSettings({ ...readyAccount, errorCode }, readyModels, {
+      initialSection: "account",
+    });
+    assert.match(markup, /Metask User/);
+    assert.match(markup, />Sign in with Metask</);
+    assert.doesNotMatch(markup, />Retry sign-in refresh</);
+    assert.doesNotMatch(markup, /Sign-in expired|removed from this device/);
+  }
+  assert.equal(
+    accountErrorMessageId("token_refresh_failed"),
+    "account.error.refresh",
+  );
+  for (const locale of ["en-US", "zh-CN"]) {
+    assert.doesNotMatch(
+      translate(locale, "account.error.refresh"),
+      /expired|revoked|removed|过期|失效|撤销|移除/i,
+    );
+  }
+});

@@ -1020,6 +1020,7 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 - 热力图按每日 total Token 使用紫色五级强度呈现，日历语义固定为 `Asia/Shanghai`。宽窗显示最近53个周列，小于620px时显示最近13个周列且不产生水平滚动；每个视图均从周一开始，截至当天，因此当前周尚未发生的日期保持范围外占位。范围外占位与成功响应中的零使用日必须视觉可区分；颜色不能作为唯一信息，图例必须同时给出“少/多”文本和强度格。焦点日下方持续显示完整日期、总量、输入、输出、缓存创建、缓存读取和已记录费用；鼠标悬停、点击以及键盘方向键移动都能选择日期，并有可见focus样式；
 - history 按 unavailable/loading/ready/stale显示。已有值刷新失败时继续显示并标注“可能已过期”，不得清空成0；初次不可用只给局部、可操作说明，不把Account伪装成未登录。只有整个history范围成功且通过严格验证时，范围内缺失日期才显示为0；失败不能生成零值热力图。刷新只由用户点击或authenticated/generation建立后的Host自动同步触发；进入设置、Renderer reload、snapshot update和本地timer都不能触发；
 - authenticated 后用量分组直接展示 history，不读取或推断旧 `run_mode`。不得显示当前 OAuth 合同无法取得的余额、今日或累计摘要，也不得显示完整email、account id、标准费用、请求数、RPM/TPM、响应时间、API Key数量、订阅额度、模型分布、按模型趋势、最近请求、任意外部管理链接或其他装饰性图表；固定充值页是账户区唯一允许的外部动作，Renderer不得取得或拼接其URL；
+- 请求或配置错误、网络失败与刷新结果不确定不得被描述为“凭据过期”“后端撤销”或“已从设备移除”。Account错误可保留authenticated identity；此时账户信息和账号菜单提供既有登录动作。重新登录取消后仍有错误时，入口继续可达。刷新阻断由Host校验，不从错误文字反推权限、不自动重试旧token、不增加保存恢复页面或公开状态；
 - 已验证 identity 的 refresh timer 或 wall clock 无法安排时继续显示 `authenticated`，在 Account 设置错误区说明自动刷新未安排并提供唯一 `重试登录刷新`；该动作调用 Host `retryRefresh`，不得由 Renderer timer、reload 或普通 snapshot update 自动重放；hard expiry 后 Metask 新目录/解析由 Host fail closed；
 - 重新登录或退出登录不得因 Models、Task、Session、Run、job、worker或 Task-owned credential的运行时引用而被阻止，也不得静默终止或改写这些引用；既有 Task按创建时取得的 ExecutionConfig继续收口；
 - 退出登录必须说明 Account设备凭据会清理、Metask模型将暂时不可用于新 Task、自定义模型不受影响且历史保留；不能把它描述成对 live Task的热撤权。

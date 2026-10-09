@@ -69,16 +69,17 @@ export const enUS = {
   "account.error.no_models":
     "No models are available for this Metask account. Refresh the catalog or check the account in Metask and retry.",
   "account.error.deadline":
-    "Metask did not respond in time. Check your connection and try again.",
+    "Metask did not respond in time. Check your connection.",
   "account.error.browser":
     "MetaWork could not open the sign-in page. Try opening it again.",
   "account.error.authorization":
     "The Metask sign-in could not be completed. Start sign-in again.",
-  "account.error.session_expired": "Sign-in expired. Sign in to continue.",
+  "account.error.refresh":
+    "Sign-in refresh could not be completed. Sign in again.",
   "account.error.service":
-    "Metask is temporarily unavailable. Try again shortly.",
+    "Metask is temporarily unavailable. Check your connection or service status.",
   "account.error.metask_access":
-    "Metask rejected this sign-in credential. It was removed from this device; sign in again.",
+    "Metask rejected this sign-in credential. Sign in again.",
   "account.error.credentials":
     "MetaWork could not confirm the credential update on this device.",
   "account.error.refresh_schedule":
