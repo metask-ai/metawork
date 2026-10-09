@@ -350,6 +350,7 @@ function renderTaskList(tasks, props = {}) {
       },
       createElement(TaskList, {
         tasks,
+        workspaces: [],
         activeTaskId: null,
         showArchived: false,
         onSelectTask() {},
@@ -993,6 +994,131 @@ test("Task list keeps duplicate titles free of workspace metadata", () => {
     markup,
     /task-list-meta|\/repo\/alpha|\/repo\/beta|Default/,
   );
+});
+
+test("Manual projects repeat their tasks while automatic tasks stay global", () => {
+  const task = (id, workspaceId, overrides = {}) => ({
+    id,
+    title: `Task ${id}`,
+    workspaceId,
+    archived: false,
+    unreadCompletionRunId: null,
+    currentRunPhase: null,
+    activeOperation: null,
+    recentOrder: id,
+    runs: [],
+    compacts: [],
+    ...overrides,
+  });
+  const workspaces = [
+    {
+      id: "automatic",
+      kind: "automatic",
+      displayName: "Default",
+      canonicalRoot: "/custom-default/random-task-directory",
+      recentOrder: "0",
+    },
+    {
+      id: "alpha",
+      kind: "manual",
+      displayName: "Same directory name",
+      canonicalRoot: "/repo/alpha",
+      recentOrder: "9007199254740993",
+    },
+    {
+      id: "beta",
+      kind: "manual",
+      displayName: "Same directory name",
+      canonicalRoot: "/repo/beta",
+      recentOrder: "9007199254740994",
+    },
+    {
+      id: "empty",
+      kind: "manual",
+      displayName: "Empty project",
+      canonicalRoot: "/repo/empty",
+      recentOrder: "1",
+    },
+  ];
+  const tasks = [
+    task("1", "automatic"),
+    task("2", "alpha", {
+      currentRunPhase: "waiting_ui",
+      permissionReviewState: "needs_user",
+    }),
+    task("3", "alpha", { currentRunPhase: "running" }),
+    task("4", "alpha"),
+    task("5", "beta", { archived: true }),
+    task("6", "alpha", { unreadCompletionRunId: "9" }),
+  ];
+  const markup = renderTaskList(tasks, {
+    workspaces,
+    activeTaskId: "2",
+  });
+  const projectsStart = markup.indexOf('class="task-projects"');
+  const tasksStart = markup.indexOf('class="task-list-heading"');
+  assert.ok(projectsStart < tasksStart, "Projects appear above global tasks");
+  const projects = markup.slice(projectsStart, tasksStart);
+  const alpha = projects.slice(
+    projects.indexOf('data-workspace-id="alpha"'),
+    projects.indexOf('data-workspace-id="empty"'),
+  );
+  assert.match(markup, />5 tasks</);
+  assert.equal((markup.match(/data-task-id="1"/g) ?? []).length, 1);
+  for (const id of ["2", "3", "4", "6"])
+    assert.equal(
+      (markup.match(new RegExp(`data-task-id="${id}"`, "g")) ?? []).length,
+      2,
+    );
+  assert.doesNotMatch(
+    markup,
+    /data-task-id="5"|data-workspace-id="automatic"|custom-default/,
+  );
+  assert.deepEqual(
+    [...alpha.matchAll(/data-task-id="([^"]+)"/g)].map((match) => match[1]),
+    ["2", "3", "6", "4"],
+  );
+  assert.ok(
+    projects.indexOf('data-workspace-id="beta"') <
+      projects.indexOf('data-workspace-id="alpha"'),
+  );
+  assert.match(projects, /title="\/repo\/alpha"/);
+  assert.match(projects, /title="\/repo\/beta"/);
+  assert.match(projects, /Archived tasks are hidden/);
+  assert.match(projects, /No tasks in this project yet/);
+  assert.equal((markup.match(/aria-current="page"/g) ?? []).length, 2);
+  assert.equal((markup.match(/aria-label="Attention"/g) ?? []).length, 2);
+  assert.equal((markup.match(/task-notification-dot/g) ?? []).length, 2);
+
+  const archived = renderTaskList(tasks, { workspaces, showArchived: true });
+  assert.equal((archived.match(/data-task-id="5"/g) ?? []).length, 2);
+  assert.match(archived, />6 tasks</);
+  const suppressed = renderTaskList(tasks, {
+    workspaces,
+    suppressedCompletionTaskId: "6",
+    synchronized: false,
+  });
+  assert.doesNotMatch(
+    suppressed,
+    /task-notification-dot|aria-label="Attention"|aria-label="Running"/,
+  );
+});
+
+test("Redacted project paths do not appear in directory titles", () => {
+  const markup = renderTaskList([], {
+    workspaces: [
+      {
+        id: "1",
+        kind: "manual",
+        displayName: "Project",
+        canonicalRoot: "/private/path",
+        recentOrder: "1",
+        redacted: true,
+      },
+    ],
+  });
+  assert.match(markup, /title="Project"/);
+  assert.doesNotMatch(markup, /\/private\/path/);
 });
 
 test("Sidebar typography reserves bold weight for the product identity", async () => {

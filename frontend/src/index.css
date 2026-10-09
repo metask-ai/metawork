@@ -6791,6 +6791,48 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-micro);
 }
 
+.task-projects {
+  margin-bottom: 24px;
+}
+
+.task-project {
+  margin-top: 12px;
+  min-width: 0;
+}
+
+.task-project-heading {
+  display: flex;
+  margin: 0;
+  padding: 6px 10px;
+  align-items: center;
+  gap: 8px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-control);
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.task-project-heading svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.task-project-heading > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-project-items {
+  margin-left: 24px;
+}
+
+.task-project-items .task-list-empty {
+  margin: 4px 10px;
+  font-size: var(--text-label);
+}
+
 .task-list-item {
   display: block;
   width: 100%;

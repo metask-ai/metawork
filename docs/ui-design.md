@@ -204,13 +204,13 @@ Workspace
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 单列表导航和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 与项目导航和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Task 列表与路径上下文
 
 登录后的左栏从上到下只承担五类稳定职责：品牌/窗口识别、New task、已接通的全局能力入口、Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
 
-- 左栏不显示 Workspace 标题、添加动作或切换器；它直接以一个连续列表列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 Manual/Automatic Task，不按状态拆分栏目。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
+- 左栏保留全局 Task 列表，并按 [Task 列表、项目与排序](#56-task-列表项目与排序) 额外展示用户选择目录的项目导航；不提供全局 Workspace 切换器或目录添加动作。只消费同一 canonical snapshot 中仍被投影的 Workspace 与所属 Task，Workspace 移除后保留的历史 Task 不生成可点击的死入口；
 - Task 被选择后使用自身绑定的 Workspace 路径，不提交额外的全局 Workspace 导航动作；不同路径下的后台 Task 都必须持续可见；
 - New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。Manual Workspace 直接显示 canonical directory，Automatic Workspace 统一显示“默认”，不得暴露随机目录或内部 kind 术语；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
@@ -412,18 +412,25 @@ Disabled
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
 
-### 5.6 Task 单列表与排序
+### 5.6 Task 列表、项目与排序
 
-Task 在一个连续列表中只出现一次。状态排序与视觉结构分离：当前仍依次按需要处理、正在运行、排队、其他未归档与已归档的优先级排列，同一优先级内按 `recentOrder` 倒序，但这些优先级不生成标题、分隔或独立栏目：
+全局 Task 列表以“最近 / Recent”为标题，保留所有可见任务，每个 Task 在该列表中只出现一次；其上方展示“项目”区域，canonical snapshot 中每个 Manual Workspace 使用自己的 identity、目录名称和所属 Task 形成一个项目。Automatic Workspace 不生成项目，包括用户调整了默认目录上级位置的情形。两处任务入口共享选择、状态、完成提醒和任务操作，不复制 Task 状态或因项目展示改变绑定。
+
+全局列表与每个项目内部共用同一排序：依次按需要处理、正在运行、排队、其他未归档与已归档的优先级排列，同一优先级内按 Task `recentOrder` 倒序；状态优先级不生成标题、分隔或独立栏目。项目之间按 Workspace `recentOrder` 倒序：
 
 ```text
-Tasks
+Projects
+  [Directory name]
+    [Task in this directory] [status icon]
+Recent
   [Task name]  [status icon]
   [Task name]  [status icon]
   [Task name]
 ```
 
-- 列表不显示 `Needs your attention / Running / Queued / Recent / Archived` 等状态标题；
+- 列表不按状态拆分栏目，不显示 `Needs your attention / Running / Queued / Archived` 等状态标题；
+- 只有存在仍被投影的 Manual Workspace 时显示“项目”；目录标题使用文件夹图标与单行名称，完整安全路径放在 hover title 中，redacted 时不显示路径。任务缩进一级，不在每个任务行重复目录说明；同名目录保留 canonical identity，可通过标题的路径区分；
+- 项目任务始终展开；空项目保留目录标题和无任务说明。全局归档显示开关同时作用于全局与项目列表；项目只有隐藏的归档任务时说明归档已隐藏，不误称项目没有任务；全局任务计数只计算唯一 Task，不因项目入口重复计数；
 - 当前排序优先级只决定行的位置，不在视觉上形成分组；排序规则后续变化不得重新引入状态栏目；
 - Task 列表项只显示任务名称与必要状态信号，不在名称下追加 Workspace、`Default / 默认`、模型或其他配置标签；同名 Task 仍保持原名称，由用户按需重命名，不用第二行元数据替代命名；
 - 运行中、排队、等待用户、失败和中断使用图标和颜色共同表达；可访问名称通过 `aria-label` 和 tooltip 提供，不在行内保留文字状态标签；

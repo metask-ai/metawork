@@ -1,6 +1,6 @@
 import { useRef, useState, type MouseEvent } from "react";
 
-import type { TaskView } from "../../bridge/contracts.ts";
+import type { TaskView, WorkspaceView } from "../../bridge/contracts.ts";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { Menu } from "../../components/ui/menu.tsx";
 import { taskCountMessageId } from "../../i18n/formatters.ts";
@@ -11,6 +11,7 @@ export type TaskMenuAction = "rename" | "archive" | "delete";
 
 export function TaskList({
   tasks,
+  workspaces,
   activeTaskId,
   suppressedCompletionTaskId = null,
   showArchived,
@@ -21,6 +22,7 @@ export function TaskList({
   synchronized = true,
 }: {
   tasks: TaskView[];
+  workspaces: WorkspaceView[];
   activeTaskId: string | null;
   suppressedCompletionTaskId?: string | null;
   showArchived: boolean;
@@ -36,6 +38,13 @@ export function TaskList({
   const visibleTasks = orderedTasks(tasks, showArchived);
   const visibleTaskCount = visibleTasks.length;
   const archivedCount = tasks.filter((task) => task.archived).length;
+  const projects = workspaces
+    .filter((workspace) => workspace.kind === "manual")
+    .sort((left, right) => {
+      const leftOrder = BigInt(left.recentOrder);
+      const rightOrder = BigInt(right.recentOrder);
+      return rightOrder > leftOrder ? 1 : rightOrder < leftOrder ? -1 : 0;
+    });
 
   const menuTask =
     menuTaskId === null
@@ -48,35 +57,79 @@ export function TaskList({
     setMenuTaskId(taskId);
   }
 
+  function renderTask(task: TaskView) {
+    return (
+      <button
+        key={task.id}
+        data-task-id={task.id}
+        className="task-list-item focus-ring"
+        aria-current={activeTaskId === task.id ? "page" : undefined}
+        onClick={() => onSelectTask(task.id)}
+        onContextMenu={(event) => openTaskMenu(event, task.id)}
+      >
+        <span className="task-list-row">
+          <span>{task.title || t("task.item", { id: task.id })}</span>
+          <TaskSignals
+            task={task}
+            synchronized={synchronized}
+            completionSuppressed={suppressedCompletionTaskId === task.id}
+          />
+        </span>
+      </button>
+    );
+  }
+
   return (
     <nav className="task-list" aria-label={t("task.list")}>
+      {projects.length > 0 && (
+        <section className="task-projects" aria-label={t("task.projects")}>
+          <p className="section-label">{t("task.projects")}</p>
+          {projects.map((workspace) => {
+            const projectTasks = visibleTasks.filter(
+              (task) => task.workspaceId === workspace.id,
+            );
+            return (
+              <section
+                key={workspace.id}
+                className="task-project"
+                data-workspace-id={workspace.id}
+                aria-label={workspace.displayName}
+              >
+                <h3
+                  className="task-project-heading"
+                  title={
+                    workspace.redacted
+                      ? workspace.displayName
+                      : workspace.canonicalRoot
+                  }
+                >
+                  <Icon name="workspace" />
+                  <span>{workspace.displayName}</span>
+                </h3>
+                <div className="task-project-items">
+                  {projectTasks.map(renderTask)}
+                  {projectTasks.length === 0 && (
+                    <p className="task-list-empty">
+                      {tasks.some((task) => task.workspaceId === workspace.id)
+                        ? t("task.archived_hidden")
+                        : t("task.project_empty")}
+                    </p>
+                  )}
+                </div>
+              </section>
+            );
+          })}
+        </section>
+      )}
       <div className="task-list-heading">
-        <p className="section-label">{t("task.list")}</p>
+        <p className="section-label">{t("task.recent")}</p>
         <span>
           {t(taskCountMessageId(locale, visibleTaskCount), {
             count: visibleTaskCount,
           })}
         </span>
       </div>
-      {visibleTasks.map((task) => (
-        <button
-          key={task.id}
-          data-task-id={task.id}
-          className="task-list-item focus-ring"
-          aria-current={activeTaskId === task.id ? "page" : undefined}
-          onClick={() => onSelectTask(task.id)}
-          onContextMenu={(event) => openTaskMenu(event, task.id)}
-        >
-          <span className="task-list-row">
-            <span>{task.title || t("task.item", { id: task.id })}</span>
-            <TaskSignals
-              task={task}
-              synchronized={synchronized}
-              completionSuppressed={suppressedCompletionTaskId === task.id}
-            />
-          </span>
-        </button>
-      ))}
+      {visibleTasks.map(renderTask)}
       {visibleTaskCount === 0 && (
         <p className="task-list-empty">
           {tasks.length > 0 ? t("task.archived_hidden") : t("task.no_tasks")}
