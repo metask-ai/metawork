@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const multimodal = @import("multimodal.zig");
+const identity_profile = @import("identity.zig");
 const sdk = @import("metask_agentcore");
 const wire = sdk.types;
 const event_pump = @import("event_pump");
@@ -876,6 +877,7 @@ pub const Runtime = struct {
         config.struct_size = @sizeOf(wire.SessionCreateConfigV1);
         config.host = &host_config;
         config.model = sdk.bytesView(binding.target.model);
+        config.prompt_profile = &identity_profile.profile;
 
         var diagnostic = emptyOwnedBytes();
         var raw_session: ?*wire.SessionHandle = null;
@@ -1137,11 +1139,18 @@ pub const Runtime = struct {
         var metadata_live = true;
         defer if (metadata_live) success.deinitMetadata();
 
+        // Updating identity is part of restore admission. Keep the candidate
+        // unpublished and the Runtime fenced until mutation and cleanup finish.
+        const identity_error: ?Error = blk: {
+            identity_profile.apply(self.api, success.raw_session) catch |err|
+                break :blk err;
+            break :blk null;
+        };
         self.sessions_mutex.lockUncancelable(self.io);
         std.debug.assert(self.active_restore_calls > 0);
         std.debug.assert(self.session_reservations[session_slot]);
         std.debug.assert(self.sessions[session_slot] == null);
-        const reject = self.shutting_down.load(.acquire) or self.runtime != raw_runtime;
+        const reject = identity_error != null or self.shutting_down.load(.acquire) or self.runtime != raw_runtime;
         if (!reject) {
             session.raw = success.raw_session;
             self.sessions[session_slot] = session;
@@ -1174,7 +1183,8 @@ pub const Runtime = struct {
         } else {
             self.finishRestoreReservation(session_slot);
         }
-        return error.RuntimeShuttingDown;
+        if (!destroyed) return error.RestoreContractFailed;
+        return identity_error orelse error.RuntimeShuttingDown;
     }
 
     fn retainFailedRestoreCandidate(

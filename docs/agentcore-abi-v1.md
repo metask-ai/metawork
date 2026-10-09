@@ -60,7 +60,7 @@ schema 1 manifest 还必须包含精确的 `shared_library = { path, entry_point
 
 每个 required table、entry 与 reserved field 都必须通过官方 discovery 和 SDK validation。ABI 中存在 entry 只证明 Host 必须能正确理解该表面，不代表 MetaWork 产品已经开放对应能力。
 
-revision 18 的 `SessionCreateConfigV1.prompt_profile` 与 `RunOptionsV1.context_blocks/context_block_count` 分别占用原 reserved words，其他 reserved 字段必须继续为零；不得用旧 struct layout 调用新 ABI。`set_prompt_profile` 是 mandatory entry，但 MetaWork 当前不开放 prompt customization，Session 创建传 null profile，每次 Run 传 null blocks 和零 count。官方 SDK 完整校验 `describe.prompt` 与 `prompt_manifest` observation，Agent 明确消费该 observation 而不投影或持久化它；这不建立产品 prompt editor 或提示审计能力。
+revision 18 的 `SessionCreateConfigV1.prompt_profile` 与 `RunOptionsV1.context_blocks/context_block_count` 分别占用原 reserved words，其他 reserved 字段必须继续为零；不得用旧 struct layout 调用新 ABI。`set_prompt_profile` 是 mandatory entry，但 MetaWork 当前不开放 prompt customization，Session 创建传入 Agent-owned 固定产品身份 profile（见 [集成契约](agentcore-integration.md#session-产品身份)），每次 Run 传 null blocks 和零 count。官方 SDK 完整校验 `describe.prompt` 与 `prompt_manifest` observation，Agent 明确消费该 observation 而不投影或持久化它；这不建立产品 prompt editor 或提示审计能力。
 
 Runtime 只有一个 `create` entry，第二个参数是可空 `RuntimePluginConfigV1`；不得为不同 plugin 配置建立第二条 create ABI 路径。MCP `apply_configuration` 接受完整 declarative replacement：Host 必须使用非零 desired revision，并校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 转移 replacement ownership，`SUPERSEDED` 或 `REJECTED` 不得取得该 ownership，malformed report 必须 fail closed。
 

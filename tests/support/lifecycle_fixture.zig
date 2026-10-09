@@ -160,7 +160,42 @@ pub const CallbackSignal = struct {
     }
 };
 
+// Bounded owned snapshots of actual Host ABI input; tests inspect what was sent.
+pub const FakePromptProfile = struct {
+    count: usize = 0,
+    ids: [4][64]u8 = @splat(@splat(0)),
+    id_lens: [4]usize = @splat(0),
+    texts: [4][2048]u8 = @splat(@splat(0)),
+    text_lens: [4]usize = @splat(0),
+
+    fn copy(input: ?*const wire.PromptProfileV1) ?FakePromptProfile {
+        var result = FakePromptProfile{};
+        const profile = input orelse return result;
+        if (profile.struct_size != @sizeOf(wire.PromptProfileV1) or
+            profile.reserved0 != 0 or !std.mem.allEqual(u64, &profile.reserved, 0) or
+            profile.section_count > result.ids.len) return null;
+        if (profile.section_count == 0) return result;
+        const sections = profile.sections orelse return null;
+        result.count = @intCast(profile.section_count);
+        for (sections[0..result.count], 0..) |section, i| {
+            if (section.struct_size != @sizeOf(wire.PromptSectionV1) or
+                section.op_code != wire.PROMPT_OP_REPLACE or section.order != 0 or
+                section.interpolate != 0 or section.reserved0 != 0 or
+                !std.mem.allEqual(u64, &section.reserved, 0)) return null;
+            const id = sdk.borrowedBytes(section.id) catch return null;
+            const text = sdk.borrowedBytes(section.text) catch return null;
+            if (id.len > result.ids[i].len or text.len > result.texts[i].len) return null;
+            @memcpy(result.ids[i][0..id.len], id);
+            @memcpy(result.texts[i][0..text.len], text);
+            result.id_lens[i] = id.len;
+            result.text_lens[i] = text.len;
+        }
+        return result;
+    }
+};
+
 pub const FakeSession = struct {
+    prompt_profile: FakePromptProfile = .{},
     in_use: bool = false,
     running: bool = false,
     destroyed: bool = false,
@@ -179,7 +214,7 @@ pub const FakeSession = struct {
     allow_finish: bool = false,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
-    description_buffer: [4096]u8 = [_]u8{0} ** 4096,
+    description_buffer: [8192]u8 = [_]u8{0} ** 8192,
     permission_session_granted: bool = false,
     model: [256]u8 = [_]u8{0} ** 256,
     model_len: usize = 0,
@@ -283,6 +318,14 @@ pub const FakeCore = struct {
     forced_checkpoint_export_status: ?u32 = null,
     forced_checkpoint_describe_status: ?u32 = null,
     forced_checkpoint_restore_status: ?u32 = null,
+    forced_prompt_status: ?u32 = null,
+    malformed_prompt_diagnostic: bool = false,
+    prompt_updates: usize = 0,
+    prompt_changes: usize = 0,
+    restored_prompt_profile: FakePromptProfile = .{},
+    prompt_controlled: bool = false,
+    prompt_entered: bool = false,
+    allow_prompt: bool = false,
     forced_checkpoint_restore_degraded: bool = false,
     checkpoint_generation: u64 = 0,
     checkpoint_payload: []const u8 = "fixture-checkpoint",
@@ -586,6 +629,28 @@ pub const FakeCore = struct {
         self.forced_checkpoint_restore_degraded = true;
     }
 
+    pub fn armControlledPrompt(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        self.prompt_controlled = true;
+        self.prompt_entered = false;
+        self.allow_prompt = false;
+    }
+
+    pub fn waitUntilPromptEntered(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        while (!self.prompt_entered)
+            self.checkpoint_condition.waitUncancelable(std.testing.io, &self.mutex);
+    }
+
+    pub fn releaseControlledPrompt(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        self.allow_prompt = true;
+        self.checkpoint_condition.broadcast(std.testing.io);
+    }
+
     pub fn armControlledRestore(self: *FakeCore) void {
         self.lock();
         defer self.unlock();
@@ -820,6 +885,7 @@ pub fn sessionCreate(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
+    const profile = FakePromptProfile.copy(config.?.prompt_profile) orelse return wire.STATUS_INVALID_ARGUMENT;
     const host = config.?.host orelse {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
@@ -888,6 +954,7 @@ pub fn sessionCreate(
             session.* = .{
                 .in_use = true,
                 .plan = fake_core.next_plan,
+                .prompt_profile = profile,
                 .callbacks = callbacks.?.*,
                 .session_id = session_id,
                 .session_id_len = id.len,
@@ -1365,6 +1432,7 @@ pub fn sessionRestore(
         session.* = .{
             .in_use = true,
             .restored = true,
+            .prompt_profile = fake_core.restored_prompt_profile,
             .restore_degraded = restore_degraded,
             .callbacks = callbacks.?.*,
             .session_id = session_id,
@@ -1437,6 +1505,17 @@ pub fn sessionDescribe(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
+    var entries: [4]sdk.PromptProfileSection = undefined;
+    for (entries[0..session.prompt_profile.count], 0..) |*entry, i| entry.* = .{
+        .op = .replace,
+        .id = session.prompt_profile.ids[i][0..session.prompt_profile.id_lens[i]],
+        .text = session.prompt_profile.texts[i][0..session.prompt_profile.text_lens[i]],
+        .order = 0,
+        .interpolate = false,
+    };
+    const profile_json = std.json.Stringify.valueAlloc(std.testing.allocator, entries[0..session.prompt_profile.count], .{}) catch
+        return wire.STATUS_OUT_OF_MEMORY;
+    defer std.testing.allocator.free(profile_json);
     const described_session_id: []const u8 = if (session_id_mismatch)
         "ffffffffffffffffffffffff"
     else
@@ -1450,25 +1529,27 @@ pub fn sessionDescribe(
         (if (session.restore_degraded)
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":[],\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
                     session.run_id,
                     session.compact_id,
                     generation,
+                    profile_json,
                 },
             )
         else
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":[],\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
                     session.run_id,
                     session.compact_id,
                     generation,
+                    profile_json,
                 },
             )) catch {
             diagnostic(out_error);
@@ -2210,9 +2291,40 @@ const fake_session_api = wire.SessionApiV1{
     .abort = sessionAbort,
 };
 
-fn sessionSetPromptProfile(_: ?*wire.SessionHandle, _: ?*const wire.PromptProfileV1, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+fn sessionSetPromptProfile(handle: ?*wire.SessionHandle, profile: ?*const wire.PromptProfileV1, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
     if (out_diagnostic) |output| output.* = std.mem.zeroes(wire.OwnedBytesV1);
-    return wire.STATUS_INVALID_ARGUMENT;
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse return wire.STATUS_INVALID_ARGUMENT));
+    const replacement = FakePromptProfile.copy(profile) orelse return wire.STATUS_INVALID_ARGUMENT;
+    fake_core.lock();
+    fake_core.prompt_updates += 1;
+    if (fake_core.prompt_controlled) {
+        fake_core.prompt_controlled = false;
+        fake_core.prompt_entered = true;
+        fake_core.checkpoint_condition.broadcast(std.testing.io);
+        while (!fake_core.allow_prompt)
+            fake_core.checkpoint_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+    }
+    const forced = fake_core.forced_prompt_status;
+    fake_core.forced_prompt_status = null;
+    const malformed = fake_core.malformed_prompt_diagnostic;
+    fake_core.malformed_prompt_diagnostic = false;
+    fake_core.unlock();
+    if (malformed) {
+        if (out_diagnostic) |out| out.* = .{ .ptr = null, .len = 1 };
+        return wire.STATUS_OK;
+    }
+    if (forced) |code| return code;
+    session.lock();
+    defer session.unlock();
+    if (!session.in_use or session.destroyed) return wire.STATUS_INVALID_STATE;
+    if (session.running or session.compacting) return wire.STATUS_BUSY;
+    if (!std.meta.eql(session.prompt_profile, replacement)) {
+        session.prompt_profile = replacement;
+        fake_core.lock();
+        fake_core.prompt_changes += 1;
+        fake_core.unlock();
+    }
+    return wire.STATUS_OK;
 }
 
 const fake_session_control_api = wire.SessionControlApiV1{

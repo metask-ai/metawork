@@ -3132,6 +3132,81 @@ test "Runtime shutdown waits for restore and rejects its late candidate" {
     runtime_live = false;
 }
 
+test "Runtime shutdown waits for identity update and rejects its late candidate" {
+    const RestoreHarness = struct {
+        runtime: *lifecycle.Runtime,
+        source: *CheckpointRestoreSource,
+        result: std.atomic.Value(enum(u8) { pending, rejected, unexpected }) = .init(.pending),
+
+        fn run(self: *@This()) void {
+            _ = self.runtime.restoreSessionRoute(restoreOptions(
+                self.source.source(),
+                "000000000000000000000001",
+                0,
+                0,
+            )) catch |err| {
+                self.result.store(
+                    if (err == error.RuntimeShuttingDown) .rejected else .unexpected,
+                    .release,
+                );
+                return;
+            };
+            self.result.store(.unexpected, .release);
+        }
+    };
+    const ShutdownHarness = struct {
+        runtime: *lifecycle.Runtime,
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.runtime.shutdown() catch self.failed.store(true, .release);
+        }
+    };
+
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(3);
+    fake_core.setRestoreHistory(0, 0);
+    fake_core.armControlledPrompt();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    var runtime_live = true;
+    defer if (runtime_live) {
+        runtime.shutdown() catch {};
+        runtime.deinit();
+    };
+    var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+    var restore_harness = RestoreHarness{ .runtime = runtime, .source = &source };
+    const restore_thread = try std.Thread.spawn(.{}, RestoreHarness.run, .{&restore_harness});
+    fake_core.waitUntilPromptEntered();
+    try std.testing.expectError(error.SessionCapacity, openSession(runtime));
+
+    var shutdown_harness = ShutdownHarness{ .runtime = runtime };
+    const shutdown_thread = try std.Thread.spawn(.{}, ShutdownHarness.run, .{&shutdown_harness});
+    // Yielding a fixed number of times does not establish that the other
+    // thread entered shutdown. Observe its admission barrier before releasing
+    // the restore candidate, otherwise this test races a valid early restore.
+    while (!runtime.shutting_down.load(.acquire)) std.Thread.yield() catch {};
+    fake_core.lock();
+    const destroyed_while_restore_blocked = fake_core.runtime_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), destroyed_while_restore_blocked);
+
+    fake_core.releaseControlledPrompt();
+    restore_thread.join();
+    shutdown_thread.join();
+    try std.testing.expectEqual(.rejected, restore_harness.result.load(.acquire));
+    try std.testing.expect(!shutdown_harness.failed.load(.acquire));
+    fake_core.lock();
+    const restored = fake_core.checkpoint_restores;
+    const sessions_destroyed = fake_core.session_destroyed;
+    const runtimes_destroyed = fake_core.runtime_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), restored);
+    try std.testing.expectEqual(@as(usize, 1), sessions_destroyed);
+    try std.testing.expectEqual(@as(usize, 1), runtimes_destroyed);
+    runtime.deinit();
+    runtime_live = false;
+}
+
 test "restore cleanup failure remains Runtime-owned until shutdown" {
     fake_core.reset();
     fake_core.setCheckpointGeneration(3);
@@ -3678,4 +3753,80 @@ test "Session creation OOM leaves Runtime reusable and credential process-only" 
     try std.testing.expectEqualStrings(expected_workspace, snapshot.workspace_root);
     try std.testing.expect(fake_core.credential_seen);
     try closeSession(session, .session_close);
+}
+
+fn expectMetaWorkProfile(profile: fixture.FakePromptProfile) !void {
+    try std.testing.expectEqual(@as(usize, 2), profile.count);
+    try std.testing.expectEqualStrings("metacodes:identity", profile.ids[0][0..profile.id_lens[0]]);
+    try std.testing.expectEqualStrings("metacodes:subagent", profile.ids[1][0..profile.id_lens[1]]);
+    for (0..2) |i| {
+        const text = profile.texts[i][0..profile.text_lens[i]];
+        try std.testing.expect(std.mem.indexOf(u8, text, "MetaWork") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Metask AgentCore") != null);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+    }
+}
+
+test "Agent identity survives borrowed create input and updates old or equal restore profiles" {
+    for ([_]bool{ false, true }) |matching| {
+        fake_core.reset();
+        fake_core.setCheckpointGeneration(3);
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const fresh = try openSession(runtime);
+        const raw: *fixture.FakeSession = @ptrCast(@alignCast(fresh.raw.?));
+        const expected = raw.prompt_profile;
+        try expectMetaWorkProfile(expected);
+        try closeSession(fresh, .session_close);
+        try runtime.releaseClosedSession(fresh);
+        if (matching) fake_core.restored_prompt_profile = expected;
+        var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+        const restored = try runtime.restoreSessionRoute(restoreOptions(source.source(), "000000000000000000000002", 0, 0));
+        const restored_raw: *fixture.FakeSession = @ptrCast(@alignCast(restored.session.raw.?));
+        try std.testing.expect(std.meta.eql(expected, restored_raw.prompt_profile));
+        try std.testing.expectEqual(@as(usize, 1), fake_core.prompt_updates);
+        try std.testing.expectEqual(@as(usize, if (matching) 0 else 1), fake_core.prompt_changes);
+    }
+}
+
+test "identity update refusal and malformed results never publish a usable restore" {
+    const cases = [_]struct { status: ?u32 = null, malformed: bool = false, cleanup_fails: bool = false, expected: anyerror }{
+        .{ .status = wire.STATUS_INVALID_ARGUMENT, .expected = error.RestoreFailed },
+        .{ .status = wire.STATUS_RESOURCE_LIMIT, .expected = error.RestoreFailed },
+        .{ .status = wire.STATUS_CHECKPOINT_BUDGET_REQUIRED, .expected = error.RestoreFailed },
+        .{ .status = 0xffff, .expected = error.RestoreContractFailed },
+        .{ .status = wire.STATUS_STALE_RUN, .expected = error.RestoreContractFailed },
+        .{ .malformed = true, .expected = error.RestoreContractFailed },
+        .{ .status = wire.STATUS_RESOURCE_LIMIT, .cleanup_fails = true, .expected = error.RestoreContractFailed },
+    };
+    for (cases) |case| {
+        fake_core.reset();
+        fake_core.setCheckpointGeneration(3);
+        fake_core.forced_prompt_status = case.status;
+        fake_core.malformed_prompt_diagnostic = case.malformed;
+        if (case.cleanup_fails) fake_core.forceNextSessionDestroyStatus(wire.STATUS_BUSY);
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        var source = CheckpointRestoreSource{ .bytes = "fixture-checkpoint" };
+        try std.testing.expectError(case.expected, runtime.restoreSessionRoute(restoreOptions(source.source(), "000000000000000000000001", 0, 0)));
+        try std.testing.expectEqual(@as(usize, 0), runtime.active_restore_calls);
+        try std.testing.expect(!runtime.session_reservations[0]);
+        try std.testing.expectEqual(@as(usize, 0), fake_core.prompt_changes);
+        if (case.cleanup_fails) {
+            try std.testing.expectEqual(lifecycle.SessionState.poisoned, runtime.sessions[0].?.snapshot().state);
+            try std.testing.expectError(error.SessionCapacity, openSession(runtime));
+        } else {
+            try std.testing.expect(runtime.sessions[0] == null);
+            try std.testing.expectEqual(@as(usize, 1), fake_core.session_destroyed);
+            _ = try openSession(runtime);
+        }
+        try runtime.shutdown();
+        try std.testing.expectEqual(fake_core.session_created, fake_core.session_destroyed);
+    }
 }

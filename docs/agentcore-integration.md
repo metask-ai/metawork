@@ -47,7 +47,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 - 不能注册到 React/Native SDK 正式链路；
 - 不维护上游 ABI facade 或 SDK 行为的平行测试套件。
 
-当前 bundle 还提供 Session prompt profile、per-Run context blocks、typed `prompt_manifest` 和 `describe.prompt`；当前产品不传入 customization、不建立 Renderer 入口或持久投影，其 ABI 消费见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、结构化 `CoreEvent.run_state`、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Product Control 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
+当前 bundle 还提供 Session prompt profile、per-Run context blocks、typed `prompt_manifest` 和 `describe.prompt`；Agent 使用固定 Session 产品身份 profile；当前产品不开放用户 customization、不建立 Renderer 入口或持久投影，其 ABI 消费见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、结构化 `CoreEvent.run_state`、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Product Control 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
 
 公开 observation 的消费边界如下；“持久化”均指 Product Task 派生事实，不保存 raw CoreEvent：
 
@@ -220,6 +220,14 @@ Host 可以在 AgentCore event 外增加产品路由 envelope：
 - Host 可以维护 `run.started/completed/stopped/failed/cancelled/interrupted/waiting_ui` 等产品生命周期状态；
 - envelope 必须保留 SDK 验证后的原始 stop code/reason；
 - Renderer view model 可以派生消息列表和工具卡片，但不能反向成为 AgentCore 协议来源。
+
+### Session 产品身份
+
+Agent 内部固定替换官方 `metacodes:identity` 与 `metacodes:subagent` sections，分别维护主助手产品身份和子代理委派角色；显示名称取 canonical manifest。其余 locked safety/system 与模型、平台、工作区环境继续由 AgentCore 提供。此策略不建立 Product、Bridge 或 Renderer 配置、状态或 mutation 接口。
+
+fresh create 同步传入该 profile。checkpoint restore 完成原有 report、逻辑身份、模型、generation 与 idle 校验后，Agent 在发布候选 route 前调用官方 idle-only profile setter；相同 profile 由 SDK 处理为 no-op。恢复 reservation 与 in-flight fence 覆盖 setter 及失败清理，mutation 不持有 sessions mutex。更新失败不发布可用候选，沿既有恢复错误返回；销毁失败时保留 poisoned candidate，由 Runtime shutdown 继续拥有清理责任。不得清空 profile、增加预算、compaction 或无限重试来伪造成功。
+
+profile 的 owned copy、子代理与 isolated Skill 继承、checkpoint 编码均由官方 SDK 拥有。旧 checkpoint 先恢复再应用当前身份；下一次正常导出持久化该 profile，不改写历史或批量迁移。带 profile 的官方 checkpoint 不能通过删除 profile 或降级依赖来兼容早期 SDK。`describe.prompt` 与 Run `prompt_manifest` 仅有界消费和验证，不成为上层投影。
 
 ## 6. Session 与 Runtime 生命周期
 
