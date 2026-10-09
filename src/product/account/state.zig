@@ -124,6 +124,8 @@ const CommittedState = struct {
     concurrency_limit: ?u32 = null,
     error_code: contract.ErrorCode = .none,
     safe_diagnostic: SafeDiagnostic = .{},
+    /// Internal transport evidence only; never projected to the public Account wire.
+    refresh_not_consumed: bool = false,
     next_attempt_id: u64 = 1,
 
     fn activeAttempt(self: *const CommittedState) ?u64 {
@@ -639,6 +641,8 @@ pub const AccountIdentity = struct {
 pub const WorkerFailure = struct {
     error_code: contract.ErrorCode,
     safe_diagnostic: SafeDiagnostic = .{},
+    /// Internal transport evidence only; never projected to the public Account wire.
+    refresh_not_consumed: bool = false,
 
     pub fn fromCode(error_code: contract.ErrorCode) WorkerFailure {
         std.debug.assert(error_code != .none);

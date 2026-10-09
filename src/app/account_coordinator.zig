@@ -805,7 +805,7 @@ test "Account refresh scheduling failure is visible and explicitly retryable" {
     try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_s), platform.last_timer_interval_ns);
 }
 
-test "Account clock and refresh retry arm failures publish refresh schedule failure" {
+test "Account clock and explicit refresh schedule retry failures remain observable" {
     var runtime = try initRuntimeForTest();
     var platform: account_api.TestSupport.Platform = .{
         .now_unix_seconds = null,
@@ -840,9 +840,8 @@ test "Account clock and refresh retry arm failures publish refresh schedule fail
     platform.now_unix_seconds = 100;
     platform.timer_start_fails = true;
     sink.count = 0;
-    _ = coordinator.commitPrepared(
-        account_api.TestSupport.prepareRefreshRetrySchedule(&runtime),
-    );
+    const retried = coordinator.commandSink().submit(.retry_refresh);
+    try std.testing.expect(retried.accepted);
     // The newly available clock also admits the generation-bound summary job.
     try std.testing.expectEqual(@as(usize, 3), sink.count);
     try std.testing.expectEqual(

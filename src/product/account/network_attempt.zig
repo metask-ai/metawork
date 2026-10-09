@@ -255,13 +255,17 @@ pub const NetworkAttempt = struct {
                 self.sink.publish(self.attempt_id, &result);
             },
             .refresh => {
+                var tracked: RefreshTransportEvidence = .{ .transport = self.transport };
                 var refreshed = self.credential_owner.?.refresh(
                     self.allocator,
-                    self.transport,
+                    .{ .context = &tracked, .perform_fn = RefreshTransportEvidence.perform },
                     self.now_unix_seconds,
                     control,
                 ) catch |err| {
-                    self.publishFailure(metask.errorCode(err));
+                    self.publishCompletion(.{ .failed = .{
+                        .error_code = metask.errorCode(err),
+                        .refresh_not_consumed = !tracked.called or err == error.TokenRefreshFailed,
+                    } });
                     return;
                 };
                 defer refreshed.deinit();
@@ -280,6 +284,17 @@ pub const NetworkAttempt = struct {
             },
         }
     }
+
+    const RefreshTransportEvidence = struct {
+        transport: metask.Transport,
+        called: bool = false,
+
+        fn perform(context: *anyopaque, request: metask.Request, output: []u8) metask.TransportError!metask.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.called = true;
+            return self.transport.perform(request, output);
+        }
+    };
 
     fn publishCompletion(
         self: *NetworkAttempt,
