@@ -146,7 +146,7 @@ pub fn refreshWithToken(
         &response_storage,
     ) catch |err| return transportFailure(err);
     if (response.status != 200)
-        return classifyStatus(response.status, false);
+        return classifyRefreshFailure(response);
     return oauth.parseTokenResponse(
         allocator,
         response.body,
@@ -221,9 +221,35 @@ fn transportFailure(transport_error: TransportError) ClientError {
     };
 }
 
+fn classifyRefreshFailure(response: Response) ClientError {
+    if (response.status != 400) return classifyStatus(response.status, false);
+    if (response.body.len == 0 or response.body.len > oauth.Limits.token_body_bytes)
+        return error.ProtocolInvalid;
+    var scratch: [oauth.Limits.token_body_bytes * 2]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var parsed = std.json.parseFromSlice(
+        struct { @"error": []const u8 },
+        fba.allocator(),
+        response.body,
+        .{ .ignore_unknown_fields = true },
+    ) catch return error.ProtocolInvalid;
+    defer parsed.deinit();
+    const code = parsed.value.@"error";
+    if (std.mem.eql(u8, code, "invalid_grant")) return error.Unauthorized;
+    if (std.mem.eql(u8, code, "invalid_request") or
+        std.mem.eql(u8, code, "invalid_client") or
+        std.mem.eql(u8, code, "unauthorized_client") or
+        std.mem.eql(u8, code, "unsupported_grant_type") or
+        std.mem.eql(u8, code, "invalid_scope"))
+        return error.TokenRefreshFailed;
+    return error.ProtocolInvalid;
+}
+
 fn classifyStatus(status: u16, exchange: bool) ClientError {
     return switch (status) {
-        400, 401, 403 => if (exchange)
+        400 => if (exchange) error.OAuthExchangeFailed else error.ProtocolInvalid,
+        401, 403 => if (exchange)
             error.OAuthExchangeFailed
         else
             error.Unauthorized,
@@ -372,11 +398,11 @@ test "refresh requires and installs the rotated refresh token" {
             response_buffer: []u8,
         ) TransportError!Response {
             if (request.kind != .refresh_token or
-                std.mem.indexOf(
+                !std.mem.eql(
                     u8,
                     request.body,
-                    "refresh_token=old-refresh",
-                ) == null)
+                    "grant_type=refresh_token&client_id=metawork&refresh_token=old-refresh",
+                ))
                 return error.ProtocolFailed;
             const body =
                 \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"bearer","expires_in":30}
@@ -396,4 +422,45 @@ test "refresh requires and installs the rotated refresh token" {
     try std.testing.expectEqualStrings("new-access", tokens.access_token.view());
     try std.testing.expectEqualStrings("new-refresh", tokens.refresh_token.view());
     try std.testing.expectEqual(@as(i64, 50), tokens.expires_at);
+}
+
+test "refresh HTTP 400 distinguishes invalid grant from request and protocol errors" {
+    const Case = struct { body: []const u8, expected: ClientError };
+    const cases = [_]Case{
+        .{ .body = "{\"error\":\"invalid_grant\",\"error_description\":\"refresh token expired\"}", .expected = error.Unauthorized },
+        .{ .body = "{\"error\":\"invalid_request\",\"error_description\":\"client_id required\"}", .expected = error.TokenRefreshFailed },
+        .{ .body = "{\"error\":\"invalid_client\"}", .expected = error.TokenRefreshFailed },
+        .{ .body = "{\"error\":\"unauthorized_client\"}", .expected = error.TokenRefreshFailed },
+        .{ .body = "{\"error\":\"unsupported_grant_type\"}", .expected = error.TokenRefreshFailed },
+        .{ .body = "{\"error\":\"invalid_scope\"}", .expected = error.TokenRefreshFailed },
+        .{ .body = "{\"error\":\"unknown\"}", .expected = error.ProtocolInvalid },
+        .{ .body = "{\"error\":42}", .expected = error.ProtocolInvalid },
+        .{ .body = "{}", .expected = error.ProtocolInvalid },
+        .{ .body = "<html>Bad Request</html>", .expected = error.ProtocolInvalid },
+    };
+    const ErrorTransport = struct {
+        body: []const u8,
+        fn perform(context: *anyopaque, request: Request, output: []u8) TransportError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (request.kind != .refresh_token or !std.mem.eql(
+                u8,
+                request.body,
+                "grant_type=refresh_token&client_id=metawork&refresh_token=retained-refresh",
+            )) return error.ProtocolFailed;
+            @memcpy(output[0..self.body.len], self.body);
+            return .{ .status = 400, .body = output[0..self.body.len] };
+        }
+    };
+    var token = try oauth.Secret.init(std.testing.allocator, "retained-refresh");
+    defer token.deinit();
+    for (cases) |case| {
+        var transport: ErrorTransport = .{ .body = case.body };
+        try std.testing.expectError(case.expected, refreshWithToken(
+            std.testing.allocator,
+            .{ .context = &transport, .perform_fn = ErrorTransport.perform },
+            &token,
+            100,
+            null,
+        ));
+    }
 }

@@ -2269,3 +2269,52 @@ test "retry refresh schedules fresh credentials and refreshes inside skew" {
     try std.testing.expect(refresh.attemptId() != null);
     try std.testing.expect(refresh.transition.takeEffect().? == .refresh_token);
 }
+
+test "cold restore request error preserves the retained refresh credential" {
+    const RequestErrorTransport = struct {
+        fn perform(_: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
+            if (request.kind != .refresh_token or !std.mem.eql(
+                u8,
+                request.body,
+                "grant_type=refresh_token&client_id=metawork&refresh_token=retained-refresh",
+            )) return error.ProtocolFailed;
+            const body = "{\"error\":\"invalid_request\",\"error_description\":\"client_id required\"}";
+            @memcpy(output[0..body.len], body);
+            return .{ .status = 400, .body = output[0..body.len] };
+        }
+    };
+    var context: u8 = 0;
+    var runtime = Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        std.Thread.getCurrentId(),
+        .{ .context = &context, .perform_fn = RequestErrorTransport.perform },
+        TestSupport.loopbackEndpoint(),
+        .{ .context = &context, .notify_fn = runtimeTestWake },
+    );
+    var platform: TestSupport.Platform = .{};
+    try platform.setStoredRefreshToken("retained-refresh");
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    var restored = runtime.prepareStart(platform.ports());
+    defer restored.deinit();
+    try std.testing.expect(runtime.takeRefreshAfterCommit(&restored));
+    runtime.commit(&restored);
+    var refresh = runtime.prepareRestoredRefresh();
+    defer refresh.deinit();
+    try std.testing.expect(runtime.admitEffect(&refresh));
+    runtime.commit(&refresh);
+    try std.testing.expect(runtime.dispatchCommitted(&refresh) == null);
+    runtime.effects.network_attempt.join();
+    var failed = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer failed.deinit();
+    runtime.commit(&failed);
+    try std.testing.expectEqual(contract.AccountState.signed_out, runtime.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.token_refresh_failed, runtime.view().error_code);
+    try std.testing.expectEqualStrings("retained-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+}

@@ -469,6 +469,7 @@ pub fn buildRefreshBody(
 ) ProtocolError![]const u8 {
     return writeForm(output, &.{
         .{ "grant_type", "refresh_token" },
+        .{ "client_id", client_id },
         .{ "refresh_token", refresh_token.view() },
     });
 }
@@ -791,7 +792,7 @@ test "authorization code and refresh bodies do not widen client contract" {
     defer refresh.deinit();
     const refresh_body = try buildRefreshBody(&body_storage, &refresh);
     try std.testing.expectEqualStrings(
-        "grant_type=refresh_token&refresh_token=refresh-token",
+        "grant_type=refresh_token&client_id=metawork&refresh_token=refresh-token",
         refresh_body,
     );
 }
