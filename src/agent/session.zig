@@ -3,6 +3,11 @@
 //! feed a bounded sink. No callback calls WebView or registers desktop tools.
 
 const std = @import("std");
+const session_time_context = @import("session/time_context.zig");
+
+pub const RunTimeSource = session_time_context.Source;
+pub const RunTimeSnapshot = session_time_context.Snapshot;
+pub const RunTimeZoneIdentity = session_time_context.Identity;
 const multimodal = @import("session/multimodal.zig");
 const builtin = @import("builtin");
 const sdk = @import("metask_agentcore");
@@ -2567,4 +2572,5 @@ test {
     _ = session_control;
     _ = session_binding;
     _ = session_runtime;
+    _ = session_time_context;
 }

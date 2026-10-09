@@ -28,6 +28,7 @@ const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
 const mcp_management_coordinator = @import("app/mcp_management_coordinator.zig");
 const app_paths = @import("app/paths.zig");
 const app_platform = @import("app/platform.zig");
+const run_time_context = @import("app/run_time_context.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
 const app_stores = @import("app/stores.zig");
 const app_window = @import("app/window.zig");
@@ -738,6 +739,7 @@ test "MCP Application composition imports the startup owner" {
 test {
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(models_automation_vault);
+    std.testing.refAllDecls(run_time_context);
 }
 
 test "automation Models vault is bounded, overwrites securely, and deletes idempotently" {

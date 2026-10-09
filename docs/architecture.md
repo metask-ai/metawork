@@ -134,6 +134,7 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 | `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `external_link_handoff` | 一级 | Renderer 只提交用户显式点击的有界 `http`、`https` 或 `mailto` URL；Bridge 校验 connection/window、协议、绝对地址、无 credential 与控制字符后，Application 通过公开 `PlatformServices.openExternalUrl` 交给系统 handler。URL 不进入 Product、Snapshot、日志或持久化，失败只返回闭合结果 | SDK Runtime API 提供不要求全局放宽 WebView navigation policy、可逐次接收同等严格目标的 external-open 能力并通过 macOS/Windows 验收 |
+| `run_local_timezone` | macOS、Windows 二级 | Native SDK 的公开时钟提供 Unix 时间，但其本地化时间格式化接口不提供结构化时区 identity 与指定时刻的 offset。Application 通过公开 CoreFoundation / Windows timezone API 为 Agent worker 采样同一时刻的有界 owned 时区值；不设置系统时区，不访问 SDK 私有数据，不解析本地化字符串，不形成时区数据库或映射表。失败返回显式缺失的结构化值；不读取 credential、窗口或 Renderer 状态 | Native SDK 公开等价结构化时区能力，并通过目标平台、并发、时区变化和夏令时验证后删除此 seam 与专用 allowlist |
 | `macos_icon_composer_package` | build-time | 只补 `.icon` 资源编译，不进入 executable 或 Runtime/Bridge API | SDK 原生产生等价资源与 metadata 并通过分发验收 |
 
 Window compatibility 共享的 startup window identity 只能由 Application 在窗口创建期建立一次并验证，再注入需要它的 seam；消费者不得复制捕获机制或把 identity 当成通用 system handle。`minimize` 等 Runtime API 已提供的能力必须保持正常路径，不能因相邻按钮使用 compatibility 而被吸入 seam。

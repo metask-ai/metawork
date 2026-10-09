@@ -2813,6 +2813,54 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   assert.match(window, /runtime\.showMessageDialog\(/);
 });
 
+test("Run local timezone has one Application consumer and exact read-only OS symbols", () => {
+  const seam = "src/native_sdk_compat/run_local_timezone.zig";
+  assert.deepEqual(
+    zigFiles("src/").filter((file) =>
+      read(file).includes("native_sdk_compat/run_local_timezone.zig"),
+    ),
+    ["src/app/run_time_context.zig"],
+  );
+  assert.match(
+    read("src/app/run_time_context.zig"),
+    /native_sdk\.runtime\.nowMs\(\)/,
+  );
+  assert.match(read("docs/architecture.md"), /`run_local_timezone`/);
+  assert.doesNotMatch(read(seam), /@import\("(?:native_sdk|metawork_agent)"\)/);
+  assert.deepEqual(
+    externSymbols(read("src/native_sdk_compat/run_local_timezone/macos.zig"), [
+      "CoreFoundation",
+    ]),
+    [
+      "CFRelease",
+      "CFStringCreateWithCString",
+      "CFStringGetCString",
+      "CFTimeZoneCopySystem",
+      "CFTimeZoneCreateWithName",
+      "CFTimeZoneGetName",
+      "CFTimeZoneGetSecondsFromGMT",
+      "CFTimeZoneResetSystem",
+    ].sort(),
+  );
+  assert.deepEqual(
+    externSymbols(
+      read("src/native_sdk_compat/run_local_timezone/windows.zig"),
+      ["kernel32"],
+    ),
+    [
+      "FileTimeToSystemTime",
+      "GetDynamicTimeZoneInformation",
+      "SystemTimeToFileTime",
+      "SystemTimeToTzSpecificLocalTimeEx",
+    ].sort(),
+  );
+  assert.doesNotMatch(
+    read("src/native_sdk_compat/run_local_timezone/macos.zig") +
+      read("src/native_sdk_compat/run_local_timezone/windows.zig"),
+    /CFTimeZoneSetDefault|SetDynamicTimeZoneInformation|SetTimeZoneInformation|SetLocalTime|GetLocalTime/,
+  );
+});
+
 test("Application arbitrates single-instance ownership before business owners", () => {
   const app = read("src/app.zig");
   const platform = read("src/app/platform.zig");
