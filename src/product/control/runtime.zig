@@ -8061,6 +8061,11 @@ pub const Runtime = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    /// Exercises the writer while a test deliberately holds lifecycle reconciliation.
+    pub fn commitTaskHistory(control: *Runtime) Error!void {
+        return control.commitTaskStateIfConfigured();
+    }
+
     pub fn taskPermissionReviewText(control: *Runtime) task_runtime.TextProjection {
         return control.taskRuntimeTextProjection();
     }
