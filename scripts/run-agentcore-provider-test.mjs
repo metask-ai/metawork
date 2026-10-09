@@ -331,7 +331,9 @@ function assertHostIdentity(payload, child) {
         : "你是 MetaWork 内的 AI 助手。",
     ),
   );
-  assert.ok(prompt.includes("Metask AgentCore"));
+  assert.ok(!prompt.includes("Metask AgentCore"));
+  assert.ok(prompt.includes("不主动介绍底层执行内核、模型名称或模型厂商"));
+  assert.ok(prompt.includes("仅在用户明确询问相关技术信息时"));
   assert.ok(
     prompt.includes(`You are powered by the model ${activeProvider.model}.`),
   );

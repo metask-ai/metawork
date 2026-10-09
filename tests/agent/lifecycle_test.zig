@@ -3762,7 +3762,9 @@ fn expectMetaWorkProfile(profile: fixture.FakePromptProfile) !void {
     for (0..2) |i| {
         const text = profile.texts[i][0..profile.text_lens[i]];
         try std.testing.expect(std.mem.indexOf(u8, text, "MetaWork") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "Metask AgentCore") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Metask AgentCore") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "不主动介绍底层执行内核、模型名称或模型厂商") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "仅在用户明确询问相关技术信息时") != null);
         try std.testing.expect(std.unicode.utf8ValidateSlice(text));
     }
 }
