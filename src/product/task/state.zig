@@ -367,6 +367,8 @@ pub const PendingInterruption = enum(u8) {
 };
 
 pub const TerminalPayload = struct {
+    /// Applied by the main thread only when the terminal event drain completes.
+    exclude_on_product_terminal: bool,
     phase: RunPhase,
     outcome: RunOutcome,
     cause: ?RunCause,
@@ -377,6 +379,8 @@ pub const TerminalPayload = struct {
 };
 
 pub const CompactTerminalPayload = struct {
+    /// Applied by the main thread only when it observes this terminal fact.
+    exclude_on_product_terminal: bool,
     phase: CompactPhase,
     cause: ?CompactCause,
     before_context_tokens: u64,
@@ -919,6 +923,8 @@ pub fn finalizeMarkedTerminalRunsAfterEventDrain(
         }
         run.output_retry_group = null;
         freezeRunElapsedMs(run, finished_at_ms);
+        if (terminalPayload(run).?.exclude_on_product_terminal and run.coverage == .pending)
+            run.coverage = .excluded;
         run.event_stream_finalized = true;
         if (run.finished_at_unix_ms == null)
             run.finished_at_unix_ms = if (finished_at_unix_ms) |value|
@@ -1646,6 +1652,7 @@ test "compact projection withholds worker terminal until main-thread observation
     };
     compact.agent_handoff.store(.running, .release);
     compact.terminal_payload = .{
+        .exclude_on_product_terminal = false,
         .phase = .compacted,
         .cause = null,
         .before_context_tokens = 120,
@@ -1713,6 +1720,7 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
     try run.assistant.list.appendSlice(std.testing.allocator, "suffix");
     defer run.assistant.list.deinit(std.testing.allocator);
     run.terminal_payload = .{
+        .exclude_on_product_terminal = false,
         .phase = .completed,
         .outcome = .completed,
         .cause = null,
@@ -1765,6 +1773,68 @@ test "event drain withholds terminal facts and assistant suffix until finalizati
     );
 }
 
+test "event drain applies Conversation exclusion even after queued cancellation was observed" {
+    for ([_]bool{ false, true }) |exclude| {
+        var runs = [_]?RunRecord{.{
+            .id = 7,
+            .generation = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = "model",
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .input = .{ .text = .{ .value = @constCast("prompt") } },
+            .commentary_ends = &.{},
+            .tools = &.{},
+            .terminal_diagnostic = @constCast(""),
+            .terminal_observed = true,
+            .terminal_payload = .{
+                .exclude_on_product_terminal = exclude,
+                .phase = .cancelled,
+                .outcome = .cancelled,
+                .cause = .user_cancel,
+                .session_disposition_at_completion = .reusable,
+            },
+            .terminal_publication = .init(.published),
+        }};
+        var task = Task{
+            .durable = .{
+                .id = 3,
+                .recent_order = 1,
+                .execution_generation = 1,
+                .execution_protocol = .anthropic_messages,
+                .execution_model = @constCast("model"),
+                .permission_profile = .approval_required,
+                .permission_interaction = .interactive,
+                .workspace_id = 2,
+                .workspace_root = @constCast("root"),
+                .title = @constCast("title"),
+                .runs = &runs,
+                .compacts = &.{},
+                .ui_history = &.{},
+            },
+            .runtime = .{},
+        };
+        const run = &runs[0].?;
+        try std.testing.expectEqual(ConversationCoverage.pending, run.coverage);
+        try std.testing.expect(productTerminalFacts(run) == null);
+        try std.testing.expect(markTerminalRunsBeforeEventDrain(&task));
+        try std.testing.expectEqual(ConversationCoverage.pending, run.coverage);
+        try std.testing.expect(finalizeMarkedTerminalRunsAfterEventDrain(&task, null, null));
+        try std.testing.expectEqual(
+            if (exclude) ConversationCoverage.excluded else ConversationCoverage.pending,
+            run.coverage,
+        );
+        try std.testing.expectEqual(RunPhase.cancelled, runPhase(run));
+        try std.testing.expect(!markTerminalRunsBeforeEventDrain(&task));
+        try std.testing.expect(!finalizeMarkedTerminalRunsAfterEventDrain(&task, null, null));
+        try std.testing.expectEqual(
+            if (exclude) ConversationCoverage.excluded else ConversationCoverage.pending,
+            run.coverage,
+        );
+    }
+}
+
 test "event drain advances the final commentary boundary with the committed suffix" {
     var commentary_ends = [_]u64{3};
     var runs = [_]?RunRecord{.{
@@ -1807,6 +1877,7 @@ test "event drain advances the final commentary boundary with the committed suff
     defer run.assistant.list.deinit(std.testing.allocator);
     run.assistant.committed_len = 3;
     run.terminal_payload = .{
+        .exclude_on_product_terminal = false,
         .phase = .completed,
         .outcome = .completed,
         .cause = null,
@@ -1868,6 +1939,7 @@ test "event drain fails closed when an output segment remains unresolved" {
     try run.output_segment.list.appendSlice(std.testing.allocator, "draft");
     defer run.output_segment.list.deinit(std.testing.allocator);
     run.terminal_payload = .{
+        .exclude_on_product_terminal = false,
         .phase = .completed,
         .outcome = .completed,
         .cause = null,

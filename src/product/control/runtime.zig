@@ -8061,6 +8061,11 @@ pub const Runtime = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    /// Exercises the writer while a test deliberately holds lifecycle reconciliation.
+    pub fn commitTaskHistory(control: *Runtime) Error!void {
+        return control.commitTaskStateIfConfigured();
+    }
+
     pub fn taskPermissionReviewText(control: *Runtime) task_runtime.TextProjection {
         return control.taskRuntimeTextProjection();
     }
@@ -8438,6 +8443,7 @@ fn commitCompactProductTerminal(
         after_context_tokens,
         diagnostic,
         source_diagnostic_truncated,
+        false,
     );
 }
 
@@ -8580,6 +8586,7 @@ fn commitTerminal(
             run.redaction_secret,
         );
         run.terminal_payload = .{
+            .exclude_on_product_terminal = false,
             .phase = phase,
             .outcome = outcome,
             .cause = cause,
@@ -13937,7 +13944,7 @@ test "Run elapsed projection samples an injected clock without publishing revisi
     try std.testing.expectEqual(revision, control.revision);
     try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, 999));
     try std.testing.expectEqual(@as(?u64, null), task_test_state.runElapsedMs(run, null));
-    run.terminal_payload = .{ .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
+    run.terminal_payload = .{ .exclude_on_product_terminal = false, .phase = .completed, .outcome = .completed, .cause = null, .session_disposition_at_completion = .reusable };
     run.terminal_publication.store(.published, .release);
     try std.testing.expectEqual(@as(?u64, 134000), task_test_state.runElapsedMs(run, now));
     run.terminal_observed = true;
@@ -15123,6 +15130,7 @@ test "default snapshot budget contains the maximum structural projection" {
                 .file_changes = file_changes,
                 .terminal_publication = .init(.published),
                 .terminal_payload = .{
+                    .exclude_on_product_terminal = false,
                     .phase = .completed,
                     .outcome = .completed,
                     .cause = null,
@@ -15140,6 +15148,7 @@ test "default snapshot budget contains the maximum structural projection" {
                 .after_run_id = 1,
                 .terminal_publication = .init(.published),
                 .terminal_payload = .{
+                    .exclude_on_product_terminal = false,
                     .phase = .compacted,
                     .cause = null,
                     .before_context_tokens = std.math.maxInt(u64),

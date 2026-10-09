@@ -801,6 +801,7 @@ test "unobserved Compact terminal remains active and stays outside Conversation 
         .agent_handoff = .init(.running),
         .terminal_publication = .init(.published),
         .terminal_payload = .{
+            .exclude_on_product_terminal = false,
             .phase = .compacted,
             .cause = null,
             .before_context_tokens = 100,
@@ -854,6 +855,7 @@ fn terminalRun(id: u64, coverage: task_state.ConversationCoverage) task_state.Ru
         .tools = @constCast(&[_]?task_state.ToolView{}),
         .terminal_publication = .init(.published),
         .terminal_payload = .{
+            .exclude_on_product_terminal = false,
             .phase = .completed,
             .outcome = .completed,
             .cause = null,

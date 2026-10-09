@@ -19,6 +19,8 @@ const productControlTaskInput = fixture.productControlTaskInput;
 const waitControlSnapshot = fixture.waitProductControlSnapshot;
 const installControlExecution = fixture.installProductControlExecution;
 const installControlExecutionGeneration = fixture.installProductControlExecutionGeneration;
+const task_state = product_task.testing.state_module;
+const task_execution = product_task.testing.execution_module;
 
 fn scheduledBinding(
     workbench: *product_control.Runtime,
@@ -981,6 +983,122 @@ const TaskPersistenceProbe = struct {
         var result = self.capability();
         result.restored_bytes = restored_bytes;
         return result;
+    }
+};
+
+/// Captures each actual writer call, including the candidate before lifecycle
+/// reconciliation. A later successful save cannot hide an earlier rejection.
+const CoverageCommitProbe = struct {
+    const Observation = struct {
+        phase: []const u8,
+        coverage: task_state.ConversationCoverage,
+        healthy: bool,
+        bytes_match: bool,
+    };
+    control: ?*product_control.Runtime = null,
+    task_id: u64 = 0,
+    record_id: u64 = 0,
+    compact: bool = false,
+    observations: [16]Observation = undefined,
+    count: usize = 0,
+
+    fn capability(self: *@This()) product_task.history.Capability {
+        return .{ .context = self, .enabled = true, .commit_fn = commit };
+    }
+
+    fn watch(self: *@This(), control: *product_control.Runtime, task_id: u64, record_id: u64, compact: bool) void {
+        self.control = control;
+        self.task_id = task_id;
+        self.record_id = record_id;
+        self.compact = compact;
+        self.count = 0;
+    }
+
+    fn commit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        if (self.record_id == 0) return .committed;
+        if (self.count == self.observations.len) return .failed;
+        const control = self.control.?;
+        const task = control.task_runtime.find(self.task_id).?;
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const projected = product_task.history.projectTask(arena.allocator(), task, null) catch return .failed;
+        const json = std.json.Stringify.valueAlloc(arena.allocator(), projected, .{}) catch return .failed;
+        const phase, const coverage = if (self.compact) facts: {
+            const compact = task_state.findCompact(task.durable.compacts, self.record_id).?;
+            break :facts .{ @tagName(task_state.compactProjectionFacts(compact).phase), compact.coverage };
+        } else facts: {
+            const run = task_state.findRun(task.durable.runs, self.record_id).?;
+            break :facts .{ @tagName(task_state.runPhase(run)), run.coverage };
+        };
+        self.observations[self.count] = .{
+            .phase = phase,
+            .coverage = coverage,
+            .healthy = control.task_persistence_health == .ready,
+            .bytes_match = std.mem.indexOf(u8, bytes, json) != null and
+                std.mem.indexOf(u8, bytes, "exclude_on_product_terminal") == null,
+        };
+        self.count += 1;
+        return .committed;
+    }
+
+    fn expect(self: *const @This(), index: usize, phase: []const u8, coverage: task_state.ConversationCoverage) !void {
+        try std.testing.expect(index < self.count);
+        const observation = self.observations[index];
+        try std.testing.expectEqualStrings(phase, observation.phase);
+        try std.testing.expectEqual(coverage, observation.coverage);
+        for (self.observations[0..self.count]) |value| {
+            try std.testing.expect(value.healthy);
+            try std.testing.expect(value.bytes_match);
+        }
+    }
+};
+
+/// Uses the existing Product worker notifier after publication, rather than a
+/// Core return or automatic-title Completion as a terminal barrier.
+const TerminalPublicationGate = struct {
+    target: union(enum) { none, run: *task_state.RunRecord, compact: *task_state.CompactRecord } = .none,
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    entered: std.atomic.Value(bool) = .init(false),
+    released: bool = false,
+
+    fn wake(context: ?*anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        const published = switch (self.target) {
+            .none => false,
+            .run => |run| run.terminal_publication.load(.acquire) == .published,
+            .compact => |compact| compact.terminal_publication.load(.acquire) == .published,
+        };
+        // Compact also notifies before execution; that wake must pass through.
+        if (!published or self.entered.load(.acquire)) return true;
+        self.entered.store(true, .release);
+        while (!self.released) self.condition.waitUncancelable(std.testing.io, &self.mutex);
+        return true;
+    }
+
+    fn arm(self: *@This(), target: @FieldType(@This(), "target")) void {
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        self.target = target;
+    }
+
+    fn wait(self: *@This()) !void {
+        for (0..2_500) |_| {
+            if (self.entered.load(.acquire)) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake);
+        }
+        return error.TestUnexpectedResult;
+    }
+
+    fn release(self: *@This()) void {
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        self.target = .none;
+        self.released = true;
+        self.condition.broadcast(std.testing.io);
     }
 };
 
@@ -6074,7 +6192,56 @@ test "Product Control terminal compact result wins a too-late cancellation race"
     );
 }
 
-test "Product Control cancels a queued compact without entering AgentCore" {
+test "Product Control coverage saves queued Run cancellation before and after the event drain" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var persistence: CoverageCommitProbe = .{};
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = persistence.capability();
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_tasks = 2,
+        .max_runs_per_task = 2,
+        .max_tools_per_run = 1,
+    }, configuration);
+    defer workbench.deinit();
+    defer persistence.record_id = 0;
+    defer fake_core.releaseControlled();
+    try installControlExecution(&workbench);
+    const blocker_id = try workbench.createTask(productControlTaskInput());
+    const target_id = try workbench.createTask(productControlTaskInput());
+    try workbench.renameTask(target_id, "queued cancellation target");
+    fake_core.setSessionPlan(.controlled);
+    _ = try workbench.runTask(blocker_id, .{ .text = "occupy the worker" });
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    const run_id = try workbench.runTask(target_id, .{ .text = "cancel while queued" });
+    const task = workbench.task_runtime.find(target_id).?;
+    const run = task_state.findRun(task.durable.runs, run_id).?;
+    persistence.watch(&workbench, target_id, run_id, false);
+    try workbench.cancel(target_id, run_id);
+    try persistence.expect(0, "running", .pending);
+    try std.testing.expect(run.terminal_observed);
+    try std.testing.expect(!run.event_stream_finalized);
+    try std.testing.expect(task_state.terminalPayload(run).?.exclude_on_product_terminal);
+    try std.testing.expect(workbench.task_persistence_health == .ready);
+    const commits_after_cancel = persistence.count;
+    try workbench.cancel(target_id, run_id);
+    try std.testing.expectEqual(commits_after_cancel, persistence.count);
+    try workbench.drainAgentEvents();
+    try std.testing.expect(persistence.count > commits_after_cancel);
+    try persistence.expect(persistence.count - 1, "cancelled", .excluded);
+    try std.testing.expect(run.event_stream_finalized);
+    const commits_after_drain = persistence.count;
+    try workbench.drainAgentEvents();
+    try std.testing.expectEqual(commits_after_drain, persistence.count);
+}
+
+test "Product Control coverage saves queued compact cancellation without entering AgentCore" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -6085,6 +6252,9 @@ test "Product Control cancels a queued compact without entering AgentCore" {
         shutdownTestComposition(runtime) catch unreachable;
         deinitTestComposition(runtime);
     }
+    var persistence: CoverageCommitProbe = .{};
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = persistence.capability();
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -6097,9 +6267,10 @@ test "Product Control cancels a queued compact without entering AgentCore" {
             .max_compacts_per_task = 1,
             .max_tools_per_run = 1,
         },
-        productControlConfiguration(),
+        configuration,
     );
     defer workbench.deinit();
+    defer persistence.record_id = 0;
     try installControlExecution(&workbench);
 
     const blocking_task_id = try workbench.createTask(productControlTaskInput());
@@ -6128,7 +6299,12 @@ test "Product Control cancels a queued compact without entering AgentCore" {
     try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
     const operation_id = try workbench.compactTaskAtBinding(compact_task_id, 1);
     try waitControlSnapshot(&workbench, "\"phase\":\"queued\"");
+    persistence.watch(&workbench, compact_task_id, operation_id, true);
     try workbench.cancelCompact(compact_task_id, operation_id);
+    try persistence.expect(0, "stopping", .pending);
+    try std.testing.expect(persistence.count >= 2);
+    try persistence.expect(persistence.count - 1, "aborted", .excluded);
+    try std.testing.expect(workbench.task_persistence_health == .ready);
     try waitControlSnapshot(&workbench, "\"phase\":\"aborted\"");
     fake_core.lock();
     const compact_calls = fake_core.compact_calls;
@@ -6139,6 +6315,130 @@ test "Product Control cancels a queued compact without entering AgentCore" {
 
     try workbench.cancel(blocking_task_id, blocking_run_id);
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"cancelled\"");
+}
+
+fn expectWorkerFailureCoverage(compact_operation: bool) !void {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var persistence: CoverageCommitProbe = .{};
+    var gate: TerminalPublicationGate = .{};
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = persistence.capability();
+    configuration.change_notifier = .{ .context = &gate, .wake = TerminalPublicationGate.wake };
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_tasks = 2,
+        .max_runs_per_task = 2,
+        .max_compacts_per_task = 1,
+        .max_tools_per_run = 1,
+    }, configuration);
+    defer workbench.deinit();
+    defer persistence.record_id = 0;
+    defer gate.release();
+    defer fake_core.releaseControlled();
+    try installControlExecution(&workbench);
+    const blocker_id = try workbench.createTask(productControlTaskInput());
+    const target_id = try workbench.createTask(productControlTaskInput());
+    try workbench.renameTask(target_id, "worker failure target");
+    if (compact_operation) {
+        _ = try workbench.runTask(target_id, .{ .text = "establish Conversation" });
+        try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+    }
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    _ = try workbench.runTask(blocker_id, .{ .text = "occupy the worker" });
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    const operation_id = if (compact_operation)
+        try workbench.compactTaskAtBinding(target_id, 1)
+    else
+        try workbench.runTask(target_id, .{ .text = "fail the worker handoff" });
+    const task = workbench.task_runtime.find(target_id).?;
+    // Invalidate the Agent reservation before Executor claims the job. This
+    // exercises the actual beginRunOutcome failure / executePreparedCompact
+    // error branches, rather than a failed Core terminal result.
+    var access = try task.runtime.acquireAccess();
+    if (compact_operation) {
+        try access.cancelPreparedCompact(operation_id);
+        gate.arm(.{ .compact = task_state.findCompact(task.durable.compacts, operation_id).? });
+    } else {
+        try access.cancelPreparedRun(operation_id);
+        gate.arm(.{ .run = task_state.findRun(task.durable.runs, operation_id).? });
+    }
+    access.deinit();
+    fake_core.lock();
+    const run_calls_before = fake_core.run_calls;
+    const compact_calls_before = fake_core.compact_calls;
+    fake_core.unlock();
+    fake_core.releaseControlled();
+    try gate.wait();
+
+    if (compact_operation) {
+        const compact = task_state.findCompact(task.durable.compacts, operation_id).?;
+        const terminal = task_state.compactTerminalPayload(compact).?;
+        try std.testing.expect(terminal.exclude_on_product_terminal);
+        try std.testing.expectEqual(task_state.CompactCause.dependency_contract_failure, terminal.cause.?);
+        try std.testing.expect(!compact.terminal_observed);
+        try std.testing.expect(!task_execution.commitCompactProductTerminal(
+            .{ .project_fn = task_execution.projectSanitized },
+            compact,
+            .compacted,
+            null,
+            .reusable,
+            .{},
+            0,
+            0,
+            "",
+            false,
+            false,
+        ));
+        try std.testing.expect(terminal.exclude_on_product_terminal);
+    } else {
+        const run = task_state.findRun(task.durable.runs, operation_id).?;
+        const terminal = task_state.terminalPayload(run).?;
+        try std.testing.expect(terminal.exclude_on_product_terminal);
+        try std.testing.expectEqual(task_state.RunOutcome.dependency_contract_failure, terminal.outcome);
+        try std.testing.expect(!run.event_stream_finalized);
+        try std.testing.expect(!task_execution.commitRunTerminal(
+            .{ .project_fn = task_execution.projectSanitized },
+            run,
+            .completed,
+            .completed,
+            null,
+            .reusable,
+            "",
+            false,
+            false,
+        ));
+        try std.testing.expect(terminal.exclude_on_product_terminal);
+    }
+    persistence.watch(&workbench, target_id, operation_id, compact_operation);
+    // Deliberately save before any lifecycle reconciliation. Production
+    // publication and the real writer gate are both exercised here.
+    try product_control.TestSupport.commitTaskHistory(&workbench);
+    try persistence.expect(0, if (compact_operation) "compacting" else "running", .pending);
+    try workbench.drainAgentEvents();
+    try std.testing.expect(persistence.count >= 2);
+    try persistence.expect(persistence.count - 1, "failed", .excluded);
+    try std.testing.expect(workbench.task_persistence_health == .ready);
+    fake_core.lock();
+    const run_calls_after = fake_core.run_calls;
+    const compact_calls_after = fake_core.compact_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(run_calls_before, run_calls_after);
+    try std.testing.expectEqual(compact_calls_before, compact_calls_after);
+}
+
+test "Product Control coverage saves a worker begin failure before its terminal event drain" {
+    try expectWorkerFailureCoverage(false);
+}
+
+test "Product Control coverage saves a worker compact call error before terminal observation" {
+    try expectWorkerFailureCoverage(true);
 }
 
 test "Product Control shutdown terminates a waiting UI Run before joining workers" {

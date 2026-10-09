@@ -240,7 +240,6 @@ pub fn executeRun(context: *anyopaque) void {
         .run => |value| value,
         .failure => |failure| {
             run.agent_handoff.store(.finishing, .release);
-            run.coverage = .excluded;
             commitBeginFailure(job.projector, run, failure);
             publishAutomaticTitleFallback(run);
             job.notifier.notify();
@@ -292,7 +291,6 @@ pub fn cancelRun(context: *anyopaque) void {
         else => unreachable,
     };
     cancelPreparedRunOrPanic(job.sessionAccess(), run.id);
-    run.coverage = .excluded;
     _ = commitRunTerminal(
         job.projector,
         run,
@@ -305,6 +303,7 @@ pub fn cancelRun(context: *anyopaque) void {
         },
         "",
         false,
+        true,
     );
     publishAutomaticTitleFallback(run);
     job.notifier.notify();
@@ -319,7 +318,6 @@ pub fn executeCompact(context: *anyopaque) void {
     compact.agent_handoff.store(.running, .release);
     var terminal = job.sessionAccess().executePreparedCompact(compact.id) catch |err| {
         compact.agent_handoff.store(.finishing, .release);
-        compact.coverage = .excluded;
         _ = commitCompactProductTerminal(
             job.projector,
             compact,
@@ -331,6 +329,7 @@ pub fn executeCompact(context: *anyopaque) void {
             0,
             "",
             false,
+            true,
         );
         job.notifier.notify();
         return;
@@ -357,7 +356,6 @@ pub fn cancelCompact(context: *anyopaque) void {
     _ = compact.pending_interruption.cmpxchgStrong(.none, .app_shutdown, .acq_rel, .acquire);
     const interruption = policy.pendingExternalInterruption(compact);
     cancelPreparedCompactOrPanic(job.sessionAccess(), compact.id);
-    compact.coverage = .excluded;
     _ = commitCompactProductTerminal(
         job.projector,
         compact,
@@ -369,6 +367,7 @@ pub fn cancelCompact(context: *anyopaque) void {
         0,
         "",
         false,
+        true,
     );
     job.notifier.notify();
 }
@@ -465,11 +464,13 @@ pub fn commitRunTerminal(
     session_disposition: agent.SessionDisposition,
     diagnostic: []const u8,
     source_diagnostic_truncated: bool,
+    exclude_on_product_terminal: bool,
 ) bool {
     std.debug.assert(state.isTerminalPhase(phase));
     if (run.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
         const projected = projector.project(run.terminal_diagnostic, diagnostic, run.redaction_secret);
         run.terminal_payload = .{
+            .exclude_on_product_terminal = exclude_on_product_terminal,
             .phase = phase,
             .outcome = outcome,
             .cause = cause,
@@ -500,6 +501,7 @@ fn commitAgentTerminal(projector: TextProjector, run: *state.RunRecord, result: 
         result.session_disposition_at_completion,
         result.diagnostic(),
         result.diagnostic_truncated,
+        false,
     );
 }
 
@@ -514,6 +516,7 @@ fn commitBeginFailure(projector: TextProjector, run: *state.RunRecord, failure: 
         failure.session_disposition,
         "",
         false,
+        true,
     );
 }
 
@@ -539,6 +542,7 @@ fn commitCompactTerminal(
         result.after_context_tokens,
         result.diagnostic(),
         result.diagnostic_truncated,
+        false,
     );
 }
 
@@ -553,6 +557,7 @@ pub fn commitCompactProductTerminal(
     after_context_tokens: u64,
     diagnostic: []const u8,
     source_diagnostic_truncated: bool,
+    exclude_on_product_terminal: bool,
 ) bool {
     std.debug.assert(state.isTerminalCompactPhase(phase));
     if (compact.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
@@ -562,6 +567,7 @@ pub fn commitCompactProductTerminal(
             compact.redaction_secret,
         );
         compact.terminal_payload = .{
+            .exclude_on_product_terminal = exclude_on_product_terminal,
             .phase = phase,
             .cause = cause,
             .before_context_tokens = before_context_tokens,
