@@ -9,6 +9,8 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { readNativePackageManifest } from "./package-metadata.mjs";
 
 import {
   defaultWindowsTimestampUrl,
@@ -45,16 +47,23 @@ function guiExecutableBytes(size = 512, machine = 0x8664) {
 }
 
 test("Windows distributions derive exact target and artifact identities", () => {
+  const manifest = readNativePackageManifest(
+    fileURLToPath(new URL("../", import.meta.url)),
+  );
+  const artifactStem = `${manifest.identity.executableName}-${manifest.metadata.version}`;
   const x64 = windowsDistributionForArchitecture("x64");
   const arm64 = windowsDistributionForArchitecture("arm64");
   assert.equal(x64.targetId, "x86_64-windows-gnu");
   assert.equal(x64.peMachine, 0x8664);
   assert.equal(x64.innoArchitecture, "x64compatible");
-  assert.equal(x64.installerArtifactName, "metawork-0.2.0-windows-x64.exe");
+  assert.equal(x64.installerArtifactName, `${artifactStem}-windows-x64.exe`);
   assert.equal(arm64.targetId, "aarch64-windows-gnu");
   assert.equal(arm64.peMachine, 0xaa64);
   assert.equal(arm64.innoArchitecture, "arm64");
-  assert.equal(arm64.installerArtifactName, "metawork-0.2.0-windows-arm64.exe");
+  assert.equal(
+    arm64.installerArtifactName,
+    `${artifactStem}-windows-arm64.exe`,
+  );
   assert.throws(
     () => windowsDistributionForArchitecture("x86"),
     /expected x64 or arm64/u,

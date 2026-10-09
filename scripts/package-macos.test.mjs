@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { readNativePackageManifest } from "./package-metadata.mjs";
 
 import {
   buildDeveloperIdRequirement,
@@ -32,16 +33,18 @@ const teamId = "Z4T2BLNJ8X";
 const distributionIdentityName = `Developer ID Application: Developer Name (${teamId})`;
 
 test("distribution DMG metadata comes from the Native product manifest", () => {
-  assert.deepEqual(localPackageMetadata, {
-    displayName: "MetaWork",
-    version: "0.2.0",
-  });
+  const manifest = readNativePackageManifest(
+    fileURLToPath(new URL("../", import.meta.url)),
+  );
+  const artifactStem = `${manifest.identity.executableName}-${manifest.metadata.version}`;
+  assert.deepEqual(localPackageMetadata, manifest.metadata);
+  assert.deepEqual(localProductIdentity, manifest.identity);
   assert.deepEqual(macosDistributionForAgentCoreTarget("aarch64-macos"), {
     artifact: "arm64",
-    diskImageName: "metawork-0.2.0-macos-arm64.dmg",
+    diskImageName: `${artifactStem}-macos-arm64.dmg`,
     diskImagePath: fileURLToPath(
       new URL(
-        "../zig-out/package/metawork-0.2.0-macos-arm64.dmg",
+        `../zig-out/package/${artifactStem}-macos-arm64.dmg`,
         import.meta.url,
       ),
     ),
@@ -50,7 +53,7 @@ test("distribution DMG metadata comes from the Native product manifest", () => {
   });
   assert.equal(
     macosDistributionForAgentCoreTarget("x86_64-macos").diskImageName,
-    "metawork-0.2.0-macos-x64.dmg",
+    `${artifactStem}-macos-x64.dmg`,
   );
   assert.throws(
     () => macosDistributionForAgentCoreTarget("x86_64-windows-gnu"),
