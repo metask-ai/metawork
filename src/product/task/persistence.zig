@@ -1566,6 +1566,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         .usage = usageFromWire(wire.usage),
         .terminal_publication = .init(.published),
         .terminal_payload = .{
+            .exclude_on_product_terminal = false,
             .phase = phase,
             .outcome = outcome,
             .cause = cause,
@@ -1843,6 +1844,7 @@ fn restoreCompact(
         .after_run_id = wire.after_run_id,
         .terminal_publication = .init(.published),
         .terminal_payload = .{
+            .exclude_on_product_terminal = false,
             .phase = if (interrupted)
                 .interrupted
             else

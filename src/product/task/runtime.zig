@@ -700,6 +700,7 @@ pub const PreparedRun = struct {
                 .reusable,
                 "",
                 false,
+                true,
             );
             run_record.terminal_observed = true;
             task_state.freezeRunElapsedMs(run_record, self.effects.run_clock.now());
@@ -772,6 +773,7 @@ pub const PreparedCompact = struct {
                 0,
                 "",
                 false,
+                true,
             );
             compact.terminal_observed = true;
             self.task.runtime.active_operation = .none;
@@ -3822,6 +3824,8 @@ pub const Runtime = struct {
                             task,
                             terminal.session_disposition_at_completion,
                         );
+                        if (terminal.exclude_on_product_terminal and compact.coverage == .pending)
+                            compact.coverage = .excluded;
                         compact.terminal_observed = true;
                     }
                     task.runtime.active_operation = .none;
