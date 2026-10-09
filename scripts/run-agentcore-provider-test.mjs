@@ -414,6 +414,13 @@ const server = createServer((request, response) => {
           `${activeProvider.name} request body was not serialized`,
         );
       if (hostMode) {
+        // Gemini's model is already checked by the exact request path above.
+        if (activeProvider.name !== "gemini")
+          assert.equal(
+            payload.model,
+            activeProvider.model,
+            "Host Run must preserve the selected model",
+          );
         const prompt = JSON.stringify(
           payload.instructions ??
             payload.system ??

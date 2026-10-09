@@ -1516,7 +1516,6 @@ pub const Session = struct {
             _ = self.agent_runtime.notifyEventConsumer();
             return terminal;
         }
-        self.core_call_in_progress = true;
         const input = &self.run_input.?;
         const has_images = input.* == .multimodal and input.multimodal.has_images;
         self.unlock();
@@ -1532,6 +1531,17 @@ pub const Session = struct {
         time_block.text = sdk.bytesView(time_text);
         options.context_blocks = @ptrCast(&time_block);
         options.context_block_count = 1;
+        // Platform sampling is pre-Core preparation. Cancellation or close
+        // during that unlocked work must converge before entering Core.
+        self.lock();
+        if (self.cancel_requested or self.state == .closing) {
+            const terminal = self.finishBeforeCoreCallLocked();
+            self.unlock();
+            _ = self.agent_runtime.notifyEventConsumer();
+            return terminal;
+        }
+        self.core_call_in_progress = true;
+        self.unlock();
         // A successful Core call must still populate and validate the complete
         // fixed-layout result. Zero initialization makes a missing write fail
         // deterministically on `struct_size` instead of exposing undefined data.

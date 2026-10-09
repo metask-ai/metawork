@@ -75,6 +75,125 @@ test "Run time source missing is an initialization error" {
     try std.testing.expectError(error.InvalidLimits, lifecycle.Runtime.initWithApi(std.testing.io, std.testing.allocator, &fake_api, .{ .max_sessions = 1 }));
 }
 
+const RunSamplingGate = struct {
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    entered: bool = false,
+    released: bool = false,
+
+    fn sample(context: ?*anyopaque) lifecycle.RunTimeSnapshot {
+        const self: *RunSamplingGate = @ptrCast(@alignCast(context.?));
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        self.entered = true;
+        self.condition.broadcast(std.testing.io);
+        while (!self.released) self.condition.waitUncancelable(std.testing.io, &self.mutex);
+        return .{ .unix_ms = 1791509400000 };
+    }
+
+    fn waitUntilEntered(self: *RunSamplingGate) void {
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        while (!self.entered) self.condition.waitUncancelable(std.testing.io, &self.mutex);
+    }
+
+    fn release(self: *RunSamplingGate) void {
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        self.released = true;
+        self.condition.broadcast(std.testing.io);
+    }
+};
+
+fn expectInterruptedRunSampling(action: enum { cancel, close, shutdown }) !void {
+    const Execution = struct {
+        run: lifecycle.Run,
+        terminal: ?lifecycle.TerminalResult = null,
+
+        fn execute(self: *@This()) void {
+            self.terminal = self.run.execute();
+            self.run.deinit();
+        }
+    };
+    const Teardown = struct {
+        fn close(session: *lifecycle.Session) void {
+            session.close(.session_close) catch unreachable;
+        }
+
+        fn shutdown(runtime: *lifecycle.Runtime) void {
+            runtime.shutdown() catch unreachable;
+        }
+    };
+    fake_core.reset();
+    var gate = RunSamplingGate{};
+    const runtime = try createTestRuntime(.{ .max_sessions = 1, .run_time_source = .{ .context = &gate, .sample_fn = RunSamplingGate.sample } });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    var execution = Execution{ .run = try session.beginRun(try session.prepareRun(.{ .text = "interrupt while sampling" })) };
+    const control = execution.run.control();
+    defer if (execution.terminal) |*terminal| terminal.deinit();
+    {
+        const execution_thread = try std.Thread.spawn(.{}, Execution.execute, .{&execution});
+        defer execution_thread.join();
+        defer gate.release();
+        gate.waitUntilEntered();
+
+        var teardown_thread: ?std.Thread = null;
+        defer if (teardown_thread) |thread| {
+            gate.release();
+            thread.join();
+        };
+        switch (action) {
+            .cancel => {
+                var lease = control.tryAcquireLease().?;
+                defer lease.deinit();
+                try std.testing.expectEqual(lifecycle.TerminationRequestResult.requested, lease.requestTermination(.{ .interrupted = .user_cancel }));
+            },
+            .close => teardown_thread = try std.Thread.spawn(.{}, Teardown.close, .{session}),
+            .shutdown => teardown_thread = try std.Thread.spawn(.{}, Teardown.shutdown, .{runtime}),
+        }
+        if (action != .cancel) try session.waitForState(.closing);
+        fake_core.lock();
+        const abort_calls = fake_core.abort_calls;
+        const session_destroyed = fake_core.session_destroyed;
+        const runtime_destroyed = fake_core.runtime_destroyed;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, 0), abort_calls);
+        try std.testing.expectEqual(@as(usize, 0), session_destroyed);
+        try std.testing.expectEqual(@as(usize, 0), runtime_destroyed);
+    }
+    const terminal = &execution.terminal.?;
+    const expected: lifecycle.ExternalInterruption = switch (action) {
+        .cancel => .user_cancel,
+        .close => .session_close,
+        .shutdown => .app_shutdown,
+    };
+    try std.testing.expectEqual(lifecycle.TerminationSignal{ .interrupted = expected }, terminal.termination_signal.?);
+    try std.testing.expectEqual(@as(?u32, null), terminal.raw_status_code);
+    fake_core.lock();
+    const run_calls = fake_core.run_calls;
+    const abort_calls = fake_core.abort_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 0), run_calls);
+    try std.testing.expectEqual(@as(usize, 0), abort_calls);
+    try std.testing.expectEqual(if (action == .cancel) lifecycle.SessionState.idle else .closed, session.snapshot().state);
+}
+
+test "Run time sampling cancellation stays pre-Core" {
+    try expectInterruptedRunSampling(.cancel);
+}
+
+test "Run time sampling close waits for execution without entering Core" {
+    try expectInterruptedRunSampling(.close);
+}
+
+test "Run time sampling shutdown waits for execution without entering Core" {
+    try expectInterruptedRunSampling(.shutdown);
+}
+
 const CheckpointCollector = struct {
     bytes: [256]u8 = undefined,
     len: usize = 0,
