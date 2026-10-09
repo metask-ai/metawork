@@ -999,6 +999,7 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     session.addImport("metask_agentcore", sdk);
+    session.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     session.addImport("agent_protocol", agent_protocol);
     session.addImport("agent_model_binding", agent_model_binding);
     session.addImport("event_pump", event_pump);

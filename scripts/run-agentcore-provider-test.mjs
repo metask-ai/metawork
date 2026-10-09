@@ -305,6 +305,46 @@ function userParts(provider, payload) {
     });
 }
 
+function systemPrompt(payload) {
+  const content =
+    payload.instructions ??
+    payload.system ??
+    payload.systemInstruction?.parts ??
+    payload.system_instruction?.parts ??
+    (payload.input ?? payload.messages ?? [])
+      .filter((message) => message.role === "system")
+      .map((message) => message.content);
+  return typeof content === "string"
+    ? content
+    : (content ?? [])
+        .flat(Infinity)
+        .map((part) => (typeof part === "string" ? part : part.text))
+        .join("\n");
+}
+
+function assertHostIdentity(payload, child) {
+  const prompt = systemPrompt(payload);
+  assert.ok(
+    prompt.includes(
+      child
+        ? "你是 MetaWork 内执行当前委派任务的子代理。"
+        : "你是 MetaWork 内的 AI 助手。",
+    ),
+  );
+  assert.ok(!prompt.includes("Metask AgentCore"));
+  assert.ok(prompt.includes("不主动介绍底层执行内核、模型名称或模型厂商"));
+  assert.ok(prompt.includes("仅在用户明确询问相关技术信息时"));
+  assert.ok(
+    prompt.includes(`You are powered by the model ${activeProvider.model}.`),
+  );
+  assert.ok(prompt.includes("Platform:"));
+  assert.ok(prompt.includes("Primary working directory:"));
+  // Only reject obsolete product identity, not legitimate mentions in history.
+  assert.ok(!prompt.includes("MetaCode is a local, single-binary CLI agent"));
+  if (child) assert.ok(!prompt.includes("你是 MetaWork 内的 AI 助手。"));
+  else assert.ok(prompt.includes("When you encounter an obstacle"));
+}
+
 function sseFor(provider) {
   return provider.response
     .map((chunk) =>
@@ -355,7 +395,21 @@ const server = createServer((request, response) => {
         throw new Error(
           `${activeProvider.name} request body was not serialized`,
         );
-      if (requestCount > 0) {
+      if (hostMode) assertHostIdentity(payload, requestCount >= 8);
+      if (hostMode && requestCount >= 6) {
+        const users = userParts(activeProvider, payload);
+        const latest = JSON.stringify(users.at(-1));
+        assert.ok(
+          latest.includes(
+            requestCount === 6
+              ? "Legacy identity restore."
+              : requestCount === 7
+                ? "Legacy identity persisted."
+                : "METAWORK_ISOLATED_IDENTITY_PROOF",
+          ),
+        );
+      }
+      if (requestCount > 0 && requestCount < 6) {
         const users = userParts(activeProvider, payload);
         const expectedUsers = [
           [{ text: "Reply with one short sentence." }],
@@ -406,6 +460,17 @@ try {
   const consumerRoot = path.join(scratch, "zig-consumer");
   await mkdir(consumerRoot);
   if (hostMode) {
+    const skillRoot = path.join(
+      consumerRoot,
+      ".agents",
+      "skills",
+      "identity-proof",
+    );
+    await mkdir(skillRoot, { recursive: true });
+    await writeFile(
+      path.join(skillRoot, "SKILL.md"),
+      "---\nname: Identity proof\ndescription: Verify isolated MetaWork identity\ndisable-model-invocation: true\ncontext: fork\n---\nMETAWORK_ISOLATED_IDENTITY_PROOF\nReply with one short sentence.\n",
+    );
     await writeFile(
       path.join(consumerRoot, "image.png"),
       Buffer.from(png, "base64"),
@@ -541,9 +606,11 @@ pub fn build(b: *std.Build) void {
       providerFailures.push(
         new Error(`${provider.name}: ${requestError.message}`),
       );
-    else if (requestCount !== 6)
+    else if (requestCount !== (hostMode ? 10 : 6))
       providerFailures.push(
-        new Error(`${provider.name}: expected 6 requests, got ${requestCount}`),
+        new Error(
+          `${provider.name}: expected ${hostMode ? 10 : 6} requests, got ${requestCount}`,
+        ),
       );
     else
       console.log(

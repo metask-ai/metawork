@@ -43,12 +43,26 @@ fn success(runtime: *agent.Runtime, session: *agent.Session, input: agent.RunInp
         return error.HostRunFailed;
     }
     var events: usize = 0;
+    var manifests: usize = 0;
     while (runtime.takeEvent()) |event| {
         var owned = event;
-        owned.deinit();
+        defer owned.deinit();
+        var parsed = try agent.decodeCoreEvent(runtime.allocator, owned.json);
+        defer parsed.deinit();
+        switch (parsed.value) {
+            .known => |known| switch (known) {
+                .prompt_manifest => |manifest| {
+                    try validateManifest(manifest, input == .skill);
+                    manifests += 1;
+                },
+                else => {},
+            },
+            .unknown => {},
+        }
         events += 1;
     }
     if (events == 0) return error.MissingHostEvents;
+    if ((id == 1 or input == .skill) and manifests == 0) return error.MissingPromptManifest;
     return id;
 }
 
@@ -162,5 +176,125 @@ pub fn main(init: std.process.Init) !void {
         } else |err| if (err != error.InvalidRunInput) return err;
     }
     _ = try success(runtime, restored.session, .{ .text = "Continue after rejection." });
+    try restored.session.close(.session_close);
+    try runtime.releaseClosedSession(restored.session);
+    checkpoint.len = 0;
+    checkpoint.offset = 0;
+    try legacyIdentity(runtime, options, limits, &checkpoint);
+    checkpoint.len = 0;
+    checkpoint.offset = 0;
+    try isolatedIdentity(runtime, options, limits, &checkpoint);
+    std.debug.print("Host identity, legacy restore and isolated Skill inheritance passed: {s}\n", .{provider});
     std.debug.print("Host multimodal history and checkpoint acceptance passed: {s}\n", .{provider});
+}
+
+fn validateManifest(manifest: anytype, child: bool) !void {
+    var identity_seen = false;
+    var env_seen = false;
+    var safety_seen = false;
+    var system_seen = false;
+    for (manifest.sections) |section| {
+        if (std.mem.eql(u8, section.id, if (child) "metacodes:subagent" else "metacodes:identity")) identity_seen = section.origin == .host;
+        if (std.mem.eql(u8, section.id, "metacodes:env")) env_seen = section.class == .generated;
+        if (std.mem.eql(u8, section.id, "metacodes:safety-policy")) safety_seen = section.class == .locked and section.origin == .kernel;
+        if (std.mem.eql(u8, section.id, "metacodes:system")) system_seen = section.class == .locked and section.origin == .kernel;
+    }
+    if (!identity_seen or !env_seen or (!child and (!safety_seen or !system_seen))) return error.InvalidPromptManifest;
+}
+
+// Simulate a historical unprofiled Session using the existing internal Runtime
+// handle in this fixture only. Production never clears identity or edits bytes.
+fn legacyIdentity(runtime: *agent.Runtime, options: agent.SessionOpenOptions, limits: agent.CheckpointLimits, checkpoint: *Checkpoint) !void {
+    const session = try runtime.createSession(options);
+    const status = try agent.Status.fromCode(runtime.api.sessionControl().setPromptProfile()(session.raw, null, null));
+    if (status != .ok) return error.LegacyProfileFixtureFailed;
+    var exported = try session.exportCheckpoint(limits, .{ .context = checkpoint, .write_fn = Checkpoint.write }, 0, 0, options.model_binding.target.model);
+    defer exported.deinit();
+    if (exported != .success) return error.LegacyExportFailed;
+    const description = exported.success.description;
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+    const restored = try runtime.restoreSessionRoute(.{
+        .session = options,
+        .checkpoint_limits = limits,
+        .source = .{ .context = checkpoint, .read_fn = Checkpoint.read },
+        .expectation = .{
+            .logical_session_id = description.session_id,
+            .checkpoint_generation = exported.success.checkpoint.generation,
+            .last_run_id = 0,
+            .last_compact_id = 0,
+            .model = options.model_binding.target.model,
+        },
+    });
+    const last_run = try success(runtime, restored.session, .{ .text = "Legacy identity restore." });
+    checkpoint.len = 0;
+    checkpoint.offset = 0;
+    var upgraded = try restored.session.exportCheckpoint(limits, .{ .context = checkpoint, .write_fn = Checkpoint.write }, last_run, 0, options.model_binding.target.model);
+    defer upgraded.deinit();
+    if (upgraded != .success) return error.UpgradedExportFailed;
+    const upgraded_description = upgraded.success.description;
+    try restored.session.close(.session_close);
+    try runtime.releaseClosedSession(restored.session);
+    var continued = options;
+    continued.operation_id_floor = .{ .last_run_id = last_run };
+    const roundtrip = try runtime.restoreSessionRoute(.{
+        .session = continued,
+        .checkpoint_limits = limits,
+        .source = .{ .context = checkpoint, .read_fn = Checkpoint.read },
+        .expectation = .{
+            .logical_session_id = upgraded_description.session_id,
+            .checkpoint_generation = upgraded.success.checkpoint.generation,
+            .last_run_id = last_run,
+            .last_compact_id = 0,
+            .model = options.model_binding.target.model,
+        },
+    });
+    _ = try success(runtime, roundtrip.session, .{ .text = "Legacy identity persisted." });
+    try roundtrip.session.close(.session_close);
+    try runtime.releaseClosedSession(roundtrip.session);
+}
+
+fn isolatedIdentity(runtime: *agent.Runtime, options: agent.SessionOpenOptions, limits: agent.CheckpointLimits, checkpoint: *Checkpoint) !void {
+    var catalog = try runtime.querySkillCatalog(.{
+        .canonical_user_home = options.canonical_user_home,
+        .target = .{ .workspace = .{ .canonical_root = options.workspace.canonical_root, .epoch = "identity-proof" } },
+    });
+    defer catalog.deinitProjection();
+    defer runtime.releaseSkillCatalog(catalog.lease) catch unreachable;
+    if (catalog.projection.skills.len != 1) return error.MissingIsolatedSkill;
+    const skill = catalog.projection.skills[0];
+    var bound = options;
+    bound.workspace_epoch = "identity-proof";
+    bound.skill_catalog = catalog.lease;
+    bound.skill_policy = .{ .granted_skill_ids = &.{skill.skill_id} };
+    const session = try runtime.createSession(bound);
+    const input = agent.RunInput{ .skill = .{
+        .skill_id = skill.skill_id,
+        .catalog_revision = catalog.projection.revision,
+        .argument_values = &.{},
+    } };
+    const last_run = try success(runtime, session, input);
+    var exported = try session.exportCheckpoint(limits, .{ .context = checkpoint, .write_fn = Checkpoint.write }, last_run, 0, bound.model_binding.target.model);
+    defer exported.deinit();
+    if (exported != .success) return error.SkillExportFailed;
+    const description = exported.success.description;
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+    bound.operation_id_floor = .{ .last_run_id = description.last_run_id, .last_compact_id = description.last_compact_id };
+    const restored = try runtime.restoreSessionRoute(.{
+        .session = bound,
+        .checkpoint_limits = limits,
+        .source = .{ .context = checkpoint, .read_fn = Checkpoint.read },
+        .expectation = .{
+            .logical_session_id = description.session_id,
+            .checkpoint_generation = exported.success.checkpoint.generation,
+            .last_run_id = description.last_run_id,
+            .last_compact_id = description.last_compact_id,
+            .model = bound.model_binding.target.model,
+        },
+    });
+    if (restored.report.health != .complete) return error.SkillRestoreDegraded;
+    _ = try success(runtime, restored.session, input);
+    try restored.session.close(.session_close);
+    try runtime.releaseClosedSession(restored.session);
 }
