@@ -8,9 +8,14 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Marker,
     [Parameter(Mandatory = $true)]
-    [int]$ResponseClientX,
+    [double]$TargetClientX,
     [Parameter(Mandatory = $true)]
-    [int]$ResponseClientY,
+    [double]$TargetClientY,
+    [Parameter(Mandatory = $true)]
+    [double]$ViewportWidth,
+    [Parameter(Mandatory = $true)]
+    [double]$ViewportHeight,
+    [switch]$CodeOnly,
     [string]$ExpectedCode
 )
 
@@ -29,6 +34,15 @@ public static class MetaWorkClipboardProbe {
     public struct Point { public int X; public int Y; }
 
     [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint source, uint target, bool attach);
+    [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr window);
+
+    [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr window);
 
     [DllImport("user32.dll")]
@@ -39,6 +53,12 @@ public static class MetaWorkClipboardProbe {
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetAncestor(IntPtr window, uint flags);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr window, out Rect rect);
 
     [DllImport("user32.dll")]
     public static extern bool ClientToScreen(IntPtr window, ref Point point);
@@ -128,6 +148,7 @@ function Invoke-MetaWorkButton([System.Windows.Automation.AutomationElement]$but
         $scrollPattern.ScrollIntoView()
         Start-Sleep -Milliseconds 180
     }
+    Restore-MetaWorkForeground
     $button.SetFocus()
     Start-Sleep -Milliseconds 100
     $rectangle = $button.Current.BoundingRectangle
@@ -187,10 +208,26 @@ function Clear-MetaWorkClipboard() {
 }
 
 function Restore-MetaWorkForeground() {
-    if ([MetaWorkClipboardProbe]::GetForegroundWindow() -ne $window) {
+    $foreground = [MetaWorkClipboardProbe]::GetForegroundWindow()
+    if ($foreground -eq $window) { return }
+    $targetProcessId = [uint32]0
+    $foregroundProcessId = [uint32]0
+    $currentThread = [MetaWorkClipboardProbe]::GetCurrentThreadId()
+    $targetThread = [MetaWorkClipboardProbe]::GetWindowThreadProcessId($window, [ref]$targetProcessId)
+    $foregroundThread = [MetaWorkClipboardProbe]::GetWindowThreadProcessId($foreground, [ref]$foregroundProcessId)
+    $targetAttached = [MetaWorkClipboardProbe]::AttachThreadInput($currentThread, $targetThread, $true)
+    $foregroundAttached = $false
+    try {
+        if ($foregroundThread -ne 0 -and $foregroundThread -ne $targetThread -and $foregroundThread -ne $currentThread) {
+            $foregroundAttached = [MetaWorkClipboardProbe]::AttachThreadInput($foregroundThread, $targetThread, $true)
+        }
+        [MetaWorkClipboardProbe]::BringWindowToTop($window) | Out-Null
         [MetaWorkClipboardProbe]::SetForegroundWindow($window) | Out-Null
-        Start-Sleep -Milliseconds 40
+    } finally {
+        if ($foregroundAttached) { [MetaWorkClipboardProbe]::AttachThreadInput($foregroundThread, $targetThread, $false) | Out-Null }
+        if ($targetAttached) { [MetaWorkClipboardProbe]::AttachThreadInput($currentThread, $targetThread, $false) | Out-Null }
     }
+    Start-Sleep -Milliseconds 40
 }
 
 function Wait-MetaWorkCopyFeedback(
@@ -215,7 +252,11 @@ function Wait-MetaWorkCopyFeedback(
             Start-Sleep -Milliseconds 40
         }
     }
-    throw "MetaWork did not expose successful copy feedback; lastName=$name; foreground=$([MetaWorkClipboardProbe]::GetForegroundWindow())"
+    $foregroundProcessId = [uint32]0
+    $foreground = [MetaWorkClipboardProbe]::GetForegroundWindow()
+    [MetaWorkClipboardProbe]::GetWindowThreadProcessId($foreground, [ref]$foregroundProcessId) | Out-Null
+    $foregroundOwner = if ($foregroundProcessId -ne 0) { (Get-Process -Id $foregroundProcessId).ProcessName } else { 'none' }
+    throw "MetaWork did not expose successful copy feedback; lastName=$name; foreground=$foreground; owner=$foregroundOwner"
 }
 
 function Read-MetaWorkClipboard([scriptblock]$accept) {
@@ -262,14 +303,33 @@ if (-not [MetaWorkClipboardProbe]::SetWindowPos($window, [IntPtr](-1), 0, 0, 0, 
 [MetaWorkClipboardProbe]::SetForegroundWindow($window) | Out-Null
 Start-Sleep -Milliseconds 100
 
-Clear-MetaWorkClipboard
-$responsePoint = New-Object MetaWorkClipboardProbe+Point
-$responsePoint.X = $ResponseClientX
-$responsePoint.Y = $ResponseClientY
-if (-not [MetaWorkClipboardProbe]::ClientToScreen($window, [ref]$responsePoint)) {
-    throw 'Could not map the measured response-copy point to the test window'
+if ($ViewportWidth -le 0 -or $ViewportHeight -le 0) { throw 'Clipboard input requires observed viewport bounds' }
+$client = New-Object MetaWorkClipboardProbe+Rect
+if (-not [MetaWorkClipboardProbe]::GetClientRect($window, [ref]$client)) { throw 'Could not read clipboard client bounds' }
+$targetPoint = New-Object MetaWorkClipboardProbe+Point
+$targetPoint.X = [int]($TargetClientX * ($client.Right - $client.Left) / $ViewportWidth)
+$targetPoint.Y = [int]($TargetClientY * ($client.Bottom - $client.Top) / $ViewportHeight)
+if (-not [MetaWorkClipboardProbe]::ClientToScreen($window, [ref]$targetPoint)) {
+    throw 'Could not map the measured clipboard point to the test window'
 }
-$responseButton = Find-MetaWorkButton '^(\u590d\u5236\u56de\u590d|Copy response)$' ([System.Windows.Point]::new($responsePoint.X, $responsePoint.Y))
+$measuredPoint = [System.Windows.Point]::new($targetPoint.X, $targetPoint.Y)
+if ($CodeOnly) {
+    if ([string]::IsNullOrEmpty($ExpectedCode)) { throw 'Code probe requires expected code' }
+    Clear-MetaWorkClipboard
+    $codeButton = Find-MetaWorkButton '^(\u590d\u5236\u4ee3\u7801|Copy code)$' $measuredPoint
+    Invoke-MetaWorkButton $codeButton
+    Wait-MetaWorkCopyFeedback $codeButton
+    $plainOnly = Read-MetaWorkClipboard {
+        param($plain, $html, $formats)
+        return $plain -eq $ExpectedCode -and [string]::IsNullOrEmpty($html)
+    }
+    if ($plainOnly.Plain -ne $ExpectedCode -or -not [string]::IsNullOrEmpty($plainOnly.Html)) {
+        throw 'Windows code copy did not produce exact plain-only code'
+    }
+    Write-Output 'clipboard=true code=true html=false'
+} else {
+Clear-MetaWorkClipboard
+$responseButton = Find-MetaWorkButton '^(\u590d\u5236\u56de\u590d|Copy response)$' $measuredPoint
 Invoke-MetaWorkButton $responseButton
 Wait-MetaWorkCopyFeedback $responseButton
 $rich = Read-MetaWorkClipboard {
@@ -300,30 +360,13 @@ if ($html -match '(?i)<(?:button|script|img)\b') {
     throw 'Windows clipboard HTML included forbidden active or product elements'
 }
 
-$codeVerified = $false
-if (-not [string]::IsNullOrEmpty($ExpectedCode)) {
-    Clear-MetaWorkClipboard
-    $codeButton = Find-MetaWorkButton '^(\u590d\u5236\u4ee3\u7801|Copy code)$'
-    Invoke-MetaWorkButton $codeButton
-    Wait-MetaWorkCopyFeedback $codeButton
-    $plainOnly = Read-MetaWorkClipboard {
-        param($plain, $html, $formats)
-        return $plain -eq $ExpectedCode -and [string]::IsNullOrEmpty($html)
-    }
-    if ($plainOnly.Plain -ne $ExpectedCode -or
-        -not [string]::IsNullOrEmpty($plainOnly.Html)) {
-        throw 'Windows code copy did not produce exact plain-only code'
-    }
-    $codeVerified = $true
-}
-
 Write-Output (
-    'clipboard=true bytes={0} html=true marker={1} code={2} formats={3}' -f
+    'clipboard=true bytes={0} html=true marker={1} formats={2}' -f
     $ExpectedBytes,
     $Marker,
-    $codeVerified.ToString().ToLowerInvariant(),
     ($formats -join ',')
 )
+}
 } finally {
     if (-not $wasTopmost) {
         [MetaWorkClipboardProbe]::SetWindowPos($window, [IntPtr](-2), 0, 0, 0, 0, 0x0013) | Out-Null

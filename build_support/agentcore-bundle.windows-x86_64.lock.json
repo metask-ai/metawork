@@ -2,9 +2,9 @@
   "schema_version": 1,
   "vendor": "metask",
   "name": "agentcore",
-  "version": "0.2.0-dev+95980e10aadd",
+  "version": "0.5.0-dev+eeff8dc69607",
   "source": {
-    "commit": "95980e10aaddf5634468c07b5d1e107e21290905",
+    "commit": "eeff8dc69607555b3ad564fa25714b78a8175e15",
     "dirty": false
   },
   "toolchain": {
@@ -33,8 +33,24 @@
   "contract": {
     "binary_abi_status": "experimental",
     "binary_abi_version": 1,
-    "binary_abi_revision": 15,
+    "binary_abi_revision": 18,
     "binary_abi_table_size": 64
+  },
+  "shared_library": {
+    "path": "lib/metask_agentcore.dll",
+    "entry_point": "metask_agentcore_get_api",
+    "install_name": null,
+    "needed": [
+      "ADVAPI32.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "KERNEL32.dll",
+      "ntdll.dll",
+      "CRYPT32.dll"
+    ]
   },
   "runtime_assets": [
     {
@@ -50,7 +66,11 @@
   "files": [
     {
       "path": "lib/metask_agentcore.lib",
-      "sha256": "afbca45352711f584eaad09ae0bfff022589c738b3c9015164339506575ee2f9"
+      "sha256": "343909454845d1d6ca8fab8e6d43f9552592459fe58535f3c9df76ca19206723"
+    },
+    {
+      "path": "lib/metask_agentcore.dll",
+      "sha256": "13ecec2c61cba3433bf54f79096260116f8fcf3e9812dd9fade196b8ae409fc9"
     },
     {
       "path": "bin/rg.exe",
@@ -62,7 +82,7 @@
     },
     {
       "path": "include/metask/agentcore.h",
-      "sha256": "cda77288a3f3f95c433481affb5248190b9ecbd1176ca4cde052540c846b41bc"
+      "sha256": "6e1ae56764d9ad305932f1d5c207c3e1d77ed873bc8702000bef670d9d8df9d1"
     },
     {
       "path": "bindings/zig/build.zig",
@@ -70,27 +90,27 @@
     },
     {
       "path": "bindings/zig/build.zig.zon",
-      "sha256": "c2d2be4e512357280cb80c603df8dc3f9ade6a4c9ff94beaa266783ae095e582"
+      "sha256": "13abe7f3524f9d54a5f2d7a8a5296d7a044c1e19f672b7a8b047be3c5cffa41e"
     },
     {
       "path": "bindings/zig/src/root.zig",
-      "sha256": "84f1a11d11cd93c7f661b36e25e1a73d8bf2b4ad09d56676bb1fadd8aa223cd8"
+      "sha256": "850670e2bbb2de109f179057bf61a916c3afec27f90677dc5a23c0436ef198ac"
     },
     {
       "path": "bindings/zig/src/protocol.zig",
-      "sha256": "a8c1cf59a62b5958f2ef642e02d030c44bac96fbd0f5e79e7d8e302ca99704d9"
+      "sha256": "05b1141bd0f1df106e6a8bb07b2e2e5a52d34bd9337645c2b9dccecd01254d18"
     },
     {
       "path": "bindings/zig/src/types.zig",
-      "sha256": "357d19f4f8f5baeee7eeb9e2cc8f6462f1875cbd14a9969dc789447b5b1d311c"
+      "sha256": "8802aea5dd5c06522158f69c63b71861fcb361e11f169a9c19842a89e1eb257e"
     },
     {
       "path": "bindings/rust/Cargo.toml",
-      "sha256": "fd75d1494440554825bc37223a5be68982ced6c0b73cd31f55ea99dd7a7f89ae"
+      "sha256": "d2fb7bb5bccc6fdd260645a6f16b43af2e547f81b136f623449ff21b7fdebe7b"
     },
     {
       "path": "bindings/rust/Cargo.lock",
-      "sha256": "b2c6ebf21bc999acda24a7069b78df9b885f821e621a7f60655328a07777dc67"
+      "sha256": "3cade7b86c1a6f3c005ee1609a27c5bbd9c0dfdde07e7a1c79a9d171c55b801c"
     },
     {
       "path": "bindings/rust/link.cfg",
@@ -98,23 +118,23 @@
     },
     {
       "path": "bindings/rust/build.rs",
-      "sha256": "ae8fc0a01df7dceece2f7eeb70a022af8d0d16876e2fefe963eb3a8ab982ee97"
+      "sha256": "740f955d63dc3dc592fde8e83d9458ce4903a263a38a32b348aa0dd0785eeab9"
     },
     {
       "path": "bindings/rust/src/lib.rs",
-      "sha256": "e73f273d488b4666f8c407f60709fa358e034ad365fa10bd2ff96ec4fa9aa7ba"
+      "sha256": "8e78c64563b421da72207aaf2a6d53a3158f2cfca0c081b9bbd9f31f9196f81b"
     },
     {
       "path": "bindings/rust/src/raw.rs",
-      "sha256": "7ad761826c38266575049522d3b736b032e99c8f93e6a09e1eeb395cde4e90f5"
+      "sha256": "9f937c9bec950c581350410d75b125744c95af35fe90aaa6c02c9c7ca0e85765"
     },
     {
       "path": "bindings/rust/examples/link_probe.rs",
-      "sha256": "47e8c1478f9ad8efbeb39b6c46d093303aa9afcae03a62873a46559fb05a033b"
+      "sha256": "42c9821c105745780888ea918723aa49daa2c1644579dbdbd5fa5764fc9b2f57"
     },
     {
       "path": "README.md",
-      "sha256": "f57020185c325dfc3a8dbc352c497f3507fe613fa98ea05a1980640d2d2f86ce"
+      "sha256": "c46f2ab68aedb430a69156b11477da48cbe65d17a8bd7d9996d7039590c9995b"
     }
   ]
 }

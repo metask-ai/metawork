@@ -25,6 +25,7 @@ import {
 
 const fixtureFiles = [
   "lib/metask_agentcore.lib",
+  "lib/metask_agentcore.dll",
   "include/metask/agentcore.h",
   "bindings/zig/build.zig",
   "bindings/zig/build.zig.zon",
@@ -89,8 +90,14 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 15,
+      binary_abi_revision: 18,
       binary_abi_table_size: 64,
+    },
+    shared_library: {
+      path: "lib/metask_agentcore.dll",
+      entry_point: "metask_agentcore_get_api",
+      install_name: null,
+      needed: ["KERNEL32.dll"],
     },
     runtime_assets: [
       {
@@ -107,6 +114,19 @@ async function fixture(t, mutateManifest = () => {}) {
   };
   mutateManifest(manifest);
   if (manifest.target.os === "macos") {
+    manifest.shared_library = {
+      path: "lib/libmetask_agentcore.dylib",
+      entry_point: "metask_agentcore_get_api",
+      install_name: "@rpath/libmetask_agentcore.dylib",
+      needed: ["/usr/lib/libSystem.B.dylib"],
+    };
+    manifest.files.find(
+      (file) => file.path === "lib/metask_agentcore.dll",
+    ).path = "lib/libmetask_agentcore.dylib";
+    await rename(
+      path.join(root, "lib/metask_agentcore.dll"),
+      path.join(root, "lib/libmetask_agentcore.dylib"),
+    );
     manifest.runtime_assets[0].path = "bin/rg";
     manifest.files.find((file) => file.path === "bin/rg.exe").path = "bin/rg";
     await rename(path.join(root, "bin/rg.exe"), path.join(root, "bin/rg"));
@@ -179,7 +199,7 @@ async function seedCanonicalBundle(repositoryRoot) {
   return { storageRoot, target };
 }
 
-test("accepts a locked revision 15 Windows x64 GNU candidate", async (t) => {
+test("accepts a locked revision 18 Windows x64 GNU candidate", async (t) => {
   const { root, manifest } = await fixture(t);
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
@@ -189,7 +209,7 @@ test("accepts a locked revision 15 Windows x64 GNU candidate", async (t) => {
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts a locked revision 15 Windows ARM64 GNU candidate", async (t) => {
+test("accepts a locked revision 18 Windows ARM64 GNU candidate", async (t) => {
   const { root, manifest } = await fixture(t, (manifest) => {
     manifest.target = {
       id: "aarch64-windows-gnu",
@@ -208,7 +228,7 @@ test("accepts a locked revision 15 Windows ARM64 GNU candidate", async (t) => {
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts a locked revision 15 macOS arm64 candidate", async (t) => {
+test("accepts a locked revision 18 macOS arm64 candidate", async (t) => {
   const candidate = await fixture(t, (manifest) => {
     manifest.target = {
       id: "aarch64-macos",
@@ -241,7 +261,7 @@ test("accepts a locked revision 15 macOS arm64 candidate", async (t) => {
   assert.equal(path.basename(result.libraryPath), "libmetask_agentcore.a");
 });
 
-test("accepts a locked revision 15 macOS x64 candidate when cross-building on arm64 macOS", async (t) => {
+test("accepts a locked revision 18 macOS x64 candidate when cross-building on arm64 macOS", async (t) => {
   const candidate = await fixture(t, (manifest) => {
     manifest.target = {
       id: "x86_64-macos",
@@ -388,7 +408,7 @@ test("staged preflight refuses a retired revision lock", async (t) => {
   );
   await assert.rejects(
     verifyStagedAgentCoreBundle(root, injectedVerification),
-    /requires a revision 15 repository lock/,
+    /requires a revision 18 repository lock/,
   );
 });
 
@@ -441,7 +461,7 @@ test("rejects incorrect ABI table size and legacy contract fields", async (t) =>
 test("rejects missing and extra payload entries", async (t) => {
   const missing = await fixture(t, (manifest) => {
     manifest.files = manifest.files.filter(
-      (file) => file.path !== fixtureFiles[1],
+      (file) => file.path !== "include/metask/agentcore.h",
     );
   });
   await assert.rejects(
@@ -927,5 +947,58 @@ test("verify-staged reports a missing canonical bundle", async (t) => {
   await assert.rejects(
     verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification),
     /staged AgentCore bundle x86_64-windows-gnu is missing/,
+  );
+});
+
+test("requires the exact shared library declaration and both pinned libraries", async (t) => {
+  for (const mutate of [
+    (m) => {
+      delete m.shared_library;
+    },
+    (m) => {
+      m.shared_library.extra = true;
+    },
+    (m) => {
+      m.shared_library.entry_point = "other_entry";
+    },
+    (m) => {
+      m.shared_library.path = "lib/other.dll";
+    },
+    (m) => {
+      m.shared_library.install_name = "other";
+    },
+    (m) => {
+      m.shared_library.needed = [null];
+    },
+    (m) => {
+      m.shared_library.needed.push(m.shared_library.needed[0]);
+    },
+    (m) => {
+      m.files = m.files.filter((f) => f.path !== "lib/metask_agentcore.dll");
+    },
+    (m) => {
+      m.files = m.files.filter((f) => f.path !== "lib/metask_agentcore.lib");
+    },
+  ]) {
+    const candidate = await fixture(t, mutate);
+    await assert.rejects(
+      validateAgentCoreBundle(candidate.root, injectedChecks),
+      /manifest|shared library|shared_library|checksum-pinned/,
+    );
+  }
+  const missing = await fixture(t);
+  await rm(path.join(missing.root, "lib/metask_agentcore.dll"));
+  await assert.rejects(
+    validateAgentCoreBundle(missing.root, injectedChecks),
+    /filesystem contains missing/,
+  );
+  const tampered = await fixture(t);
+  await writeFile(
+    path.join(tampered.root, "lib/metask_agentcore.dll"),
+    "tampered",
+  );
+  await assert.rejects(
+    validateAgentCoreBundle(tampered.root, injectedChecks),
+    /checksum mismatch/,
   );
 });

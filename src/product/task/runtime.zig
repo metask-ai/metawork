@@ -2302,7 +2302,10 @@ pub const Runtime = struct {
             const decision = task_deletion.decide(task.deletion, .{
                 .checkpoint_pending = checkpoint_store_available and
                     task.runtime.worker_leases.hasLive(),
-                .close_operation_running = task.runtime.close_completion.load(.acquire) == .running or
+                // A requested close may still be waiting for worker leases;
+                // deletion must not issue a second detach in that interval.
+                .close_operation_running = task.runtime.close_requested or
+                    task.runtime.close_completion.load(.acquire) == .running or
                     task.runtime.close_thread != null,
                 .unfinalized_terminal_events = task_state.hasUnfinalizedTerminalEvents(task),
                 .session = session,

@@ -137,6 +137,11 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
             .retry_notice,
             .stream_done,
             => true,
+            .prompt_manifest => |manifest| {
+                for (manifest.sections) |section|
+                    if (!std.unicode.utf8ValidateSlice(section.id)) return false;
+                return true;
+            },
             .run_state => |state| {
                 if (state.run_id == 0) return false;
                 for (state.in_flight_tools) |tool|
@@ -186,6 +191,7 @@ fn uiRequestTextValid(request: sdk.UiRequest) bool {
             permission.canonical_arguments_digest,
             permission.arguments_json,
             if (permission.candidate) |candidate| candidate.rule_id else "",
+            if (permission.candidate) |candidate| candidate.target orelse "" else "",
         }),
     };
 }
@@ -208,7 +214,7 @@ pub fn providerKindCode(value: Protocol) u32 {
 pub fn protocolKindCode(value: Protocol) u32 {
     return switch (value) {
         .openai_responses => wire.OPENAI_PROTOCOL_RESPONSES,
-        // ABI revision 15 uses code zero for these three explicit protocols.
+        // ABI revision 18 uses code zero for these three explicit protocols.
         // That wire encoding does not define a MetaWork protocol default.
         .openai_chat_completions, .anthropic_messages, .gemini_native => wire.PROTOCOL_DEFAULT,
     };

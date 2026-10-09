@@ -740,10 +740,10 @@ export type PendingUi = {
   availableChoices: PermissionChoice[];
   policyGeneration: string;
   canonicalArgumentsDigest: string;
-  candidate: {
-    ruleId: string;
-    scope: "exact_arguments";
-  } | null;
+  candidate:
+    | { ruleId: string; scope: "exact_arguments" }
+    | { ruleId: string; scope: "file_target"; target: string }
+    | null;
 };
 
 export type PermissionChoice =

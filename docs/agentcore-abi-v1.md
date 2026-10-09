@@ -32,6 +32,8 @@ ABI revision、function-table layout、required entry、symbol 或稳定外部�
 
 schema 1 manifest 必须包含 `runtime_assets`，当前精确接受一个 ripgrep declaration：`name/version/revision/path/upstream/license/role` 全部必填，不接受未知字段。Windows 路径为 `bin/rg.exe`，macOS 为 `bin/rg`；执行文件与 `bin/ripgrep-LICENSE-MIT` 必须同时在 `files` 中由 checksum 锁定。具体版本、revision 与 checksum 只由 manifest/lock 拥有。开发构建与正式 runtime package 必须部署这两份 payload，不从环境或其他源码树获取替代品。
 
+schema 1 manifest 还必须包含精确的 `shared_library = { path, entry_point, install_name, needed }` declaration。Windows 路径为 `lib/metask_agentcore.dll` 且 install name 为 null；macOS 路径为 `lib/libmetask_agentcore.dylib` 且 install name 为 `@rpath/libmetask_agentcore.dylib`；entry point 仅为 `metask_agentcore_get_api`。静态库与共享库都必须由 `files` checksum 锁定，loader dependencies 由 exact lock 拥有。MetaWork 继续通过官方 Zig package 静态链接；接受共享库 payload 不建立运行时动态加载路径或 DLL fallback。
+
 上游 Runtime 仍拥有 ripgrep resolver；其 `RG_BIN`、`PATH`、Host 同目录及系统位置选择语义不由 MetaWork 重实现。随包 checksum 证明部署身份，不证明在存在环境覆盖时实际执行的路径；当前 ABI 没有 Runtime-scoped 工具路径注入或所选路径证明。发布验证必须在不依赖外部 rg 的环境执行真实 Glob/Grep。MetaWork 不通过 Agent 改写进程全局环境，也不声称已实现运行时工具路径强制锁定。
 
 正式 `agent/` 只通过 bundle 的官方 `bindings/zig` package 获得 ABI types、typed protocol、module 与 link graph。MetaWork 不复制 header、raw enum、event tag、Permission/Skill/MCP schema、facade code 或 SDK validation；官方 SDK 是这些协议形状的唯一真源。bundle 散文不能放宽 manifest、lock、官方 header 或 bindings，互相冲突时按 dependency defect fail closed。
@@ -41,10 +43,10 @@ schema 1 manifest 必须包含 `runtime_assets`，当前精确接受一个 ripgr
 接受的 ABI identity 为：
 
 - `binary_abi_version = 1`；
-- `binary_abi_revision = 15`；
+- `binary_abi_revision = 18`；
 - discovery symbol 仅为 `metask_agentcore_get_api`；
 - root `binary_abi_table_size = 64`；
-- Runtime、Session、SessionControl、Skill、MCP 子表大小依次为 24、40、64、32、40 bytes；
+- Runtime、Session、SessionControl、Skill、MCP 子表大小依次为 24、40、72、32、40 bytes；
 - root 与全部五个子表均为 mandatory；struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零。
 
 `ApiV1` surface 为：
@@ -52,17 +54,19 @@ schema 1 manifest 必须包含 `runtime_assets`，当前精确接受一个 ripgr
 - root：owned buffer release，以及 Runtime、Session、SessionControl、Skill、MCP 子表指针；
 - Runtime：create、destroy；
 - Session：create、destroy、typed Run、Run abort；
-- SessionControl：restore、describe、model、Permission rules、manual compact/abort、checkpoint export；
+- SessionControl：restore、describe、model、Permission rules、manual compact/abort、checkpoint export、idle-only prompt profile replacement；
 - Skill：Workspace catalog resolve/release、Skill policy bind；
 - MCP：Runtime configuration apply/refresh/describe、Session selection replacement。
 
 每个 required table、entry 与 reserved field 都必须通过官方 discovery 和 SDK validation。ABI 中存在 entry 只证明 Host 必须能正确理解该表面，不代表 MetaWork 产品已经开放对应能力。
 
+revision 18 的 `SessionCreateConfigV1.prompt_profile` 与 `RunOptionsV1.context_blocks/context_block_count` 分别占用原 reserved words，其他 reserved 字段必须继续为零；不得用旧 struct layout 调用新 ABI。`set_prompt_profile` 是 mandatory entry，但 MetaWork 当前不开放 prompt customization，Session 创建传 null profile，每次 Run 传 null blocks 和零 count。官方 SDK 完整校验 `describe.prompt` 与 `prompt_manifest` observation，Agent 明确消费该 observation 而不投影或持久化它；这不建立产品 prompt editor 或提示审计能力。
+
 Runtime 只有一个 `create` entry，第二个参数是可空 `RuntimePluginConfigV1`；不得为不同 plugin 配置建立第二条 create ABI 路径。MCP `apply_configuration` 接受完整 declarative replacement：Host 必须使用非零 desired revision，并校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 转移 replacement ownership，`SUPERSEDED` 或 `REJECTED` 不得取得该 ownership，malformed report 必须 fail closed。
 
-当前 `SessionHostConfigV1.protocol_kind_code` 将调用方明确选择的协议映射为对应 ABI 编码：`openai_responses` 使用 `OPENAI_PROTOCOL_RESPONSES`；`openai_chat_completions`、`anthropic_messages` 和 `gemini_native` 使用 `PROTOCOL_DEFAULT`。这里的 `PROTOCOL_DEFAULT` 只表示 ABI 编码，不定义 MetaWork 的默认协议；协议选择合同见 [Completion 架构](completion-architecture.md#3-provider-与协议)。`RunInputV1` 的 parts/count 与 reserved layout 由官方 helper 构造；revision 15 只定义文本与图片 part，不定义 document part、文档输入上限或文档能力拒绝 status。公共输入、ownership 和预算合同见 [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入)。
+当前 `SessionHostConfigV1.protocol_kind_code` 将调用方明确选择的协议映射为对应 ABI 编码：`openai_responses` 使用 `OPENAI_PROTOCOL_RESPONSES`；`openai_chat_completions`、`anthropic_messages` 和 `gemini_native` 使用 `PROTOCOL_DEFAULT`。这里的 `PROTOCOL_DEFAULT` 只表示 ABI 编码，不定义 MetaWork 的默认协议；协议选择合同见 [Completion 架构](completion-architecture.md#3-provider-与协议)。`RunInputV1` 的 parts/count 与 reserved layout 由官方 helper 构造；revision 18 只定义文本与图片 part，不定义 document part、文档输入上限或文档能力拒绝 status。公共输入、ownership 和预算合同见 [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入)。
 
-ABI revision 15 将 `image_input_unsupported` 定义为本次 Run 含图片时的 admission 拒绝；在 Text、Skill、仅文本 parts、compact、mutation、export、describe 或 restore 路径出现时属于 dependency contract failure。不能因为 SDK 认识该值就在错误的 operation 或输入形状上放行。
+ABI revision 18 将 `image_input_unsupported` 定义为本次 Run 含图片时的 admission 拒绝；在 Text、Skill、仅文本 parts、compact、mutation、export、describe 或 restore 路径出现时属于 dependency contract failure。不能因为 SDK 认识该值就在错误的 operation 或输入形状上放行。
 
 本次 revision hard cut 不提供旧 checkpoint 的兼容适配、迁移或跨 revision 恢复承诺；不主动删除或改写已有产品历史或 checkpoint，无法恢复时沿现有 typed failure 路径明确失败。当前 revision 的 export/restore 完整性与生命周期验证仍为必需。
 

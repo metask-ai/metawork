@@ -5587,6 +5587,44 @@ test "Product Control refreshes an idle Task from committed policy after an enab
     try std.testing.expectEqual(@as(usize, 1), refreshes);
 }
 
+test "Task deletion waits for a requested Session close before its worker starts" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, productControlConfiguration());
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    const task_id = try workbench.createTask(productControlTaskInput());
+    try workbench.setTaskArchived(task_id, true);
+    const task = workbench.task_runtime.find(task_id).?;
+    var lease = try task.runtime.worker_leases.acquire();
+    defer if (lease.isActive()) lease.deinit();
+
+    try workbench.deleteTask(task_id);
+    try std.testing.expect(task.runtime.close_requested);
+    try std.testing.expect(task.runtime.hasAttachedSession());
+    try std.testing.expect(task.runtime.close_thread == null);
+    workbench.syncLifecycle();
+    workbench.syncLifecycle();
+    try std.testing.expectEqual(.deleting, task.deletion);
+    try std.testing.expect(task.runtime.close_requested);
+    try std.testing.expect(task.runtime.close_thread == null);
+
+    lease.deinit();
+    try waitTaskDeleted(&workbench, task_id);
+    fake_core.lock();
+    const destroyed = fake_core.session_destroyed;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), destroyed);
+}
+
 test "Task deletion retries an off-thread Session release failure" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 2 });

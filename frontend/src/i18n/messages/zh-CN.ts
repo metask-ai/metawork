@@ -782,6 +782,10 @@ export const zhCN: Record<MessageId, string> = {
   "approval.arguments": "参数",
   "approval.deny": "拒绝",
   "approval.allow_once": "允许一次",
+  "approval.allow_session_file": "本会话允许该工具修改此文件",
+  "approval.deny_session_file": "本会话拒绝该工具修改此文件",
+  "approval.scope_file_session":
+    "仅本次，或本会话允许 {tool} 修改同一文件，包含不同内容。",
   "approval.allow_session": "本会话允许相同参数",
   "approval.deny_session": "本会话拒绝相同参数",
   "approval.more_allow_options": "更多允许选项",

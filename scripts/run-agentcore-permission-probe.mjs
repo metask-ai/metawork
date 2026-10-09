@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import {
   access,
@@ -186,6 +187,69 @@ const effects = {
       content: "session-grant",
     },
   },
+  session_grant_changed: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(outside, "session-grant.txt"),
+      content: "changed-content",
+    },
+  },
+  session_grant_other_file: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(outside, "session-grant-other.txt"),
+      content: "other-file",
+    },
+  },
+  session_grant_other_tool: {
+    tool: "Edit",
+    arguments: {
+      file_path: path.join(outside, "session-grant.txt"),
+      old_string: "changed-content",
+      new_string: "edited-content",
+    },
+  },
+  session_grant_denied: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(outside, "session-denied.txt"),
+      content: "denied-content",
+    },
+  },
+  session_grant_denied_changed: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(outside, "session-denied.txt"),
+      content: "different-denied-content",
+    },
+  },
+  restore_deny_seed: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(outside, "restore-denied.txt"),
+      content: "denied-before-restore",
+    },
+  },
+  restore_deny_changed: {
+    tool: "Write",
+    arguments: {
+      file_path: path.join(outside, "restore-denied.txt"),
+      content: "denied-after-restore",
+    },
+  },
+  restore_grant_changed: [
+    {
+      tool: "Read",
+      arguments: { file_path: path.join(outside, "restore-grant.txt") },
+    },
+    {
+      tool: "Write",
+      arguments: {
+        file_path: path.join(outside, "restore-grant.txt"),
+        content: "restored-changed-content",
+      },
+    },
+  ],
   unavailable_accept_write: {
     tool: "Write",
     arguments: {
@@ -508,11 +572,21 @@ pub fn build(b: *std.Build) void {
     { cwd: consumerRoot, label: "isolated AgentCore permission probe" },
   );
   if (requestError) throw requestError;
-  const expectedRequestCount = process.platform === "win32" ? 53 : 57;
+  // Four additional Runs plus a Read before the restored Write exercise scope and tool admission.
+  const expectedRequestCount = process.platform === "win32" ? 66 : 70;
   if (requestCount !== expectedRequestCount)
     throw new Error(
       `permission probe observed ${requestCount} provider requests instead of ${expectedRequestCount}`,
     );
+
+  assert.equal(
+    await readFile(path.join(outside, "session-grant.txt"), "utf8"),
+    "changed-content",
+  );
+  assert.equal(
+    await readFile(path.join(outside, "restore-grant.txt"), "utf8"),
+    "restored-changed-content",
+  );
 
   const expectedPresent = [
     path.join(workspace, "accept-inside.txt"),
@@ -545,6 +619,9 @@ pub fn build(b: *std.Build) void {
       : [path.join(workspace, ".git", "config")]),
     path.join(workspace, "deny-full-bash.txt"),
     path.join(outside, "unavailable.txt"),
+    path.join(outside, "session-grant-other.txt"),
+    path.join(outside, "session-denied.txt"),
+    path.join(outside, "restore-denied.txt"),
     path.join(workspace, "shell-disabled.txt"),
     path.join(workspace, "deny-over-ask-allow.txt"),
     ...(process.platform === "win32"

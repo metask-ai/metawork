@@ -1179,6 +1179,7 @@ pub fn applyEvent(
     };
     var durable_boundary = false;
     switch (event) {
+        .prompt_manifest => return .unchanged,
         .thinking_chunk => {
             if (!setObservedActivity(run, .thinking)) return .unchanged;
         },

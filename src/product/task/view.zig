@@ -308,12 +308,15 @@ pub fn writePendingUi(
     order: u64,
     permission: agent.PermissionRequest,
 ) Error!void {
+    const candidate_target = if (permission.candidate) |candidate| candidate.target else null;
+    const target_sensitive = if (candidate_target) |target| text.containsSensitive(target) else false;
+    const visible_candidate = if (target_sensitive) null else permission.candidate;
     writer.print("{{\"requestId\":\"{d}\",\"runId\":\"{d}\",\"order\":\"{d}\",\"redacted\":{},", .{
         request_id,
         run_id,
         order,
         text.containsSensitive(permission.tool.name) or
-            text.containsSensitive(permission.arguments_json),
+            text.containsSensitive(permission.arguments_json) or target_sensitive,
     }) catch return error.SnapshotTooLarge;
     writer.print("\"kind\":\"permission\",\"toolNamespace\":\"{s}\",\"tool\":", .{
         @tagName(permission.tool.namespace),
@@ -328,7 +331,7 @@ pub fn writePendingUi(
     var wrote_choice = false;
     for (permission.responses) |choice| {
         if (choice == .allow_session or choice == .deny_session) {
-            if (permission.candidate == null) continue;
+            if (visible_candidate == null) continue;
         }
         if (wrote_choice) writer.writeByte(',') catch return error.SnapshotTooLarge;
         jsonValue(writer, @tagName(choice)) catch return error.SnapshotTooLarge;
@@ -339,11 +342,16 @@ pub fn writePendingUi(
     }) catch return error.SnapshotTooLarge;
     try text.writeJson(writer, permission.canonical_arguments_digest);
     writer.writeAll(",\"candidate\":") catch return error.SnapshotTooLarge;
-    if (permission.candidate) |candidate| {
+    if (visible_candidate) |candidate| {
         writer.writeAll("{\"ruleId\":") catch return error.SnapshotTooLarge;
         try text.writeJson(writer, candidate.rule_id);
-        writer.print(",\"scope\":\"{s}\"}}", .{@tagName(candidate.scope)}) catch
+        writer.print(",\"scope\":\"{s}\"", .{@tagName(candidate.scope)}) catch
             return error.SnapshotTooLarge;
+        if (candidate.target) |target| {
+            writer.writeAll(",\"target\":") catch return error.SnapshotTooLarge;
+            try text.writeJson(writer, target);
+        }
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }

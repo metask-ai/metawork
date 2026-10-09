@@ -46,6 +46,14 @@ export function ApprovalPanel({
   const choices = new Set(pending.availableChoices);
   const sessionChoiceAvailable =
     choices.has("allow_session") || choices.has("deny_session");
+  const fileCandidate =
+    pending.candidate?.scope === "file_target" ? pending.candidate : null;
+  const allowSessionLabel = t(
+    fileCandidate ? "approval.allow_session_file" : "approval.allow_session",
+  );
+  const denySessionLabel = t(
+    fileCandidate ? "approval.deny_session_file" : "approval.deny_session",
+  );
   const diagnostic = diagnoseRepeatedPermission(task, pending);
 
   const respondPermission = (permission: PermissionChoice) =>
@@ -93,9 +101,14 @@ export function ApprovalPanel({
       <DetailField label={t("approval.scope")}>
         <p className="approval-scope-value">
           {sessionChoiceAvailable
-            ? t("approval.scope_session_available")
+            ? fileCandidate
+              ? t("approval.scope_file_session", { tool: pending.tool })
+              : t("approval.scope_session_available")
             : t("approval.scope_once")}
         </p>
+        {fileCandidate && (
+          <p className="approval-scope-value">{fileCandidate.target}</p>
+        )}
         {sessionChoiceAvailable && (
           <p className="approval-scope-expiry">
             {t("approval.session_expiry")}
@@ -161,7 +174,7 @@ export function ApprovalPanel({
                         className="approval-choice-menu-item"
                         onClick={() => respondPermission("deny_session")}
                       >
-                        {t("approval.deny_session")}
+                        {denySessionLabel}
                       </Menu.Item>
                     </Menu.Popup>
                   </Menu.Positioner>
@@ -177,7 +190,7 @@ export function ApprovalPanel({
               disabled={actionDisabled}
               onClick={() => respondPermission("deny_session")}
             >
-              {t("approval.deny_session")}
+              {denySessionLabel}
             </Button>
           )
         )}
@@ -211,7 +224,7 @@ export function ApprovalPanel({
                         className="approval-choice-menu-item"
                         onClick={() => respondPermission("allow_session")}
                       >
-                        {t("approval.allow_session")}
+                        {allowSessionLabel}
                       </Menu.Item>
                     </Menu.Popup>
                   </Menu.Positioner>
@@ -227,7 +240,7 @@ export function ApprovalPanel({
               disabled={actionDisabled}
               onClick={() => respondPermission("allow_session")}
             >
-              {t("approval.allow_session")}
+              {allowSessionLabel}
             </Button>
           )
         )}

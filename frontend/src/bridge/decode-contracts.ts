@@ -3071,19 +3071,41 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
       item.candidate === null
         ? null
         : (() => {
-            const candidateItem = object(item.candidate, `${path}.candidate`, [
-              "ruleId",
-              "scope",
-            ]);
-            return {
-              ruleId: nonEmptyString(
-                candidateItem.ruleId,
-                `${path}.candidate.ruleId`,
-              ),
-              scope: enumValue(candidateItem.scope, `${path}.candidate.scope`, [
-                "exact_arguments",
-              ] as const),
-            };
+            const scope = enumValue(
+              (item.candidate as JsonObject)?.scope,
+              `${path}.candidate.scope`,
+              ["exact_arguments", "file_target"] as const,
+            );
+            const candidateItem = object(
+              item.candidate,
+              `${path}.candidate`,
+              scope === "file_target"
+                ? ["ruleId", "scope", "target"]
+                : ["ruleId", "scope"],
+            );
+            const ruleId = nonEmptyString(
+              candidateItem.ruleId,
+              `${path}.candidate.ruleId`,
+            );
+            if (scope === "file_target") {
+              if (
+                item.toolNamespace !== "builtin" ||
+                (item.tool !== "Write" && item.tool !== "Edit")
+              )
+                fail(
+                  `${path}.candidate.scope`,
+                  "file_target requires built-in Write or Edit",
+                );
+              return {
+                ruleId,
+                scope,
+                target: nonEmptyString(
+                  candidateItem.target,
+                  `${path}.candidate.target`,
+                ),
+              };
+            }
+            return { ruleId, scope };
           })();
     if (
       candidate === null &&

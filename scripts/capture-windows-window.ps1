@@ -10,7 +10,11 @@ param(
     [switch]$OpenSettings,
     [switch]$SelectFirstTask,
     [switch]$OpenSearch,
-    [switch]$OpenBashDetail
+    [switch]$OpenBashDetail,
+    [double]$TaskClientX,
+    [double]$TaskClientY,
+    [double]$ViewportWidth,
+    [double]$ViewportHeight
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +24,12 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class MetaWorkVisualCapture {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Point { public int X; public int Y; }
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr window, out Rect rect);
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr window, ref Point point);
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect {
         public int Left;
@@ -107,7 +117,14 @@ function Invoke-MetaWorkControlKey([byte]$virtualKey) {
 }
 
 if ($SelectFirstTask) {
-    Invoke-MetaWorkClick ($rect.Left + 120) ($rect.Top + 320)
+    if ($ViewportWidth -le 0 -or $ViewportHeight -le 0) { throw 'Task capture requires observed viewport coordinates' }
+    $client = New-Object MetaWorkVisualCapture+Rect
+    if (-not [MetaWorkVisualCapture]::GetClientRect($window, [ref]$client)) { throw 'Cannot read visual client bounds' }
+    $point = New-Object MetaWorkVisualCapture+Point
+    $point.X = [int]($TaskClientX * ($client.Right - $client.Left) / $ViewportWidth)
+    $point.Y = [int]($TaskClientY * ($client.Bottom - $client.Top) / $ViewportHeight)
+    if (-not [MetaWorkVisualCapture]::ClientToScreen($window, [ref]$point)) { throw 'Cannot map visual client coordinates' }
+    Invoke-MetaWorkClick $point.X $point.Y
     Start-Sleep -Milliseconds 450
 }
 

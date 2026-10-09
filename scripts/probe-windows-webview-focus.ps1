@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
-    [int]$ProcessId
+    [int]$ProcessId,
+    [Parameter(Mandatory = $true)]
+    [string]$ComposerName
 )
 
 $ErrorActionPreference = 'Stop'
@@ -137,7 +139,7 @@ finally {
 }
 Start-Sleep -Milliseconds 250
 
-$condition = New-Object System.Windows.Automation.OrCondition(
+$inputType = New-Object System.Windows.Automation.OrCondition(
     (New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Edit
@@ -145,6 +147,15 @@ $condition = New-Object System.Windows.Automation.OrCondition(
     (New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::ComboBox
+    ))
+)
+# The approval selector is also a writable ComboBox. Bind to the actual
+# Composer name read from the DOM before sending any keyboard or ValuePattern input.
+$condition = New-Object System.Windows.Automation.AndCondition(
+    $inputType,
+    (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        $ComposerName
     ))
 )
 $composer = Find-MetaWorkComposerInput $window $condition 10000
