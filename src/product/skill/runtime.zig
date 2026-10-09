@@ -2089,6 +2089,10 @@ test "asset ownership follows the registered Workspace id across fencing epochs"
 
 test "retiring a Workspace id drops policy and provenance in both stores and keeps durable transactions" {
     var harness: TestHarness = .{};
+    var staging = std.testing.tmpDir(.{});
+    defer staging.cleanup();
+    var staging_path_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const staging_path_len = try staging.dir.realPath(std.testing.io, &staging_path_storage);
     var storage = std.testing.tmpDir(.{});
     defer storage.cleanup();
     var enablement_dir = std.testing.tmpDir(.{});
@@ -2097,7 +2101,7 @@ test "retiring a Workspace id drops policy and provenance in both stores and kee
     var runtime = try Runtime.init(std.testing.io, std.testing.allocator, harness.effectPorts(), .{
         .state = .{
             .sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
-            .management = .{ .file_store = &persistence, .staging_root = "/tmp" },
+            .management = .{ .file_store = &persistence, .staging_root = staging_path_storage[0..staging_path_len] },
         },
         .max_workspaces = 2,
         .canonical_user_home = "/home/tester",
