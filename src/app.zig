@@ -424,6 +424,7 @@ fn createAgentRuntime(
 ) !*agent.Runtime {
     return agent.Runtime.init(io, std.heap.c_allocator, .{
         .max_sessions = 50,
+        .run_time_source = run_time_context.source,
         .mcp_input = mcp_input,
         .max_ui_request_bytes = pending_ui_json_capacity,
         .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,

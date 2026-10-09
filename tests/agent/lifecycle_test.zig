@@ -28,6 +28,53 @@ const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
 
+const TestRunClock = struct {
+    snapshot: lifecycle.RunTimeSnapshot = .{},
+    samples: usize = 0,
+
+    fn sample(context: ?*anyopaque) lifecycle.RunTimeSnapshot {
+        const self: *TestRunClock = @ptrCast(@alignCast(context.?));
+        self.samples += 1;
+        return self.snapshot;
+    }
+};
+
+test "Run time sampling occurs at Core execution and refreshes each Run" {
+    fake_core.reset();
+    var clock = TestRunClock{};
+    const runtime = try createTestRuntime(.{ .max_sessions = 1, .run_time_source = .{ .context = &clock, .sample_fn = TestRunClock.sample } });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const run_id = try session.prepareRun(.{ .text = "today" });
+    var run = try session.beginRun(run_id);
+    try std.testing.expectEqual(@as(usize, 0), clock.samples);
+    clock.snapshot = .{ .unix_ms = 1791509400000, .utc_offset_seconds = 28800, .timezone = lifecycle.RunTimeZoneIdentity.init(.iana, "Asia/Shanghai") };
+    var terminal = run.execute();
+    terminal.deinit();
+    run.deinit();
+    try std.testing.expectEqual(@as(usize, 1), clock.samples);
+    try std.testing.expect(std.mem.indexOf(u8, fake_core.run_time_text[0..fake_core.run_time_text_len], "2026-10-09T09:30:00+08:00") != null);
+    while (runtime.takeEvent()) |event| {
+        var owned = event;
+        owned.deinit();
+    }
+    clock.snapshot = .{};
+    var next = try session.beginRun(try session.prepareRun(.{ .text = "now" }));
+    var next_terminal = next.execute();
+    next_terminal.deinit();
+    next.deinit();
+    try std.testing.expectEqual(@as(usize, 2), clock.samples);
+    try std.testing.expect(std.mem.indexOf(u8, fake_core.run_time_text[0..fake_core.run_time_text_len], "Current time for this Run: unavailable") != null);
+}
+
+test "Run time source missing is an initialization error" {
+    fake_core.reset();
+    try std.testing.expectError(error.InvalidLimits, lifecycle.Runtime.initWithApi(std.testing.io, std.testing.allocator, &fake_api, .{ .max_sessions = 1 }));
+}
+
 const CheckpointCollector = struct {
     bytes: [256]u8 = undefined,
     len: usize = 0,
@@ -193,6 +240,7 @@ test "canonical AgentCore refresh invokes the Host MCP connector and returns a b
     }});
     defer input.deinit();
     const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{
+        .run_time_source = lifecycle.RunTimeSource.unavailable,
         .max_sessions = 1,
         .mcp_input = &input,
     });
@@ -218,6 +266,7 @@ test "canonical AgentCore refresh invokes the Host MCP connector and returns a b
 
 test "canonical AgentCore accepts an empty complete MCP Session replacement" {
     const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{
+        .run_time_source = lifecycle.RunTimeSource.unavailable,
         .max_sessions = 1,
     });
     defer {
@@ -303,7 +352,7 @@ test "MCP empty Runtime accepts the initial declarative configuration apply" {
         std.testing.io,
         std.testing.allocator,
         &fake_api,
-        .{ .max_sessions = 1 },
+        .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
     );
     defer {
         runtime.shutdown() catch unreachable;
@@ -361,6 +410,7 @@ test "MCP Runtime declaratively applies a replacement configuration" {
         std.testing.allocator,
         &fake_api,
         .{
+            .run_time_source = lifecycle.RunTimeSource.unavailable,
             .max_sessions = 1,
             .mcp_input = &initial,
         },
@@ -712,7 +762,7 @@ test "Runtime rejects missing revision 18 child tables and entries" {
             std.testing.io,
             std.testing.allocator,
             &api,
-            .{ .max_sessions = 1 },
+            .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
         ),
     );
 
@@ -726,7 +776,7 @@ test "Runtime rejects missing revision 18 child tables and entries" {
             std.testing.io,
             std.testing.allocator,
             &api,
-            .{ .max_sessions = 1 },
+            .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
         ),
     );
 
@@ -740,7 +790,7 @@ test "Runtime rejects missing revision 18 child tables and entries" {
             std.testing.io,
             std.testing.allocator,
             &api,
-            .{ .max_sessions = 1 },
+            .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
         ),
     );
 
@@ -752,7 +802,7 @@ test "Runtime rejects missing revision 18 child tables and entries" {
         std.testing.io,
         std.testing.allocator,
         &api,
-        .{ .max_sessions = 1 },
+        .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
     ));
     session_control_api = fake_api.session_control.?.*;
     session_control_api.struct_size = 64;
@@ -760,7 +810,7 @@ test "Runtime rejects missing revision 18 child tables and entries" {
         std.testing.io,
         std.testing.allocator,
         &api,
-        .{ .max_sessions = 1 },
+        .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
     ));
 
     var mcp_api = api.mcp.?.*;
@@ -773,7 +823,7 @@ test "Runtime rejects missing revision 18 child tables and entries" {
             std.testing.io,
             std.testing.allocator,
             &api,
-            .{ .max_sessions = 1 },
+            .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
         ),
     );
 }
@@ -858,7 +908,7 @@ test "canonical AgentCore resolves additional Skill sources conflicts and Worksp
     defer std.testing.allocator.free(source_a);
     const source_b = try tmp.dir.realPathFileAlloc(std.testing.io, "source-b", std.testing.allocator);
     defer std.testing.allocator.free(source_b);
-    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
+    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 });
     defer {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
@@ -1012,7 +1062,7 @@ test "canonical AgentCore management and Workspace resolve all personal and proj
         roots[index] = try tmp.dir.realPathFileAlloc(std.testing.io, dir, std.testing.allocator);
         root_count += 1;
     }
-    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 });
+    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 });
     defer {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
@@ -1154,7 +1204,7 @@ test "Catalog invalid sources fail before Core and management rejects project so
 test "Catalog additional source allocation failures release all owners and leave Runtime reusable" {
     fake_core.reset();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const runtime = try lifecycle.Runtime.initWithApi(std.testing.io, failing.allocator(), &fake_api, .{ .max_sessions = 1 });
+    const runtime = try lifecycle.Runtime.initWithApi(std.testing.io, failing.allocator(), &fake_api, .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 });
     defer {
         runtime.shutdown() catch unreachable;
         runtime.deinit();
@@ -3635,7 +3685,7 @@ test "Agent Runtime initialization OOM fails before acquiring the Runtime" {
         std.testing.io,
         failing.allocator(),
         &fake_api,
-        .{ .max_sessions = 1 },
+        .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
     ));
     try std.testing.expect(failing.has_induced_failure);
     fake_core.lock();
@@ -3660,7 +3710,7 @@ test "Session creation OOM leaves Runtime reusable and credential process-only" 
         std.testing.io,
         failing.allocator(),
         &fake_api,
-        .{ .max_sessions = 1 },
+        .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
     );
     try registerTestComposition(runtime, executor);
     executor_registered = true;

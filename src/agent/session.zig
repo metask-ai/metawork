@@ -373,6 +373,7 @@ pub const SessionRestoreRoute = struct {
 
 pub const Limits = struct {
     max_sessions: usize,
+    run_time_source: ?RunTimeSource = null,
     /// Consumed exactly once during successful Agent Runtime construction.
     /// Build this input before Runtime init so attributable MCP preparation
     /// failures can select the ordinary empty Runtime path.
@@ -1523,6 +1524,14 @@ pub const Session = struct {
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
         options.max_turns = 16;
+        var time_text_buffer: [session_time_context.max_text_bytes]u8 = undefined;
+        const time_text = session_time_context.format(&time_text_buffer, self.agent_runtime.run_time_source.sample()) catch unreachable;
+        var time_block = std.mem.zeroes(wire.ContextBlockV1);
+        time_block.struct_size = @sizeOf(wire.ContextBlockV1);
+        time_block.label = sdk.bytesView(session_time_context.label);
+        time_block.text = sdk.bytesView(time_text);
+        options.context_blocks = @ptrCast(&time_block);
+        options.context_block_count = 1;
         // A successful Core call must still populate and validate the complete
         // fixed-layout result. Zero initialization makes a missing write fail
         // deterministically on `struct_size` instead of exposing undefined data.

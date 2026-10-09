@@ -305,6 +305,63 @@ function userParts(provider, payload) {
     });
 }
 
+const timeExpectations = [
+  [
+    "Run start time (system local): 2026-10-09T23:59:59+08:00",
+    "System timezone: Asia/Shanghai (IANA)",
+  ],
+  [
+    "Run start time (system local): 2026-10-10T00:00:01+08:00",
+    "System timezone: Asia/Shanghai (IANA)",
+  ],
+  [
+    "Run start time (system local): 2026-10-09T09:00:01-07:00",
+    "System timezone: Pacific Standard Time (Windows)",
+  ],
+  [
+    "Run start time (system local): 2026-10-09T21:45:01+05:45",
+    "System timezone: unavailable; the numeric offset above is known.",
+  ],
+  [
+    "Run start time (UTC): 2026-10-10T01:00:00Z",
+    "System local timezone and offset: unavailable.",
+  ],
+  [
+    "Current time for this Run: unavailable. Do not infer it from earlier Run snapshots.",
+  ],
+];
+
+function verifyHostTime(users) {
+  return users.map((parts, index) => {
+    assert.ok(
+      parts[0]?.text?.startsWith("<system-reminder>"),
+      "Host time must precede the original Run input",
+    );
+    const match = /^<system-reminder>([\s\S]*?)<\/system-reminder>\s*/.exec(
+      parts[0].text,
+    );
+    assert.ok(match, "Host time must use the official Core context wrapper");
+    assert.ok(match[1].includes("# metawork-time-context\n"));
+    for (const expected of timeExpectations[index])
+      assert.ok(
+        match[1].includes(expected),
+        `Run ${index + 1}: missing ${expected}`,
+      );
+    assert.ok(
+      match[1].includes(
+        "Your knowledge cutoff does not indicate the current date.",
+      ),
+    );
+    assert.equal(
+      parts.filter((part) => part.text?.includes("# metawork-time-context\n"))
+        .length,
+      1,
+    );
+    const remaining = parts[0].text.slice(match[0].length);
+    return [...(remaining ? [{ text: remaining }] : []), ...parts.slice(1)];
+  });
+}
+
 function sseFor(provider) {
   return provider.response
     .map((chunk) =>
@@ -318,6 +375,7 @@ function sseFor(provider) {
 let activeProvider = null;
 let requestCount = 0;
 let requestError = null;
+let systemPrompt = null;
 const server = createServer((request, response) => {
   const chunks = [];
   request.on("data", (chunk) => chunks.push(chunk));
@@ -351,12 +409,33 @@ const server = createServer((request, response) => {
           `${activeProvider.name} request must use application/json`,
         );
       const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      if (requestCount === 0 && !activeProvider.bodyOk(payload))
+      if (requestCount === 0 && !hostMode && !activeProvider.bodyOk(payload))
         throw new Error(
           `${activeProvider.name} request body was not serialized`,
         );
-      if (requestCount > 0) {
-        const users = userParts(activeProvider, payload);
+      if (hostMode) {
+        const prompt = JSON.stringify(
+          payload.instructions ??
+            payload.system ??
+            payload.systemInstruction ??
+            payload.system_instruction ??
+            (payload.messages ?? payload.input ?? []).filter(
+              (message) =>
+                message.role === "system" || message.role === "developer",
+            ),
+        );
+        assert.ok(!prompt.includes("metawork-time-context"));
+        if (requestCount === 0) systemPrompt = prompt;
+        else
+          assert.equal(
+            prompt,
+            systemPrompt,
+            "Run time must not change the kernel system prompt",
+          );
+      }
+      if (hostMode || requestCount > 0) {
+        const originalUsers = userParts(activeProvider, payload);
+        const users = hostMode ? verifyHostTime(originalUsers) : originalUsers;
         const expectedUsers = [
           [{ text: "Reply with one short sentence." }],
           [
@@ -370,7 +449,7 @@ const server = createServer((request, response) => {
           [{ text: "Continue after restore." }],
           [{ text: "Continue after rejection." }],
         ];
-        for (let index = 1; index < users.length; index += 1)
+        for (let index = hostMode ? 0 : 1; index < users.length; index += 1)
           assert.deepEqual(users[index], expectedUsers[index]);
         assert.equal(
           users.length,
