@@ -769,6 +769,8 @@ pub const Coordinator = struct {
         const input = if (runtime_build.input) |*value| value else return .unavailable;
         const runtime = agent.Runtime.init(self.io, self.allocator, .{
             .max_sessions = 1,
+            // Catalog-only Runtime; it never owns an executable Session.
+            .run_time_source = agent.RunTimeSource.unavailable,
             .mcp_input = input,
         }) catch return .unavailable;
         var authorizations = runtime_build.takeAuthorizations();

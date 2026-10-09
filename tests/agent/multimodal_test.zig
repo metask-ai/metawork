@@ -148,7 +148,7 @@ test "multimodal allocation failures release reservations including terminal dia
     for (0..3) |failure_offset| {
         fixture.fake_core.reset();
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const runtime = try agent.Runtime.initWithApi(std.testing.io, failing.allocator(), &fixture.fake_api, .{ .max_sessions = 1 });
+        const runtime = try agent.Runtime.initWithApi(std.testing.io, failing.allocator(), &fixture.fake_api, .{ .run_time_source = agent.RunTimeSource.unavailable, .max_sessions = 1 });
         defer destroy(runtime);
         const session = try fixture.openSession(runtime);
         failing.fail_index = failing.alloc_index + failure_offset;
@@ -164,7 +164,7 @@ test "multimodal allocation failures release reservations including terminal dia
 test "multimodal shared budget rejects before any allocation" {
     fixture.fake_core.reset();
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const runtime = try agent.Runtime.initWithApi(std.testing.io, failing.allocator(), &fixture.fake_api, .{ .max_sessions = 2, .max_multimodal_input_bytes = image_cost });
+    const runtime = try agent.Runtime.initWithApi(std.testing.io, failing.allocator(), &fixture.fake_api, .{ .run_time_source = agent.RunTimeSource.unavailable, .max_sessions = 2, .max_multimodal_input_bytes = image_cost });
     defer destroy(runtime);
     const first = try fixture.openSession(runtime);
     const second = try fixture.openSession(runtime);

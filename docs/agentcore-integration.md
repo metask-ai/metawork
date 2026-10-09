@@ -47,7 +47,7 @@ candidate probe 只用于证明锁定 artifact 与官方 Zig package 可以 sour
 - 不能注册到 React/Native SDK 正式链路；
 - 不维护上游 ABI facade 或 SDK 行为的平行测试套件。
 
-当前 bundle 还提供 Session prompt profile、per-Run context blocks、typed `prompt_manifest` 和 `describe.prompt`；Agent 使用固定 Session 产品身份 profile；当前产品不开放用户 customization、不建立 Renderer 入口或持久投影，其 ABI 消费见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、结构化 `CoreEvent.run_state`、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Product Control 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
+当前 bundle 还提供 Session prompt profile、per-Run context blocks、typed `prompt_manifest` 和 `describe.prompt`；Agent 使用固定 Session 产品身份 profile，并按下面定义的输入范围消费 Host 时间上下文；当前产品不开放用户 customization、不建立 Renderer 入口或持久投影，其 ABI 消费见 [AgentCore ABI v1 合同](agentcore-abi-v1.md)。当前 bundle 提供完整 typed status、八个 StopReason、known/unknown observation decoder、结构化 `CoreEvent.run_state`、Permission provenance、`UiRequest` decoder、request-aware `UiResponse` encoder、Skill/MCP catalog decoder、Session description/restore/checkpoint entry、idle-only Session model mutation、Runtime MCP configuration apply，以及 callback-scoped validated `RunContext`。正式 `agent/` 直接使用官方 `bindings/zig` package 暴露的表面，Product Control 只保存受限运行时投影；MetaWork 不手写 raw enum、tag switch、identity layout、Permission/Skill/MCP schema 或 SDK module/link graph。
 
 公开 observation 的消费边界如下；“持久化”均指 Product Task 派生事实，不保存 raw CoreEvent：
 
@@ -265,6 +265,14 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量；当前单图对应 3.75 MB raw image 的标准 Base64。Host 的总 prompt 核算包括用户文字、文本附件封装与正文、Base64 和 media type 字节；全部 text part 合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 默认 64 MiB，约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方 raw bytes、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在 owned allocation 前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
 
 `image_input_unsupported` 只在本次 Run 含图片时作为 typed admission 拒绝，并映射为同名 Product cause；Session 保持 reusable。文本附件最终是普通 text part，不借用该 status。文本-only、Text、Skill 或其他 operation 不因认识该 status 而放行。当前锁定的 ABI revision 18 不定义 document part 或文档能力拒绝 status。非 OK result 的可读边界由 ABI 合同规定。附件历史保持由 Core 所有；MetaWork 不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，也不删除输入以换取保存成功。调用方应显式配置足够的 checkpoint 限额，否则沿既有 typed failure 返回。
+
+### 每 Run 时间上下文
+
+Application 通过 Native SDK 公开时钟读取 Unix 时间，并通过 [高层架构](architecture.md#35-native-sdk) 登记的窄 `run_local_timezone` capability 取得同一时刻的系统本地 UTC offset 与平台原生 identity；不解析本地化时间字符串、不维护时区数据库或 Windows/IANA 映射。Application 向 Agent Runtime 注入同步、有界、worker-safe 的采样 callback，context 必须存活至 Runtime shutdown 完成；缺少 callback 在初始化时拒绝。
+
+Agent 对普通文本与多模态输入，在已有执行资格和取消检查之后、实际 Core Run 调用前采样一次，不在 Session 锁内执行平台读取。两种输入路径共享同一 options，Core 调用期保持 owned 文本与 block。每个后续受支持 Run 重新采样；一个 Run 的工具循环仍使用本轮开始快照。时区 identity 缺失时保留已知 offset，本地时间/offset 不可用时明确使用 UTC，时钟不可用或超出可表示范围时明确表示未知；不以旧快照补写，也不因时间不可用终止正常 Run。block 的短正文区分当前与历史快照、开始时间与实时钟，并保留用户指定时区/参考日期的语义；产品行为见 [产品需求](requirements.md#54-agent-交互)，wire 与 label 见 [ABI 消费合同](agentcore-abi-v1.md#3-abi-identity-与-function-table)。
+
+Core Conversation/checkpoint 可以保留旧时间 block。MetaWork 不改写 opaque checkpoint、不重放时间、不增加 Product history、Bridge、event 或 Snapshot 字段。Run 上下文不是 system-role 指令，fixture 请求断言只能证明传递，不能替代远端模型理解效果验证。当前 ABI 不接受 Skill Run 的 context blocks；Skill 不调用时间采样，保持 null blocks 与零 count，继续遵循官方 Skill 执行与身份继承语义。这是已登记的能力缺口，不通过改写 Skill 参数、Session profile 或 opaque checkpoint 补齐。独立 Completion 与 manual compact 不接入该采样 capability。
 
 ### 每 Session 规则
 

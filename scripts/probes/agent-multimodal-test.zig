@@ -2,6 +2,26 @@
 const std = @import("std");
 const agent = @import("metawork_agent");
 
+// Deterministic time source through the production Host adapter, including
+// successive snapshots, missing identity, UTC-only and unavailable states.
+const RunClock = struct {
+    calls: usize = 0,
+
+    fn sample(context: ?*anyopaque) agent.RunTimeSnapshot {
+        const self: *RunClock = @ptrCast(@alignCast(context.?));
+        const index = self.calls;
+        self.calls += 1;
+        return switch (index) {
+            0 => .{ .unix_ms = 1791561599000, .utc_offset_seconds = 28800, .timezone = agent.RunTimeZoneIdentity.init(.iana, "Asia/Shanghai") },
+            1 => .{ .unix_ms = 1791561601000, .utc_offset_seconds = 28800, .timezone = agent.RunTimeZoneIdentity.init(.iana, "Asia/Shanghai") },
+            2 => .{ .unix_ms = 1791561601000, .utc_offset_seconds = -25200, .timezone = agent.RunTimeZoneIdentity.init(.windows, "Pacific Standard Time") },
+            3 => .{ .unix_ms = 1791561601000, .utc_offset_seconds = 20700 },
+            4 => .{ .unix_ms = 1791594000000 },
+            else => .{},
+        };
+    }
+};
+
 const Checkpoint = struct {
     bytes: []u8,
     len: usize = 0,
@@ -86,7 +106,8 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(gif);
     const large_png = try dir.readFileAlloc(init.io, "large.png", allocator, .limited(4 * 1024 * 1024));
     defer allocator.free(large_png);
-    const runtime = try agent.Runtime.init(init.io, allocator, .{ .max_sessions = 1 });
+    var clock = RunClock{};
+    const runtime = try agent.Runtime.init(init.io, allocator, .{ .max_sessions = 1, .run_time_source = .{ .context = &clock, .sample_fn = RunClock.sample } });
     defer {
         runtime.shutdown() catch unreachable;
         runtime.deinit();

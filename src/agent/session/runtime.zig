@@ -68,6 +68,7 @@ pub const Runtime = struct {
     api: sdk.Api,
     runtime: ?*wire.RuntimeHandle,
     max_prompt_bytes: usize,
+    run_time_source: root.RunTimeSource,
     multimodal_input_budget: multimodal.Budget,
     max_event_bytes: usize,
     event_enqueue_timeout: std.Io.Duration,
@@ -124,6 +125,7 @@ pub const Runtime = struct {
         api: sdk.Api,
         limits: Limits,
     ) (Error || std.mem.Allocator.Error)!*Runtime {
+        const run_time_source = limits.run_time_source orelse return error.InvalidLimits;
         if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.max_multimodal_input_bytes == 0 or limits.event_capacity == 0 or
             limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
             limits.per_session_event_bytes == 0 or limits.max_event_bytes == 0 or
@@ -202,6 +204,7 @@ pub const Runtime = struct {
             .api = api,
             .runtime = runtime,
             .max_prompt_bytes = limits.max_prompt_bytes,
+            .run_time_source = run_time_source,
             .multimodal_input_budget = .{ .limit = limits.max_multimodal_input_bytes },
             .max_event_bytes = limits.max_event_bytes,
             .event_enqueue_timeout = limits.event_enqueue_timeout,

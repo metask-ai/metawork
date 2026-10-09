@@ -164,6 +164,8 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.4 Agent 交互
 
+- 每次普通文本或多模态 Run 开始执行时，Host 为模型提供当前系统时间快照，包含可用的系统本地日期时间、该时刻 UTC offset 与带平台类型的时区 identity；排队、跨日、系统时区变化和 Conversation 恢复后必须重新采样。用户明确指定的时区或参考日期仍有效，历史快照只描述旧 Run。该快照不是实时钟，也不能替代最新事实查询；知识截止日期不得作为当前日期参照。时区 identity 缺失但 offset 可用时提供带 offset 的本地时间；本地时区信息不可用时明确提供 UTC，时钟不可用时明确表示未知，不猜测或从历史补写。该上下文不改变用户输入、产品历史与复制内容。
+
 - 用户可以提交普通文本，或由图片与受限 UTF-8 文本附件组成的多模态输入并启动真实 Agent Run；文本附件只按原始 UTF-8 参考资料发送，不等于文档解析能力。模型目录中的 `imageInput` 只提供图片发送前提示，不能替代 Product admission 或 AgentCore typed capability 判断，也不能授权 Renderer 丢弃媒体、切换模型或降级成文本。目录仍可保留上游 `pdfInput` 元数据，但 MetaWork 不据此开放 PDF 输入；
 - AgentCore → Host → Bridge 持续投影 Agent 可见输出，并把 commentary、final/partial response 与 provisional 区分为稳定过程说明、安全正文和可回滚临时文本；Renderer 必须在正式 terminal fact 前随真实 Snapshot revision 持续更新 Run 的工作过程，不能把已到达的过程事实藏到终态后一次性展示；
 - `thinking_chunk` 正文不进入可见 output、Snapshot、持久历史或搜索；其事件类型只把当前安全状态细化为“正在思考”，`text_chunk` 到达后状态切换为“正在撰写回复”；

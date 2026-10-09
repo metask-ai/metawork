@@ -28,6 +28,7 @@ const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
 const mcp_management_coordinator = @import("app/mcp_management_coordinator.zig");
 const app_paths = @import("app/paths.zig");
 const app_platform = @import("app/platform.zig");
+const run_time_context = @import("app/run_time_context.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
 const app_stores = @import("app/stores.zig");
 const app_window = @import("app/window.zig");
@@ -423,6 +424,7 @@ fn createAgentRuntime(
 ) !*agent.Runtime {
     return agent.Runtime.init(io, std.heap.c_allocator, .{
         .max_sessions = 50,
+        .run_time_source = run_time_context.source,
         .mcp_input = mcp_input,
         .max_ui_request_bytes = pending_ui_json_capacity,
         .max_terminal_diagnostic_bytes = terminal_diagnostic_capacity,
@@ -738,6 +740,7 @@ test "MCP Application composition imports the startup owner" {
 test {
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(models_automation_vault);
+    std.testing.refAllDecls(run_time_context);
 }
 
 test "automation Models vault is bounded, overwrites securely, and deletes idempotently" {
