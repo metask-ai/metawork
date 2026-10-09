@@ -159,7 +159,10 @@ Account durable authority 由系统安全存储中的 Metask refresh token 与�
 - refresh timer、网络、loopback、deadline 与 cancellation 由 Account-owned policy和 Application byte/platform adapter协作收口；
 - 被阻断的 refresh 不得调度或发布可重试的 `refresh_schedule_failed` 来覆盖原失败；只有明确未消费且记录解除成功才能恢复刷新资格；
 - refresh timer 或 wall clock 失败不得静默；`refresh_schedule_failed` 必须保留 `authenticated` identity、提供显式 retry，并与 hard-expiry lease gate 共同 fail closed；
-- shutdown 停止新 command，取消 timer，cancel/join worker，消费或销毁 mailbox，清零 access/refresh token，最后断开 ports；`deinit` 不执行平台 effect；
+- 真正 Host stop 入口先停止 Account command、timer、summary 与会启动 Models 的 observer。窗口隐藏、托盘后台与 Renderer reload 不执行 Account shutdown；
+- shutdown 的在飞 refresh 使用原 network deadline 等待唯一结果，join 后在主线程尝试一次持久化合法新 token，然后清理旧记录；已进入 mailbox 的合法结果同样收口。存储与 worker 收口期间保持平台 ports 和单实例 lease 有效；关闭不发送 Userinfo、不安装新 identity、不启动 summary/catalog，也不在退出时重新保存运行中已失败的结果；
+- transport selector 已选中完整 refresh 响应时，后到的取消不能覆盖该结果；deadline/cancellation 先胜出则按结果不确定保留阻断。网络 deadline 不等于 worker join 或系统存储的墙钟上限，不得提前销毁 worker 仍使用的资源；
+- 关闭最终只按 Account → Product 顺序提交唯一 shutdown terminal fact，再 cancel/join 其他 worker，销毁 mailbox、清零 credential 并断开 ports；`deinit` 不执行平台 effect；
 - 登录、refresh、restore、重新登录、取消、logout、明确 credential-store 失败、network/deadline failure、stale completion、mailbox collision 与 shutdown 都必须保持单一 terminal fact；
 - Userinfo 未验证时绝不发布 authenticated identity；
 - authorization generation 只随可用授权建立/替换，旧 generation 的 lease 和 completion不能再次生效；

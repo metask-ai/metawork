@@ -555,6 +555,7 @@ pub const Runtime = struct {
     summary: summary_impl.State = .{},
     summary_job: ?*SummaryJob = null,
     refresh_blocked: bool = false,
+    stopping: bool = false,
     request_binding: ?struct { attempt_id: u64, generation: u64, digest: [32]u8 } = null,
 
     pub fn init(
@@ -606,6 +607,7 @@ pub const Runtime = struct {
         command: contract.AccountCommand,
     ) PrepareResult {
         self.assertMainThread();
+        if (self.stopping) return .{ .rejected = .invalid_state };
         if (command == .retry_refresh) return self.prepareRetryRefresh();
         if (command == .refresh_summary) return .{ .rejected = .invalid_state };
         return wrapPrepareResult(self.account.prepareCommand(command));
@@ -613,7 +615,7 @@ pub const Runtime = struct {
 
     pub fn prepareTokenRefresh(self: *Runtime) PrepareResult {
         self.assertMainThread();
-        if (self.refresh_blocked) return .{ .rejected = .invalid_state };
+        if (self.stopping or self.refresh_blocked) return .{ .rejected = .invalid_state };
         return wrapPrepareResult(self.account.prepareTokenRefresh());
     }
 
@@ -669,8 +671,32 @@ pub const Runtime = struct {
         }
     }
 
+    pub fn stopAdmission(self: *Runtime) void {
+        self.assertMainThread();
+        if (self.stopping) return;
+        self.stopping = true;
+        self.cancelRefreshTimer();
+        _ = self.shutdownSummary();
+    }
+
     pub fn prepareShutdown(self: *Runtime) Prepared {
         self.assertMainThread();
+        self.stopAdmission();
+        self.discardQueuedEffectForShutdown();
+        // Refresh keeps its original network deadline. Join before taking the
+        // mailbox so a complete rotation is saved once while ports are alive.
+        if (self.effects.network_attempt.started and self.effects.network_attempt.kind == .refresh) {
+            self.effects.network_attempt.join();
+            if (self.prepareNextCompletion()) |result| switch (result) {
+                .prepared => |value| {
+                    var observed = value;
+                    // Persistence is already settled; never admit Userinfo or
+                    // commit a second identity/terminal fact while closing.
+                    observed.deinit();
+                },
+                .rejected, .ignored_stale => {},
+            };
+        }
         return .{ .transition = self.account.prepareShutdown() };
     }
 
@@ -729,6 +755,7 @@ pub const Runtime = struct {
 
     pub fn refreshSummary(self: *Runtime) SummaryRefreshResult {
         self.assertMainThread();
+        if (self.stopping) return .{ .result = .rejected(.invalid_state), .changed = false };
         if (self.summary_job != null)
             return .{ .result = .rejected(.operation_in_progress), .changed = false };
         var lease = (self.authorizationLease() catch
@@ -751,6 +778,7 @@ pub const Runtime = struct {
 
     pub fn reconcileSummaryAuthorization(self: *Runtime) bool {
         self.assertMainThread();
+        if (self.stopping) return false;
         if (self.account.view().state != .authenticated) {
             self.cancelSummaryJob();
             return self.summary.clearAuthorization();
@@ -1182,6 +1210,7 @@ pub const Runtime = struct {
             .shutdown => {
                 self.cancelRefreshTimer();
                 self.effects.cancelJoinAndDiscard();
+                self.clearCredentials();
                 self.platform = null;
             },
         }
@@ -1220,7 +1249,7 @@ pub const Runtime = struct {
     }
 
     fn scheduleRefresh(self: *Runtime) ?Prepared {
-        if (self.refresh_blocked) return null;
+        if (self.stopping or self.refresh_blocked) return null;
         const platform = self.platform orelse
             return self.prepareRefreshScheduleFailure();
         const expires_at = self.credentials.expiresAt() orelse {
@@ -1749,6 +1778,10 @@ pub const TestSupport = if (builtin.is_test) struct {
     ) void {
         var result: login_attempt.WorkerResult = .{ .exchange = input.take() };
         runtime.effects.loginSink().publish(attempt_id, &result);
+    }
+
+    pub fn joinNetwork(runtime: *Runtime) void {
+        runtime.effects.network_attempt.join();
     }
 
     pub fn occupyEffectQueue(runtime: *Runtime) void {
@@ -2621,4 +2654,23 @@ test "committed replacement remains available after marker cleanup failure" {
     var restored = try credential_store.restore(std.testing.allocator, platform.ports().credentials);
     defer restored.deinit();
     try std.testing.expectEqualStrings("new-refresh", restored.account.refresh_token.view());
+}
+
+test "shutdown does not retry a rotation that already failed storage" {
+    var transport: RotationTestTransport = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+    var platform: TestSupport.Platform = .{ .credential_write_fails = true };
+    try platform.setStoredRefreshToken("refresh-token");
+    defer runtime.deinit();
+    try beginTestRefresh(&runtime, &platform);
+    try finishTestRefresh(&runtime);
+    try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
+    var stopped = runtime.prepareShutdown();
+    defer stopped.deinit();
+    try std.testing.expect(runtime.admitEffect(&stopped));
+    runtime.commit(&stopped);
+    _ = runtime.dispatchCommitted(&stopped);
+    try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
+    try std.testing.expect(platform.refresh_marker != null);
+    try std.testing.expectEqual(@as(usize, 1), transport.calls);
 }

@@ -123,19 +123,7 @@ pub const Adapter = struct {
         switch (outcome) {
             .fetch => |result| {
                 selection.cancelDiscard();
-                if (request.control) |control| {
-                    if (control.cancellation.isCancelled())
-                        return error.Cancelled;
-                }
-                return switch (result) {
-                    .completed => |completed| .{
-                        .status = completed.status,
-                        .body = response_buffer[0..completed.body_len],
-                    },
-                    .network_failed => error.NetworkFailed,
-                    .response_too_large => error.ResponseTooLarge,
-                    .protocol_failed => error.ProtocolFailed,
-                };
+                return selectedFetch(request, result, response_buffer);
             },
             .deadline => {
                 selection.cancelDiscard();
@@ -146,6 +134,21 @@ pub const Adapter = struct {
                 return error.Cancelled;
             },
         }
+    }
+
+    fn selectedFetch(request: metask_transport.Request, result: FetchResult, response_buffer: []u8) metask_transport.TransportError!metask_transport.Response {
+        // The selector already chose fetch. A complete refresh response is
+        // authoritative even when cancellation arrives during loser cleanup.
+        const complete_refresh = request.kind == .refresh_token and result == .completed;
+        if (!complete_refresh) if (request.control) |control| {
+            if (control.cancellation.isCancelled()) return error.Cancelled;
+        };
+        return switch (result) {
+            .completed => |completed| .{ .status = completed.status, .body = response_buffer[0..completed.body_len] },
+            .network_failed => error.NetworkFailed,
+            .response_too_large => error.ResponseTooLarge,
+            .protocol_failed => error.ProtocolFailed,
+        };
     }
 
     fn fetch(
@@ -249,3 +252,18 @@ pub const Adapter = struct {
         cancellation.wait();
     }
 };
+
+test "Account selected complete refresh response survives late cancellation" {
+    var cancellation = metask_transport.Cancellation.init(std.testing.io);
+    cancellation.cancel();
+    var buffer: [2]u8 = .{ '{', '}' };
+    const control: metask_transport.RequestControl = .{
+        .cancellation = &cancellation,
+        .deadline = std.Io.Clock.Timestamp.fromNow(std.testing.io, .{ .raw = .fromSeconds(30), .clock = .boot }),
+    };
+    const response = try Adapter.selectedFetch(.{ .kind = .refresh_token, .control = control }, .{ .completed = .{ .status = 200, .body_len = 2 } }, &buffer);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("{}", response.body);
+    try std.testing.expectError(error.Cancelled, Adapter.selectedFetch(.{ .kind = .models, .control = control }, .{ .completed = .{ .status = 200, .body_len = 2 } }, &buffer));
+    try std.testing.expectError(error.Cancelled, Adapter.selectedFetch(.{ .kind = .refresh_token, .control = control }, .network_failed, &buffer));
+}

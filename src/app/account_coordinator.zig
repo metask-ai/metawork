@@ -17,6 +17,7 @@ pub const Coordinator = struct {
     control: control_ports.AccountCommitSink,
     main_thread_id: std.Thread.Id,
     commit_observer: ?CommitObserver = null,
+    stopping: bool = false,
 
     pub fn init(
         runtime: *account_api.Runtime,
@@ -45,6 +46,7 @@ pub const Coordinator = struct {
     ) account_contract.AccountCommandResult {
         const self: *Coordinator = @ptrCast(@alignCast(context));
         self.assertMainThread();
+        if (self.stopping) return .rejected(.invalid_state);
         if (command == .refresh_summary) {
             const refreshed = self.runtime.refreshSummary();
             if (refreshed.changed) self.commitSummaryNoFail();
@@ -96,6 +98,7 @@ pub const Coordinator = struct {
 
     pub fn drain(self: *Coordinator) void {
         self.assertMainThread();
+        if (self.stopping) return;
         while (self.runtime.prepareNextCompletion()) |result| {
             switch (result) {
                 .prepared => |prepared| {
@@ -133,7 +136,7 @@ pub const Coordinator = struct {
             .attempt_terminal = attempt_terminal,
         });
         if (self.commit_observer) |observer| observer.notify();
-        if (self.runtime.reconcileSummaryAuthorization())
+        if (!self.stopping and self.runtime.reconcileSummaryAuthorization())
             self.commitSummaryNoFail();
 
         // A continuation effect can fail admission only after its preceding
@@ -161,9 +164,17 @@ pub const Coordinator = struct {
         return .acceptedAttempt(attempt_id);
     }
 
+    pub fn beginShutdown(self: *Coordinator) void {
+        self.assertMainThread();
+        if (self.stopping) return;
+        self.stopping = true;
+        self.commit_observer = null;
+        self.runtime.stopAdmission();
+    }
+
     pub fn shutdown(self: *Coordinator) void {
         self.assertMainThread();
-        _ = self.runtime.shutdownSummary();
+        self.beginShutdown();
         var result = self.commitPrepared(self.runtime.prepareShutdown());
         if (!result.accepted and result.error_code == .local_resource_exhausted) {
             self.runtime.discardQueuedEffectForShutdown();
@@ -890,4 +901,120 @@ test "Account observer retains a healthy in-flight authorization during refresh"
     try std.testing.expect(refreshed.accepted);
     try std.testing.expectEqual(@as(usize, 1), observer.calls);
     try std.testing.expect(!observer.unavailable);
+}
+
+const ClosingRefreshTransport = struct {
+    gated: bool = false,
+    started: std.Io.Event = .unset,
+    release: std.Io.Event = .unset,
+    calls: usize = 0,
+    observed_cancel: bool = false,
+
+    fn port(self: *@This()) account_api.Transport {
+        return .{ .context = self, .perform_fn = perform };
+    }
+    fn perform(context: *anyopaque, request: account_api.TransportRequest, output: []u8) account_api.TransportError!account_api.TransportResponse {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        if (request.kind != .refresh_token) return error.ProtocolFailed;
+        if (self.gated) {
+            self.started.set(std.testing.io);
+            self.release.wait(std.testing.io) catch return error.NetworkFailed;
+        }
+        self.observed_cancel = request.control.?.cancellation.isCancelled();
+        if (self.observed_cancel) return error.Cancelled;
+        const body = "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
+        @memcpy(output[0..body.len], body);
+        return .{ .status = 200, .body = output[0..body.len] };
+    }
+    fn releaseOnTimerStop(context: *anyopaque, _: u64) !void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.release.set(std.testing.io);
+    }
+};
+
+const ClosingObserver = struct {
+    calls: usize = 0,
+    fn notify(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+    }
+};
+
+test "Account shutdown saves mailbox or in-flight rotation once before detaching ports" {
+    for ([_]bool{ false, true }) |in_flight| {
+        var transport: ClosingRefreshTransport = .{ .gated = in_flight };
+        var runtime = account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), account_api.TestSupport.loopbackEndpoint(), .{ .context = &testing_wake_context, .notify_fn = testingWake });
+        defer runtime.deinit();
+        var platform: account_api.TestSupport.Platform = .{};
+        try platform.setStoredRefreshToken("old-refresh");
+        account_api.TestSupport.attachPlatform(&runtime, &platform);
+        if (in_flight) runtime.platform.?.timer = .{ .context = &transport, .start_fn = ClosingTimer.start, .cancel_fn = ClosingRefreshTransport.releaseOnTimerStop };
+        var auth = try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask", "old-access", "old-refresh", 200);
+        defer auth.deinit();
+        runtime.commit(&auth);
+        var sink: RecordingSink = .{ .runtime = &runtime };
+        var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+        // A direct refresh does not schedule unrelated summary or catalog work.
+        var refresh = switch (runtime.prepareTokenRefresh()) {
+            .prepared => |p| p,
+            else => return error.TestUnexpectedResult,
+        };
+        defer refresh.deinit();
+        try std.testing.expect(runtime.admitEffect(&refresh));
+        runtime.commit(&refresh);
+        _ = runtime.dispatchCommitted(&refresh);
+        if (in_flight) try transport.started.wait(std.testing.io) else account_api.TestSupport.joinNetwork(&runtime);
+        var observer: ClosingObserver = .{};
+        coordinator.setCommitObserver(.{ .context = &observer, .notify_fn = ClosingObserver.notify });
+        coordinator.shutdown();
+        coordinator.drain();
+        try std.testing.expectEqualStrings("new-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+        try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
+        try std.testing.expect(platform.refresh_marker == null);
+        try std.testing.expectEqual(@as(usize, 1), transport.calls);
+        try std.testing.expect(!transport.observed_cancel);
+        try std.testing.expectEqual(@as(usize, 0), observer.calls);
+        try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
+        try std.testing.expectEqual(@as(usize, 1), sink.count);
+        try std.testing.expect(sink.records[0].attempt_terminal);
+        try std.testing.expectEqual(account_contract.AccountState.signed_out, runtime.view().state);
+        try std.testing.expect(coordinator.commandSink().submit(.begin_login).error_code == .invalid_state);
+        try std.testing.expect(runtime.platform == null);
+        try std.testing.expect(runtime.summary_job == null);
+        try std.testing.expect(!runtime.credentials.refreshAvailable());
+    }
+}
+
+const ClosingTimer = struct {
+    fn start(_: *anyopaque, _: u64, _: u64, _: bool) !void {
+        return error.UnexpectedTimer;
+    }
+};
+
+test "Account shutdown failed rotation save preserves durable block without a second write" {
+    var transport: ClosingRefreshTransport = .{};
+    var runtime = account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), account_api.TestSupport.loopbackEndpoint(), .{ .context = &testing_wake_context, .notify_fn = testingWake });
+    defer runtime.deinit();
+    var platform: account_api.TestSupport.Platform = .{ .credential_write_fails = true };
+    try platform.setStoredRefreshToken("old-refresh");
+    account_api.TestSupport.attachPlatform(&runtime, &platform);
+    var auth = try account_api.TestSupport.prepareAuthenticated(&runtime, "account-1", "Metask", "old-access", "old-refresh", 200);
+    defer auth.deinit();
+    runtime.commit(&auth);
+    var sink: RecordingSink = .{ .runtime = &runtime };
+    var coordinator = Coordinator.init(&runtime, sink.port(), std.Thread.getCurrentId());
+    var refresh = switch (runtime.prepareTokenRefresh()) {
+        .prepared => |p| p,
+        else => return error.TestUnexpectedResult,
+    };
+    defer refresh.deinit();
+    try std.testing.expect(runtime.admitEffect(&refresh));
+    runtime.commit(&refresh);
+    _ = runtime.dispatchCommitted(&refresh);
+    coordinator.shutdown();
+    try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
+    try std.testing.expectEqualStrings("old-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+    try std.testing.expect(platform.refresh_marker != null);
+    try std.testing.expectEqual(@as(usize, 1), sink.count);
 }

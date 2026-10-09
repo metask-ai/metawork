@@ -270,6 +270,8 @@ const App = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.single_instance) |coordinator| coordinator.stopIngress();
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
+        if (self.account_started) if (self.account_coordinator) |coordinator|
+            coordinator.beginShutdown();
         if (self.control) |control| {
             control.shutdownAttachmentStagingExecutor();
             control.stopFilePreviewAdmission();
@@ -737,6 +739,7 @@ test "MCP Application composition imports the startup owner" {
 
 test {
     std.testing.refAllDecls(account_coordinator);
+    std.testing.refAllDecls(metask_http_transport);
     std.testing.refAllDecls(models_automation_vault);
 }
 
