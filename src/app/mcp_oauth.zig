@@ -2929,3 +2929,34 @@ test "MCP OAuth well-known derivation omits resource query but preserves identit
         ),
     );
 }
+
+test "MCP callback accepts extensions while retaining exact issuer validation" {
+    const state = "0123456789012345678901234567890123456789012";
+    for ([_][]const u8{
+        "https%3A%2F%2Fother.example.test",
+        "https%3A%2F%2FAUTH.example.test",
+    }) |issuer| {
+        var policy = CallbackPolicy.init(std.testing.allocator, state, "https://auth.example.test", true);
+        defer policy.deinit();
+        var storage: [512]u8 = undefined;
+        const target = try std.fmt.bufPrint(&storage, "/auth/callback?code=a&state={s}&iss={s}&extension=1", .{ state, issuer });
+        const result = try CallbackPolicy.handleRequest(&policy, .{
+            .method = .get,
+            .target = target,
+            .has_content_length = false,
+            .has_transfer_encoding = false,
+        });
+        try std.testing.expect(!result.complete);
+        try std.testing.expect(policy.callback == null);
+    }
+    var policy = CallbackPolicy.init(std.testing.allocator, state, "https://auth.example.test", true);
+    defer policy.deinit();
+    const result = try CallbackPolicy.handleRequest(&policy, .{
+        .method = .get,
+        .target = "/auth/callback?code=a&state=" ++ state ++ "&iss=https%3A%2F%2Fauth.example.test&extension=1",
+        .has_content_length = false,
+        .has_transfer_encoding = false,
+    });
+    try std.testing.expect(result.complete);
+    try std.testing.expectEqualStrings("a", policy.callback.?.code.view());
+}

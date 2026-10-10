@@ -379,7 +379,7 @@ Metask 登录或配置用户 Provider → Host 后台恢复/验证 API、credent
 → Composer 确认模型 → Task admission → 当前同步执行 baseline
 ```
 
-Metask C1 OAuth/login 已按 `https://app.metask-ai.com`、`metawork`、`openid profile email` 与每次登录由 OS 分配端口的 `http://localhost:<dynamic-port>/auth/metask/callback` 发布合同锁定；Models-owned C2 catalog使用已通过 production复核的无 Profile-ID通用路径。Account先提交 token rotation，再严格验证 `/api/oauth/userinfo` 并提交以 `sub` 为 principal 的 identity；Application随后以 authorization lease启动独立 Models continuation，C2失败不得抹除已完成登录。用户连接使用 Models-owned typed protocol/endpoint/credential流程，不依赖 OAuth，但必须通过 [Completion 架构](completion-architecture.md)定义的 Agent-owned one-shot test。Workbench的新 Task admission以 Models desired与 Product active binding完全一致且 ready为条件，不能把仅有 authenticated identity、目录 intent或未验证连接误报成已经可以执行。
+Metask C1 OAuth/login 的 authority、client、scope 与动态 loopback callback 以 [Account 架构](account-architecture.md#5-metask-oauth-与-identity-合同)为唯一合同；Models-owned C2 catalog使用已通过 production复核的无 Profile-ID通用路径。Account先提交 token rotation，再严格验证 `/api/oauth/userinfo` 并提交以 `sub` 为 principal 的 identity；Application随后以 authorization lease启动独立 Models continuation，C2失败不得抹除已完成登录。用户连接使用 Models-owned typed protocol/endpoint/credential流程，不依赖 OAuth，但必须通过 [Completion 架构](completion-architecture.md)定义的 Agent-owned one-shot test。Workbench的新 Task admission以 Models desired与 Product active binding完全一致且 ready为条件，不能把仅有 authenticated identity、目录 intent或未验证连接误报成已经可以执行。
 
 ### 7.3 Fault-domain 结论
 

@@ -68,13 +68,12 @@ export const zhCN: Record<MessageId, string> = {
   "account.action_failed": "账号操作需要处理",
   "account.error.no_models":
     "这个 Metask 账号当前没有可用模型。请重新同步目录，或在 Metask 中检查账号后重试。",
-  "account.error.deadline": "Metask 未能及时响应。请检查网络后重试。",
+  "account.error.deadline": "Metask 未能及时响应，请检查网络。",
   "account.error.browser": "MetaWork 无法打开登录页面，请重新打开。",
   "account.error.authorization": "未能完成 Metask 登录，请重新登录。",
-  "account.error.session_expired": "登录已失效，请登录后继续。",
-  "account.error.service": "Metask 暂时不可用，请稍后重试。",
-  "account.error.metask_access":
-    "Metask 已拒绝此登录凭据。该凭据已从这台设备移除，请重新登录。",
+  "account.error.refresh": "未能完成登录刷新，请重新登录。",
+  "account.error.service": "Metask 暂时不可用，请检查网络或服务状态。",
+  "account.error.metask_access": "Metask 已拒绝此登录凭据，请重新登录。",
   "account.error.credentials": "MetaWork 无法确认这台设备上的凭据更新结果。",
   "account.error.refresh_schedule":
     "无法安排自动登录刷新。请立即重试以恢复自动刷新。",

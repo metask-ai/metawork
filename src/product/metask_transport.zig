@@ -33,6 +33,10 @@ pub const Response = struct {
 
 pub const TransportError = error{
     NetworkFailed,
+    /// The worker has finished without starting the HTTP request send.
+    NetworkNotSent,
+    CancelledNotSent,
+    DeadlineExceededNotSent,
     ResponseTooLarge,
     ProtocolFailed,
     Cancelled,

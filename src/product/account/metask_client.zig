@@ -106,7 +106,6 @@ pub fn exchangeAuthorizationCode(
         allocator,
         response.body,
         now_unix_seconds,
-        true,
     ) catch return error.ProtocolInvalid;
 }
 
@@ -146,13 +145,17 @@ pub fn refreshWithToken(
         &response_storage,
     ) catch |err| return transportFailure(err);
     if (response.status != 200)
-        return classifyStatus(response.status, false);
-    return oauth.parseTokenResponse(
+        return classifyRefreshFailure(response);
+    var tokens = oauth.parseTokenResponse(
         allocator,
         response.body,
         now_unix_seconds,
-        false,
     ) catch return error.ProtocolInvalid;
+    if (std.mem.eql(u8, tokens.refresh_token.view(), refresh_token.view())) {
+        tokens.deinit();
+        return error.ProtocolInvalid;
+    }
+    return tokens.take();
 }
 
 pub fn fetchIdentity(
@@ -171,7 +174,7 @@ pub fn fetchIdentity(
         &userinfo_storage,
     ) catch |err| return transportFailure(err);
     if (response.status != 200)
-        return classifyStatus(response.status, false);
+        return classifyIdentityFailure(response);
     const userinfo = oauth.parseCurrentUser(response.body) catch
         return error.ProtocolInvalid;
     return state.AccountIdentity.init(
@@ -212,18 +215,60 @@ pub fn fetchUsageHistory(
 
 fn transportFailure(transport_error: TransportError) ClientError {
     return switch (transport_error) {
-        error.Cancelled => error.Cancelled,
-        error.DeadlineExceeded => error.DeadlineExceeded,
-        error.NetworkFailed => error.ServiceUnavailable,
+        error.Cancelled, error.CancelledNotSent => error.Cancelled,
+        error.DeadlineExceeded, error.DeadlineExceededNotSent => error.DeadlineExceeded,
+        error.NetworkFailed, error.NetworkNotSent => error.ServiceUnavailable,
         error.ResponseTooLarge,
         error.ProtocolFailed,
         => error.ProtocolInvalid,
     };
 }
 
+fn oauthError(response: Response) ?[]const u8 {
+    // Return only known static codes; the bounded parser and its storage die here.
+    if (response.body.len == 0 or response.body.len > oauth.Limits.token_body_bytes) return null;
+    var scratch: [oauth.Limits.token_body_bytes * 2]u8 = undefined;
+    defer std.crypto.secureZero(u8, &scratch);
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    var parsed = std.json.parseFromSlice(struct { @"error": []const u8 }, fba.allocator(), response.body, .{ .ignore_unknown_fields = true }) catch return null;
+    defer parsed.deinit();
+    inline for (.{ "invalid_grant", "invalid_request", "invalid_client", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "authorization_revoked", "user_not_found" }) |code| {
+        if (std.mem.eql(u8, parsed.value.@"error", code)) return code;
+    }
+    return null;
+}
+
+fn classifyRefreshFailure(response: Response) ClientError {
+    const code = oauthError(response) orelse return nonCredentialFailure(response.status);
+    if (response.status == 400 and std.mem.eql(u8, code, "invalid_grant")) return error.Unauthorized;
+    if ((response.status == 401 and std.mem.eql(u8, code, "invalid_client")) or
+        (response.status == 400 and (std.mem.eql(u8, code, "invalid_request") or
+            std.mem.eql(u8, code, "unauthorized_client") or std.mem.eql(u8, code, "unsupported_grant_type") or
+            std.mem.eql(u8, code, "invalid_scope")))) return error.TokenRefreshFailed;
+    return nonCredentialFailure(response.status);
+}
+
+fn classifyIdentityFailure(response: Response) ClientError {
+    if (response.status == 401) {
+        if (oauthError(response)) |code| {
+            if (std.mem.eql(u8, code, "authorization_revoked") or std.mem.eql(u8, code, "user_not_found")) return error.Unauthorized;
+        }
+    }
+    return nonCredentialFailure(response.status);
+}
+
+fn nonCredentialFailure(status: u16) ClientError {
+    return switch (status) {
+        429 => error.RateLimited,
+        500...599 => error.ServiceUnavailable,
+        else => error.ProtocolInvalid,
+    };
+}
+
 fn classifyStatus(status: u16, exchange: bool) ClientError {
     return switch (status) {
-        400, 401, 403 => if (exchange)
+        400 => if (exchange) error.OAuthExchangeFailed else error.ProtocolInvalid,
+        401, 403 => if (exchange)
             error.OAuthExchangeFailed
         else
             error.Unauthorized,
@@ -268,7 +313,7 @@ const FakeTransport = struct {
                     "redirect_uri=http%3A%2F%2Flocalhost%3A49152%2Fauth%2Fmetask%2Fcallback",
                 ) == null) return error.ProtocolFailed;
                 break :blk
-                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email"}
+                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600}
                 ;
             },
             1 => blk: {
@@ -359,10 +404,9 @@ test "userinfo failure never infers a principal from the token" {
 test "refresh requires and installs the rotated refresh token" {
     var previous = try oauth.parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"old-access","refresh_token":"old-refresh","token_type":"Bearer","expires_in":20,"scope":"openid profile email"}
+        \\{"access_token":"old-access","refresh_token":"old-refresh","token_type":"Bearer","expires_in":20,"scope":"read model:invoke"}
     ,
         0,
-        true,
     );
     defer previous.deinit();
     var fake = struct {
@@ -372,11 +416,11 @@ test "refresh requires and installs the rotated refresh token" {
             response_buffer: []u8,
         ) TransportError!Response {
             if (request.kind != .refresh_token or
-                std.mem.indexOf(
+                !std.mem.eql(
                     u8,
                     request.body,
-                    "refresh_token=old-refresh",
-                ) == null)
+                    "grant_type=refresh_token&client_id=metawork&refresh_token=old-refresh",
+                ))
                 return error.ProtocolFailed;
             const body =
                 \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"bearer","expires_in":30}
@@ -396,4 +440,56 @@ test "refresh requires and installs the rotated refresh token" {
     try std.testing.expectEqualStrings("new-access", tokens.access_token.view());
     try std.testing.expectEqualStrings("new-refresh", tokens.refresh_token.view());
     try std.testing.expectEqual(@as(i64, 50), tokens.expires_at);
+}
+
+test "refresh HTTP 400 distinguishes invalid grant from request and protocol errors" {
+    const Case = struct { body: []const u8, expected: ClientError };
+    const cases = [_]Case{
+        .{ .body = "{\"error\":\"invalid_grant\",\"error_description\":\"refresh token expired\"}", .expected = error.Unauthorized },
+        .{ .body = "{\"error\":\"invalid_request\",\"error_description\":\"client_id required\"}", .expected = error.TokenRefreshFailed },
+        .{ .body = "{\"error\":\"invalid_client\"}", .expected = error.ProtocolInvalid },
+        .{ .body = "{\"error\":\"unauthorized_client\"}", .expected = error.TokenRefreshFailed },
+        .{ .body = "{\"error\":\"unsupported_grant_type\"}", .expected = error.TokenRefreshFailed },
+        .{ .body = "{\"error\":\"invalid_scope\"}", .expected = error.TokenRefreshFailed },
+        .{ .body = "{\"error\":\"unknown\"}", .expected = error.ProtocolInvalid },
+        .{ .body = "{\"error\":42}", .expected = error.ProtocolInvalid },
+        .{ .body = "{}", .expected = error.ProtocolInvalid },
+        .{ .body = "<html>Bad Request</html>", .expected = error.ProtocolInvalid },
+    };
+    const ErrorTransport = struct {
+        body: []const u8,
+        fn perform(context: *anyopaque, request: Request, output: []u8) TransportError!Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (request.kind != .refresh_token or !std.mem.eql(
+                u8,
+                request.body,
+                "grant_type=refresh_token&client_id=metawork&refresh_token=retained-refresh",
+            )) return error.ProtocolFailed;
+            @memcpy(output[0..self.body.len], self.body);
+            return .{ .status = 400, .body = output[0..self.body.len] };
+        }
+    };
+    var token = try oauth.Secret.init(std.testing.allocator, "retained-refresh");
+    defer token.deinit();
+    for (cases) |case| {
+        var transport: ErrorTransport = .{ .body = case.body };
+        try std.testing.expectError(case.expected, refreshWithToken(
+            std.testing.allocator,
+            .{ .context = &transport, .perform_fn = ErrorTransport.perform },
+            &token,
+            100,
+            null,
+        ));
+    }
+}
+
+test "refresh and identity invalidate only exact endpoint error pairs" {
+    try std.testing.expectEqual(error.TokenRefreshFailed, classifyRefreshFailure(.{ .status = 401, .body = "{\"error\":\"invalid_client\"}" }));
+    try std.testing.expectEqual(error.ProtocolInvalid, classifyRefreshFailure(.{ .status = 401, .body = "{\"error\":\"invalid_grant\"}" }));
+    try std.testing.expectEqual(error.ProtocolInvalid, classifyRefreshFailure(.{ .status = 403, .body = "{}" }));
+    try std.testing.expectEqual(error.ServiceUnavailable, classifyRefreshFailure(.{ .status = 503, .body = "{\"error\":\"invalid_grant\"}" }));
+    try std.testing.expectEqual(error.ProtocolInvalid, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"invalid_token\"}" }));
+    try std.testing.expectEqual(error.ProtocolInvalid, classifyIdentityFailure(.{ .status = 403, .body = "{\"error\":\"authorization_revoked\"}" }));
+    try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"authorization_revoked\"}" }));
+    try std.testing.expectEqual(error.Unauthorized, classifyIdentityFailure(.{ .status = 401, .body = "{\"error\":\"user_not_found\"}" }));
 }

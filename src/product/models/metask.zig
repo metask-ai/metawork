@@ -648,11 +648,11 @@ fn requireSuccess(status: u16) Error!void {
 
 fn transportError(err: transport_api.TransportError) Error {
     return switch (err) {
-        error.NetworkFailed => error.ServiceUnavailable,
+        error.NetworkFailed, error.NetworkNotSent => error.ServiceUnavailable,
         error.ResponseTooLarge => error.CatalogTooLarge,
         error.ProtocolFailed => error.ProtocolInvalid,
-        error.Cancelled => error.Cancelled,
-        error.DeadlineExceeded => error.DeadlineExceeded,
+        error.Cancelled, error.CancelledNotSent => error.Cancelled,
+        error.DeadlineExceeded, error.DeadlineExceededNotSent => error.DeadlineExceeded,
     };
 }
 

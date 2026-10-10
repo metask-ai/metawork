@@ -81,23 +81,25 @@ Account 不知道 provider 当前是否为默认值、是否存在 custom source
 
 正式客户端只接受以下固定 public-client 合同：
 
-| 项目          | 固定值                                                               |
-| ------------- | -------------------------------------------------------------------- |
-| Flow          | OAuth 2.0 Authorization Code + PKCE S256                             |
-| Authority     | `https://app.metask-ai.com`                                          |
-| Authorize     | `https://app.metask-ai.com/oauth/authorize`                          |
-| Token         | `https://app.metask-ai.com/api/oauth/token`                          |
-| Userinfo      | bearer `GET https://app.metask-ai.com/api/oauth/userinfo`            |
-| Client ID     | `metawork`，无 `client_secret`                                       |
-| Scope         | `openid profile email`                                               |
-| Redirect      | `http://localhost:<dynamic-port>/auth/metask/callback`               |
-| Usage history | bearer `GET https://app.metask-ai.com/v1/usage/stats`               |
+| 项目          | 固定值                                                    |
+| ------------- | --------------------------------------------------------- |
+| Flow          | OAuth 2.0 Authorization Code + PKCE S256                  |
+| Authority     | `https://app.metask-ai.com`                               |
+| Authorize     | `https://app.metask-ai.com/oauth/authorize`               |
+| Token         | `https://app.metask-ai.com/api/oauth/token`               |
+| Userinfo      | bearer `GET https://app.metask-ai.com/api/oauth/userinfo` |
+| Client ID     | `metawork`，无 `client_secret`                            |
+| Scope         | `read model:invoke`                                       |
+| Redirect      | `http://localhost:<dynamic-port>/auth/metask/callback`    |
+| Usage history | bearer `GET https://app.metask-ai.com/v1/usage/stats`     |
 
-Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。每次登录由 Application callback listener 在 IPv4 loopback `127.0.0.1` 上绑定 OS 分配的动态端口；授权请求和 authorization-code exchange 必须使用同一个实际端口，并保持精确 `localhost` host 与 callback path。无法取得本地端口时登录明确失败，不改用非 loopback 地址或其他 URI。callback 只接受一次精确路径的 `GET`，严格解析 query、拒绝重复或 unknown 参数，并以 constant-time 比较 `state`。
+Account 只生成 CSPRNG `state` 与 PKCE verifier，只接受 S256 challenge。每次登录由 Application callback listener 在 IPv4 loopback `127.0.0.1` 上绑定 OS 分配的动态端口；授权请求和 authorization-code exchange 必须使用同一个实际端口，并保持精确 `localhost` host 与 callback path。无法取得本地端口时登录明确失败，不改用非 loopback 地址或其他 URI。callback 只接受一次精确路径的 `GET`，严格按 form encoding 解析 query、拒绝已识别参数重复及 code/error 冲突，忽略未知扩展参数，并以 constant-time 比较 `state`；扩展参数不得提供 identity 或改变 issuer 接受政策。
 
-authorization-code token response 必须有界解码，包含非空 `access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in` 与精确 scope；refresh response 具有相同 token 与过期字段，允许省略 scope。token response 不提供 principal；refresh token 成功轮换并 durable commit 后不得恢复旧 token。
+authorization-code token response 必须有界解码，包含非空 `access_token`、每次必需的新 `refresh_token`、Bearer `token_type`、正整数 `expires_in`。scope 按大小写敏感的空格分隔权限集合校验，顺序与重复项不改变集合，显式返回时必须恰为 `read` 与 `model:invoke`；首次换取与刷新响应省略 scope 时沿用本次请求或此前已验证的同一权限集合，显式空值、`null`、错误类型、权限不足或额外权限均拒绝，且不得据此删除 refresh credential。refresh request 必须携带固定 `client_id = metawork`，不使用 client secret；refresh response 具有相同 token 与过期字段。token response 不提供 principal；refresh token 成功轮换并 durable commit 后不得恢复旧 token。
 
-只有 Userinfo 是有界、结构完整的 JSON，具有非空 UTF-8 `sub`、精确 `client_id = metawork` 与非空有界 `authorization_id`，Account 才能把 `sub` 绑定到已提交 token 并提交 authenticated identity。`name`、`email` 与 `phone_number` 都是非阻断、best-effort 资料字段：缺失、`null`、空值、类型错误、格式错误或超出字段边界都不得拒绝 identity。合法有界 UTF-8 `name` 发布为 `display_name`，否则发布空值；合法非空 `email` 必须无控制字符且恰含一个分隔本地部分与域名的 `@`，Account Host 只保留首个 Unicode 码点加 `***@` 与原域名组成的 `email_hint`，否则发布空值；合法 `phone_number` 只允许可选前导 `+` 和 7–20 位 ASCII 数字，Account Host 只保留可选 `+`、前三位数字、`****` 与末四位数字组成的 `phone_hint`，否则发布空值。新 Userinfo 不提供 concurrency，Account 发布 `null`。承载完整资料的 response buffer 在解析后清零。只有失败请求实际使用了当前 credential 时，明确 `401/403` 才能删除该 credential 并进入 `signed_out`：refresh exchange 使用旧 refresh token，Userinfo identity validation 使用刚提交的新 access token；authorization-code exchange 不使用 retained credential，其 `400/401/403` 必须归类为 `oauth_exchange_failed`，不得删除已有会话的 credential。network、deadline、`429` 或 `5xx` 保留可恢复 credential 并发布 Account error，不得回退到旧 identity。
+只有 Userinfo 是有界、结构完整的 JSON，具有非空 UTF-8 `sub`、精确 `client_id = metawork` 与非空有界 `authorization_id`，Account 才能把 `sub` 绑定到已提交 token 并提交 authenticated identity。`name`、`email` 与 `phone_number` 都是非阻断、best-effort 资料字段：缺失、`null`、空值、类型错误、格式错误或超出字段边界都不得拒绝 identity。合法有界 UTF-8 `name` 发布为 `display_name`，否则发布空值；合法非空 `email` 必须无控制字符且恰含一个分隔本地部分与域名的 `@`，Account Host 只保留首个 Unicode 码点加 `***@` 与原域名组成的 `email_hint`，否则发布空值；合法 `phone_number` 只允许可选前导 `+` 和 7–20 位 ASCII 数字，Account Host 只保留可选 `+`、前三位数字、`****` 与末四位数字组成的 `phone_hint`，否则发布空值。新 Userinfo 不提供 concurrency，Account 发布 `null`。承载完整资料的 response buffer 在解析后清零。只有失败请求的 attempt identity、authorization generation 与所用 credential binding 仍精确匹配当前请求时，才允许凭据 mutation。refresh exchange 仅将完整有界 OAuth JSON 的 `400 + invalid_grant` 解释为 refresh credential 失效；`400 + invalid_request / unauthorized_client / unsupported_grant_type / invalid_scope` 与 `401 + invalid_client` 是明确未消费的请求或配置错误，保留 credential，解除持久阻断成功后才恢复刷新资格。Application transport 必须以实际 HTTP 发送边界交付未发送证据：DNS、TCP 连接与 TLS 握手失败，或在发送前结束的 deadline/取消，只有 worker 收口后确认尚未进入任何 HTTP 写入操作，才允许解除阻断并保留刷新资格；不改变对应的网络、deadline 或取消错误分类。其他状态码、损坏或未知响应，以及开始发送后的 network、deadline、取消、`429` 和 `5xx` 均不证明回滚，保留阻断记录且不得重放旧 refresh token。authorization-code exchange 不消费 retained credential，其 `400/401/403` 归类为 `oauth_exchange_failed`，不得删除已有会话。
+
+Userinfo 仅将完整有界 JSON 的 `401 + authorization_revoked / user_not_found` 解释为对应 refresh credential 失效；`invalid_token`、普通 `401/403` 或协议错误不能证明 refresh token 失效，保留已提交的新 refresh token，并以 Account 错误和普通登录入口结束未验证身份。正常已验证 refresh 沿用当前 principal，不新增 Userinfo 请求。
 
 新的 OAuth gateway token 只发送给新 OAuth Userinfo 与 `app.metask-ai.com/v1/*`，不得发送给旧 `/api/v1/auth/me` 或 `/api/v1/usage/dashboard/*`，也不得以旧 `run_mode` 决定 history admission。authenticated identity 建立后，Account 直接把 `usage_eligibility` 置为 enabled并读取以周一为起点、截至上海当天的最近 53 个周列（365–371 个日历日）的 usage stats。history 请求固定使用 `scope=user&granularity=day`，Host拥有 `Asia/Shanghai` 日历范围并把本地日边界换算为 UTC `since`（包含）与 `before`（不包含）；Renderer不提交或推断这些参数。响应必须回显 `scope=user`、`granularity=day`、`timezone=Asia/Shanghai` 与精确查询边界；Host严格校验桶顺序、唯一性、`bucket_start`、Token恒等式与 `totals`。稀疏响应中缺失日期只在整段响应通过验证后由Renderer解释为零使用。`cost_mu` 是非负毫 U 整数并在Host中无损规范化为 U 十进制定点字符串；当前已发布响应允许省略 `unit` 与 `cost_complete`，若出现 `unit` 则必须为 `mU`，每日金额因此只具有 recorded cost语义，不承诺区间费用完整。服务端新增未知JSON字段可以忽略，但已消费字段类型必须严格；identity 的三个 best-effort资料字段是明确例外，字段自身不可用时只丢弃该投影。全部金额必须在Host中规范化为十进制定点字符串，不允许NaN、Infinity、指数形式或二进制浮点直接跨Bridge；Token计数必须规范化为十进制整数文本。history 的范围必须从周一开始并覆盖最近53个周列；范围、日期顺序、唯一性和上界必须整体通过验证后才可提交。失败或不完整响应不得清空旧值或伪造零使用。summary只描述整个Metask账户，不得暗示为MetaWork独占消耗。
 
@@ -125,22 +127,31 @@ Account summary 使用独立于 identity transaction 的有界单飞 attempt。a
 
 refresh timer 的 wall-clock 读取、首次 arm 和失败后的 retry arm 都必须有 Account-owned 可观察结果。无法安排刷新时保持已验证 identity，但发布 `refresh_schedule_failed`；hard expiry 后停止签发或接受 authorization generation。用户通过显式 `retry_refresh` 重新 arm，或在 token 已进入 refresh window 时立即启动 refresh；不得依赖 Renderer timer、每次任意 commit 自动重试或继续发放过期 token。
 
-logout 只要求删除 Account-owned refresh credential并提交 `signed_out`；它不读取 Models 或 consumer 状态。删除明确失败时保留原 committed identity并发布 Account error；成功后 Runtime 清除 access/refresh token和 authorization generation，随后由 Application 通知 Models 授权不可用。
+logout 先删除 Account-owned refresh credential，再删除刷新阻断记录并提交 `signed_out`；它不读取 Models 或 consumer 状态。删除明确失败时保留原 committed identity并发布 Account error；成功后 Runtime 清除 access/refresh token和 authorization generation，随后由 Application 通知 Models 授权不可用。
 
 把 credential mutation 错误解释为“未提交”的前提，是当前锁定 Native SDK 的 outcome-certainty Gate 持续通过：精确 package version 与 integrity、受支持平台实现、公开 wrapper 和系统安全存储同步返回合同必须同时匹配。依赖升级或实现漂移必须先重新审计并更新 Gate；若任一受支持平台不能证明错误即未提交，Account 不得把结果压成现有 definite failure，而必须先引入 `outcome_unknown`、readback 或 restart reconciliation，再允许后续状态迁移。当前 Gate 通过，因此不预防性增加未知状态。
 
 ## 7. Persistence 与恢复
 
-Account durable authority 只有系统安全存储中的 Metask refresh token：
+Account durable authority 由系统安全存储中的 Metask refresh token 与绑定它的刷新阻断记录共同表达：
 
 - credential service identity 为产品 Bundle ID 加 `.account`，automation 构建使用独立 `.automation.account`；
-- 固定 account name 为 `metask-refresh-token`；
+- refresh token 的固定 account name 为 `metask-refresh-token`，保留原始 token 字节格式；
+- 刷新阻断记录的固定 account name 为 `metask-refresh-in-flight`，精确 ASCII 格式为 `v1:<64 位小写 SHA-256 十六进制摘要>`，摘要输入为本次旧 refresh token 完整字节；摘要按 credential 材料管理，不进入日志、Bridge、Snapshot 或普通文件，不按 TTL 自动解除；
 - Account 不读写 `preferences.json` 或 `models.json`；这些格式归 Models；
 - Account summary 仅存在于当前进程内，不写入 credential storage、文件、Task历史或日志；
 - production 与 automation 的 credential service 隔离，不得相互恢复。
 - Account Runtime 和平台 binding 不拥有数据目录、路径创建或文件权限；Models 等其他 owner 的持久化路径不得作为 Account 初始化前置条件。
 
-冷启动是唯一可以消费 retained refresh token 的入口：没有 refresh token 时直接进入 `signed_out`；存在时只尝试一次 restore，先 refresh并提交 rotation，再以 Userinfo 建立 identity。retryable restore failure 保留 credential 和错误事实，但后续显式登录必须开始新 OAuth，不能重新进入隐式 restore 或形成无出口循环。credential-store read failure 是 Account error，不得伪造成有效登录或 Models catalog failure。
+冷启动是唯一可以消费 retained refresh token 的入口。没有 token 时进入 `signed_out`，合法残留记录仅尝试清理；有 token 且记录缺失时尝试一次 restore；记录合法且摘要匹配当前 token 时，禁止刷新并以普通登录入口要求重新登录；记录合法但摘要不匹配时，本地 token 已被替换，可以 restore 当前 token。任何读取失败、未知版本、损坏或超长记录都 fail closed，不发 refresh HTTP，发布 Account 存储错误。每次 restore 必须先 refresh并 durable commit，再以 Userinfo 建立 identity；后续显式登录总是新 OAuth，不形成隐式 restore 循环。
+
+每次 refresh 先成功写入绑定当前 token 的阻断记录，再发送唯一 HTTP。记录写入失败不发 HTTP；调用 transport 前的明确本地失败、transport 证明未发送或服务端明确未消费结果只尝试一次清理记录，清理失败保持阻断。合法轮换必须返回不同的新 refresh token，主线程只尝试一次保存新 token；失败保留旧记录并阻断刷新，释放未提交新 token，不建立本地保存恢复流程。新 token 保存成功后安装当前 credential，再清理旧记录；清理失败不回滚成功轮换，因为记录与新 token 摘要不匹配，重启可恢复新 token，下一次 HTTP 前仍必须成功覆盖记录。
+
+已验证会话的 refresh 遇到明确未发送的 network、deadline 或取消故障，且阻断记录已成功清除时，terminal commit 后必须用固定短延迟的一次性 timer 自动重试；每次 timer 只发起一个新的 attempt，后续同类未发送失败再次延迟，不在刷新窗口内立即循环。保留原失败诊断；timer 安排失败才发布 `refresh_schedule_failed` 并提供显式 retry。请求或配置错误不自动循环重试；signed_out restore 不增加隐式重试循环。
+
+结果不确定时保持阻断；timer、`retry_refresh`、错误展示变化、登录取消或时间经过都不能解除。`retry_refresh` 只恢复未被阻断的已验证会话的安全调度，不增加 signed_out restore 或保存恢复入口。未过 hard expiry 的既有 verified identity 仍按现有 lease 合同使用。显式新 OAuth 保存成功可替换 token 并清理旧记录；失败或取消保留原阻断。invalid_grant、明确 Userinfo 授权失效及 logout 均先删 token 再删记录，token 删除失败不得先清记录。
+
+写记录后、发送 HTTP 前终止进程，会保守要求重新登录；新 token 已保存、旧记录未清理时，可恢复新 token。协议保证正常系统存储返回与进程终止恢复，不承诺丢响应无感恢复、外部存储回滚或断电后的无感连续性。新旧 Host 不得同时修改同一 credential service；更新前退出旧 Host，旧二进制不理解阻断记录，不保证降级防重放。
 
 ## 8. 并发、取消、shutdown 与回归不变量
 
@@ -148,8 +159,12 @@ Account durable authority 只有系统安全存储中的 Metask refresh token：
 - 每个 attempt 最多一个 terminal completion，stale completion 必须销毁 owned secret且不能改变 state；
 - 只有仍在等待 OAuth callback 的登录可以取消；callback 被主线程提交为 `token_exchange(login)` 后取消命令即失效，credential persistence 一旦可能提交即跨过取消边界；
 - refresh timer、网络、loopback、deadline 与 cancellation 由 Account-owned policy和 Application byte/platform adapter协作收口；
+- 被阻断的 refresh 不得调度或发布可重试的 `refresh_schedule_failed` 来覆盖原失败；只有明确未消费且记录解除成功才能恢复刷新资格；
 - refresh timer 或 wall clock 失败不得静默；`refresh_schedule_failed` 必须保留 `authenticated` identity、提供显式 retry，并与 hard-expiry lease gate 共同 fail closed；
-- shutdown 停止新 command，取消 timer，cancel/join worker，消费或销毁 mailbox，清零 access/refresh token，最后断开 ports；`deinit` 不执行平台 effect；
+- 真正 Host stop 入口先停止 Account command、timer、summary 与会启动 Models 的 observer。窗口隐藏、托盘后台与 Renderer reload 不执行 Account shutdown；
+- shutdown 的在飞 refresh 使用原 network deadline 等待唯一结果，join 后在主线程尝试一次持久化合法新 token，然后清理旧记录；已进入 mailbox 的合法结果同样收口。存储与 worker 收口期间保持平台 ports 和单实例 lease 有效；关闭不发送 Userinfo、不安装新 identity、不启动 summary/catalog，也不在退出时重新保存运行中已失败的结果；
+- transport selector 已选中完整 refresh 响应时，后到的取消不能覆盖该结果；deadline/cancellation 先胜出时，必须 join worker 后检查发送边界；确认未发送才可解除阻断，否则按结果不确定保留阻断。网络 deadline 不等于 worker join 或系统存储的墙钟上限，不得提前销毁 worker 仍使用的资源；
+- 关闭最终只按 Account → Product 顺序提交唯一 shutdown terminal fact，再 cancel/join 其他 worker，销毁 mailbox、清零 credential 并断开 ports；`deinit` 不执行平台 effect；
 - 登录、refresh、restore、重新登录、取消、logout、明确 credential-store 失败、network/deadline failure、stale completion、mailbox collision 与 shutdown 都必须保持单一 terminal fact；
 - Userinfo 未验证时绝不发布 authenticated identity；
 - authorization generation 只随可用授权建立/替换，旧 generation 的 lease 和 completion不能再次生效；

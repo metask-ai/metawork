@@ -12,7 +12,7 @@ export function accountErrorMessageId(code: AccountErrorCode): MessageId {
     case "oauth_exchange_failed":
       return "account.error.authorization";
     case "token_refresh_failed":
-      return "account.error.session_expired";
+      return "account.error.refresh";
     case "metask_unauthorized":
       return "account.error.metask_access";
     case "metask_rate_limited":

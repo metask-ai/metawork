@@ -66,6 +66,7 @@ test.after(async () => {
 
 const account = {
   state: "authenticated",
+  errorCode: "none",
   displayName: "Metask User",
   emailHint: "m***@example.com",
   phoneHint: "",
@@ -293,4 +294,48 @@ test("authorization without cancellation keeps app actions available without an 
     await screen.findByRole("dialog", { name: "MetaWork" }),
     null,
   );
+});
+
+test("account menu preserves keyboard sign-in after refresh failure or cancelled reauthorization", async () => {
+  for (const errorCode of ["token_refresh_failed", "user_cancelled"]) {
+    let loginCalls = 0;
+    const user = userEvent.setup({ document: dom.window.document });
+    renderIdentity(
+      {
+        onBeginLogin() {
+          loginCalls += 1;
+        },
+      },
+      { ...account, errorCode },
+    );
+    const trigger = screen.getByRole("button", {
+      name: "Account and application menu",
+    });
+    await user.click(trigger);
+    const loginItem = await screen.findByRole("menuitem", {
+      name: "Sign in with Metask",
+    });
+    loginItem.focus();
+    await user.keyboard("{Enter}");
+    assert.equal(loginCalls, 1);
+    await waitFor(() => assert.equal(screen.queryByRole("menu"), null));
+    await waitFor(() => assert.equal(document.activeElement, trigger));
+    cleanup();
+  }
+});
+
+test("healthy account and refresh scheduling failure do not offer reauthorization", async () => {
+  for (const errorCode of ["none", "refresh_schedule_failed"]) {
+    const user = userEvent.setup({ document: dom.window.document });
+    renderIdentity({}, { ...account, errorCode });
+    await user.click(
+      screen.getByRole("button", { name: "Account and application menu" }),
+    );
+    await screen.findByRole("menu");
+    assert.equal(
+      screen.queryByRole("menuitem", { name: "Sign in with Metask" }),
+      null,
+    );
+    cleanup();
+  }
 });

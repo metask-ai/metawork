@@ -43,6 +43,9 @@ pub const Adapter = struct {
                 .set_refresh_token_fn = setRefreshToken,
                 .get_refresh_token_fn = getRefreshToken,
                 .delete_refresh_token_fn = deleteRefreshToken,
+                .set_refresh_marker_fn = setRefreshMarker,
+                .get_refresh_marker_fn = getRefreshMarker,
+                .delete_refresh_marker_fn = deleteRefreshMarker,
             },
             .authorization_url = .{
                 .context = self,
@@ -145,6 +148,40 @@ pub const Adapter = struct {
         self.services.deleteCredential(.{
             .service = store.service,
             .account = store.refresh_token_account,
+        }) catch |err| switch (err) {
+            error.CredentialNotFound => {},
+            else => return error.DeleteFailed,
+        };
+    }
+    fn setRefreshMarker(context: *anyopaque, value: []const u8) store.StoreError!void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return error.WriteFailed;
+        if (value.len != store.marker_bytes) return error.WriteFailed;
+        self.services.setCredential(.{
+            .service = store.service,
+            .account = store.refresh_in_flight_account,
+            .secret = value,
+        }) catch return error.WriteFailed;
+    }
+
+    fn getRefreshMarker(context: *anyopaque, output: []u8) store.StoreError!?[]const u8 {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return error.ReadFailed;
+        return self.services.getCredential(.{
+            .service = store.service,
+            .account = store.refresh_in_flight_account,
+        }, output) catch |err| switch (err) {
+            error.CredentialNotFound => null,
+            else => error.ReadFailed,
+        };
+    }
+
+    fn deleteRefreshMarker(context: *anyopaque) store.StoreError!void {
+        const self: *Adapter = @ptrCast(@alignCast(context));
+        self.assertMainThread() catch return error.DeleteFailed;
+        self.services.deleteCredential(.{
+            .service = store.service,
+            .account = store.refresh_in_flight_account,
         }) catch |err| switch (err) {
             error.CredentialNotFound => {},
             else => return error.DeleteFailed,

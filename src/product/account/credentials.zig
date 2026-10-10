@@ -131,6 +131,12 @@ pub const CredentialOwner = struct {
         try current.bindAccountId(principal_ref);
     }
 
+    pub fn refreshToken(self: *const CredentialOwner) ?*const oauth.Secret {
+        if (self.tokens) |*tokens| return &tokens.refresh_token;
+        if (self.stored_refresh_token) |*token| return token;
+        return null;
+    }
+
     pub fn refresh(
         self: *const CredentialOwner,
         allocator: std.mem.Allocator,
@@ -325,7 +331,7 @@ test "refresh rotation is available before strict identity lookup" {
     try std.testing.expectEqual(@as(usize, 1), fake.step);
     owner.replaceRotation(&rotation);
     try std.testing.expectError(
-        error.Unauthorized,
+        error.ProtocolInvalid,
         owner.fetchIdentity(
             .{ .context = &fake, .perform_fn = @TypeOf(fake).perform },
             null,
@@ -349,7 +355,6 @@ test "refresh rotation binds the current principal before ownership transfer" {
         \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":20}
     ,
         0,
-        false,
     );
     var rotation: CredentialRotation = .{
         .tokens = rotated_tokens.take(),

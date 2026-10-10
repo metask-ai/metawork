@@ -8,7 +8,7 @@ pub const authorize_url = authority ++ "/oauth/authorize";
 pub const token_url = authority ++ "/api/oauth/token";
 pub const userinfo_url = authority ++ "/api/oauth/userinfo";
 pub const client_id = "metawork";
-pub const scope = "openid profile email";
+pub const scope = "read model:invoke";
 pub const callback_path = "/auth/metask/callback";
 
 pub const Limits = struct {
@@ -141,8 +141,8 @@ pub fn parseCallbackTarget(
 
 /// Product-neutral RFC 9207 callback validation used by MCP after it has
 /// recorded an issuer from validated authorization-server metadata. Account
-/// keeps its previous additive-parameter behavior by calling
-/// `parseCallbackTarget`; it neither requests nor interprets `iss`.
+/// uses the same additive-parameter rules via `parseCallbackTarget`; it
+/// neither requests nor interprets `iss`.
 pub const CallbackValidation = struct {
     expected_issuer: ?[]const u8 = null,
     issuer_required: bool = false,
@@ -255,14 +255,13 @@ const TokenResponse = struct {
     refresh_token: []const u8,
     token_type: []const u8,
     expires_in: u64,
-    scope: ?[]const u8 = null,
+    scope: []const u8 = scope,
 };
 
 pub fn parseTokenResponse(
     allocator: std.mem.Allocator,
     body: []const u8,
     now_unix_seconds: i64,
-    require_scope: bool,
 ) (ProtocolError || std.mem.Allocator.Error)!TokenSet {
     if (body.len == 0 or body.len > Limits.token_body_bytes)
         return error.InvalidTokenResponse;
@@ -299,11 +298,24 @@ pub fn parseTokenResponse(
     result.refresh_token = try Secret.init(allocator, raw.refresh_token);
     errdefer result.refresh_token.deinit();
 
-    if (raw.scope) |returned_scope| {
-        if (!std.mem.eql(u8, returned_scope, scope))
-            return error.InvalidTokenResponse;
-    } else if (require_scope) return error.InvalidTokenResponse;
+    if (!hasRequestedScope(raw.scope)) return error.InvalidTokenResponse;
     return result;
+}
+
+// Account only admits the full scope it requested. OAuth scope order and
+// repeated tokens do not change the granted set; names remain case-sensitive.
+fn hasRequestedScope(value: []const u8) bool {
+    var read = false;
+    var invoke = false;
+    var tokens = std.mem.splitScalar(u8, value, ' ');
+    while (tokens.next()) |token| {
+        if (std.mem.eql(u8, token, "read")) {
+            read = true;
+        } else if (std.mem.eql(u8, token, "model:invoke")) {
+            invoke = true;
+        } else return false;
+    }
+    return read and invoke;
 }
 
 pub const CurrentUser = struct {
@@ -469,6 +481,7 @@ pub fn buildRefreshBody(
 ) ProtocolError![]const u8 {
     return writeForm(output, &.{
         .{ "grant_type", "refresh_token" },
+        .{ "client_id", client_id },
         .{ "refresh_token", refresh_token.view() },
     });
 }
@@ -520,6 +533,7 @@ test "PKCE authorize URL carries the dynamically assigned loopback port" {
     var buffer: [Limits.authorization_url_bytes]u8 = undefined;
     const url = try buildAuthorizeUrl(&buffer, callback_port, &material);
     try std.testing.expect(std.mem.startsWith(u8, url, authorize_url ++ "?"));
+    try std.testing.expect(std.mem.indexOf(u8, url, "scope=read%20model%3Ainvoke&") != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         url,
@@ -601,7 +615,7 @@ test "callback parser validates RFC 9207 issuer without normalization" {
         std.testing.allocator,
         callback_path ++
             "?code=secret-code&state=" ++ expected_state ++
-            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant",
+            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant&extension=1",
         expected_state,
         .{ .expected_issuer = issuer, .issuer_required = true },
     );
@@ -622,7 +636,7 @@ test "callback parser validates RFC 9207 issuer without normalization" {
             std.testing.allocator,
             callback_path ++
                 "?error=access_denied&state=" ++ expected_state ++
-                "&iss=https%3A%2F%2FAUTH.example.test%2Ftenant",
+                "&iss=https%3A%2F%2FAUTH.example.test%2Ftenant&extension=1",
             expected_state,
             .{ .expected_issuer = issuer },
         ),
@@ -631,7 +645,7 @@ test "callback parser validates RFC 9207 issuer without normalization" {
         std.testing.allocator,
         callback_path ++
             "?code=secret-code&state=" ++ expected_state ++
-            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant",
+            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant&extension=1",
         expected_state,
     );
     callback_without_issuer_policy.deinit();
@@ -640,10 +654,9 @@ test "callback parser validates RFC 9207 issuer without normalization" {
 test "token decoder validates consumed fields and tolerates additive metadata" {
     var tokens = try parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email","gateway_url":"https://app.metask-ai.com"}
+        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"gateway_url":"https://app.metask-ai.com"}
     ,
         100,
-        true,
     );
     defer tokens.deinit();
     try std.testing.expectEqualStrings("new-access", tokens.access_token.view());
@@ -657,29 +670,40 @@ test "token decoder validates consumed fields and tolerates additive metadata" {
         \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"unknown":true}
     ,
         0,
-        false,
     );
     extended.deinit();
-    try std.testing.expectError(
-        error.InvalidTokenResponse,
-        parseTokenResponse(
-            std.testing.allocator,
-            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1}
+}
+
+test "token scope is a case-sensitive set and omission inherits the requested grant" {
+    var storage: [512]u8 = undefined;
+    const format =
+        \\{{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"{s}"}}
+    ;
+    for ([_][]const u8{ "read model:invoke", "model:invoke read", "read read model:invoke" }) |granted| {
+        const body = try std.fmt.bufPrint(&storage, format, .{granted});
+        var tokens = try parseTokenResponse(std.testing.allocator, body, 0);
+        tokens.deinit();
+    }
+    for ([_][]const u8{
+        "",                        "read",               "model:invoke",       "READ model:invoke",  "openid profile email",
+        "read model:invoke admin", " read model:invoke", "read model:invoke ", "read  model:invoke", "read\\tmodel:invoke",
+    }) |granted| {
+        const body = try std.fmt.bufPrint(&storage, format, .{granted});
+        try std.testing.expectError(
+            error.InvalidTokenResponse,
+            parseTokenResponse(std.testing.allocator, body, 0),
+        );
+    }
+    for ([_][]const u8{
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":null}
         ,
-            0,
-            true,
-        ),
-    );
-    try std.testing.expectError(
-        error.InvalidTokenResponse,
-        parseTokenResponse(
-            std.testing.allocator,
-            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"unexpected"}
-        ,
-            0,
-            true,
-        ),
-    );
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":42}
+    }) |body| {
+        try std.testing.expectError(
+            error.InvalidTokenResponse,
+            parseTokenResponse(std.testing.allocator, body, 0),
+        );
+    }
 }
 
 test "current user decoder binds the principal and projects optional profile fields" {
@@ -791,7 +815,7 @@ test "authorization code and refresh bodies do not widen client contract" {
     defer refresh.deinit();
     const refresh_body = try buildRefreshBody(&body_storage, &refresh);
     try std.testing.expectEqualStrings(
-        "grant_type=refresh_token&refresh_token=refresh-token",
+        "grant_type=refresh_token&client_id=metawork&refresh_token=refresh-token",
         refresh_body,
     );
 }

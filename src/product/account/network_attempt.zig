@@ -255,13 +255,17 @@ pub const NetworkAttempt = struct {
                 self.sink.publish(self.attempt_id, &result);
             },
             .refresh => {
+                var tracked: RefreshTransportEvidence = .{ .transport = self.transport };
                 var refreshed = self.credential_owner.?.refresh(
                     self.allocator,
-                    self.transport,
+                    .{ .context = &tracked, .perform_fn = RefreshTransportEvidence.perform },
                     self.now_unix_seconds,
                     control,
                 ) catch |err| {
-                    self.publishFailure(metask.errorCode(err));
+                    self.publishCompletion(.{ .failed = .{
+                        .error_code = metask.errorCode(err),
+                        .refresh_not_consumed = !tracked.may_have_sent or err == error.TokenRefreshFailed,
+                    } });
                     return;
                 };
                 defer refreshed.deinit();
@@ -280,6 +284,23 @@ pub const NetworkAttempt = struct {
             },
         }
     }
+
+    const RefreshTransportEvidence = struct {
+        transport: metask.Transport,
+        may_have_sent: bool = false,
+
+        fn perform(context: *anyopaque, request: metask.Request, output: []u8) metask.TransportError!metask.Response {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.may_have_sent = true;
+            return self.transport.perform(request, output) catch |err| {
+                switch (err) {
+                    error.NetworkNotSent, error.CancelledNotSent, error.DeadlineExceededNotSent => self.may_have_sent = false,
+                    else => {},
+                }
+                return err;
+            };
+        }
+    };
 
     fn publishCompletion(
         self: *NetworkAttempt,
@@ -410,7 +431,7 @@ const LoginTransport = struct {
             return error.Cancelled;
         }
         const body =
-            \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email"}
+            \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"read model:invoke"}
         ;
         @memcpy(output[0..body.len], body);
         return .{ .status = 200, .body = output[0..body.len] };
