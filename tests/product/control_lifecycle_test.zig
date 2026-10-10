@@ -5832,6 +5832,7 @@ test "Task deletion releases an idle Session without blocking the caller" {
 
     const task_id = try workbench.createTask(productControlTaskInput());
     const run_id = try workbench.runTask(task_id, .{ .text = "finish before deletion" });
+    fake_core.waitRunEntered();
     try workbench.cancel(task_id, run_id);
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"cancelled\"");
     try workbench.setTaskArchived(task_id, true);
