@@ -221,7 +221,7 @@ Attachment staging 是 Product Control 内部候选资源 owner，原件存储�
 
 路径输入使用独立 bounded attachment lane，以有界块复制普通非空文件，读取必须 no-follow 并在前后 stat 不变；用户源路径只活到候选建立，不进入日志、Snapshot、持久化或发送时重读。DOM 字节输入只接收本次 File 的连续块，不宣称具备路径身份或 stat 保证；每个主窗口连接至多一个接收批次，在开始时预留完整数量和原件字节配额，逐块写入 store，不分配文件总大小的接收 buffer。预留和 ready/borrowed 附件共用总配额，不能被 picker 绕过；它不等于进程总内存上限。
 
-两个入口都整批原子 staging，共用单文件、数量和总容量限制。Product 按签名识别 PNG/JPEG/WebP，并通过 Application 注入的 codec 验证和生成有界 PNG；其他非空内容只接受完整 UTF-8 且无 NUL 的文本。图片和文本共用单文件上限，不按扩展名或 MIME 分类，不发布通用 binary grant。失败必须释放整批候选；原件的存储 identity 只由 Host 生成。未发送原件位于 store 的 staging namespace，重启清除该 namespace，已接纳原件不因此丢失。
+两个入口都整批原子 staging，共用单文件、数量和总容量限制。Product 按签名识别 PNG/JPEG/WebP，并通过 Application 注入的 codec 验证和生成有界 PNG；其他非空内容只接受完整 UTF-8 且无 NUL 的文本。图片和文本共用单文件上限，不按扩展名或 MIME 分类，不发布通用 binary grant。所有来源共用一个 Product 输入批次与固定容量的资源槽；整批元数据和数量、字节配额必须在创建任何原件前完成校验与预留。失败必须撤销整批候选 authority；只有确认物理删除的原件才返还配额。删除失败的 identity 保留为有界 cleanup debt，不发布 descriptor，不阻止其他合法 ready/borrowed 附件；后续显式添加可有界重试清理，不能用重连或取消假装释放。原件的存储 identity 只由 Host 生成。未发送原件位于 store 的 staging namespace，重启清除该 namespace，已接纳原件不因此丢失。
 
 staging 状态精确为 `staging | ready | borrowed | consumed | released | failed`。Bridge 在 `tasks.run` 前校验 token 属于当前 connection/window、均为 ready 且不重复。Product 在 Task authority 校验后将原件移入 Task namespace并构造有界、不可信资料引用；图片同时提供有界 PNG，文本不全量嵌入 prompt。顺序为可空用户文字 part 后接 chip 顺序的图片预览/原件引用。含文本附件时用户指令必须非空。Agent 消费普通 text/image part 和既有 built-in Read/Grep，不增加 AgentCore ABI、host tool 或 Provider-specific document path。准备失败回滚至可重试 staging；Run 接纳是 token 消费 linearization point，此后即使 history save、enqueue、transport 或 terminal 失败也不得恢复或重放 token。
 

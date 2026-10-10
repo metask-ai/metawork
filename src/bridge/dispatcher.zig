@@ -1048,10 +1048,12 @@ pub const Dispatcher = struct {
             error.FileTooLarge => "file_too_large",
             error.TextFileTooLarge => "text_file_too_large",
             error.TooManyFiles => "too_many_files",
-            error.StagingCapacity, error.OutOfMemory, error.IdentityExhausted => "staging_capacity",
+            error.StagingCapacity, error.InputBusy, error.OutOfMemory, error.IdentityExhausted => "staging_capacity",
             error.ExecutorShuttingDown => "shutting_down",
             error.StaleTransfer => "stale_transfer",
-            error.EmptyFile, error.InvalidDisplayName => "read_failed",
+            error.EmptyFile, error.InvalidDisplayName, error.ReadFailed, error.WriteFailed => "read_failed",
+            error.FileChanged => "file_changed",
+            error.UnsupportedType => "unsupported_type",
             else => "invalid_transfer",
         };
         return std.fmt.bufPrint(output, "{{\"status\":\"rejected\",\"reason\":\"{s}\"}}", .{reason});
@@ -2609,7 +2611,7 @@ pub const Dispatcher = struct {
             invocation.source.window_id,
         );
         const released = if (id) |attachment_id|
-            (try self.requireProductControl()).releaseAttachment(attachment_id)
+            try (try self.requireProductControl()).releaseAttachmentChecked(attachment_id)
         else
             false;
         return std.fmt.bufPrint(output, "{{\"released\":{}}}", .{released});

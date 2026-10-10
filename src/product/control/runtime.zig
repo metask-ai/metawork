@@ -2290,6 +2290,14 @@ pub const Runtime = struct {
         return self.attachments.stageBatch(candidates, output);
     }
 
+    pub fn releaseAttachmentChecked(self: *Runtime, id: u64) Error!bool {
+        return self.attachments.releaseChecked(id);
+    }
+
+    pub fn cancelAttachmentReceiveChecked(self: *Runtime, id: u64) Error!bool {
+        return self.attachments.cancelReceiveChecked(id);
+    }
+
     pub fn releaseAttachment(self: *Runtime, id: u64) bool {
         return self.attachments.release(id);
     }

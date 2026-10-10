@@ -2,7 +2,7 @@
 //! store so admission moves a file rather than copying a large attachment.
 const std = @import("std");
 
-pub const Error = std.mem.Allocator.Error || error{ DirectoryUnavailable, ReadFailed, WriteFailed, UnsupportedType, FileChanged, FileTooLarge };
+pub const Error = std.mem.Allocator.Error || error{ DirectoryUnavailable, ReadFailed, WriteFailed, UnsupportedType, FileChanged, FileTooLarge, DeleteFailed };
 pub const File = struct {
     name: [32]u8,
     task_id: u64 = 0,
@@ -42,16 +42,24 @@ pub const FileStore = struct {
         return std.fmt.bufPrint(buffer, "{d}/{s}.{s}", .{ file.task_id, file.name, @tagName(file.extension) }) catch error.WriteFailed;
     }
 
-    pub fn begin(self: *FileStore, size: usize) Error!File {
+    pub fn allocate(self: *FileStore, size: usize) Error!File {
         var random: [16]u8 = undefined;
         std.Io.randomSecure(self.io, &random) catch return error.WriteFailed;
-        const value: File = .{ .name = std.fmt.bytesToHex(random, .lower), .size = size };
+        return .{ .name = std.fmt.bytesToHex(random, .lower), .size = size };
+    }
+
+    pub fn create(self: *FileStore, value: File) Error!void {
         var dir = self.root.createDirPathOpen(self.io, "0", .{ .open_options = .{ .follow_symlinks = false }, .permissions = directoryPermissions() }) catch return error.WriteFailed;
         defer dir.close(self.io);
         var name_buffer: [40]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buffer, "{s}.{s}", .{ value.name, @tagName(value.extension) }) catch return error.WriteFailed;
         const file = dir.createFile(self.io, name, .{ .exclusive = true, .permissions = filePermissions(), .resolve_beneath = true }) catch return error.WriteFailed;
         file.close(self.io);
+    }
+
+    pub fn begin(self: *FileStore, size: usize) Error!File {
+        const value = try self.allocate(size);
+        try self.create(value);
         return value;
     }
 
@@ -156,8 +164,15 @@ pub const FileStore = struct {
     }
 
     pub fn delete(self: *FileStore, value: File) void {
+        self.deleteChecked(value) catch {};
+    }
+
+    pub fn deleteChecked(self: *FileStore, value: File) Error!void {
         var buffer: [80]u8 = undefined;
-        self.root.deleteFile(self.io, relative(value, &buffer) catch return) catch {};
+        self.root.deleteFile(self.io, try relative(value, &buffer)) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return error.DeleteFailed,
+        };
     }
 
     pub fn deleteTask(self: *FileStore, task_id: u64) void {
