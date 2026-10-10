@@ -10,6 +10,14 @@ pub const File = struct {
     extension: enum { txt, png, jpg, webp } = .txt,
 };
 
+pub const Source = struct {
+    handle: std.Io.File,
+    before: std.Io.File.Stat,
+    pub fn close(self: Source, io: std.Io) void {
+        self.handle.close(io);
+    }
+};
+
 pub const FileStore = struct {
     io: std.Io,
     root: std.Io.Dir,
@@ -89,28 +97,45 @@ pub const FileStore = struct {
         return value;
     }
 
-    /// Copy through a bounded buffer; never allocate the source file's size.
-    pub fn copyPath(self: *FileStore, path: []const u8, max_bytes: usize) Error!File {
+    pub fn openSource(self: *FileStore, path: []const u8) Error!Source {
         const source = positionalHandle(std.Io.Dir.openFileAbsolute(self.io, path, .{ .allow_directory = false, .follow_symlinks = false }) catch return error.ReadFailed);
-        defer source.close(self.io);
-        const before = source.stat(self.io) catch return error.ReadFailed;
-        if (before.kind != .file or before.size == 0) return error.UnsupportedType;
-        if (before.size > max_bytes) return error.FileTooLarge;
-        const value = try self.begin(@intCast(before.size));
-        errdefer self.delete(value);
+        errdefer source.close(self.io);
+        const stat = source.stat(self.io) catch return error.ReadFailed;
+        if (stat.kind != .file or stat.size == 0) return error.UnsupportedType;
+        return .{ .handle = source, .before = stat };
+    }
+
+    /// Source is opened exactly once at probe; copy keeps that identity and
+    /// checks cancellation between bounded reads and writes.
+    pub fn copySource(self: *FileStore, source: Source, value: File, cancelled: ?*const std.atomic.Value(bool)) (Error || error{Cancelled})!void {
         var bytes: [64 * 1024]u8 = undefined;
         defer std.crypto.secureZero(u8, &bytes);
         var offset: usize = 0;
         while (offset < value.size) {
+            if (cancelled) |token| if (token.load(.acquire)) return error.Cancelled;
             const chunk = bytes[0..@min(bytes.len, value.size - offset)];
-            const count = source.readPositionalAll(self.io, chunk, offset) catch return error.ReadFailed;
+            const count = source.handle.readPositionalAll(self.io, chunk, offset) catch return error.ReadFailed;
             if (count != chunk.len) return error.FileChanged;
+            if (cancelled) |token| if (token.load(.acquire)) return error.Cancelled;
             try self.append(value, offset, chunk);
             offset += count;
         }
-        const after = source.stat(self.io) catch return error.ReadFailed;
+        const after = source.handle.stat(self.io) catch return error.ReadFailed;
+        const before = source.before;
         if (before.inode != after.inode or before.size != after.size or !std.meta.eql(before.mtime, after.mtime) or !std.meta.eql(before.ctime, after.ctime)) return error.FileChanged;
         try self.finish(value);
+    }
+
+    pub fn copyPath(self: *FileStore, path: []const u8, max_bytes: usize) Error!File {
+        const source = try self.openSource(path);
+        defer source.close(self.io);
+        if (source.before.size > max_bytes) return error.FileTooLarge;
+        const value = try self.begin(@intCast(source.before.size));
+        errdefer self.delete(value);
+        self.copySource(source, value, null) catch |err| return switch (err) {
+            error.Cancelled => unreachable,
+            else => |failure| failure,
+        };
         return value;
     }
 
@@ -243,4 +268,22 @@ test "positional originals and bounded path copy retain exact bytes" {
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("abcdefgh", bytes);
     try std.testing.expectError(error.FileTooLarge, store.copyPath(source_path, 7));
+}
+
+test "copy rejects a changed source using the original open handle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abc" });
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &root);
+    var file_store = try FileStore.init(std.testing.io, std.testing.allocator, root[0..len]);
+    defer file_store.deinit();
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root[0..len], "source.txt" });
+    defer std.testing.allocator.free(path);
+    const source = try file_store.openSource(path);
+    defer source.close(std.testing.io);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "abcd" });
+    const target = try file_store.begin(3);
+    defer file_store.delete(target);
+    try std.testing.expectError(error.FileChanged, file_store.copySource(source, target, null));
 }

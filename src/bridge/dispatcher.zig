@@ -1315,6 +1315,8 @@ pub const Dispatcher = struct {
             self.completeAttachmentRejected(completion_id, switch (err) {
                 error.ShuttingDown => .shutting_down,
                 error.Capacity, error.OutOfMemory => .staging_capacity,
+                error.InputBusy => .input_busy,
+                error.CleanupFailed => .cleanup_failed,
                 else => .read_failed,
             });
         };
@@ -1375,6 +1377,8 @@ pub const Dispatcher = struct {
             const request_id = request_id_storage[0..slot.request_id_len];
             slot.* = .{};
             switch (result) {
+                .accepted => unreachable,
+                .cancelled => respondAttachmentCancelled(responder, request_id),
                 .rejected => |reason| respondAttachmentRejected(responder, request_id, reason),
                 .ready => |descriptors| {
                     if (self.delivery.connectedGeneration() != generation or

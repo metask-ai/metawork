@@ -57,6 +57,7 @@ pub const Runtime = struct {
     next_id: u64 = 1,
     receiving: ?Receive = null,
     next_receive_id: u64 = 1,
+    preparing: ?u64 = null,
     pub fn init(allocator: std.mem.Allocator, limits: Limits, file_store: ?*FileStore, images: ImagePreparation) Error!Runtime {
         if (limits.max_files == 0 or limits.max_display_name_bytes == 0 or limits.max_file_bytes == 0 or limits.max_staged_bytes == 0) return error.InvalidLimits;
         const slots = try allocator.alloc(?Entry, limits.max_files);
@@ -74,15 +75,15 @@ pub const Runtime = struct {
     /// One resource core for path, byte and internal candidates. All metadata and
     /// allocations complete before any original is created or ownership changes.
     pub fn beginReceive(self: *Runtime, files: []const ReceiveFile) Error!u64 {
-        return self.reserve(files, null);
+        return self.reserve(files, null, true, null);
     }
-    fn reserve(self: *Runtime, files: []const ReceiveFile, owned: ?[]Candidate) Error!u64 {
+    fn reserve(self: *Runtime, files: []const ReceiveFile, owned: ?[]Candidate, initialize: bool, prepared_id: ?u64) Error!u64 {
         const fs = self.file_store orelse return error.StagingCapacity;
-        if (self.receiving != null) return error.InputBusy;
+        if (self.receiving != null or self.preparing != null) return error.InputBusy;
         _ = self.retryCleanup();
         if (files.len == 0) return error.EmptyBatch;
         if (files.len > self.limits.max_files) return error.TooManyFiles;
-        if (self.next_receive_id == 0) return error.IdentityExhausted;
+        if (prepared_id == null and self.next_receive_id == 0) return error.IdentityExhausted;
         var total: usize = 0;
         for (files) |file| {
             if (!validDisplayName(file.display_name, self.limits.max_display_name_bytes)) return error.InvalidDisplayName;
@@ -120,21 +121,56 @@ pub const Runtime = struct {
         // From here each reserved identity is accounted even when create fails.
         prepared = 0;
         self.used_bytes += total;
-        const id = self.next_receive_id;
-        self.next_receive_id +%= 1;
+        const id = prepared_id orelse self.next_receive_id;
+        if (prepared_id == null) self.next_receive_id +%= 1;
         self.receiving = .{ .id = id, .indices = indices };
         for (indices) |slot| self.slots[slot].?.batch_id = id;
         owns_indices = false;
         if (owned) |items| for (items) |*candidate| {
             candidate.stored = null;
         };
-        for (indices, 0..) |slot, index| {
+        if (initialize) for (indices, 0..) |slot, index| {
             if (!existing[index]) fs.create(self.slots[slot].?.file) catch |err| {
                 _ = self.cancelReceiveChecked(id) catch return error.CleanupFailed;
                 return err;
             };
-        }
+        };
         return id;
+    }
+    pub fn beginPreparing(self: *Runtime) Error!u64 {
+        if (self.receiving != null or self.preparing != null) return error.InputBusy;
+        _ = self.retryCleanup();
+        if (self.freeSlotCount() == 0 or self.used_bytes == self.limits.max_staged_bytes) {
+            if (self.cleanupDebt().count != 0) return error.CleanupFailed;
+            return error.StagingCapacity;
+        }
+        if (self.next_receive_id == 0) return error.IdentityExhausted;
+        const id = self.next_receive_id;
+        self.next_receive_id +%= 1;
+        self.preparing = id;
+        return id;
+    }
+    pub fn reservePrepared(self: *Runtime, id: u64, files: []const ReceiveFile) Error!void {
+        if (self.preparing != id) return error.StaleTransfer;
+        self.preparing = null;
+        _ = try self.reserve(files, null, false, id);
+    }
+    pub fn cancelPreparing(self: *Runtime, id: u64) bool {
+        if (self.preparing != id) return false;
+        self.preparing = null;
+        return true;
+    }
+    pub fn writeFiles(self: *const Runtime, id: u64, output: []store.File) Error![]const store.File {
+        const batch = self.receiving orelse return error.StaleTransfer;
+        if (batch.id != id or output.len < batch.indices.len) return error.StaleTransfer;
+        for (batch.indices, 0..) |slot, index| output[index] = self.slots[slot].?.file;
+        return output[0..batch.indices.len];
+    }
+    pub fn acknowledgeCopied(self: *Runtime, id: u64) Error!void {
+        const batch = if (self.receiving) |*value| value else return error.StaleTransfer;
+        if (batch.id != id) return error.StaleTransfer;
+        batch.file_index = batch.indices.len;
+        batch.offset = 0;
     }
     pub fn appendReceive(self: *Runtime, id: u64, file_index: usize, offset: usize, bytes: []const u8) Error!void {
         const receive = if (self.receiving) |*value| value else return error.StaleTransfer;
@@ -143,13 +179,39 @@ pub const Runtime = struct {
         const entry = &self.slots[receive.indices[file_index]].?;
         if (offset > entry.file.size or bytes.len > entry.file.size - offset) return error.InvalidTransfer;
         try self.file_store.?.append(entry.file, offset, bytes);
-        receive.offset += bytes.len;
+        try self.acknowledgeWrite(id, file_index, offset, bytes.len);
+    }
+    pub fn writeTarget(self: *const Runtime, id: u64, index: usize, offset: usize, count: usize) Error!store.File {
+        const batch = self.receiving orelse return error.StaleTransfer;
+        if (batch.id != id) return error.StaleTransfer;
+        if (index != batch.file_index or offset != batch.offset or index >= batch.indices.len or count == 0) return error.InvalidTransfer;
+        const file = self.slots[batch.indices[index]].?.file;
+        if (offset > file.size or count > file.size - offset) return error.InvalidTransfer;
+        return file;
+    }
+    pub fn validateComplete(self: *const Runtime, id: u64) Error!void {
+        const batch = self.receiving orelse return error.StaleTransfer;
+        if (batch.id != id) return error.StaleTransfer;
+        if (batch.file_index != batch.indices.len) return error.InvalidTransfer;
+    }
+    pub fn acknowledgeWrite(self: *Runtime, id: u64, file_index: usize, offset: usize, count: usize) Error!void {
+        const receive = if (self.receiving) |*value| value else return error.StaleTransfer;
+        if (receive.id != id or file_index != receive.file_index or offset != receive.offset or file_index >= receive.indices.len or count == 0) return error.InvalidTransfer;
+        const entry = &self.slots[receive.indices[file_index]].?;
+        if (offset > entry.file.size or count > entry.file.size - offset) return error.InvalidTransfer;
+        receive.offset += count;
         if (receive.offset == entry.file.size) {
             receive.file_index += 1;
             receive.offset = 0;
         }
     }
     pub fn finishReceive(self: *Runtime, id: u64, output: []Descriptor) Error![]const Descriptor {
+        return self.finish(id, output, false);
+    }
+    pub fn finishValidated(self: *Runtime, id: u64, output: []Descriptor) Error![]const Descriptor {
+        return self.finish(id, output, true);
+    }
+    fn finish(self: *Runtime, id: u64, output: []Descriptor, validated: bool) Error![]const Descriptor {
         const receive = self.receiving orelse return error.StaleTransfer;
         if (receive.id != id) return error.StaleTransfer;
         if (receive.file_index != receive.indices.len) return error.InvalidTransfer;
@@ -157,11 +219,11 @@ pub const Runtime = struct {
         if (self.next_id == 0 or receive.indices.len - 1 > std.math.maxInt(u64) - self.next_id) return error.IdentityExhausted;
         for (receive.indices) |slot| {
             const entry = &self.slots[slot].?;
-            self.file_store.?.finish(entry.file) catch |err| {
+            if (!validated) self.file_store.?.finish(entry.file) catch |err| {
                 _ = self.cancelReceiveChecked(id) catch return error.CleanupFailed;
                 return err;
             };
-            self.classify(entry) catch |err| {
+            self.classify(entry, validated) catch |err| {
                 _ = self.cancelReceiveChecked(id) catch return error.CleanupFailed;
                 return err;
             };
@@ -213,7 +275,7 @@ pub const Runtime = struct {
             if (candidate.stored != null and owned == null) return error.InvalidTransfer;
             file.* = .{ .display_name = candidate.display_name, .size_bytes = if (candidate.stored) |stored| stored.size else candidate.bytes.len };
         }
-        const id = try self.reserve(files, owned);
+        const id = try self.reserve(files, owned, true, null);
         errdefer _ = self.cancelReceive(id);
         for (candidates, 0..) |candidate, index| {
             if (candidate.bytes.len != 0) self.appendReceive(id, index, 0, candidate.bytes) catch |err| {
@@ -291,7 +353,7 @@ pub const Runtime = struct {
         if (entry.state != .ready and entry.state != .borrowed) return null;
         return self.descriptor(entry);
     }
-    fn classify(self: *Runtime, entry: *Entry) Error!void {
+    fn classify(self: *Runtime, entry: *Entry, validated: bool) Error!void {
         var prefix: [12]u8 = undefined;
         const count = try self.file_store.?.read(entry.file, 0, &prefix);
         if (detectFormat(prefix[0..count])) |format| {
@@ -315,43 +377,10 @@ pub const Runtime = struct {
             entry.format = format;
             return;
         }
-        // UTF-8 state crosses chunk boundaries, including overlong/surrogate checks.
-        var chunk: [64 * 1024]u8 = undefined;
-        defer std.crypto.secureZero(u8, &chunk);
-        var offset: usize = 0;
-        var remaining: u3 = 0;
-        var codepoint: u32 = 0;
-        var minimum: u32 = 0;
-        while (offset < entry.file.size) {
-            const bytes = chunk[0..@min(chunk.len, entry.file.size - offset)];
-            if (try self.file_store.?.read(entry.file, offset, bytes) != bytes.len) return error.FileChanged;
-            for (bytes) |byte| {
-                if (byte == 0) return error.UnsupportedType;
-                if (remaining == 0) {
-                    if (byte < 0x80) continue;
-                    if (byte >= 0xc2 and byte <= 0xdf) {
-                        remaining = 1;
-                        codepoint = byte & 0x1f;
-                        minimum = 0x80;
-                    } else if (byte >= 0xe0 and byte <= 0xef) {
-                        remaining = 2;
-                        codepoint = byte & 0x0f;
-                        minimum = 0x800;
-                    } else if (byte >= 0xf0 and byte <= 0xf4) {
-                        remaining = 3;
-                        codepoint = byte & 7;
-                        minimum = 0x10000;
-                    } else return error.UnsupportedType;
-                } else {
-                    if (byte & 0xc0 != 0x80) return error.UnsupportedType;
-                    codepoint = (codepoint << 6) | (byte & 0x3f);
-                    remaining -= 1;
-                    if (remaining == 0 and (codepoint < minimum or codepoint > 0x10ffff or (codepoint >= 0xd800 and codepoint <= 0xdfff))) return error.UnsupportedType;
-                }
-            }
-            offset += bytes.len;
-        }
-        if (remaining != 0) return error.UnsupportedType;
+        if (!validated) validateOriginal(self.file_store.?, entry.file, null) catch |err| return switch (err) {
+            error.Cancelled => unreachable,
+            else => |failure| failure,
+        };
     }
     fn descriptor(_: *const Runtime, entry: Entry) Descriptor {
         return .{ .id = entry.id, .kind = if (entry.format == null) .file else .image, .format = entry.format, .display_name = entry.display_name, .size_bytes = entry.file.size };
@@ -756,4 +785,50 @@ test "metadata preflight rejects an entire batch before original creation" {
     try std.testing.expectEqual(@as(usize, 4), runtime.freeSlotCount());
     try std.testing.expect(runtime.receiving == null);
     try std.testing.expectError(error.FileNotFound, fixture.store.root.openDir(std.testing.io, "0", .{}));
+}
+
+/// Shared disk validation: signature identification and streaming UTF-8. Image
+/// codec work remains on the Native loop thread at publication.
+pub fn validateOriginal(file_store: *FileStore, file: store.File, cancelled: ?*const std.atomic.Value(bool)) (Error || error{Cancelled})!void {
+    var prefix: [12]u8 = undefined;
+    const count = try file_store.read(file, 0, &prefix);
+    if (detectFormat(prefix[0..count]) != null) return;
+    // UTF-8 state crosses chunk boundaries, including overlong/surrogate checks.
+    var chunk: [64 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &chunk);
+    var offset: usize = 0;
+    var remaining: u3 = 0;
+    var codepoint: u32 = 0;
+    var minimum: u32 = 0;
+    while (offset < file.size) {
+        if (cancelled) |token| if (token.load(.acquire)) return error.Cancelled;
+        const bytes = chunk[0..@min(chunk.len, file.size - offset)];
+        if (try file_store.read(file, offset, bytes) != bytes.len) return error.FileChanged;
+        for (bytes) |byte| {
+            if (byte == 0) return error.UnsupportedType;
+            if (remaining == 0) {
+                if (byte < 0x80) continue;
+                if (byte >= 0xc2 and byte <= 0xdf) {
+                    remaining = 1;
+                    codepoint = byte & 0x1f;
+                    minimum = 0x80;
+                } else if (byte >= 0xe0 and byte <= 0xef) {
+                    remaining = 2;
+                    codepoint = byte & 0x0f;
+                    minimum = 0x800;
+                } else if (byte >= 0xf0 and byte <= 0xf4) {
+                    remaining = 3;
+                    codepoint = byte & 7;
+                    minimum = 0x10000;
+                } else return error.UnsupportedType;
+            } else {
+                if (byte & 0xc0 != 0x80) return error.UnsupportedType;
+                codepoint = (codepoint << 6) | (byte & 0x3f);
+                remaining -= 1;
+                if (remaining == 0 and (codepoint < minimum or codepoint > 0x10ffff or (codepoint >= 0xd800 and codepoint <= 0xdfff))) return error.UnsupportedType;
+            }
+        }
+        offset += bytes.len;
+    }
+    if (remaining != 0) return error.UnsupportedType;
 }

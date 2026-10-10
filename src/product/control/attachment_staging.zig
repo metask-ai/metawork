@@ -1,378 +1,242 @@
-//! Bounded worker lane that turns native file paths into validated bytes.
+//! Bounded attachment I/O jobs. Product retains identities and quotas; workers
+//! receive frozen files, one owned chunk, or opened source handles.
 const std = @import("std");
 const attachment = @import("metawork_product_attachment");
-
 pub const max_in_flight: usize = 4;
 pub const worker_count: usize = 2;
-
-pub const Rejection = enum {
-    unsupported_type,
-    file_too_large,
-    text_file_too_large,
-    too_many_files,
-    staging_capacity,
-    read_failed,
-    file_changed,
-    shutting_down,
-};
-
-pub const Input = struct {
-    completion_id: u64,
-    path_count: usize,
-    paths: []const u8,
-    limits: attachment.Limits,
-    file_store: *attachment.FileStore,
-};
-
-pub const Completion = struct {
-    completion_id: u64,
-    rejection: ?Rejection,
-    candidates: []const attachment.Candidate,
-};
-
+pub const Rejection = enum { unsupported_type, file_too_large, text_file_too_large, too_many_files, staging_capacity, read_failed, file_changed, input_busy, cleanup_failed, shutting_down };
+pub fn reject(err: anyerror) Rejection {
+    return switch (err) {
+        error.UnsupportedType, error.EmptyFile, error.InvalidDisplayName => .unsupported_type,
+        error.FileTooLarge => .file_too_large,
+        error.TextFileTooLarge => .text_file_too_large,
+        error.TooManyFiles, error.EmptyBatch => .too_many_files,
+        error.StagingCapacity, error.OutOfMemory, error.IdentityExhausted, error.Capacity => .staging_capacity,
+        error.FileChanged => .file_changed,
+        error.InputBusy => .input_busy,
+        error.CleanupFailed, error.DeleteFailed => .cleanup_failed,
+        error.ShuttingDown, error.ExecutorShuttingDown => .shutting_down,
+        else => .read_failed,
+    };
+}
+pub const Input = struct { completion_id: u64, path_count: usize, paths: []const u8, limits: attachment.Limits, file_store: *attachment.FileStore };
+pub const Phase = enum { probed, copied, initialized, written, validated };
+pub const Completion = struct { completion_id: u64, phase: Phase, rejection: ?Rejection, cancelled: bool, files: []const attachment.ReceiveFile };
 pub const Taken = struct { job: *anyopaque, completion: Completion };
-pub const Notifier = struct {
-    context: ?*anyopaque = null,
-    wake_fn: *const fn (?*anyopaque) bool,
-};
-pub const ExecutorJob = struct {
-    identity: *anyopaque,
-    context: *anyopaque,
-    execute_fn: *const fn (*anyopaque) void,
-    cancel_fn: *const fn (*anyopaque) void,
-};
+pub const Notifier = struct { context: ?*anyopaque = null, wake_fn: *const fn (?*anyopaque) bool };
+pub const ExecutorJob = struct { identity: *anyopaque, context: *anyopaque, execute_fn: *const fn (*anyopaque) void, cancel_fn: *const fn (*anyopaque) void };
 pub const Executor = struct {
     context: *anyopaque,
     enqueue_fn: *const fn (*anyopaque, ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void,
-
     fn enqueue(self: Executor, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
         return self.enqueue_fn(self.context, job);
     }
 };
 pub const Error = std.mem.Allocator.Error || error{ ShuttingDown, Capacity, InvalidInput };
-
 const Job = struct {
     lane: *Lane,
     completion_id: u64,
-    path_count: usize,
-    paths: []u8,
-    limits: attachment.Limits,
     file_store: *attachment.FileStore,
-    rejection: ?Rejection = .read_failed,
-    candidate_storage: ?[]attachment.Candidate = null,
-    candidates: []attachment.Candidate = &.{},
-
+    phase: Phase = .probed,
+    cancelled: std.atomic.Value(bool) = .init(false),
+    rejection: ?Rejection = null,
+    paths: []u8 = &.{},
+    metadata: []attachment.ReceiveFile = &.{},
+    sources: []attachment.store.Source = &.{},
+    source_count: usize = 0,
+    targets: []attachment.store.File = &.{},
+    chunk: []u8 = &.{},
+    offset: usize = 0,
+    limits: attachment.Limits = undefined,
     fn execute(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
-        self.readBatch();
+        self.perform() catch |err| {
+            if (err != error.Cancelled) self.rejection = reject(err);
+        };
+        // The completion boundary proves no worker uses these handles/buffers.
+        if (self.phase != .probed or self.rejection != null or self.cancelled.load(.acquire)) self.closeSources();
         self.lane.publish(self);
     }
-
     fn cancel(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
-        self.rejection = .shutting_down;
+        self.cancelled.store(true, .release);
+        self.closeSources();
         self.lane.publish(self);
     }
-
-    fn readBatch(self: *Job) void {
-        if (self.path_count == 0 or self.path_count > self.limits.max_files) {
-            self.rejection = .too_many_files;
-            return;
-        }
-        const candidates = self.lane.allocator.alloc(attachment.Candidate, self.path_count) catch {
-            self.rejection = .staging_capacity;
-            return;
-        };
-        self.candidate_storage = candidates;
-        self.candidates = candidates[0..0];
-        var split = std.mem.splitScalar(u8, self.paths, '\n');
-        var total: usize = 0;
-        while (split.next()) |path| {
-            if (self.candidates.len == self.path_count or path.len == 0 or
-                !std.fs.path.isAbsolute(path))
-            {
-                self.rejection = .read_failed;
-                return;
-            }
-            const display_name = std.fs.path.basename(path);
-            if (display_name.len == 0 or
-                display_name.len > self.limits.max_display_name_bytes)
-            {
-                self.rejection = .unsupported_type;
-                return;
-            }
-            const stored = self.file_store.copyPath(path, self.limits.max_file_bytes) catch |err| {
-                self.rejection = switch (err) {
-                    error.FileTooLarge => .file_too_large,
-                    error.FileChanged => .file_changed,
-                    error.UnsupportedType => .unsupported_type,
-                    else => .read_failed,
-                };
-                return;
-            };
-            if (stored.size > self.limits.max_staged_bytes - total) {
-                self.file_store.delete(stored);
-                self.rejection = .staging_capacity;
-                return;
-            }
-            self.candidates.len += 1;
-            self.candidates[self.candidates.len - 1] = .{ .display_name = display_name, .stored = stored };
-            total += stored.size;
-        }
-        if (self.candidates.len != self.path_count) {
-            self.rejection = .read_failed;
-            return;
-        }
-        self.rejection = null;
+    fn check(self: *Job) error{Cancelled}!void {
+        if (self.cancelled.load(.acquire)) return error.Cancelled;
     }
-
-    fn deinit(self: *Job) void {
-        for (self.candidates) |candidate| {
-            if (candidate.stored) |file| self.file_store.delete(file);
+    fn perform(self: *Job) !void {
+        try self.check();
+        switch (self.phase) {
+            .probed => {
+                var split = std.mem.splitScalar(u8, self.paths, '\n');
+                for (self.metadata, 0..) |*meta, index| {
+                    try self.check();
+                    const path = split.next() orelse return error.InvalidInput;
+                    if (path.len == 0 or !std.fs.path.isAbsolute(path)) return error.ReadFailed;
+                    const source = try self.file_store.openSource(path);
+                    self.sources[index] = source;
+                    self.source_count += 1;
+                    meta.* = .{ .display_name = std.fs.path.basename(path), .size_bytes = std.math.cast(usize, source.before.size) orelse return error.FileTooLarge };
+                }
+                if (split.next() != null) return error.InvalidInput;
+            },
+            .copied => {
+                for (self.targets, self.sources) |file, source| {
+                    try self.check();
+                    try self.file_store.create(file);
+                    try self.file_store.copySource(source, file, &self.cancelled);
+                }
+            },
+            .initialized => for (self.targets) |file| {
+                try self.check();
+                try self.file_store.create(file);
+            },
+            .written => {
+                try self.file_store.append(self.targets[0], self.offset, self.chunk);
+            },
+            .validated => for (self.targets) |file| {
+                try self.check();
+                try self.file_store.finish(file);
+                try attachment.validateOriginal(self.file_store, file, &self.cancelled);
+            },
         }
-        if (self.candidate_storage) |storage| self.lane.allocator.free(storage);
-        std.crypto.secureZero(u8, self.paths);
-        self.lane.allocator.free(self.paths);
+        try self.check();
+    }
+    fn closeSources(self: *Job) void {
+        for (self.sources[0..self.source_count]) |source| source.close(self.file_store.io);
+        self.source_count = 0;
+    }
+    fn deinit(self: *Job) void {
+        self.closeSources();
+        for ([_][]u8{ self.paths, self.chunk }) |bytes| {
+            std.crypto.secureZero(u8, bytes);
+            self.lane.allocator.free(bytes);
+        }
+        self.lane.allocator.free(self.metadata);
+        self.lane.allocator.free(self.sources);
+        self.lane.allocator.free(self.targets);
         self.lane.allocator.destroy(self);
     }
 };
-
-test "attachment staging lane classifies an ordered file batch" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "picture.png",
-        .data = "\x89PNG\r\n\x1a\nbody",
-    });
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "notes.txt",
-        .data = "plain text",
-    });
-
-    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    const paths = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{s}{c}picture.png\n{s}{c}notes.txt",
-        .{ root_storage[0..root_len], std.fs.path.sep, root_storage[0..root_len], std.fs.path.sep },
-    );
-    defer std.testing.allocator.free(paths);
-
-    const Wake = struct {
-        count: usize = 0,
-        fn notify(context: ?*anyopaque) bool {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.count += 1;
-            return true;
-        }
-    };
-    const TestExecutor = struct {
-        fn enqueue(_: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
-            job.execute_fn(job.context);
-        }
-    };
-    var wake = Wake{};
-    var executor_context: u8 = 0;
-    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{
-        .context = &wake,
-        .wake_fn = Wake.notify,
-    }, .{
-        .context = &executor_context,
-        .enqueue_fn = TestExecutor.enqueue,
-    });
-    defer {
-        lane.stopAdmission();
-        lane.deinit();
-    }
-    var store = try attachment.FileStore.init(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
-    defer store.deinit();
-    try lane.begin(.{
-        .completion_id = 7,
-        .path_count = 2,
-        .paths = paths,
-        .limits = testLimits(),
-        .file_store = &store,
-    });
-    try std.testing.expectEqual(@as(usize, 1), wake.count);
-    const taken = lane.take() orelse return error.TestUnexpectedResult;
-    defer lane.release(taken);
-    try std.testing.expectEqual(@as(u64, 7), taken.completion.completion_id);
-    try std.testing.expectEqual(@as(?Rejection, null), taken.completion.rejection);
-    try std.testing.expectEqual(@as(usize, 2), taken.completion.candidates.len);
-    try std.testing.expectEqualStrings("picture.png", taken.completion.candidates[0].display_name);
-    const first = try store.readAlloc(std.testing.allocator, taken.completion.candidates[0].stored.?);
-    defer std.testing.allocator.free(first);
-    try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\nbody", first);
-    try std.testing.expectEqualStrings("notes.txt", taken.completion.candidates[1].display_name);
-    const second = try store.readAlloc(std.testing.allocator, taken.completion.candidates[1].stored.?);
-    defer std.testing.allocator.free(second);
-    try std.testing.expectEqualStrings("plain text", second);
-}
-
-test "attachment staging lane rejects a mixed empty-file batch atomically" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "picture.webp",
-        .data = "RIFF\x04\x00\x00\x00WEBPbody",
-    });
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "notes.txt",
-        .data = "",
-    });
-    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    const paths = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{s}{c}picture.webp\n{s}{c}notes.txt",
-        .{ root_storage[0..root_len], std.fs.path.sep, root_storage[0..root_len], std.fs.path.sep },
-    );
-    defer std.testing.allocator.free(paths);
-
-    const Wake = struct {
-        fn notify(_: ?*anyopaque) bool {
-            return true;
-        }
-    };
-    const TestExecutor = struct {
-        fn enqueue(_: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
-            job.execute_fn(job.context);
-        }
-    };
-    var context: u8 = 0;
-    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{
-        .wake_fn = Wake.notify,
-    }, .{
-        .context = &context,
-        .enqueue_fn = TestExecutor.enqueue,
-    });
-    defer {
-        lane.stopAdmission();
-        lane.deinit();
-    }
-    var store = try attachment.FileStore.init(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
-    defer store.deinit();
-    try lane.begin(.{
-        .completion_id = 8,
-        .path_count = 2,
-        .paths = paths,
-        .limits = testLimits(),
-        .file_store = &store,
-    });
-    const taken = lane.take() orelse return error.TestUnexpectedResult;
-    defer lane.release(taken);
-    try std.testing.expectEqual(Rejection.unsupported_type, taken.completion.rejection.?);
-}
-
-fn testLimits() attachment.Limits {
-    return .{
-        .max_files = 4,
-        .max_display_name_bytes = 128,
-        .max_file_bytes = 1024,
-
-        .max_staged_bytes = 4096,
-    };
-}
-
 pub const Lane = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     notifier: Notifier,
     executor: Executor,
     mutex: std.Io.Mutex = .init,
+    jobs: [max_in_flight]?*Job = @splat(null),
     completions: [max_in_flight]?*Job = @splat(null),
     head: usize = 0,
     tail: usize = 0,
     completion_count: usize = 0,
     active_count: usize = 0,
     accepting: bool = true,
-
     pub fn create(io: std.Io, allocator: std.mem.Allocator, notifier: Notifier, executor: Executor) !*Lane {
         const self = try allocator.create(Lane);
         self.* = .{ .io = io, .allocator = allocator, .notifier = notifier, .executor = executor };
         return self;
     }
-
-    pub fn begin(self: *Lane, input: Input) Error!void {
-        if (input.paths.len == 0 or input.path_count == 0) return error.InvalidInput;
+    fn allocate(self: *Lane, id: u64, store: *attachment.FileStore) Error!*Job {
         self.lock();
-        if (!self.accepting or self.active_count == max_in_flight) {
-            const accepting = self.accepting;
-            self.unlock();
-            return if (accepting) error.Capacity else error.ShuttingDown;
-        }
-        self.active_count += 1;
-        self.unlock();
-        errdefer {
-            self.lock();
-            self.active_count -= 1;
-            self.unlock();
-        }
+        defer self.unlock();
+        if (!self.accepting) return error.ShuttingDown;
+        if (self.active_count == max_in_flight) return error.Capacity;
         const job = try self.allocator.create(Job);
-        errdefer self.allocator.destroy(job);
-        const paths = try self.allocator.dupe(u8, input.paths);
-        errdefer self.allocator.free(paths);
-        job.* = .{
-            .lane = self,
-            .completion_id = input.completion_id,
-            .path_count = input.path_count,
-            .paths = paths,
-            .limits = input.limits,
-            .file_store = input.file_store,
+        job.* = .{ .lane = self, .completion_id = id, .file_store = store };
+        for (&self.jobs) |*slot| if (slot.* == null) {
+            slot.* = job;
+            break;
         };
-        self.executor.enqueue(.{
-            .identity = job,
-            .context = job,
-            .execute_fn = Job.execute,
-            .cancel_fn = Job.cancel,
-        }) catch |err| return switch (err) {
+        self.active_count += 1;
+        return job;
+    }
+    fn enqueue(self: *Lane, job: *Job) Error!void {
+        self.executor.enqueue(.{ .identity = job, .context = job, .execute_fn = Job.execute, .cancel_fn = Job.cancel }) catch |err| return switch (err) {
             error.ExecutorShuttingDown => error.ShuttingDown,
             error.QueueFull => error.Capacity,
         };
     }
-
+    pub fn begin(self: *Lane, input: Input) Error!void {
+        if (input.path_count == 0 or input.path_count > input.limits.max_files or input.paths.len == 0) return error.InvalidInput;
+        const job = try self.allocate(input.completion_id, input.file_store);
+        errdefer self.release(.{ .job = job, .completion = undefined });
+        job.paths = try self.allocator.dupe(u8, input.paths);
+        job.metadata = try self.allocator.alloc(attachment.ReceiveFile, input.path_count);
+        job.sources = try self.allocator.alloc(attachment.store.Source, input.path_count);
+        job.limits = input.limits;
+        try self.enqueue(job);
+    }
+    /// Transfer the probed job and opened source handles into a copy job. The
+    /// caller must not release Taken after this succeeds.
+    pub fn continueCopy(self: *Lane, taken: Taken, files: []const attachment.store.File) Error!void {
+        const job: *Job = @ptrCast(@alignCast(taken.job));
+        if (job.phase != .probed or files.len != job.source_count) return error.InvalidInput;
+        job.targets = try self.allocator.dupe(attachment.store.File, files);
+        job.phase = .copied;
+        try self.enqueue(job);
+    }
+    pub fn continueValidation(self: *Lane, taken: Taken) Error!void {
+        const job: *Job = @ptrCast(@alignCast(taken.job));
+        if (job.phase != .copied) return error.InvalidInput;
+        job.phase = .validated;
+        try self.enqueue(job);
+    }
+    pub fn beginFiles(self: *Lane, id: u64, store: *attachment.FileStore, phase: Phase, files: []const attachment.store.File, offset: usize, bytes: []const u8) Error!void {
+        if (phase == .probed or phase == .copied or files.len == 0 or bytes.len > 128 * 1024 or (phase == .written and (files.len != 1 or bytes.len == 0))) return error.InvalidInput;
+        const job = try self.allocate(id, store);
+        errdefer self.release(.{ .job = job, .completion = undefined });
+        job.phase = phase;
+        job.targets = try self.allocator.dupe(attachment.store.File, files);
+        job.offset = offset;
+        job.chunk = try self.allocator.dupe(u8, bytes);
+        try self.enqueue(job);
+    }
+    pub fn cancel(self: *Lane, id: u64) void {
+        self.lock();
+        defer self.unlock();
+        for (self.jobs) |slot| if (slot) |job| {
+            if (job.completion_id == id) job.cancelled.store(true, .release);
+        };
+    }
     pub fn stopAdmission(self: *Lane) void {
         self.lock();
+        defer self.unlock();
         self.accepting = false;
-        self.unlock();
+        for (self.jobs) |slot| if (slot) |job| {
+            job.cancelled.store(true, .release);
+        };
     }
-
     pub fn take(self: *Lane) ?Taken {
         self.lock();
-        if (self.completion_count == 0) {
-            self.unlock();
-            return null;
-        }
+        defer self.unlock();
+        if (self.completion_count == 0) return null;
         const job = self.completions[self.head].?;
         self.completions[self.head] = null;
-        self.head = (self.head + 1) % self.completions.len;
+        self.head = (self.head + 1) % max_in_flight;
         self.completion_count -= 1;
-        self.unlock();
-        return .{ .job = job, .completion = .{
-            .completion_id = job.completion_id,
-            .rejection = job.rejection,
-            .candidates = job.candidates,
-        } };
+        return .{ .job = job, .completion = .{ .completion_id = job.completion_id, .phase = job.phase, .rejection = job.rejection, .cancelled = job.cancelled.load(.acquire), .files = job.metadata } };
     }
-
     pub fn release(self: *Lane, taken: Taken) void {
         const job: *Job = @ptrCast(@alignCast(taken.job));
-        job.deinit();
         self.lock();
+        for (&self.jobs) |*slot| if (slot.* == job) {
+            slot.* = null;
+            break;
+        };
         self.active_count -= 1;
         self.unlock();
+        job.deinit();
     }
-
     pub fn deinit(self: *Lane) void {
         std.debug.assert(!self.accepting and self.active_count == 0 and self.completion_count == 0);
-        const allocator = self.allocator;
-        allocator.destroy(self);
+        self.allocator.destroy(self);
     }
-
     fn publish(self: *Lane, job: *Job) void {
         self.lock();
         self.completions[self.tail] = job;
-        self.tail = (self.tail + 1) % self.completions.len;
+        self.tail = (self.tail + 1) % max_in_flight;
         self.completion_count += 1;
         self.unlock();
         _ = self.notifier.wake_fn(self.notifier.context);
@@ -384,3 +248,81 @@ pub const Lane = struct {
         self.mutex.unlock(self.io);
     }
 };
+
+test "path probe reserves before copy and cancellation joins the writer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "original content" });
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &root);
+    var store = try attachment.FileStore.init(std.testing.io, std.testing.allocator, root[0..len]);
+    defer store.deinit();
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root[0..len], "source.txt" });
+    defer std.testing.allocator.free(path);
+    const Queue = struct {
+        pending: ?ExecutorJob = null,
+        fn enqueue(context: *anyopaque, job: ExecutorJob) error{ ExecutorShuttingDown, QueueFull }!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(self.pending == null);
+            self.pending = job;
+        }
+        fn run(self: *@This()) void {
+            const job = self.pending.?;
+            self.pending = null;
+            job.execute_fn(job.context);
+        }
+        fn wake(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    var queue = Queue{};
+    const lane = try Lane.create(std.testing.io, std.testing.allocator, .{ .wake_fn = Queue.wake }, .{ .context = &queue, .enqueue_fn = Queue.enqueue });
+    defer {
+        lane.stopAdmission();
+        lane.deinit();
+    }
+    const limits: attachment.Limits = .{ .max_files = 2, .max_display_name_bytes = 64, .max_file_bytes = 64, .max_staged_bytes = 128 };
+    var runtime = try attachment.Runtime.init(std.testing.allocator, limits, &store, .{});
+    defer runtime.deinit();
+    const id = try runtime.beginPreparing();
+    try lane.begin(.{ .completion_id = 1, .path_count = 1, .paths = path, .limits = limits, .file_store = &store });
+    queue.run();
+    const probe = lane.take().?;
+    try std.testing.expectEqual(Phase.probed, probe.completion.phase);
+    try std.testing.expectEqual(@as(?Rejection, null), probe.completion.rejection);
+    try std.testing.expectError(error.FileNotFound, store.root.openDir(std.testing.io, "0", .{}));
+    try runtime.reservePrepared(id, probe.completion.files);
+    var targets: [2]attachment.store.File = undefined;
+    const files = try runtime.writeFiles(id, &targets);
+    try lane.continueCopy(probe, files);
+    lane.cancel(1);
+    queue.run();
+    const copied = lane.take().?;
+    try std.testing.expect(copied.completion.cancelled);
+    lane.release(copied);
+    try std.testing.expect(try runtime.cancelReceiveChecked(id));
+    try std.testing.expectEqual(@as(usize, 0), runtime.used_bytes);
+    try std.testing.expectEqual(@as(usize, 0), lane.active_count);
+    const next_id = try runtime.beginPreparing();
+    try lane.begin(.{ .completion_id = 2, .path_count = 1, .paths = path, .limits = limits, .file_store = &store });
+    queue.run();
+    const next_probe = lane.take().?;
+    try runtime.reservePrepared(next_id, next_probe.completion.files);
+    const next_files = try runtime.writeFiles(next_id, &targets);
+    try lane.continueCopy(next_probe, next_files);
+    queue.run();
+    const next_copy = lane.take().?;
+    try std.testing.expectEqual(@as(?Rejection, null), next_copy.completion.rejection);
+    try runtime.acknowledgeCopied(next_id);
+    try lane.continueValidation(next_copy);
+    queue.run();
+    const validated = lane.take().?;
+    try std.testing.expectEqual(@as(?Rejection, null), validated.completion.rejection);
+    lane.release(validated);
+    var output: [2]attachment.Descriptor = undefined;
+    const ready = try runtime.finishValidated(next_id, &output);
+    const original = try store.readAlloc(std.testing.allocator, runtime.slots[0].?.file);
+    defer std.testing.allocator.free(original);
+    try std.testing.expectEqualStrings("original content", original);
+    try std.testing.expect(runtime.release(ready[0].id));
+}
