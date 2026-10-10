@@ -89,7 +89,7 @@ Account 不知道 provider 当前是否为默认值、是否存在 custom source
 | Token         | `https://app.metask-ai.com/api/oauth/token`               |
 | Userinfo      | bearer `GET https://app.metask-ai.com/api/oauth/userinfo` |
 | Client ID     | `metawork`，无 `client_secret`                            |
-| Scope         | `openid profile email`                                    |
+| Scope         | `read model:invoke`                                       |
 | Redirect      | `http://localhost:<dynamic-port>/auth/metask/callback`    |
 | Usage history | bearer `GET https://app.metask-ai.com/v1/usage/stats`     |
 

@@ -425,7 +425,7 @@ const LoginTransport = struct {
             return error.Cancelled;
         }
         const body =
-            \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email"}
+            \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"read model:invoke"}
         ;
         @memcpy(output[0..body.len], body);
         return .{ .status = 200, .body = output[0..body.len] };

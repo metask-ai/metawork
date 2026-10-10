@@ -315,7 +315,7 @@ const FakeTransport = struct {
                     "redirect_uri=http%3A%2F%2Flocalhost%3A49152%2Fauth%2Fmetask%2Fcallback",
                 ) == null) return error.ProtocolFailed;
                 break :blk
-                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email"}
+                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"read model:invoke"}
                 ;
             },
             1 => blk: {
@@ -406,7 +406,7 @@ test "userinfo failure never infers a principal from the token" {
 test "refresh requires and installs the rotated refresh token" {
     var previous = try oauth.parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"old-access","refresh_token":"old-refresh","token_type":"Bearer","expires_in":20,"scope":"openid profile email"}
+        \\{"access_token":"old-access","refresh_token":"old-refresh","token_type":"Bearer","expires_in":20,"scope":"read model:invoke"}
     ,
         0,
         true,

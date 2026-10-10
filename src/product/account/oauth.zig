@@ -8,7 +8,7 @@ pub const authorize_url = authority ++ "/oauth/authorize";
 pub const token_url = authority ++ "/api/oauth/token";
 pub const userinfo_url = authority ++ "/api/oauth/userinfo";
 pub const client_id = "metawork";
-pub const scope = "openid profile email";
+pub const scope = "read model:invoke";
 pub const callback_path = "/auth/metask/callback";
 
 pub const Limits = struct {
@@ -521,6 +521,7 @@ test "PKCE authorize URL carries the dynamically assigned loopback port" {
     var buffer: [Limits.authorization_url_bytes]u8 = undefined;
     const url = try buildAuthorizeUrl(&buffer, callback_port, &material);
     try std.testing.expect(std.mem.startsWith(u8, url, authorize_url ++ "?"));
+    try std.testing.expect(std.mem.indexOf(u8, url, "scope=read%20model%3Ainvoke&") != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         url,
@@ -641,7 +642,7 @@ test "callback parser validates RFC 9207 issuer without normalization" {
 test "token decoder validates consumed fields and tolerates additive metadata" {
     var tokens = try parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"openid profile email","gateway_url":"https://app.metask-ai.com"}
+        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"read model:invoke","gateway_url":"https://app.metask-ai.com"}
     ,
         100,
         true,
@@ -671,16 +672,20 @@ test "token decoder validates consumed fields and tolerates additive metadata" {
             true,
         ),
     );
-    try std.testing.expectError(
-        error.InvalidTokenResponse,
-        parseTokenResponse(
-            std.testing.allocator,
-            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"unexpected"}
+    for ([_][]const u8{
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"unexpected"}
         ,
-            0,
-            true,
-        ),
-    );
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"read"}
+        ,
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"openid profile email"}
+    }) |body| {
+        for ([_]bool{ true, false }) |require_scope| {
+            try std.testing.expectError(
+                error.InvalidTokenResponse,
+                parseTokenResponse(std.testing.allocator, body, 0, require_scope),
+            );
+        }
+    }
 }
 
 test "current user decoder binds the principal and projects optional profile fields" {
