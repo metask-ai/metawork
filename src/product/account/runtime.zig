@@ -18,6 +18,7 @@ const summary_impl = @import("account_summary");
 
 const refresh_timer_id: u64 = 0x4d57_4143_4354_5246;
 const refresh_skew_seconds: i64 = 60;
+const refresh_retry_interval_ns: u64 = 30 * std.time.ns_per_s;
 
 const SummaryJob = struct {
     allocator: std.mem.Allocator,
@@ -503,6 +504,7 @@ pub const Prepared = struct {
     login_exchange: ?login_attempt.CallbackExchangeInput = null,
     refresh_after_commit: bool = false,
     schedule_refresh_after_commit: bool = false,
+    retry_refresh_after_commit: bool = false,
 
     pub fn factKind(self: *const Prepared) contract.AccountFactKind {
         return self.transition.factKind();
@@ -522,6 +524,7 @@ pub const Prepared = struct {
         self.transition.deinit();
         self.refresh_after_commit = false;
         self.schedule_refresh_after_commit = false;
+        self.retry_refresh_after_commit = false;
     }
 };
 
@@ -956,7 +959,9 @@ pub const Runtime = struct {
 
     pub fn dispatchCommitted(self: *Runtime, prepared: *Prepared) ?Prepared {
         self.assertMainThread();
-        const follow_up = if (prepared.schedule_refresh_after_commit)
+        const follow_up = if (prepared.retry_refresh_after_commit)
+            self.scheduleRefreshRetry()
+        else if (prepared.schedule_refresh_after_commit)
             self.scheduleRefresh()
         else
             null;
@@ -1017,6 +1022,12 @@ pub const Runtime = struct {
                 completion.payload = .{ .failed = .fromCode(error_code) };
             };
         }
+        const retry_unsent_refresh = refresh_attempt and !self.refresh_blocked and
+            completion.payload == .failed and completion.payload.failed.refresh_not_consumed and
+            switch (completion.payload.failed.error_code) {
+                .metask_service_unavailable, .deadline_exceeded, .user_cancelled => true,
+                else => false,
+            };
         const loaded_identity = completion.payload == .identity_loaded;
         const login_failed_with_identity = self.account.currentIdentity() != null and
             !refresh_attempt and completion.payload == .failed;
@@ -1025,6 +1036,7 @@ pub const Runtime = struct {
                 .transition = transition,
                 .schedule_refresh_after_commit = transition.view().state == .authenticated and
                     (loaded_identity or login_failed_with_identity),
+                .retry_refresh_after_commit = transition.view().state == .authenticated and retry_unsent_refresh,
             } },
             .rejected => |error_code| .{ .rejected = error_code },
             .ignored_stale => .ignored_stale,
@@ -1268,6 +1280,18 @@ pub const Runtime = struct {
             std.time.ns_per_s,
         ) catch std.math.maxInt(u64);
         platform.timer.start(refresh_timer_id, @max(interval_ns, 1), false) catch
+            return self.prepareRefreshScheduleFailure();
+        return null;
+    }
+
+    fn scheduleRefreshRetry(self: *Runtime) ?Prepared {
+        if (self.stopping or self.refresh_blocked or
+            self.account.view().state != .authenticated or
+            self.account.activeAttempt() != null or !self.credentials.available()) return null;
+        const platform = self.platform orelse return self.prepareRefreshScheduleFailure();
+        // One shot: another proven-unsent failure may arm the next retry.
+        // Do not use scheduleRefresh here: inside the skew it would retry now.
+        platform.timer.start(refresh_timer_id, refresh_retry_interval_ns, false) catch
             return self.prepareRefreshScheduleFailure();
         return null;
     }
@@ -1855,6 +1879,7 @@ fn loginStartError(err: login_attempt.StartError) contract.ErrorCode {
 
 const RuntimeTestTransport = struct {
     calls: usize = 0,
+    failure: metask_client.TransportError = error.NetworkFailed,
 
     fn port(self: *RuntimeTestTransport) metask_client.Transport {
         return .{ .context = self, .perform_fn = perform };
@@ -1867,7 +1892,7 @@ const RuntimeTestTransport = struct {
     ) metask_client.TransportError!metask_client.Response {
         const self: *RuntimeTestTransport = @ptrCast(@alignCast(context));
         self.calls += 1;
-        return error.NetworkFailed;
+        return self.failure;
     }
 };
 
@@ -2465,45 +2490,48 @@ test "marker write failure sends no refresh HTTP and remains safely retryable" {
 }
 
 test "unknown transport result blocks timer retry cancelled reauthentication and restart" {
-    var transport: RuntimeTestTransport = .{};
-    var runtime = try initRuntimeForUnitTest(&transport);
-    var platform: TestSupport.Platform = .{};
-    try platform.setStoredRefreshToken("refresh-token");
-    defer {
-        TestSupport.detachPlatform(&runtime);
-        runtime.deinit();
+    for ([_]metask_client.TransportError{ error.NetworkFailed, error.Cancelled, error.DeadlineExceeded }) |failure| {
+        var transport: RuntimeTestTransport = .{ .failure = failure };
+        var runtime = try initRuntimeForUnitTest(&transport);
+        var platform: TestSupport.Platform = .{};
+        try platform.setStoredRefreshToken("refresh-token");
+        defer {
+            TestSupport.detachPlatform(&runtime);
+            runtime.deinit();
+        }
+        try beginTestRefresh(&runtime, &platform);
+        try finishTestRefresh(&runtime);
+        try std.testing.expectEqual(@as(usize, 1), transport.calls);
+        try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
+        try std.testing.expect(runtime.refresh_blocked);
+        try std.testing.expect(runtime.prepareTimer(refresh_timer_id).? == .rejected);
+        try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
+        _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
+        var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
+            .prepared => |p| p,
+            else => return error.TestUnexpectedResult,
+        };
+        defer cancel.deinit();
+        _ = cancel.transition.takeEffect();
+        runtime.commit(&cancel);
+        try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
+        var restarted = try initRuntimeForUnitTest(&transport);
+        defer {
+            TestSupport.detachPlatform(&restarted);
+            restarted.deinit();
+        }
+        var restored = restarted.prepareStart(platform.ports());
+        defer restored.deinit();
+        restarted.commit(&restored);
+        try std.testing.expect(!restarted.takeRefreshAfterCommit(&restored));
+        try std.testing.expectEqual(contract.AccountState.signed_out, restarted.view().state);
+        try std.testing.expectEqual(@as(usize, 1), transport.calls);
     }
-    try beginTestRefresh(&runtime, &platform);
-    try finishTestRefresh(&runtime);
-    try std.testing.expectEqual(@as(usize, 1), transport.calls);
-    try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
-    try std.testing.expect(runtime.refresh_blocked);
-    try std.testing.expect(runtime.prepareTimer(refresh_timer_id).? == .rejected);
-    try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
-    _ = TestSupport.commitBeginLoginWithoutDispatch(&runtime);
-    var cancel = switch (runtime.prepareCommand(.cancel_operation)) {
-        .prepared => |p| p,
-        else => return error.TestUnexpectedResult,
-    };
-    defer cancel.deinit();
-    _ = cancel.transition.takeEffect();
-    runtime.commit(&cancel);
-    try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
-    var restarted = try initRuntimeForUnitTest(&transport);
-    defer {
-        TestSupport.detachPlatform(&restarted);
-        restarted.deinit();
-    }
-    var restored = restarted.prepareStart(platform.ports());
-    defer restored.deinit();
-    restarted.commit(&restored);
-    try std.testing.expect(!restarted.takeRefreshAfterCommit(&restored));
-    try std.testing.expectEqual(contract.AccountState.signed_out, restarted.view().state);
-    try std.testing.expectEqual(@as(usize, 1), transport.calls);
 }
 
 const RotationTestTransport = struct {
     identity_failure: bool = false,
+    unsent_failures_remaining: usize = 0,
     calls: usize = 0,
     fn port(self: *@This()) metask_client.Transport {
         return .{ .context = self, .perform_fn = perform };
@@ -2511,6 +2539,10 @@ const RotationTestTransport = struct {
     fn perform(context: *anyopaque, request: metask_client.Request, output: []u8) metask_client.TransportError!metask_client.Response {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.calls += 1;
+        if (request.kind == .refresh_token and self.unsent_failures_remaining != 0) {
+            self.unsent_failures_remaining -= 1;
+            return error.NetworkNotSent;
+        }
         const body = if (request.kind == .refresh_token)
             "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}"
         else if (request.kind == .userinfo and self.identity_failure)
@@ -2673,4 +2705,166 @@ test "shutdown does not retry a rotation that already failed storage" {
     try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
     try std.testing.expect(platform.refresh_marker != null);
     try std.testing.expectEqual(@as(usize, 1), transport.calls);
+}
+
+test "refresh not sent clears blocking marker and permits retry and cold restore" {
+    for ([_]metask_client.TransportError{ error.NetworkNotSent, error.CancelledNotSent, error.DeadlineExceededNotSent }) |failure| {
+        for ([_]bool{ false, true }) |marker_delete_fails| {
+            var transport: RuntimeTestTransport = .{ .failure = failure };
+            var runtime = try initRuntimeForUnitTest(&transport);
+            var platform: TestSupport.Platform = .{ .marker_delete_fails = marker_delete_fails };
+            try platform.setStoredRefreshToken("refresh-token");
+            defer {
+                TestSupport.detachPlatform(&runtime);
+                runtime.deinit();
+            }
+            try beginTestRefresh(&runtime, &platform);
+            try finishTestRefresh(&runtime);
+            try std.testing.expectEqual(@as(usize, 1), transport.calls);
+            try std.testing.expectEqual(@as(usize, if (marker_delete_fails) 0 else 1), platform.timer_start_count);
+            if (!marker_delete_fails) {
+                try std.testing.expectEqual(refresh_timer_id, platform.last_timer_id.?);
+                try std.testing.expectEqual(@as(u64, 30 * std.time.ns_per_s), platform.last_timer_interval_ns);
+            }
+            try std.testing.expectEqual(marker_delete_fails, runtime.refresh_blocked);
+            try std.testing.expectEqual(marker_delete_fails, platform.refresh_marker != null);
+            try std.testing.expectEqualStrings("refresh-token", platform.refresh_token[0..platform.refresh_token_len.?]);
+            if (marker_delete_fails) {
+                try std.testing.expectEqual(contract.ErrorCode.credential_store_delete_failed, runtime.view().error_code);
+                try std.testing.expect(runtime.prepareCommand(.retry_refresh) == .rejected);
+            } else {
+                try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+                try std.testing.expectEqual(metask_client.errorCode(switch (failure) {
+                    error.NetworkNotSent => error.ServiceUnavailable,
+                    error.CancelledNotSent => error.Cancelled,
+                    error.DeadlineExceededNotSent => error.DeadlineExceeded,
+                    else => unreachable,
+                }), runtime.view().error_code);
+                var retry = switch (runtime.prepareCommand(.retry_refresh)) {
+                    .prepared => |value| value,
+                    else => return error.TestUnexpectedResult,
+                };
+                defer retry.deinit();
+                var timer = switch (runtime.prepareTimer(refresh_timer_id).?) {
+                    .prepared => |value| value,
+                    else => return error.TestUnexpectedResult,
+                };
+                defer timer.deinit();
+            }
+            var restarted = try initRuntimeForUnitTest(&transport);
+            defer {
+                TestSupport.detachPlatform(&restarted);
+                restarted.deinit();
+            }
+            var restored = restarted.prepareStart(platform.ports());
+            defer restored.deinit();
+            restarted.commit(&restored);
+            try std.testing.expectEqual(!marker_delete_fails, restarted.takeRefreshAfterCommit(&restored));
+            try std.testing.expectEqual(@as(usize, 1), transport.calls);
+        }
+    }
+}
+
+test "unsent refresh retries through its timer and recovers after access expiry" {
+    var transport: RotationTestTransport = .{ .unsent_failures_remaining = 2 };
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), transport.port(), TestSupport.loopbackEndpoint(), .{ .context = &transport, .notify_fn = runtimeTestWake });
+    var platform: TestSupport.Platform = .{ .now_unix_seconds = 140 };
+    try platform.setStoredRefreshToken("refresh-token");
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try beginTestRefresh(&runtime, &platform);
+    try finishTestRefresh(&runtime);
+    try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+    try std.testing.expectEqual(refresh_retry_interval_ns, platform.last_timer_interval_ns);
+
+    for ([_]i64{ 170, 200 }) |now| {
+        platform.now_unix_seconds = now;
+        if (now == 200) try std.testing.expect((try runtime.authorizationLease()) == null);
+        var retry = switch (runtime.prepareTimer(platform.last_timer_id.?).?) {
+            .prepared => |prepared| prepared,
+            else => return error.TestUnexpectedResult,
+        };
+        defer retry.deinit();
+        try std.testing.expect(runtime.admitEffect(&retry));
+        runtime.commit(&retry);
+        try std.testing.expect(runtime.dispatchCommitted(&retry) == null);
+        try finishTestRefresh(&runtime);
+        if (now == 170) {
+            try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
+            try std.testing.expectEqual(refresh_retry_interval_ns, platform.last_timer_interval_ns);
+            try std.testing.expect(!runtime.refresh_blocked);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), transport.calls);
+    try std.testing.expectEqual(@as(usize, 3), platform.timer_start_count);
+    try std.testing.expectEqual(@as(u64, 3540 * std.time.ns_per_s), platform.last_timer_interval_ns);
+    try std.testing.expectEqual(@as(usize, 1), platform.credential_write_count);
+    try std.testing.expectEqualStrings("new-refresh", platform.refresh_token[0..platform.refresh_token_len.?]);
+    try std.testing.expect(platform.refresh_marker == null);
+    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.none, runtime.view().error_code);
+    var lease = (try runtime.authorizationLease()).?;
+    defer lease.deinit();
+    try std.testing.expectEqualStrings("new-access", lease.access_token);
+    try std.testing.expectEqual(@as(usize, 0), platform.authorization_open_count);
+}
+
+test "unsent refresh retry arm failure is visible and manually retryable" {
+    var transport: RuntimeTestTransport = .{ .failure = error.NetworkNotSent };
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{ .timer_start_fails = true };
+    try platform.setStoredRefreshToken("refresh-token");
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try beginTestRefresh(&runtime, &platform);
+    runtime.effects.network_attempt.join();
+    var failed = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer failed.deinit();
+    runtime.commit(&failed);
+    var schedule_failed = runtime.dispatchCommitted(&failed) orelse return error.TestUnexpectedResult;
+    defer schedule_failed.deinit();
+    runtime.commit(&schedule_failed);
+    try std.testing.expect(runtime.dispatchCommitted(&schedule_failed) == null);
+    try std.testing.expectEqual(@as(usize, 1), platform.timer_start_count);
+    try std.testing.expect(!runtime.refresh_blocked);
+    try std.testing.expect(platform.refresh_marker == null);
+    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+    try std.testing.expectEqual(contract.ErrorCode.refresh_schedule_failed, runtime.view().error_code);
+    platform.timer_start_fails = false;
+    var retry = switch (runtime.prepareCommand(.retry_refresh)) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer retry.deinit();
+    runtime.commit(&retry);
+    try std.testing.expect(runtime.dispatchCommitted(&retry) == null);
+    try std.testing.expectEqual(@as(usize, 2), platform.timer_start_count);
+}
+
+test "stopping suppresses a prepared unsent refresh retry" {
+    var transport: RuntimeTestTransport = .{ .failure = error.NetworkNotSent };
+    var runtime = try initRuntimeForUnitTest(&transport);
+    var platform: TestSupport.Platform = .{};
+    defer {
+        TestSupport.detachPlatform(&runtime);
+        runtime.deinit();
+    }
+    try beginTestRefresh(&runtime, &platform);
+    runtime.effects.network_attempt.join();
+    var failed = switch (runtime.prepareNextCompletion().?) {
+        .prepared => |prepared| prepared,
+        else => return error.TestUnexpectedResult,
+    };
+    defer failed.deinit();
+    runtime.commit(&failed);
+    runtime.stopAdmission();
+    try std.testing.expect(runtime.dispatchCommitted(&failed) == null);
+    try std.testing.expectEqual(@as(usize, 0), platform.timer_start_count);
 }

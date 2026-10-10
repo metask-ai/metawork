@@ -215,9 +215,9 @@ pub fn fetchUsageHistory(
 
 fn transportFailure(transport_error: TransportError) ClientError {
     return switch (transport_error) {
-        error.Cancelled => error.Cancelled,
-        error.DeadlineExceeded => error.DeadlineExceeded,
-        error.NetworkFailed => error.ServiceUnavailable,
+        error.Cancelled, error.CancelledNotSent => error.Cancelled,
+        error.DeadlineExceeded, error.DeadlineExceededNotSent => error.DeadlineExceeded,
+        error.NetworkFailed, error.NetworkNotSent => error.ServiceUnavailable,
         error.ResponseTooLarge,
         error.ProtocolFailed,
         => error.ProtocolInvalid,

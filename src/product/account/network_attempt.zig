@@ -264,7 +264,7 @@ pub const NetworkAttempt = struct {
                 ) catch |err| {
                     self.publishCompletion(.{ .failed = .{
                         .error_code = metask.errorCode(err),
-                        .refresh_not_consumed = !tracked.called or err == error.TokenRefreshFailed,
+                        .refresh_not_consumed = !tracked.may_have_sent or err == error.TokenRefreshFailed,
                     } });
                     return;
                 };
@@ -287,12 +287,18 @@ pub const NetworkAttempt = struct {
 
     const RefreshTransportEvidence = struct {
         transport: metask.Transport,
-        called: bool = false,
+        may_have_sent: bool = false,
 
         fn perform(context: *anyopaque, request: metask.Request, output: []u8) metask.TransportError!metask.Response {
             const self: *@This() = @ptrCast(@alignCast(context));
-            self.called = true;
-            return self.transport.perform(request, output);
+            self.may_have_sent = true;
+            return self.transport.perform(request, output) catch |err| {
+                switch (err) {
+                    error.NetworkNotSent, error.CancelledNotSent, error.DeadlineExceededNotSent => self.may_have_sent = false,
+                    else => {},
+                }
+                return err;
+            };
         }
     };
 
