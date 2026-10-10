@@ -355,7 +355,6 @@ test "refresh rotation binds the current principal before ownership transfer" {
         \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":20}
     ,
         0,
-        false,
     );
     var rotation: CredentialRotation = .{
         .tokens = rotated_tokens.take(),

@@ -141,8 +141,8 @@ pub fn parseCallbackTarget(
 
 /// Product-neutral RFC 9207 callback validation used by MCP after it has
 /// recorded an issuer from validated authorization-server metadata. Account
-/// keeps its previous additive-parameter behavior by calling
-/// `parseCallbackTarget`; it neither requests nor interprets `iss`.
+/// uses the same additive-parameter rules via `parseCallbackTarget`; it
+/// neither requests nor interprets `iss`.
 pub const CallbackValidation = struct {
     expected_issuer: ?[]const u8 = null,
     issuer_required: bool = false,
@@ -255,14 +255,13 @@ const TokenResponse = struct {
     refresh_token: []const u8,
     token_type: []const u8,
     expires_in: u64,
-    scope: ?[]const u8 = null,
+    scope: []const u8 = scope,
 };
 
 pub fn parseTokenResponse(
     allocator: std.mem.Allocator,
     body: []const u8,
     now_unix_seconds: i64,
-    require_scope: bool,
 ) (ProtocolError || std.mem.Allocator.Error)!TokenSet {
     if (body.len == 0 or body.len > Limits.token_body_bytes)
         return error.InvalidTokenResponse;
@@ -299,11 +298,24 @@ pub fn parseTokenResponse(
     result.refresh_token = try Secret.init(allocator, raw.refresh_token);
     errdefer result.refresh_token.deinit();
 
-    if (raw.scope) |returned_scope| {
-        if (!std.mem.eql(u8, returned_scope, scope))
-            return error.InvalidTokenResponse;
-    } else if (require_scope) return error.InvalidTokenResponse;
+    if (!hasRequestedScope(raw.scope)) return error.InvalidTokenResponse;
     return result;
+}
+
+// Account only admits the full scope it requested. OAuth scope order and
+// repeated tokens do not change the granted set; names remain case-sensitive.
+fn hasRequestedScope(value: []const u8) bool {
+    var read = false;
+    var invoke = false;
+    var tokens = std.mem.splitScalar(u8, value, ' ');
+    while (tokens.next()) |token| {
+        if (std.mem.eql(u8, token, "read")) {
+            read = true;
+        } else if (std.mem.eql(u8, token, "model:invoke")) {
+            invoke = true;
+        } else return false;
+    }
+    return read and invoke;
 }
 
 pub const CurrentUser = struct {
@@ -603,7 +615,7 @@ test "callback parser validates RFC 9207 issuer without normalization" {
         std.testing.allocator,
         callback_path ++
             "?code=secret-code&state=" ++ expected_state ++
-            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant",
+            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant&extension=1",
         expected_state,
         .{ .expected_issuer = issuer, .issuer_required = true },
     );
@@ -624,7 +636,7 @@ test "callback parser validates RFC 9207 issuer without normalization" {
             std.testing.allocator,
             callback_path ++
                 "?error=access_denied&state=" ++ expected_state ++
-                "&iss=https%3A%2F%2FAUTH.example.test%2Ftenant",
+                "&iss=https%3A%2F%2FAUTH.example.test%2Ftenant&extension=1",
             expected_state,
             .{ .expected_issuer = issuer },
         ),
@@ -633,7 +645,7 @@ test "callback parser validates RFC 9207 issuer without normalization" {
         std.testing.allocator,
         callback_path ++
             "?code=secret-code&state=" ++ expected_state ++
-            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant",
+            "&iss=https%3A%2F%2Fauth.example.test%2Ftenant&extension=1",
         expected_state,
     );
     callback_without_issuer_policy.deinit();
@@ -642,10 +654,9 @@ test "callback parser validates RFC 9207 issuer without normalization" {
 test "token decoder validates consumed fields and tolerates additive metadata" {
     var tokens = try parseTokenResponse(
         std.testing.allocator,
-        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"scope":"read model:invoke","gateway_url":"https://app.metask-ai.com"}
+        \\{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600,"gateway_url":"https://app.metask-ai.com"}
     ,
         100,
-        true,
     );
     defer tokens.deinit();
     try std.testing.expectEqualStrings("new-access", tokens.access_token.view());
@@ -659,32 +670,39 @@ test "token decoder validates consumed fields and tolerates additive metadata" {
         \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"unknown":true}
     ,
         0,
-        false,
     );
     extended.deinit();
-    try std.testing.expectError(
-        error.InvalidTokenResponse,
-        parseTokenResponse(
-            std.testing.allocator,
-            \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1}
-        ,
-            0,
-            true,
-        ),
-    );
+}
+
+test "token scope is a case-sensitive set and omission inherits the requested grant" {
+    var storage: [512]u8 = undefined;
+    const format =
+        \\{{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"{s}"}}
+    ;
+    for ([_][]const u8{ "read model:invoke", "model:invoke read", "read read model:invoke" }) |granted| {
+        const body = try std.fmt.bufPrint(&storage, format, .{granted});
+        var tokens = try parseTokenResponse(std.testing.allocator, body, 0);
+        tokens.deinit();
+    }
     for ([_][]const u8{
-        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"unexpected"}
+        "",                        "read",               "model:invoke",       "READ model:invoke",  "openid profile email",
+        "read model:invoke admin", " read model:invoke", "read model:invoke ", "read  model:invoke", "read\\tmodel:invoke",
+    }) |granted| {
+        const body = try std.fmt.bufPrint(&storage, format, .{granted});
+        try std.testing.expectError(
+            error.InvalidTokenResponse,
+            parseTokenResponse(std.testing.allocator, body, 0),
+        );
+    }
+    for ([_][]const u8{
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":null}
         ,
-        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"read"}
-        ,
-        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":"openid profile email"}
+        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":1,"scope":42}
     }) |body| {
-        for ([_]bool{ true, false }) |require_scope| {
-            try std.testing.expectError(
-                error.InvalidTokenResponse,
-                parseTokenResponse(std.testing.allocator, body, 0, require_scope),
-            );
-        }
+        try std.testing.expectError(
+            error.InvalidTokenResponse,
+            parseTokenResponse(std.testing.allocator, body, 0),
+        );
     }
 }
 

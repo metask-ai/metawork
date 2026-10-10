@@ -184,18 +184,20 @@ pub fn CallbackParser(comptime limits: struct {
             defer std.crypto.secureZero(u8, &issuer_storage);
             var error_seen = false;
             var error_description_seen = false;
+            var error_uri_seen = false;
             var code: ?[]const u8 = null;
             var state_value: ?[]const u8 = null;
             var issuer_value: ?[]const u8 = null;
             var issuer_seen = false;
 
+            var key_storage: [limits.target_bytes]u8 = undefined;
+            defer std.crypto.secureZero(u8, &key_storage);
             var pairs = std.mem.splitScalar(u8, query, '&');
             while (pairs.next()) |pair| {
                 if (pair.len == 0) return error.InvalidCallback;
-                const equals = std.mem.indexOfScalar(u8, pair, '=') orelse
-                    return error.InvalidCallback;
-                const key = pair[0..equals];
-                const value = pair[equals + 1 ..];
+                const equals = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+                const key = try percentDecode(pair[0..equals], &key_storage);
+                const value = if (equals < pair.len) pair[equals + 1 ..] else "";
                 if (std.mem.eql(u8, key, "code")) {
                     if (code != null) return error.InvalidCallback;
                     code = try percentDecode(value, &code_storage);
@@ -225,9 +227,15 @@ pub fn CallbackParser(comptime limits: struct {
                     defer std.crypto.secureZero(u8, &description_storage);
                     _ = try percentDecode(value, &description_storage);
                     error_description_seen = true;
-                } else {
-                    return error.InvalidCallback;
+                } else if (std.mem.eql(u8, key, "error_uri")) {
+                    if (error_uri_seen) return error.InvalidCallback;
+                    var uri_storage: [limits.target_bytes]u8 = undefined;
+                    defer std.crypto.secureZero(u8, &uri_storage);
+                    _ = try percentDecode(value, &uri_storage);
+                    error_uri_seen = true;
                 }
+                // RFC 6749: unrecognized response parameters are ignored.
+                // No extension can supply state, code or issuer authority.
             }
 
             const actual_state = state_value orelse return error.StateMismatch;
@@ -247,7 +255,7 @@ pub fn CallbackParser(comptime limits: struct {
                 if (code != null) return error.InvalidCallback;
                 return .rejected;
             }
-            if (error_description_seen) return error.InvalidCallback;
+            if (error_description_seen or error_uri_seen) return error.InvalidCallback;
             return .{
                 .code = try Secret.init(
                     allocator,
@@ -307,7 +315,7 @@ test "PKCE material has the RFC 7636 S256 shape" {
     try std.testing.expectEqual(pkce_encoded_bytes, material.challenge.len);
 }
 
-test "callback parser rejects duplicate and unknown parameters" {
+test "callback extensions cannot bypass recognized fields or state" {
     const Parser = CallbackParser(.{
         .secret_bytes = 64,
         .state_bytes = pkce_encoded_bytes,
@@ -317,22 +325,49 @@ test "callback parser rejects duplicate and unknown parameters" {
         .error_description_bytes = 128,
     });
     const state = "0123456789012345678901234567890123456789012";
+    var callback = try Parser.parse(
+        std.testing.allocator,
+        "/callback?co%64e=a&state=" ++ state ++ "&extra=1&extra=2&flag",
+        state,
+        .{ .callback_path = "/callback" },
+    );
+    defer callback.deinit();
+    try std.testing.expectEqualStrings("a", callback.code.view());
+    for ([_][]const u8{
+        "/callback?code=a&co%64e=b&state=" ++ state,
+        "/callback?code=a&state=" ++ state ++ "&st%61te=" ++ state,
+        "/callback?code=a&error=access_denied&state=" ++ state ++ "&extra=1",
+        "/callback?error=a&error=a&state=" ++ state,
+        "/callback?error=a&error_description=a&error_description=a&state=" ++ state,
+        "/callback?error=a&error_uri=a&error_uri=a&state=" ++ state,
+        "/callback?code=a&error_uri=a&state=" ++ state,
+        "/callback?code=a&iss=a&iss=a&state=" ++ state,
+    }) |target| {
+        try std.testing.expectError(
+            error.InvalidCallback,
+            Parser.parse(std.testing.allocator, target, state, .{
+                .callback_path = "/callback",
+                .allow_unvalidated_issuer = true,
+            }),
+        );
+    }
     try std.testing.expectError(
-        error.InvalidCallback,
+        error.StateMismatch,
         Parser.parse(
             std.testing.allocator,
-            "/callback?code=a&code=b&state=" ++ state,
+            "/callback?code=a&state=wrong&extra=" ++ state,
             state,
             .{ .callback_path = "/callback" },
         ),
     );
-    try std.testing.expectError(
-        error.InvalidCallback,
-        Parser.parse(
-            std.testing.allocator,
-            "/callback?code=a&state=" ++ state ++ "&extra=1",
-            state,
-            .{ .callback_path = "/callback" },
-        ),
-    );
+    for ([_][]const u8{
+        "&error_uri=https%3A%2F%2Fexample.test%2Ferror&error_description=Denied&extension=1",
+        "&error_description=Denied&error_uri=https%3A%2F%2Fexample.test%2Ferror&extension=1",
+    }) |suffix| {
+        var storage: [512]u8 = undefined;
+        const target = try std.fmt.bufPrint(&storage, "/callback?error=access_denied&state={s}{s}", .{ state, suffix });
+        var rejection = try Parser.parse(std.testing.allocator, target, state, .{ .callback_path = "/callback" });
+        defer rejection.deinit();
+        try std.testing.expect(rejection == .rejected);
+    }
 }

@@ -106,7 +106,6 @@ pub fn exchangeAuthorizationCode(
         allocator,
         response.body,
         now_unix_seconds,
-        true,
     ) catch return error.ProtocolInvalid;
 }
 
@@ -151,7 +150,6 @@ pub fn refreshWithToken(
         allocator,
         response.body,
         now_unix_seconds,
-        false,
     ) catch return error.ProtocolInvalid;
     if (std.mem.eql(u8, tokens.refresh_token.view(), refresh_token.view())) {
         tokens.deinit();
@@ -315,7 +313,7 @@ const FakeTransport = struct {
                     "redirect_uri=http%3A%2F%2Flocalhost%3A49152%2Fauth%2Fmetask%2Fcallback",
                 ) == null) return error.ProtocolFailed;
                 break :blk
-                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600,"scope":"read model:invoke"}
+                \\{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":3600}
                 ;
             },
             1 => blk: {
@@ -409,7 +407,6 @@ test "refresh requires and installs the rotated refresh token" {
         \\{"access_token":"old-access","refresh_token":"old-refresh","token_type":"Bearer","expires_in":20,"scope":"read model:invoke"}
     ,
         0,
-        true,
     );
     defer previous.deinit();
     var fake = struct {
