@@ -121,7 +121,8 @@ import {
 import { WorkbenchConnection } from "../bridge/connection.ts";
 import {
   AttachmentCleanupError,
-  type AttachmentReceive,
+  type AttachmentAddOperation,
+  type AddView,
 } from "../bridge/attachment-receive.ts";
 import type {
   TaskCreateReason,
@@ -305,12 +306,13 @@ export default function App() {
   const [sourceMutationError, setSourceMutationError] = useState<string | null>(
     null,
   );
-  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentView, setAttachmentView] = useState<AddView | null>(null);
+  const attachmentBusy = attachmentView !== null;
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const attachmentBusyRef = useRef(false);
   const attachmentOperation = useRef<{
     cancelled: boolean;
-    receive?: AttachmentReceive;
+    add: AttachmentAddOperation;
   } | null>(null);
   const droppedAttachmentHandlerRef = useRef<(paths: string[]) => void>(
     () => undefined,
@@ -358,6 +360,10 @@ export default function App() {
   const accountCancelBusyRef = useRef(false);
   const workspaceBusyRef = useRef(false);
   const connectionBusyRef = useRef(false);
+  const connectionRetryRef = useRef<{
+    promise: Promise<void>;
+    replace: boolean;
+  } | null>(null);
   const taskPanelToggle = useRef<HTMLButtonElement>(null);
   const taskInformationTrigger = useRef<HTMLButtonElement>(null);
   const taskPanelOpeners = useRef(new Map<string, HTMLButtonElement>());
@@ -769,7 +775,7 @@ export default function App() {
       const operation = attachmentOperation.current;
       if (!operation) return;
       operation.cancelled = true;
-      void operation.receive?.cancel().catch(() => undefined);
+      void operation.add.cancel().catch(() => undefined);
     },
     [composerDraftScope, bridgeGeneration, route, settingsOpen, searchOpen],
   );
@@ -1053,8 +1059,8 @@ export default function App() {
           setFullAccessSuccessors({});
           if (attachmentOperation.current) {
             attachmentOperation.current.cancelled = true;
-            void attachmentOperation.current.receive
-              ?.cancel()
+            void attachmentOperation.current.add
+              .cancel()
               .catch(() => undefined);
           }
           dispatchWorkbench({ type: "generation.started", generation });
@@ -1259,26 +1265,47 @@ export default function App() {
     });
   }
 
-  async function retryViewSynchronization(replaceConnection = false) {
-    if (connectionBusyRef.current) return;
-    connectionBusyRef.current = true;
-    setConnectionBusy(true);
-    setViewSyncFailed(false);
+  async function retryViewSynchronization(
+    replaceConnection = false,
+    expectedGeneration?: string,
+  ): Promise<void> {
+    if (
+      expectedGeneration &&
+      expectedGeneration !== bridgeGenerationRef.current
+    )
+      return;
+    const pending = connectionRetryRef.current;
+    if (pending) {
+      await pending.promise;
+      if (replaceConnection && !pending.replace)
+        await retryViewSynchronization(true, expectedGeneration);
+      return;
+    }
+    const promise = (async () => {
+      connectionBusyRef.current = true;
+      setConnectionBusy(true);
+      setViewSyncFailed(false);
+      if (replaceConnection) setBridgeReady(false);
+      try {
+        const current = connection.current;
+        if (!current) throw new Error("Workbench connection is not available");
+        await current.retry({ replaceConnection });
+        setBridgeReady(true);
+        setStatus(quietStatus("connection.recovered", { scope: "connection" }));
+      } catch {
+        setViewSyncFailed(true);
+        setBridgeReady(false);
+      } finally {
+        connectionBusyRef.current = false;
+        setConnectionBusy(false);
+      }
+    })();
+    connectionRetryRef.current = { promise, replace: replaceConnection };
     try {
-      const current = connection.current;
-      if (!current) throw new Error("Workbench connection is not available");
-      await current.retry({ replaceConnection });
-      setBridgeReady(true);
-      setStatus(quietStatus("connection.recovered", { scope: "connection" }));
-    } catch (error) {
-      setViewSyncFailed(true);
-      setBridgeReady(false);
-      // WorkbenchConnection has already published the typed failure status.
-      // Keep the last classification intact so retry failures cannot become a
-      // generic render-gate signal.
+      await promise;
     } finally {
-      connectionBusyRef.current = false;
-      setConnectionBusy(false);
+      if (connectionRetryRef.current?.promise === promise)
+        connectionRetryRef.current = null;
     }
   }
 
@@ -1907,78 +1934,93 @@ export default function App() {
       return;
     const requestedScope = composerDraftScopeRef.current;
     const requestedGeneration = bridgeGenerationRef.current;
-    const operation: { cancelled: boolean; receive?: AttachmentReceive } = {
-      cancelled: false,
-    };
+    const target = newTaskDraftActive ? newTaskDrafts : taskDrafts;
+    const targetId = newTaskDraftActive
+      ? newTaskDraftId
+      : (activeTask?.id ?? null);
+    if (!target.currentDraft(targetId)) return;
+    let add: AttachmentAddOperation;
+    try {
+      add = client.createAttachmentAdd(async () => {
+        if (requestedGeneration !== bridgeGenerationRef.current) return;
+        taskDrafts.invalidateAttachments();
+        newTaskDrafts.invalidateAttachments();
+        await retryViewSynchronization(true, requestedGeneration);
+      });
+    } catch (error) {
+      setAttachmentError(errorText(error));
+      return;
+    }
+    const operation = { cancelled: false, add };
     attachmentOperation.current = operation;
     attachmentBusyRef.current = true;
-    setAttachmentBusy(true);
+    setAttachmentView("adding");
     setAttachmentError(null);
+    const currentOperation = () =>
+      attachmentOperation.current === operation &&
+      composerDraftScopeRef.current === requestedScope &&
+      bridgeGenerationRef.current === requestedGeneration &&
+      !operation.cancelled;
     try {
-      if (input && "files" in input)
-        operation.receive = client.createAttachmentReceive();
-      const result = input
+      const source = input
         ? "files" in input
-          ? await operation.receive!.run(input.files)
-          : await client.addDroppedAttachments(input.paths)
-        : await client.chooseAttachments();
+          ? { kind: "file_bytes" as const, files: input.files }
+          : { kind: "native_paths" as const, paths: input.paths }
+        : { kind: "picker" as const };
+      const result = await add.run(source, (view) => {
+        if (attachmentOperation.current === operation) setAttachmentView(view);
+      });
       if (result.status === "cancelled") return;
       if (result.status === "rejected") {
-        if (!operation.cancelled) setAttachmentError(result.reason);
+        if (
+          attachmentOperation.current === operation &&
+          composerDraftScopeRef.current === requestedScope &&
+          (result.reason === "cleanup_failed" || !operation.cancelled)
+        )
+          setAttachmentError(result.reason);
         return;
       }
-      if (
-        operation.cancelled ||
-        composerDraftScopeRef.current !== requestedScope
-      ) {
-        if (operation.receive) {
-          await operation.receive.cancel();
-          return;
-        }
-        await Promise.allSettled(
-          result.attachments.map((attachment) =>
-            client.releaseAttachment(attachment.token),
-          ),
-        );
+      const current = target.currentDraft(targetId);
+      if (!currentOperation() || !current || current.kind === "skill") {
+        const cleanup = await add.cancel();
+        if (
+          cleanup.status === "cleanup_failed" &&
+          composerDraftScopeRef.current === requestedScope
+        )
+          setAttachmentError("cleanup_failed");
         return;
       }
-      const current = composerDraftRef.current as ComposerDraft;
-      if (current.kind === "skill") {
-        if (operation.receive) {
-          await operation.receive.cancel();
-          return;
-        }
-        await Promise.allSettled(
-          result.attachments.map((attachment) =>
-            client.releaseAttachment(attachment.token),
-          ),
-        );
-        return;
-      }
-      const existing = current.kind === "multimodal" ? current.attachments : [];
-      updateComposerDraft({
+      const next: ComposerDraft = {
         kind: "multimodal",
         text: current.text,
-        attachments: [...existing, ...result.attachments],
+        attachments: [
+          ...(current.kind === "multimodal" ? current.attachments : []),
+          ...result.attachments,
+        ],
+      };
+      const handedOff = add.handoff(() => {
+        if (!currentOperation() || !target.commitDraft(targetId, next))
+          return false;
+        composerDraftRef.current = next;
+        return true;
       });
-      operation.receive?.handoff();
-      attachmentOperation.current = null;
-    } catch (error) {
-      let failure = error;
-      try {
-        await operation.receive?.cancel();
-      } catch (cleanupError) {
-        failure = cleanupError;
+      if (!handedOff) {
+        const cleanup = await add.cancel();
+        if (
+          cleanup.status === "cleanup_failed" &&
+          composerDraftScopeRef.current === requestedScope
+        )
+          setAttachmentError("cleanup_failed");
       }
-      if (failure instanceof AttachmentCleanupError) {
-        if (requestedGeneration === bridgeGenerationRef.current)
-          await retryViewSynchronization(true);
-      } else if (!operation.cancelled) setAttachmentError(errorText(failure));
+    } catch (error) {
+      if (!(error instanceof AttachmentCleanupError) && currentOperation())
+        setAttachmentError(errorText(error));
     } finally {
-      if (attachmentOperation.current === operation)
+      if (attachmentOperation.current === operation) {
         attachmentOperation.current = null;
-      attachmentBusyRef.current = false;
-      setAttachmentBusy(false);
+        attachmentBusyRef.current = false;
+        setAttachmentView(null);
+      }
     }
   }
 
@@ -3033,6 +3075,7 @@ export default function App() {
         attachmentsEnabled={snapshot.capabilities.attachments.enabled}
         attachmentMaxFileBytes={snapshot.capabilities.attachments.maxFileBytes}
         attachmentBusy={attachmentBusy}
+        attachmentCancelling={attachmentView === "cancelling"}
         attachmentError={attachmentError}
         attachmentModelWarning={attachmentModelWarning}
         skillCatalog={skillCatalog}
@@ -3168,12 +3211,12 @@ export default function App() {
             void addAttachments({ files });
         }}
         onCancelAttachments={
-          attachmentOperation.current?.receive
+          attachmentOperation.current && attachmentView === "adding"
             ? () => {
                 const operation = attachmentOperation.current;
                 if (!operation) return;
                 operation.cancelled = true;
-                void operation.receive?.cancel().catch(() => undefined);
+                void operation.add.cancel().catch(() => undefined);
               }
             : undefined
         }

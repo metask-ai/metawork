@@ -580,6 +580,10 @@ export const zhCN: Record<MessageId, string> = {
   "run.activity.unsynchronized": "状态尚未同步",
   "run.activity.requesting_stop": "正在请求停止…",
   "attachment.add": "添加文件",
+  "attachment.cancelling": "正在取消添加…",
+  "attachment.error.input_busy": "文件仍在处理中，请稍后再添加。",
+  "attachment.error.cleanup_failed":
+    "部分未发送文件未能清理；可稍后重新添加，已有草稿仍保留。",
   "attachment.cancel": "取消添加",
   "attachment.error.invalid_transfer": "文件添加未完成，请重新添加。",
   "attachment.error.stale_transfer": "本次文件添加已失效，请重新添加。",

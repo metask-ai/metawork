@@ -74,6 +74,8 @@ function attachmentErrorMessage(reason: string): MessageId {
     shutting_down: "attachment.error.shutting_down",
     invalid_transfer: "attachment.error.invalid_transfer",
     stale_transfer: "attachment.error.stale_transfer",
+    input_busy: "attachment.error.input_busy",
+    cleanup_failed: "attachment.error.cleanup_failed",
   };
   return messages[reason] ?? "attachment.error.generic";
 }
@@ -88,6 +90,7 @@ export function ComposerFooter({
   attachmentsEnabled,
   attachmentMaxFileBytes,
   attachmentBusy,
+  attachmentCancelling = false,
   attachmentError,
   attachmentModelWarning,
   skillCatalog,
@@ -137,6 +140,7 @@ export function ComposerFooter({
   attachmentsEnabled: boolean;
   attachmentMaxFileBytes: string;
   attachmentBusy: boolean;
+  attachmentCancelling?: boolean;
   attachmentError: string | null;
   attachmentModelWarning: "image" | null;
   skillCatalog: SkillCatalogView;
@@ -739,18 +743,25 @@ export function ComposerFooter({
                   ref={attachmentButtonRef}
                   className="composer-attachment-add"
                   data-busy={attachmentBusy || undefined}
+                  aria-busy={attachmentBusy || undefined}
                   aria-label={t(
-                    attachmentBusy && onCancelAttachments
-                      ? "attachment.cancel"
-                      : "attachment.add",
+                    attachmentCancelling
+                      ? "attachment.cancelling"
+                      : attachmentBusy && onCancelAttachments
+                        ? "attachment.cancel"
+                        : "attachment.add",
                   )}
                   title={t(
-                    attachmentBusy && onCancelAttachments
-                      ? "attachment.cancel"
-                      : "attachment.add",
+                    attachmentCancelling
+                      ? "attachment.cancelling"
+                      : attachmentBusy && onCancelAttachments
+                        ? "attachment.cancel"
+                        : "attachment.add",
                   )}
                   disabled={
-                    composeDisabled || (attachmentBusy && !onCancelAttachments)
+                    composeDisabled ||
+                    attachmentCancelling ||
+                    (attachmentBusy && !onCancelAttachments)
                   }
                   onClick={
                     attachmentBusy ? onCancelAttachments : onChooseAttachments

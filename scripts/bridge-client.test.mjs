@@ -233,53 +233,17 @@ test("Task completion acknowledgement preserves exact Task and Run identity", as
   await assert.rejects(mismatched.markTaskCompletionSeen("11", "17"));
 });
 
-test("attachment commands use only opaque grant payloads", async () => {
+test("attachment release carries only its opaque grant", async () => {
   const calls = [];
   const token = "a".repeat(48);
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
-      if (command === "metawork.attachments.choose")
-        return {
-          status: "ready",
-          attachments: [
-            {
-              token,
-              kind: "image",
-              format: "png",
-              displayName: "diagram.png",
-              sizeBytes: "128",
-            },
-          ],
-        };
-      if (command === "metawork.attachments.addDropped")
-        return {
-          status: "ready",
-          attachments: [
-            {
-              token: "b".repeat(48),
-              kind: "file",
-              displayName: "notes.txt",
-              sizeBytes: "64",
-            },
-          ],
-        };
       return { released: true };
     }),
   });
-
-  assert.equal((await client.chooseAttachments()).status, "ready");
-  assert.equal(
-    (await client.addDroppedAttachments(["C:\\tmp\\notes.txt"])).status,
-    "ready",
-  );
   assert.deepEqual(await client.releaseAttachment(token), { released: true });
   assert.deepEqual(calls, [
-    { command: "metawork.attachments.choose", payload: {} },
-    {
-      command: "metawork.attachments.addDropped",
-      payload: { paths: ["C:\\tmp\\notes.txt"] },
-    },
     { command: "metawork.attachments.release", payload: { token } },
   ]);
 });

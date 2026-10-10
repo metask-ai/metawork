@@ -639,6 +639,11 @@ export const enUS = {
   "run.activity.unsynchronized": "Status not synchronized",
   "run.activity.requesting_stop": "Requesting stop…",
   "attachment.add": "Add files",
+  "attachment.cancelling": "Cancelling file addition…",
+  "attachment.error.input_busy":
+    "Files are still being processed. Try adding again shortly.",
+  "attachment.error.cleanup_failed":
+    "Some unsent files could not be cleaned up. Try adding again later; your existing draft is retained.",
   "attachment.cancel": "Cancel adding files",
   "attachment.error.invalid_transfer":
     "File transfer did not complete. Add the files again.",

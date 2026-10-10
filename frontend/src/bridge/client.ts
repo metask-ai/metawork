@@ -66,16 +66,17 @@ import {
   decodeMcpAuthorizationCancelResult,
   decodeFilePreview,
   decodeFileChangeDiff,
-  decodeAttachmentChooseResult,
   decodeAttachmentReleaseResult,
-  decodeAttachmentReceiveResult,
-  decodeAttachmentReceiveAcceptance,
+  decodeAttachmentAddBegin,
+  decodeAttachmentAddAcceptance,
+  decodeAttachmentAddResult,
+  decodeAttachmentCancelResult,
   decodeAutomaticWorkspaceRootMutationResult,
   decodeExternalLinkOpenResult,
 } from "./decode-contracts.ts";
 import { RendererBridgeContractError } from "./contract-error.ts";
 import { fetchWorkbenchSnapshot } from "./snapshot/snapshot-client.ts";
-import { AttachmentReceive } from "./attachment-receive.ts";
+import { AttachmentAddOperation } from "./attachment-receive.ts";
 
 export {
   RendererBridgeContractError,
@@ -830,37 +831,30 @@ export class BridgeClient {
     );
   }
 
-  async chooseAttachments() {
-    // Like Workspace and Skill pickers, this command includes a user-controlled
-    // native modal. A fixed Bridge timeout would abandon a valid selection and
-    // leave the resulting staged grants without a Renderer consumer.
-    return decodeAttachmentChooseResult(
-      await this.bridge().invoke(commands.chooseAttachments, {}),
-    );
-  }
-
-  createAttachmentReceive() {
+  createAttachmentAdd(recover: () => Promise<void>) {
     const connection = this.attachmentConnection;
-    if (connection?.mode !== "file_bytes")
-      throw new Error("File byte input is unavailable");
+    if (!connection) throw new Error("Attachment input is unavailable");
     if (this.nextReceiveBatch > 18446744073709551615n)
       throw new Error("Attachment batch identity exhausted");
     const key = {
       generation: connection.generation,
       batchId: String(this.nextReceiveBatch++),
     };
-    return new AttachmentReceive(
+    return new AttachmentAddOperation(
       {
-        begin: async (files) =>
-          decodeAttachmentReceiveAcceptance(
-            await this.invoke(commands.beginAttachmentReceive, {
+        begin: async (source) => {
+          if (source.kind !== "picker" && source.kind !== connection.mode)
+            throw new Error("Attachment source does not match the connection");
+          return decodeAttachmentAddBegin(
+            await this.bridge().invoke(commands.beginAttachmentAdd, {
               ...key,
-              files,
+              source,
             }),
-          ),
+          );
+        },
         append: async (fileIndex, offset, dataBase64) =>
-          decodeAttachmentReceiveAcceptance(
-            await this.invoke(commands.appendAttachmentReceive, {
+          decodeAttachmentAddAcceptance(
+            await this.invoke(commands.appendAttachmentAdd, {
               ...key,
               fileIndex,
               offset,
@@ -868,21 +862,16 @@ export class BridgeClient {
             }),
           ),
         finish: async () =>
-          decodeAttachmentReceiveResult(
-            await this.invoke(commands.finishAttachmentReceive, key),
+          decodeAttachmentAddResult(
+            await this.bridge().invoke(commands.finishAttachmentAdd, key),
           ),
         cancel: async () =>
-          decodeAttachmentReleaseResult(
-            await this.invoke(commands.cancelAttachmentReceive, key),
+          decodeAttachmentCancelResult(
+            await this.invoke(commands.cancelAttachmentAdd, key),
           ),
+        recover,
       },
       connection.maxChunkBytes,
-    );
-  }
-
-  async addDroppedAttachments(paths: string[]) {
-    return decodeAttachmentChooseResult(
-      await this.bridge().invoke(commands.addDroppedAttachments, { paths }),
     );
   }
 
