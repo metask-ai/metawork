@@ -1290,15 +1290,20 @@ pub const Dispatcher = struct {
                     return;
                 } };
             }
+            const product_id = workbench.prepareAttachmentAdd() catch |err| {
+                respondAddError(responder, invocation.request.id, err);
+                return;
+            };
             const completion = self.addSlot(responder, invocation.request.id, key.generation, invocation.source.window_id, key.batch_id) orelse {
+                _ = workbench.cancelAttachmentPreparation(product_id);
                 respondAddError(responder, invocation.request.id, error.InputBusy);
                 return;
             };
-            const product_id = workbench.beginAttachmentBytes(completion, metadata[0..files.len]) catch |err| {
+            self.receive_active = .{ .batch_id = key.batch_id, .product_id = product_id, .unified = true, .bytes = true };
+            workbench.beginPreparedAttachmentBytes(completion, product_id, metadata[0..files.len]) catch |err| {
                 self.completeAttachmentStaging(completion, .{ .rejected = addRejection(err) });
                 return;
             };
-            self.receive_active = .{ .batch_id = key.batch_id, .product_id = product_id, .unified = true, .bytes = true };
             return;
         }
         var path_storage: [native_sdk.platform.max_drop_paths_bytes]u8 = undefined;
@@ -7178,8 +7183,10 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     const Capture = struct {
         response: ?[]u8 = null,
         calls: usize = 0,
+        control: *product_control.Runtime,
         fn receive(context: *anyopaque, _: native_sdk.bridge.Source, response: []const u8) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));
+            try std.testing.expectEqual(@as(usize, 0), self.control.attachment_lane.active_count);
             if (self.response) |previous| std.testing.allocator.free(previous);
             self.response = try std.testing.allocator.dupe(u8, response);
             self.calls += 1;
@@ -7203,7 +7210,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
             try std.testing.expect(std.mem.indexOf(u8, self.response.?, text) != null);
         }
     };
-    var capture = Capture{};
+    var capture = Capture{ .control = &workbench };
     defer capture.deinit();
     const key1 = "{\"generation\":\"1\",\"batchId\":\"1\"}";
     try capture.invoke(native, source, commands.cancel_attachment_add, key1);

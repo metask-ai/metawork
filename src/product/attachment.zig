@@ -14,7 +14,6 @@ pub const Limits = struct {
 pub const Candidate = struct {
     display_name: []const u8,
     bytes: []const u8 = &.{},
-    stored: ?store.File = null,
 };
 pub const ImagePreparation = struct {
     context: ?*anyopaque = null,
@@ -66,18 +65,23 @@ pub const Runtime = struct {
     }
     pub fn deinit(self: *Runtime) void {
         if (self.receiving) |receive| _ = self.cancelReceive(receive.id);
+        var incomplete = false;
         for (self.slots) |*slot| if (slot.*) |*entry| {
-            if (!self.destroyEntry(entry, false)) self.freeEntryMemory(entry);
+            if (!self.destroyEntry(entry, false)) {
+                incomplete = true;
+                self.freeEntryMemory(entry);
+            }
         };
+        if (incomplete) std.log.warn("attachment shutdown left physical cleanup incomplete", .{});
         self.allocator.free(self.slots);
         self.* = undefined;
     }
     /// One resource core for path, byte and internal candidates. All metadata and
     /// allocations complete before any original is created or ownership changes.
     pub fn beginReceive(self: *Runtime, files: []const ReceiveFile) Error!u64 {
-        return self.reserve(files, null, true, null);
+        return self.reserve(files, true, null);
     }
-    fn reserve(self: *Runtime, files: []const ReceiveFile, owned: ?[]Candidate, initialize: bool, prepared_id: ?u64) Error!u64 {
+    fn reserve(self: *Runtime, files: []const ReceiveFile, initialize: bool, prepared_id: ?u64) Error!u64 {
         const fs = self.file_store orelse return error.StagingCapacity;
         if (self.receiving != null or self.preparing != null) return error.InputBusy;
         _ = self.retryCleanup();
@@ -96,8 +100,6 @@ pub const Runtime = struct {
             if (self.freeSlotCount() + debt.count >= files.len and total <= self.limits.max_staged_bytes - (self.used_bytes - debt.bytes)) return error.CleanupFailed;
             return error.StagingCapacity;
         }
-        const existing = try self.allocator.alloc(bool, files.len);
-        defer self.allocator.free(existing);
         const entries = try self.allocator.alloc(Entry, files.len);
         defer self.allocator.free(entries);
         var prepared: usize = 0;
@@ -105,12 +107,10 @@ pub const Runtime = struct {
         const indices = try self.allocator.alloc(usize, files.len);
         var owns_indices = true;
         errdefer if (owns_indices) self.allocator.free(indices);
-        for (files, entries, 0..) |file, *entry, index| {
+        for (files, entries) |file, *entry| {
             const name = try self.allocator.dupe(u8, file.display_name);
             errdefer self.allocator.free(name);
-            const stored = if (owned) |items| items[index].stored else null;
-            existing[index] = stored != null;
-            entry.* = .{ .state = .input_reserved, .display_name = name, .file = if (stored) |value| value else try fs.allocate(file.size_bytes) };
+            entry.* = .{ .state = .input_reserved, .display_name = name, .file = try fs.allocate(file.size_bytes) };
             prepared += 1;
         }
         for (entries, 0..) |entry, index| {
@@ -126,11 +126,8 @@ pub const Runtime = struct {
         self.receiving = .{ .id = id, .indices = indices };
         for (indices) |slot| self.slots[slot].?.batch_id = id;
         owns_indices = false;
-        if (owned) |items| for (items) |*candidate| {
-            candidate.stored = null;
-        };
-        if (initialize) for (indices, 0..) |slot, index| {
-            if (!existing[index]) fs.create(self.slots[slot].?.file) catch |err| {
+        if (initialize) for (indices) |slot| {
+            fs.create(self.slots[slot].?.file) catch |err| {
                 _ = self.cancelReceiveChecked(id) catch return error.CleanupFailed;
                 return err;
             };
@@ -153,7 +150,7 @@ pub const Runtime = struct {
     pub fn reservePrepared(self: *Runtime, id: u64, files: []const ReceiveFile) Error!void {
         if (self.preparing != id) return error.StaleTransfer;
         self.preparing = null;
-        _ = try self.reserve(files, null, false, id);
+        _ = try self.reserve(files, false, id);
     }
     pub fn cancelPreparing(self: *Runtime, id: u64) bool {
         if (self.preparing != id) return false;
@@ -261,21 +258,14 @@ pub const Runtime = struct {
         return self.cancelReceiveChecked(id) catch false;
     }
     pub fn stageBatch(self: *Runtime, candidates: []const Candidate, output: []Descriptor) Error![]const Descriptor {
-        return self.stage(candidates, null, output);
-    }
-    pub fn stageOwnedBatch(self: *Runtime, candidates: []Candidate, output: []Descriptor) Error![]const Descriptor {
-        return self.stage(candidates, candidates, output);
-    }
-    fn stage(self: *Runtime, candidates: []const Candidate, owned: ?[]Candidate, output: []Descriptor) Error![]const Descriptor {
         if (self.receiving != null) return error.InputBusy;
         if (candidates.len > self.limits.max_files or output.len < candidates.len) return error.TooManyFiles;
         const files = try self.allocator.alloc(ReceiveFile, candidates.len);
         defer self.allocator.free(files);
         for (candidates, files) |candidate, *file| {
-            if (candidate.stored != null and owned == null) return error.InvalidTransfer;
-            file.* = .{ .display_name = candidate.display_name, .size_bytes = if (candidate.stored) |stored| stored.size else candidate.bytes.len };
+            file.* = .{ .display_name = candidate.display_name, .size_bytes = candidate.bytes.len };
         }
-        const id = try self.reserve(files, owned, true, null);
+        const id = try self.reserve(files, true, null);
         errdefer _ = self.cancelReceive(id);
         for (candidates, 0..) |candidate, index| {
             if (candidate.bytes.len != 0) self.appendReceive(id, index, 0, candidate.bytes) catch |err| {
@@ -392,6 +382,12 @@ pub const Runtime = struct {
         return .{ .id = entry.id, .kind = if (entry.format == null) .file else .image, .format = entry.format, .display_name = entry.display_name, .size_bytes = entry.file.size };
     }
     fn destroyEntry(self: *Runtime, entry: *Entry, keep_original: bool) bool {
+        // Input cleanup owns only the staging namespace. A failed Run rollback
+        // must never turn its Task original into an input-cleanup target.
+        if (!keep_original and entry.file.task_id != 0) {
+            entry.state = .cleanup_pending;
+            return false;
+        }
         if (!keep_original) self.file_store.?.deleteChecked(entry.file) catch {
             entry.state = .cleanup_pending;
             return false;
@@ -837,4 +833,29 @@ pub fn validateOriginal(file_store: *FileStore, file: store.File, cancelled: ?*c
         offset += bytes.len;
     }
     if (remaining != 0) return error.UnsupportedType;
+}
+
+test "input cleanup cannot delete a Task original after failed Run rollback" {
+    var fixture = try TestStore.init();
+    defer fixture.deinit();
+    var runtime = try Runtime.init(std.testing.allocator, testLimits(), &fixture.store, .{});
+    defer runtime.deinit();
+    var output: [1]Descriptor = undefined;
+    const ready = try runtime.stageBatch(&.{.{ .display_name = "a.txt", .bytes = "original" }}, &output);
+    const id = ready[0].id;
+    var parts: [1]BorrowedPart = undefined;
+    var indices: [1]usize = undefined;
+    var borrow = try runtime.borrow(&.{id}, &parts, &indices, 42);
+    const original = runtime.slots[indices[0]].?.file;
+    try fixture.store.root.deleteDir(std.testing.io, "0");
+    const blocker = try fixture.store.root.createFile(std.testing.io, "0", .{});
+    blocker.close(std.testing.io);
+    borrow.rollback();
+    try std.testing.expectEqual(@as(u64, 42), runtime.slots[indices[0]].?.file.task_id);
+    try std.testing.expectError(error.CleanupFailed, runtime.releaseChecked(id));
+    try std.testing.expect(!runtime.retryCleanup());
+    try std.testing.expectEqual(@as(usize, 8), runtime.used_bytes);
+    var bytes: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 8), try fixture.store.read(original, 0, &bytes));
+    try std.testing.expectEqualStrings("original", &bytes);
 }

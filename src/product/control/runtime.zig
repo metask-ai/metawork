@@ -1524,10 +1524,10 @@ pub const Runtime = struct {
         try self.attachment_lane.begin(.{ .completion_id = completion_id, .path_count = path_count, .paths = paths, .limits = self.attachments.limits, .file_store = self.attachments.file_store orelse return error.StagingCapacity });
         self.attachment_io = .{ .completion_id = completion_id, .product_id = id };
     }
-    pub fn beginAttachmentBytes(self: *Runtime, completion_id: u64, files: []const product_attachment.ReceiveFile) Error!u64 {
+    pub fn beginPreparedAttachmentBytes(self: *Runtime, completion_id: u64, id: u64, files: []const product_attachment.ReceiveFile) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.attachment_io != null) return error.InputBusy;
-        const id = try self.attachments.beginPreparing();
+        if (self.attachments.preparing != id) return error.StaleTransfer;
         errdefer _ = self.attachments.cancelPreparing(id);
         try self.attachments.reservePrepared(id, files);
         errdefer _ = self.attachments.cancelReceive(id);
@@ -1535,7 +1535,6 @@ pub const Runtime = struct {
         const targets = try self.attachments.writeFiles(id, &storage);
         try self.attachment_lane.beginFiles(completion_id, self.attachments.file_store.?, .initialized, targets, 0, &.{});
         self.attachment_io = .{ .completion_id = completion_id, .product_id = id };
-        return id;
     }
     pub fn appendAttachmentBytes(self: *Runtime, completion_id: u64, id: u64, index: usize, offset: usize, bytes: []const u8) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
@@ -1572,16 +1571,16 @@ pub const Runtime = struct {
                 self.attachment_io = null;
                 _ = self.attachments.cancelPreparing(op.product_id);
                 _ = self.attachments.cancelReceiveChecked(op.product_id) catch {
-                    sink.complete_fn(sink.context, op.completion_id, .{ .rejected = .cleanup_failed });
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
                     continue;
                 };
-                sink.complete_fn(sink.context, op.completion_id, if (op.cancel_requested or raw.cancelled) .cancelled else .{ .rejected = raw.rejection.? });
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, if (op.cancel_requested or raw.cancelled) .cancelled else .{ .rejected = raw.rejection.? });
                 continue;
             }
             if (raw.phase == .probed) {
                 self.attachments.reservePrepared(op.product_id, raw.files) catch |err| {
                     self.attachment_io = null;
-                    sink.complete_fn(sink.context, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
                     continue;
                 };
                 var file_storage: [lifecycle.multimodal_input_limits.max_parts]product_attachment.store.File = undefined;
@@ -1589,10 +1588,10 @@ pub const Runtime = struct {
                 self.attachment_lane.continueCopy(taken, files) catch |err| {
                     self.attachment_io = null;
                     _ = self.attachments.cancelReceiveChecked(op.product_id) catch {
-                        sink.complete_fn(sink.context, op.completion_id, .{ .rejected = .cleanup_failed });
+                        self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
                         continue;
                     };
-                    sink.complete_fn(sink.context, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
                     continue;
                 };
                 transferred = true;
@@ -1600,15 +1599,15 @@ pub const Runtime = struct {
             }
             self.attachment_io = null;
             if (raw.phase == .initialized) {
-                sink.complete_fn(sink.context, op.completion_id, .accepted);
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .accepted);
                 continue;
             }
             if (raw.phase == .written) {
                 self.attachments.acknowledgeWrite(op.product_id, op.file_index, op.offset, op.count) catch |err| {
-                    sink.complete_fn(sink.context, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
                     continue;
                 };
-                sink.complete_fn(sink.context, op.completion_id, .accepted);
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .accepted);
                 continue;
             }
             if (raw.phase == .copied) {
@@ -1617,10 +1616,10 @@ pub const Runtime = struct {
                 self.attachment_lane.continueValidation(taken) catch |err| {
                     self.attachment_io = null;
                     _ = self.attachments.cancelReceiveChecked(op.product_id) catch {
-                        sink.complete_fn(sink.context, op.completion_id, .{ .rejected = .cleanup_failed });
+                        self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
                         continue;
                     };
-                    sink.complete_fn(sink.context, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
                     continue;
                 };
                 transferred = true;
@@ -1629,14 +1628,20 @@ pub const Runtime = struct {
             var descriptors: [lifecycle.multimodal_input_limits.max_parts]product_attachment.Descriptor = undefined;
             const ready = (if (raw.phase == .validated) self.attachments.finishValidated(op.product_id, &descriptors) else self.attachments.finishReceive(op.product_id, &descriptors)) catch |err| {
                 _ = self.attachments.cancelReceiveChecked(op.product_id) catch {
-                    sink.complete_fn(sink.context, op.completion_id, .{ .rejected = .cleanup_failed });
+                    self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = .cleanup_failed });
                     continue;
                 };
-                sink.complete_fn(sink.context, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
+                self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .rejected = attachment_staging.reject(err) });
                 continue;
             };
-            sink.complete_fn(sink.context, op.completion_id, .{ .ready = ready });
+            self.completeAttachmentJob(taken, &transferred, sink, op.completion_id, .{ .ready = ready });
         }
+    }
+
+    fn completeAttachmentJob(self: *Runtime, taken: attachment_staging.Taken, released: *bool, sink: AttachmentStagingSink, completion_id: u64, result: AttachmentStagingResult) void {
+        self.attachment_lane.release(taken);
+        released.* = true;
+        sink.complete_fn(sink.context, completion_id, result);
     }
 
     /// Performs only bounded identity/authority work on the main thread and
