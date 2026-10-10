@@ -205,6 +205,9 @@ pub const MultimodalAttachment = struct {
     format: ?AttachmentFormat,
     display_name: []const u8,
     bytes: []const u8,
+    reference: []const u8 = &.{},
+    size_bytes: ?u64 = null,
+    source_format: ?AttachmentFormat = null,
 };
 
 pub const RunInput = union(enum) {
@@ -911,6 +914,7 @@ pub const DeletionEffects = struct {
     commit_without_task_fn: *const fn (*anyopaque, u64) DurableCommit,
     delete_checkpoint_task_fn: *const fn (*anyopaque, u64) void,
     delete_file_change_task_fn: *const fn (*anyopaque, u64) void,
+    delete_attachment_task_fn: *const fn (*anyopaque, u64) void,
     release: ReleaseEffects,
 
     fn releaseSession(self: DeletionEffects, task_id: u64) SessionReleaseOutcome {
@@ -927,6 +931,10 @@ pub const DeletionEffects = struct {
 
     fn deleteFileChangeTask(self: DeletionEffects, task_id: u64) void {
         self.delete_file_change_task_fn(self.context, task_id);
+    }
+
+    fn deleteAttachmentTask(self: DeletionEffects, task_id: u64) void {
+        self.delete_attachment_task_fn(self.context, task_id);
     }
 };
 
@@ -2333,6 +2341,7 @@ pub const Runtime = struct {
                         .committed => {
                             effects.deleteCheckpointTask(task_id);
                             effects.deleteFileChangeTask(task_id);
+                            effects.deleteAttachmentTask(task_id);
                             deinitTask(self, &removed, effects.release);
                             result.changed = true;
                         },
@@ -5453,6 +5462,7 @@ fn validateRunInput(
                 return error.RunInputTooLarge;
             var has_text_attachment = false;
             for (multimodal.attachments) |item| {
+                if (part_count >= parts.len) return error.RunInputTooLarge;
                 parts[part_count] = switch (item.kind) {
                     .image => .{ .image = .{
                         .format = switch (item.format orelse return error.InvalidRunInput) {
@@ -5472,6 +5482,11 @@ fn validateRunInput(
                     },
                 };
                 part_count += 1;
+                if (item.reference.len != 0) {
+                    if (part_count >= parts.len) return error.RunInputTooLarge;
+                    parts[part_count] = .{ .text_attachment = .{ .display_name = item.display_name, .bytes = item.reference } };
+                    part_count += 1;
+                }
             }
             if (has_text_attachment and
                 std.mem.trim(u8, multimodal.text, " \t\r\n").len == 0)
@@ -5496,14 +5511,14 @@ fn validateRunInput(
                 skill.skill_id.len,
                 pinned.revision.len,
             ) catch return error.ProjectionCapacity;
-            if (bytes > limits.max_user_message_bytes)
+            if (bytes > @min(limits.max_user_message_bytes, 64 * 1024))
                 return error.ProjectionCapacity;
             for (skill_input.argument_values) |value| {
                 if (!std.unicode.utf8ValidateSlice(value))
                     return error.InvalidSkillArguments;
                 bytes = std.math.add(usize, bytes, value.len) catch
                     return error.ProjectionCapacity;
-                if (bytes > limits.max_user_message_bytes)
+                if (bytes > @min(limits.max_user_message_bytes, 64 * 1024))
                     return error.ProjectionCapacity;
             }
             break :blk .{ .skill = .{
@@ -5570,9 +5585,9 @@ fn copyRunInput(
                 );
                 record.* = .{
                     .kind = item.kind,
-                    .format = item.format,
+                    .format = item.source_format orelse item.format,
                     .display_name = display.value,
-                    .size_bytes = item.bytes.len,
+                    .size_bytes = item.size_bytes orelse item.bytes.len,
                     .redacted = display.redacted,
                 };
                 initialized += 1;

@@ -499,6 +499,14 @@ test("Composer drafts survive a WebView reload scope and fail safely when storag
     text: "Follow up after this run",
   });
   writeTaskDraft("8", { kind: "text", text: "Stale draft" });
+  const largeDraft = { kind: "text", text: "界\n".repeat(100 * 1024) };
+  assert.equal(composerDraftWithinLimits(largeDraft), false);
+  writeTaskDraft("7", largeDraft);
+  assert.deepEqual(readTaskDraft("7"), largeDraft);
+  writeNewTaskDraft("large", largeDraft);
+  assert.deepEqual(readNewTaskDraft("large"), largeDraft);
+  clearNewTaskDraft("large");
+  writeTaskDraft("7", { kind: "text", text: "Follow up after this run" });
   writeTaskDraft("media", {
     kind: "multimodal",
     text: "Keep only this text",
@@ -636,7 +644,7 @@ test("Skill drafts persist identity, revision, and positional values together", 
     "metawork.task-draft.v1.7",
     JSON.stringify({
       kind: "text",
-      text: "x".repeat(16 * 1024 + 1),
+      text: "x".repeat(8 * 1024 * 1024 + 1),
     }),
   );
   assert.deepEqual(readTaskDraft("7"), { kind: "text", text: "" });
@@ -662,7 +670,7 @@ test("preparing a retry never overwrites an existing Composer draft", () => {
     },
   );
   assert.deepEqual(
-    prepareRetryDraft({ kind: "text", text: "" }, "x".repeat(16 * 1024 + 1)),
+    prepareRetryDraft({ kind: "text", text: "" }, "x".repeat(256 * 1024 + 1)),
     {
       draft: { kind: "text", text: "" },
       kind: "too_long",

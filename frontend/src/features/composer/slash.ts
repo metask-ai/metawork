@@ -33,7 +33,8 @@ export type ComposerSkillDraft = {
 export type ComposerDraft =
   ComposerTextDraft | ComposerSkillDraft | ComposerMultimodalDraft;
 
-export const maxComposerCharacters = 16 * 1024;
+export const maxComposerCharacters = 16 * 1024; // Structured Skill arguments.
+export const maxComposerTextBytes = 256 * 1024;
 export const maxSkillArguments = 64;
 export const maxSkillRunInputBytes = 64 * 1024;
 
@@ -58,7 +59,7 @@ function utf8ByteLength(value: string) {
 
 export function composerDraftWithinLimits(draft: ComposerDraft) {
   if (draft.kind === "text" || draft.kind === "multimodal")
-    return draft.text.length <= maxComposerCharacters;
+    return utf8ByteLength(draft.text) <= maxComposerTextBytes;
   if (
     !Number.isInteger(draft.maxValues) ||
     draft.maxValues < 0 ||

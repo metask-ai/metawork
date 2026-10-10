@@ -1,5 +1,6 @@
 import {
   emptyComposerDraft,
+  composerDraftWithinLimits,
   maxComposerCharacters,
   maxSkillArguments,
   maxSkillRunInputBytes,
@@ -14,7 +15,8 @@ const legacyNewTaskPrefix = "metawork.new-task-draft.";
 const newTaskPrefix = "metawork.new-task-draft.v1.";
 export const unscopedNewTaskDraftId = "unscoped";
 export { maxComposerCharacters };
-const maxPersistedDraftBytes = 1024 * 1024;
+// Keep oversized text drafts editable across reloads, including JSON escaping.
+const maxPersistedDraftBytes = 8 * 1024 * 1024;
 const maxPersistedDraftSemanticBytes =
   maxSkillRunInputBytes + maxSkillRunInputBytes;
 
@@ -43,7 +45,7 @@ export function prepareRetryDraft(
 } {
   if (draftHasContent(currentDraft))
     return { draft: currentDraft, kind: "preserved" };
-  if (instruction.length > maxComposerCharacters)
+  if (!composerDraftWithinLimits({ kind: "text", text: instruction }))
     return { draft: currentDraft, kind: "too_long" };
   return {
     draft: { kind: "text", text: instruction },
@@ -188,7 +190,6 @@ function decodeTaggedDraft(value: string | null): ComposerDraft {
       (exactKeys(draft, ["kind", "text"]) ||
         exactKeys(draft, ["kind", "text", "attachmentsReloadRequired"])) &&
       typeof draft.text === "string" &&
-      draft.text.length <= maxComposerCharacters &&
       (draft.attachmentsReloadRequired === undefined ||
         draft.attachmentsReloadRequired === true)
     )
@@ -208,11 +209,7 @@ function decodeTaggedDraft(value: string | null): ComposerDraft {
 }
 
 function decodeLegacyTextDraft(value: string | null): ComposerDraft {
-  if (
-    !value ||
-    value.length > maxComposerCharacters ||
-    utf8ByteLength(value) > maxPersistedDraftBytes
-  )
+  if (!value || utf8ByteLength(value) > maxPersistedDraftBytes)
     return emptyComposerDraft();
   return { kind: "text", text: value };
 }
@@ -226,9 +223,7 @@ function encodeDraft(value: ComposerDraft): string | null {
     });
     return utf8ByteLength(encoded) <= maxPersistedDraftBytes ? encoded : null;
   }
-  if (value.kind === "text") {
-    if (value.text.length > maxComposerCharacters) return null;
-  } else if (!skillDraftPersistable(value)) return null;
+  if (value.kind === "skill" && !skillDraftPersistable(value)) return null;
   const encoded = JSON.stringify(value);
   return utf8ByteLength(encoded) <= maxPersistedDraftBytes ? encoded : null;
 }

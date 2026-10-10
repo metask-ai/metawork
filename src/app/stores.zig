@@ -18,6 +18,7 @@ pub const Stores = struct {
     task_restored_bytes: ?[]u8 = null,
     checkpoint: ?product_task.checkpoint_store.FileStore = null,
     checkpoint_open_failed: bool = true,
+    attachments: ?product_control.AttachmentFileStore = null,
     file_change: ?product_task.file_change_store.FileStore = null,
     scheduled_task: ?schedule_persistence.FileStore = null,
     scheduled_task_restore_failed: bool = true,
@@ -59,12 +60,14 @@ pub const Stores = struct {
         else
             null;
 
-        // Lock order is Task history, checkpoint store, then file-change store.
+        // Lock order: Task history, checkpoints, attachments, then file changes.
         self.checkpoint = product_task.checkpoint_store.FileStore.init(
             io,
             paths.checkpointsDir(),
         ) catch null;
         self.checkpoint_open_failed = self.checkpoint == null;
+
+        self.attachments = product_control.AttachmentFileStore.init(io, allocator, paths.attachmentsDir()) catch null;
 
         self.file_change = product_task.file_change_store.FileStore.init(
             io,
@@ -128,6 +131,7 @@ pub const Stores = struct {
         if (self.scheduled_task) |*store| store.deinit();
         if (self.task_restored_bytes) |bytes| self.allocator.free(bytes);
         if (self.file_change) |*store| store.deinit();
+        if (self.attachments) |*store| store.deinit();
         if (self.checkpoint) |*store| store.deinit();
         if (self.task) |*store| store.deinit();
         if (self.mcp_configuration) |*store| store.deinit();

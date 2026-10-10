@@ -46,9 +46,9 @@ function resizeComposerTextarea(textarea: HTMLTextAreaElement) {
 function formatAttachmentSize(value: string) {
   const bytes = Number(value);
   if (!Number.isSafeInteger(bytes) || bytes <= 0) return value;
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1_000) return `${bytes} B`;
+  if (bytes < 1_000_000) return `${Math.ceil(bytes / 1_000)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
 }
 
 function attachmentTypeLabel(
@@ -66,7 +66,7 @@ function attachmentErrorMessage(reason: string): MessageId {
   const messages: Record<string, MessageId> = {
     unsupported_type: "attachment.error.unsupported_type",
     file_too_large: "attachment.error.file_too_large",
-    text_file_too_large: "attachment.error.text_file_too_large",
+    text_file_too_large: "attachment.error.file_too_large",
     too_many_files: "attachment.error.too_many_files",
     staging_capacity: "attachment.error.staging_capacity",
     read_failed: "attachment.error.read_failed",
@@ -224,10 +224,10 @@ export function ComposerFooter({
     !composeDisabled &&
     !attachmentBusy;
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
-  const sendEnabled = canSubmit && slashInput === null;
   const skillDraftCurrent =
     draft.kind !== "skill" || isSkillDraftCurrent(draft, skillCatalog);
   const draftWithinLimits = composerDraftWithinLimits(draft);
+  const sendEnabled = canSubmit && slashInput === null && draftWithinLimits;
   const candidates = useMemo(
     () =>
       slashInput
@@ -570,7 +570,6 @@ export function ComposerFooter({
               <Textarea
                 ref={textareaRef}
                 value={draft.text}
-                maxLength={maxComposerCharacters}
                 disabled={composeDisabled}
                 role="combobox"
                 aria-autocomplete="list"
@@ -610,6 +609,11 @@ export function ComposerFooter({
                 }}
                 onKeyDown={handleTextKeyDown}
               />
+              {!draftWithinLimits && (
+                <p className="composer-attachment-error" role="status">
+                  {t("run.text_input_too_large")}
+                </p>
+              )}
             </>
           ) : (
             <div className="skill-draft">

@@ -4333,6 +4333,8 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
         root_storage[0..root_len],
     );
     defer automatic_root.deinit();
+    var attachment_store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
+    defer attachment_store.deinit();
     var workbench = try product_control.Runtime.init(
         std.testing.allocator,
         std.testing.io,
@@ -4345,7 +4347,7 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
             .max_runs_per_task = 3,
             .max_tools_per_run = 1,
         },
-        .{ .directories = .{ .testing_automatic_workspace_root = &automatic_root } },
+        .{ .attachment_store = &attachment_store, .attachment_images = .{ .prepare_fn = fixture.prepareTestAttachmentImage }, .directories = .{ .testing_automatic_workspace_root = &automatic_root } },
     );
     defer workbench.deinit();
     try installControlExecution(&workbench);
@@ -5832,6 +5834,7 @@ test "Task deletion releases an idle Session without blocking the caller" {
 
     const task_id = try workbench.createTask(productControlTaskInput());
     const run_id = try workbench.runTask(task_id, .{ .text = "finish before deletion" });
+    fake_core.waitRunEntered();
     try workbench.cancel(task_id, run_id);
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"cancelled\"");
     try workbench.setTaskArchived(task_id, true);
@@ -7262,4 +7265,99 @@ test "late event from a finalized Run is dropped and newer active work continues
     try std.testing.expect(std.mem.indexOf(u8, open_snapshot, "\"currentRunPhase\":\"running\"") != null);
     fake_core.releaseControlled();
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
+}
+
+test "expanded text and file limits reach AgentCore intact and reject overflow before consumption" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_sessions = 1,
+    });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
+        std.testing.io,
+        std.testing.allocator,
+        root_storage[0..root_len],
+    );
+    defer automatic_root.deinit();
+    var attachment_store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
+    defer attachment_store.deinit();
+    var workbench = try product_control.Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        runtime,
+        .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 2,
+            .max_tools_per_run = 1,
+        },
+        .{ .attachment_store = &attachment_store, .attachment_images = .{ .prepare_fn = fixture.prepareTestAttachmentImage }, .directories = .{ .testing_automatic_workspace_root = &automatic_root } },
+    );
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+
+    const limits = product_control.Limits{};
+    const text = try std.testing.allocator.alloc(u8, limits.max_user_message_bytes + 1);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'x');
+    const file = try std.testing.allocator.alloc(u8, limits.max_attachment_file_bytes + 1);
+    defer std.testing.allocator.free(file);
+    @memset(file, 'f');
+    var descriptors: [8]product_control.AttachmentDescriptor = undefined;
+    try std.testing.expectError(error.FileTooLarge, workbench.stageAttachments(
+        &.{.{ .display_name = "build.log", .bytes = file }},
+        &descriptors,
+    ));
+    const candidates = [_]product_control.AttachmentCandidate{
+        .{ .display_name = "build.log", .bytes = file[0 .. file.len - 1] },
+    } ** 8;
+    const staged = try workbench.stageAttachments(&candidates, &descriptors);
+    var ids: [8]u64 = undefined;
+    for (staged, &ids) |descriptor, *id| {
+        try std.testing.expect(descriptor.kind == .file);
+        try std.testing.expectEqual(limits.max_attachment_file_bytes, descriptor.size_bytes);
+        id.* = descriptor.id;
+    }
+    const task_id = try workbench.createTaskForWorkspace(
+        .automatic,
+        1,
+        workbench.newTaskAdmissionView().active_selection_revision,
+        null,
+        null,
+        null,
+        .{ .interactive = null },
+    );
+    try std.testing.expectError(error.ProjectionCapacity, workbench.runTask(task_id, .{ .text = text }));
+    try std.testing.expectError(error.ProjectionCapacity, workbench.runTask(task_id, .{
+        .multimodal = .{ .text = text, .attachment_ids = &ids },
+    }));
+    // The Core receives bounded references, never the 800 MB of file bodies.
+    fake_core.expected_multimodal_parts = null;
+    fake_core.expected_multimodal_text = text[0 .. text.len - 1];
+    const run_id = try workbench.runTask(task_id, .{ .multimodal = .{
+        .text = text[0 .. text.len - 1],
+        .attachment_ids = &ids,
+    } });
+    var needle: [192]u8 = undefined;
+    try waitControlSnapshot(&workbench, try std.fmt.bufPrint(
+        &needle,
+        "\"id\":\"{d}\",\"conversationCoverage\":\"included\",\"phase\":\"completed\"",
+        .{run_id},
+    ));
+    try std.testing.expect(fake_core.multimodal_text_matches);
+    try std.testing.expectEqual(@as(usize, 9), fake_core.multimodal_part_count);
+    try std.testing.expectEqual(@as(usize, 8), fake_core.multimodal_reference_count);
+    try std.testing.expect(fake_core.multimodal_prompt_bytes < limits.max_user_message_bytes + 8 * 8192);
+    for (ids) |id| try std.testing.expect(!workbench.releaseAttachment(id));
 }

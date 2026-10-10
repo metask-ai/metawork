@@ -113,6 +113,9 @@ pub const Error = lifecycle.Error || product_attachment.Error || product_schedul
     AutomaticWorkspaceUnsupported,
 };
 
+const default_attachment_file_bytes: usize = 100_000_000;
+const default_attachment_count: usize = 8;
+
 pub const Limits = struct {
     worker_count: usize = 4,
     queue_capacity: usize = 16,
@@ -135,12 +138,11 @@ pub const Limits = struct {
     max_catalog_issues: usize = 128,
     max_skill_arguments: usize = 64,
     max_task_title_bytes: usize = 512,
-    max_user_message_bytes: usize = 64 * 1024,
-    max_attachments_per_draft: usize = 8,
+    max_user_message_bytes: usize = 256 * 1024,
+    max_attachments_per_draft: usize = default_attachment_count,
     max_attachment_display_name_bytes: usize = 512,
-    max_attachment_file_bytes: usize = lifecycle.multimodal_input_limits.max_image_raw_bytes,
-    max_text_attachment_file_bytes: usize = 64 * 1024,
-    max_staged_attachment_bytes: usize = 32 * 1024 * 1024,
+    max_attachment_file_bytes: usize = default_attachment_file_bytes,
+    max_staged_attachment_bytes: usize = default_attachment_count * default_attachment_file_bytes,
     max_assistant_message_bytes: usize = 256 * 1024,
     max_tool_field_bytes: usize = 256 * 1024,
     max_file_refs_per_tool: usize = 32,
@@ -163,7 +165,8 @@ pub const Limits = struct {
 const checkpoint_export_limits: lifecycle.CheckpointLimits = .{
     .hard_bytes = 64 * 1024 * 1024,
     .max_section_bytes = 16 * 1024 * 1024,
-    .max_string_bytes = 1024 * 1024,
+    // Each encoded image preview fits with its checkpoint framing.
+    .max_string_bytes = 2 * 1024 * 1024,
     .max_messages = 4096,
     .max_blocks_per_message = 256,
     .chunk_bytes = 256 * 1024,
@@ -201,6 +204,11 @@ pub const TaskWorkspaceRequest = union(enum) {
     },
     automatic,
 };
+
+pub const AttachmentFileStore = product_attachment.FileStore;
+pub const AttachmentImagePreparation = product_attachment.ImagePreparation;
+pub const max_attachment_preview_pixels = product_attachment.max_image_preview_pixels;
+pub const max_attachment_preview_bytes = product_attachment.max_image_preview_bytes;
 
 pub const AttachmentAcceptance = struct {
     context: ?*anyopaque = null,
@@ -335,6 +343,8 @@ pub const Configuration = struct {
     task_persistence: TaskPersistence = .{},
     checkpoint_store: CheckpointStoreConfiguration = .{},
     file_change_store: FileChangeStoreConfiguration = .{},
+    attachment_store: ?*product_attachment.FileStore = null,
+    attachment_images: product_attachment.ImagePreparation = .{},
     schedule_notifier: ScheduleNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
     skill_enablement: SkillEnablementConfiguration = .{},
@@ -1137,8 +1147,6 @@ pub const Runtime = struct {
             limits.max_attachments_per_draft >= lifecycle.multimodal_input_limits.max_parts or
             limits.max_attachment_display_name_bytes == 0 or
             limits.max_attachment_file_bytes == 0 or
-            limits.max_text_attachment_file_bytes == 0 or
-            limits.max_text_attachment_file_bytes > limits.max_attachment_file_bytes or
             limits.max_staged_attachment_bytes == 0 or
             limits.max_user_message_bytes == 0 or limits.max_assistant_message_bytes == 0 or
             limits.max_tool_field_bytes == 0 or limits.max_pending_ui_json_bytes == 0 or
@@ -1260,9 +1268,8 @@ pub const Runtime = struct {
             .max_files = limits.max_attachments_per_draft,
             .max_display_name_bytes = limits.max_attachment_display_name_bytes,
             .max_file_bytes = limits.max_attachment_file_bytes,
-            .max_text_file_bytes = limits.max_text_attachment_file_bytes,
             .max_staged_bytes = limits.max_staged_attachment_bytes,
-        });
+        }, configuration.attachment_store, configuration.attachment_images);
         errdefer attachments.deinit();
         var product_tasks = try task_runtime.Runtime.init(allocator, limits.max_tasks);
         errdefer product_tasks.deinitStorage();
@@ -1505,11 +1512,11 @@ pub const Runtime = struct {
             .completion_id = completion_id,
             .path_count = path_count,
             .paths = paths,
+            .file_store = self.attachments.file_store orelse return error.InvalidInput,
             .limits = .{
                 .max_files = self.limits.max_attachments_per_draft,
                 .max_display_name_bytes = self.limits.max_attachment_display_name_bytes,
                 .max_file_bytes = self.limits.max_attachment_file_bytes,
-                .max_text_file_bytes = self.limits.max_text_attachment_file_bytes,
                 .max_staged_bytes = self.limits.max_staged_attachment_bytes,
             },
         });
@@ -1529,7 +1536,7 @@ pub const Runtime = struct {
                 continue;
             }
             var descriptors: [lifecycle.multimodal_input_limits.max_parts]product_attachment.Descriptor = undefined;
-            const staged = self.attachments.stageBatch(raw.candidates, &descriptors) catch |err| {
+            const staged = self.attachments.stageOwnedBatch(@constCast(raw.candidates), &descriptors) catch |err| {
                 const rejection: AttachmentStagingRejection = switch (err) {
                     error.TooManyFiles => .too_many_files,
                     error.FileTooLarge => .file_too_large,
@@ -4012,6 +4019,7 @@ pub const Runtime = struct {
                     multimodal.attachment_ids,
                     &borrowed_parts,
                     &borrowed_indices,
+                    task_id,
                 );
                 for (borrowed_parts[0..multimodal.attachment_ids.len], 0..) |part, index| {
                     const descriptor = self.attachments.descriptorFor(part.attachmentId()) orelse unreachable;
@@ -4025,12 +4033,20 @@ pub const Runtime = struct {
                             },
                             .display_name = descriptor.display_name,
                             .bytes = image.bytes,
+                            .reference = image.reference,
+                            .size_bytes = descriptor.size_bytes,
+                            .source_format = switch (descriptor.format.?) {
+                                .png => .png,
+                                .jpeg => .jpeg,
+                                .webp => .webp,
+                            },
                         },
                         .text => |text| .{
                             .kind = .file,
                             .format = null,
                             .display_name = descriptor.display_name,
                             .bytes = text.bytes,
+                            .size_bytes = descriptor.size_bytes,
                         },
                     };
                 }
@@ -5299,7 +5315,7 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":true,\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -5322,6 +5338,7 @@ pub const Runtime = struct {
             mcp_capabilities.host.secret_capture,
             mcp_capabilities.secret_max_bytes,
             mcp_capabilities.host.oauth,
+            self.attachments.file_store != null and self.attachments.images.prepare_fn != null,
             self.limits.max_attachments_per_draft,
             self.limits.max_attachment_file_bytes,
             self.limits.max_staged_attachment_bytes,
@@ -6956,6 +6973,11 @@ pub const Runtime = struct {
         if (self.file_change_store) |store| store.deleteTask(task_id);
     }
 
+    fn deleteTaskRuntimeAttachments(context: *anyopaque, task_id: u64) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.attachments.file_store) |store| store.deleteTask(task_id);
+    }
+
     fn taskRuntimeDeletionEffects(self: *Runtime) task_runtime.DeletionEffects {
         return .{
             .context = self,
@@ -6963,6 +6985,7 @@ pub const Runtime = struct {
             .commit_without_task_fn = commitTaskRuntimeWithoutTask,
             .delete_checkpoint_task_fn = deleteTaskRuntimeCheckpointTask,
             .delete_file_change_task_fn = deleteTaskRuntimeFileChanges,
+            .delete_attachment_task_fn = deleteTaskRuntimeAttachments,
             .release = self.taskRuntimeReleaseEffects(),
         };
     }
@@ -10273,9 +10296,21 @@ test "Workspace projection derives aggregate Task signals and removal preserves 
     try std.testing.expectError(error.TaskClosing, control.runTask(3, .{ .text = "continue" }));
 }
 
+fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8) anyerror![]u8 {
+    return allocator.dupe(u8, bytes);
+}
+
 test "Automatic Workspace snapshot matches the catalog-free Renderer fixture variant" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
+    defer store.deinit();
     var control = try testRuntime();
     defer control.deinit();
+    control.attachments.file_store = &store;
+    control.attachments.images.prepare_fn = testAttachmentPreview;
     product_workspace.testing.makeAutomatic(&control.workspace, 1, 3);
     try control.skill.setWorkspaceCatalogAuthorized(1, 1, false, control.skillProjectionBudget());
 
@@ -10291,8 +10326,16 @@ test "Automatic Workspace snapshot matches the catalog-free Renderer fixture var
 }
 
 test "Product Control snapshot serializer matches the Renderer contract fixture" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    var store = try AttachmentFileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
+    defer store.deinit();
     var control = try testRuntime();
     defer control.deinit();
+    control.attachments.file_store = &store;
+    control.attachments.images.prepare_fn = testAttachmentPreview;
 
     try std.testing.expectEqual(
         CatalogAvailability.uninitialized,

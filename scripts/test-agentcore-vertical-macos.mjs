@@ -18,6 +18,7 @@ import path from "node:path";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { crc32 as pngCrc32, deflateSync } from "node:zlib";
 import { buildAutomationDebugArtifact } from "./build.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import { verifyAgentCoreRuntimeAssets } from "./agentcore-runtime-assets.mjs";
@@ -112,8 +113,11 @@ appEnvironment.PATH =
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
-const canonicalWorkspace = await realpath(workspace);
-const platformHome = join(canonicalWorkspace, "platform-home");
+const fixtureRoot = await realpath(workspace);
+await mkdir(join(fixtureRoot, "work"));
+const canonicalWorkspace = await realpath(join(fixtureRoot, "work"));
+// Match production: owned originals live outside the Task's Workspace.
+const platformHome = join(fixtureRoot, "platform-home");
 await mkdir(platformHome, { recursive: true });
 const automationDataDirectoryName = "MetaWork Automation";
 const dataRoot =
@@ -129,7 +133,7 @@ const isolatedPlatformEnv =
   process.platform === "win32"
     ? { APPDATA: platformHome, LOCALAPPDATA: platformHome }
     : { HOME: platformHome };
-const relativeDataRoot = path.relative(canonicalWorkspace, dataRoot);
+const relativeDataRoot = path.relative(fixtureRoot, dataRoot);
 if (
   relativeDataRoot === "" ||
   relativeDataRoot === ".." ||
@@ -139,15 +143,49 @@ if (
   throw new Error(`vertical data root escaped its fixture: ${dataRoot}`);
 const fixturePath = join(canonicalWorkspace, "fixture.txt");
 await writeFile(fixturePath, "agentcore-vertical-before\n", { mode: 0o600 });
-const attachmentPngBytes = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+// A valid 100 MB PNG exercises the same admission ceiling as the log. Its
+// high-entropy pixels require a bounded preview and a >1 MiB checkpoint string.
+const attachmentPngBytes = largePngFixture(1200, 900, 100_000_000);
+const attachmentJpegBytes = Buffer.from(
+  "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAAaADAAQAAAABAAAAAQAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAAQABAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMAAgICAgICAwICAwUDAwMFBgUFBQUGCAYGBgYGCAoICAgICAgKCgoKCgoKCgwMDAwMDA4ODg4ODw8PDw8PDw8PD//bAEMBAgICBAQEBwQEBxALCQsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEP/dAAQAAf/aAAwDAQACEQMRAD8A+L6KKK/lM/38P//Z",
   "base64",
 );
-const attachmentJpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 const attachmentPngPath = join(canonicalWorkspace, "reference.png");
 const attachmentJpegPath = join(canonicalWorkspace, "brief.jpg");
 await writeFile(attachmentPngPath, attachmentPngBytes, { mode: 0o600 });
 await writeFile(attachmentJpegPath, attachmentJpegBytes, { mode: 0o600 });
+const attachmentLogPath = join(canonicalWorkspace, "build.log");
+const attachmentLogText =
+  "LOG_START\n" + "x".repeat(100_000_000 - 18) + "\nLOG_END";
+assert.equal(Buffer.byteLength(attachmentLogText), 100_000_000);
+await writeFile(attachmentLogPath, attachmentLogText, { mode: 0o600 });
+// Stay within the Native automation command budget; the exact 256 KiB
+// boundary is covered by Renderer/Bridge and Product lifecycle tests.
+const multimodalInstruction = "Compare the reference images and log.\n".padEnd(
+  12 * 1024,
+  "x",
+);
+const attachmentMetadata = [
+  {
+    kind: "image",
+    format: "png",
+    displayName: path.basename(attachmentPngPath),
+    sizeBytes: String(attachmentPngBytes.length),
+  },
+  {
+    kind: "image",
+    format: "jpeg",
+    displayName: path.basename(attachmentJpegPath),
+    sizeBytes: String(attachmentJpegBytes.length),
+  },
+  {
+    kind: "file",
+    displayName: path.basename(attachmentLogPath),
+    sizeBytes: String(Buffer.byteLength(attachmentLogText)),
+  },
+];
+let retainedAttachmentPaths = [];
+
 const windowsClipboard70 = clipboardMarkdownFixture(
   70 * 1024,
   "70K",
@@ -263,12 +301,30 @@ const responses = [
     ),
     350,
   ),
-  (payload) => {
-    assertMultimodalProviderRequest(
+  async (payload) => {
+    const logPath = await assertMultimodalProviderRequest(
       payload,
-      "Compare the reference images.",
-      attachmentPngBytes,
-      attachmentJpegBytes,
+      multimodalInstruction,
+    );
+    return toolSse("attachment-read", "attachment-read-1", "Read", {
+      file_path: logPath,
+      offset: 1,
+      limit: 1,
+    });
+  },
+  (payload) => {
+    const result = payload.messages
+      ?.at(-1)
+      ?.content?.find(
+        (part) =>
+          part.type === "tool_result" &&
+          part.tool_use_id === "attachment-read-1",
+      );
+    assert.ok(result, "missing real attachment Read result");
+    assert.equal(result.is_error ?? false, false, JSON.stringify(result));
+    assert.ok(
+      JSON.stringify(result.content).includes("LOG_START"),
+      "Read did not return the original file's first line",
     );
     return textSse(
       process.platform === "win32" ? "m11" : "m5",
@@ -1056,20 +1112,7 @@ try {
     "metawork.attachments.choose",
     {},
   );
-  assertAttachmentChoice(attachmentChoice, [
-    {
-      kind: "image",
-      format: "png",
-      displayName: path.basename(attachmentPngPath),
-      sizeBytes: String(attachmentPngBytes.length),
-    },
-    {
-      kind: "image",
-      format: "jpeg",
-      displayName: path.basename(attachmentJpegPath),
-      sizeBytes: String(attachmentJpegBytes.length),
-    },
-  ]);
+  assertAttachmentChoice(attachmentChoice, attachmentMetadata);
   const attachmentTokens = attachmentChoice.attachments.map(
     (attachment) => attachment.token,
   );
@@ -1079,7 +1122,7 @@ try {
     expectedBindingEpoch,
     input: {
       kind: "multimodal",
-      text: "Compare the reference images.",
+      text: multimodalInstruction,
       attachmentTokens,
     },
   });
@@ -1123,20 +1166,11 @@ try {
     throw new Error(
       `Multimodal Run did not complete: ${JSON.stringify(multimodalTerminal.run)}`,
     );
-  assertMultimodalHistory(multimodalTerminal, attachmentTokens, [
-    {
-      kind: "image",
-      format: "png",
-      displayName: path.basename(attachmentPngPath),
-      sizeBytes: String(attachmentPngBytes.length),
-    },
-    {
-      kind: "image",
-      format: "jpeg",
-      displayName: path.basename(attachmentJpegPath),
-      sizeBytes: String(attachmentJpegBytes.length),
-    },
-  ]);
+  assertMultimodalHistory(
+    multimodalTerminal,
+    attachmentTokens,
+    attachmentMetadata,
+  );
   await probeWindowsClipboard({
     taskId,
     expectedPath: windowsClipboard70Path,
@@ -1423,21 +1457,9 @@ try {
   assertMultimodalHistory(
     { current: restoredSnapshot, run: restoredMultimodalRun },
     attachmentTokens,
-    [
-      {
-        kind: "image",
-        format: "png",
-        displayName: path.basename(attachmentPngPath),
-        sizeBytes: String(attachmentPngBytes.length),
-      },
-      {
-        kind: "image",
-        format: "jpeg",
-        displayName: path.basename(attachmentJpegPath),
-        sizeBytes: String(attachmentJpegBytes.length),
-      },
-    ],
+    attachmentMetadata,
   );
+  await assertRetainedOriginals(retainedAttachmentPaths);
   await poll(
     async () => {
       const health = await readCheckpointHealth(taskId);
@@ -1457,6 +1479,8 @@ try {
   const afterDelete = await snapshot();
   if (afterDelete.tasks.some((item) => item.id === taskId))
     throw new Error("Deleted Task record remained in the projection");
+  for (const originalPath of retainedAttachmentPaths)
+    await expectMissing(originalPath);
   await expectMissing(compactCheckpoint.blobPath);
   await stopApplication("app stop");
 
@@ -1492,6 +1516,7 @@ function startApplication() {
       METAWORK_AUTOMATION_ATTACHMENTS: [
         attachmentPngPath,
         attachmentJpegPath,
+        attachmentLogPath,
       ].join("\n"),
       METAWORK_AGENTCORE_VERTICAL_PROVIDER_BASE_URL: baseUrl,
       ...(chromeProbePort === null
@@ -1596,7 +1621,7 @@ function assertAttachmentChoice(actual, expected) {
     assert.deepEqual(
       {
         kind: attachment.kind,
-        format: attachment.format,
+        ...(attachment.kind === "image" ? { format: attachment.format } : {}),
         displayName: attachment.displayName,
         sizeBytes: attachment.sizeBytes,
       },
@@ -1605,42 +1630,141 @@ function assertAttachmentChoice(actual, expected) {
   }
 }
 
-function assertMultimodalProviderRequest(payload, text, pngBytes, jpegBytes) {
+async function assertMultimodalProviderRequest(payload, text) {
   const lastUser = payload.messages
     ?.filter((message) => message.role === "user")
     .at(-1);
-  assert.deepEqual(lastUser?.content, [
-    { type: "text", text },
-    {
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: "image/png",
-        data: pngBytes.toString("base64"),
-      },
-    },
-    {
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: "image/jpeg",
-        data: jpegBytes.toString("base64"),
-      },
-    },
-  ]);
+  assert.equal(lastUser?.content?.length, 7);
+  const [
+    context,
+    instruction,
+    png,
+    pngReference,
+    jpeg,
+    jpegReference,
+    logReference,
+  ] = lastUser.content;
+  assert.equal(context.type, "text");
+  assert.match(
+    context.text,
+    /^<system-reminder>[\s\S]*# metawork-time-context\n[\s\S]*<\/system-reminder>$/,
+  );
+  assert.match(
+    context.text,
+    /Run start time \(system local\): \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}|Run start time \(UTC\): \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z|Current time for this Run: unavailable\./,
+  );
+  assert.ok(
+    context.text.includes(
+      "Your knowledge cutoff does not indicate the current date.",
+    ),
+  );
+  assert.deepEqual(instruction, { type: "text", text });
+  for (const [index, image] of [png, jpeg].entries()) {
+    assert.equal(image.type, "image");
+    assert.equal(image.source.media_type, "image/png");
+    const bytes = Buffer.from(image.source.data, "base64");
+    assert.ok(
+      bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")),
+    );
+    assert.ok(bytes.length <= 1_400_000);
+    if (index === 0) {
+      assert.ok(bytes.readUInt32BE(16) > 0 && bytes.readUInt32BE(16) < 1200);
+      assert.ok(bytes.readUInt32BE(20) > 0 && bytes.readUInt32BE(20) < 900);
+      assert.ok(
+        image.source.data.length > 1024 * 1024,
+        "fixture did not exercise the larger checkpoint string budget",
+      );
+    } else {
+      assert.equal(bytes.readUInt32BE(16), 1);
+      assert.equal(bytes.readUInt32BE(20), 1);
+    }
+  }
+  const references = [pngReference, jpegReference, logReference];
+  const originalPaths = references.map((reference, index) => {
+    assert.equal(reference.type, "text");
+    assert.match(reference.text, /Trust: untrusted reference data/);
+    assert.ok(
+      reference.text.includes(
+        `size=${attachmentMetadata[index].sizeBytes} bytes`,
+      ),
+    );
+    const encodedPath = reference.text.match(
+      /file_path=("(?:[^"\\]|\\.)*")\. The original/,
+    );
+    assert.ok(encodedPath, "missing encoded original-file reference");
+    const originalPath = JSON.parse(encodedPath[1]);
+    const relative = path.relative(
+      join(dataRoot, "workbench", "attachments"),
+      originalPath,
+    );
+    assert.ok(
+      relative !== "" &&
+        !relative.startsWith("..") &&
+        !path.isAbsolute(relative),
+      "original escaped Task attachment store",
+    );
+    assert.ok(
+      path.relative(canonicalWorkspace, originalPath).startsWith(".."),
+      "fixture did not exercise reading an original outside the Workspace",
+    );
+    return originalPath;
+  });
+  await assertRetainedOriginals(originalPaths);
+  retainedAttachmentPaths = originalPaths;
+  assert.ok(
+    [instruction, pngReference, jpegReference, logReference].reduce(
+      (sum, part) => sum + part.text.length,
+      0,
+    ) <
+      multimodalInstruction.length + 20 * 1024,
+    "large log body was embedded in the prompt",
+  );
+  assert.ok(
+    JSON.stringify(lastUser).length < 16 * 1024 * 1024,
+    "prepared image input exceeded the SDK prompt budget",
+  );
+  return originalPaths[2];
+}
+
+async function assertRetainedOriginals(originalPaths) {
+  assert.equal(originalPaths.length, 3);
+  const originals = [
+    attachmentPngBytes,
+    attachmentJpegBytes,
+    Buffer.from(attachmentLogText),
+  ];
+  for (let index = 0; index < originalPaths.length; index++) {
+    const stored = await readFile(originalPaths[index]);
+    assert.equal(
+      createHash("sha256").update(stored).digest("hex"),
+      createHash("sha256").update(originals[index]).digest("hex"),
+      "retained original differs from the selected file",
+    );
+  }
 }
 
 function assertMultimodalHistory(result, attachmentTokens, expected) {
   assert.deepEqual(result.run.input, {
     kind: "multimodal",
-    text: "Compare the reference images.",
+    text: multimodalInstruction,
     attachments: expected.map((attachment) => ({
       ...attachment,
       redacted: false,
     })),
     redacted: false,
   });
-  const encoded = JSON.stringify(result.current);
+  const encoded = JSON.stringify(result.run);
+  assert.equal(
+    encoded.includes(attachmentLogPath),
+    false,
+    "snapshot retained text file path",
+  );
+  assert.equal(
+    encoded.includes("x".repeat(64 * 1024)),
+    false,
+    "snapshot automatically retained the full text file body",
+  );
+
   for (const token of attachmentTokens)
     assert.equal(
       encoded.includes(token),
@@ -1658,7 +1782,7 @@ function assertMultimodalHistory(result, attachmentTokens, expected) {
     "snapshot retained attachment path",
   );
   assert.equal(
-    encoded.includes(attachmentPngBytes.toString("base64")),
+    encoded.includes(attachmentPngBytes.subarray(0, 4096).toString("base64")),
     false,
     "snapshot retained attachment bytes",
   );
@@ -1667,6 +1791,46 @@ function assertMultimodalHistory(result, attachmentTokens, expected) {
     false,
     "snapshot retained attachment bytes",
   );
+}
+
+function largePngFixture(width, height, size) {
+  function chunk(type, data) {
+    const bytes = Buffer.alloc(data.length + 12);
+    bytes.writeUInt32BE(data.length);
+    bytes.write(type, 4, "ascii");
+    data.copy(bytes, 8);
+    bytes.writeUInt32BE(pngCrc32(bytes.subarray(4, -4)), bytes.length - 4);
+    return bytes;
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const pixels = Buffer.alloc((width * 4 + 1) * height);
+  let state = 12345;
+  for (let row = 0; row < height; row++) {
+    for (let column = 0; column < width; column++) {
+      const offset = row * (width * 4 + 1) + 1 + column * 4;
+      for (let channel = 0; channel < 3; channel++) {
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+        pixels[offset + channel] = state >>> 24;
+      }
+      pixels[offset + 3] = 255;
+    }
+  }
+  const image = [
+    Buffer.from("89504e470d0a1a0a", "hex"),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", deflateSync(pixels)),
+  ];
+  const end = chunk("IEND", Buffer.alloc(0));
+  const paddingSize =
+    size - image.reduce((sum, item) => sum + item.length, 0) - end.length - 12;
+  image.push(chunk("mwTa", Buffer.alloc(paddingSize, 120)), end);
+  const result = Buffer.concat(image);
+  assert.equal(result.length, size);
+  return result;
 }
 
 async function readCheckpointHealth(taskId) {
@@ -2001,6 +2165,11 @@ async function readSnapshot() {
       snapshotId: descriptor.snapshotId,
       offset: String(offset),
     });
+    if (chunk === null) {
+      const error = new Error("snapshot chunk response was unavailable");
+      error.retryableSnapshotRead = true;
+      throw error;
+    }
     const expectedBytes = Math.min(
       descriptor.chunkBytes,
       descriptor.bytes - offset,
@@ -2513,7 +2682,9 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           throw new Error("Host model did not reach AgentCore correctly");
         const queued = queue[served];
         const fixture =
-          typeof queued === "function" ? queued(payload, requests) : queued;
+          typeof queued === "function"
+            ? await queued(payload, requests)
+            : queued;
         const body =
           typeof fixture === "string" ? fixture : (fixture?.body ?? null);
         if (!body) throw new Error("unexpected extra provider request");

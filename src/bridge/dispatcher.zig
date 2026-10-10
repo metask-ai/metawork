@@ -2508,7 +2508,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayloadWithLimit(
             handlers.TaskRun,
             invocation.request.payload,
-            128 * 1024,
+            native_sdk.bridge.max_message_bytes,
         );
         defer parsed.deinit();
         var input = try handlers.parseTaskRunInput(parsed.value.input);
@@ -2534,7 +2534,7 @@ pub const Dispatcher = struct {
                 } };
             },
             .multimodal => |multimodal| multimodal_input: {
-                if (multimodal.text.len > 64 * 1024)
+                if (multimodal.text.len > (product_control.Limits{}).max_user_message_bytes)
                     return error.InvalidBridgePayload;
                 const ids = self.attachment_grants.resolve(
                     multimodal.attachment_tokens,
@@ -5578,6 +5578,12 @@ test "automation attachment path batches preserve platform selection cardinality
 
 test "file receive dispatch scopes cancellation, response loss and generation cleanup" {
     const fixture = @import("lifecycle_fixture");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    var store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
+    defer store.deinit();
     var wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("attachment_receive.fixture"), .{});
     defer wire.deinit();
     var fixture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -5600,7 +5606,9 @@ test "file receive dispatch scopes cancellation, response loss and generation cl
     };
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
-    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
+    var configuration = fixture.productControlConfiguration();
+    configuration.attachment_store = &store;
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
         .attachment_input = .file_bytes,
         .context = null,

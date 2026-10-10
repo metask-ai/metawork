@@ -1875,9 +1875,10 @@ test("file size rejection displays the Host limit and preserves ready chips", ()
 test("text file size rejection remains actionable", () => {
   renderComposer({
     attachmentsEnabled: true,
+    attachmentMaxFileBytes: "100000000",
     attachmentError: "text_file_too_large",
   });
-  assert.match(screen.getByRole("alert").textContent, /too large/i);
+  assert.match(screen.getByRole("alert").textContent, /100 MB/);
 });
 
 test("file drag highlights the active Composer and hands the drop files to its input owner", () => {
@@ -1927,4 +1928,31 @@ test("receiving offers cancellation, keeps text editable and rejects another dro
     value: { types: ["Files"], files: [new File(["abc"], "a.txt")] },
   });
   fireEvent(document, drop);
+});
+
+test("long ordinary text stays intact and oversized text disables both send paths", async () => {
+  const changes = [];
+  const composer = renderComposer({
+    onDraftChange: (draft) => changes.push(draft),
+  });
+  assert.equal(composer.textarea.hasAttribute("maxlength"), false);
+  const text = "error stack\n".repeat(24000);
+  fireEvent.change(composer.textarea, { target: { value: text } });
+  assert.equal(composer.textarea.value, text);
+  assert.equal(changes.at(-1).text, text);
+  assert.match(
+    screen.getByRole("status").textContent,
+    /256 KiB.*full draft.*100 MB/,
+  );
+  const send = screen.getByRole("button", { name: "Send" });
+  assert.equal(send.disabled, true);
+  fireEvent.keyDown(composer.textarea, { key: "Enter" });
+  fireEvent.click(send);
+  assert.equal(composer.submissions(), 0);
+  fireEvent.change(composer.textarea, {
+    target: { value: "x".repeat(256 * 1024) },
+  });
+  assert.equal(send.disabled, false);
+  fireEvent.keyDown(composer.textarea, { key: "Enter" });
+  assert.equal(composer.submissions(), 1);
 });

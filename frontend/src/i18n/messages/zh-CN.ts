@@ -129,6 +129,9 @@ export const zhCN: Record<MessageId, string> = {
   "workspace.confirm_access": "确认访问权限",
   "workspace.removing_short": "正在移除",
   "task.list": "任务",
+  "task.recent": "最近",
+  "task.projects": "项目",
+  "task.project_empty": "此项目还没有任务。",
   "task.count.one": "{count} 个任务",
   "task.count.other": "{count} 个任务",
   "task.item": "任务 {id}",
@@ -587,7 +590,7 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.type.image": "图片",
   "attachment.type.file": "文本文件",
   "attachment.reload_required":
-    "附件不会在重新载入后保留，请重新添加后再发送。",
+    "未发送的附件不会在重新载入后保留，请重新添加后再发送。",
   "attachment.skill_conflict":
     "请先移除附件再选择 Skill，或将开头的斜杠改写为普通文本。",
   "attachment.model_warning.image":
@@ -596,7 +599,6 @@ export const zhCN: Record<MessageId, string> = {
     "所选文件不是支持的图片，也不是有效的 UTF-8 文本。",
   "attachment.error.file_too_large":
     "所选文件超过单文件大小上限（{limit} MB）。",
-  "attachment.error.text_file_too_large": "所选文本文件过大。",
   "attachment.error.too_many_files": "最多可添加 8 个文件。",
   "attachment.error.staging_capacity": "附件暂存空间不足，请移除文件后重试。",
   "attachment.error.read_failed": "无法读取所选文件中的某个文件。",
@@ -624,6 +626,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.review_draft_help": "保留当前草稿不变，并将焦点移到输入区。",
   "run.retry_prepared": "指令已复制到输入区，请检查后再发送。",
   "run.draft_preserved": "已保留当前输入区草稿，未作修改。",
+  "run.text_input_too_large":
+    "文本超过 256 KiB 发送上限。完整草稿已保留，请缩短内容或把日志作为文本文件添加（最大 100 MB）。",
   "run.retry_too_long":
     "这条指令超出输入区长度限制，请改写一条更短的后续指令。",
   "run.provider_failure.title": "模型服务请求失败",

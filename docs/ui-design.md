@@ -204,13 +204,13 @@ Workspace
 
 ## 5. 左栏：能力与 Task
 
-> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 单列表导航和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
+> Capability：**部分当前、部分目标**。Renderer 合同已提供 MetaWork 顶层与 Workspace/Task 分离的 AgentCore Skill catalog projection；本地 package/inventory、详情与管理 mutation 是本次目标合同。shell 已提供稳定 New task、全局 Task 与项目导航和左下角账号入口；Skill 中心、消费 Host-owned management/Runtime/admission 事实的 MCP 页面与持久定时任务都作为同级全局能力进入该 shell。
 
 ### 5.1 Task 列表与路径上下文
 
 登录后的左栏从上到下只承担五类稳定职责：品牌/窗口识别、New task、已接通的全局能力入口、Task 导航、左下角账号入口。搜索由标题栏或命令面板提供，不在窄侧栏重复占据首要位置。
 
-- 左栏不显示 Workspace 标题、添加动作或切换器；它直接以一个连续列表列出同一 canonical snapshot 中 owning Workspace 仍被投影的所有 Manual/Automatic Task，不按状态拆分栏目。Workspace 移除后保留的历史 Task 不生成可点击的死入口；
+- 左栏保留全局 Task 列表，并按 [Task 列表、项目与排序](#56-task-列表项目与排序) 额外展示用户选择目录的项目导航；不提供全局 Workspace 切换器或目录添加动作。只消费同一 canonical snapshot 中仍被投影的 Workspace 与所属 Task，Workspace 移除后保留的历史 Task 不生成可点击的死入口；
 - Task 被选择后使用自身绑定的 Workspace 路径，不提交额外的全局 Workspace 导航动作；不同路径下的后台 Task 都必须持续可见；
 - New task 默认选择 Automatic Workspace，工作目录控件直接显示“默认”；此时不提前创建 Workspace 或 Task，首次发送才请求 Host 分配 Automatic Workspace。用户可以在发送前切换到已有 Manual Workspace 或打开原生目录选择器；用户确认目录后即完成授权并只更新草稿上下文，不得追加 trust 确认、自动创建 Task 或发送已有内容。Manual Workspace 直接显示 canonical directory，Automatic Workspace 统一显示“默认”，不得暴露随机目录或内部 kind 术语；
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
@@ -412,18 +412,25 @@ Disabled
 - 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
 
-### 5.6 Task 单列表与排序
+### 5.6 Task 列表、项目与排序
 
-Task 在一个连续列表中只出现一次。状态排序与视觉结构分离：当前仍依次按需要处理、正在运行、排队、其他未归档与已归档的优先级排列，同一优先级内按 `recentOrder` 倒序，但这些优先级不生成标题、分隔或独立栏目：
+全局 Task 列表以“最近 / Recent”为标题，保留所有可见任务，每个 Task 在该列表中只出现一次；其上方展示“项目”区域，canonical snapshot 中每个 Manual Workspace 使用自己的 identity、目录名称和所属 Task 形成一个项目。Automatic Workspace 不生成项目，包括用户调整了默认目录上级位置的情形。两处任务入口共享选择、状态、完成提醒和任务操作，不复制 Task 状态或因项目展示改变绑定。
+
+全局列表与每个项目内部共用同一排序：依次按需要处理、正在运行、排队、其他未归档与已归档的优先级排列，同一优先级内按 Task `recentOrder` 倒序；状态优先级不生成标题、分隔或独立栏目。项目之间按 Workspace `recentOrder` 倒序：
 
 ```text
-Tasks
+Projects
+  [Directory name]
+    [Task in this directory] [status icon]
+Recent
   [Task name]  [status icon]
   [Task name]  [status icon]
   [Task name]
 ```
 
-- 列表不显示 `Needs your attention / Running / Queued / Recent / Archived` 等状态标题；
+- 列表不按状态拆分栏目，不显示 `Needs your attention / Running / Queued / Archived` 等状态标题；
+- 只有存在仍被投影的 Manual Workspace 时显示“项目”；目录标题使用文件夹图标与单行名称，完整安全路径放在 hover title 中，redacted 时不显示路径。任务缩进一级，不在每个任务行重复目录说明；同名目录保留 canonical identity，可通过标题的路径区分；
+- 项目任务始终展开；空项目保留目录标题和无任务说明。全局归档显示开关同时作用于全局与项目列表；项目只有隐藏的归档任务时说明归档已隐藏，不误称项目没有任务；全局任务计数只计算唯一 Task，不因项目入口重复计数；
 - 当前排序优先级只决定行的位置，不在视觉上形成分组；排序规则后续变化不得重新引入状态栏目；
 - Task 列表项只显示任务名称与必要状态信号，不在名称下追加 Workspace、`Default / 默认`、模型或其他配置标签；同名 Task 仍保持原名称，由用户按需重命名，不用第二行元数据替代命名；
 - 运行中、排队、等待用户、失败和中断使用图标和颜色共同表达；可访问名称通过 `aria-label` 和 tooltip 提供，不在行内保留文字状态标签；
@@ -718,6 +725,8 @@ Composer 是唯一 active operation 停止入口：
 - 顶部命令栏不重复显示 Task Stop，窗口控制和检查器入口保持全局职责；
 - Stop acknowledgement 只表示请求已接受，界面继续等待 canonical snapshot 的真实 terminal；transport failure 不得伪造 `Stopped`。
 
+普通文本与带附件草稿遵守[产品输入限制](requirements.md#53-task)，按 UTF-8 字节预算判断发送能力。输入框不设置会截断粘贴的字符上限；超限时保留全文、禁用按钮与 Enter 发送，并在输入框附近提示如何缩短内容或改用文本文件。超限草稿仍可在本地有界保存预算内恢复。
+
 ### 8.1 Slash、Command 与 Skill draft
 
 Slash 是 Composer 的输入手势，不是 CLI 模式。空 draft 的首个非空白字符为 `/` 时，输入框上方打开与 Composer 等宽的候选面；不位于首 token 的 `/`，以及 token 内仍含 `/` 的 URL、路径和代码片段不触发。单段绝对路径与 Slash identifier 在语法上不可区分，若未命中候选则按 unknown Slash 禁止发送，用户需要补充正文语境或改写。候选只有两处真值：
@@ -755,9 +764,11 @@ Composer 工具带在模型控件之前提供一个带可访问名称的“添�
 
 ready 附件按选择顺序显示可换行的紧凑 chip，包含经过 Host 校验的 basename、文件类别与格式化大小，并提供逐项移除按钮。图片额外显示已识别格式；其他文件使用通用文件图标。chip 不显示绝对路径、缩略图、hash、上传进度或 provider wire。文件名保持原文且服从普通用户内容方向规则；超长名称截断，完整安全名称通过 title 与可访问名称提供。键盘焦点按选择顺序进入移除按钮，删除后移到相邻 chip 或“添加文件”。窄窗不得因附件列表产生页面横向滚动。
 
-Text draft 可以为空，只要附件全部是 ready 图片；非空文字固定先于全部附件提交，chip 顺序就是 input part 顺序。经 Host 校验、不超过 64 KiB 的非空 UTF-8 无 NUL 文件以“文本文件”展示并可与图片混合发送；草稿只要含有文本附件，去除首尾空白后的用户指令就必须非空，否则发送按钮保持禁用，不额外显示常驻提示。非 UTF-8、含 NUL、超限或其他二进制内容在整批 staging 时以 typed reason 拒绝，不发布部分 chip。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应图片媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
+Text draft 可以为空，只要附件全部是 ready 图片；非空文字固定先于全部附件提交，chip 顺序就是 input part 顺序。经 Host 按[产品输入限制](requirements.md#53-task)校验的非空 UTF-8 无 NUL 文件以“文本文件”展示并可与图片混合发送；草稿只要含有文本附件，去除首尾空白后的用户指令就必须非空，否则发送按钮保持禁用，不额外显示常驻提示。非 UTF-8、含 NUL、超限或其他二进制内容在整批 staging 时以 typed reason 拒绝，不发布部分 chip。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应图片媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
 
 附件 token 与 metadata 只保存在当前 Renderer connection 的内存草稿；Task 切换可以保留，document generation replacement、reload 或 disconnect 后必须清除。Renderer 只允许保存一个不含名称、大小、类型和 token 的 generic marker，使 reload 后能提示“未发送的附件需要重新选择”。文字/Skill 仍按既有 tagged session storage 保存。New task 已创建但 Run 尚未接纳时，附件草稿和文字一起迁移到真实 Task；Run 被 Product 接纳后立即清空 draft chip，timeout 先 resync snapshot且不得自动重放。
+
+图片模型输入可以经过缩放和 PNG 转码，原件仍完整保留；文本附件按需读取本地原件。内部预览、引用和上下文预算不作为附件类型的另一套文件大小上限展示。
 
 历史用户指令的附件 chip 只显示已保存名称、类型、可选图片格式、大小和顺序，不含文本正文，不可点击、预览、下载或一键重新发送。AgentCore 返回 `image_input_unsupported` 时，该 Run 以准确 terminal notice 收口，Composer 继续可用，但附件已被已接纳 Run 消费，用户若要换模型重试必须重新选择原文件。
 

@@ -140,6 +140,9 @@ export const enUS = {
   "workspace.confirm_access": "Confirm access",
   "workspace.removing_short": "Removing",
   "task.list": "Tasks",
+  "task.recent": "Recent",
+  "task.projects": "Projects",
+  "task.project_empty": "No tasks in this project yet.",
   "task.count.one": "{count} task",
   "task.count.other": "{count} tasks",
   "task.item": "Task {id}",
@@ -646,7 +649,7 @@ export const enUS = {
   "attachment.type.image": "Image",
   "attachment.type.file": "Text file",
   "attachment.reload_required":
-    "Attachments are not kept after reload. Add them again before sending.",
+    "Unsent attachments are not kept after reload. Add them again before sending.",
   "attachment.skill_conflict":
     "Remove the attachments before choosing a Skill, or rewrite the leading slash as ordinary text.",
   "attachment.model_warning.image":
@@ -655,7 +658,6 @@ export const enUS = {
     "A selected file is neither a supported image nor valid UTF-8 text.",
   "attachment.error.file_too_large":
     "A selected file exceeds the per-file limit ({limit} MB).",
-  "attachment.error.text_file_too_large": "A selected text file is too large.",
   "attachment.error.too_many_files": "You can attach up to 8 files.",
   "attachment.error.staging_capacity":
     "There is not enough attachment space. Remove a file and try again.",
@@ -693,6 +695,8 @@ export const enUS = {
   "run.retry_prepared":
     "Instruction copied to the Composer. Review it before sending.",
   "run.draft_preserved": "Your current Composer draft was kept unchanged.",
+  "run.text_input_too_large":
+    "Text exceeds the 256 KiB send limit. Your full draft is retained; shorten it or move the log to a text file (up to 100 MB).",
   "run.retry_too_long":
     "This instruction is too long for the Composer. Write a shorter follow-up instead.",
   "run.provider_failure.title": "Model service request failed",

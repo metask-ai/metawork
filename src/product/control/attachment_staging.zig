@@ -21,6 +21,7 @@ pub const Input = struct {
     path_count: usize,
     paths: []const u8,
     limits: attachment.Limits,
+    file_store: *attachment.FileStore,
 };
 
 pub const Completion = struct {
@@ -56,6 +57,7 @@ const Job = struct {
     path_count: usize,
     paths: []u8,
     limits: attachment.Limits,
+    file_store: *attachment.FileStore,
     rejection: ?Rejection = .read_failed,
     candidate_storage: ?[]attachment.Candidate = null,
     candidates: []attachment.Candidate = &.{},
@@ -99,60 +101,23 @@ const Job = struct {
                 self.rejection = .unsupported_type;
                 return;
             }
-            var file = std.Io.Dir.openFileAbsolute(self.lane.io, path, .{
-                .allow_directory = false,
-                .follow_symlinks = false,
-            }) catch {
-                self.rejection = .read_failed;
+            const stored = self.file_store.copyPath(path, self.limits.max_file_bytes) catch |err| {
+                self.rejection = switch (err) {
+                    error.FileTooLarge => .file_too_large,
+                    error.FileChanged => .file_changed,
+                    error.UnsupportedType => .unsupported_type,
+                    else => .read_failed,
+                };
                 return;
             };
-            defer file.close(self.lane.io);
-            if (@import("builtin").os.tag == .windows) file.flags.nonblocking = true;
-            const before = file.stat(self.lane.io) catch {
-                self.rejection = .read_failed;
-                return;
-            };
-            if (before.kind != .file or before.size == 0) {
-                self.rejection = .unsupported_type;
-                return;
-            }
-            if (before.size > self.limits.max_file_bytes or before.size > std.math.maxInt(usize)) {
-                self.rejection = .file_too_large;
-                return;
-            }
-            const size: usize = @intCast(before.size);
-            if (size > self.limits.max_staged_bytes - total) {
+            if (stored.size > self.limits.max_staged_bytes - total) {
+                self.file_store.delete(stored);
                 self.rejection = .staging_capacity;
-                return;
-            }
-            const bytes = self.lane.allocator.alloc(u8, size) catch {
-                self.rejection = .staging_capacity;
-                return;
-            };
-            const read = file.readPositionalAll(self.lane.io, bytes, 0) catch {
-                std.crypto.secureZero(u8, bytes);
-                self.lane.allocator.free(bytes);
-                self.rejection = .read_failed;
-                return;
-            };
-            const after = file.stat(self.lane.io) catch {
-                std.crypto.secureZero(u8, bytes);
-                self.lane.allocator.free(bytes);
-                self.rejection = .read_failed;
-                return;
-            };
-            if (read != size or metadataChanged(before, after)) {
-                std.crypto.secureZero(u8, bytes);
-                self.lane.allocator.free(bytes);
-                self.rejection = .file_changed;
                 return;
             }
             self.candidates.len += 1;
-            self.candidates[self.candidates.len - 1] = .{
-                .display_name = display_name,
-                .bytes = bytes,
-            };
-            total += size;
+            self.candidates[self.candidates.len - 1] = .{ .display_name = display_name, .stored = stored };
+            total += stored.size;
         }
         if (self.candidates.len != self.path_count) {
             self.rejection = .read_failed;
@@ -163,9 +128,7 @@ const Job = struct {
 
     fn deinit(self: *Job) void {
         for (self.candidates) |candidate| {
-            const bytes = @constCast(candidate.bytes);
-            std.crypto.secureZero(u8, bytes);
-            self.lane.allocator.free(bytes);
+            if (candidate.stored) |file| self.file_store.delete(file);
         }
         if (self.candidate_storage) |storage| self.lane.allocator.free(storage);
         std.crypto.secureZero(u8, self.paths);
@@ -221,11 +184,14 @@ test "attachment staging lane classifies an ordered file batch" {
         lane.stopAdmission();
         lane.deinit();
     }
+    var store = try attachment.FileStore.init(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
+    defer store.deinit();
     try lane.begin(.{
         .completion_id = 7,
         .path_count = 2,
         .paths = paths,
         .limits = testLimits(),
+        .file_store = &store,
     });
     try std.testing.expectEqual(@as(usize, 1), wake.count);
     const taken = lane.take() orelse return error.TestUnexpectedResult;
@@ -234,9 +200,13 @@ test "attachment staging lane classifies an ordered file batch" {
     try std.testing.expectEqual(@as(?Rejection, null), taken.completion.rejection);
     try std.testing.expectEqual(@as(usize, 2), taken.completion.candidates.len);
     try std.testing.expectEqualStrings("picture.png", taken.completion.candidates[0].display_name);
-    try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\nbody", taken.completion.candidates[0].bytes);
+    const first = try store.readAlloc(std.testing.allocator, taken.completion.candidates[0].stored.?);
+    defer std.testing.allocator.free(first);
+    try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\nbody", first);
     try std.testing.expectEqualStrings("notes.txt", taken.completion.candidates[1].display_name);
-    try std.testing.expectEqualStrings("plain text", taken.completion.candidates[1].bytes);
+    const second = try store.readAlloc(std.testing.allocator, taken.completion.candidates[1].stored.?);
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqualStrings("plain text", second);
 }
 
 test "attachment staging lane rejects a mixed empty-file batch atomically" {
@@ -280,11 +250,14 @@ test "attachment staging lane rejects a mixed empty-file batch atomically" {
         lane.stopAdmission();
         lane.deinit();
     }
+    var store = try attachment.FileStore.init(std.testing.io, std.testing.allocator, root_storage[0..root_len]);
+    defer store.deinit();
     try lane.begin(.{
         .completion_id = 8,
         .path_count = 2,
         .paths = paths,
         .limits = testLimits(),
+        .file_store = &store,
     });
     const taken = lane.take() orelse return error.TestUnexpectedResult;
     defer lane.release(taken);
@@ -296,7 +269,7 @@ fn testLimits() attachment.Limits {
         .max_files = 4,
         .max_display_name_bytes = 128,
         .max_file_bytes = 1024,
-        .max_text_file_bytes = 64,
+
         .max_staged_bytes = 4096,
     };
 }
@@ -345,6 +318,7 @@ pub const Lane = struct {
             .path_count = input.path_count,
             .paths = paths,
             .limits = input.limits,
+            .file_store = input.file_store,
         };
         self.executor.enqueue(.{
             .identity = job,
@@ -410,9 +384,3 @@ pub const Lane = struct {
         self.mutex.unlock(self.io);
     }
 };
-
-fn metadataChanged(before: std.Io.File.Stat, after: std.Io.File.Stat) bool {
-    return before.inode != after.inode or before.size != after.size or
-        before.kind != after.kind or !std.meta.eql(before.mtime, after.mtime) or
-        !std.meta.eql(before.ctime, after.ctime);
-}
