@@ -59,14 +59,14 @@ pub const FileStore = struct {
         if (offset > value.size or bytes.len > value.size - offset) return error.WriteFailed;
         var buffer: [80]u8 = undefined;
         const path = try relative(value, &buffer);
-        const file = self.root.openFile(self.io, path, .{ .mode = .read_write, .follow_symlinks = false, .resolve_beneath = true }) catch return error.WriteFailed;
+        const file = positionalHandle(self.root.openFile(self.io, path, .{ .mode = .read_write, .follow_symlinks = false, .resolve_beneath = true }) catch return error.WriteFailed);
         defer file.close(self.io);
         file.writePositionalAll(self.io, bytes, offset) catch return error.WriteFailed;
     }
 
     pub fn finish(self: *FileStore, value: File) Error!void {
         var buffer: [80]u8 = undefined;
-        const file = self.root.openFile(self.io, try relative(value, &buffer), .{ .mode = .read_write, .follow_symlinks = false, .resolve_beneath = true }) catch return error.WriteFailed;
+        const file = positionalHandle(self.root.openFile(self.io, try relative(value, &buffer), .{ .mode = .read_write, .follow_symlinks = false, .resolve_beneath = true }) catch return error.WriteFailed);
         defer file.close(self.io);
         const stat = file.stat(self.io) catch return error.WriteFailed;
         if (stat.kind != .file or stat.size != value.size) return error.FileChanged;
@@ -83,7 +83,7 @@ pub const FileStore = struct {
 
     /// Copy through a bounded buffer; never allocate the source file's size.
     pub fn copyPath(self: *FileStore, path: []const u8, max_bytes: usize) Error!File {
-        const source = std.Io.Dir.openFileAbsolute(self.io, path, .{ .allow_directory = false, .follow_symlinks = false }) catch return error.ReadFailed;
+        const source = positionalHandle(std.Io.Dir.openFileAbsolute(self.io, path, .{ .allow_directory = false, .follow_symlinks = false }) catch return error.ReadFailed);
         defer source.close(self.io);
         const before = source.stat(self.io) catch return error.ReadFailed;
         if (before.kind != .file or before.size == 0) return error.UnsupportedType;
@@ -108,7 +108,7 @@ pub const FileStore = struct {
 
     pub fn read(self: *FileStore, value: File, offset: usize, bytes: []u8) Error!usize {
         var buffer: [80]u8 = undefined;
-        const file = self.root.openFile(self.io, try relative(value, &buffer), .{ .follow_symlinks = false, .resolve_beneath = true }) catch return error.ReadFailed;
+        const file = positionalHandle(self.root.openFile(self.io, try relative(value, &buffer), .{ .follow_symlinks = false, .resolve_beneath = true }) catch return error.ReadFailed);
         defer file.close(self.io);
         return file.readPositionalAll(self.io, bytes, offset) catch error.ReadFailed;
     }
@@ -168,6 +168,14 @@ pub const FileStore = struct {
     }
 };
 
+// Windows no-follow opens use asynchronous handles. Reflect that mode in the
+// owned File so std.Io waits for pending positional operations correctly.
+fn positionalHandle(opened: std.Io.File) std.Io.File {
+    var file = opened;
+    if (@import("builtin").os.tag == .windows) file.flags.nonblocking = true;
+    return file;
+}
+
 fn directoryPermissions() std.Io.File.Permissions {
     return if (@import("builtin").os.tag == .windows) .default_dir else .fromMode(0o700);
 }
@@ -195,4 +203,29 @@ test "accepted originals survive reopening and Task deletion removes them" {
     try std.testing.expectError(error.ReadFailed, reopened.read(abandoned, 0, &bytes));
     reopened.deleteTask(42);
     try std.testing.expectError(error.ReadFailed, reopened.read(accepted, 0, &bytes));
+}
+
+test "positional originals and bounded path copy retain exact bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    var store = try FileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
+    defer store.deinit();
+    const value = try store.begin(8);
+    defer store.delete(value);
+    try store.append(value, 4, "efgh");
+    try store.append(value, 0, "abcd");
+    try store.finish(value);
+    var part: [3]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try store.read(value, 2, &part));
+    try std.testing.expectEqualStrings("cde", &part);
+    const source_path = try store.pathAlloc(std.testing.allocator, value);
+    defer std.testing.allocator.free(source_path);
+    const copied = try store.copyPath(source_path, 8);
+    defer store.delete(copied);
+    const bytes = try store.readAlloc(std.testing.allocator, copied);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("abcdefgh", bytes);
+    try std.testing.expectError(error.FileTooLarge, store.copyPath(source_path, 7));
 }
