@@ -409,7 +409,7 @@ Disabled
 - 模型 authority、Workspace authority 或定义固定的非交互 PermissionProfile 不再满足时显示 `需要处理`，并要求用户编辑确认；立即运行与恢复启用在确认前禁用。occurrence 不得进入同步 Agent permission wait。未覆盖操作使该次运行以 typed 原因停止，通知只定位真实 Task 和处理原因，不提供远程批准、临时升级或继续原 Run；
 - Schedule store 只使用当前 schema 1；旧 shape、未知 version 或损坏数据只进入通用持久化恢复确认面，不向 Renderer 发布迁移状态或历史 binding。确认恢复时必须明确说明原文件会保留为恢复副本；
 - 每次 default occurrence 创建新的真实 Task 与 Automatic Workspace；同一 occurrence 所属 Task 的后续 Run 复用该目录。运行历史链接 Task，不展示 automatic `workspace-key`；目录保留不等于 Host 重启后恢复 Task。
-- 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；显式退出通过托盘动作完成并在确认中说明影响，重启后定义与触发游标从 Host store 恢复；
+- 页面不再显示“仅在 MetaWork 运行时触发”限制条。窗口关闭时 MetaWork 留在系统后台并继续计划；托盘显式退出直接进入应用 shutdown，不弹出确认，重启后定义与触发游标从 Host store 恢复；
 - 已有定义时的搜索使用 `type="search"`；分区是带可访问名称的 region/list；模板行、任务行和 overflow 动作都有明确 button 语义。drawer 打开后焦点进入标题/说明，`Escape` 或关闭动作回到原触发行；运行历史更新不抢焦点。
 
 ### 5.6 Task 列表、项目与排序

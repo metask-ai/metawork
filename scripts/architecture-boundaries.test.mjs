@@ -2810,7 +2810,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
       "write",
     ].sort(),
   );
-  assert.match(window, /runtime\.showMessageDialog\(/);
 });
 
 test("Run local timezone has one Application consumer and exact read-only OS symbols", () => {
@@ -2892,7 +2891,7 @@ test("Application arbitrates single-instance ownership before business owners", 
   );
 
   const explicitQuit = app.match(
-    /if \(result == \.quit_confirmed\) \{[\s\S]*?\n\s*\}/u,
+    /if \(result == \.quit_requested\) \{[\s\S]*?\n\s*\}/u,
   )?.[0];
   assert.ok(explicitQuit, "explicit quit lifecycle must remain explicit");
   assert.ok(explicitQuit.indexOf("coordinator.stopIngress();") >= 0);
@@ -2903,7 +2902,7 @@ test("Application arbitrates single-instance ownership before business owners", 
   );
   assert.match(
     platform,
-    /confirmExplicitQuit\([\s\S]*?\.quit_confirmed[\s\S]*?pub fn requestExplicitQuit/u,
+    /app_window\.tray_quit_id => \.quit_requested,[\s\S]*?pub fn requestExplicitQuit/u,
   );
 });
 

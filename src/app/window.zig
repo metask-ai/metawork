@@ -82,25 +82,6 @@ pub const State = struct {
         runtime.focusWindow(main_window_id) catch {};
     }
 
-    pub fn confirmExplicitQuit(
-        _: *State,
-        runtime: *native_sdk.Runtime,
-        schedule: control_ports.ScheduleHost,
-    ) bool {
-        if (schedule.hasEnabledScheduledTasks()) {
-            const result = runtime.showMessageDialog(.{
-                .style = .warning,
-                .title = "Quit MetaWork?",
-                .message = "Scheduled tasks will pause while MetaWork is not running.",
-                .informative_text = "Closing the main window keeps them running. Use Quit only when you want to stop the background host.",
-                .primary_button = "Keep Running",
-                .secondary_button = "Quit MetaWork",
-            }) catch return false;
-            if (result != .secondary) return false;
-        }
-        return true;
-    }
-
     pub fn requestExplicitQuit(_: *State, runtime: *native_sdk.Runtime) !void {
         try runtime.closeWindow(main_window_id);
     }

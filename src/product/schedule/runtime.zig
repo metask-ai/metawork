@@ -394,13 +394,6 @@ pub const Runtime = struct {
         return self.background_available;
     }
 
-    pub fn hasEnabled(self: *const Runtime) bool {
-        for (self.store.items) |entry| {
-            if (entry) |item| if (item.enabled) return true;
-        }
-        return false;
-    }
-
     /// Product Control remains the single owner of the global revision. This
     /// latch reports both committed Schedule state changes and health changes
     /// caused by a failed/uncertain persistence effect.

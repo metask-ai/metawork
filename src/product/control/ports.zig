@@ -242,13 +242,9 @@ pub const McpOauthPort = struct {
 pub const ScheduleHost = struct {
     context: *anyopaque,
     set_background_available_fn: *const fn (*anyopaque, bool) void,
-    has_enabled_fn: *const fn (*anyopaque) bool,
 
     pub fn setScheduleBackgroundAvailableNoFail(self: ScheduleHost, available: bool) void {
         self.set_background_available_fn(self.context, available);
-    }
-    pub fn hasEnabledScheduledTasks(self: ScheduleHost) bool {
-        return self.has_enabled_fn(self.context);
     }
 };
 

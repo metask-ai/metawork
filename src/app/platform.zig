@@ -44,7 +44,7 @@ test "Windows Adapter rejects both gestures before effects and allows detached c
 
 pub const TrayCommandResult = enum {
     handled,
-    quit_confirmed,
+    quit_requested,
 };
 
 pub const scheduled_task_timer_id: u64 = 0x4d57_5343_4844_544b;
@@ -124,7 +124,6 @@ pub const Adapter = struct {
     pub fn handleTrayCommand(
         self: *Adapter,
         tray_item_id: native_sdk.platform.TrayItemId,
-        schedule: control_ports.ScheduleHost,
     ) TrayCommandResult {
         const runtime_value = self.native_runtime orelse return .handled;
         return switch (tray_item_id) {
@@ -132,10 +131,7 @@ pub const Adapter = struct {
                 self.window.showMainWindow(runtime_value);
                 break :result .handled;
             },
-            app_window.tray_quit_id => if (self.window.confirmExplicitQuit(runtime_value, schedule))
-                .quit_confirmed
-            else
-                .handled,
+            app_window.tray_quit_id => .quit_requested,
             else => .handled,
         };
     }

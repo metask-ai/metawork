@@ -394,12 +394,9 @@ const App = struct {
                     try self.dispatcher.?.emitProductChanged();
                 }
             },
-            .command => |command| if (command.source == .tray) if (self.control) |control| {
-                const result = self.platform.handleTrayCommand(
-                    command.tray_item_id,
-                    control.scheduleHost(),
-                );
-                if (result == .quit_confirmed) {
+            .command => |command| if (command.source == .tray) {
+                const result = self.platform.handleTrayCommand(command.tray_item_id);
+                if (result == .quit_requested) {
                     if (self.single_instance) |coordinator| coordinator.stopIngress();
                     try self.platform.requestExplicitQuit();
                 }

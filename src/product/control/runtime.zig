@@ -2313,10 +2313,6 @@ pub const Runtime = struct {
         return self.attachments.cancelReceive(id);
     }
 
-    pub fn hasEnabledScheduledTasks(self: *Runtime) bool {
-        return self.schedule.hasEnabled();
-    }
-
     const ScheduleCredentialRedaction = struct {
         owner: *Runtime,
 
@@ -8070,7 +8066,6 @@ pub const Runtime = struct {
         return .{
             .context = self,
             .set_background_available_fn = controlSetScheduleBackgroundAvailable,
-            .has_enabled_fn = controlHasEnabledScheduledTasks,
         };
     }
 
@@ -8390,9 +8385,6 @@ fn controlMcpRequireReauthorization(context: *anyopaque, failure: McpRuntimeAuth
 
 fn controlSetScheduleBackgroundAvailable(context: *anyopaque, available: bool) void {
     controlOwner(context).setScheduleBackgroundAvailableNoFail(available);
-}
-fn controlHasEnabledScheduledTasks(context: *anyopaque) bool {
-    return controlOwner(context).hasEnabledScheduledTasks();
 }
 
 fn closeWorker(
