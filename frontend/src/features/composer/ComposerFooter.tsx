@@ -762,7 +762,7 @@ export function ComposerFooter({
                         ? onCancelAttachments
                           ? "close"
                           : "loading"
-                        : "paperclip"
+                        : "plus"
                     }
                   />
                 </Button>
