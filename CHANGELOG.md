@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-10
+
+### Added
+
+- Agent Session 新增固定的 MetaWork 产品身份；每次普通文本或多模态 Run 都注入重新采样的系统时间、UTC offset 与平台时区 identity，不改写用户输入或产品历史。
+- 左栏新增 Manual Workspace 项目导航，在保留全局 Task 列表的同时按项目展示同一批 Task。
+
+### Changed
+
+- 升级至 AgentCore ABI revision 18，并将 Windows 与 macOS 的 x86_64/ARM64 bundles 刷新至 revision `eeff8dc69607`，接入 Session prompt profile、per-Run context blocks 与新版 typed input 合同。
+- Composer 输入框随内容扩展且不再截断草稿；超限草稿保持可编辑并禁止发送。单个受支持附件上限提高至 100 MB，Run 接纳后的原件由 Task 持有，可跨重启与 Conversation 恢复继续读取，并随 Task 删除。
+- Metask OAuth scope 对齐已部署的 `read model:invoke` 合同；scope 按集合校验，callback 接受不改变身份与 issuer policy 的扩展参数。
+
+### Fixed
+
+- 修复 refresh token 轮换在发送前失败、结果不确定、重启与 Host shutdown 下的恢复：仅在可证明请求未发送时重试，无法证明安全时跨重启保持阻断，并保留可达的登录入口。
+- 修复 Task 删除在 Session 真正关闭前完成、Conversation coverage 在取消或 worker failure 的 terminal barrier 处错误纳入，以及 Run 时间采样未及时响应中断的问题。
+
 ## [0.2.1] - 2026-10-08
 
 ### Added
@@ -326,7 +344,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.1...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/metask-ai/metawork/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/metask-ai/metawork/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/metask-ai/metawork/compare/v0.1.12...v0.2.0
 [0.1.12]: https://github.com/metask-ai/metawork/compare/v0.1.11...v0.1.12
