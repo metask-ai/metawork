@@ -2872,7 +2872,7 @@ pub fn waitProductControlSnapshot(
     workbench: *product_control.Runtime,
     needle: []const u8,
 ) !void {
-    var output: [128 * 1024]u8 = undefined;
+    var output: [512 * 1024]u8 = undefined;
     for (0..10_000) |_| {
         try workbench.drainAgentEvents();
         const snapshot = try workbench.writeSnapshot(&output);

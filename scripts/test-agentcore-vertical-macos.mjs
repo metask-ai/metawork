@@ -159,7 +159,8 @@ const attachmentLogText =
   "LOG_START\n" + "x".repeat(100_000_000 - 18) + "\nLOG_END";
 assert.equal(Buffer.byteLength(attachmentLogText), 100_000_000);
 await writeFile(attachmentLogPath, attachmentLogText, { mode: 0o600 });
-// Stay within the Native automation command budget.
+// Stay within the Native automation command budget; the exact 256 KiB
+// boundary is covered by Renderer/Bridge and Product lifecycle tests.
 const multimodalInstruction = "Compare the reference images and log.\n".padEnd(
   12 * 1024,
   "x",

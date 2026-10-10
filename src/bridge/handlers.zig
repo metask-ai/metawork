@@ -956,3 +956,23 @@ test "Scheduled Task payload rejects Workspace and Skill configuration" {
         parseScheduledTaskInstruction(skill_input.value),
     );
 }
+
+test "expanded Run wire decodes escaped UTF-8 beyond the old payload budget" {
+    const prefix = "{\"taskId\":\"1\",\"expectedBindingEpoch\":\"1\",\"input\":{\"kind\":\"text\",\"text\":\"";
+    const suffix = "\"}}";
+    const count = 52428;
+    const unit = "界\\n\\\"";
+    const payload = try std.testing.allocator.alloc(u8, prefix.len + unit.len * count + 4 + suffix.len);
+    defer std.testing.allocator.free(payload);
+    @memcpy(payload[0..prefix.len], prefix);
+    for (0..count) |index| @memcpy(payload[prefix.len + index * unit.len ..][0..unit.len], unit);
+    @memcpy(payload[prefix.len + count * unit.len ..][0..4], "xxxx");
+    @memcpy(payload[payload.len - suffix.len ..], suffix);
+    var parsed = try parsePayloadWithLimit(TaskRun, payload, 1024 * 1024);
+    defer parsed.deinit();
+    var input = try parseTaskRunInput(parsed.value.input);
+    defer input.deinit();
+    try std.testing.expectEqual(@as(usize, 256 * 1024), input.value.text.len);
+    try std.testing.expect(std.mem.startsWith(u8, input.value.text, "界\n\""));
+    try std.testing.expect(std.mem.endsWith(u8, input.value.text, "xxxx"));
+}

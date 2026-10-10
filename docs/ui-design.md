@@ -725,6 +725,8 @@ Composer 是唯一 active operation 停止入口：
 - 顶部命令栏不重复显示 Task Stop，窗口控制和检查器入口保持全局职责；
 - Stop acknowledgement 只表示请求已接受，界面继续等待 canonical snapshot 的真实 terminal；transport failure 不得伪造 `Stopped`。
 
+普通文本与带附件草稿遵守[产品输入限制](requirements.md#53-task)，按 UTF-8 字节预算判断发送能力。输入框不设置会截断粘贴的字符上限；超限时保留全文、禁用按钮与 Enter 发送，并在输入框附近提示如何缩短内容或改用文本文件。超限草稿仍可在本地有界保存预算内恢复。
+
 ### 8.1 Slash、Command 与 Skill draft
 
 Slash 是 Composer 的输入手势，不是 CLI 模式。空 draft 的首个非空白字符为 `/` 时，输入框上方打开与 Composer 等宽的候选面；不位于首 token 的 `/`，以及 token 内仍含 `/` 的 URL、路径和代码片段不触发。单段绝对路径与 Slash identifier 在语法上不可区分，若未命中候选则按 unknown Slash 禁止发送，用户需要补充正文语境或改写。候选只有两处真值：

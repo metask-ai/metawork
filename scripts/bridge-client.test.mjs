@@ -1022,3 +1022,16 @@ test("Models recovery and global default commands preserve their exact revision 
     },
   ]);
 });
+
+test("Run wire preserves expanded UTF-8 text with JSON escapes", async () => {
+  const text = '界\n"'.repeat(52428) + "xxxx";
+  assert.equal(new TextEncoder().encode(text).byteLength, 256 * 1024);
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      assert.equal(command, "metawork.tasks.run");
+      assert.equal(JSON.parse(JSON.stringify(payload)).input.text, text);
+      return { accepted: true, taskId: "1", runId: "2", reason: null };
+    }),
+  });
+  await client.run("1", "1", { kind: "text", text });
+});

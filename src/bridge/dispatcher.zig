@@ -2508,7 +2508,7 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayloadWithLimit(
             handlers.TaskRun,
             invocation.request.payload,
-            128 * 1024,
+            native_sdk.bridge.max_message_bytes,
         );
         defer parsed.deinit();
         var input = try handlers.parseTaskRunInput(parsed.value.input);
@@ -2534,7 +2534,7 @@ pub const Dispatcher = struct {
                 } };
             },
             .multimodal => |multimodal| multimodal_input: {
-                if (multimodal.text.len > 64 * 1024)
+                if (multimodal.text.len > (product_control.Limits{}).max_user_message_bytes)
                     return error.InvalidBridgePayload;
                 const ids = self.attachment_grants.resolve(
                     multimodal.attachment_tokens,

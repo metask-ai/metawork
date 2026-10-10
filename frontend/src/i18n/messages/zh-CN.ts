@@ -626,6 +626,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.review_draft_help": "保留当前草稿不变，并将焦点移到输入区。",
   "run.retry_prepared": "指令已复制到输入区，请检查后再发送。",
   "run.draft_preserved": "已保留当前输入区草稿，未作修改。",
+  "run.text_input_too_large":
+    "文本超过 256 KiB 发送上限。完整草稿已保留，请缩短内容或把日志作为文本文件添加（最大 100 MB）。",
   "run.retry_too_long":
     "这条指令超出输入区长度限制，请改写一条更短的后续指令。",
   "run.provider_failure.title": "模型服务请求失败",

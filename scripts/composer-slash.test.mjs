@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   composerDraftToRunInput,
+  composerDraftWithinLimits,
   isSkillDraftCurrent,
   parseSlashInput,
   resolveSlashCandidates,
@@ -307,4 +308,19 @@ test("Skill refresh repairs Workspace discovery before binding an existing Task"
     skillCatalogRefreshTarget(true, emptyCatalog("degraded")),
     "task",
   );
+});
+
+test("ordinary text uses a UTF-8 byte budget independent of Skill arguments", () => {
+  for (const text of ["x".repeat(256 * 1024), "界".repeat(87381) + "x"]) {
+    assert.equal(new TextEncoder().encode(text).byteLength, 256 * 1024);
+    assert.equal(composerDraftWithinLimits({ kind: "text", text }), true);
+    assert.equal(
+      composerDraftWithinLimits({ kind: "text", text: text + "x" }),
+      false,
+    );
+    assert.equal(
+      composerDraftWithinLimits({ kind: "multimodal", text, attachments: [] }),
+      true,
+    );
+  }
 });

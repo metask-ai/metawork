@@ -5511,14 +5511,14 @@ fn validateRunInput(
                 skill.skill_id.len,
                 pinned.revision.len,
             ) catch return error.ProjectionCapacity;
-            if (bytes > limits.max_user_message_bytes)
+            if (bytes > @min(limits.max_user_message_bytes, 64 * 1024))
                 return error.ProjectionCapacity;
             for (skill_input.argument_values) |value| {
                 if (!std.unicode.utf8ValidateSlice(value))
                     return error.InvalidSkillArguments;
                 bytes = std.math.add(usize, bytes, value.len) catch
                     return error.ProjectionCapacity;
-                if (bytes > limits.max_user_message_bytes)
+                if (bytes > @min(limits.max_user_message_bytes, 64 * 1024))
                     return error.ProjectionCapacity;
             }
             break :blk .{ .skill = .{

@@ -7267,7 +7267,7 @@ test "late event from a finalized Run is dropped and newer active work continues
     try waitControlSnapshot(&workbench, "\"terminal\":{\"outcome\":\"completed\"");
 }
 
-test "expanded file limits reach AgentCore through bounded references and reject overflow before consumption" {
+test "expanded text and file limits reach AgentCore intact and reject overflow before consumption" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,

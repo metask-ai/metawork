@@ -695,6 +695,8 @@ export const enUS = {
   "run.retry_prepared":
     "Instruction copied to the Composer. Review it before sending.",
   "run.draft_preserved": "Your current Composer draft was kept unchanged.",
+  "run.text_input_too_large":
+    "Text exceeds the 256 KiB send limit. Your full draft is retained; shorten it or move the log to a text file (up to 100 MB).",
   "run.retry_too_long":
     "This instruction is too long for the Composer. Write a shorter follow-up instead.",
   "run.provider_failure.title": "Model service request failed",

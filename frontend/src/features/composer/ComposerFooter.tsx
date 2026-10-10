@@ -224,10 +224,10 @@ export function ComposerFooter({
     !composeDisabled &&
     !attachmentBusy;
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
-  const sendEnabled = canSubmit && slashInput === null;
   const skillDraftCurrent =
     draft.kind !== "skill" || isSkillDraftCurrent(draft, skillCatalog);
   const draftWithinLimits = composerDraftWithinLimits(draft);
+  const sendEnabled = canSubmit && slashInput === null && draftWithinLimits;
   const candidates = useMemo(
     () =>
       slashInput
@@ -570,7 +570,6 @@ export function ComposerFooter({
               <Textarea
                 ref={textareaRef}
                 value={draft.text}
-                maxLength={maxComposerCharacters}
                 disabled={composeDisabled}
                 role="combobox"
                 aria-autocomplete="list"
@@ -610,6 +609,11 @@ export function ComposerFooter({
                 }}
                 onKeyDown={handleTextKeyDown}
               />
+              {!draftWithinLimits && (
+                <p className="composer-attachment-error" role="status">
+                  {t("run.text_input_too_large")}
+                </p>
+              )}
             </>
           ) : (
             <div className="skill-draft">
