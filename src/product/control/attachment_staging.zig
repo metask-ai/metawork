@@ -4,7 +4,7 @@ const std = @import("std");
 const attachment = @import("metawork_product_attachment");
 pub const max_in_flight: usize = 4;
 pub const worker_count: usize = 2;
-pub const Rejection = enum { unsupported_type, file_too_large, text_file_too_large, too_many_files, staging_capacity, read_failed, file_changed, input_busy, cleanup_failed, shutting_down };
+pub const Rejection = enum { unsupported_type, file_too_large, text_file_too_large, too_many_files, staging_capacity, read_failed, file_changed, invalid_transfer, stale_transfer, input_busy, cleanup_failed, shutting_down };
 pub fn reject(err: anyerror) Rejection {
     return switch (err) {
         error.UnsupportedType, error.EmptyFile, error.InvalidDisplayName => .unsupported_type,
@@ -13,6 +13,8 @@ pub fn reject(err: anyerror) Rejection {
         error.TooManyFiles, error.EmptyBatch => .too_many_files,
         error.StagingCapacity, error.OutOfMemory, error.IdentityExhausted, error.Capacity => .staging_capacity,
         error.FileChanged => .file_changed,
+        error.InvalidTransfer => .invalid_transfer,
+        error.StaleTransfer => .stale_transfer,
         error.InputBusy => .input_busy,
         error.CleanupFailed, error.DeleteFailed => .cleanup_failed,
         error.ShuttingDown, error.ExecutorShuttingDown => .shutting_down,

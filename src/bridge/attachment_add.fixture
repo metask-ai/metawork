@@ -1,0 +1,50 @@
+{
+  "begin": {
+    "generation": "1",
+    "batchId": "3",
+    "source": {
+      "kind": "file_bytes",
+      "files": [
+        {
+          "name": "a.txt",
+          "sizeBytes": "3"
+        }
+      ]
+    }
+  },
+  "append": {
+    "generation": "1",
+    "batchId": "3",
+    "fileIndex": 0,
+    "offset": "0",
+    "dataBase64": "YWJj"
+  },
+  "key": {
+    "generation": "1",
+    "batchId": "3"
+  },
+  "accepted": {
+    "status": "accepted"
+  },
+  "ready": {
+    "status": "ready",
+    "attachments": [
+      {
+        "token": "070707070707070707070707070707070707070707070707",
+        "kind": "file",
+        "displayName": "a.txt",
+        "sizeBytes": "3"
+      }
+    ]
+  },
+  "cancelled": {
+    "status": "cancelled"
+  },
+  "cleaned": {
+    "status": "cleaned",
+    "released": true
+  },
+  "cleanupFailed": {
+    "status": "cleanup_failed"
+  }
+}

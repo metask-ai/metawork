@@ -26,6 +26,10 @@ import {
   type RunActivity,
   type RunView,
   type AttachmentChooseResult,
+  type AttachmentAddResult,
+  type AttachmentAddAcceptance,
+  type AttachmentAddBeginResult,
+  type AttachmentCancelResult,
   type AttachmentReceiveResult,
   type ScheduledTaskView,
   type PersistenceRecoveryOutcome,
@@ -5909,4 +5913,60 @@ export function decodeAttachmentReceiveAcceptance(value: unknown) {
   if (result.status !== "rejected")
     fail("$.status", "expected accepted or rejected");
   return result;
+}
+
+export function decodeAttachmentAddResult(value: unknown): AttachmentAddResult {
+  const root = value as JsonObject;
+  if (
+    root?.status === "rejected" &&
+    [
+      "invalid_transfer",
+      "stale_transfer",
+      "input_busy",
+      "cleanup_failed",
+    ].includes(root.reason as string)
+  ) {
+    const item = object(value, "$", ["status", "reason"]);
+    return {
+      status: "rejected",
+      reason: enumValue(item.reason, "$.reason", [
+        "invalid_transfer",
+        "stale_transfer",
+        "input_busy",
+        "cleanup_failed",
+      ] as const),
+    };
+  }
+  return decodeAttachmentChooseResult(value);
+}
+export function decodeAttachmentAddBegin(
+  value: unknown,
+): AttachmentAddBeginResult {
+  if ((value as JsonObject)?.status === "accepted") {
+    object(value, "$", ["status"]);
+    return { status: "accepted" };
+  }
+  return decodeAttachmentAddResult(value);
+}
+export function decodeAttachmentAddAcceptance(
+  value: unknown,
+): AttachmentAddAcceptance {
+  const result = decodeAttachmentAddBegin(value);
+  if (result.status === "ready")
+    fail("$.status", "expected accepted, cancelled or rejected");
+  return result;
+}
+export function decodeAttachmentCancelResult(
+  value: unknown,
+): AttachmentCancelResult {
+  const status = enumValue((value as JsonObject)?.status, "$.status", [
+    "cleaned",
+    "cleanup_failed",
+  ] as const);
+  if (status === "cleanup_failed") {
+    object(value, "$", ["status"]);
+    return { status };
+  }
+  const item = object(value, "$", ["status", "released"]);
+  return { status, released: booleanValue(item.released, "$.released") };
 }

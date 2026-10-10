@@ -287,6 +287,12 @@ pub const Runtime = struct {
         }
         return self.finishReceive(id, output);
     }
+    pub fn hasCleanupDebt(self: *const Runtime, batch_id: ?u64, attachment_id: ?u64) bool {
+        for (self.slots) |slot| if (slot) |entry| {
+            if (entry.state == .cleanup_pending and (if (batch_id) |id| entry.batch_id == id else if (attachment_id) |id| entry.id == id else false)) return true;
+        };
+        return false;
+    }
     pub fn cleanupDebt(self: *const Runtime) CleanupDebt {
         var debt: CleanupDebt = .{ .count = 0, .bytes = 0 };
         for (self.slots) |slot| if (slot) |entry| {

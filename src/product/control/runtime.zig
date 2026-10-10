@@ -1504,10 +1504,22 @@ pub const Runtime = struct {
         immediate: FilePreviewState,
     };
 
-    pub fn beginAttachmentStaging(self: *Runtime, completion_id: u64, path_count: usize, paths: []const u8) Error!void {
+    pub fn prepareAttachmentAdd(self: *Runtime) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.attachment_io != null) return error.InputBusy;
-        const id = try self.attachments.beginPreparing();
+        return self.attachments.beginPreparing();
+    }
+    pub fn cancelAttachmentPreparation(self: *Runtime, id: u64) bool {
+        return self.attachments.cancelPreparing(id);
+    }
+    pub fn beginAttachmentStaging(self: *Runtime, completion_id: u64, path_count: usize, paths: []const u8) Error!void {
+        const id = try self.prepareAttachmentAdd();
+        return self.beginPreparedAttachmentStaging(completion_id, id, path_count, paths);
+    }
+    pub fn beginPreparedAttachmentStaging(self: *Runtime, completion_id: u64, id: u64, path_count: usize, paths: []const u8) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.attachment_io != null) return error.InputBusy;
+        if (self.attachments.preparing != id) return error.StaleTransfer;
         errdefer _ = self.attachments.cancelPreparing(id);
         try self.attachment_lane.begin(.{ .completion_id = completion_id, .path_count = path_count, .paths = paths, .limits = self.attachments.limits, .file_store = self.attachments.file_store orelse return error.StagingCapacity });
         self.attachment_io = .{ .completion_id = completion_id, .product_id = id };
@@ -2366,6 +2378,12 @@ pub const Runtime = struct {
         return self.attachments.stageBatch(candidates, output);
     }
 
+    pub fn attachmentWriterActive(self: *const Runtime) bool {
+        return self.attachment_io != null;
+    }
+    pub fn attachmentCleanupPending(self: *const Runtime, batch_id: ?u64, attachment_id: ?u64) bool {
+        return self.attachments.hasCleanupDebt(batch_id, attachment_id);
+    }
     pub fn releaseAttachmentChecked(self: *Runtime, id: u64) Error!bool {
         return self.attachments.releaseChecked(id);
     }
