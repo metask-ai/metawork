@@ -28,6 +28,7 @@ const mcp_oauth_coordinator = @import("app/mcp_oauth_coordinator.zig");
 const mcp_management_coordinator = @import("app/mcp_management_coordinator.zig");
 const app_paths = @import("app/paths.zig");
 const app_platform = @import("app/platform.zig");
+const attachment_images = @import("app/attachment_images.zig");
 const run_time_context = @import("app/run_time_context.zig");
 const app_single_instance = @import("app/single_instance_coordinator.zig");
 const app_stores = @import("app/stores.zig");
@@ -553,6 +554,8 @@ pub fn run(init: std.process.Init) !void {
             .file_store = if (stores_state.checkpoint) |*store| store else null,
             .open_failed = stores_state.checkpoint_open_failed,
         },
+        .attachment_store = if (stores_state.attachments) |*store| store else null,
+        .attachment_images = .{ .context = &app.platform, .prepare_fn = attachment_images.prepare },
         .file_change_store = .{
             .file_store = if (stores_state.file_change) |*store| store else null,
         },
@@ -741,6 +744,7 @@ test {
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(models_automation_vault);
     std.testing.refAllDecls(run_time_context);
+    std.testing.refAllDecls(attachment_images);
 }
 
 test "automation Models vault is bounded, overwrites securely, and deletes idempotently" {

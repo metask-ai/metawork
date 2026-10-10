@@ -14,13 +14,23 @@ const windowsClipboardProbe = await readFile(
 test("desktop vertical uses one canonical Workspace identity for Agent file paths", () => {
   assert.match(
     source,
-    /const canonicalWorkspace = await realpath\(workspace\)/,
+    /const canonicalWorkspace = await realpath\(join\(fixtureRoot, "work"\)\)/,
   );
+  assert.match(
+    source,
+    /const platformHome = join\(fixtureRoot, "platform-home"\)/,
+  );
+  assert.match(source, /path\.relative\(fixtureRoot, dataRoot\)/);
   assert.match(source, /const fixturePath = join\(canonicalWorkspace,/);
+  assert.match(
+    source,
+    /const attachmentLogPath = join\(canonicalWorkspace, "build\.log"\)/,
+  );
+  assert.doesNotMatch(source, /const attachmentLogPath = join\(workspace,/);
   assert.match(source, /METAWORK_AUTOMATION_WORKSPACE: canonicalWorkspace/);
   assert.match(
     source,
-    /METAWORK_AUTOMATION_ATTACHMENTS: \[\s*attachmentPngPath,\s*attachmentJpegPath,\s*\]\.join\("\\n"\)/,
+    /METAWORK_AUTOMATION_ATTACHMENTS: \[\s*attachmentPngPath,\s*attachmentJpegPath,\s*attachmentLogPath,\s*\]\.join\("\\n"\)/,
   );
   assert.doesNotMatch(source, /METAWORK_AUTOMATION_WORKSPACE: workspace/);
   assert.doesNotMatch(source, /const fixturePath = join\(workspace,/);

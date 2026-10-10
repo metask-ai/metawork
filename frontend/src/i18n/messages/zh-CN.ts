@@ -590,7 +590,7 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.type.image": "图片",
   "attachment.type.file": "文本文件",
   "attachment.reload_required":
-    "附件不会在重新载入后保留，请重新添加后再发送。",
+    "未发送的附件不会在重新载入后保留，请重新添加后再发送。",
   "attachment.skill_conflict":
     "请先移除附件再选择 Skill，或将开头的斜杠改写为普通文本。",
   "attachment.model_warning.image":
@@ -599,7 +599,6 @@ export const zhCN: Record<MessageId, string> = {
     "所选文件不是支持的图片，也不是有效的 UTF-8 文本。",
   "attachment.error.file_too_large":
     "所选文件超过单文件大小上限（{limit} MB）。",
-  "attachment.error.text_file_too_large": "所选文本文件过大。",
   "attachment.error.too_many_files": "最多可添加 8 个文件。",
   "attachment.error.staging_capacity": "附件暂存空间不足，请移除文件后重试。",
   "attachment.error.read_failed": "无法读取所选文件中的某个文件。",

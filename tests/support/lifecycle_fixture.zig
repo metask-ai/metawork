@@ -304,6 +304,11 @@ pub const FakeCore = struct {
     run_time_text_len: usize = 0,
     run_time_observations: usize = 0,
     multimodal_input_matches: bool = false,
+    multimodal_part_count: usize = 0,
+    multimodal_prompt_bytes: usize = 0,
+    multimodal_reference_count: usize = 0,
+    expected_multimodal_text: ?[]const u8 = null,
+    multimodal_text_matches: bool = false,
     session_destroy_failures: usize = 0,
     runtime_destroy_failures: usize = 0,
     session_create_failures: usize = 0,
@@ -1852,6 +1857,18 @@ pub fn sessionRunInput(
             const parts = (typed_input.parts orelse return wire.STATUS_INVALID_ARGUMENT)[0..@intCast(typed_input.part_count)];
             fake_core.lock();
             defer fake_core.unlock();
+            fake_core.multimodal_part_count = parts.len;
+            fake_core.multimodal_prompt_bytes = 0;
+            fake_core.multimodal_reference_count = 0;
+            for (parts) |part| {
+                const bytes = sdk.borrowedBytes(part.text) catch return wire.STATUS_INVALID_ARGUMENT;
+                const data = sdk.borrowedBytes(part.data) catch return wire.STATUS_INVALID_ARGUMENT;
+                fake_core.multimodal_prompt_bytes += bytes.len + data.len;
+                if (std.mem.indexOf(u8, bytes, "file_path=") != null) fake_core.multimodal_reference_count += 1;
+            }
+            if (fake_core.expected_multimodal_text) |expected| {
+                fake_core.multimodal_text_matches = parts.len != 0 and std.mem.eql(u8, expected, sdk.borrowedBytes(parts[0].text) catch return wire.STATUS_INVALID_ARGUMENT);
+            }
             if (fake_core.expected_multimodal_parts) |expected| {
                 var matches = parts.len == expected.len and
                     typed_input.text.len == 0 and typed_input.skill_id.len == 0 and
@@ -2879,4 +2896,8 @@ pub fn failPipelineOnThread(session: *lifecycle.Session) void {
 
 pub fn shutdownOnThread(runtime: *lifecycle.Runtime) void {
     shutdownTestComposition(runtime) catch unreachable;
+}
+
+pub fn prepareTestAttachmentImage(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8) anyerror![]u8 {
+    return allocator.dupe(u8, bytes);
 }

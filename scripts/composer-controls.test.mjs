@@ -1875,9 +1875,10 @@ test("file size rejection displays the Host limit and preserves ready chips", ()
 test("text file size rejection remains actionable", () => {
   renderComposer({
     attachmentsEnabled: true,
+    attachmentMaxFileBytes: "100000000",
     attachmentError: "text_file_too_large",
   });
-  assert.match(screen.getByRole("alert").textContent, /too large/i);
+  assert.match(screen.getByRole("alert").textContent, /100 MB/);
 });
 
 test("file drag highlights the active Composer and hands the drop files to its input owner", () => {
