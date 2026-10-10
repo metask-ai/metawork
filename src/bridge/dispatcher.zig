@@ -1249,6 +1249,13 @@ pub const Dispatcher = struct {
         return output[0..used];
     }
     fn beginAttachmentAdd(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        beginAttachmentAddChecked(context, invocation, responder) catch |err| {
+            // Async admission rejection is a command failure, not an SDK event
+            // callback failure that stops the background host.
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn beginAttachmentAddChecked(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
@@ -1368,6 +1375,13 @@ pub const Dispatcher = struct {
         };
     }
     fn appendAttachmentAdd(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        appendAttachmentAddChecked(context, invocation, responder) catch |err| {
+            // Async admission rejection is a command failure, not an SDK event
+            // callback failure that stops the background host.
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn appendAttachmentAddChecked(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
@@ -1415,6 +1429,13 @@ pub const Dispatcher = struct {
         };
     }
     fn finishAttachmentAdd(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        finishAttachmentAddChecked(context, invocation, responder) catch |err| {
+            // Async admission rejection is a command failure, not an SDK event
+            // callback failure that stops the background host.
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn finishAttachmentAddChecked(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
@@ -1496,6 +1517,13 @@ pub const Dispatcher = struct {
         responder.success(id, value) catch {};
     }
     fn cancelAttachmentAdd(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        cancelAttachmentAddChecked(context, invocation, responder) catch |err| {
+            // Async admission rejection is a command failure, not an SDK event
+            // callback failure that stops the background host.
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn cancelAttachmentAddChecked(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
         defer callback.deinit();
@@ -7244,5 +7272,18 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.invoke(native, source, commands.cancel_attachment_add, key3);
     try capture.expect("\"released\":true");
     try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
-    try std.testing.expectError(error.EventWindowMismatch, capture.invoke(native, .{ .origin = "zero://app", .window_id = 4 }, commands.cancel_attachment_add, key3));
+    try capture.invoke(native, .{ .origin = "zero://app", .window_id = 4 }, commands.cancel_attachment_add, key3);
+    try capture.expect("EventWindowMismatch");
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"4\",\"source\":{\"kind\":\"native_paths\",\"paths\":[\"C:/tmp/a.txt\"]}}");
+    try capture.expect("InvalidBridgePayload");
+    try std.testing.expectEqual(@as(u64, 3), dispatcher.receive_high_water);
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    workbench.attachment_lane.stopAdmission();
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"4\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}}");
+    try capture.expect("shutting_down");
+    try std.testing.expectEqual(@as(u64, 4), dispatcher.receive_active.?.batch_id);
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    try capture.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"4\"}");
+    try capture.expect("\"status\":\"cleaned\"");
+    try std.testing.expect(dispatcher.receive_active == null);
 }

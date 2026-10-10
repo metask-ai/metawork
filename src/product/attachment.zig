@@ -84,7 +84,7 @@ pub const Runtime = struct {
     fn reserve(self: *Runtime, files: []const ReceiveFile, initialize: bool, prepared_id: ?u64) Error!u64 {
         const fs = self.file_store orelse return error.StagingCapacity;
         if (self.receiving != null or self.preparing != null) return error.InputBusy;
-        _ = self.retryCleanup();
+        if (prepared_id == null) _ = self.retryCleanup();
         if (files.len == 0) return error.EmptyBatch;
         if (files.len > self.limits.max_files) return error.TooManyFiles;
         if (prepared_id == null and self.next_receive_id == 0) return error.IdentityExhausted;
