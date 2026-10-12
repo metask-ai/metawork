@@ -3,6 +3,11 @@ import {
   builtinProviderIds,
   permissionProfiles,
   approvalModes,
+  approvalFailureReasons,
+  taskApprovalModeReasons,
+  type TaskApprovalModeResult,
+  type TaskApprovalChange,
+  type TaskApprovalResult,
   runCauses,
   type AccountCommandResult,
   type BuiltinProviderId,
@@ -3173,6 +3178,43 @@ function decodeTaskMcpAuthority(
   return { kind, selection: null };
 }
 
+function decodeTaskApprovalChange(
+  value: unknown,
+  path: string,
+): TaskApprovalChange {
+  const item = object(value, path, ["revision", "targetMode", "state"]);
+  return {
+    revision: positiveWireId(item.revision, `${path}.revision`),
+    targetMode: enumValue(item.targetMode, `${path}.targetMode`, approvalModes),
+    state: enumValue(item.state, `${path}.state`, [
+      "pending",
+      "recovering",
+      "outcome_unknown",
+    ] as const),
+  };
+}
+
+function decodeTaskApprovalResult(
+  value: unknown,
+  path: string,
+): TaskApprovalResult {
+  const item = object(value, path, ["revision", "outcome", "reason"]);
+  const revision = positiveWireId(item.revision, `${path}.revision`);
+  const outcome = enumValue(item.outcome, `${path}.outcome`, [
+    "completed",
+    "failed",
+  ] as const);
+  if (outcome === "completed") {
+    if (item.reason !== null) fail(`${path}.reason`, "expected null");
+    return { revision, outcome, reason: null };
+  }
+  return {
+    revision,
+    outcome,
+    reason: enumValue(item.reason, `${path}.reason`, approvalFailureReasons),
+  };
+}
+
 function decodeTask(value: unknown, path: string): TaskView {
   const item = object(value, path, [
     "id",
@@ -3181,6 +3223,10 @@ function decodeTask(value: unknown, path: string): TaskView {
     "workspaceId",
     "permissionProfile",
     "approvalMode",
+    "approvalRevision",
+    "availableApprovalModes",
+    "approvalChange",
+    "approvalResult",
     "permissionReviewState",
     "binding",
     "modelSelectionAvailability",
@@ -3269,6 +3315,44 @@ function decodeTask(value: unknown, path: string): TaskView {
     `${path}.approvalMode`,
     approvalModes,
   );
+  const approvalRevision = positiveWireId(
+    item.approvalRevision,
+    `${path}.approvalRevision`,
+  );
+  const availableApprovalModes = arrayValue(
+    item.availableApprovalModes,
+    `${path}.availableApprovalModes`,
+    (mode, modePath) => enumValue(mode, modePath, approvalModes),
+  );
+  if (new Set(availableApprovalModes).size !== availableApprovalModes.length)
+    fail(`${path}.availableApprovalModes`, "duplicate approval mode");
+  const approvalChange =
+    item.approvalChange === null
+      ? null
+      : decodeTaskApprovalChange(item.approvalChange, `${path}.approvalChange`);
+  const approvalResult =
+    item.approvalResult === null
+      ? null
+      : decodeTaskApprovalResult(item.approvalResult, `${path}.approvalResult`);
+  if (
+    approvalChange &&
+    (availableApprovalModes.length !== 0 || approvalResult !== null)
+  )
+    fail(
+      path,
+      "pending approval change cannot admit another intent or publish a result",
+    );
+  if (
+    approvalChange &&
+    BigInt(approvalChange.revision) !== BigInt(approvalRevision) &&
+    BigInt(approvalChange.revision) !== BigInt(approvalRevision) + 1n
+  )
+    fail(path, "approval intent must reference the current or next revision");
+  if (
+    approvalResult?.outcome === "completed" &&
+    approvalResult.revision !== approvalRevision
+  )
+    fail(path, "completed approval result must match the committed revision");
   const permissionReviewState = enumValue(
     item.permissionReviewState,
     `${path}.permissionReviewState`,
@@ -3280,10 +3364,15 @@ function decodeTask(value: unknown, path: string): TaskView {
     (approvalMode !== "auto_review" && permissionReviewState !== "idle")
   )
     fail(path, "approval mode must match session execution facts");
-  if (runs.some((run) => run.permissionProfile !== permissionProfile))
+  if (
+    runs.some(
+      (run) =>
+        run.terminal === null && run.permissionProfile !== permissionProfile,
+    )
+  )
     fail(
       path,
-      "Run permission provenance must match its immutable Task profile",
+      "active Run permission provenance must match the current Task profile",
     );
   const context = decodeConversationContext(item.context, `${path}.context`);
   const compacts = arrayValue(item.compacts, `${path}.compacts`, decodeCompact);
@@ -3491,7 +3580,8 @@ function decodeTask(value: unknown, path: string): TaskView {
       fail(path, "UI history must reference a projected Run");
     if (
       record.answeredBy === "reviewer" &&
-      (permissionProfile !== "approval_required" ||
+      (runs.find((run) => run.id === record.runId)?.permissionProfile !==
+        "approval_required" ||
         runs.find((run) => run.id === record.runId)?.permissionInteraction !==
           "interactive")
     )
@@ -3551,6 +3641,10 @@ function decodeTask(value: unknown, path: string): TaskView {
     workspaceId: positiveWireId(item.workspaceId, `${path}.workspaceId`),
     permissionProfile,
     approvalMode,
+    approvalRevision,
+    availableApprovalModes,
+    approvalChange,
+    approvalResult,
     permissionReviewState,
     binding,
     modelSelectionAvailability,
@@ -5504,6 +5598,40 @@ export function decodeTaskCompletionSeenResult(
     taskId,
     runId,
     marked: booleanValue(item.marked, "$.marked"),
+  };
+}
+
+export function decodeTaskApprovalModeResult(
+  value: unknown,
+  expectedTaskId: string,
+): TaskApprovalModeResult {
+  const item = object(value, "$", [
+    "accepted",
+    "taskId",
+    "approvalRevision",
+    "reason",
+  ]);
+  const taskId = positiveWireId(item.taskId, "$.taskId");
+  if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
+  if (booleanValue(item.accepted, "$.accepted")) {
+    if (item.reason !== null) fail("$.reason", "expected null");
+    return {
+      accepted: true,
+      taskId,
+      approvalRevision: positiveWireId(
+        item.approvalRevision,
+        "$.approvalRevision",
+      ),
+      reason: null,
+    };
+  }
+  if (item.approvalRevision !== null)
+    fail("$.approvalRevision", "expected null");
+  return {
+    accepted: false,
+    taskId,
+    approvalRevision: null,
+    reason: enumValue(item.reason, "$.reason", taskApprovalModeReasons),
   };
 }
 

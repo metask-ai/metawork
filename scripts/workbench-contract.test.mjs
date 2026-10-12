@@ -3078,3 +3078,39 @@ test("file Session candidate fixture matches the Host pending serializer", () =>
   );
   assert.deepEqual(decodeWorkbenchSnapshot(candidate), candidate);
 });
+
+test("approval mode changes preserve historical Run permissions and reviewer provenance", () => {
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.runs[0].phase = "completed";
+  task.runs[0].activity = null;
+  task.runs[0].terminal = terminal("completed");
+  task.permissionProfile = "full_access";
+  task.approvalMode = "full_access";
+  task.approvalRevision = "2";
+  task.approvalResult = { revision: "2", outcome: "completed", reason: null };
+  task.uiHistory.push({
+    requestId: "8",
+    runId: "7",
+    order: "1",
+    kind: "permission",
+    state: "allowed_once",
+    detail: "",
+    itemCount: 0,
+    detailTruncated: false,
+    redacted: false,
+    answeredBy: "reviewer",
+    reviewReason: "Matches the user request",
+    agentRequestId: "",
+    permission: null,
+  });
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  task.runs[0].permissionProfile = "full_access";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(value),
+    /reviewer decisions require/,
+  );
+});

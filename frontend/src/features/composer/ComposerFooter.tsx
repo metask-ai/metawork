@@ -6,6 +6,7 @@ import {
   useState,
   type KeyboardEvent,
   type RefObject,
+  type ReactNode,
 } from "react";
 
 import type { SkillCatalogView, TaskView } from "../../bridge/contracts.ts";
@@ -82,6 +83,7 @@ function attachmentErrorMessage(reason: string): MessageId {
 
 export function ComposerFooter({
   textareaRef,
+  approvalModeControl,
   archived,
   closing,
   unavailable,
@@ -132,6 +134,7 @@ export function ComposerFooter({
   onOpenModels,
 }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
+  approvalModeControl?: ReactNode;
   archived: boolean;
   closing: boolean;
   unavailable: boolean;
@@ -778,6 +781,7 @@ export function ComposerFooter({
                   />
                 </Button>
               )}
+              {approvalModeControl}
               {modelLabel && (
                 <span className="composer-model-context">
                   <span className="sr-only">{t("account.model")}</span>

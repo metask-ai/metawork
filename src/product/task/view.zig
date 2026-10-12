@@ -124,6 +124,7 @@ pub const Input = struct {
     task: *const task_state.Task,
     recovery: task_recovery.Projection,
     model_selection_availability: ModelSelectionAvailability,
+    available_approval_modes: []const task_state.ApprovalMode = &.{},
     shutting_down: bool,
     text: TextProjection,
     catalog: CatalogProjection,
@@ -144,6 +145,26 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         task.durable.recent_order,
     }) catch return error.SnapshotTooLarge;
     try input.text.writeJson(writer, task.durable.title);
+    writer.print(",\"approvalRevision\":\"{d}\",\"availableApprovalModes\":[", .{task.durable.approval_revision}) catch return error.SnapshotTooLarge;
+    for (input.available_approval_modes, 0..) |mode, index| {
+        if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+        jsonValue(writer, @tagName(mode)) catch return error.SnapshotTooLarge;
+    }
+    writer.writeAll("],\"approvalChange\":") catch return error.SnapshotTooLarge;
+    if (task.approval_change) |change| {
+        const phase: []const u8 = switch (change.phase) {
+            .recovering => "recovering",
+            .outcome_unknown => "outcome_unknown",
+            else => "pending",
+        };
+        writer.print("{{\"revision\":\"{d}\",\"targetMode\":\"{s}\",\"state\":\"{s}\"}}", .{ change.revision, @tagName(change.target), phase }) catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"approvalResult\":") catch return error.SnapshotTooLarge;
+    if (task.approval_result) |result| {
+        writer.print("{{\"revision\":\"{d}\",\"outcome\":\"{s}\",\"reason\":", .{ result.revision, @tagName(result.outcome) }) catch return error.SnapshotTooLarge;
+        if (result.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"approvalMode\":\"{s}\",\"permissionReviewState\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"protocol\":\"{s}\",\"model\":", .{
         task.durable.workspace_id,
         @tagName(task.durable.permission_profile),

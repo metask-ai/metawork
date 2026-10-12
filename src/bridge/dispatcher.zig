@@ -377,6 +377,7 @@ pub const Dispatcher = struct {
             .{ .name = commands.append_attachment_receive, .function = appendAttachmentReceive },
             .{ .name = commands.finish_attachment_receive, .function = finishAttachmentReceive },
             .{ .name = commands.cancel_attachment_receive, .function = cancelAttachmentReceive },
+            .{ .name = commands.set_approval_mode, .function = setApprovalMode },
             .{ .name = commands.select_task_model, .function = selectTaskModel },
             .{ .name = commands.restore_task, .function = restoreTask },
             .{ .name = commands.compact, .function = compactTask },
@@ -3067,6 +3068,30 @@ pub const Dispatcher = struct {
         return std.fmt.bufPrint(output, "{{\"released\":{}}}", .{released});
     }
 
+    fn setApprovalMode(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.TaskApprovalMode, invocation.request.payload);
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const epoch = try handlers.parseWireId(parsed.value.expectedBindingEpoch);
+        const expected_revision = try handlers.parseWireId(parsed.value.expectedApprovalRevision);
+        if (task_id == 0 or epoch == 0 or expected_revision == 0) return error.InvalidBridgeId;
+        const revision = (try self.requireProductControl()).setApprovalMode(task_id, parsed.value.targetMode, epoch, expected_revision) catch |err| {
+            if (taskApprovalModeRejection(err)) |reason|
+                return encodeTaskApprovalModeResult(output, task_id, null, reason);
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeTaskApprovalModeResult(output, task_id, revision, null);
+    }
+
     fn selectTaskModel(
         context: *anyopaque,
         invocation: native_sdk.bridge.Invocation,
@@ -5006,6 +5031,22 @@ fn taskRunRejection(err: anyerror) ?[]const u8 {
     };
 }
 
+fn taskApprovalModeRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.UnknownTask => "task_not_found",
+        error.BindingEpochMismatch => "stale_binding",
+        error.ApprovalRevisionMismatch => "stale_revision",
+        error.TaskBusy => "busy",
+        error.TaskClosing => "task_closed",
+        error.UnsupportedPermissionProfile => "unsupported_interaction",
+        error.ApprovalUnavailable => "unavailable",
+        error.ApprovalRevisionExhausted => "revision_exhausted",
+        error.ReviewGenerationExhausted => "review_exhausted",
+        error.ExecutorShuttingDown => "shutting_down",
+        else => null,
+    };
+}
+
 fn taskModelSelectionRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.TaskModelMismatch => "model_changed",
@@ -5288,6 +5329,18 @@ fn encodeTaskRunResult(
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeTaskApprovalModeResult(output: []u8, task_id: u64, revision: ?u64, reason: ?[]const u8) ![]const u8 {
+    if (task_id == 0 or (revision != null) == (reason != null) or (revision != null and revision.? == 0))
+        return error.InvalidTaskApprovalModeResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"taskId\":\"{d}\",\"approvalRevision\":", .{ revision != null, task_id }) catch return error.NoSpaceLeft;
+    if (revision) |value| writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft else writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
+    if (reason) |value| std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft else writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
     return writer.buffered();
 }
@@ -7032,6 +7085,17 @@ test "Dispatcher validates authority before domain calls and preserves committed
     _ = native_dispatcher.dispatch(request, source, &lost_response);
     try std.testing.expect(workbench.currentRevision() > 0);
     try std.testing.expect(harness.wake_calls >= 2);
+
+    const approval_requests = [_]struct { payload: []const u8, expected: []const u8 }{
+        .{ .payload = "{\"id\":\"mode-noop\",\"command\":\"metawork.tasks.setApprovalMode\",\"payload\":{\"taskId\":\"1\",\"targetMode\":\"manual\",\"expectedBindingEpoch\":\"1\",\"expectedApprovalRevision\":\"1\"}}", .expected = "\"accepted\":true,\"taskId\":\"1\",\"approvalRevision\":\"1\",\"reason\":null" },
+        .{ .payload = "{\"id\":\"mode-stale-binding\",\"command\":\"metawork.tasks.setApprovalMode\",\"payload\":{\"taskId\":\"1\",\"targetMode\":\"auto_review\",\"expectedBindingEpoch\":\"99\",\"expectedApprovalRevision\":\"1\"}}", .expected = "\"approvalRevision\":null,\"reason\":\"stale_binding\"" },
+        .{ .payload = "{\"id\":\"mode-stale-revision\",\"command\":\"metawork.tasks.setApprovalMode\",\"payload\":{\"taskId\":\"1\",\"targetMode\":\"auto_review\",\"expectedBindingEpoch\":\"1\",\"expectedApprovalRevision\":\"99\"}}", .expected = "\"reason\":\"stale_revision\"" },
+        .{ .payload = "{\"id\":\"mode-missing\",\"command\":\"metawork.tasks.setApprovalMode\",\"payload\":{\"taskId\":\"99\",\"targetMode\":\"full_access\",\"expectedBindingEpoch\":\"1\",\"expectedApprovalRevision\":\"1\"}}", .expected = "\"reason\":\"task_not_found\"" },
+    };
+    for (approval_requests) |approval_request| {
+        const result = native_dispatcher.dispatch(approval_request.payload, source, &response);
+        try std.testing.expect(std.mem.indexOf(u8, result, approval_request.expected) != null);
+    }
 
     const stale_successor = native_dispatcher.dispatch(
         "{\"id\":\"stale-successor\",\"command\":\"metawork.tasks.createFullAccessSuccessor\",\"payload\":{\"sourceTaskId\":\"1\",\"expectedBindingEpoch\":\"99\"}}",

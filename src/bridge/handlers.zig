@@ -295,6 +295,12 @@ pub const TaskRun = struct {
     expectedBindingEpoch: []const u8,
     input: std.json.Value,
 };
+pub const TaskApprovalMode = struct {
+    taskId: []const u8,
+    targetMode: product_control.ApprovalMode,
+    expectedBindingEpoch: []const u8,
+    expectedApprovalRevision: []const u8,
+};
 pub const TaskModelSelection = struct {
     taskId: []const u8,
     expectedModel: []const u8,
@@ -984,4 +990,22 @@ test "expanded Run wire decodes escaped UTF-8 beyond the old payload budget" {
     try std.testing.expectEqual(@as(usize, 256 * 1024), input.value.text.len);
     try std.testing.expect(std.mem.startsWith(u8, input.value.text, "界\n\""));
     try std.testing.expect(std.mem.endsWith(u8, input.value.text, "xxxx"));
+}
+
+test "Task approval mode payload is typed and requires both exact CAS identities" {
+    var parsed = try parsePayload(TaskApprovalMode,
+        \\{"taskId":"3","targetMode":"auto_review","expectedBindingEpoch":"7","expectedApprovalRevision":"18446744073709551615"}
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(product_control.ApprovalMode.auto_review, parsed.value.targetMode);
+    try std.testing.expectEqual(@as(u64, 7), try parseWireId(parsed.value.expectedBindingEpoch));
+    try std.testing.expectEqual(std.math.maxInt(u64), try parseWireId(parsed.value.expectedApprovalRevision));
+    const invalid = [_][]const u8{
+        \\{"taskId":"3","targetMode":"accept_edits","expectedBindingEpoch":"7","expectedApprovalRevision":"1"},
+        \\{"taskId":"3","targetMode":"manual","expectedBindingEpoch":"7"},
+        \\{"taskId":"3","targetMode":"manual","expectedBindingEpoch":"7","expectedApprovalRevision":1},
+        \\{"taskId":"3","targetMode":"full_access","expectedBindingEpoch":"7","expectedApprovalRevision":"1","sessionId":"9"},
+    };
+    for (invalid) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(TaskApprovalMode, payload));
+    try std.testing.expectError(error.InvalidBridgeId, parseWireId("01"));
 }

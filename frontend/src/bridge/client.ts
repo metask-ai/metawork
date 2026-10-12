@@ -46,6 +46,7 @@ import {
   decodeTaskRunResult,
   decodeTaskCompletionSeenResult,
   decodeTaskModelSelectionResult,
+  decodeTaskApprovalModeResult,
   decodeScheduledTaskMutationResult,
   decodeScheduledTaskEnabledResult,
   decodeScheduledTaskRunResult,
@@ -878,6 +879,23 @@ export class BridgeClient {
   async releaseAttachment(token: string) {
     return decodeAttachmentReleaseResult(
       await this.invoke(commands.releaseAttachment, { token }),
+    );
+  }
+
+  async setApprovalMode(
+    taskId: string,
+    targetMode: ApprovalMode,
+    expectedBindingEpoch: string,
+    expectedApprovalRevision: string,
+  ) {
+    return decodeTaskApprovalModeResult(
+      await this.invoke(commands.setApprovalMode, {
+        taskId,
+        targetMode,
+        expectedBindingEpoch,
+        expectedApprovalRevision,
+      }),
+      taskId,
     );
   }
 

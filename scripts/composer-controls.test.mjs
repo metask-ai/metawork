@@ -92,6 +92,9 @@ const vite = await createServer({
   server: { middlewareMode: true },
 });
 
+const { ApprovalModeMenu } = await vite.ssrLoadModule(
+  "/src/features/approvals/ApprovalModeMenu.tsx",
+);
 const { SelectionMenu } = await vite.ssrLoadModule(
   "/src/components/ui/SelectionMenu.tsx",
 );
@@ -2033,4 +2036,108 @@ test("attachment draft handoff is synchronous and rejects changed or missing tar
       attachmentsReloadRequired: true,
     });
   });
+});
+
+function approvalElement(task, overrides = {}) {
+  return createElement(
+    I18nContext.Provider,
+    {
+      value: {
+        locale: "en-US",
+        setLocale() {},
+        t: (id, values) => translate("en-US", id, values),
+      },
+    },
+    createElement(ApprovalModeMenu, {
+      task,
+      request: null,
+      disabled: false,
+      onSelect() {},
+      onRefresh() {},
+      ...overrides,
+    }),
+  );
+}
+const approvalTask = {
+  id: "3",
+  approvalMode: "manual",
+  approvalRevision: "1",
+  availableApprovalModes: ["manual", "auto_review", "full_access"],
+  approvalChange: null,
+  approvalResult: null,
+  activeOperation: { kind: "run", id: "7" },
+};
+
+test("existing conversation approval selection is Host-controlled and restores keyboard focus", async () => {
+  const selected = [];
+  const user = userEvent.setup({ document: dom.window.document });
+  const result = render(
+    approvalElement(approvalTask, { onSelect: (mode) => selected.push(mode) }),
+  );
+  const trigger = screen.getByRole("combobox", { name: "Approval mode" });
+  trigger.focus();
+  await user.keyboard("{Enter}");
+  assert.match(
+    (await screen.findByRole("option", { name: /Full access/ })).textContent,
+    /Stops the current run/,
+  );
+  await user.keyboard("{ArrowDown}{Enter}");
+  assert.deepEqual(selected, ["auto_review"]);
+  assert.match(trigger.textContent, /Manual approval/);
+  assert.equal(document.activeElement, trigger);
+  result.rerender(
+    approvalElement({
+      ...approvalTask,
+      approvalMode: "auto_review",
+      approvalRevision: "2",
+    }),
+  );
+  assert.match(trigger.textContent, /Automatic review/);
+  await user.keyboard("{Enter}{Escape}");
+  assert.equal(document.activeElement, trigger);
+});
+
+test("approval pending, unavailable and unknown states admit no duplicate mode and refresh only", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  let refreshed = 0;
+  let selected = 0;
+  const pending = {
+    ...approvalTask,
+    availableApprovalModes: [],
+    approvalChange: {
+      revision: "2",
+      targetMode: "full_access",
+      state: "outcome_unknown",
+    },
+  };
+  const view = render(
+    approvalElement(pending, {
+      onRefresh: () => refreshed++,
+      onSelect: () => selected++,
+    }),
+  );
+  const trigger = screen.getByRole("combobox", { name: "Approval mode" });
+  assert.equal(trigger.disabled, true);
+  assert.equal(trigger.getAttribute("aria-busy"), "true");
+  assert.match(screen.getByRole("status").textContent, /not yet confirmed/);
+  const refresh = screen.getByRole("button", { name: "Refresh status" });
+  refresh.focus();
+  await user.keyboard("{Enter}");
+  assert.equal(refreshed, 1);
+  assert.equal(selected, 0);
+  view.rerender(
+    approvalElement({ ...approvalTask, availableApprovalModes: [] }),
+  );
+  assert.equal(trigger.disabled, true);
+  view.rerender(
+    approvalElement({
+      ...approvalTask,
+      availableApprovalModes: ["manual", "auto_review"],
+    }),
+  );
+  await user.click(trigger);
+  const full = await screen.findByRole("option", { name: /Full access/ });
+  assert.equal(full.getAttribute("aria-disabled"), "true");
+  await user.click(full);
+  assert.equal(selected, 0);
 });

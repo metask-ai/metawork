@@ -773,7 +773,7 @@ export const zhCN: Record<MessageId, string> = {
     "当前 {current} tokens · {compact} 时自动压缩 · 上限 {limit}",
   "task.information": "任务信息",
   "task.information_scope":
-    "MCP 表示创建任务时的工具选择，不代表当前连接状态；已有会话暂不支持切换审批模式。",
+    "MCP 表示创建任务时的工具选择，不代表当前连接状态；审批模式显示此会话当前设置。",
   "conversation.context_observed": "当前会话最近一次观测，不是实时用量。",
   "task_panel.title": "右侧栏",
   "task_panel.empty": "从对话中打开文件或审查更改。",
@@ -997,12 +997,52 @@ export const zhCN: Record<MessageId, string> = {
     "MetaWork 跳过常规工具操作的批准；AgentCore 核心保护及系统或服务权限仍可阻止操作。",
   "permission.new_task.label": "审批模式",
   "permission.new_task.help":
-    "记住本次选择，重启后用于新任务。已有会话暂不支持切换。",
+    "记住本次选择，重启后用于新任务。已有会话可单独切换。",
   "permission.task.label": "审批模式",
-  "permission.task.help":
-    "显示此会话实际采用的审批模式；暂不支持在已有会话中切换。",
+  "permission.task.help": "显示此会话当前采用的审批模式；可在输入区切换。",
   "permission.task.full_access.help":
     "此会话采用完全访问；跳过常规批准，但 AgentCore 与系统保护仍然有效。",
+  "permission.task.menu_help": "切换本会话的审批模式，保留工作区、附件和对话。",
+  "permission.change.stop_help": "将先停止当前运行，再切换；不会自动重启运行。",
+  "permission.change.pending": "正在切换审批模式…",
+  "permission.change.recovering": "切换未完成，正在恢复原会话…",
+  "permission.change.sync_required": "暂时无法确认切换结果，请刷新状态。",
+  "permission.change.refresh": "刷新状态",
+  "permission.change.completed": "审批模式已切换。",
+  "permission.change.not_confirmed":
+    "未确认此次切换，请查看当前模式后重新选择。",
+  "permission.change.failure.cancelled": "切换已取消。",
+  "permission.change.failure.busy": "会话尚未空闲，审批模式未切换。",
+  "permission.change.failure.budget_required":
+    "当前调用预算不足，审批模式未切换。",
+  "permission.change.failure.mode_update_failed":
+    "审批模式切换失败，请确认当前模式。",
+  "permission.change.failure.checkpoint_failed":
+    "无法保存会话，审批模式未切换。",
+  "permission.change.failure.persistence_failed":
+    "无法保存审批模式，请确认当前模式后重试。",
+  "permission.change.failure.outcome_unknown":
+    "无法确认保存结果，请恢复任务记录后刷新状态。",
+  "permission.change.failure.recovery_failed":
+    "原会话恢复失败，请处理会话恢复提示后继续。",
+  "permission.change.failure.dependency_contract":
+    "会话执行组件暂不支持此次切换。",
+  "permission.change.rejection.task_not_found": "该任务已不存在。",
+  "permission.change.rejection.stale_binding":
+    "会话已变化，请查看最新状态后选择。",
+  "permission.change.rejection.stale_revision":
+    "审批模式已变化，请查看最新模式后选择。",
+  "permission.change.rejection.busy": "已有操作正在推进，请稍后选择。",
+  "permission.change.rejection.task_closed": "该任务已关闭或归档。",
+  "permission.change.rejection.unsupported_interaction":
+    "此任务不支持交互式审批切换。",
+  "permission.change.rejection.unavailable":
+    "当前会话无法切换审批模式，请查看恢复提示。",
+  "permission.change.rejection.revision_exhausted":
+    "该会话无法继续切换审批模式。",
+  "permission.change.rejection.review_exhausted": "该会话无法启用自动评审。",
+  "permission.change.rejection.shutting_down":
+    "MetaWork 正在关闭，请重启后选择。",
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
     "完全访问会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",

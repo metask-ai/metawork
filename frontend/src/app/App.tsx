@@ -43,6 +43,11 @@ import {
   SettingsPage,
   type SettingsFocusTarget,
 } from "../features/settings/SettingsPage.tsx";
+import {
+  TaskApprovalRequests,
+  type ApprovalObservation,
+} from "../features/approvals/mode-state.ts";
+import { ApprovalModeMenu } from "../features/approvals/ApprovalModeMenu.tsx";
 import { ComposerFooter } from "../features/composer/ComposerFooter.tsx";
 import {
   ApprovalPanel,
@@ -146,6 +151,7 @@ import type {
   FileChangeView,
   RunFileChanges,
   ApprovalMode,
+  WorkbenchSnapshot,
   UiResponsePayload,
 } from "../bridge/contracts.ts";
 import { useI18n, type MessageId } from "../i18n/context.ts";
@@ -321,6 +327,11 @@ export default function App() {
   const [pendingTaskModels, setPendingTaskModels] = useState<
     Record<string, string>
   >({});
+  const approvalRequestsRef = useRef(new TaskApprovalRequests());
+  const [approvalRequests, setApprovalRequests] = useState(
+    approvalRequestsRef.current.view(),
+  );
+  const approvalSnapshotRef = useRef<WorkbenchSnapshot | null>(null);
   const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
   const [fullAccessSuccessors, setFullAccessSuccessors] = useState<
     Record<string, FullAccessSuccessorState>
@@ -855,7 +866,12 @@ export default function App() {
   const workbenchMutationDisabled = bridgeUnavailable;
   const currentTaskScope = activeTask ? `task:${activeTask.id}` : "new-task";
   const taskMutationDisabled =
-    workbenchMutationDisabled || currentTaskScope in taskPending;
+    workbenchMutationDisabled ||
+    currentTaskScope in taskPending ||
+    Boolean(
+      activeTask &&
+      (activeTask.approvalChange || approvalRequests[activeTask.id]),
+    );
   const taskCanCompose =
     newTaskDraftActive ||
     (activeTask?.lifecycle === "open" &&
@@ -998,6 +1014,11 @@ export default function App() {
         if (!cancelled) {
           conversationRecovery.current.observeSnapshot(next, generation);
           observeUiResponseSnapshot(next);
+          approvalSnapshotRef.current = next;
+          publishApprovalObservations(
+            approvalRequestsRef.current.observe(next, generation),
+          );
+          setApprovalRequests(approvalRequestsRef.current.view());
           const projectedTaskIds = next.tasks.map((task) => task.id);
           observedTaskIds.current = new Set(projectedTaskIds);
           const discardedAttachments = taskDrafts.pruneDrafts([
@@ -1044,6 +1065,9 @@ export default function App() {
         if (!cancelled) {
           conversationRecovery.current.resetGeneration(generation);
           bridgeGenerationRef.current = generation;
+          approvalRequestsRef.current.reset(generation);
+          approvalSnapshotRef.current = null;
+          setApprovalRequests({});
           observedTaskIds.current.clear();
           for (const taskId of successorStopRequests.current.keys())
             setCancelPendingForTask(taskId, false);
@@ -1434,6 +1458,83 @@ export default function App() {
     } catch {
       await refreshSnapshot().catch(() => undefined);
       return false;
+    }
+  }
+
+  function publishApprovalObservations(results: ApprovalObservation[]) {
+    for (const result of results) {
+      const audience = { scope: "task" as const, taskId: result.taskId };
+      if (result.outcome === "completed")
+        setStatus(quietStatus("permission.change.completed", audience));
+      else if (result.outcome === "failed" && result.reason)
+        setStatus(
+          attentionStatus(
+            `permission.change.failure.${result.reason}`,
+            audience,
+          ),
+        );
+      else
+        setStatus(attentionStatus("permission.change.not_confirmed", audience));
+    }
+  }
+
+  async function setTaskApprovalMode(targetMode: ApprovalMode) {
+    const task = activeTask;
+    if (!task || bridgeUnavailable) return;
+    const requests = approvalRequestsRef.current;
+    const intent = requests.begin(task, targetMode);
+    if (!intent) return;
+    setApprovalRequests(requests.view());
+    try {
+      const result = await client.setApprovalMode(
+        intent.taskId,
+        targetMode,
+        intent.bindingEpoch,
+        intent.revision,
+      );
+      if (!requests.current(intent)) return;
+      if (result.accepted) requests.accept(intent, result.approvalRevision);
+      else {
+        requests.reject(intent);
+        setStatus(
+          attentionStatus(`permission.change.rejection.${result.reason}`, {
+            scope: "task",
+            taskId: intent.taskId,
+          }),
+        );
+      }
+      setApprovalRequests(requests.view());
+      await refreshSnapshot();
+    } catch {
+      if (!requests.current(intent)) return;
+      requests.requireSync(intent);
+      setApprovalRequests(requests.view());
+      // A lost response is not a rejection. Refresh only; never replay the intent.
+      await refreshSnapshot().catch(() => undefined);
+    }
+  }
+
+  async function refreshTaskApprovalMode() {
+    const taskId = activeTask?.id;
+    if (!taskId || bridgeUnavailable) return;
+    const intent = approvalRequestsRef.current.view()[taskId]?.intent;
+    try {
+      await refreshSnapshot();
+      const observed = approvalSnapshotRef.current?.tasks.find(
+        (task) => task.id === taskId,
+      );
+      if (intent && observed && !observed.approvalChange) {
+        const result = approvalRequestsRef.current.unconfirmed(intent);
+        if (result) publishApprovalObservations([result]);
+        setApprovalRequests(approvalRequestsRef.current.view());
+      }
+    } catch {
+      setStatus(
+        attentionStatus("permission.change.sync_required", {
+          scope: "task",
+          taskId,
+        }),
+      );
     }
   }
 
@@ -3063,6 +3164,17 @@ export default function App() {
       )}
       <ComposerFooter
         textareaRef={composer}
+        approvalModeControl={
+          activeTask ? (
+            <ApprovalModeMenu
+              task={activeTask}
+              request={approvalRequests[activeTask.id] ?? null}
+              disabled={bridgeUnavailable}
+              onSelect={(mode) => void setTaskApprovalMode(mode)}
+              onRefresh={() => void refreshTaskApprovalMode()}
+            />
+          ) : null
+        }
         archived={Boolean(activeTask?.archived)}
         closing={activeTask?.lifecycle === "closing"}
         unavailable={Boolean(

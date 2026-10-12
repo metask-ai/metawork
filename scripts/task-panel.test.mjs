@@ -4353,7 +4353,7 @@ test("task information uses a keyboard-accessible icon and retains creation MCP 
     assert.equal(screen.queryByRole("combobox"), null);
     assert.match(
       document.body.textContent,
-      /mode this session actually adopted.*Switching existing sessions is not supported yet/,
+      /current mode of this conversation.*Change it in the composer/,
     );
     assert.match(document.body.textContent, /not current connection status/);
     await user.keyboard("{Escape}");

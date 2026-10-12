@@ -863,7 +863,11 @@ New task 的模式菜单只展示三个真实选项：
 - `自动评审`：按任务意图评审本次内置工具请求，不确定或失败时转人工；菜单明确使用 Task 模型并产生额外 usage 费用，同时说明不是安全保证、MCP 请求仍需人工；
 - `完全访问`：MetaWork 不再为常规工具操作请求批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。它不是 root、Sandbox 或“信任 Workspace”。
 
-New task 直接显示 Host 发布的默认审批模式，并允许在发送前修改本次选择；首次默认值、选择记忆、授权与恢复边界由[产品需求](requirements.md#55-审批与输入)定义，不叠加第二个确认 modal 或独立委托开关。自动评审被预选时，费用、非安全保证及转人工说明仍须可见。帮助文字明确“已有会话暂不支持切换”；Task 信息只读显示原模式，不受新默认值影响。Settings 不提供权限入口。
+New task 直接显示 Host 发布的默认审批模式，并允许在发送前修改本次选择；首次默认值、选择记忆、授权与恢复边界由[产品需求](requirements.md#55-审批与输入)定义，不叠加第二个确认 modal 或独立委托开关。自动评审被预选时，费用、非安全保证及转人工说明仍须可见。已有交互式 Task 在 Composer 显示同一三档菜单，Task 信息显示当前模式，不受新 Task 默认值影响。Settings 不提供权限入口。
+
+已有 Task 的菜单只消费 Host `availableApprovalModes`，保留当前模式文字；不具备切换 authority 时只读。切换请求受理后显示忙碌状态并禁用重复选择，直到 canonical Snapshot 确认当前模式及 revision；不能乐观切换。跨完全访问边界且已有 Run 时，目标选项明确“先停止当前运行，再切换；不会自动重启运行”。Renderer 不另建 stop-then-switch 编排，也不重发当前输入。
+
+恢复原会话、结果未知与失败各自提供真实状态文字。超时或断连不能呈现成功，结果未确认时提供显式“刷新状态”，只刷新 Snapshot；用户查看最新模式后才可再次选择。菜单使用既有键盘导航、可见 focus 与 Escape/选择后 trigger 焦点恢复，费用及完全访问边界说明保持可读；390px 窄窗控件换行且不得遮挡发送/停止动作。
 
 Renderer 只显示 Host capability projection 声明的模式，不独立审核或更改 authority。Scheduled Task 继续采用其固定非交互 PermissionProfile，不显示自动评审选择；对应映射及授权语义由[产品需求](requirements.md#55-审批与输入)唯一拥有。
 
@@ -1014,7 +1018,7 @@ Providers（capability-gated）
 
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
 
-设置树不提供权限分区或权限设置项。New task 只显示 Host 声明的审批模式并记住成功创建 Task 时的选择，既有 Task 只读展示其已采用模式；具体交互见[审批模式](#102-审批模式)。
+设置树不提供权限分区或权限设置项。New task 只显示 Host 声明的审批模式并记住成功创建 Task 时的选择，既有 Task 的会话模式选择与当前值展示见[审批模式](#102-审批模式)。
 
 `Providers` 只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才整体进入设置树；它与 `Models` 平级，不是 Models 的下一级。不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 

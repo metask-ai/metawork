@@ -1086,15 +1086,15 @@ pub const Runtime = struct {
         ApprovalUnavailable,
     };
 
-    pub fn beginApprovalChange(
-        self: *Runtime,
-        task_id: u64,
+    /// Projection and commands share the same per-target admission decision.
+    fn approvalChangeRevision(
+        self: *const Runtime,
+        task: *const task_state.Task,
         expected_binding_epoch: u64,
         expected_revision: u64,
         target: task_state.ApprovalMode,
-        effects: RecoveryAdmissionEffects,
+        authority: ProjectionAuthority,
     ) ApprovalError!u64 {
-        const task = self.find(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
         if (expected_revision == 0 or expected_revision != task.durable.approval_revision)
@@ -1107,7 +1107,6 @@ pub const Runtime = struct {
         if (current == target) return task.durable.approval_revision;
         if (self.permission_reviews_closed or task.runtime.active_operation == .compact or task.runtime.active_operation == .restore)
             return error.TaskBusy;
-        const authority = effects.authority(projectionAuthorityQuery(task));
         if (authority.shutting_down or !authority.task_persistence_ready or
             !authority.workspace_identity_exact or !authority.automatic_owner_exact or !authority.authority_stable)
             return error.ApprovalUnavailable;
@@ -1124,7 +1123,31 @@ pub const Runtime = struct {
         if (target == .auto_review and (task.runtime.permission_review.exhausted or
             task.runtime.permission_review.generation == std.math.maxInt(u64)))
             return error.ReviewGenerationExhausted;
-        const revision = std.math.add(u64, task.durable.approval_revision, 1) catch return error.ApprovalRevisionExhausted;
+        return std.math.add(u64, task.durable.approval_revision, 1) catch return error.ApprovalRevisionExhausted;
+    }
+
+    fn availableApprovalModes(self: *const Runtime, task: *const task_state.Task, authority: ProjectionAuthority, buffer: *[3]task_state.ApprovalMode) []const task_state.ApprovalMode {
+        if (authority.shutting_down) return &.{};
+        var count: usize = 0;
+        for (std.enums.values(task_state.ApprovalMode)) |mode| {
+            _ = self.approvalChangeRevision(task, task.durable.binding_epoch, task.durable.approval_revision, mode, authority) catch continue;
+            buffer[count] = mode;
+            count += 1;
+        }
+        return buffer[0..count];
+    }
+
+    pub fn beginApprovalChange(
+        self: *Runtime,
+        task_id: u64,
+        expected_binding_epoch: u64,
+        expected_revision: u64,
+        target: task_state.ApprovalMode,
+        effects: RecoveryAdmissionEffects,
+    ) ApprovalError!u64 {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const revision = try self.approvalChangeRevision(task, expected_binding_epoch, expected_revision, target, effects.authority(projectionAuthorityQuery(task)));
+        if (revision == task.durable.approval_revision) return revision;
         task.runtime.permission_review.invalidate();
         if (target == .manual and task.runtime.pending_ui_request_id != 0) {
             task.runtime.permission_review.phase = .needs_user;
@@ -3722,11 +3745,14 @@ pub const Runtime = struct {
             count += 1;
             const external = effects.authority(projectionAuthorityQuery(task));
             const recovery = self.recoveryProjectionWithAuthority(task, external);
+            var available_modes: [3]task_state.ApprovalMode = undefined;
+            const modes = self.availableApprovalModes(task, external, &available_modes);
             task_view.writeProjection(writer, .{
                 .task = task,
                 .now_ms = effects.now_ms,
                 .recovery = recovery,
                 .model_selection_availability = external.model_selection_availability,
+                .available_approval_modes = modes,
                 .shutting_down = external.shutting_down,
                 .text = effects.text,
                 .catalog = effects.catalog,
@@ -6906,6 +6932,19 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
     var authority = ProjectionAuthority{ .shutting_down = false, .task_persistence_ready = true, .checkpoint_store_ready = true, .execution_admission = .available, .workspace_identity_exact = true, .automatic_owner_exact = true, .runtime_admission = .available, .authority_stable = true, .model_selection_availability = .runtime_detached };
     const effects = RecoveryAdmissionEffects{ .context = &authority, .authority_fn = Harness.authority };
     const generation = task.runtime.permission_review.generation;
+    var mode_buffer: [3]task_state.ApprovalMode = undefined;
+    try std.testing.expectEqualSlices(task_state.ApprovalMode, &.{ .manual, .auto_review, .full_access }, runtime.availableApprovalModes(task, authority, &mode_buffer));
+    authority.checkpoint_store_ready = false;
+    try std.testing.expectEqualSlices(task_state.ApprovalMode, &.{ .manual, .auto_review }, runtime.availableApprovalModes(task, authority, &mode_buffer));
+    authority.checkpoint_store_ready = true;
+    task.durable.permission_interaction = .noninteractive;
+    try std.testing.expectEqual(@as(usize, 0), runtime.availableApprovalModes(task, authority, &mode_buffer).len);
+    task.durable.permission_interaction = .interactive;
+    authority.shutting_down = true;
+    try std.testing.expectEqual(@as(usize, 0), runtime.availableApprovalModes(task, authority, &mode_buffer).len);
+    authority.shutting_down = false;
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(generation, task.runtime.permission_review.generation);
     try std.testing.expectEqual(@as(u64, 1), try runtime.beginApprovalChange(1, 1, 1, .manual, effects));
     try std.testing.expectEqual(generation, task.runtime.permission_review.generation);
     try std.testing.expect(task.approval_change == null);
@@ -6914,6 +6953,7 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
     try std.testing.expectEqual(@as(u64, 2), try runtime.beginApprovalChange(1, 1, 1, .auto_review, effects));
     try std.testing.expect(task_policy.hasActiveOperation(task));
     try std.testing.expect(!task.durable.permission_review_delegated);
+    try std.testing.expectEqual(@as(usize, 0), runtime.availableApprovalModes(task, authority, &mode_buffer).len);
     try std.testing.expectError(error.TaskBusy, runtime.beginApprovalChange(1, 1, 1, .manual, effects));
     task.approval_change.?.phase = .mode_commit;
     const prepared = try runtime.prepareApprovalCommit(1);

@@ -822,8 +822,36 @@ export type TaskModelSelectionAvailability =
   | "unsupported_source"
   | "authority_changed";
 
+export const approvalFailureReasons = [
+  "cancelled",
+  "busy",
+  "budget_required",
+  "mode_update_failed",
+  "checkpoint_failed",
+  "persistence_failed",
+  "outcome_unknown",
+  "recovery_failed",
+  "dependency_contract",
+] as const;
+export type ApprovalFailureReason = (typeof approvalFailureReasons)[number];
+export type TaskApprovalChange = {
+  revision: string;
+  targetMode: ApprovalMode;
+  state: "pending" | "recovering" | "outcome_unknown";
+};
+export type TaskApprovalResult = {
+  revision: string;
+} & (
+  | { outcome: "completed"; reason: null }
+  | { outcome: "failed"; reason: ApprovalFailureReason }
+);
+
 export type TaskView = {
   approvalMode: ApprovalMode;
+  approvalRevision: string;
+  availableApprovalModes: ApprovalMode[];
+  approvalChange: TaskApprovalChange | null;
+  approvalResult: TaskApprovalResult | null;
   permissionReviewState: "idle" | "reviewing" | "needs_user";
   id: string;
   recentOrder: string;
@@ -1437,6 +1465,28 @@ export type TaskCompletionSeenResult = {
   runId: string;
   marked: boolean;
 };
+
+export const taskApprovalModeReasons = [
+  "task_not_found",
+  "stale_binding",
+  "stale_revision",
+  "busy",
+  "task_closed",
+  "unsupported_interaction",
+  "unavailable",
+  "revision_exhausted",
+  "review_exhausted",
+  "shutting_down",
+] as const;
+export type TaskApprovalModeReason = (typeof taskApprovalModeReasons)[number];
+export type TaskApprovalModeResult =
+  | { accepted: true; taskId: string; approvalRevision: string; reason: null }
+  | {
+      accepted: false;
+      taskId: string;
+      approvalRevision: null;
+      reason: TaskApprovalModeReason;
+    };
 
 export type TaskModelSelectionReason =
   | "model_changed"
