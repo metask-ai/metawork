@@ -573,6 +573,7 @@ try {
     assert.equal(authorizedWorkspace.epoch, expectedWorkspaceEpoch);
     assert.equal(authorizedWorkspace.canonicalRoot, canonicalWorkspace);
     await finishApprovalRestart();
+    await probeWindowsWebViewFocus();
     catalogSnapshot = await readCatalog();
   }
   const currentAdmission = (await snapshot()).newTaskAdmission;
@@ -2554,7 +2555,11 @@ async function probeWindowsClipboard({
               if (codeButtons.length !== 1) return {point:null, codeButtonCount:codeButtons.length};
               button = codeButtons[0];
             }
-            button.scrollIntoView({block:'center', behavior:'instant'});
+            const viewport = button.closest('.ai-conversation-viewport');
+            if (!viewport) return {point:null, reason:'conversation_viewport_missing'};
+            const target = button.getBoundingClientRect();
+            const view = viewport.getBoundingClientRect();
+            viewport.scrollTop += target.y + target.height / 2 - view.y - view.height / 2;
             const r = button.getBoundingClientRect();
             const x = r.x + r.width / 2, y = r.y + r.height / 2;
             const hit = document.elementFromPoint(x,y);
@@ -2600,7 +2605,11 @@ async function probeWindowsClipboard({
       const { stdout } = await execFileAsync(
         "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
         args,
-        { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
+        {
+          timeout: commandTimeoutMs,
+          maxBuffer: 1024 * 1024,
+          windowsHide: true,
+        },
       );
       process.stdout.write(`Windows clipboard evidence: ${stdout.trim()}\n`);
     }
