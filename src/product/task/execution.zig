@@ -699,6 +699,7 @@ fn takeCheckpointRecord(
     const terminal: checkpoint_record.Terminal = switch (terminal_kind) {
         .run => .{ .run = terminal_id },
         .compact => .{ .compact = terminal_id },
+        .approval => .{ .approval = terminal_id },
     };
     const result = checkpoint_record.Record{
         .blob = .{

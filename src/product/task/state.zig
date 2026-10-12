@@ -663,8 +663,8 @@ pub const DurableTaskRecord = struct {
     permission_profile: PermissionProfile,
     permission_interaction: PermissionInteraction,
     binding_epoch: u64 = 1,
-    /// Persisted session fact: true means auto_review was adopted at creation.
-    /// Not an independent preference or a live user toggle.
+    approval_revision: u64 = 1,
+    /// Persisted current Task delegation; Run authority is captured separately.
     permission_review_delegated: bool = false,
     workspace_id: u64,
     workspace_epoch: u64 = 1,
@@ -685,10 +685,50 @@ pub const DurableTaskRecord = struct {
 
 pub const RuntimeAttachment = task_attachment.State;
 
+pub const ApprovalFailureReason = enum {
+    cancelled,
+    busy,
+    budget_required,
+    mode_update_failed,
+    checkpoint_failed,
+    persistence_failed,
+    outcome_unknown,
+    recovery_failed,
+    dependency_contract,
+};
+
+pub const ApprovalChange = struct {
+    revision: u64,
+    binding_epoch: u64,
+    target: ApprovalMode,
+    phase: enum {
+        waiting,
+        baseline_export,
+        baseline_commit,
+        mutation_export,
+        mode_commit,
+        recovering,
+        outcome_unknown,
+    } = .waiting,
+    baseline_confirmed: bool = false,
+    recovery_attempt_id: ?u64 = null,
+    unknown_history: ?struct { bytes: []u8, mode_commit: bool } = null,
+    candidate: ?checkpoint_record.Record = null,
+    failure: ?ApprovalFailureReason = null,
+};
+
+pub const ApprovalResult = struct {
+    revision: u64,
+    outcome: enum { completed, failed },
+    reason: ?ApprovalFailureReason = null,
+};
+
 pub const Task = struct {
     durable: DurableTaskRecord,
     runtime: RuntimeAttachment,
     conversation_observation: ConversationObservation = .{},
+    approval_change: ?ApprovalChange = null,
+    approval_result: ?ApprovalResult = null,
     deletion: task_deletion.State = .idle,
 
     pub fn permissionReviewPhase(self: *const Task) task_attachment.PermissionReviewState.Phase {

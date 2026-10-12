@@ -162,6 +162,9 @@ pub const State = struct {
     /// the active operation and its checkpoint transaction to settle.
     close_requested: bool = false,
     close_failed: bool = false,
+    /// A restore rejected before attachment publication still has a real
+    /// Session owner. Even a reusable close failure cannot install it.
+    discarding_restore: bool = false,
     cancel_requested: bool = false,
     /// Runtime-only model selection requested while the Session is busy.
     /// It is deliberately not part of task persistence and is dropped on
@@ -313,6 +316,7 @@ pub const State = struct {
             .detached => unreachable,
         };
         self.attachment = .{ .detached = cause };
+        self.discarding_restore = false;
         self.permission_review.invalidate();
         return value;
     }

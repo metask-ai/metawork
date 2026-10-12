@@ -73,10 +73,18 @@ pub const OwnedTaskExecution = struct {
         };
     }
 
-    pub fn deinit(self: *OwnedTaskExecution) void {
-        if (!self.owned) return;
+    /// A rejected restore retains only the metadata needed to close its
+    /// Session owner. It cannot keep a credential for future execution.
+    pub fn clearCredential(self: *OwnedTaskExecution) void {
+        std.debug.assert(self.owned);
         std.crypto.secureZero(u8, self.secret);
         self.allocator.free(self.secret);
+        self.secret = &.{};
+    }
+
+    pub fn deinit(self: *OwnedTaskExecution) void {
+        if (!self.owned) return;
+        self.clearCredential();
         self.allocator.free(self.base_url);
         self.allocator.free(self.model);
         self.allocator.free(self.provider_id);

@@ -47,7 +47,7 @@ const build_options = @import("build_options");
 
 pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 
-pub const Error = attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
+pub const Error = task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
     CompactCapacity,
@@ -1089,6 +1089,11 @@ pub const Runtime = struct {
     task_runtime: task_runtime.Runtime,
     task_persistence: TaskPersistence,
     task_persistence_health: TaskPersistenceHealth,
+    approval_syncing: bool = false,
+    // Deferred lifecycle facts share the approval writer; unknown keeps its
+    // exact candidate until an explicit readback decides the canonical record.
+    approval_history_dirty: bool = false,
+    approval_history_unknown: ?[]u8 = null,
     /// Bounded diagnostic count of canonical Agent events that arrived after
     /// their Run's terminal drain was finalized. Runtime-only evidence for
     /// the Stop-barrier investigation; never persisted or published.
@@ -1098,6 +1103,7 @@ pub const Runtime = struct {
     skill: skill_runtime.Runtime,
     change_notifier: ChangeNotifier,
     executor: *executor_impl.Executor,
+    approval_executor: *executor_impl.Executor,
     attachment_executor: *executor_impl.Executor,
     attachment_lane: *attachment_staging.Lane,
     attachment_io: ?struct { completion_id: u64, product_id: u64, cancel_requested: bool = false, file_index: usize = 0, offset: usize = 0, count: usize = 0 } = null,
@@ -1304,6 +1310,14 @@ pub const Runtime = struct {
         };
         var executor_owned = true;
         errdefer if (executor_owned) executor.deinit();
+        // Approval metadata must make progress while every Run worker is
+        // waiting for a permission that the metadata transaction delegates.
+        const approval_executor = try executor_impl.Executor.create(io, allocator, .{
+            .worker_count = 1,
+            .queue_capacity = product_task.approval_capacity,
+        });
+        var approval_executor_owned = true;
+        errdefer if (approval_executor_owned) approval_executor.deinit();
         const preview_executor = executor_impl.Executor.create(io, allocator, .{
             .worker_count = file_preview.worker_count,
             .queue_capacity = file_preview.max_in_flight,
@@ -1417,6 +1431,7 @@ pub const Runtime = struct {
             .change_notifier = configuration.change_notifier,
             .run_clock = configuration.run_clock,
             .executor = executor,
+            .approval_executor = approval_executor,
             .attachment_executor = attachment_executor,
             .attachment_lane = attachment_lane,
             .preview_executor = preview_executor,
@@ -1433,6 +1448,7 @@ pub const Runtime = struct {
         };
         skill_owned = false;
         executor_owned = false;
+        approval_executor_owned = false;
         attachment_executor_owned = false;
         attachment_lane_owned = false;
         preview_executor_owned = false;
@@ -3935,49 +3951,371 @@ pub const Runtime = struct {
             .explicitly_trusted => .explicitly_trusted,
             .temporary => .temporary,
         };
-        const attempt_id = switch (facts.mode) {
-            .fresh => try self.task_runtime.startFreshConversation(task_id, .{
-                .expected_binding_epoch = expected_binding_epoch,
-                .workspace_id = workspace.id,
-                .workspace_epoch = workspace.epoch,
-                .workspace_root = workspace.canonical_root,
-                .canonical_user_home = canonical_user_home,
-                .workspace_trust = workspace_trust,
-                .execution = execution,
-                .agent_runtime = self.agent_runtime,
-                .commit_binding = .{
-                    .context = self,
-                    .commit_fn = commitTaskRuntimeCandidate,
-                },
-            }),
-            .checkpoint => try self.task_runtime.startRecovery(task_id, .{
-                .expected_binding_epoch = expected_binding_epoch,
-                .workspace_id = workspace.id,
-                .workspace_epoch = workspace.epoch,
-                .workspace_root = workspace.canonical_root,
-                .canonical_user_home = canonical_user_home,
-                .workspace_trust = workspace_trust,
-                .workspace_kind = switch (workspace.kind) {
-                    .manual => .manual,
-                    .automatic => .automatic,
-                },
-                .execution = execution,
-                .agent_runtime = self.agent_runtime,
-                .checkpoint_store = self.checkpoint_store orelse unreachable,
-                .checkpoint_limits = checkpoint_export_limits,
-                .notifier = .{
-                    .context = self.change_notifier.context,
-                    .notify_fn = self.change_notifier.wake,
-                },
-                .executor = .{
-                    .context = self,
-                    .enqueue_fn = enqueueTaskRuntimeExecutor,
-                    .cancel_fn = cancelTaskRuntimeExecutor,
-                },
-            }),
-        };
+        const attempt_id = try self.task_runtime.startRecovery(task_id, .{
+            .expected_binding_epoch = expected_binding_epoch,
+            .workspace_id = workspace.id,
+            .workspace_epoch = workspace.epoch,
+            .workspace_root = workspace.canonical_root,
+            .canonical_user_home = canonical_user_home,
+            .workspace_trust = workspace_trust,
+            .workspace_kind = switch (workspace.kind) {
+                .manual => .manual,
+                .automatic => .automatic,
+            },
+            .execution = execution,
+            .agent_runtime = self.agent_runtime,
+            .checkpoint_store = self.checkpoint_store,
+            .checkpoint_limits = checkpoint_export_limits,
+            .notifier = .{
+                .context = self.change_notifier.context,
+                .notify_fn = self.change_notifier.wake,
+            },
+            .executor = .{
+                .context = self,
+                .enqueue_fn = enqueueTaskRuntimeExecutor,
+                .cancel_fn = cancelTaskRuntimeExecutor,
+            },
+        });
         self.bumpRevision();
         return attempt_id;
+    }
+
+    pub fn setApprovalMode(self: *Runtime, task_id: u64, target: product_task.ApprovalMode, expected_binding_epoch: u64, expected_revision: u64) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        const revision = try self.task_runtime.beginApprovalChange(task_id, expected_binding_epoch, expected_revision, target, self.taskRuntimeRecoveryAdmissionEffects());
+        const task = self.task_runtime.find(task_id).?;
+        if (task.approval_change == null) return revision;
+        if (task.durable.permission_profile != target.profile() and task.runtime.active_operation == .run) {
+            _ = self.task_runtime.cancelRun(task_id, task.runtime.active_operation.run, self.taskRuntimeOperationEffects()) catch {
+                self.failApprovalChange(task_id, .cancelled, false);
+                self.bumpRevision();
+                return revision;
+            };
+            self.approval_history_dirty = true;
+        }
+        // Invalidation happened at admission, before any queued reviewer result
+        // could be accepted. Cancellation never waits for that independent job.
+        self.syncPermissionReviews();
+        self.bumpRevision();
+        _ = self.syncApprovalChanges();
+        return revision;
+    }
+
+    fn approvalExecutor(self: *Runtime) product_task.ApprovalExecutor {
+        return .{ .context = self, .enqueue_fn = enqueueApprovalRuntimeExecutor, .cancel_fn = cancelApprovalRuntimeExecutor };
+    }
+
+    fn cancelApprovalRuntimeExecutor(context: *anyopaque, identity: *anyopaque) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.approval_executor.cancel(identity);
+    }
+
+    fn enqueueApprovalRuntimeExecutor(context: *anyopaque, identity: *anyopaque, job_context: *anyopaque, execute_fn: *const fn (*anyopaque) void, cancel_fn: *const fn (*anyopaque) void) error{ ExecutorShuttingDown, QueueFull }!void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        return self.approval_executor.enqueue(.{ .identity = identity, .context = job_context, .execute_fn = execute_fn, .cancel_fn = cancel_fn });
+    }
+
+    fn approvalNotifier(self: *Runtime) product_task.ApprovalNotifier {
+        return .{ .context = self.change_notifier.context, .notify_fn = self.change_notifier.wake };
+    }
+
+    fn approvalHistoryBlocked(self: *const Runtime) bool {
+        return self.approval_history_unknown != null or self.task_runtime.approvalHistoryBlocked();
+    }
+
+    fn encodeApprovalCandidate(self: *Runtime, task_id: u64) Error![]u8 {
+        const prepared = try self.task_runtime.prepareApprovalCommit(task_id);
+        defer prepared.rollback();
+        return self.encodeTaskHistoryCandidate(if (prepared.checkpoint) |record|
+            .{ .task_id = task_id, .record = record, .anchor = .available }
+        else
+            null);
+    }
+
+    fn encodeTaskHistoryCandidate(self: *Runtime, checkpoint: ?CheckpointPersistenceOverride) Error![]u8 {
+        var scratch = try self.buildTaskStateWireWithCheckpoint(checkpoint);
+        defer scratch.deinit();
+        const output = try self.allocator.alloc(u8, task_persistence.max_store_bytes);
+        defer self.allocator.free(output);
+        const bytes = try task_persistence.encode(output, scratch.state, self.taskPersistenceLimits());
+        if (self.containsKnownCredential(bytes)) return error.TaskStoreEncodeFailed;
+        return self.allocator.dupe(u8, bytes);
+    }
+
+    fn queueApprovalProjection(self: *Runtime, resolve_only: bool) !void {
+        const bytes = if (resolve_only)
+            try self.allocator.dupe(u8, self.approval_history_unknown orelse return error.TaskBusy)
+        else
+            try self.encodeTaskHistoryCandidate(null);
+        errdefer self.allocator.free(bytes);
+        try self.task_runtime.queueApprovalProjection(bytes, self.task_persistence, resolve_only, self.approvalExecutor(), self.approvalNotifier());
+        if (!resolve_only) self.approval_history_dirty = false;
+    }
+
+    fn failApprovalChange(self: *Runtime, task_id: u64, reason: task_runtime.ApprovalFailureReason, restore_required: bool) void {
+        const task = self.task_runtime.find(task_id) orelse return;
+        const change = task.approval_change orelse return;
+        const rejected = if (change.candidate) |record| record.blob else null;
+        const canonical = if (task.durable.checkpoint) |record| record.blob else null;
+        self.task_runtime.failApprovalChange(task_id, reason, restore_required);
+        // Callers have proved a rejection, including an explicit unknown
+        // readback of the old canonical frame. Never retire the recovery point
+        // still named by that frame, or infer rejection from an unknown result.
+        if (!self.shutting_down) if (rejected) |identity| {
+            if (canonical) |old| if (std.meta.eql(old, identity)) return;
+            if (self.checkpoint_store) |store|
+                self.task_runtime.queueApprovalRetirement(store, identity, self.approvalExecutor(), self.approvalNotifier()) catch {};
+        };
+    }
+
+    fn beginApprovalRecovery(self: *Runtime, task_id: u64) bool {
+        const task = self.task_runtime.find(task_id) orelse return false;
+        var change = task.approval_change orelse return false;
+        task.approval_change = null;
+        defer {
+            task.approval_change = change;
+            task.approval_change.?.binding_epoch = task.durable.binding_epoch;
+        }
+        change.recovery_attempt_id = self.restoreTaskConversation(task_id, task.durable.binding_epoch) catch return false;
+        return true;
+    }
+
+    fn syncApprovalChanges(self: *Runtime) bool {
+        if (self.approval_syncing) return false;
+        self.approval_syncing = true;
+        defer self.approval_syncing = false;
+        var changed = false;
+        var history_confirmed = false;
+        // Reap every completed worker before admitting another store write.
+        for (&self.task_runtime.approval_jobs) |*entry| {
+            const slot = entry.* orelse continue;
+            if (!slot.job.completionReady()) continue;
+            const task_id = slot.task_id;
+            if (task_id == 0) {
+                if (slot.job.work == .history) {
+                    const resolve_only = slot.job.work.history.resolve_only;
+                    switch (slot.job.outcome) {
+                        .history => |result| switch (result) {
+                            .committed, .failed => {
+                                if (resolve_only) {
+                                    self.allocator.free(self.approval_history_unknown.?);
+                                    self.approval_history_unknown = null;
+                                    self.approval_history_dirty = true;
+                                }
+                                if (resolve_only or result == .committed)
+                                    self.task_persistence_health = .ready
+                                else {
+                                    self.approval_history_dirty = true;
+                                    self.markTaskPersistenceWriteFailed();
+                                }
+                            },
+                            .outcome_unknown => {
+                                if (!resolve_only) {
+                                    std.debug.assert(self.approval_history_unknown == null);
+                                    self.approval_history_unknown = slot.job.takeHistory().?;
+                                }
+                                self.approval_history_dirty = true;
+                                self.task_persistence_health = .outcome_unknown;
+                            },
+                        },
+                        .none, .failure, .checkpoint, .retired => if (!resolve_only) {
+                            self.approval_history_dirty = true;
+                            if (!self.shutting_down) self.markTaskPersistenceWriteFailed();
+                        },
+                    }
+                    changed = true;
+                }
+                slot.job.deinit();
+                entry.* = null;
+                continue;
+            }
+            const task = self.task_runtime.find(task_id) orelse unreachable;
+            if (slot.restore_attempt_id) |attempt_id| {
+                const restore = task.runtime.restore_job orelse unreachable;
+                std.debug.assert(restore.attempt.attempt_id == attempt_id);
+                const resolve_only = slot.job.work.history.resolve_only;
+                switch (slot.job.outcome) {
+                    .history => |outcome| {
+                        restore.binding_commit = switch (outcome) {
+                            .committed => .committed,
+                            .failed => .failed,
+                            .outcome_unknown => .outcome_unknown,
+                        };
+                        switch (outcome) {
+                            .committed, .failed => {
+                                if (restore.unknown_history) |bytes| self.allocator.free(bytes);
+                                restore.unknown_history = null;
+                                task.runtime.last_restore_failure = if (outcome == .failed) .binding_persistence_failed else null;
+                                if (outcome == .committed or resolve_only)
+                                    self.task_persistence_health = .ready
+                                else
+                                    self.markTaskPersistenceWriteFailed();
+                            },
+                            .outcome_unknown => {
+                                if (!resolve_only) restore.unknown_history = slot.job.takeHistory().?;
+                                self.task_persistence_health = .outcome_unknown;
+                                task.runtime.last_restore_failure = .binding_persistence_unknown;
+                            },
+                        }
+                    },
+                    .none, .failure, .checkpoint, .retired => if (!resolve_only) {
+                        restore.binding_commit = .failed;
+                        const cancelled = slot.job.outcome == .failure and slot.job.outcome.failure.reason == .cancelled;
+                        if (cancelled) task.runtime.last_restore_failure = .cancelled;
+                        if (!cancelled and !self.shutting_down) self.markTaskPersistenceWriteFailed();
+                    },
+                }
+                slot.job.deinit();
+                entry.* = null;
+                changed = true;
+                continue;
+            }
+            const change = task.approval_change.?;
+            const mode_commit = if (change.phase == .outcome_unknown) if (change.unknown_history) |history| history.mode_commit else false else change.phase == .mode_commit;
+            const phase = change.phase;
+            const outcome = slot.job.outcome;
+            const unknown_bytes = if (outcome == .history and outcome.history == .outcome_unknown and !slot.job.work.history.resolve_only)
+                slot.job.takeHistory()
+            else
+                null;
+            const record = slot.job.takeCheckpoint();
+            slot.job.deinit();
+            entry.* = null;
+            changed = true;
+            switch (outcome) {
+                .checkpoint => self.task_runtime.recordApprovalCheckpoint(task_id, record.?),
+                .history => |result| switch (result) {
+                    .committed => {
+                        self.task_runtime.resumeApprovalConfirmation(task_id) catch {
+                            self.task_runtime.markApprovalUnknown(task_id, null);
+                            continue;
+                        };
+                        const retired = self.task_runtime.acceptApprovalCommit(task_id) catch {
+                            self.task_runtime.markApprovalUnknown(task_id, null);
+                            continue;
+                        };
+                        history_confirmed = true;
+                        // Canonical mode is installed and admission is reopened
+                        // before a separate worker retires the superseded blob.
+                        self.bumpRevision();
+                        if (!self.shutting_down) if (retired) |identity| if (self.checkpoint_store) |store| {
+                            self.task_runtime.queueApprovalRetirement(store, identity, self.approvalExecutor(), self.approvalNotifier()) catch {};
+                        };
+                    },
+                    .failed => {
+                        if (phase == .outcome_unknown) history_confirmed = true;
+                        self.failApprovalChange(task_id, .persistence_failed, mode_commit and task.approval_change.?.candidate != null);
+                    },
+                    .outcome_unknown => {
+                        self.task_persistence_health = .outcome_unknown;
+                        self.task_runtime.markApprovalUnknown(task_id, unknown_bytes);
+                    },
+                },
+                .failure => |failure| if (phase == .outcome_unknown)
+                    self.task_runtime.markApprovalUnknown(task_id, null)
+                else
+                    self.failApprovalChange(task_id, failure.reason, failure.restore_required or (phase == .mode_commit and task.approval_change.?.candidate != null)),
+                .none, .retired => if (phase == .outcome_unknown)
+                    self.task_runtime.markApprovalUnknown(task_id, null)
+                else
+                    self.failApprovalChange(task_id, .dependency_contract, phase == .mutation_export),
+            }
+        }
+        if (history_confirmed) self.task_persistence_health = .ready;
+        if (self.shutting_down) for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.runtime.restore_job) |restore| {
+            if (restore.binding_commit != .outcome_unknown) continue;
+            // No readback is implied by shutdown. Retain the canonical witness
+            // barrier while allowing the candidate Session and lease to close.
+            std.debug.assert(self.approval_history_unknown == null);
+            self.approval_history_unknown = restore.unknown_history;
+            restore.unknown_history = null;
+            restore.binding_commit = .failed;
+        };
+        for (self.task_runtime.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            const change = task.approval_change orelse continue;
+            if (self.task_runtime.approvalJobFor(task.durable.id)) continue;
+            if (self.shutting_down) continue;
+            switch (change.phase) {
+                .waiting => {
+                    if (change.recovery_attempt_id != null and task.runtime.close_failed and task.runtime.close_thread == null) {
+                        self.task_runtime.failApprovalRecovery(task.durable.id);
+                        changed = true;
+                        continue;
+                    }
+                    if (!task.runtime.hasAttachedSession()) {
+                        if (task.runtime.active_operation != .none or task.runtime.hasClosingSession() or task.runtime.close_thread != null) continue;
+                        if (change.recovery_attempt_id != null) {
+                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
+                        } else if (!self.beginApprovalRecovery(task.durable.id))
+                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
+                        changed = true;
+                        continue;
+                    }
+                    if (task.durable.permission_profile == change.target.profile()) {
+                        task.approval_change.?.phase = .mode_commit;
+                        changed = true;
+                    } else {
+                        if (!self.task_runtime.approvalCoreIdle(task.durable.id)) continue;
+                        const resources = self.taskRuntimeOperationEffects().worker.checkpoint;
+                        self.task_runtime.queueApprovalCheckpoint(task.durable.id, change.baseline_confirmed, resources, self.approvalExecutor(), self.approvalNotifier()) catch {
+                            self.failApprovalChange(task.durable.id, .checkpoint_failed, false);
+                        };
+                        changed = true;
+                    }
+                },
+                .baseline_commit, .mode_commit => {
+                    if (self.approvalHistoryBlocked()) continue;
+                    const bytes = self.encodeApprovalCandidate(task.durable.id) catch {
+                        self.failApprovalChange(task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
+                        changed = true;
+                        continue;
+                    };
+                    self.task_runtime.queueApprovalHistory(task.durable.id, bytes, self.task_persistence, self.approvalExecutor(), self.approvalNotifier()) catch {
+                        self.allocator.free(bytes);
+                        self.failApprovalChange(task.durable.id, .persistence_failed, change.phase == .mode_commit and change.candidate != null);
+                    };
+                    changed = true;
+                },
+                .recovering => {
+                    if (task.runtime.close_failed and task.runtime.close_thread == null) {
+                        self.task_runtime.failApprovalRecovery(task.durable.id);
+                        changed = true;
+                        continue;
+                    }
+                    if (task.runtime.hasAttachedSession()) {
+                        if (change.recovery_attempt_id != null and task.runtime.active_operation == .none) {
+                            self.failApprovalChange(task.durable.id, change.failure orelse .mode_update_failed, false);
+                        } else {
+                            _ = self.task_runtime.beginDetach(task.durable.id, self.taskRuntimeOperationEffects()) catch |err| switch (err) {
+                                error.CloseInProgress => {},
+                                else => self.task_runtime.failApprovalRecovery(task.durable.id),
+                            };
+                        }
+                        changed = true;
+                    } else if (task.runtime.active_operation == .none and !task.runtime.hasClosingSession() and task.runtime.close_thread == null) {
+                        if (change.recovery_attempt_id != null) {
+                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
+                        } else if (!self.beginApprovalRecovery(task.durable.id))
+                            self.failApprovalChange(task.durable.id, .recovery_failed, false);
+                        changed = true;
+                    }
+                },
+                .baseline_export, .mutation_export, .outcome_unknown => {},
+            }
+        }
+        if (self.approval_history_dirty and !self.shutting_down and
+            self.task_persistence_health.operational() and !self.approvalHistoryBlocked())
+        {
+            self.queueApprovalProjection(false) catch |err| switch (err) {
+                error.QueueFull, error.TaskBusy => {},
+                else => self.markTaskPersistenceWriteFailed(),
+            };
+        }
+        if (changed) self.bumpRevision();
+        return changed;
     }
 
     pub fn runTask(
@@ -4509,6 +4847,7 @@ pub const Runtime = struct {
 
     pub fn taskHistoryRecoveryAvailable(self: *const Runtime) bool {
         if (!self.task_persistence.enabled) return false;
+        if (self.task_runtime.approvalHistoryWorkerActive()) return false;
         return switch (self.task_persistence_health) {
             .read_failed, .corrupt, .write_failed, .outcome_unknown => true,
             .unavailable, .ready, .degraded => false,
@@ -4526,6 +4865,37 @@ pub const Runtime = struct {
         self.syncLifecycle();
         if (self.shutting_down) return .shutting_down;
         if (expected_revision != self.revision) return .stale_revision;
+        // An approval candidate owns the indeterminate history transaction.
+        // Resolve it on the bounded executor; never quarantine or rewrite it.
+        if (self.approval_history_unknown != null) {
+            self.queueApprovalProjection(true) catch return .unavailable;
+            self.bumpRevision();
+            return .outcome_unknown;
+        }
+        if (self.approval_history_dirty and !self.approvalHistoryBlocked() and self.task_persistence_health == .write_failed) {
+            self.queueApprovalProjection(false) catch return .unavailable;
+            self.bumpRevision();
+            return .outcome_unknown;
+        }
+        if (self.approvalHistoryBlocked()) {
+            for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.runtime.restore_job) |restore| {
+                if (restore.binding_commit != .outcome_unknown) continue;
+                const bytes = self.allocator.dupe(u8, restore.unknown_history orelse return .unavailable) catch return .unavailable;
+                self.task_runtime.queueRecoveryHistory(task.durable.id, bytes, self.task_persistence, true, self.approvalExecutor(), self.approvalNotifier()) catch {
+                    self.allocator.free(bytes);
+                    return .unavailable;
+                };
+                self.bumpRevision();
+                return .outcome_unknown;
+            };
+            for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.approval_change) |change| {
+                if (change.phase != .outcome_unknown) continue;
+                self.task_runtime.queueApprovalResolution(task.durable.id, self.task_persistence, self.approvalExecutor(), self.approvalNotifier()) catch return .unavailable;
+                self.bumpRevision();
+                return .outcome_unknown;
+            };
+            return .unavailable;
+        }
         if (!self.taskHistoryRecoveryAvailable()) return switch (self.task_persistence_health) {
             .ready, .degraded => .not_required,
             else => .unavailable,
@@ -4545,6 +4915,7 @@ pub const Runtime = struct {
         return switch (self.task_persistence.recover(bytes)) {
             .committed => recovered: {
                 self.task_persistence_health = .ready;
+                self.approval_history_dirty = false;
                 self.bumpRevision();
                 break :recovered .recovered;
             },
@@ -4770,6 +5141,7 @@ pub const Runtime = struct {
             },
         });
         changed = task_sync.changed or changed;
+        changed = self.syncApprovalChanges() or changed;
         var durable_changed = task_sync.durable_changed;
         if (self.finalizeWorkspaceRemovalsNoFail()) {
             changed = true;
@@ -5915,6 +6287,7 @@ pub const Runtime = struct {
         self.shutdownExecutor();
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
+        if (self.approval_history_unknown) |bytes| self.allocator.free(bytes);
         self.attachments.deinit();
         for (0..self.workspace.slotCount()) |index| {
             const workspace = self.workspace.factsAt(index) orelse continue;
@@ -5935,6 +6308,7 @@ pub const Runtime = struct {
         self.account_projection.deinit();
         std.debug.assert(self.projection_bytes == 0);
         self.executor.deinit();
+        self.approval_executor.deinit();
         self.preview_lane.deinit();
         self.preview_executor.deinit();
         self.attachment_lane.deinit();
@@ -5995,9 +6369,16 @@ pub const Runtime = struct {
         self.task_runtime.prepareShutdown(.{
             .context = self,
             .cancel_fn = cancelTaskRuntimeExecutor,
+        }, .{
+            .context = self,
+            .cancel_fn = cancelApprovalRuntimeExecutor,
         });
         self.executor.shutdown();
+        self.approval_executor.shutdown();
         self.executor_shutdown = true;
+        // Adopt confirmed history and release approval leases after join,
+        // before the final event/checkpoint barrier. No new work is admitted.
+        _ = self.syncApprovalChanges();
         self.skill.finishShutdownAfterExecutorJoin(
             self.skillProjectionBudget(),
             catalogSnapshotLimits(self.limits),
@@ -7241,11 +7622,24 @@ pub const Runtime = struct {
         };
     }
 
+    fn queueTaskRuntimeBinding(context: *anyopaque, task_id: u64) !?task_runtime.DurableCommit {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.task_persistence_health == .unavailable and !self.task_persistence.enabled and !self.task_persistence.restore_failed)
+            return .committed;
+        if (!self.task_persistence_health.operational()) return .failed;
+        if (self.approvalHistoryBlocked()) return error.TaskBusy;
+        const bytes = try self.encodeTaskHistoryCandidate(null);
+        errdefer self.allocator.free(bytes);
+        try self.task_runtime.queueRecoveryHistory(task_id, bytes, self.task_persistence, false, self.approvalExecutor(), self.approvalNotifier());
+        self.task_runtime.find(task_id).?.runtime.restore_job.?.binding_commit = .pending;
+        return null;
+    }
+
     fn taskRuntimeRecoveryEffects(self: *Runtime) task_runtime.RecoveryEffects {
         return .{
             .context = self,
             .authority_fn = taskRuntimeRecoveryAuthority,
-            .commit_binding_fn = commitTaskRuntimeCandidate,
+            .queue_binding_fn = queueTaskRuntimeBinding,
         };
     }
 
@@ -7259,6 +7653,7 @@ pub const Runtime = struct {
 
     fn commitTaskStateBestEffort(self: *Runtime) Error!void {
         self.commitTaskStateIfConfigured() catch |err| return switch (err) {
+            error.TaskBusy => {},
             error.TaskPersistenceOutcomeUnknown,
             error.TaskPersistenceUnavailable,
             error.TaskPersistenceFailed,
@@ -7269,6 +7664,7 @@ pub const Runtime = struct {
 
     fn commitTaskStateNoFail(self: *Runtime) void {
         self.commitTaskStateIfConfigured() catch |err| switch (err) {
+            error.TaskBusy => {},
             error.TaskPersistenceOutcomeUnknown,
             error.TaskPersistenceUnavailable,
             error.TaskPersistenceFailed,
@@ -7296,6 +7692,17 @@ pub const Runtime = struct {
         self: *Runtime,
         checkpoint_override: ?CheckpointPersistenceOverride,
     ) Error!void {
+        // During an approval transaction, ordinary lifecycle facts join the
+        // existing bounded history writer. Even a gap between its jobs must
+        // not turn cancel/terminal reconciliation into synchronous disk I/O.
+        for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.approval_change != null) {
+            self.approval_history_dirty = true;
+            return error.TaskBusy;
+        };
+        if (self.approvalHistoryBlocked()) {
+            self.approval_history_dirty = true;
+            return error.TaskBusy;
+        }
         switch (self.task_persistence_health) {
             .ready, .degraded, .write_failed, .outcome_unknown => {},
             .read_failed, .corrupt, .unavailable => return error.TaskPersistenceUnavailable,
@@ -7331,6 +7738,7 @@ pub const Runtime = struct {
         }
         switch (self.task_persistence.commit(bytes)) {
             .committed => {
+                self.approval_history_dirty = false;
                 if (self.task_persistence_health != .ready) {
                     self.task_persistence_health = .ready;
                     self.bumpRevision();
@@ -8193,6 +8601,10 @@ pub const Runtime = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn retryTaskSessionClose(control: *Runtime, task_id: u64) !bool {
+        return control.task_runtime.beginDetach(task_id, control.taskRuntimeOperationEffects());
+    }
+
     /// Exercises the writer while a test deliberately holds lifecycle reconciliation.
     pub fn commitTaskHistory(control: *Runtime) Error!void {
         return control.commitTaskStateIfConfigured();
@@ -8770,6 +9182,53 @@ fn cancelTaskCheckpoints(task: *TestTask) void {
         switch (compact.checkpoint.state.load(.acquire)) {
             .none, .exporting => compact.checkpoint.cancelled.store(true, .release),
             else => {},
+        }
+    }
+}
+
+test "approval checkpoint restores before the first Run and rejects a future approval anchor" {
+    var source = try testRuntime();
+    defer source.deinit();
+    var scratch = try source.buildTaskStateWire();
+    defer scratch.deinit();
+    var first = scratch.state.tasks[0];
+    first.runs = &.{};
+    first.next_run_generation = 0;
+    first.active_operation = null;
+    first.approval_revision = 2;
+    first.permission_profile = "full_access";
+    first.checkpoint_anchor = "available";
+    first.checkpoint = .{
+        .blob = .{ .generation = 0, .byte_size = 123, .digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        .session = .{ .logical_session_id = "session-before-first-run", .last_run_id = 0, .last_compact_id = 0, .model = first.binding.model },
+        .anchor = .{ .terminal = .{ .kind = "approval", .id = 2 }, .binding_epoch = first.binding.epoch },
+    };
+    var tasks = [_]task_persistence.TaskWire{first};
+    var state = scratch.state;
+    state.tasks = &tasks;
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    var history = TestTaskPersistence{ .storage = storage };
+    for ([_]u64{ 2, 3 }) |anchor_revision| {
+        tasks[0].checkpoint.?.anchor.terminal.id = anchor_revision;
+        var output: [128 * 1024]u8 = undefined;
+        const bytes = try task_persistence.encode(&output, state, source.taskPersistenceLimits());
+        var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
+            .task_persistence = history.capability(bytes),
+        });
+        defer restored.deinit();
+        if (anchor_revision == 2) {
+            const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
+            try std.testing.expectEqual(.full_access, task.durable.permission_profile);
+            try std.testing.expectEqual(@as(u64, 0), task.durable.next_run_generation);
+            const record = task.durable.checkpoint orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u64, 0), record.session.last_run_id);
+            try std.testing.expectEqual(@as(u64, 2), record.anchor.terminal.approval);
+            try std.testing.expectEqualStrings("session-before-first-run", record.session.logical_session_id);
+        } else {
+            try std.testing.expect(restored.task_runtime.find(3) == null);
+            try std.testing.expectEqual(.degraded, restored.task_persistence_health);
         }
     }
 }
@@ -9757,6 +10216,8 @@ const TestTaskPersistence = struct {
     len: usize = 0,
     commits: usize = 0,
     recoveries: usize = 0,
+    resolutions: usize = 0,
+    resolution_result: TaskPersistenceCommit = .outcome_unknown,
     result: TaskPersistenceCommit = .committed,
 
     fn commit(
@@ -9781,8 +10242,16 @@ const TestTaskPersistence = struct {
             .enabled = true,
             .restored_bytes = restored_bytes,
             .commit_fn = commit,
+            .confirmed_commit_fn = commit,
+            .resolve_commit_fn = resolve,
             .recover_fn = recover,
         };
+    }
+
+    fn resolve(context: ?*anyopaque, _: []const u8) TaskPersistenceCommit {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.resolutions += 1;
+        return self.resolution_result;
     }
 
     fn recover(
@@ -10901,8 +11370,9 @@ test "Task state round trip restores product history without fabricating a Sessi
         try std.testing.expect(!std.mem.eql(u8, restored_tool.id, "tool-running"));
     }
 
-    var snapshot_storage: [96 * 1024]u8 = undefined;
-    const snapshot = try restored.writeSnapshot(&snapshot_storage);
+    const snapshot_storage = try std.testing.allocator.alloc(u8, 96 * 1024);
+    defer std.testing.allocator.free(snapshot_storage);
+    const snapshot = try restored.writeSnapshot(snapshot_storage);
     try std.testing.expect(
         std.mem.indexOf(u8, snapshot, "\"taskHistoryPersistence\":true") != null,
     );
@@ -14882,9 +15352,11 @@ test "poisoned Session close preserves ownership until successful release" {
     const cases = [_]struct {
         completion: CloseCompletion,
         expected_health: ?task_test_attachment.AttachedHealth,
+        discarding_restore: bool = false,
     }{
         .{ .completion = .closed, .expected_health = null },
         .{ .completion = .failed_reusable, .expected_health = .available },
+        .{ .completion = .failed_reusable, .expected_health = .session_poisoned, .discarding_restore = true },
         .{ .completion = .failed_poisoned, .expected_health = .session_poisoned },
         .{ .completion = .failed_closing, .expected_health = null },
     };
@@ -14895,6 +15367,7 @@ test "poisoned Session close preserves ownership until successful release" {
         const task = &control.task_runtime.tasks[0].?;
         defer detachTaskForTest(&control, task);
         task.runtime.active_operation = .none;
+        task.runtime.discarding_restore = case.discarding_restore;
         task.runtime.active_run_id = 0;
         const route_id = task.runtime.routeId();
         foldTerminalDisposition(task, .poisoned);
@@ -14959,6 +15432,105 @@ test "poisoned Session close preserves ownership until successful release" {
             },
             .none, .running => unreachable,
         }
+    }
+}
+
+test "approval unknown commit is resolved explicitly without retrying or quarantining the write" {
+    const Catalog = struct {
+        fn query(_: *anyopaque, _: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
+            return error.CatalogUnavailable;
+        }
+    };
+    const HeldExecutor = struct {
+        queued_context: ?*anyopaque = null,
+        cancel_callback: ?*const fn (*anyopaque) void = null,
+        fn enqueue(context: *anyopaque, _: *anyopaque, job_context: *anyopaque, _: *const fn (*anyopaque) void, cancel_fn: *const fn (*anyopaque) void) error{ ExecutorShuttingDown, QueueFull }!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.queued_context = job_context;
+            self.cancel_callback = cancel_fn;
+        }
+        fn cancel(context: *anyopaque, _: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const job_context = self.queued_context orelse return false;
+            self.cancel_callback.?(job_context);
+            self.queued_context = null;
+            return true;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    for ([_]TaskPersistenceCommit{ .committed, .failed }) |final| {
+        var history = TestTaskPersistence{ .storage = storage };
+        var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
+        defer control.deinit();
+        control.canonical_user_home = try control.allocator.dupe(u8, home);
+        control.skill.ports.catalog.query_fn = Catalog.query;
+        const task = control.task_runtime.find(3).?;
+        _ = commitTerminal(&task.durable.runs[0].?, .completed, .completed, null, .reusable, "", false);
+        finalizeTestTerminalEvents(&control);
+        _ = try control.setApprovalMode(3, .auto_review, task.durable.binding_epoch, 1);
+        history.result = .outcome_unknown;
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (task.approval_change.?.phase == .outcome_unknown) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
+        try std.testing.expect(task.approval_change.?.unknown_history != null);
+        const retained = task.approval_change.?.unknown_history.?.bytes;
+        const writes = history.commits;
+        for (0..10) |_| control.syncLifecycle();
+        try std.testing.expectEqual(@as(usize, 0), history.resolutions);
+        try std.testing.expectEqual(writes, history.commits);
+        // Cancelling a queued readback cannot decide the original write or
+        // release its evidence. The executor has accepted but not run it.
+        var held: HeldExecutor = .{};
+        try control.task_runtime.queueApprovalResolution(3, history.capability(null), .{ .context = &held, .enqueue_fn = HeldExecutor.enqueue, .cancel_fn = HeldExecutor.cancel }, control.approvalNotifier());
+        try std.testing.expect(HeldExecutor.cancel(&held, &held));
+        control.syncLifecycle();
+        try std.testing.expectEqual(retained.ptr, task.approval_change.?.unknown_history.?.bytes.ptr);
+        try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
+        try std.testing.expectEqual(@as(usize, 0), history.resolutions);
+        try std.testing.expect(!task.runtime.worker_leases.hasLive());
+        // First explicit read remains indeterminate; the same candidate stays
+        // owned and the ordinary recovery writer is never called.
+        try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+        for (0..2000) |_| {
+            const pending = pending: {
+                for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
+                    if (slot.task_id == 3) break :pending slot.job;
+                };
+                break :pending null;
+            };
+            if (pending == null) break;
+            control.syncLifecycle();
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(@as(usize, 1), history.resolutions);
+        try std.testing.expectEqual(retained.ptr, task.approval_change.?.unknown_history.?.bytes.ptr);
+        try std.testing.expect(control.task_runtime.approvalHistoryBlocked());
+        try std.testing.expectEqual(writes, history.commits);
+        history.resolution_result = final;
+        history.result = .committed;
+        try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (task.approval_change == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(@as(usize, 2), history.resolutions);
+        try std.testing.expectEqual(@as(usize, 0), history.recoveries);
+        try std.testing.expectEqual(.ready, control.task_persistence_health);
+        try std.testing.expect(!control.task_runtime.approvalHistoryBlocked());
+        try std.testing.expectEqual(final == .committed, task.durable.permission_review_delegated);
+        try std.testing.expectEqual(@as(u64, if (final == .committed) 2 else 1), task.durable.approval_revision);
+        try std.testing.expectEqual(@as(@TypeOf(task.approval_result.?.outcome), if (final == .committed) .completed else .failed), task.approval_result.?.outcome);
+        try std.testing.expect(!task.runtime.worker_leases.hasLive());
     }
 }
 
@@ -18015,4 +18587,279 @@ test "MCP startup health commits a safe degraded Runtime projection" {
     control.shutting_down = true;
     control.syncLifecycle();
     try std.testing.expect(!control.mcp.?.hasRefreshJob());
+}
+
+test "approval shutdown settles joined history outcomes before releasing Task resources" {
+    const Catalog = struct {
+        fn query(_: *anyopaque, _: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
+            return error.CatalogUnavailable;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    for ([_]TaskPersistenceCommit{ .committed, .failed, .outcome_unknown }) |result| {
+        var history = TestTaskPersistence{ .storage = storage };
+        var control = try testRuntimeWith(.{
+            .task_persistence = history.capability(null),
+        });
+        defer control.deinit();
+        control.canonical_user_home = try control.allocator.dupe(u8, home);
+        control.skill.ports.catalog.query_fn = Catalog.query;
+        const task = control.task_runtime.find(3).?;
+        const run_id = task.runtime.active_run_id;
+        // This fixture Run has no live Agent RunControl. Settle it before
+        // admission, so lifecycle reconciliation cannot accept the history
+        // result that this test deliberately leaves for shutdown to reap.
+        _ = commitTerminal(&task.durable.runs[0].?, .completed, .completed, null, .reusable, "", false);
+        finalizeTestTerminalEvents(&control);
+        // Configure the outcome before enqueue; do not race the worker's
+        // read of its capability by changing this field after admission.
+        history.result = result;
+        const revision = try control.setApprovalMode(3, .auto_review, task.durable.binding_epoch, 1);
+        try std.testing.expectEqual(@as(u64, 2), revision);
+        try std.testing.expectEqual(run_id, task.runtime.active_run_id);
+        // Observed admission stops at mode_commit with no queued job. Assert
+        // that exact precondition before advancing the single enqueue step;
+        // this synchronization cannot reap an existing completion.
+        try std.testing.expectEqual(.mode_commit, task.approval_change.?.phase);
+        for (control.task_runtime.approval_jobs) |entry| try std.testing.expect(entry == null);
+        _ = control.syncApprovalChanges();
+        const pending = pending: {
+            for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
+                if (slot.task_id == 3) break :pending slot.job;
+            };
+            return error.TestUnexpectedResult;
+        };
+        for (0..2000) |_| {
+            if (pending.completionReady()) break;
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+        try std.testing.expect(pending.completionReady());
+        try std.testing.expectEqual(result, pending.outcome.history);
+        try std.testing.expectEqual(.mode_commit, task.approval_change.?.phase);
+        try std.testing.expect(!task.durable.permission_review_delegated);
+        try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
+        // Deliberately skip UI-loop publication and let shutdown reap it.
+        control.shutdownExecutor();
+        for (control.task_runtime.approval_jobs) |entry| try std.testing.expect(entry == null);
+        try std.testing.expect(!task.runtime.worker_leases.hasLive());
+        switch (result) {
+            .committed => {
+                try std.testing.expect(task.durable.permission_review_delegated);
+                try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
+                try std.testing.expect(task.approval_change == null);
+                try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+            },
+            .failed => {
+                try std.testing.expect(!task.durable.permission_review_delegated);
+                try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
+                try std.testing.expectEqual(.failed, task.approval_result.?.outcome);
+            },
+            .outcome_unknown => {
+                try std.testing.expect(!task.durable.permission_review_delegated);
+                try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
+                try std.testing.expect(control.task_runtime.approvalHistoryBlocked());
+                try std.testing.expectEqual(.outcome_unknown, control.task_persistence_health);
+            },
+        }
+    }
+}
+
+test "approval projection writes deferred facts off-thread and unknown readback retains its candidate" {
+    const Harness = struct {
+        storage: []u8,
+        main_thread: std.Thread.Id,
+        len: usize = 0,
+        main_commits: usize = 0,
+        worker_commits: usize = 0,
+        resolutions: usize = 0,
+        recoveries: usize = 0,
+        resolution_result: TaskPersistenceCommit = .outcome_unknown,
+        projection_result: TaskPersistenceCommit = .outcome_unknown,
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+        fn save(context: ?*anyopaque, bytes: []const u8) TaskPersistenceCommit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.Thread.getCurrentId() == self.main_thread) {
+                self.main_commits += 1;
+            } else {
+                self.worker_commits += 1;
+                if (self.worker_commits == 1) {
+                    self.entered.store(true, .release);
+                    while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+                }
+                // The mode commit succeeds; its deferred projection is unknown.
+                if (self.worker_commits == 2) return self.projection_result;
+            }
+            if (bytes.len > self.storage.len) return .failed;
+            @memcpy(self.storage[0..bytes.len], bytes);
+            self.len = bytes.len;
+            return .committed;
+        }
+        fn resolve(context: ?*anyopaque, bytes: []const u8) TaskPersistenceCommit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            std.debug.assert(std.Thread.getCurrentId() != self.main_thread);
+            self.resolutions += 1;
+            if (self.resolution_result == .committed) {
+                @memcpy(self.storage[0..bytes.len], bytes);
+                self.len = bytes.len;
+            }
+            return self.resolution_result;
+        }
+        fn recover(context: ?*anyopaque, _: []const u8) TaskPersistenceCommit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.recoveries += 1;
+            return .failed;
+        }
+        fn capability(self: *@This()) TaskPersistence {
+            return .{ .context = self, .enabled = true, .commit_fn = save, .confirmed_commit_fn = save, .resolve_commit_fn = resolve, .recover_fn = recover };
+        }
+        fn query(_: *anyopaque, _: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
+            return error.CatalogUnavailable;
+        }
+    };
+    const HeldExecutor = struct {
+        job: ?*anyopaque = null,
+        cancel_callback: ?*const fn (*anyopaque) void = null,
+        fn enqueue(context: *anyopaque, _: *anyopaque, job: *anyopaque, _: *const fn (*anyopaque) void, cancel_fn: *const fn (*anyopaque) void) error{ ExecutorShuttingDown, QueueFull }!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.job = job;
+            self.cancel_callback = cancel_fn;
+        }
+        fn cancel(context: *anyopaque, _: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.cancel_callback.?(self.job.?);
+            self.job = null;
+            return true;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    const cases = [_]struct { projection: TaskPersistenceCommit, resolved: TaskPersistenceCommit }{
+        .{ .projection = .outcome_unknown, .resolved = .committed },
+        .{ .projection = .outcome_unknown, .resolved = .failed },
+        .{ .projection = .failed, .resolved = .failed },
+    };
+    for (cases) |case| {
+        var history = Harness{ .storage = storage, .main_thread = std.Thread.getCurrentId(), .projection_result = case.projection };
+        var control = try testRuntimeWith(.{ .task_persistence = history.capability() });
+        defer control.deinit();
+        defer history.released.store(true, .release);
+        control.canonical_user_home = try control.allocator.dupe(u8, home);
+        control.skill.ports.catalog.query_fn = Harness.query;
+        const task = control.task_runtime.find(3).?;
+        _ = commitTerminal(&task.durable.runs[0].?, .completed, .completed, null, .reusable, "", false);
+        finalizeTestTerminalEvents(&control);
+        control.commitTaskStateNoFail();
+        const main_commits = history.main_commits;
+        _ = try control.setApprovalMode(3, .auto_review, task.durable.binding_epoch, 1);
+        control.syncLifecycle();
+        for (0..2000) |_| {
+            if (history.entered.load(.acquire)) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(history.entered.load(.acquire));
+        try control.renameTask(3, "renamed while mode writer is held");
+        try std.testing.expect(control.approval_history_dirty);
+        try std.testing.expectEqual(main_commits, history.main_commits);
+        history.released.store(true, .release);
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (control.approval_history_unknown != null or control.task_persistence_health == .write_failed) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        if (case.projection == .failed) {
+            try std.testing.expect(control.approval_history_unknown == null);
+            try std.testing.expect(control.approval_history_dirty);
+            try std.testing.expectEqual(.write_failed, control.task_persistence_health);
+            try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+            try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
+            for (0..10) |_| control.syncLifecycle();
+            try std.testing.expectEqual(@as(usize, 2), history.worker_commits);
+            // Only an explicit recovery may retry this definite write failure.
+            try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+            try std.testing.expect(!control.taskHistoryRecoveryAvailable());
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (!control.approvalHistoryBlocked()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expectEqual(.ready, control.task_persistence_health);
+            try std.testing.expect(!control.approval_history_dirty);
+            try std.testing.expectEqual(@as(usize, 3), history.worker_commits);
+            try std.testing.expectEqual(@as(usize, 0), history.resolutions);
+            try std.testing.expectEqual(@as(usize, 0), history.recoveries);
+            try std.testing.expectEqual(main_commits, history.main_commits);
+            var canonical = try task_persistence.decode(std.testing.allocator, history.storage[0..history.len], control.taskPersistenceLimits());
+            defer canonical.deinit();
+            try std.testing.expectEqualStrings("renamed while mode writer is held", canonical.value.tasks[0].title);
+            try std.testing.expectEqual(@as(u64, 2), canonical.value.tasks[0].approval_revision);
+            try std.testing.expect(canonical.value.tasks[0].permission_review_delegated);
+            continue;
+        }
+        const retained = control.approval_history_unknown orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(.outcome_unknown, control.task_persistence_health);
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+        try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
+        try std.testing.expect(task.durable.permission_review_delegated);
+        var candidate = try task_persistence.decode(std.testing.allocator, retained, control.taskPersistenceLimits());
+        defer candidate.deinit();
+        try std.testing.expectEqualStrings("renamed while mode writer is held", candidate.value.tasks[0].title);
+        try control.renameTask(3, "latest title while projection is unknown");
+        for (0..10) |_| control.syncLifecycle();
+        try std.testing.expectEqual(@as(usize, 2), history.worker_commits);
+        try std.testing.expectEqual(main_commits, history.main_commits);
+        try std.testing.expectEqual(@as(usize, 0), history.resolutions);
+        try std.testing.expectEqual(@as(usize, 0), history.recoveries);
+
+        // Queued cancellation releases only the read job's duplicate packet.
+        var held = HeldExecutor{};
+        const copy = try control.allocator.dupe(u8, retained);
+        try control.task_runtime.queueApprovalProjection(copy, history.capability(), true, .{ .context = &held, .enqueue_fn = HeldExecutor.enqueue, .cancel_fn = HeldExecutor.cancel }, control.approvalNotifier());
+        try std.testing.expect(HeldExecutor.cancel(&held, &held));
+        control.syncLifecycle();
+        try std.testing.expectEqual(retained.ptr, control.approval_history_unknown.?.ptr);
+        try std.testing.expectEqual(.outcome_unknown, control.task_persistence_health);
+        try std.testing.expect(!control.task_runtime.approval_cleanup_leases.hasLive());
+        try std.testing.expectEqual(@as(usize, 0), history.resolutions);
+        try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (!control.task_runtime.approvalHistoryWorkerActive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(@as(usize, 1), history.resolutions);
+        try std.testing.expectEqual(retained.ptr, control.approval_history_unknown.?.ptr);
+        try std.testing.expectEqual(@as(usize, 2), history.worker_commits);
+        history.resolution_result = case.resolved;
+        try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (!control.approvalHistoryBlocked() and !control.approval_history_dirty) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(control.approval_history_unknown == null);
+        try std.testing.expect(!control.approvalHistoryBlocked());
+        try std.testing.expect(!control.approval_history_dirty);
+        try std.testing.expectEqual(.ready, control.task_persistence_health);
+        try std.testing.expectEqual(@as(usize, 2), history.resolutions);
+        try std.testing.expectEqual(@as(usize, 3), history.worker_commits);
+        try std.testing.expectEqual(main_commits, history.main_commits);
+        try std.testing.expectEqual(@as(usize, 0), history.recoveries);
+        var canonical = try task_persistence.decode(std.testing.allocator, history.storage[0..history.len], control.taskPersistenceLimits());
+        defer canonical.deinit();
+        try std.testing.expectEqualStrings("latest title while projection is unknown", canonical.value.tasks[0].title);
+        try std.testing.expectEqual(@as(u64, 2), canonical.value.tasks[0].approval_revision);
+        try std.testing.expect(canonical.value.tasks[0].permission_review_delegated);
+        try std.testing.expect(!control.task_runtime.approval_cleanup_leases.hasLive());
+    }
 }

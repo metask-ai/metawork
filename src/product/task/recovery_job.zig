@@ -71,7 +71,7 @@ pub const PreparedAttempt = struct {
     workspace_id: u64,
     workspace_epoch: u64,
     workspace_kind: WorkspaceKind,
-    checkpoint: checkpoint_record.Record,
+    checkpoint: ?checkpoint_record.Record,
     run_id_floor: u64,
     compact_id_floor: u64,
     ui_request_id_floor: u64,
@@ -264,7 +264,7 @@ pub const Failure = enum {
 
 pub const Candidate = struct {
     binding: agent_session.Binding,
-    report: agent.CheckpointRestoreReport,
+    report: ?agent.CheckpointRestoreReport,
     execution: owned_execution.OwnedTaskExecution,
 
     pub fn takeExecution(self: *Candidate) owned_execution.OwnedTaskExecution {
@@ -273,22 +273,6 @@ pub const Candidate = struct {
 
     pub fn takeBinding(self: *Candidate) agent_session.Binding {
         return self.binding.take();
-    }
-
-    /// Releases every candidate-owned resource on all paths. A failed close or
-    /// release leaves the Session owned by the Agent Runtime, but the execution
-    /// secret must never survive that failure.
-    pub fn discard(self: *Candidate) bool {
-        var released = switch (self.binding.closeOutcome(.session_close)) {
-            .closed => true,
-            .failure => false,
-        };
-        if (released) self.binding.releaseClosed() catch {
-            released = false;
-        };
-        self.execution.deinit();
-        self.* = undefined;
-        return released;
     }
 };
 
@@ -305,10 +289,14 @@ pub const State = enum(u8) {
     cancelled,
 };
 
+/// Composition-thread state after the restore worker has completed. The
+/// candidate and its lease remain owned until canonical binding is known.
+pub const BindingCommit = enum { not_started, pending, committed, failed, outcome_unknown };
+
 pub const Job = struct {
     allocator: std.mem.Allocator,
     runtime: *agent.Runtime,
-    store: *checkpoint_store.FileStore,
+    store: ?*checkpoint_store.FileStore,
     notifier: Notifier,
     checkpoint_limits: agent.CheckpointLimits,
     attempt: PreparedAttempt,
@@ -316,6 +304,8 @@ pub const Job = struct {
     state: std.atomic.Value(State) = .init(.queued),
     outcome: Outcome = .none,
     lease: worker_lease.WorkerLease,
+    binding_commit: BindingCommit = .not_started,
+    unknown_history: ?[]u8 = null,
 
     pub fn execute(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
@@ -336,12 +326,13 @@ pub const Job = struct {
         self.cancellation.store(true, .release);
         const prior = self.state.cmpxchgStrong(
             .queued,
-            .cancelled,
+            .running,
             .acq_rel,
             .acquire,
         );
         std.debug.assert(prior == null);
         self.outcome = .{ .failure = .cancelled };
+        self.state.store(.cancelled, .release);
         self.notifier.notify();
     }
 
@@ -375,14 +366,14 @@ pub const Job = struct {
 
     pub fn deinit(self: *Job) void {
         std.debug.assert(self.completionReady());
-        switch (self.outcome) {
-            .candidate => |*candidate| _ = candidate.discard(),
-            .none, .failure => {},
-        }
+        // Composition must install or transfer the candidate to its ordinary
+        // closing owner before freeing the restore attempt.
+        std.debug.assert(self.outcome != .candidate);
+        if (self.unknown_history) |bytes| self.allocator.free(bytes);
         self.allocator.free(self.attempt.task_model);
         self.attempt.execution.deinit();
         self.attempt.workspace.deinit();
-        self.attempt.checkpoint.deinit(self.allocator);
+        if (self.attempt.checkpoint) |*checkpoint| checkpoint.deinit(self.allocator);
         self.lease.deinit();
         const allocator = self.allocator;
         self.* = undefined;
@@ -393,69 +384,72 @@ pub const Job = struct {
         if (self.cancellation.load(.acquire))
             return .{ .failure = .cancelled };
 
-        var source = self.store.openVerified(
-            self.attempt.checkpoint.blob,
-            &self.cancellation,
-        ) catch |err| return .{ .failure = switch (err) {
-            error.Cancelled => .cancelled,
-            error.BlobMissing => .checkpoint_missing,
-            error.BlobMismatch => .checkpoint_mismatch,
-            else => .checkpoint_io,
-        } };
-        defer source.deinit();
-
         const execution = self.attempt.execution.input();
-        var restored = agent_session.restore(self.runtime, .{
-            .session = .{
-                .model_binding = .{
-                    .target = .{
-                        .provider_id = execution.target.provider_id,
-                        .protocol = agent_protocol.toAgent(execution.target.protocol),
-                        .base_url = execution.target.base_url,
-                        .model = self.attempt.checkpoint.session.model,
-                    },
-                    .credential = execution.api_key,
+        const options: agent.SessionOpenOptions = .{
+            .model_binding = .{
+                .target = .{
+                    .provider_id = execution.target.provider_id,
+                    .protocol = agent_protocol.toAgent(execution.target.protocol),
+                    .base_url = execution.target.base_url,
+                    .model = if (self.attempt.checkpoint) |checkpoint| checkpoint.session.model else self.attempt.task_model,
                 },
-                .permission_mode = self.attempt.permission_mode,
-                .shell_policy = self.attempt.shell_policy,
-                .permission_interaction = self.attempt.permission_interaction,
-                .workspace = .{
-                    .canonical_root = self.attempt.workspace.canonical_root,
-                    .trust = switch (self.attempt.workspace.trust) {
-                        .explicitly_trusted => .explicitly_trusted,
-                        .temporary => .{ .temporary = self.attempt.workspace.canonical_root },
-                    },
-                },
-                .canonical_user_home = self.attempt.workspace.canonical_user_home,
-                .workspace_epoch = self.attempt.workspace.epoch_token,
-                .skill_catalog = null,
-                .skill_policy = null,
-                .mcp_selection = null,
-                .operation_id_floor = .{
-                    .last_run_id = self.attempt.run_id_floor,
-                    .last_compact_id = self.attempt.compact_id_floor,
-                    .last_ui_request_id = self.attempt.ui_request_id_floor,
+                .credential = execution.api_key,
+            },
+            .permission_mode = self.attempt.permission_mode,
+            .shell_policy = self.attempt.shell_policy,
+            .permission_interaction = self.attempt.permission_interaction,
+            .workspace = .{
+                .canonical_root = self.attempt.workspace.canonical_root,
+                .trust = switch (self.attempt.workspace.trust) {
+                    .explicitly_trusted => .explicitly_trusted,
+                    .temporary => .{ .temporary = self.attempt.workspace.canonical_root },
                 },
             },
-            .checkpoint_limits = self.checkpoint_limits,
-            .source = .{ .context = &source, .read_fn = readCheckpoint },
-            .expectation = .{
-                .logical_session_id = self.attempt.checkpoint.session.logical_session_id,
-                .checkpoint_generation = self.attempt.checkpoint.blob.generation,
-                .last_run_id = self.attempt.checkpoint.session.last_run_id,
-                .last_compact_id = self.attempt.checkpoint.session.last_compact_id,
-                .model = self.attempt.checkpoint.session.model,
+            .canonical_user_home = self.attempt.workspace.canonical_user_home,
+            .workspace_epoch = self.attempt.workspace.epoch_token,
+            .skill_catalog = null,
+            .skill_policy = null,
+            .mcp_selection = null,
+            .operation_id_floor = .{
+                .last_run_id = self.attempt.run_id_floor,
+                .last_compact_id = self.attempt.compact_id_floor,
+                .last_ui_request_id = self.attempt.ui_request_id_floor,
             },
-        }) catch |err| return .{ .failure = mapRestoreError(err) };
-        var access = restored.binding.acquireAccess() catch {
-            return .{ .failure = if (discardBinding(&restored.binding))
+        };
+        var report: ?agent.CheckpointRestoreReport = null;
+        var binding = if (self.attempt.checkpoint) |checkpoint| restored: {
+            var source = self.store.?.openVerified(checkpoint.blob, &self.cancellation) catch |err| return .{ .failure = switch (err) {
+                error.Cancelled => .cancelled,
+                error.BlobMissing => .checkpoint_missing,
+                error.BlobMismatch => .checkpoint_mismatch,
+                else => .checkpoint_io,
+            } };
+            defer source.deinit();
+            var restored = agent_session.restore(self.runtime, .{
+                .session = options,
+                .checkpoint_limits = self.checkpoint_limits,
+                .source = .{ .context = &source, .read_fn = readCheckpoint },
+                .expectation = .{
+                    .logical_session_id = checkpoint.session.logical_session_id,
+                    .checkpoint_generation = checkpoint.blob.generation,
+                    .last_run_id = checkpoint.session.last_run_id,
+                    .last_compact_id = checkpoint.session.last_compact_id,
+                    .model = checkpoint.session.model,
+                },
+            }) catch |err| return .{ .failure = mapRestoreError(err) };
+            report = restored.report;
+            break :restored restored.takeBinding();
+        } else agent_session.Binding.open(self.runtime, options) catch |err| return .{ .failure = mapRestoreError(err) };
+        if (self.cancellation.load(.acquire)) return .{ .failure = if (discardBinding(&binding)) .cancelled else .candidate_cleanup_failed };
+        var access = binding.acquireAccess() catch {
+            return .{ .failure = if (discardBinding(&binding))
                 .restore_rejected
             else
                 .candidate_cleanup_failed };
         };
         access.setModel(self.attempt.task_model) catch {
             access.deinit();
-            return .{ .failure = if (discardBinding(&restored.binding))
+            return .{ .failure = if (discardBinding(&binding))
                 .restore_rejected
             else
                 .candidate_cleanup_failed };
@@ -463,8 +457,8 @@ pub const Job = struct {
         access.deinit();
 
         return .{ .candidate = .{
-            .binding = restored.takeBinding(),
-            .report = restored.report,
+            .binding = binding.take(),
+            .report = report,
             .execution = self.attempt.execution.take(),
         } };
     }

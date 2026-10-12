@@ -218,6 +218,7 @@ pub const FakeSession = struct {
     permission_session_granted: bool = false,
     permission_mode_code: u32 = wire.PERMISSION_DEFAULT,
     policy_generation: u64 = 1,
+    forced_permission_mode_status: ?u32 = null,
     model: [256]u8 = [_]u8{0} ** 256,
     model_len: usize = 0,
 
@@ -311,7 +312,9 @@ pub const FakeCore = struct {
     multimodal_reference_count: usize = 0,
     expected_multimodal_text: ?[]const u8 = null,
     multimodal_text_matches: bool = false,
+    session_destroy_probe: ?struct { context: *anyopaque, observe_fn: *const fn (*anyopaque) void } = null,
     session_destroy_failures: usize = 0,
+    permission_mode_updates: usize = 0,
     runtime_destroy_failures: usize = 0,
     session_create_failures: usize = 0,
     forced_skill_update_status: ?u32 = null,
@@ -1138,6 +1141,10 @@ pub fn sessionDestroy(
     }
     session.unlock();
     fake_core.lock();
+    const probe = fake_core.session_destroy_probe;
+    fake_core.unlock();
+    if (probe) |observer| observer.observe_fn(observer.context);
+    fake_core.lock();
     const forced_status = fake_core.forced_session_destroy_status;
     fake_core.forced_session_destroy_status = null;
     if (forced_status) |status| {
@@ -1941,6 +1948,7 @@ pub fn sessionRunInput(
     session.running = true;
     session.run_id = run_id;
     const plan = session.plan;
+    const permission_generation = session.policy_generation;
     session.broadcast();
     session.unlock();
 
@@ -2050,6 +2058,7 @@ pub fn sessionRunInput(
                     else
                         session.session_id[0..session.session_id_len],
                     if (plan == .wrong_ui_request_run_id) run_id + 1 else run_id,
+                    permission_generation,
                 ) catch {
                     diagnostic(out_error);
                     return wire.STATUS_OUT_OF_MEMORY;
@@ -2097,13 +2106,14 @@ pub fn sessionRunInput(
                     return wire.STATUS_CALLBACK_FAILED;
                 };
                 defer decoded_response.deinit();
+                var provenance_failed = false;
                 const response_valid = switch (decoded_response.value) {
                     .permission => |permission| blk: {
                         const valid = std.mem.eql(
                             u8,
                             permission.request_id,
                             "1111111111111111111111111111111111111111111111111111111111111111",
-                        ) and permission.policy_generation == 1 and
+                        ) and permission.policy_generation == permission_generation and
                             switch (permission.permission) {
                                 .allow_session, .deny_session => if (permission.rule_id) |rule_id|
                                     std.mem.eql(
@@ -2119,6 +2129,11 @@ pub fn sessionRunInput(
                             .allow_session, .deny_session => session.permission_session_granted = true,
                             .allow_once, .deny_once => {},
                         };
+                        // Official Core emits provenance after every answered
+                        // permission callback. Exercise the same Agent event
+                        // stream, including the current policy generation.
+                        if (valid and !emitPermissionProvenance(session, handle, run_id, request_json, permission))
+                            provenance_failed = true;
                         break :blk valid;
                     },
                     .answers => false,
@@ -2132,6 +2147,14 @@ pub fn sessionRunInput(
                 };
                 release(session.callbacks.ctx, &response);
                 if (response.ptr != null or response.len != 0) {
+                    diagnostic(out_error);
+                    return wire.STATUS_CALLBACK_FAILED;
+                }
+                if (provenance_failed) {
+                    session.lock();
+                    session.running = false;
+                    session.broadcast();
+                    session.unlock();
                     diagnostic(out_error);
                     return wire.STATUS_CALLBACK_FAILED;
                 }
@@ -2391,6 +2414,9 @@ fn permissionModeName(code: u32) []const u8 {
 
 pub fn sessionUpdatePermissionMode(handle: ?*wire.SessionHandle, code: u32, out_error: ?*wire.OwnedBytesV1) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    fake_core.lock();
+    fake_core.permission_mode_updates += 1;
+    fake_core.unlock();
     const session: *FakeSession = @ptrCast(@alignCast(handle orelse return wire.STATUS_INVALID_ARGUMENT));
     switch (code) {
         wire.PERMISSION_DEFAULT, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_AUTO, wire.PERMISSION_DONT_ASK, wire.PERMISSION_FULL_ACCESS => {},
@@ -2400,6 +2426,10 @@ pub fn sessionUpdatePermissionMode(handle: ?*wire.SessionHandle, code: u32, out_
     defer session.unlock();
     if (!session.in_use or session.destroyed) return wire.STATUS_INVALID_STATE;
     if (session.running or session.compacting) return wire.STATUS_BUSY;
+    if (session.forced_permission_mode_status) |status| {
+        session.forced_permission_mode_status = null;
+        return status;
+    }
     if (session.permission_mode_code != code) {
         session.permission_mode_code = code;
         session.policy_generation += 1;
@@ -2511,6 +2541,7 @@ fn invokeDetachedUiCallback(session: *FakeSession) void {
     };
     const callback_context = session.callbacks.ctx;
     const run_id = session.run_id;
+    const permission_generation = session.policy_generation;
     var session_id = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1;
     const session_id_len = session.session_id_len;
     @memcpy(session_id[0..session_id_len], session.session_id[0..session_id_len]);
@@ -2527,6 +2558,7 @@ fn invokeDetachedUiCallback(session: *FakeSession) void {
         &request_storage,
         session_id[0..session_id_len],
         run_id,
+        permission_generation,
     ) catch return;
     const callback_status = callback(
         callback_context,
@@ -2550,10 +2582,51 @@ fn invokeDetachedUiCallback(session: *FakeSession) void {
     if (signal) |active_signal| active_signal.markFinished();
 }
 
+fn emitPermissionProvenance(
+    session: *FakeSession,
+    handle: ?*wire.SessionHandle,
+    run_id: u64,
+    request_json: []const u8,
+    response: sdk.protocol.PermissionResponse,
+) bool {
+    var parsed = sdk.protocol.decodeUiRequest(std.testing.allocator, request_json) catch return false;
+    defer parsed.deinit();
+    const request = switch (parsed.value) {
+        .permission => |value| value,
+        else => return false,
+    };
+    const provenance: sdk.protocol.PermissionProvenance = .{
+        .decision = if (response.permission == .allow_once or response.permission == .allow_session) .allow else .deny,
+        .source = .callback,
+        .matched_rule_id = null,
+        .session_id = request.session_id,
+        .run_id = run_id,
+        .tool_call_id = request.tool_call_id,
+        .request_id = request.request_id,
+        .tool = request.tool,
+        .canonical_arguments_digest = request.canonical_arguments_digest,
+        .policy_generation = request.policy_generation,
+        .used_session_rule = false,
+        .callback_outcome = .answered,
+        .response = response.permission,
+    };
+    var storage: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    std.json.Stringify.value(.{ .permission_provenance = provenance }, .{}, &writer) catch return false;
+    const callback = session.callbacks.on_event orelse return false;
+    var run = std.mem.zeroes(wire.RunContextV1);
+    run.struct_size = @sizeOf(wire.RunContextV1);
+    run.session = handle;
+    run.run_id = run_id;
+    run.session_id = sdk.bytesView(request.session_id);
+    return callback(session.callbacks.ctx, &run, sdk.bytesView(writer.buffered())) == wire.EVENT_CONTINUE;
+}
+
 fn permissionRequestJson(
     storage: []u8,
     session_id: []const u8,
     run_id: u64,
+    policy_generation: u64,
 ) std.fmt.BufPrintError![]const u8 {
     fake_core.lock();
     const arguments = fake_core.permission_arguments_json;
@@ -2569,8 +2642,8 @@ fn permissionRequestJson(
     std.json.Stringify.value(arguments, .{}, &writer) catch return error.NoSpaceLeft;
     return std.fmt.bufPrint(
         storage,
-        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"{s}\",\"name\":\"Bash\",\"binding\":\"{s}\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":1,\"arguments_json\":{s},\"responses\":{s},\"candidate\":{s}}}",
-        .{ session_id, run_id, namespace, binding, writer.buffered(), if (session_choices) "[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"]" else "[\"deny_once\",\"allow_once\"]", if (session_choices) "{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\",\"target\":null}" else "null" },
+        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"{s}\",\"name\":\"Bash\",\"binding\":\"{s}\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":{d},\"arguments_json\":{s},\"responses\":{s},\"candidate\":{s}}}",
+        .{ session_id, run_id, namespace, binding, policy_generation, writer.buffered(), if (session_choices) "[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"]" else "[\"deny_once\",\"allow_once\"]", if (session_choices) "{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\",\"target\":null}" else "null" },
     );
 }
 
