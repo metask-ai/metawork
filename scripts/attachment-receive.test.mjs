@@ -350,3 +350,39 @@ test("byte mode never subscribes to the alternate native drop path", async () =>
   client.onFileDrop(() => assert.fail());
   assert.equal(subscriptions, 0);
 });
+
+for (const source of [{ kind: "picker" }, byteSource()]) {
+  test(`busy ${source.kind} admission preserves its rejection without connection recovery`, async () => {
+    const calls = [];
+    const client = new BridgeClient({
+      bridge: {
+        on: () => () => {},
+        invoke: async (command, payload) => {
+          if (command === "metawork.events.connect") return oldWire.connect;
+          calls.push({ command, payload });
+          if (command.endsWith("beginAdd"))
+            return { status: "rejected", reason: "input_busy" };
+          if (command.endsWith("cancelAdd"))
+            return { status: "cleaned", released: false };
+          assert.fail(`Unexpected command: ${command}`);
+        },
+      },
+    });
+    await client.connect();
+    const op = client.createAttachmentAdd(async () =>
+      assert.fail("An unrelated batch must not force connection recovery"),
+    );
+    assert.deepEqual(await op.run(source), {
+      status: "rejected",
+      reason: "input_busy",
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].command, "metawork.attachments.beginAdd");
+    assert.equal(calls[1].command, "metawork.attachments.cancelAdd");
+    assert.deepEqual(calls[1].payload, {
+      generation: calls[0].payload.generation,
+      batchId: calls[0].payload.batchId,
+    });
+    assert.equal(op.primaryFailure.reason, "input_busy");
+  });
+}

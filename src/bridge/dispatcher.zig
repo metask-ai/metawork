@@ -1535,7 +1535,9 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const key = try self.requireAddKey(invocation, parsed.value.generation, parsed.value.batchId);
         self.receive_high_water = @max(self.receive_high_water, key.batch_id);
-        if (self.add_cancel != null) return error.AttachmentCancelBusy;
+        if (self.add_cancel) |pending| {
+            if (pending.generation == key.generation and pending.window_id == invocation.source.window_id and pending.batch_id == key.batch_id) return error.AttachmentCancelBusy;
+        }
         for (self.attachment_in_flight) |slot| if (slot.active and slot.batch_id == key.batch_id and slot.generation == key.generation and slot.window_id == invocation.source.window_id) {
             if ((try self.requireProductControl()).cancelAttachmentStaging(slot.completion_id)) {
                 var cancel: AddCancel = .{ .generation = key.generation, .window_id = invocation.source.window_id, .batch_id = key.batch_id, .responder = responder, .request_id = undefined, .request_len = invocation.request.id.len };
@@ -7173,6 +7175,10 @@ test "unified add async jobs join cancellation and freeze their protocol produce
             @memset(out, 7);
             return true;
         }
+        fn uniqueRandom(_: ?*anyopaque, out: []u8) bool {
+            std.Io.randomSecure(std.testing.io, out) catch return false;
+            return true;
+        }
         fn picker(_: ?*anyopaque, _: native_sdk.platform.OpenDialogOptions, _: []u8) anyerror!native_sdk.platform.OpenDialogResult {
             return .{ .count = attachment_grant.max_grants + 1, .paths = "/ignored" };
         }
@@ -7218,9 +7224,10 @@ test "unified add async jobs join cancellation and freeze their protocol produce
         response: ?[]u8 = null,
         calls: usize = 0,
         control: *product_control.Runtime,
+        allow_other_jobs: bool = false,
         fn receive(context: *anyopaque, _: native_sdk.bridge.Source, response: []const u8) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            try std.testing.expectEqual(@as(usize, 0), self.control.attachment_lane.active_count);
+            if (!self.allow_other_jobs) try std.testing.expectEqual(@as(usize, 0), self.control.attachment_lane.active_count);
             if (self.response) |previous| std.testing.allocator.free(previous);
             self.response = try std.testing.allocator.dupe(u8, response);
             self.calls += 1;
@@ -7284,14 +7291,6 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.expect("InvalidBridgePayload");
     try std.testing.expectEqual(@as(u64, 3), dispatcher.receive_high_water);
     try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
-    workbench.attachment_lane.stopAdmission();
-    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"4\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}}");
-    try capture.expect("shutting_down");
-    try std.testing.expectEqual(@as(u64, 4), dispatcher.receive_active.?.batch_id);
-    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
-    try capture.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"4\"}");
-    try capture.expect("\"status\":\"cleaned\"");
-    try std.testing.expect(dispatcher.receive_active == null);
     // All three source adapters reject an oversized batch before any I/O.
     const too_many_paths = [_][]const u8{"/ignored"} ** (attachment_grant.max_grants + 1);
     const TooManyFile = struct { name: []const u8 = "a.txt", sizeBytes: []const u8 = "3" };
@@ -7315,4 +7314,107 @@ test "unified add async jobs join cancellation and freeze their protocol produce
         try capture.expect("\"released\":false");
         try std.testing.expect(dispatcher.receive_active == null);
     }
+    // Retain three ready batches, then cancel a fourth without draining its job.
+    dispatcher.platform.attachment_input = .file_bytes;
+    dispatcher.platform.random_fn = Host.uniqueRandom;
+    for (8..11) |batch| {
+        var begin_buffer: [220]u8 = undefined;
+        const begin = try std.fmt.bufPrint(&begin_buffer, "{{\"generation\":\"1\",\"batchId\":\"{d}\",\"source\":{{\"kind\":\"file_bytes\",\"files\":[{{\"name\":\"file{d}.txt\",\"sizeBytes\":\"3\"}}]}}}}", .{ batch, batch });
+        var expected_calls = capture.calls + 1;
+        try capture.invoke(native, source, commands.begin_attachment_add, begin);
+        try capture.wait(&workbench, &dispatcher, expected_calls);
+        try capture.expect("\"status\":\"accepted\"");
+        var append_buffer: [180]u8 = undefined;
+        const append = try std.fmt.bufPrint(&append_buffer, "{{\"generation\":\"1\",\"batchId\":\"{d}\",\"fileIndex\":0,\"offset\":\"0\",\"dataBase64\":\"YWJj\"}}", .{batch});
+        expected_calls = capture.calls + 1;
+        try capture.invoke(native, source, commands.append_attachment_add, append);
+        try capture.wait(&workbench, &dispatcher, expected_calls);
+        var key_buffer: [80]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buffer, "{{\"generation\":\"1\",\"batchId\":\"{d}\"}}", .{batch});
+        expected_calls = capture.calls + 1;
+        try capture.invoke(native, source, commands.finish_attachment_add, key);
+        try capture.wait(&workbench, &dispatcher, expected_calls);
+        try capture.expect("\"status\":\"ready\"");
+    }
+    var debt_path_buffer: [80]u8 = undefined;
+    var debt_path: ?[]const u8 = null;
+    var untouched_id: u64 = 0;
+    for (workbench.attachments.slots) |slot| if (slot) |entry| {
+        if (std.mem.eql(u8, entry.display_name, "file9.txt")) {
+            // A directory at the original path deterministically denies deletion.
+            debt_path = try std.fmt.bufPrint(&debt_path_buffer, "0/{s}.txt", .{entry.file.name});
+            try store.deleteChecked(entry.file);
+            try store.root.createDir(std.testing.io, debt_path.?, .default_dir);
+        }
+        if (std.mem.eql(u8, entry.display_name, "file10.txt")) untouched_id = entry.id;
+    };
+    try std.testing.expect(untouched_id != 0);
+    try std.testing.expect(debt_path != null);
+    const calls_before_cancel = capture.calls;
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"11\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"pending.txt\",\"sizeBytes\":\"3\"}]}}");
+    const pending_key = "{\"generation\":\"1\",\"batchId\":\"11\"}";
+    try capture.invoke(native, source, commands.cancel_attachment_add, pending_key);
+    try std.testing.expect(dispatcher.add_cancel != null);
+    try std.testing.expectEqual(calls_before_cancel, capture.calls);
+    var other = Capture{ .control = &workbench, .allow_other_jobs = true };
+    defer other.deinit();
+    try other.invoke(native, source, commands.cancel_attachment_add, pending_key);
+    try other.expect("AttachmentCancelBusy");
+    try std.testing.expect(dispatcher.add_cancel != null);
+    try other.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"12\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"busy.txt\",\"sizeBytes\":\"3\"}]}}");
+    try other.expect("input_busy");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"12\"}");
+    try other.expect("\"status\":\"cleaned\"");
+    try other.expect("\"released\":false");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"8\"}");
+    try other.expect("\"released\":true");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"9\"}");
+    try other.expect("\"status\":\"cleanup_failed\"");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"9\"}");
+    try other.expect("\"status\":\"cleanup_failed\"");
+    try std.testing.expectEqual(@as(usize, 9), workbench.attachments.used_bytes);
+    try std.testing.expectEqual(@as(usize, 1), workbench.attachments.cleanupDebt().count);
+    try std.testing.expect(workbench.attachments.descriptorFor(untouched_id) != null);
+    try std.testing.expectEqual(@as(usize, 1), workbench.attachment_lane.active_count);
+    try std.testing.expectEqual(calls_before_cancel, capture.calls);
+
+    // Replacement resets batch allocation; an equal number is a distinct key.
+    const reconnected = native.dispatch(connect_request, source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, reconnected, "\"generation\":\"2\"") != null);
+    try other.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"11\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"busy.txt\",\"sizeBytes\":\"3\"}]}}");
+    try other.expect("input_busy");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"11\"}");
+    try other.expect("\"status\":\"cleaned\"");
+    try other.expect("\"released\":false");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"1\"}");
+    try other.expect("\"released\":false");
+    try std.testing.expectEqual(@as(u64, 1), dispatcher.add_cancel.?.generation);
+    try std.testing.expectEqual(@as(u64, 11), dispatcher.add_cancel.?.batch_id);
+    try std.testing.expectEqual(@as(usize, 6), workbench.attachments.used_bytes);
+    try capture.wait(&workbench, &dispatcher, calls_before_cancel + 2);
+    try capture.expect("\"status\":\"cleaned\"");
+    try std.testing.expect(dispatcher.add_cancel == null);
+    try std.testing.expect(workbench.attachment_io == null);
+    try std.testing.expectEqual(@as(usize, 3), workbench.attachments.used_bytes);
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"9\"}");
+    try other.expect("\"released\":false");
+    try std.testing.expectEqual(@as(usize, 1), workbench.attachments.cleanupDebt().count);
+    try store.root.deleteDir(std.testing.io, debt_path.?);
+    try std.testing.expect(workbench.attachments.retryCleanup());
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    // Once the old job settles, a new batch can start and join its own cancel.
+    const before_new = capture.calls;
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"12\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"new.txt\",\"sizeBytes\":\"3\"}]}}");
+    try capture.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"12\"}");
+    try capture.wait(&workbench, &dispatcher, before_new + 2);
+    try capture.expect("\"status\":\"cleaned\"");
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    workbench.attachment_lane.stopAdmission();
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"99\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}}");
+    try capture.expect("shutting_down");
+    try std.testing.expectEqual(@as(u64, 99), dispatcher.receive_active.?.batch_id);
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    try capture.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"99\"}");
+    try capture.expect("\"status\":\"cleaned\"");
+    try std.testing.expect(dispatcher.receive_active == null);
 }
