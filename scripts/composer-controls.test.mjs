@@ -95,6 +95,9 @@ const vite = await createServer({
 const { SelectionMenu } = await vite.ssrLoadModule(
   "/src/components/ui/SelectionMenu.tsx",
 );
+const { useNewTaskDrafts } = await vite.ssrLoadModule(
+  "/src/features/composer/useTaskDrafts.ts",
+);
 const { ComposerFooter } = await vite.ssrLoadModule(
   "/src/features/composer/ComposerFooter.tsx",
 );
@@ -1955,4 +1958,79 @@ test("long ordinary text stays intact and oversized text disables both send path
   assert.equal(send.disabled, false);
   fireEvent.keyDown(composer.textarea, { key: "Enter" });
   assert.equal(composer.submissions(), 1);
+});
+
+test("cancelling keeps one disabled action and the existing text editable", () => {
+  const composer = renderComposer({
+    attachmentsEnabled: true,
+    attachmentBusy: true,
+    attachmentCancelling: true,
+    canSubmit: false,
+    onCancelAttachments: () => assert.fail("duplicate cancel"),
+  });
+  const cancel = screen.getByRole("button", {
+    name: "Cancelling file addition…",
+  });
+  assert.equal(cancel.disabled, true);
+  assert.equal(cancel.title, "Cancelling file addition…");
+  assert.equal(composer.textarea.disabled, false);
+  fireEvent.click(cancel);
+});
+test("attachment draft handoff is synchronous and rejects changed or missing targets", () => {
+  let drafts;
+  function Harness({ id }) {
+    drafts = useNewTaskDrafts(id);
+    return null;
+  }
+  const view = render(createElement(Harness, { id: "attachment-handoff-one" }));
+  const oldCommit = drafts.commitDraft;
+  const first = {
+    kind: "multimodal",
+    text: "instruction",
+    attachments: [
+      {
+        token: "a".repeat(48),
+        kind: "file",
+        displayName: "a.txt",
+        sizeBytes: "3",
+      },
+    ],
+  };
+  act(() => {
+    assert.equal(drafts.commitDraft(null, first), false);
+    assert.equal(drafts.commitDraft("attachment-handoff-one", first), true);
+    const current = drafts.currentDraft("attachment-handoff-one");
+    assert.deepEqual(current, first);
+    const second = {
+      ...current,
+      attachments: [
+        ...current.attachments,
+        {
+          token: "b".repeat(48),
+          kind: "file",
+          displayName: "b.txt",
+          sizeBytes: "3",
+        },
+      ],
+    };
+    assert.equal(drafts.commitDraft("attachment-handoff-one", second), true);
+    assert.equal(
+      drafts.currentDraft("attachment-handoff-one").attachments.length,
+      2,
+    );
+  });
+  view.rerender(createElement(Harness, { id: "attachment-handoff-two" }));
+  act(() => {
+    assert.equal(oldCommit("attachment-handoff-one", first), false);
+    assert.equal(drafts.currentDraft("attachment-handoff-one"), null);
+  });
+  view.rerender(createElement(Harness, { id: "attachment-handoff-one" }));
+  act(() => {
+    drafts.invalidateAttachments();
+    assert.deepEqual(drafts.currentDraft("attachment-handoff-one"), {
+      kind: "text",
+      text: "instruction",
+      attachmentsReloadRequired: true,
+    });
+  });
 });

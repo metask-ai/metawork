@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
+import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import {
@@ -7,6 +8,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  readdir,
   rename,
   rm,
   symlink,
@@ -50,12 +52,16 @@ const native = path.join(
   "bin",
   "native.js",
 );
-const binary = path.join(
-  root,
-  "zig-out",
-  "bin",
-  process.platform === "win32" ? "metawork.exe" : "metawork",
-);
+// An explicit prebuilt artifact lets isolated probes avoid replacing a user's
+// development executable. Ordinary runs retain the standard build output.
+const binary = process.env.METAWORK_TEST_APP_BINARY
+  ? path.resolve(root, process.env.METAWORK_TEST_APP_BINARY)
+  : path.join(
+      root,
+      "zig-out",
+      "bin",
+      process.platform === "win32" ? "metawork.exe" : "metawork",
+    );
 const appCwd = process.env.METAWORK_TEST_APP_CWD
   ? path.resolve(root, process.env.METAWORK_TEST_APP_CWD)
   : root;
@@ -574,6 +580,7 @@ try {
     throw new Error(
       `Task snapshot disagrees with the accepted binding epoch: ${JSON.stringify(createdTask.binding)}`,
     );
+  await probeUnifiedAttachmentInputs();
   const deliveryCountBeforeRun = productDeliveryEmitCount();
   if (chromeUiProbeEnabled) {
     const evidenceDir = process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR;
@@ -1604,6 +1611,156 @@ function crc32(bytes) {
       crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
   }
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+async function probeUnifiedAttachmentInputs() {
+  const key = { generation: "1", batchId: "1" };
+  const started = performance.now();
+  const picker = await invokeBridge("metawork.attachments.beginAdd", {
+    ...key,
+    source: { kind: "picker" },
+  });
+  assertAttachmentChoice(picker, attachmentMetadata);
+  const timings = [
+    { source: "picker", elapsedMs: performance.now() - started },
+  ];
+  await assertUnifiedStagedOriginals();
+  assert.deepEqual(await invokeBridge("metawork.attachments.cancelAdd", key), {
+    status: "cleaned",
+    released: true,
+  });
+  for (const attachment of picker.attachments) {
+    assert.deepEqual(
+      await invokeBridge("metawork.attachments.release", {
+        token: attachment.token,
+      }),
+      { released: false },
+    );
+  }
+  const dropStarted = performance.now();
+  const dropKey = { generation: "1", batchId: "2" };
+  const choice =
+    process.platform === "win32"
+      ? await probeDomAttachmentBytes(dropKey)
+      : await invokeBridge("metawork.attachments.beginAdd", {
+          ...dropKey,
+          source: {
+            kind: "native_paths",
+            paths: [attachmentPngPath, attachmentJpegPath, attachmentLogPath],
+          },
+        });
+  assertAttachmentChoice(choice, attachmentMetadata);
+  const dropElapsedMs = performance.now() - dropStarted;
+  await assertUnifiedStagedOriginals();
+  timings.push({
+    source: process.platform === "win32" ? "file_bytes" : "native_paths",
+    elapsedMs: dropElapsedMs,
+  });
+  assert.deepEqual(
+    await invokeBridge("metawork.attachments.cancelAdd", dropKey),
+    { status: "cleaned", released: true },
+  );
+  for (const attachment of choice.attachments) {
+    assert.deepEqual(
+      await invokeBridge("metawork.attachments.release", {
+        token: attachment.token,
+      }),
+      { released: false },
+    );
+  }
+  console.log(
+    JSON.stringify({
+      attachmentInputProbe: {
+        timings,
+        bytes: attachmentMetadata.reduce(
+          (total, item) => total + Number(item.sizeBytes),
+          0,
+        ),
+        count: attachmentMetadata.length,
+        pickerSelection: "automation-path-injection",
+        domFiles: process.platform === "win32" ? "cdp-file-input" : null,
+        osDrag: false,
+      },
+    }),
+  );
+}
+
+async function assertUnifiedStagedOriginals() {
+  const staging = join(dataRoot, "workbench", "attachments", "0");
+  const originals = await readdir(staging);
+  assert.equal(originals.length, 3);
+  const expected = new Map([
+    [".png", createHash("sha256").update(attachmentPngBytes).digest("hex")],
+    [".jpg", createHash("sha256").update(attachmentJpegBytes).digest("hex")],
+    [".txt", createHash("sha256").update(attachmentLogText).digest("hex")],
+  ]);
+  for (const name of originals) {
+    const extension = path.extname(name);
+    assert.ok(expected.has(extension));
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(join(staging, name)))
+      hash.update(chunk);
+    assert.equal(hash.digest("hex"), expected.get(extension));
+    expected.delete(extension);
+  }
+  assert.equal(expected.size, 0);
+}
+
+async function probeDomAttachmentBytes(key) {
+  const webview = await connectTestWebView(chromeProbePort, {
+    requestTimeoutMs: commandTimeoutMs,
+  });
+  const selector = "[data-attachment-input-probe]";
+  try {
+    await webview.evaluate(
+      `(() => { const input = document.createElement('input'); input.type = 'file'; input.multiple = true; input.hidden = true; input.dataset.attachmentInputProbe = ''; document.body.append(input); })()`,
+    );
+    const document = await webview.send("DOM.getDocument");
+    const input = await webview.send("DOM.querySelector", {
+      nodeId: document.root.nodeId,
+      selector,
+    });
+    await webview.send("DOM.setFileInputFiles", {
+      nodeId: input.nodeId,
+      files: [attachmentPngPath, attachmentJpegPath, attachmentLogPath],
+    });
+    const files = await webview.evaluate(
+      `Array.from(document.querySelector(${JSON.stringify(selector)}).files, file => ({ name: file.name, sizeBytes: String(file.size) }))`,
+    );
+    assert.deepEqual(
+      await invokeWebViewBridge(webview, "metawork.attachments.beginAdd", {
+        ...key,
+        source: { kind: "file_bytes", files },
+      }),
+      { status: "accepted" },
+    );
+    for (const [fileIndex, file] of files.entries()) {
+      for (
+        let offset = 0;
+        offset < Number(file.sizeBytes);
+        offset += 128 * 1024
+      ) {
+        const accepted = await webview.evaluate(`(async () => {
+          const file = document.querySelector(${JSON.stringify(selector)}).files[${fileIndex}];
+          const bytes = new Uint8Array(await file.slice(${offset}, ${offset + 128 * 1024}).arrayBuffer());
+          let binary = '';
+          for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+          return await window.zero.invoke('metawork.attachments.appendAdd', { ...${JSON.stringify(key)}, fileIndex: ${fileIndex}, offset: ${JSON.stringify(String(offset))}, dataBase64: btoa(binary) });
+        })()`);
+        assert.deepEqual(accepted, { status: "accepted" });
+      }
+    }
+    return await invokeWebViewBridge(
+      webview,
+      "metawork.attachments.finishAdd",
+      key,
+    );
+  } finally {
+    await webview
+      .evaluate(`document.querySelector(${JSON.stringify(selector)})?.remove()`)
+      .catch(() => {});
+    webview.close();
+  }
 }
 
 function assertAttachmentChoice(actual, expected) {
@@ -2949,7 +3106,9 @@ function clipboardMarkdownFixture(targetBytes, label, checkpointKind) {
   const remaining =
     targetBytes - Buffer.byteLength(prefix) - Buffer.byteLength(suffix);
   if (remaining < 0) throw new Error("clipboard fixture target is too small");
-  const markdown = `${prefix}${"x".repeat(remaining)}${suffix}`;
+  // Keep reply padding distinct from attachment padding so the history leak
+  // assertion observes attachment content rather than the expected reply.
+  const markdown = `${prefix}${"r".repeat(remaining)}${suffix}`;
   if (Buffer.byteLength(markdown) !== targetBytes)
     throw new Error("clipboard fixture byte count is not exact");
   return markdown;

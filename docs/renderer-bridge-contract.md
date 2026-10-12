@@ -140,6 +140,14 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 
 成功的 `metawork.events.connect` 响应增加 `attachmentInput = { mode, maxChunkBytes }`，拒绝响应不带该字段。Application 选择 `mode = native_paths | file_bytes`；Windows 使用 `file_bytes`，其他平台使用 `native_paths`。`maxChunkBytes` 是非零 canonical decimal raw-byte 上限，不能超过单次 Bridge frame 预算；它只约束字节入口，不是 Product capability。Renderer 每个平台只消费一个拖放入口，不监听另一入口作重试或超时 fallback。
 
+新的添加操作使用 revision 1 上的四个 async command。整批 key 精确为非零 canonical decimal u64 string 的 `{ generation, batchId }`，绑定当前 window/connection。`beginAdd` 精确接收 key 与 `source`：`{ kind: "picker" }`、`{ kind: "native_paths", paths }` 或 `{ kind: "file_bytes", files: [{ name, sizeBytes }] }`；路径仅能来自当前 Native drop，DOM 字节仅能来自本次 File，模式必须匹配 handshake。picker 与路径在最终整批准备结束后返回 ready/cancelled/rejected；字节来源只有完整预留并初始化 writer 后才返回 accepted。
+
+`appendAdd` 精确接收 key、JSON u32 `fileIndex`、canonical u64 string `offset` 与 `dataBase64`，只允许连续文件、连续 offset 和单块上限；worker 实际写入完成后返回 accepted/cancelled/rejected。`finishAdd` 只接收 key，在 worker 完成同步、文本校验及 Native loop 图片准备后，整批原子发布 ready/cancelled/rejected；ready 沿用既有 descriptor。新拒绝原因在既有文件原因上增加 `invalid_transfer | stale_transfer | input_busy | cleanup_failed`，不新增 Snapshot 状态或轮询接口。
+
+`cancelAdd` 只接收 key。取消先撤销 writer admission，等待在途 job 关闭句柄，再撤销未消费 grants 并清理候选；只在确认静止且物理清理完成后返回 `{ status: "cleaned", released: boolean }`，删除失败返回 `{ status: "cleanup_failed" }`。未知/已清理 key 的 released=false 不得掩盖该批次的活 writer 或 cleanup debt；借用和已消费原件受 Run 所有权保护。取消先于 begin 通过有界高水位拒绝迟到请求。每个 async responder 恰好结算一次，pending 输入收到 cancelled，已完成 responder 不重复结算。begin 与 finish 无固定短超时，单块和 cancel 使用既有有界 transport budget；取消结果未知立即替换连接，Renderer 清除旧连接未发送附件并保留文字，Host ledger 不因此重置。不自动重试、重放或建立 Host TTL。
+
+既有 revision 1 命令及其 sync/async 语义保留为同一 Product 资源核心的薄适配；旧字节协议与新协议不能交叉驱动同一 writer。旧拒绝原因不增加新名字：input_busy 映射 staging_capacity，cleanup failure 作为 command failure。原件、配额及债务的 owner 与物理清理不变量见[Product 附件合同](product-architecture.md#26-文件-attachment-staging)。
+
 `metawork.attachments.choose` 是 revision 1 async command，只接受空对象。Application 在当前 source/window authority 下打开不限制扩展名的原生多选 picker。`metawork.attachments.addDropped` 是同一 revision 的 async command，payload 精确为 `{ paths }`；`paths` 是 Native SDK `drop:files` 事件给 Renderer 的非空绝对路径数组，Renderer 只能在当前事件处理中提交，不得缓存或投影。Bridge 对路径数量、编码和总字节有界校验。路径入口随后由同一个 Product Control attachment lane 完成整批 staging，结果严格为以下三种之一：
 
 ```json

@@ -19,7 +19,7 @@ const skill_grant = @import("skill_grant.zig");
 const attachment_grant = @import("attachment_grant.zig");
 
 const product_handler_count = commands.product.len;
-const async_product_handler_count = 4;
+const async_product_handler_count = 8;
 const sync_product_handler_count = product_handler_count - async_product_handler_count;
 const max_preview_in_flight: usize = 8;
 const max_diff_in_flight: usize = 8;
@@ -203,6 +203,7 @@ pub const Dispatcher = struct {
     };
     const DiffInFlight = PreviewInFlight;
     const AttachmentInFlight = struct {
+        batch_id: ?u64 = null,
         active: bool = false,
         completion_id: u64 = 0,
         generation: u64 = 0,
@@ -211,6 +212,15 @@ pub const Dispatcher = struct {
         request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined,
         request_id_len: usize = 0,
     };
+    const AddCancel = struct {
+        generation: u64,
+        window_id: native_sdk.platform.WindowId,
+        batch_id: u64,
+        responder: native_sdk.bridge.AsyncResponder,
+        request_id: [native_sdk.bridge.max_id_bytes]u8,
+        request_len: usize,
+    };
+    const AddDebt = struct { generation: u64, window_id: native_sdk.platform.WindowId, batch_id: u64, product_id: ?u64 = null, attachment_id: ?u64 = null };
     const AttachmentGrantAcceptance = struct {
         dispatcher: *Dispatcher,
         tokens: []const []const u8,
@@ -232,7 +242,9 @@ pub const Dispatcher = struct {
     skill_grants: skill_grant.State = .{},
     attachment_grants: attachment_grant.State = .{},
     receive_high_water: u64 = 0,
-    receive_active: ?struct { batch_id: u64, product_id: u64 } = null,
+    receive_active: ?struct { batch_id: u64, product_id: u64, unified: bool = false, bytes: bool = true } = null,
+    add_cancel: ?AddCancel = null,
+    add_debt: [attachment_grant.max_grants]?AddDebt = @splat(null),
     window_chrome_generation: u64 = 0,
     window_chrome_connected: bool = false,
     sequence: u64 = 0,
@@ -410,6 +422,10 @@ pub const Dispatcher = struct {
             .context = self,
             .invoke_fn = addDroppedAttachments,
         };
+        self.registered_async_handlers[4] = .{ .name = commands.begin_attachment_add, .context = self, .invoke_fn = beginAttachmentAdd };
+        self.registered_async_handlers[5] = .{ .name = commands.append_attachment_add, .context = self, .invoke_fn = appendAttachmentAdd };
+        self.registered_async_handlers[6] = .{ .name = commands.finish_attachment_add, .context = self, .invoke_fn = finishAttachmentAdd };
+        self.registered_async_handlers[7] = .{ .name = commands.cancel_attachment_add, .context = self, .invoke_fn = cancelAttachmentAdd };
         return .{
             .policy = policy,
             .registry = .{ .handlers = &self.registered_handlers },
@@ -454,8 +470,16 @@ pub const Dispatcher = struct {
     }
 
     fn releaseAllAttachmentGrants(self: *Dispatcher) void {
+        if (self.control) |workbench| for (self.attachment_in_flight) |slot| {
+            if (slot.active) _ = workbench.cancelAttachmentStaging(slot.completion_id);
+        };
         if (self.receive_active) |receive| {
-            if (self.control) |workbench| _ = workbench.cancelAttachmentReceive(receive.product_id);
+            if (self.control) |workbench| {
+                if (!workbench.attachmentWriterActive()) {
+                    _ = workbench.cancelAttachmentPreparation(receive.product_id);
+                    _ = workbench.cancelAttachmentReceive(receive.product_id);
+                }
+            }
         }
         self.receive_active = null;
         self.receive_high_water = 0;
@@ -1048,10 +1072,12 @@ pub const Dispatcher = struct {
             error.FileTooLarge => "file_too_large",
             error.TextFileTooLarge => "text_file_too_large",
             error.TooManyFiles => "too_many_files",
-            error.StagingCapacity, error.OutOfMemory, error.IdentityExhausted => "staging_capacity",
+            error.StagingCapacity, error.InputBusy, error.OutOfMemory, error.IdentityExhausted => "staging_capacity",
             error.ExecutorShuttingDown => "shutting_down",
             error.StaleTransfer => "stale_transfer",
-            error.EmptyFile, error.InvalidDisplayName => "read_failed",
+            error.EmptyFile, error.InvalidDisplayName, error.ReadFailed, error.WriteFailed => "read_failed",
+            error.FileChanged => "file_changed",
+            error.UnsupportedType => "unsupported_type",
             else => "invalid_transfer",
         };
         return std.fmt.bufPrint(output, "{{\"status\":\"rejected\",\"reason\":\"{s}\"}}", .{reason});
@@ -1087,6 +1113,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const key = try self.requireReceiveKey(invocation, parsed.value.generation, parsed.value.batchId);
         const active = self.receive_active orelse return receiveRejected(output, error.StaleTransfer);
+        if (active.unified) return receiveRejected(output, error.InvalidTransfer);
         if (active.batch_id != key.batch_id) return receiveRejected(output, error.StaleTransfer);
         const offset = handlers.parseWireId(parsed.value.offset) catch return receiveRejected(output, error.InvalidTransfer);
         var bytes: [attachment_chunk_bytes]u8 = undefined;
@@ -1108,6 +1135,7 @@ pub const Dispatcher = struct {
         defer parsed.deinit();
         const key = try self.requireReceiveKey(invocation, parsed.value.generation, parsed.value.batchId);
         const active = self.receive_active orelse return receiveRejected(output, error.StaleTransfer);
+        if (active.unified) return receiveRejected(output, error.InvalidTransfer);
         if (active.batch_id != key.batch_id) return receiveRejected(output, error.StaleTransfer);
         const workbench = try self.requireProductControl();
         var descriptors: [attachment_grant.max_grants]product_control.AttachmentDescriptor = undefined;
@@ -1122,25 +1150,40 @@ pub const Dispatcher = struct {
         var issued_storage: [attachment_grant.max_grants]attachment_grant.Issued = undefined;
         const issued = self.attachment_grants.issueBatch(key.generation, invocation.source.window_id, ids[0..ready.len], &issued_storage, self.platform.context, self.platform.random_fn) catch {
             self.releaseAttachmentDescriptors(ready);
+            if (workbench.attachmentCleanupPending(active.product_id, null)) {
+                self.rememberAddDebt(.{ .generation = key.generation, .window_id = invocation.source.window_id, .batch_id = key.batch_id, .product_id = active.product_id });
+                return error.CleanupFailed;
+            }
             return receiveRejected(output, error.StagingCapacity);
         };
         self.attachment_grants.tagReceiveBatch(ids[0..ready.len], key.batch_id);
-        errdefer _ = self.cancelReceiveBatch(key.generation, invocation.source.window_id, key.batch_id);
+        errdefer _ = self.cancelReceiveBatch(key.generation, invocation.source.window_id, key.batch_id) catch {};
         return encodeAttachmentsReady(output, ready, issued);
     }
 
-    fn cancelReceiveBatch(self: *Dispatcher, generation: u64, window_id: native_sdk.platform.WindowId, batch_id: u64) bool {
+    fn cancelReceiveBatch(self: *Dispatcher, generation: u64, window_id: native_sdk.platform.WindowId, batch_id: u64) !bool {
         const workbench = self.control orelse return false;
         var released = false;
+        var failed = false;
         if (self.receive_active) |active| if (active.batch_id == batch_id) {
-            released = workbench.cancelAttachmentReceive(active.product_id);
+            if (active.unified) return error.InvalidTransfer;
+            released = workbench.cancelAttachmentReceiveChecked(active.product_id) catch cleanup: {
+                failed = true;
+                self.rememberAddDebt(.{ .generation = generation, .window_id = window_id, .batch_id = batch_id, .product_id = active.product_id });
+                break :cleanup false;
+            };
             self.receive_active = null;
         };
         var ids: [attachment_grant.max_grants]u64 = undefined;
         for (self.attachment_grants.takeReceiveBatch(generation, window_id, batch_id, &ids)) |id| {
-            released = workbench.releaseAttachment(id) or released;
+            released = (workbench.releaseAttachmentChecked(id) catch cleanup: {
+                failed = true;
+                self.rememberAddDebt(.{ .generation = generation, .window_id = window_id, .batch_id = batch_id, .attachment_id = id });
+                break :cleanup false;
+            }) or released;
         }
         self.receive_high_water = @max(self.receive_high_water, batch_id);
+        if (failed or self.hasAddDebt(generation, window_id, batch_id)) return error.CleanupFailed;
         return released;
     }
 
@@ -1151,7 +1194,366 @@ pub const Dispatcher = struct {
         var parsed = try handlers.parsePayload(handlers.AttachmentReceiveKey, invocation.request.payload);
         defer parsed.deinit();
         const key = try self.requireReceiveKey(invocation, parsed.value.generation, parsed.value.batchId);
-        return std.fmt.bufPrint(output, "{{\"released\":{}}}", .{self.cancelReceiveBatch(key.generation, invocation.source.window_id, key.batch_id)});
+        return std.fmt.bufPrint(output, "{{\"released\":{}}}", .{try self.cancelReceiveBatch(key.generation, invocation.source.window_id, key.batch_id)});
+    }
+
+    fn requireAddKey(self: *Dispatcher, invocation: native_sdk.bridge.Invocation, generation_text: []const u8, batch_text: []const u8) !struct { generation: u64, batch_id: u64 } {
+        try self.requireBootstrapWindow(invocation.source.window_id);
+        if (!self.platform.on_main_thread_fn(self.platform.context)) return error.InvalidBridgeThread;
+        const generation = try handlers.parseWireId(generation_text);
+        const batch_id = try handlers.parseWireId(batch_text);
+        if (generation == 0 or batch_id == 0) return error.InvalidBridgeId;
+        try self.delivery.validateConnection(generation, invocation.source.window_id);
+        return .{ .generation = generation, .batch_id = batch_id };
+    }
+    fn respondAddError(responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, err: anyerror) void {
+        var buffer: [256]u8 = undefined;
+        const reason: []const u8 = switch (err) {
+            error.InputBusy => "input_busy",
+            error.CleanupFailed, error.DeleteFailed => "cleanup_failed",
+            error.StaleTransfer => "stale_transfer",
+            error.InvalidTransfer => "invalid_transfer",
+            error.UnsupportedType, error.EmptyFile, error.InvalidDisplayName => "unsupported_type",
+            error.FileTooLarge => "file_too_large",
+            error.FileChanged => "file_changed",
+            error.TooManyFiles, error.EmptyBatch => "too_many_files",
+            error.StagingCapacity, error.Capacity, error.OutOfMemory, error.IdentityExhausted => "staging_capacity",
+            error.ShuttingDown, error.ExecutorShuttingDown => "shutting_down",
+            else => "read_failed",
+        };
+        const value = std.fmt.bufPrint(&buffer, "{{\"status\":\"rejected\",\"reason\":\"{s}\"}}", .{reason}) catch unreachable;
+        responder.success(request_id, value) catch {};
+    }
+    fn addSlot(self: *Dispatcher, responder: native_sdk.bridge.AsyncResponder, request_id: []const u8, generation: u64, window: native_sdk.platform.WindowId, batch: u64) ?u64 {
+        const id = self.reserveAttachmentStaging(responder, request_id, generation, window) orelse return null;
+        for (&self.attachment_in_flight) |*slot| if (slot.active and slot.completion_id == id) {
+            slot.batch_id = batch;
+            break;
+        };
+        return id;
+    }
+    fn addPaths(paths: []const []const u8, output: []u8) ![]const u8 {
+        if (paths.len == 0 or paths.len > attachment_grant.max_grants) return error.TooManyFiles;
+        var used: usize = 0;
+        for (paths, 0..) |path, index| {
+            if (path.len == 0 or !std.fs.path.isAbsolute(path) or std.mem.indexOfScalar(u8, path, '\n') != null) return error.InvalidBridgePayload;
+            if (index != 0) {
+                if (used == output.len) return error.InvalidBridgePayload;
+                output[used] = '\n';
+                used += 1;
+            }
+            if (path.len > output.len - used) return error.InvalidBridgePayload;
+            @memcpy(output[used..][0..path.len], path);
+            used += path.len;
+        }
+        return output[0..used];
+    }
+    fn beginAttachmentAdd(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        beginAttachmentAddChecked(context, invocation, responder) catch |err| {
+            // Async admission rejection is a command failure, not an SDK event
+            // callback failure that stops the background host.
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn beginAttachmentAddChecked(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayloadWithLimit(handlers.AttachmentAddBegin, invocation.request.payload, native_sdk.platform.max_drop_paths_bytes * 2);
+        defer parsed.deinit();
+        const value = parsed.value;
+        const key = try self.requireAddKey(invocation, value.generation, value.batchId);
+        const source = value.source;
+        var shape = try handlers.parsePayloadWithLimit(std.json.Value, invocation.request.payload, native_sdk.platform.max_drop_paths_bytes * 2);
+        defer shape.deinit();
+        const source_shape = shape.value.object.get("source").?.object;
+        if (source_shape.count() != (if (source.kind == .picker) @as(usize, 1) else @as(usize, 2))) return error.InvalidBridgePayload;
+        switch (source.kind) {
+            .picker => if (source.paths != null or source.files != null) return error.InvalidBridgePayload,
+            .native_paths => if (self.platform.attachment_input != .native_paths or source.paths == null or source.files != null) return error.InvalidBridgePayload,
+            .file_bytes => if (self.platform.attachment_input != .file_bytes or source.files == null or source.paths != null) return error.InvalidBridgePayload,
+        }
+        if (key.batch_id <= self.receive_high_water) {
+            respondAddError(responder, invocation.request.id, error.StaleTransfer);
+            return;
+        }
+        self.receive_high_water = key.batch_id;
+        if (self.receive_active != null or self.add_cancel != null) {
+            respondAddError(responder, invocation.request.id, error.InputBusy);
+            return;
+        }
+        const workbench = try self.requireProductControl();
+        if (source.kind == .file_bytes) {
+            const files = source.files.?;
+            if (files.len == 0 or files.len > attachment_grant.max_grants) {
+                respondAddError(responder, invocation.request.id, error.TooManyFiles);
+                return;
+            }
+            var metadata: [attachment_grant.max_grants]product_control.AttachmentReceiveFile = undefined;
+            for (files, 0..) |file, index| {
+                const size = try handlers.parseWireId(file.sizeBytes);
+                metadata[index] = .{ .display_name = file.name, .size_bytes = std.math.cast(usize, size) orelse {
+                    respondAddError(responder, invocation.request.id, error.FileTooLarge);
+                    return;
+                } };
+            }
+            const product_id = workbench.prepareAttachmentAdd() catch |err| {
+                respondAddError(responder, invocation.request.id, err);
+                return;
+            };
+            const completion = self.addSlot(responder, invocation.request.id, key.generation, invocation.source.window_id, key.batch_id) orelse {
+                _ = workbench.cancelAttachmentPreparation(product_id);
+                respondAddError(responder, invocation.request.id, error.InputBusy);
+                return;
+            };
+            self.receive_active = .{ .batch_id = key.batch_id, .product_id = product_id, .unified = true, .bytes = true };
+            workbench.beginPreparedAttachmentBytes(completion, product_id, metadata[0..files.len]) catch |err| {
+                self.completeAttachmentStaging(completion, .{ .rejected = addRejection(err) });
+                return;
+            };
+            return;
+        }
+        var path_storage: [native_sdk.platform.max_drop_paths_bytes]u8 = undefined;
+        const paths = if (source.kind == .native_paths) addPaths(source.paths.?, &path_storage) catch |err| {
+            if (err != error.TooManyFiles) return err;
+            respondAddError(responder, invocation.request.id, err);
+            return;
+        } else &.{};
+        const product_id = workbench.prepareAttachmentAdd() catch |err| {
+            respondAddError(responder, invocation.request.id, err);
+            return;
+        };
+        const completion = self.addSlot(responder, invocation.request.id, key.generation, invocation.source.window_id, key.batch_id) orelse {
+            _ = workbench.cancelAttachmentPreparation(product_id);
+            respondAddError(responder, invocation.request.id, error.InputBusy);
+            return;
+        };
+        self.receive_active = .{ .batch_id = key.batch_id, .product_id = product_id, .unified = true, .bytes = false };
+        var dialog_storage: [native_sdk.platform.max_dialog_paths_bytes]u8 = undefined;
+        const selected = if (source.kind == .native_paths) native_sdk.platform.OpenDialogResult{ .paths = paths, .count = source.paths.?.len } else if (self.automation.active()) automation: {
+            const selected_paths = self.automation.attachmentPaths() orelse {
+                _ = workbench.cancelAttachmentPreparation(product_id);
+                self.completeAttachmentStaging(completion, .{ .rejected = .read_failed });
+                return;
+            };
+            const count = countAutomationAttachmentPaths(selected_paths) orelse {
+                _ = workbench.cancelAttachmentPreparation(product_id);
+                self.completeAttachmentStaging(completion, .{ .rejected = .read_failed });
+                return;
+            };
+            break :automation native_sdk.platform.OpenDialogResult{ .paths = selected_paths, .count = count };
+        } else self.platform.show_open_dialog_fn(self.platform.context, .{ .title = "Choose files", .allow_directories = false, .allow_multiple = true }, &dialog_storage) catch {
+            _ = workbench.cancelAttachmentPreparation(product_id);
+            self.completeAttachmentStaging(completion, .{ .rejected = .read_failed });
+            return;
+        };
+        const active = self.receive_active;
+        if (active == null or active.?.product_id != product_id or self.delivery.connectedGeneration() != key.generation or self.delivery.connectedWindow() != invocation.source.window_id) {
+            _ = workbench.cancelAttachmentPreparation(product_id);
+            self.completeAttachmentStaging(completion, .cancelled);
+            return;
+        }
+        if (selected.count == 0) {
+            _ = workbench.cancelAttachmentPreparation(product_id);
+            self.completeAttachmentStaging(completion, .cancelled);
+            return;
+        }
+        workbench.beginPreparedAttachmentStaging(completion, product_id, selected.count, selected.paths) catch |err| {
+            _ = workbench.cancelAttachmentPreparation(product_id);
+            self.completeAttachmentStaging(completion, .{ .rejected = addRejection(err) });
+        };
+    }
+    fn addRejection(err: anyerror) product_control.AttachmentStagingRejection {
+        return switch (err) {
+            error.InvalidTransfer => .invalid_transfer,
+            error.StaleTransfer => .stale_transfer,
+            error.InputBusy => .input_busy,
+            error.CleanupFailed, error.DeleteFailed => .cleanup_failed,
+            error.UnsupportedType, error.EmptyFile, error.InvalidDisplayName => .unsupported_type,
+            error.TooManyFiles, error.EmptyBatch => .too_many_files,
+            error.FileTooLarge => .file_too_large,
+            error.FileChanged => .file_changed,
+            error.StagingCapacity, error.OutOfMemory, error.Capacity, error.IdentityExhausted => .staging_capacity,
+            error.ShuttingDown, error.ExecutorShuttingDown => .shutting_down,
+            else => .read_failed,
+        };
+    }
+    fn appendAttachmentAdd(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        appendAttachmentAddChecked(context, invocation, responder) catch |err| {
+            // Async admission rejection is a command failure, not an SDK event
+            // callback failure that stops the background host.
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn appendAttachmentAddChecked(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayloadWithLimit(handlers.AttachmentReceiveAppend, invocation.request.payload, 192 * 1024);
+        defer parsed.deinit();
+        const value = parsed.value;
+        const key = try self.requireAddKey(invocation, value.generation, value.batchId);
+        const active = self.receive_active orelse {
+            respondAddError(responder, invocation.request.id, error.StaleTransfer);
+            return;
+        };
+        if (!active.unified or !active.bytes or active.batch_id != key.batch_id) {
+            respondAddError(responder, invocation.request.id, error.InvalidTransfer);
+            return;
+        }
+        if (self.add_cancel != null) {
+            respondAttachmentCancelled(responder, invocation.request.id);
+            return;
+        }
+        var bytes: [attachment_chunk_bytes]u8 = undefined;
+        defer std.crypto.secureZero(u8, &bytes);
+        const decoder = std.base64.standard.Decoder;
+        const size = decoder.calcSizeForSlice(value.dataBase64) catch {
+            respondAddError(responder, invocation.request.id, error.InvalidTransfer);
+            return;
+        };
+        if (size == 0 or size > bytes.len) {
+            respondAddError(responder, invocation.request.id, error.InvalidTransfer);
+            return;
+        }
+        decoder.decode(bytes[0..size], value.dataBase64) catch {
+            respondAddError(responder, invocation.request.id, error.InvalidTransfer);
+            return;
+        };
+        const offset = std.math.cast(usize, try handlers.parseWireId(value.offset)) orelse {
+            respondAddError(responder, invocation.request.id, error.InvalidTransfer);
+            return;
+        };
+        const completion = self.addSlot(responder, invocation.request.id, key.generation, invocation.source.window_id, key.batch_id) orelse {
+            respondAddError(responder, invocation.request.id, error.InputBusy);
+            return;
+        };
+        (try self.requireProductControl()).appendAttachmentBytes(completion, active.product_id, value.fileIndex, offset, bytes[0..size]) catch |err| {
+            self.completeAttachmentStaging(completion, .{ .rejected = addRejection(err) });
+        };
+    }
+    fn finishAttachmentAdd(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        finishAttachmentAddChecked(context, invocation, responder) catch |err| {
+            // Async admission rejection is a command failure, not an SDK event
+            // callback failure that stops the background host.
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn finishAttachmentAddChecked(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.AttachmentReceiveKey, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requireAddKey(invocation, parsed.value.generation, parsed.value.batchId);
+        const active = self.receive_active orelse {
+            respondAddError(responder, invocation.request.id, error.StaleTransfer);
+            return;
+        };
+        if (!active.unified or !active.bytes or active.batch_id != key.batch_id) {
+            respondAddError(responder, invocation.request.id, error.InvalidTransfer);
+            return;
+        }
+        if (self.add_cancel != null) {
+            respondAttachmentCancelled(responder, invocation.request.id);
+            return;
+        }
+        const completion = self.addSlot(responder, invocation.request.id, key.generation, invocation.source.window_id, key.batch_id) orelse {
+            respondAddError(responder, invocation.request.id, error.InputBusy);
+            return;
+        };
+        (try self.requireProductControl()).finishAttachmentBytes(completion, active.product_id) catch |err| {
+            self.completeAttachmentStaging(completion, .{ .rejected = addRejection(err) });
+        };
+    }
+    fn rememberAddDebt(self: *Dispatcher, debt: AddDebt) void {
+        for (self.add_debt) |slot| if (slot) |existing| {
+            if (std.meta.eql(existing, debt)) return;
+        };
+        if (self.control) |workbench| for (&self.add_debt) |*slot| if (slot.*) |existing| {
+            if (!workbench.attachmentCleanupPending(existing.product_id, existing.attachment_id)) slot.* = null;
+        };
+        for (&self.add_debt) |*slot| if (slot.* == null) {
+            slot.* = debt;
+            return;
+        };
+        // Each debt owns at least one Product slot; exceeding this is an invariant failure.
+        unreachable;
+    }
+    fn cleanAdd(self: *Dispatcher, generation: u64, window: native_sdk.platform.WindowId, batch: u64) !bool {
+        const workbench = try self.requireProductControl();
+        var released = false;
+        var failed = false;
+        if (self.receive_active) |active| if (active.unified and active.batch_id == batch) {
+            released = workbench.cancelAttachmentPreparation(active.product_id);
+            released = (workbench.cancelAttachmentReceiveChecked(active.product_id) catch debt_failed: {
+                self.rememberAddDebt(.{ .generation = generation, .window_id = window, .batch_id = batch, .product_id = active.product_id });
+                failed = true;
+                break :debt_failed false;
+            }) or released;
+            self.receive_active = null;
+        };
+        var ids: [attachment_grant.max_grants]u64 = undefined;
+        for (self.attachment_grants.takeReceiveBatch(generation, window, batch, &ids)) |id| {
+            released = (workbench.releaseAttachmentChecked(id) catch debt_failed: {
+                self.rememberAddDebt(.{ .generation = generation, .window_id = window, .batch_id = batch, .attachment_id = id });
+                failed = true;
+                break :debt_failed false;
+            }) or released;
+        }
+        for (&self.add_debt) |*slot| if (slot.*) |debt| {
+            if (!workbench.attachmentCleanupPending(debt.product_id, debt.attachment_id)) {
+                slot.* = null;
+                continue;
+            }
+            if (debt.generation == generation and debt.window_id == window and debt.batch_id == batch) failed = true;
+        };
+        if (failed) return error.CleanupFailed;
+        return released;
+    }
+    fn respondAddCancel(responder: native_sdk.bridge.AsyncResponder, id: []const u8, cleaned: bool, released: bool) void {
+        if (!cleaned) {
+            responder.success(id, "{\"status\":\"cleanup_failed\"}") catch {};
+            return;
+        }
+        var buffer: [64]u8 = undefined;
+        const value = std.fmt.bufPrint(&buffer, "{{\"status\":\"cleaned\",\"released\":{}}}", .{released}) catch unreachable;
+        responder.success(id, value) catch {};
+    }
+    fn cancelAttachmentAdd(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        cancelAttachmentAddChecked(context, invocation, responder) catch |err| {
+            // Async admission rejection is a command failure, not an SDK event
+            // callback failure that stops the background host.
+            responder.fail(invocation.request.id, .handler_failed, @errorName(err)) catch {};
+        };
+    }
+    fn cancelAttachmentAddChecked(context: *anyopaque, invocation: native_sdk.bridge.Invocation, responder: native_sdk.bridge.AsyncResponder) anyerror!void {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        var parsed = try handlers.parsePayload(handlers.AttachmentReceiveKey, invocation.request.payload);
+        defer parsed.deinit();
+        const key = try self.requireAddKey(invocation, parsed.value.generation, parsed.value.batchId);
+        self.receive_high_water = @max(self.receive_high_water, key.batch_id);
+        if (self.add_cancel) |pending| {
+            if (pending.generation == key.generation and pending.window_id == invocation.source.window_id and pending.batch_id == key.batch_id) return error.AttachmentCancelBusy;
+        }
+        for (self.attachment_in_flight) |slot| if (slot.active and slot.batch_id == key.batch_id and slot.generation == key.generation and slot.window_id == invocation.source.window_id) {
+            if ((try self.requireProductControl()).cancelAttachmentStaging(slot.completion_id)) {
+                var cancel: AddCancel = .{ .generation = key.generation, .window_id = invocation.source.window_id, .batch_id = key.batch_id, .responder = responder, .request_id = undefined, .request_len = invocation.request.id.len };
+                @memcpy(cancel.request_id[0..cancel.request_len], invocation.request.id);
+                self.add_cancel = cancel;
+                return;
+            }
+            // Native picker may still be open; abandon its authority now, and
+            // ignore the modal result when its handler resumes.
+            self.completeAttachmentStaging(slot.completion_id, .cancelled);
+        };
+        const released = self.cleanAdd(key.generation, invocation.source.window_id, key.batch_id) catch {
+            respondAddCancel(responder, invocation.request.id, false, false);
+            return;
+        };
+        respondAddCancel(responder, invocation.request.id, true, released);
     }
 
     fn chooseAttachments(
@@ -1313,6 +1715,8 @@ pub const Dispatcher = struct {
             self.completeAttachmentRejected(completion_id, switch (err) {
                 error.ShuttingDown => .shutting_down,
                 error.Capacity, error.OutOfMemory => .staging_capacity,
+                error.InputBusy => .input_busy,
+                error.CleanupFailed => .cleanup_failed,
                 else => .read_failed,
             });
         };
@@ -1358,51 +1762,94 @@ pub const Dispatcher = struct {
         self.completeAttachmentStaging(completion_id, result);
     }
 
-    fn completeAttachmentStaging(
-        self: *Dispatcher,
-        completion_id: u64,
-        result: product_control.AttachmentStagingResult,
-    ) void {
+    fn completeAttachmentStaging(self: *Dispatcher, completion_id: u64, result: product_control.AttachmentStagingResult) void {
         for (&self.attachment_in_flight) |*slot| {
             if (!slot.active or slot.completion_id != completion_id) continue;
             const responder = slot.responder;
             const generation = slot.generation;
             const window_id = slot.window_id;
+            const batch_id = slot.batch_id;
             var request_id_storage: [native_sdk.bridge.max_id_bytes]u8 = undefined;
             @memcpy(request_id_storage[0..slot.request_id_len], slot.request_id_storage[0..slot.request_id_len]);
             const request_id = request_id_storage[0..slot.request_id_len];
             slot.* = .{};
+            const cancel = if (self.add_cancel) |value| if (value.batch_id == batch_id and value.generation == generation and value.window_id == window_id) value else null else null;
+            if (cancel) |pending| {
+                self.add_cancel = null;
+                const cleaned = (result != .rejected or result.rejected != .cleanup_failed);
+                const released = self.cleanAdd(generation, window_id, batch_id.?) catch false;
+                respondAttachmentCancelled(responder, request_id);
+                respondAddCancel(pending.responder, pending.request_id[0..pending.request_len], cleaned and !self.hasAddDebt(generation, window_id, batch_id.?), released or cleaned);
+                return;
+            }
             switch (result) {
-                .rejected => |reason| respondAttachmentRejected(responder, request_id, reason),
+                .accepted => responder.success(request_id, "{\"status\":\"accepted\"}") catch {},
+                .cancelled => {
+                    if (batch_id) |batch| {
+                        _ = self.cleanAdd(generation, window_id, batch) catch {
+                            respondAddError(responder, request_id, error.CleanupFailed);
+                            return;
+                        };
+                    }
+                    respondAttachmentCancelled(responder, request_id);
+                },
+                .rejected => |reason| {
+                    if (batch_id != null) {
+                        var buffer: [256]u8 = undefined;
+                        const encoded = std.fmt.bufPrint(&buffer, "{{\"status\":\"rejected\",\"reason\":\"{s}\"}}", .{@tagName(reason)}) catch unreachable;
+                        responder.success(request_id, encoded) catch {};
+                    } else respondAttachmentRejected(responder, request_id, reason);
+                },
                 .ready => |descriptors| {
-                    if (self.delivery.connectedGeneration() != generation or
-                        self.delivery.connectedWindow() != window_id)
-                    {
+                    if (self.delivery.connectedGeneration() != generation or self.delivery.connectedWindow() != window_id) {
                         self.releaseAttachmentDescriptors(descriptors);
-                        respondAttachmentRejected(responder, request_id, .shutting_down);
+                        respondAttachmentCancelled(responder, request_id);
                         return;
                     }
                     var ids: [attachment_grant.max_grants]u64 = undefined;
                     for (descriptors, 0..) |descriptor, index| ids[index] = descriptor.id;
                     var issued_storage: [attachment_grant.max_grants]attachment_grant.Issued = undefined;
-                    const issued = self.attachment_grants.issueBatch(
-                        generation,
-                        window_id,
-                        ids[0..descriptors.len],
-                        &issued_storage,
-                        self.platform.context,
-                        self.platform.random_fn,
-                    ) catch {
+                    const issued = self.attachment_grants.issueBatch(generation, window_id, ids[0..descriptors.len], &issued_storage, self.platform.context, self.platform.random_fn) catch {
                         self.releaseAttachmentDescriptors(descriptors);
+                        if (batch_id) |batch| {
+                            _ = self.cleanAdd(generation, window_id, batch) catch {};
+                        }
                         respondAttachmentRejected(responder, request_id, .staging_capacity);
                         return;
                     };
-                    respondAttachmentsReady(responder, request_id, descriptors, issued);
+                    if (batch_id) |batch| self.attachment_grants.tagReceiveBatch(ids[0..descriptors.len], batch);
+                    var buffer: [native_sdk.bridge.max_result_bytes]u8 = undefined;
+                    const encoded = encodeAttachmentsReady(&buffer, descriptors, issued) catch {
+                        if (batch_id) |batch| {
+                            _ = self.cleanAdd(generation, window_id, batch) catch {};
+                        } else {
+                            for (issued) |grant| _ = self.attachment_grants.release(grant.token, generation, window_id);
+                            self.releaseAttachmentDescriptors(descriptors);
+                        }
+                        responderEncodingFailure(responder, request_id);
+                        return;
+                    };
+                    if (batch_id != null) self.receive_active = null;
+                    responder.success(request_id, encoded) catch {
+                        if (batch_id) |batch| {
+                            _ = self.cleanAdd(generation, window_id, batch) catch {};
+                        } else {
+                            for (issued) |grant| _ = self.attachment_grants.release(grant.token, generation, window_id);
+                            self.releaseAttachmentDescriptors(descriptors);
+                        }
+                    };
                 },
             }
             return;
         }
         if (result == .ready) self.releaseAttachmentDescriptors(result.ready);
+    }
+    fn hasAddDebt(self: *Dispatcher, generation: u64, window: native_sdk.platform.WindowId, batch: u64) bool {
+        const workbench = self.control orelse return false;
+        for (self.add_debt) |slot| if (slot) |debt| {
+            if (debt.generation == generation and debt.window_id == window and debt.batch_id == batch and workbench.attachmentCleanupPending(debt.product_id, debt.attachment_id)) return true;
+        };
+        return false;
     }
 
     fn completeAttachmentRejected(
@@ -1437,8 +1884,13 @@ pub const Dispatcher = struct {
         request_id: []const u8,
         reason: product_control.AttachmentStagingRejection,
     ) void {
+        if (reason == .cleanup_failed) {
+            responder.fail(request_id, .internal_error, "Attachment cleanup failed") catch {};
+            return;
+        }
+        const name = if (reason == .input_busy) "staging_capacity" else @tagName(reason);
         var buffer: [256]u8 = undefined;
-        const value = std.fmt.bufPrint(&buffer, "{{\"status\":\"rejected\",\"reason\":\"{s}\"}}", .{@tagName(reason)}) catch {
+        const value = std.fmt.bufPrint(&buffer, "{{\"status\":\"rejected\",\"reason\":\"{s}\"}}", .{name}) catch {
             responder.fail(request_id, .internal_error, "Attachment result encoding failed") catch {};
             return;
         };
@@ -2609,7 +3061,7 @@ pub const Dispatcher = struct {
             invocation.source.window_id,
         );
         const released = if (id) |attachment_id|
-            (try self.requireProductControl()).releaseAttachment(attachment_id)
+            try (try self.requireProductControl()).releaseAttachmentChecked(attachment_id)
         else
             false;
         return std.fmt.bufPrint(output, "{{\"released\":{}}}", .{released});
@@ -6694,4 +7146,275 @@ test "window chrome environment and action ack match the shared Renderer wire fi
     const expected_ack = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value.object.get("handled").?, .{});
     defer std.testing.allocator.free(expected_ack);
     try std.testing.expectEqualStrings(expected_ack, try Dispatcher.encodeWindowChromeHandled(&output, 7));
+}
+
+test "unified add async jobs join cancellation and freeze their protocol producer" {
+    const fixture = @import("lifecycle_fixture");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    var store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
+    defer store.deinit();
+    var wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("attachment_receive.fixture"), .{});
+    defer wire.deinit();
+    var fixture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer fixture_arena.deinit();
+    const Host = struct {
+        fn wake(_: ?*anyopaque) anyerror!void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
+        fn cancel(_: ?*anyopaque, _: u64) anyerror!void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, out: []u8) bool {
+            @memset(out, 7);
+            return true;
+        }
+        fn uniqueRandom(_: ?*anyopaque, out: []u8) bool {
+            std.Io.randomSecure(std.testing.io, out) catch return false;
+            return true;
+        }
+        fn picker(_: ?*anyopaque, _: native_sdk.platform.OpenDialogOptions, _: []u8) anyerror!native_sdk.platform.OpenDialogResult {
+            return .{ .count = attachment_grant.max_grants + 1, .paths = "/ignored" };
+        }
+    };
+    fixture.fake_core.reset();
+    const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+    var configuration = fixture.productControlConfiguration();
+    configuration.attachment_store = &store;
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
+    var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
+        .attachment_input = .file_bytes,
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .show_open_dialog_fn = Host.picker,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_gesture_fn = undefined,
+        .window_chrome_control_fn = undefined,
+        .window_chrome_disconnect_fn = undefined,
+    }, .{}, 3);
+    defer {
+        dispatcher.deinit();
+        workbench.shutdownExecutor();
+        runtime.shutdown() catch unreachable;
+        workbench.deinit();
+        runtime.deinit();
+    }
+    const native = dispatcher.register(@import("policy.zig").product(.release));
+    const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    var output: [16 * 1024]u8 = undefined;
+    const connect_request = "{\"id\":\"c\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}";
+    const connected = native.dispatch(connect_request, source, &output);
+    const expected_connect = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("connect").?, .{});
+    try std.testing.expect(std.mem.indexOf(u8, connected, expected_connect) != null);
+    const Capture = struct {
+        response: ?[]u8 = null,
+        calls: usize = 0,
+        control: *product_control.Runtime,
+        allow_other_jobs: bool = false,
+        fn receive(context: *anyopaque, _: native_sdk.bridge.Source, response: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!self.allow_other_jobs) try std.testing.expectEqual(@as(usize, 0), self.control.attachment_lane.active_count);
+            if (self.response) |previous| std.testing.allocator.free(previous);
+            self.response = try std.testing.allocator.dupe(u8, response);
+            self.calls += 1;
+        }
+        fn deinit(self: *@This()) void {
+            if (self.response) |value| std.testing.allocator.free(value);
+        }
+        fn invoke(self: *@This(), n: native_sdk.bridge.Dispatcher, source_value: native_sdk.bridge.Source, command: []const u8, payload: []const u8) !void {
+            const handler = n.async_registry.find(command).?;
+            try handler.invoke_fn(handler.context, .{ .request = .{ .id = "add-test", .command = command, .payload = payload }, .source = source_value }, .{ .context = self, .source = source_value, .respond_fn = receive });
+        }
+        fn wait(self: *@This(), control: *product_control.Runtime, boundary: *Dispatcher, count: usize) !void {
+            var attempts: usize = 0;
+            while (self.calls < count and attempts < 2000) : (attempts += 1) {
+                control.drainAttachmentStagingCompletions(boundary.attachmentStagingSink());
+                std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+            }
+            try std.testing.expectEqual(count, self.calls);
+        }
+        fn expect(self: *@This(), text: []const u8) !void {
+            try std.testing.expect(std.mem.indexOf(u8, self.response.?, text) != null);
+        }
+    };
+    var capture = Capture{ .control = &workbench };
+    defer capture.deinit();
+    const key1 = "{\"generation\":\"1\",\"batchId\":\"1\"}";
+    try capture.invoke(native, source, commands.cancel_attachment_add, key1);
+    try capture.expect("\"status\":\"cleaned\"");
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"1\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}}");
+    try capture.expect("stale_transfer");
+    const key2 = "{\"generation\":\"1\",\"batchId\":\"2\"}";
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"2\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}}");
+    try std.testing.expectEqual(@as(usize, 2), capture.calls);
+    try capture.invoke(native, source, commands.cancel_attachment_add, key2);
+    try std.testing.expectEqual(@as(usize, 2), capture.calls);
+    try capture.wait(&workbench, &dispatcher, 4);
+    try capture.expect("\"status\":\"cleaned\"");
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    var add_wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("attachment_add.fixture"), .{});
+    defer add_wire.deinit();
+    const add_begin = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), add_wire.value.object.get("begin").?, .{});
+    const key3 = "{\"generation\":\"1\",\"batchId\":\"3\"}";
+    try capture.invoke(native, source, commands.begin_attachment_add, add_begin);
+    try capture.wait(&workbench, &dispatcher, 5);
+    try capture.expect("accepted");
+    const legacy = native.dispatch("{\"id\":\"r\",\"command\":\"metawork.attachments.finishReceive\",\"payload\":{\"generation\":\"1\",\"batchId\":\"3\"}}", source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, legacy, "invalid_transfer") != null);
+    try capture.invoke(native, source, commands.append_attachment_add, "{\"generation\":\"1\",\"batchId\":\"3\",\"fileIndex\":0,\"offset\":\"0\",\"dataBase64\":\"YWJj\"}");
+    try capture.wait(&workbench, &dispatcher, 6);
+    try capture.expect("accepted");
+    try capture.invoke(native, source, commands.finish_attachment_add, key3);
+    try capture.wait(&workbench, &dispatcher, 7);
+    const expected_ready = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), add_wire.value.object.get("ready").?, .{});
+    try capture.expect(expected_ready);
+    try capture.invoke(native, source, commands.cancel_attachment_add, key3);
+    try capture.expect("\"released\":true");
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    try capture.invoke(native, .{ .origin = "zero://app", .window_id = 4 }, commands.cancel_attachment_add, key3);
+    try capture.expect("EventWindowMismatch");
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"4\",\"source\":{\"kind\":\"native_paths\",\"paths\":[\"C:/tmp/a.txt\"]}}");
+    try capture.expect("InvalidBridgePayload");
+    try std.testing.expectEqual(@as(u64, 3), dispatcher.receive_high_water);
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    // All three source adapters reject an oversized batch before any I/O.
+    const too_many_paths = [_][]const u8{"/ignored"} ** (attachment_grant.max_grants + 1);
+    const TooManyFile = struct { name: []const u8 = "a.txt", sizeBytes: []const u8 = "3" };
+    const too_many_files = [_]TooManyFile{.{}} ** (attachment_grant.max_grants + 1);
+    const inputs = [_][]const u8{
+        try std.json.Stringify.valueAlloc(fixture_arena.allocator(), .{ .generation = "1", .batchId = "5", .source = .{ .kind = "picker" } }, .{}),
+        try std.json.Stringify.valueAlloc(fixture_arena.allocator(), .{ .generation = "1", .batchId = "6", .source = .{ .kind = "native_paths", .paths = too_many_paths } }, .{}),
+        try std.json.Stringify.valueAlloc(fixture_arena.allocator(), .{ .generation = "1", .batchId = "7", .source = .{ .kind = "file_bytes", .files = too_many_files } }, .{}),
+    };
+    for (inputs, 0..) |input, index| {
+        dispatcher.platform.attachment_input = if (index == 1) .native_paths else .file_bytes;
+        try capture.invoke(native, source, commands.begin_attachment_add, input);
+        try capture.expect("\"reason\":\"too_many_files\"");
+        try std.testing.expect(workbench.attachments.preparing == null);
+        try std.testing.expect(workbench.attachment_io == null);
+        try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+        var key_buffer: [80]u8 = undefined;
+        const cancel_key = try std.fmt.bufPrint(&key_buffer, "{{\"generation\":\"1\",\"batchId\":\"{d}\"}}", .{index + 5});
+        try capture.invoke(native, source, commands.cancel_attachment_add, cancel_key);
+        try capture.expect("\"status\":\"cleaned\"");
+        try capture.expect("\"released\":false");
+        try std.testing.expect(dispatcher.receive_active == null);
+    }
+    // Retain three ready batches, then cancel a fourth without draining its job.
+    dispatcher.platform.attachment_input = .file_bytes;
+    dispatcher.platform.random_fn = Host.uniqueRandom;
+    for (8..11) |batch| {
+        var begin_buffer: [220]u8 = undefined;
+        const begin = try std.fmt.bufPrint(&begin_buffer, "{{\"generation\":\"1\",\"batchId\":\"{d}\",\"source\":{{\"kind\":\"file_bytes\",\"files\":[{{\"name\":\"file{d}.txt\",\"sizeBytes\":\"3\"}}]}}}}", .{ batch, batch });
+        var expected_calls = capture.calls + 1;
+        try capture.invoke(native, source, commands.begin_attachment_add, begin);
+        try capture.wait(&workbench, &dispatcher, expected_calls);
+        try capture.expect("\"status\":\"accepted\"");
+        var append_buffer: [180]u8 = undefined;
+        const append = try std.fmt.bufPrint(&append_buffer, "{{\"generation\":\"1\",\"batchId\":\"{d}\",\"fileIndex\":0,\"offset\":\"0\",\"dataBase64\":\"YWJj\"}}", .{batch});
+        expected_calls = capture.calls + 1;
+        try capture.invoke(native, source, commands.append_attachment_add, append);
+        try capture.wait(&workbench, &dispatcher, expected_calls);
+        var key_buffer: [80]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buffer, "{{\"generation\":\"1\",\"batchId\":\"{d}\"}}", .{batch});
+        expected_calls = capture.calls + 1;
+        try capture.invoke(native, source, commands.finish_attachment_add, key);
+        try capture.wait(&workbench, &dispatcher, expected_calls);
+        try capture.expect("\"status\":\"ready\"");
+    }
+    var debt_path_buffer: [80]u8 = undefined;
+    var debt_path: ?[]const u8 = null;
+    var untouched_id: u64 = 0;
+    for (workbench.attachments.slots) |slot| if (slot) |entry| {
+        if (std.mem.eql(u8, entry.display_name, "file9.txt")) {
+            // A directory at the original path deterministically denies deletion.
+            debt_path = try std.fmt.bufPrint(&debt_path_buffer, "0/{s}.txt", .{entry.file.name});
+            try store.deleteChecked(entry.file);
+            try store.root.createDir(std.testing.io, debt_path.?, .default_dir);
+        }
+        if (std.mem.eql(u8, entry.display_name, "file10.txt")) untouched_id = entry.id;
+    };
+    try std.testing.expect(untouched_id != 0);
+    try std.testing.expect(debt_path != null);
+    const calls_before_cancel = capture.calls;
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"11\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"pending.txt\",\"sizeBytes\":\"3\"}]}}");
+    const pending_key = "{\"generation\":\"1\",\"batchId\":\"11\"}";
+    try capture.invoke(native, source, commands.cancel_attachment_add, pending_key);
+    try std.testing.expect(dispatcher.add_cancel != null);
+    try std.testing.expectEqual(calls_before_cancel, capture.calls);
+    var other = Capture{ .control = &workbench, .allow_other_jobs = true };
+    defer other.deinit();
+    try other.invoke(native, source, commands.cancel_attachment_add, pending_key);
+    try other.expect("AttachmentCancelBusy");
+    try std.testing.expect(dispatcher.add_cancel != null);
+    try other.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"12\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"busy.txt\",\"sizeBytes\":\"3\"}]}}");
+    try other.expect("input_busy");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"12\"}");
+    try other.expect("\"status\":\"cleaned\"");
+    try other.expect("\"released\":false");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"8\"}");
+    try other.expect("\"released\":true");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"9\"}");
+    try other.expect("\"status\":\"cleanup_failed\"");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"9\"}");
+    try other.expect("\"status\":\"cleanup_failed\"");
+    try std.testing.expectEqual(@as(usize, 9), workbench.attachments.used_bytes);
+    try std.testing.expectEqual(@as(usize, 1), workbench.attachments.cleanupDebt().count);
+    try std.testing.expect(workbench.attachments.descriptorFor(untouched_id) != null);
+    try std.testing.expectEqual(@as(usize, 1), workbench.attachment_lane.active_count);
+    try std.testing.expectEqual(calls_before_cancel, capture.calls);
+
+    // Replacement resets batch allocation; an equal number is a distinct key.
+    const reconnected = native.dispatch(connect_request, source, &output);
+    try std.testing.expect(std.mem.indexOf(u8, reconnected, "\"generation\":\"2\"") != null);
+    try other.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"11\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"busy.txt\",\"sizeBytes\":\"3\"}]}}");
+    try other.expect("input_busy");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"11\"}");
+    try other.expect("\"status\":\"cleaned\"");
+    try other.expect("\"released\":false");
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"1\"}");
+    try other.expect("\"released\":false");
+    try std.testing.expectEqual(@as(u64, 1), dispatcher.add_cancel.?.generation);
+    try std.testing.expectEqual(@as(u64, 11), dispatcher.add_cancel.?.batch_id);
+    try std.testing.expectEqual(@as(usize, 6), workbench.attachments.used_bytes);
+    try capture.wait(&workbench, &dispatcher, calls_before_cancel + 2);
+    try capture.expect("\"status\":\"cleaned\"");
+    try std.testing.expect(dispatcher.add_cancel == null);
+    try std.testing.expect(workbench.attachment_io == null);
+    try std.testing.expectEqual(@as(usize, 3), workbench.attachments.used_bytes);
+    try other.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"9\"}");
+    try other.expect("\"released\":false");
+    try std.testing.expectEqual(@as(usize, 1), workbench.attachments.cleanupDebt().count);
+    try store.root.deleteDir(std.testing.io, debt_path.?);
+    try std.testing.expect(workbench.attachments.retryCleanup());
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    // Once the old job settles, a new batch can start and join its own cancel.
+    const before_new = capture.calls;
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"12\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"new.txt\",\"sizeBytes\":\"3\"}]}}");
+    try capture.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"12\"}");
+    try capture.wait(&workbench, &dispatcher, before_new + 2);
+    try capture.expect("\"status\":\"cleaned\"");
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    workbench.attachment_lane.stopAdmission();
+    try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"2\",\"batchId\":\"99\",\"source\":{\"kind\":\"file_bytes\",\"files\":[{\"name\":\"a.txt\",\"sizeBytes\":\"3\"}]}}");
+    try capture.expect("shutting_down");
+    try std.testing.expectEqual(@as(u64, 99), dispatcher.receive_active.?.batch_id);
+    try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    try capture.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"99\"}");
+    try capture.expect("\"status\":\"cleaned\"");
+    try std.testing.expect(dispatcher.receive_active == null);
 }

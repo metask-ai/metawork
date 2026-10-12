@@ -461,6 +461,20 @@ export type AttachmentChooseResult =
         | "shutting_down";
     };
 
+export type AttachmentAddResult =
+  | AttachmentChooseResult
+  | {
+      status: "rejected";
+      reason:
+        "invalid_transfer" | "stale_transfer" | "input_busy" | "cleanup_failed";
+    };
+export type AttachmentAddAcceptance =
+  { status: "accepted" } | Exclude<AttachmentAddResult, { status: "ready" }>;
+export type AttachmentAddBeginResult =
+  AttachmentAddResult | { status: "accepted" };
+export type AttachmentCancelResult =
+  { status: "cleaned"; released: boolean } | { status: "cleanup_failed" };
+
 export type AttachmentReceiveResult =
   | AttachmentChooseResult
   | { status: "rejected"; reason: "invalid_transfer" | "stale_transfer" };

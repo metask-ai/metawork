@@ -505,19 +505,19 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 ### 6.3 展示标签与优先级
 
-| 条件                                  | English UI           | 中文 UI      | 主要动作                    |
-| ------------------------------------- | -------------------- | ------------ | --------------------------- |
-| draft page                            | New task             | 新建任务     | 输入并发送                  |
-| view sync = failed                    | View unavailable     | 视图暂不可用 | 重试同步，禁止危险 mutation |
-| waiting_user + permission review = reviewing | Automatic review | 自动评审中 | 可直接批准、拒绝或停止 |
-| waiting_user + no active permission review | Needs your attention | 需要你处理 | 回答、批准、拒绝或停止 |
-| run phase = stopping                  | Stopping             | 正在停止     | 等待真实结果                |
-| run phase = running                   | Working              | 正在工作     | 草拟下一条指令或停止        |
-| run phase = queued                    | Queued               | 排队中       | 停止                        |
-| no active Run + outcome = completed   | Completed            | 已完成       | 继续输入、打开结果          |
-| no active Run + outcome = cancelled   | Stopped              | 已停止       | 继续输入或重试              |
-| no active Run + outcome = failed      | Failed               | 失败         | 修复问题、重试或继续        |
-| no active Run + outcome = interrupted | Interrupted          | 意外中断     | 查看说明并明确继续          |
+| 条件                                         | English UI           | 中文 UI      | 主要动作                    |
+| -------------------------------------------- | -------------------- | ------------ | --------------------------- |
+| draft page                                   | New task             | 新建任务     | 输入并发送                  |
+| view sync = failed                           | View unavailable     | 视图暂不可用 | 重试同步，禁止危险 mutation |
+| waiting_user + permission review = reviewing | Automatic review     | 自动评审中   | 可直接批准、拒绝或停止      |
+| waiting_user + no active permission review   | Needs your attention | 需要你处理   | 回答、批准、拒绝或停止      |
+| run phase = stopping                         | Stopping             | 正在停止     | 等待真实结果                |
+| run phase = running                          | Working              | 正在工作     | 草拟下一条指令或停止        |
+| run phase = queued                           | Queued               | 排队中       | 停止                        |
+| no active Run + outcome = completed          | Completed            | 已完成       | 继续输入、打开结果          |
+| no active Run + outcome = cancelled          | Stopped              | 已停止       | 继续输入或重试              |
+| no active Run + outcome = failed             | Failed               | 失败         | 修复问题、重试或继续        |
+| no active Run + outcome = interrupted        | Interrupted          | 意外中断     | 查看说明并明确继续          |
 
 表格按优先级匹配。`Completed` 等 terminal 标签只描述最近一次执行；归档状态由独立标记表达，不得覆盖需要处理或正在停止的运行状态。
 
@@ -760,7 +760,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 ### 8.2 文件附件
 
-Composer 工具带在模型控件之前提供一个带可访问名称的“添加文件”按钮，使用系统原生多选文件选择器并接受普通文件；用户也可以把操作系统文件拖入当前包含可编辑 Composer 的窗口，拖入时只在输入框范围显示克制的强调轮廓和“拖放文件以添加”提示。picker 与拖放只是文件接收入口，之后必须复用相同的附件 staging、结果和草稿；不提供 WebView file input 或粘贴替代入口。处理期间只允许一个添加操作，禁止再次添加和发送，文字仍可编辑；字节接收期间添加按钮提供“取消添加”，原生 picker 由系统取消。整批成功后才显示 chip；取消不改变已有草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip。离开当前 Composer scope 或关闭接收界面取消尚未移交草稿的操作；操作 identity 必须避免切换离开再返回后接纳迟到结果，已经 ready 的附件仍按下文规则保留。
+Composer 工具带在模型控件之前提供一个使用加号图标、带可访问名称与 tooltip 的“添加文件”按钮，与模型控件等高并在工具带内垂直居中，使用系统原生多选文件选择器并接受普通文件；用户也可以把操作系统文件拖入当前包含可编辑 Composer 的窗口，拖入时只在输入框范围显示克制的强调轮廓和“拖放文件以添加”提示。picker 与拖放只是文件接收入口，之后必须复用相同的附件 staging、结果和草稿；不提供 WebView file input 或粘贴替代入口。处理期间只允许一个添加操作，禁止再次添加和发送，文字仍可编辑；所有来源使用同一种添加操作；处理时按钮提供“取消添加”，取消请求发出后显示“正在取消添加”并禁用重复操作，直到 Host 确认 writer 静止及清理结果。原生 picker 仍由系统取消；窗口 scope 失效时撤销候选 authority，忽略迟到的 picker 结果。整批成功且当前 scope/generation 的草稿同步确认提交后才显示 chip；已移交附件不会被旧操作清理。取消保留已有草稿，typed rejection 在 Composer 就地说明原因且不产生部分 chip；清理失败明确说明残留，取消结果未知立即恢复连接并清除该连接未发送附件，保留文字和重新选择提示。离开当前 Composer scope 或关闭接收界面取消尚未移交草稿的操作；操作 identity 必须避免切换离开再返回后接纳迟到结果，已经 ready 的附件仍按下文规则保留。
 
 ready 附件按选择顺序显示可换行的紧凑 chip，包含经过 Host 校验的 basename、文件类别与格式化大小，并提供逐项移除按钮。图片额外显示已识别格式；其他文件使用通用文件图标。chip 不显示绝对路径、缩略图、hash、上传进度或 provider wire。文件名保持原文且服从普通用户内容方向规则；超长名称截断，完整安全名称通过 title 与可访问名称提供。键盘焦点按选择顺序进入移除按钮，删除后移到相邻 chip 或“添加文件”。窄窗不得因附件列表产生页面横向滚动。
 

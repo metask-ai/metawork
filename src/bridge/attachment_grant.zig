@@ -57,7 +57,10 @@ pub const State = struct {
                 .generation = generation,
                 .window_id = window_id,
             };
+            var attempts: usize = 0;
             while (true) {
+                if (attempts == 16) return error.Capacity;
+                attempts += 1;
                 var random: [token_bytes]u8 = undefined;
                 if (!random_fn(random_context, &random)) return error.InvalidAuthority;
                 grant.token = std.fmt.bytesToHex(random, .lower);

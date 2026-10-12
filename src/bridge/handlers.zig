@@ -367,6 +367,15 @@ pub const AttachmentReceiveBegin = struct {
     batchId: []const u8,
     files: []const struct { name: []const u8, sizeBytes: []const u8 },
 };
+pub const AttachmentAddBegin = struct {
+    generation: []const u8,
+    batchId: []const u8,
+    source: struct {
+        kind: enum { picker, native_paths, file_bytes },
+        paths: ?[]const []const u8 = null,
+        files: ?[]const struct { name: []const u8, sizeBytes: []const u8 } = null,
+    },
+};
 pub const AttachmentReceiveAppend = struct {
     generation: []const u8,
     batchId: []const u8,

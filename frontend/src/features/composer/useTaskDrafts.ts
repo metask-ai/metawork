@@ -24,95 +24,104 @@ function useDrafts(
 ) {
   const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({});
   const draftsRef = useRef(drafts);
-  draftsRef.current = drafts;
+  const activeRef = useRef(activeId);
+  activeRef.current = activeId;
+  const publish = useCallback((next: Record<string, ComposerDraft>) => {
+    draftsRef.current = next;
+    setDrafts(next);
+  }, []);
   const draft = activeId
     ? (drafts[activeId] ?? readDraft(activeId))
     : emptyComposerDraft();
-
+  const currentDraft = useCallback(
+    (expectedId: string | null) => {
+      if (!expectedId || expectedId !== activeRef.current) return null;
+      return draftsRef.current[expectedId] ?? readDraft(expectedId);
+    },
+    [readDraft],
+  );
+  // Validate the frozen target before any effect; update the owned cache
+  // synchronously so a second add never reads the previous React render.
+  const commitDraft = useCallback(
+    (expectedId: string | null, value: ComposerDraft): boolean => {
+      if (!expectedId || expectedId !== activeRef.current) return false;
+      publish({ ...draftsRef.current, [expectedId]: value });
+      writeDraft(expectedId, value);
+      return true;
+    },
+    [publish, writeDraft],
+  );
   const updateDraft = useCallback(
     (value: ComposerDraft) => {
-      if (!activeId) return;
-      setDrafts((current) => ({ ...current, [activeId]: value }));
-      writeDraft(activeId, value);
+      commitDraft(activeRef.current, value);
     },
-    [activeId, writeDraft],
+    [commitDraft],
   );
-
   const setDraft = useCallback(
     (id: string, value: ComposerDraft) => {
-      setDrafts((current) => ({ ...current, [id]: value }));
+      publish({ ...draftsRef.current, [id]: value });
       writeDraft(id, value);
     },
-    [writeDraft],
+    [publish, writeDraft],
   );
-
   const clearDraft = useCallback(
     (id: string) => {
-      setDrafts((current) => {
-        if (!(id in current)) return current;
-        const next = { ...current };
-        delete next[id];
-        return next;
-      });
+      const next = { ...draftsRef.current };
+      delete next[id];
+      publish(next);
       clearStoredDraft(id);
     },
-    [clearStoredDraft],
+    [publish, clearStoredDraft],
   );
-
   const moveDraft = useCallback(
     (from: string, to: string) => {
       if (from === to) return "same" as const;
-      const source = drafts[from] ?? readDraft(from);
-      const target = drafts[to] ?? readDraft(to);
+      const source = draftsRef.current[from] ?? readDraft(from);
+      const target = draftsRef.current[to] ?? readDraft(to);
       const decision = newTaskDraftMoveDecision(source, target);
       if (decision === "preserve_both") return decision;
-      setDrafts((current) => {
-        const next = { ...current };
-        delete next[from];
-        if (decision === "move") next[to] = source;
-        return next;
-      });
+      const next = { ...draftsRef.current };
+      delete next[from];
+      if (decision === "move") next[to] = source;
+      publish(next);
       clearStoredDraft(from);
       if (decision === "move") writeDraft(to, source);
       return decision;
     },
-    [clearStoredDraft, drafts, readDraft, writeDraft],
+    [publish, clearStoredDraft, readDraft, writeDraft],
   );
-
-  const pruneDraftCache = useCallback((validIds: ReadonlySet<string>) => {
-    const discarded: ComposerAttachment[] = [];
-    for (const [id, draft] of Object.entries(draftsRef.current)) {
-      if (validIds.has(id) || draft.kind !== "multimodal") continue;
-      discarded.push(...draft.attachments);
-    }
-    setDrafts((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(([id]) => validIds.has(id)),
-      ),
-    );
-    return discarded;
-  }, []);
-
+  const pruneDraftCache = useCallback(
+    (validIds: ReadonlySet<string>) => {
+      const discarded: ComposerAttachment[] = [];
+      for (const [id, value] of Object.entries(draftsRef.current)) {
+        if (!validIds.has(id) && value.kind === "multimodal")
+          discarded.push(...value.attachments);
+      }
+      publish(
+        Object.fromEntries(
+          Object.entries(draftsRef.current).filter(([id]) => validIds.has(id)),
+        ),
+      );
+      return discarded;
+    },
+    [publish],
+  );
   const invalidateAttachments = useCallback(() => {
-    setDrafts((current) => {
-      let changed = false;
-      const next = { ...current };
-      for (const [id, value] of Object.entries(current)) {
-        if (value.kind !== "multimodal") continue;
-        const replacement: ComposerDraft = {
+    const next = { ...draftsRef.current };
+    for (const [id, value] of Object.entries(next))
+      if (value.kind === "multimodal") {
+        next[id] = {
           kind: "text",
           text: value.text,
           attachmentsReloadRequired: true,
         };
-        next[id] = replacement;
-        changed = true;
       }
-      return changed ? next : current;
-    });
-  }, []);
-
+    publish(next);
+  }, [publish]);
   return {
     draft,
+    currentDraft,
+    commitDraft,
     updateDraft,
     setDraft,
     clearDraft,
