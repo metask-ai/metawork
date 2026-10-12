@@ -40,12 +40,12 @@ import {
   decodeRendererBridgeConnect,
   decodeRevisionNotification,
   decodeTaskCreateResult,
-  decodeTaskFullAccessSuccessorResult,
   decodeTaskCompactResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
   decodeTaskCompletionSeenResult,
   decodeTaskModelSelectionResult,
+  decodeTaskApprovalModeResult,
   decodeScheduledTaskMutationResult,
   decodeScheduledTaskEnabledResult,
   decodeScheduledTaskRunResult,
@@ -811,19 +811,6 @@ export class BridgeClient {
     );
   }
 
-  async createFullAccessSuccessor(
-    sourceTaskId: string,
-    expectedBindingEpoch: string,
-  ) {
-    return decodeTaskFullAccessSuccessorResult(
-      await this.invoke(commands.createFullAccessSuccessor, {
-        sourceTaskId,
-        expectedBindingEpoch,
-      }),
-      sourceTaskId,
-    );
-  }
-
   async run(taskId: string, expectedBindingEpoch: string, input: TaskRunInput) {
     return decodeTaskRunResult(
       await this.invoke(commands.run, { taskId, expectedBindingEpoch, input }),
@@ -878,6 +865,23 @@ export class BridgeClient {
   async releaseAttachment(token: string) {
     return decodeAttachmentReleaseResult(
       await this.invoke(commands.releaseAttachment, { token }),
+    );
+  }
+
+  async setApprovalMode(
+    taskId: string,
+    targetMode: ApprovalMode,
+    expectedBindingEpoch: string,
+    expectedApprovalRevision: string,
+  ) {
+    return decodeTaskApprovalModeResult(
+      await this.invoke(commands.setApprovalMode, {
+        taskId,
+        targetMode,
+        expectedBindingEpoch,
+        expectedApprovalRevision,
+      }),
+      taskId,
     );
   }
 

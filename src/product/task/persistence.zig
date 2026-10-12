@@ -86,6 +86,8 @@ pub const Capability = struct {
         context: ?*anyopaque,
         bytes: []const u8,
     ) Commit = unsupportedCommit,
+    confirmed_commit_fn: *const fn (?*anyopaque, []const u8) Commit = unsupportedCommit,
+    resolve_commit_fn: *const fn (?*anyopaque, []const u8) Commit = unsupportedResolve,
     recover_fn: *const fn (
         context: ?*anyopaque,
         bytes: []const u8,
@@ -96,9 +98,23 @@ pub const Capability = struct {
         return self.commit_fn(self.context, bytes);
     }
 
+    pub fn commitConfirmed(self: Capability, bytes: []const u8) Commit {
+        if (!self.enabled) return .failed;
+        return self.confirmed_commit_fn(self.context, bytes);
+    }
+
+    pub fn resolveCommit(self: Capability, bytes: []const u8) Commit {
+        if (!self.enabled) return .outcome_unknown;
+        return self.resolve_commit_fn(self.context, bytes);
+    }
+
     pub fn recover(self: Capability, bytes: []const u8) Commit {
         if (!self.enabled) return .failed;
         return self.recover_fn(self.context, bytes);
+    }
+
+    fn unsupportedResolve(_: ?*anyopaque, _: []const u8) Commit {
+        return .outcome_unknown;
     }
 
     fn unsupportedCommit(_: ?*anyopaque, _: []const u8) Commit {
@@ -127,6 +143,8 @@ pub const FileStore = struct {
     dir: std.Io.Dir,
     lock_file: std.Io.File,
     recovery_fault: RecoveryFault = .none,
+    confirmation_sync_fault: bool = false,
+    uncertain_commit: ?struct { previous: ?[32]u8, candidate: [32]u8 } = null,
 
     pub fn init(io: std.Io, absolute_directory: []const u8) FileStoreError!FileStore {
         if (!std.fs.path.isAbsolute(absolute_directory))
@@ -178,6 +196,7 @@ pub const FileStore = struct {
     }
 
     pub fn commit(self: *FileStore, bytes: []const u8) FileStoreError!void {
+        if (self.uncertain_commit != null) return error.PersistenceOutcomeUnknown;
         if (bytes.len == 0 or bytes.len > max_store_bytes)
             return error.WriteFailed;
         var random: [8]u8 = undefined;
@@ -213,12 +232,50 @@ pub const FileStore = struct {
         if (!self.syncCommit()) return error.PersistenceOutcomeUnknown;
     }
 
+    /// Approval transactions require an observed canonical outcome before
+    /// publishing authority. This never repeats an indeterminate write.
+    pub fn commitConfirmed(self: *FileStore, allocator: std.mem.Allocator, bytes: []const u8) Commit {
+        if (self.uncertain_commit != null) return .failed;
+        const previous = self.loadAlloc(allocator) catch return .failed;
+        defer if (previous) |value| allocator.free(value);
+        self.commit(bytes) catch |err| {
+            if (err != error.PersistenceOutcomeUnknown) return .failed;
+            self.uncertain_commit = .{
+                .previous = if (previous) |value| historyDigest(value) else null,
+                .candidate = historyDigest(bytes),
+            };
+            return self.resolveCommit(allocator, bytes);
+        };
+        return .committed;
+    }
+
+    /// Reobserve the same candidate without writing or quarantining history.
+    /// The OS writer lock and Product's single-writer barrier keep this witness
+    /// bound to exactly one pending transaction until it is resolved.
+    pub fn resolveCommit(self: *FileStore, allocator: std.mem.Allocator, bytes: []const u8) Commit {
+        const witness = self.uncertain_commit orelse return .outcome_unknown;
+        if (!std.mem.eql(u8, &witness.candidate, &historyDigest(bytes))) return .outcome_unknown;
+        const canonical = self.loadAlloc(allocator) catch return .outcome_unknown;
+        defer if (canonical) |value| allocator.free(value);
+        const result: Commit = if (canonical) |value| result: {
+            const digest = historyDigest(value);
+            if (std.mem.eql(u8, &digest, &witness.candidate)) break :result .committed;
+            if (witness.previous) |previous| if (std.mem.eql(u8, &digest, &previous)) break :result .failed;
+            break :result .outcome_unknown;
+        } else if (witness.previous == null) .failed else .outcome_unknown;
+        if (result == .outcome_unknown) return .outcome_unknown;
+        if (!self.syncCommit()) return .outcome_unknown;
+        self.uncertain_commit = null;
+        return result;
+    }
+
     /// Fully stages and syncs the replacement before moving the current
     /// canonical into quarantine. A definite install failure restores the
     /// canonical; an interrupted/indeterminate window leaves recovery
     /// artifacts that make the next load fail closed instead of masquerading
     /// as an empty first launch.
     pub fn recover(self: *FileStore, bytes: []const u8) FileStoreError!void {
+        if (self.uncertain_commit != null) return error.PersistenceOutcomeUnknown;
         if (bytes.len == 0 or bytes.len > max_store_bytes)
             return error.WriteFailed;
         var random: [8]u8 = undefined;
@@ -354,9 +411,24 @@ pub const FileStore = struct {
     }
 
     fn syncCommit(self: *FileStore) bool {
+        if (self.confirmation_sync_fault) return false;
         return self.syncPath(file_name);
     }
 };
+
+fn historyDigest(bytes: []const u8) [32]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return digest;
+}
+
+fn resolveCanonicalCommit(previous: ?[]const u8, candidate: []const u8, canonical: ?[]const u8) Commit {
+    if (canonical) |actual| {
+        if (std.mem.eql(u8, actual, candidate)) return .committed;
+        if (previous) |old| if (std.mem.eql(u8, actual, old)) return .failed;
+    } else if (previous == null) return .failed;
+    return .outcome_unknown;
+}
 
 fn openOrCreateLock(io: std.Io, dir: std.Io.Dir) !std.Io.File {
     const existing = dir.openFile(
@@ -489,6 +561,7 @@ pub const TaskWire = struct {
     permission_profile: []const u8,
     permission_interaction: []const u8,
     permission_review_delegated: bool = false,
+    approval_revision: u64 = 1,
     binding: BindingWire,
     next_run_generation: u64,
     active_operation: ?OperationWire,
@@ -886,6 +959,7 @@ pub fn projectTask(
         .permission_profile = @tagName(task.durable.permission_profile),
         .permission_interaction = @tagName(task.durable.permission_interaction),
         .permission_review_delegated = task.durable.permission_review_delegated,
+        .approval_revision = task.durable.approval_revision,
         .binding = .{
             .epoch = task.durable.binding_epoch,
             .execution_generation = task.durable.execution_generation,
@@ -1259,6 +1333,8 @@ pub fn restoreTask(
                     break :blk persistedTerminalCompactPhase(compact.phase);
                 break :blk false;
             },
+            .approval => |revision| revision <= wire.approval_revision and
+                std.mem.eql(u8, value.session.model, wire.binding.model),
         };
         if (!terminal_found) return error.TaskStoreCorrupt;
     }
@@ -1339,6 +1415,7 @@ pub fn restoreTask(
             .permission_profile = permission_profile,
             .permission_interaction = permission_interaction,
             .permission_review_delegated = wire.permission_review_delegated,
+            .approval_revision = wire.approval_revision,
             .binding_epoch = wire.binding.epoch,
             .workspace_id = wire.workspace_id,
             .workspace_epoch = wire.workspace_epoch,
@@ -1392,6 +1469,8 @@ fn restoreCheckpointRecord(
         .{ .run = wire.anchor.terminal.id }
     else if (std.mem.eql(u8, wire.anchor.terminal.kind, "compact"))
         .{ .compact = wire.anchor.terminal.id }
+    else if (std.mem.eql(u8, wire.anchor.terminal.kind, "approval"))
+        .{ .approval = wire.anchor.terminal.id }
     else
         return error.TaskStoreCorrupt;
     return .{
@@ -2144,6 +2223,10 @@ pub fn decode(
 }
 
 pub const testing = if (builtin.is_test) struct {
+    pub fn setConfirmationSyncFailure(store: *FileStore, failed: bool) void {
+        store.confirmation_sync_fault = failed;
+    }
+
     pub fn setRecoveryFault(store: *FileStore, fault: RecoveryFault) void {
         store.recovery_fault = fault;
     }
@@ -2683,6 +2766,7 @@ fn validate(state: *const StateWire, limits: Limits) !void {
 }
 
 fn validateTask(task: TaskWire, limits: Limits) !void {
+    if (task.approval_revision == 0) return error.Invalid;
     if (task.permission_review_delegated and
         (!std.mem.eql(u8, task.permission_profile, "approval_required") or
             !std.mem.eql(u8, task.permission_interaction, "interactive")))
@@ -2698,7 +2782,6 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !validText(run.execution_model, limits.max_execution_model_bytes, false) or
             !validPermissionProfile(run.permission_profile) or
             !validPermissionInteraction(run.permission_interaction) or
-            !std.mem.eql(u8, run.permission_profile, task.permission_profile) or
             !std.mem.eql(u8, run.permission_interaction, task.permission_interaction) or
             !std.mem.eql(u8, run.execution_protocol, task.binding.protocol) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
@@ -2959,9 +3042,10 @@ fn validateReviewAudit(record: UiRecordWire, task: TaskWire) error{Invalid}!void
         return;
     }
     if (!std.mem.eql(u8, source, "reviewer") or
-        !oneOf(record.state, &.{ "allowed_once", "denied" }) or
-        !std.mem.eql(u8, task.permission_profile, "approval_required") or
-        !std.mem.eql(u8, task.permission_interaction, "interactive")) return error.Invalid;
+        !oneOf(record.state, &.{ "allowed_once", "denied" })) return error.Invalid;
+    const run = findRun(task.runs, record.run_id) orelse return error.Invalid;
+    if (!std.mem.eql(u8, run.permission_profile, "approval_required") or
+        !std.mem.eql(u8, run.permission_interaction, "interactive")) return error.Invalid;
     const reason = record.review_reason orelse return error.Invalid;
     if (!validText(reason, task_state.ui_record_detail_capacity, false) or
         std.mem.trim(u8, reason, " \t\r\n").len == 0) return error.Invalid;
@@ -4222,6 +4306,49 @@ test "legacy permission summary without canonical digest remains readable" {
     try std.testing.expectEqualStrings("", parsed.value.canonical_arguments_digest);
 }
 
+fn reviewTestRun() RunWire {
+    return .{
+        .id = 1,
+        .coverage = "excluded",
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = "openai_chat_completions",
+        .execution_model = "m",
+        .permission_profile = "approval_required",
+        .permission_interaction = "interactive",
+        .input = .{
+            .kind = "text",
+            .text = "inspect",
+            .skill_id = null,
+            .catalog_revision = null,
+            .invocation_name = null,
+            .display_name = null,
+            .argument_values = null,
+            .redacted = false,
+        },
+        .assistant = "done",
+        .assistant_redacted = false,
+        .commentary_ends = &.{},
+        .assistant_output_kind = "final",
+        .assistant_output_start = 0,
+        .phase = "completed",
+        .outcome = "completed",
+        .cause = null,
+        .usage = .{
+            .input_tokens = 1,
+            .output_tokens = 1,
+            .cache_read_input_tokens = 0,
+            .cache_creation_input_tokens = 0,
+        },
+        .tools = &.{},
+        .diagnostic = "",
+        .diagnostic_truncated = false,
+        .diagnostic_redacted = false,
+        .event_projection_failure = null,
+        .next_activity_order = 3,
+    };
+}
+
 fn reviewTestTask() TaskWire {
     return .{
         .id = 1,
@@ -4267,7 +4394,9 @@ test "permission review delegation persists only for interactive approval-requir
 }
 
 test "permission review audit restores bounded reviewer reasons and rejects invalid attribution" {
-    const task = reviewTestTask();
+    var runs = [_]RunWire{reviewTestRun()};
+    var task = reviewTestTask();
+    task.runs = &runs;
     var wire = UiRecordWire{
         .request_id = 1,
         .run_id = 1,
@@ -4345,4 +4474,116 @@ fn testLimits() Limits {
         .max_execution_model_bytes = 512,
         .max_terminal_diagnostic_bytes = 512,
     };
+}
+
+test "mixed permission history survives current Task mode changes and audit follows the owning Run" {
+    var runs = [_]RunWire{ reviewTestRun(), reviewTestRun() };
+    runs[1].id = 2;
+    runs[1].generation = 2;
+    runs[1].permission_profile = "full_access";
+    var tasks = [_]TaskWire{reviewTestTask()};
+    tasks[0].permission_profile = "full_access";
+    tasks[0].runs = &runs;
+    tasks[0].next_run_generation = 2;
+    var workspaces = [_]WorkspaceWire{.{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 }};
+    var output: [64 * 1024]u8 = undefined;
+    const bytes = try encode(&output, .{ .next_workspace_id = 2, .next_workspace_recent_order = 2, .next_task_id = 2, .next_task_recent_order = 2, .workspaces = &workspaces, .tasks = &tasks }, testLimits());
+    var parsed = try decode(std.testing.allocator, bytes, testLimits());
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("approval_required", parsed.value.tasks[0].runs[0].permission_profile);
+    try std.testing.expectEqualStrings("full_access", parsed.value.tasks[0].runs[1].permission_profile);
+    var record = UiRecordWire{ .request_id = 1, .run_id = 1, .order = 1, .kind = "permission", .state = "allowed_once", .detail = "Bash", .item_count = 0, .detail_truncated = false, .redacted = false, .answered_by = "reviewer", .review_reason = "Owned Run authority." };
+    try validateReviewAudit(record, tasks[0]);
+    record.run_id = 2;
+    try std.testing.expectError(error.Invalid, validateReviewAudit(record, tasks[0]));
+    record.run_id = 3;
+    try std.testing.expectError(error.Invalid, validateReviewAudit(record, tasks[0]));
+}
+
+test "approval canonical readback distinguishes committed, previous, and unconfirmed bytes" {
+    try std.testing.expectEqual(Commit.committed, resolveCanonicalCommit("old", "new", "new"));
+    try std.testing.expectEqual(Commit.failed, resolveCanonicalCommit("old", "new", "old"));
+    try std.testing.expectEqual(Commit.outcome_unknown, resolveCanonicalCommit("old", "new", "other"));
+    try std.testing.expectEqual(Commit.outcome_unknown, resolveCanonicalCommit("old", "new", null));
+    try std.testing.expectEqual(Commit.failed, resolveCanonicalCommit(null, "new", null));
+}
+
+test "confirmed approval history commit uses the real canonical FileStore" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var absolute_storage: [std.fs.max_path_bytes]u8 = undefined;
+    const absolute_len = try tmp.dir.realPath(std.testing.io, &absolute_storage);
+    var store = try FileStore.init(std.testing.io, absolute_storage[0..absolute_len]);
+    defer store.deinit();
+    try std.testing.expectEqual(Commit.committed, store.commitConfirmed(std.testing.allocator, "old"));
+    try std.testing.expectEqual(Commit.committed, store.commitConfirmed(std.testing.allocator, "new"));
+    const canonical = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(canonical);
+    try std.testing.expectEqualStrings("new", canonical);
+}
+
+test "legacy Task without approval revision restores the initial CAS revision" {
+    const allocator = std.testing.allocator;
+    const bytes = try std.json.Stringify.valueAlloc(allocator, reviewTestTask(), .{});
+    defer allocator.free(bytes);
+    const legacy = try std.mem.replaceOwned(u8, allocator, bytes, "\"approval_revision\":1,", "");
+    defer allocator.free(legacy);
+    try std.testing.expect(legacy.len < bytes.len);
+    var parsed = try std.json.parseFromSlice(TaskWire, allocator, legacy, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u64, 1), parsed.value.approval_revision);
+    try validateTask(parsed.value, testLimits());
+    parsed.value.approval_revision = 0;
+    try std.testing.expectError(error.Invalid, validateTask(parsed.value, testLimits()));
+}
+
+test "indeterminate approval history retains its witness and resolves without another write" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var absolute: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &absolute);
+    var store = try FileStore.init(std.testing.io, absolute[0..len]);
+    defer store.deinit();
+    try store.commit("previous");
+    testing.setConfirmationSyncFailure(&store, true);
+    try std.testing.expectEqual(Commit.outcome_unknown, store.commitConfirmed(std.testing.allocator, "candidate"));
+    try std.testing.expect(store.uncertain_commit != null);
+    try std.testing.expectError(error.PersistenceOutcomeUnknown, store.commit("overwrite"));
+    try std.testing.expectError(error.PersistenceOutcomeUnknown, store.recover("quarantine"));
+    try std.testing.expectEqual(Commit.outcome_unknown, store.resolveCommit(std.testing.allocator, "different candidate"));
+    testing.setConfirmationSyncFailure(&store, false);
+    try std.testing.expectEqual(Commit.committed, store.resolveCommit(std.testing.allocator, "candidate"));
+    try std.testing.expect(store.uncertain_commit == null);
+    const canonical = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(canonical);
+    try std.testing.expectEqualStrings("candidate", canonical);
+    try std.testing.expectEqual(Commit.outcome_unknown, store.resolveCommit(std.testing.allocator, "candidate"));
+    try store.commit("next");
+}
+
+test "canonical approval resolution distinguishes the prior record from an unrelated record" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var absolute: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &absolute);
+    var store = try FileStore.init(std.testing.io, absolute[0..len]);
+    defer store.deinit();
+    try store.commit("previous");
+    testing.setConfirmationSyncFailure(&store, true);
+    try std.testing.expectEqual(Commit.outcome_unknown, store.commitConfirmed(std.testing.allocator, "candidate"));
+    testing.setConfirmationSyncFailure(&store, false);
+    // Simulate observation of a foreign record or the pre-commit record at
+    // the filesystem boundary. Production writes remain closed by the witness.
+    for ([_][]const u8{ "unrelated", "previous" }) |value| {
+        const file = try store.dir.createFile(store.io, file_name, .{});
+        try file.writeStreamingAll(store.io, value);
+        try file.sync(store.io);
+        file.close(store.io);
+        try std.testing.expectEqual(if (std.mem.eql(u8, value, "previous")) Commit.failed else Commit.outcome_unknown, store.resolveCommit(std.testing.allocator, "candidate"));
+    }
+    try std.testing.expect(store.uncertain_commit == null);
+    const canonical = (try store.loadAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(canonical);
+    try std.testing.expectEqualStrings("previous", canonical);
+    try std.testing.expectEqual(Commit.outcome_unknown, (Capability{ .enabled = true }).resolveCommit("candidate"));
 }

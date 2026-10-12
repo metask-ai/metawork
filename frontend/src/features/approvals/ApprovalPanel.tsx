@@ -13,18 +13,11 @@ import { useI18n } from "../../i18n/context.ts";
 import { diagnoseRepeatedPermission } from "./permission-diagnostics.ts";
 import type { UiResponsePhase } from "./response-state.ts";
 
-export type FullAccessSuccessorAction = {
-  phase: "ready" | "stopping";
-  message: string | null;
-  onContinue: () => void;
-};
-
 export function ApprovalPanel({
   pending,
   task,
   busy,
   responsePhase,
-  fullAccessSuccessor,
   respond,
 }: {
   pending: PendingUi;
@@ -34,7 +27,6 @@ export function ApprovalPanel({
   >;
   busy: boolean;
   responsePhase: UiResponsePhase;
-  fullAccessSuccessor?: FullAccessSuccessorAction | null;
   respond: (payload: UiResponsePayload) => void;
 }) {
   const { t } = useI18n();
@@ -121,25 +113,6 @@ export function ApprovalPanel({
           <span>{t(`approval.reason_${diagnostic.reason}`)}</span>
           {diagnostic.restoreRulesInvalidated && (
             <span>{t("approval.restore_rules_invalidated")}</span>
-          )}
-          {fullAccessSuccessor && (
-            <div className="approval-successor-action">
-              <Button
-                variant="secondary"
-                size="lg"
-                disabled={
-                  actionDisabled || fullAccessSuccessor.phase === "stopping"
-                }
-                onClick={fullAccessSuccessor.onContinue}
-              >
-                {fullAccessSuccessor.phase === "stopping"
-                  ? t("approval.full_access_stopping")
-                  : t("approval.full_access_continue")}
-              </Button>
-              {fullAccessSuccessor.message && (
-                <span role="alert">{fullAccessSuccessor.message}</span>
-              )}
-            </div>
           )}
         </aside>
       )}
@@ -246,58 +219,5 @@ export function ApprovalPanel({
         )}
       </div>
     </Intervention>
-  );
-}
-
-export function FullAccessSuccessorNotice({
-  phase,
-  message,
-  retry,
-  dismiss,
-}: {
-  phase:
-    | "stopping"
-    | "stop_failed"
-    | "creating"
-    | "failed"
-    | "outcome_unknown"
-    | "syncing"
-    | "sync_failed";
-  message: string | null;
-  retry: (() => void) | null;
-  dismiss: (() => void) | null;
-}) {
-  const { t } = useI18n();
-  return (
-    <aside className="approval-successor-notice" role="status">
-      <strong>
-        {phase === "stopping"
-          ? t("approval.full_access_stopping")
-          : phase === "stop_failed"
-            ? t("approval.full_access_stop_failed")
-            : phase === "creating"
-              ? t("approval.full_access_creating")
-              : phase === "syncing" || phase === "sync_failed"
-                ? t("approval.full_access_sync_pending")
-                : phase === "outcome_unknown"
-                  ? t("approval.full_access_outcome_unknown")
-                  : t("approval.full_access_failed")}
-      </strong>
-      {message && <span>{message}</span>}
-      {retry && (
-        <Button variant="secondary" size="lg" onClick={retry}>
-          {phase === "stop_failed"
-            ? t("approval.full_access_retry_stop")
-            : phase === "sync_failed"
-              ? t("approval.full_access_retry_sync")
-              : t("approval.full_access_retry")}
-        </Button>
-      )}
-      {dismiss && (
-        <Button variant="secondary" size="lg" onClick={dismiss}>
-          {t("approval.full_access_dismiss")}
-        </Button>
-      )}
-    </aside>
   );
 }

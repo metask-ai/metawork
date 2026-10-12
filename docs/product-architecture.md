@@ -143,11 +143,13 @@ Product Task 还拥有绑定 Run identity 的 completion receipt。durable `comp
 
 Product Control 拥有全局的新 Task 默认 `ApprovalMode`，在 create admission 时复制；成功提交交互式 Task 时，同一 canonical mutation 记住其模式，并随 Task 历史进行同一次 best-effort projection commit，admission 拒绝、回滚和 noninteractive Scheduled occurrence 均不得改变。历史写入失败不回滚已发布的交互式 Task 或进程内默认值，后续完整 snapshot 按现有恢复规则重试持久化。旧合法历史缺少模式默认值时，从原默认 profile 恢复人工审批或完全访问；不得把新默认值覆盖到已有 Task。
 
-Product Task 持有创建时捕获的 effective profile、是否采用自动评审、interaction fact 与逐 Run provenance。`ApprovalMode` 从这组唯一事实派生，不建立平行的模式或委托真源；自动评审是 Session 选择，不是重启失效的临时开关。fresh create 与 checkpoint restore 必须使用同一 profile，恢复后保留原 Task 的模式；当前不开放会话中切换。模式的产品语义及 Core profile 映射见[产品需求](requirements.md#55-审批与输入)。当前 ABI 没有可消费的 mode mutation，不能用规则拼装、Renderer preference 或跨 profile restore 模拟。
+Product Task 持有当前 effective profile、是否采用自动评审、interaction fact 与单调 approval revision；每个 Run 保留创建时的 profile 与 interaction provenance。`ApprovalMode` 从 Task 的唯一 profile 和评审事实派生，不建立平行的模式或委托真源；自动评审选择随 Task 持久化恢复。显式切换在同一 interactive Task、Workspace、Session 和 Conversation 中完成，Manual 与 Automatic Workspace 都适用；noninteractive Scheduled occurrence 不开放切换。新 Task 默认模式仍由 create transaction 独立拥有，已有 Task 切换不改变默认值。模式的产品语义及 Core profile 映射见[产品需求](requirements.md#55-审批与输入)。
+
+审批切换 admission 同时校验 Task identity、binding epoch 与 approval revision，拒绝 stale、并发 mutation、归档、删除和 shutdown。相同模式无副作用；真正提交推进 approval revision，防止 A→B→A 使旧意图重新有效。人工与自动评审共享同一 Core profile：切到自动评审可以为当前未回答 request 启动一次评审，切回人工立即使旧 review identity 失效并请求取消，保留当前 request，不能等待审核线程退出或接纳已排队的旧结果。涉及 Core profile 的切换先按需取消 Run，再等待真实 terminal、event drain、callback、abort 与 checkpoint 静止；不能把取消受理当作静止，也不得重放挂起工具或自动发送下一条输入。
+
+Product Control 拥有审批事务与有界 worker；Agent 是官方 Session mode mutator 的唯一消费者。切换前先确认覆盖当前 Conversation 的旧 checkpoint；Core 成功后写入新 immutable blob，再原子确认 Task 当前模式、revision 与 checkpoint reference，确认后才开放下一 Run 并异步退休旧恢复点。mutation 前失败保持旧模式；mutation 后导出或 metadata 明确失败必须关闭变更后的 attachment，再按已确认旧基线与旧模式恢复，禁止用反向 mutation 回滚已撤销的 Session grant。结果未知时保留旧恢复点、candidate 与原 history packet，阻止冲突写入和执行，只以显式 canonical readback 决定采用哪份事实；取消或 shutdown 不得隐式重写、读回或重放。detached Task 先按已提交模式恢复 attachment，再执行此次切换，不能以目标模式 restore 模拟 mutation。已明确拒绝且不被 canonical checkpoint 引用的 candidate blob 交由同一有界 retirement owner 清理；结果仍未知时不得删除 candidate 或旧恢复点。
 
 权限诊断是 Product Task history 的有界审计投影，不是第二个 policy engine。Pending request 与 resolved occurrence 可以投影 AgentCore 已提供的 canonical arguments digest、policy generation 和 candidate/rule identity，并与既有 tool identity、decision source、Session rule 命中和 restore 结果共同用于解释重复请求。Product 不记录原始参数、credential 或可重放 response，不从 digest/tool text 推断 effect，也不自行匹配或生成 grant。
-
-`full_access` successor 由 Product Control 作为独立 Task create transaction 拥有。它只接受已收口、interactive `approval_required`、Manual Workspace 且 live execution attachment 仍精确的源 Task；以 source Task identity/binding epoch 做 CAS，在同一 Manual Workspace authority 中克隆 exact owned ExecutionConfig，按当前 Workspace catalog 与 MCP new-task authority 创建独立 `full_access` Task/Session，并按普通交互式 Task 更新默认 profile。它不克隆 Conversation、Run、checkpoint、pending UI 或 Session grant，不使用当前 global execution 代替源 binding，也不开放 Automatic Workspace ownership 转移。Renderer 负责先请求停止当前 Run、从 snapshot 观测 terminal，再发起 successor command；Product 不把 cancel acknowledgement 当作 terminal 事实。
 
 Automatic Workspace record 只有在 owning Task 已物理删除且相关 Run event、worker、Session 和 catalog lease 全部 quiescent 后才能释放。真实目录不因 Task 删除、shutdown 或重启被递归删除，也不能通过扫描遗留目录猜测或恢复 Product record。
 
@@ -248,6 +250,7 @@ Credential 是 opaque bytes。redaction 必须覆盖流式跨 chunk 与 UTF-8 co
 - 每个 Agent Session 至多一个 in-flight operation；Run、manual compact、Session mutation 与 destroy 互斥。Conversation recovery 按 §2.2 的 Task-owned active-operation 槽互斥，成功提交后才形成新的 Session attachment；
 - 每个 Session 在创建时绑定 immutable ExecutionConfig generation；默认配置变化不热替换 live Session，显式 Task rebind 也必须形成新的 Session attachment；
 - Product Control 创建、排队、取消并关闭 bounded Executor；Agent Runtime 不接收 scheduler capability，worker 只能从 Product Control admission 进入 Agent 调用；
+- 审批事务使用独立于 Run 池的有界控制执行容量；所有 Run 等待权限回复时，模式保存和审批委托仍必须能够完成，不能形成 Run 等待委托、委托保存又等待 Run worker 的依赖环。checkpoint/mutation、history confirmation、canonical readback 与退休复用同一审批 Job 和已有持久化协议，不建立第二套 writer 真源；主线程 admission、Task lease、Session idle fence、结果确认屏障和 source/target freshness 仍适用。关闭时取消 queued/running job，join 该 lane，再接纳确认事实与释放其引用；
 - worker job 只持 owned payload、稳定 record reference、scoped Agent Session access 和完成本次工作所需的窄 capability，不保存 Product Control、aggregate Runtime 或主线程可变状态指针；
 - queued cancel、worker completion、terminal publication 与 worker reference 必须各自 exactly once 收口。terminal fact 在通知、释放引用或触发外部 owner 前完成 write-once publication；
 - Bridge/main thread 不执行长耗时 Agent 调用，也不等待 permission。Renderer response、snapshot failure 与 transport disconnect 只作为 typed transport fact 进入 Product policy，默认不能中止后台 Run 或覆盖 terminal cause；
@@ -302,7 +305,7 @@ Product history 保存用户可观察且跨重启仍有意义的 Workspace、Tas
 
 Durable Task record 与 runtime attachment 必须分离。durable record 不保存 live Agent Session、catalog lease、pointer、atomic、worker/control payload、credential 或 `closed` 产品终态；runtime attachment 线性拥有 Agent Binding、ExecutionConfig 与必要 lease 的唯一使用和归还责任。Task detach 或 replacement 必须先关闭并归还 live Binding，不能丢弃或复制所有权。
 
-审批模式由 Task 捕获的 profile 与自动评审事实派生，二者随 Task 恢复；全局 default mode 独立持久化，缺少新字段的合法旧 metadata 从原 default profile 派生，缺少 Task 自动评审事实时保持人工。运行期 generation、当前评审 identity 和 in-flight job 不进入 durable history，恢复不得重放待决评审或审批。UI 历史只保存来源与脱敏有界理由，不保存原始输入或模型输出；旧非取消 UI 决定缺少来源时按用户恢复，取消保持无来源。历史决定、理由和摘要本身不具有当前授权效力。
+审批模式由 Task 当前 profile 与自动评审事实派生，连同非零 approval revision 随 Task 恢复；合法旧 metadata 缺少 revision 时从初始 revision 恢复，不重写历史 Run 的 profile。全局 default mode 独立持久化，缺少新字段的合法旧 metadata 从原 default profile 派生，缺少 Task 自动评审事实时保持人工。历史 Run 的 profile 可以不同于 Task 当前 profile，UI 审计按所属 Run 的 profile 与 interaction 校验，不能因当前模式变化丢弃合法旧决定。运行期 generation、当前评审 identity 和 in-flight job 不进入 durable history，恢复不得重放待决评审或审批。UI 历史只保存来源、typed permission 摘要与脱敏有界理由，不保存原始输入或模型输出；旧非取消 UI 决定缺少来源时按用户恢复，取消保持无来源。历史决定、理由和摘要本身不具有当前授权效力。
 
 Run/compact 的 terminal result 由 Agent 以自包含事实返回，Product 在预留 record 中 no-fail、write-once 提交后才能通知、释放 worker reference 或推进后续事务。queued-before-execute 由 Product 生成独立的 pre-execution terminal fact；Agent Session snapshot 只描述 live lifecycle，不承担历史 terminal truth。
 
@@ -381,13 +384,17 @@ checkpoint 必须与 covered 前沿精确相等，并且不能存在 pending ope
 
 历史 execution generation 只证明历史 Run 使用过哪个 execution，不是恢复当前 credential 的句柄，也不要求等于 target generation。Skill、MCP、Permission 和 projection continuity 是恢复后的可选能力状态，不是 Conversation 恢复资格；AgentCore 合法返回 degraded Session 时，Product 接受已恢复 Conversation，并让不可重建 authority 保持安全失效。
 
-用户显式发起恢复后，Product 冻结完整 source/target authority 并提交 bounded recovery job。job 不保存 Task/Workspace 指针，不查询 Product Skill，不构造 MCP Selection，也不取得 durable permission rule；它只验证 checkpoint source 并调用 Agent restore。I/O、Agent Runtime、capacity、cancellation 与 typed AgentCore refusal 必须作为 attempt 结果返回，不能折叠成一个终局连接失败。
+用户显式发起恢复后，Product 冻结完整 source/target authority 并提交 bounded recovery job。checkpoint restore 与上述空 Conversation fresh attach 使用同一恢复执行与提交边界；job 不保存 Task/Workspace 指针，不查询 Product Skill，不构造 MCP Selection，也不取得 durable permission rule，只按不可变输入验证 checkpoint source 并调用 Agent restore，或创建符合无 checkpoint 例外的空 Session。I/O、Agent Runtime、capacity、cancellation 与 typed AgentCore refusal 必须作为 attempt 结果返回；排队取消或一次失败结束本次 attempt，不得隐式重试或重放历史。
 
-成功 candidate 回到主线程后必须再次校验全部 source/target token、attachment、archive/removal、replacement 与 shutdown。stale candidate 只销毁。若 target generation 与 durable binding 不同，先以一个 durable adoption transaction 同时推进 Task binding、binding epoch 与 checkpoint anchor，commit 成功后才安装 attachment；明确失败销毁 candidate 并保留 detached Task，outcome unknown 冻结后续 mutation。进程若在 durable adoption 后、attachment install 前退出，下次启动从已推进的 binding/anchor 重新恢复，不改写历史 Run provenance。
+成功 candidate 回到主线程后必须再次校验全部 source/target token、attachment、archive/removal、replacement 与 shutdown。持久 adoption 前失效的 candidate 只销毁。若 target generation 与 durable binding 不同，主线程只编码有界、无 secret 的候选历史，由既有共享 bounded history writer 执行一次 durable adoption transaction，同时推进 Task binding、binding epoch 与存在的 checkpoint anchor；保存待决时，旧内存 binding 不变，candidate 与恢复 lease 保留，不能发布 attachment。确认提交后先接受 canonical binding，再重新校验 Session 安装资格；外部 authority 在保存期间失效时丢弃 Session，但不得回滚或覆盖已确认的 binding。明确失败结束 attempt 并拒绝 candidate；结果未知保留 exact 候选历史、Session 与 lease，冻结其他 history write/recovery，只有显式恢复动作可以排队执行不写入、不 quarantine 的 canonical 读回。读回仍未知或取消不得丢弃候选、隐式重试或推测结果；确认 candidate 或旧 canonical 后才分别接受或拒绝 adoption。事务期间的独立产品事实由后续共享 writer 补齐，补写失败不得由生命周期轮询自动重试。
+
+被拒绝的恢复 candidate 必须线性转交同一有界 Session close/release owner，不得在主线程同步调用 Agent destroy，也不得短暂发布可执行 attachment。转交前脱敏产品事实并清除 candidate 的 Host credential 副本，关闭 owner 只保留资源释放所需 metadata 和 Binding。它没有已接纳的 Run，可以在恢复 lease 释放后直接进入异步关闭；关闭成功才 detach，关闭失败保留真实 closing/attached owner、诊断和不可执行状态。即使失败报告为 reusable，也不能将这个未获安装资格的 candidate 变成可执行 attachment；生命周期轮询不得自动重试，既有显式 Host close 动作仍可安全重试。
+
+关闭必须接纳已确认的 durable binding，即使不再安装 Session；未知结果不能因关闭而重写历史或启动读回。释放 candidate 和 lease 后仍保留未知事务屏障，下一次启动从实际 canonical binding/anchor 恢复。进程若在 durable adoption 后、attachment install 前退出，下次启动同样使用已推进的 binding/anchor，不改写历史 Run provenance。
 
 graceful close/shutdown 必须先停止 admission，对已进入 AgentCore 的 operation 请求终止并等待真实 terminal/event drain，再等待 checkpoint postprocess 与全部 worker lease settled；只有此后才能把剩余 pending 标为 excluded、持久化最终历史并开始 Session close/release。checkpoint commit 与 pending exclusion 不得并发交错。已提交 history 但尚未进入 Core 的失败直接归为 excluded；尚未提交 history 的 prepared operation 不产生可排除记录。
 
-Agent terminal fact 将当前 attachment 标记为 poisoned 后，Product 必须停止该 Session 的新 admission，并在 terminal event、checkpoint postprocess、Session access 与全部 worker lease 收口后自动进入同一 close/release 路径。只有 Session 已成功 close、Agent Runtime slot 已 release 且 Product 仍持有完整 owner 事实时，Task 才能 detach，并按本节的 checkpoint restore 或 fresh attach 规则继续；close 失败必须保留真实的 attached/closing attachment、execution authority 与资源 owner，不得伪装 detached、开放 recovery 或自动形成无界重试循环。可复用 close failure 可以恢复原 attachment 的 admission；poisoned/closing failure 继续不可用，直到已有显式生命周期动作安全重试。
+Agent terminal fact 将当前 attachment 标记为 poisoned 后，Product 必须停止该 Session 的新 admission，并在 terminal event、checkpoint postprocess、Session access 与全部 worker lease 收口后自动进入同一 close/release 路径。只有 Session 已成功 close、Agent Runtime slot 已 release 且 Product 仍持有完整 owner 事实时，Task 才能 detach，并按本节的 checkpoint restore 或 fresh attach 规则继续；close 失败必须保留真实的 attached/closing attachment、execution authority 与资源 owner，不得伪装 detached、开放 recovery 或自动形成无界重试循环。已获接纳 attachment 的可复用 close failure 可以恢复原 admission；poisoned/closing failure 继续不可用，直到已有显式生命周期动作安全重试。
 
 ## 5. `.skill` 交换 artifact
 

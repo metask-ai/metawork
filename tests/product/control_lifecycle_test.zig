@@ -953,10 +953,15 @@ const TaskPersistenceProbe = struct {
     storage: ?[]u8 = null,
     len: usize = 0,
     commits: usize = 0,
+    main_thread: ?std.Thread.Id = null,
+    main_commits: usize = 0,
 
     fn commit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.commits += 1;
+        if (self.main_thread) |thread| if (std.Thread.getCurrentId() == thread) {
+            self.main_commits += 1;
+        };
         if (self.result == .committed or
             (self.result == .outcome_unknown and self.store_on_outcome_unknown)) if (self.storage) |storage|
         {
@@ -972,6 +977,7 @@ const TaskPersistenceProbe = struct {
             .context = self,
             .enabled = true,
             .commit_fn = commit,
+            .confirmed_commit_fn = commit,
             .recover_fn = commit,
         };
     }
@@ -1761,268 +1767,6 @@ test "Task permission profile is immutable and successful interactive create rem
     );
 }
 
-test "full-access successor clones exact Manual Task execution without conversation authority" {
-    fake_core.reset();
-    const runtime = try createTestComposition(.{
-        .worker_count = 1,
-        .queue_capacity = 1,
-        .max_sessions = 5,
-    });
-    defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
-    }
-    var task_persistence: TaskPersistenceProbe = .{};
-    var configuration = productControlConfiguration();
-    configuration.task_persistence = task_persistence.capability();
-    var workbench = try product_control.Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        runtime,
-        .{
-            .worker_count = 1,
-            .queue_capacity = 1,
-            .max_tasks = 5,
-            .max_workspaces = 2,
-            .max_runs_per_task = 2,
-            .max_tools_per_run = 1,
-        },
-        configuration,
-    );
-    defer workbench.deinit();
-    try installControlExecution(&workbench);
-
-    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
-    const admission = workbench.newTaskAdmissionView();
-    const source_task_id = try workbench.createTaskInWorkspace(
-        workspace_id,
-        try workbench.workspaceEpoch(workspace_id),
-        admission.active_generation,
-        admission.active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = .manual },
-    );
-    const source_binding_epoch = try workbench.taskBindingEpoch(source_task_id);
-    const source_execution = try workbench.taskExecutionIdentity(source_task_id);
-
-    try std.testing.expectError(
-        error.BindingEpochMismatch,
-        workbench.createFullAccessSuccessor(source_task_id, source_binding_epoch + 1),
-    );
-
-    // A successor consumes the source Task's owned copy, not the mutable global
-    // default. Replacing the default must not silently substitute generation 2.
-    try installControlExecutionGeneration(&workbench, 2);
-    const successor_task_id = try workbench.createFullAccessSuccessor(
-        source_task_id,
-        source_binding_epoch,
-    );
-    try std.testing.expect(successor_task_id != source_task_id);
-    try std.testing.expectEqual(
-        workspace_id,
-        try workbench.taskWorkspaceId(successor_task_id),
-    );
-    try std.testing.expectEqual(
-        product_control.PermissionProfile.approval_required,
-        try workbench.taskPermissionProfile(source_task_id),
-    );
-    try std.testing.expectEqual(
-        product_control.PermissionProfile.full_access,
-        try workbench.taskPermissionProfile(successor_task_id),
-    );
-    try std.testing.expectEqual(
-        product_control.PermissionInteraction.interactive,
-        try workbench.taskPermissionInteraction(successor_task_id),
-    );
-    try std.testing.expectEqual(
-        product_control.PermissionProfile.full_access,
-        workbench.defaultPermissionProfile(),
-    );
-    const successor_execution = try workbench.taskExecutionIdentity(successor_task_id);
-    try std.testing.expectEqual(source_execution.generation, successor_execution.generation);
-    try std.testing.expectEqual(source_execution.protocol, successor_execution.protocol);
-    try std.testing.expectEqualStrings(source_execution.model, successor_execution.model);
-    try std.testing.expectError(
-        error.UnsupportedPermissionProfile,
-        workbench.createFullAccessSuccessor(
-            successor_task_id,
-            try workbench.taskBindingEpoch(successor_task_id),
-        ),
-    );
-
-    fake_core.lock();
-    const successor_mode = fake_core.last_permission_mode_code;
-    const successor_shell = fake_core.last_shell_policy_code;
-    fake_core.unlock();
-    try std.testing.expectEqual(@as(?u32, wire.PERMISSION_FULL_ACCESS), successor_mode);
-    try std.testing.expectEqual(@as(?u32, wire.SHELL_UNRESTRICTED), successor_shell);
-}
-
-test "full-access successor preserves admitted tasks when history commit fails or is unknown" {
-    fake_core.reset();
-    const runtime = try createTestComposition(.{
-        .worker_count = 1,
-        .queue_capacity = 1,
-        .max_sessions = 5,
-    });
-    defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
-    }
-    const history = try std.testing.allocator.alloc(u8, 1024 * 1024);
-    defer std.testing.allocator.free(history);
-    var persistence: TaskPersistenceProbe = .{
-        .storage = history,
-        .store_on_outcome_unknown = true,
-    };
-    var configuration = productControlConfiguration();
-    configuration.task_persistence = persistence.capability();
-    const limits: product_control.Limits = .{
-        .worker_count = 1,
-        .queue_capacity = 1,
-        .max_tasks = 4,
-        .max_workspaces = 2,
-        .max_runs_per_task = 2,
-        .max_tools_per_run = 1,
-    };
-    var workbench = try product_control.Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        runtime,
-        limits,
-        configuration,
-    );
-    defer workbench.deinit();
-    try installControlExecution(&workbench);
-    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
-    const admission = workbench.newTaskAdmissionView();
-    const source_id = try workbench.createTaskInWorkspace(
-        workspace_id,
-        try workbench.workspaceEpoch(workspace_id),
-        admission.active_generation,
-        admission.active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = .manual },
-    );
-    const epoch = try workbench.taskBindingEpoch(source_id);
-
-    persistence.result = .failed;
-    const first_id = try workbench.createFullAccessSuccessor(source_id, epoch);
-    try std.testing.expect(workbench.task_persistence_health == .write_failed);
-    try std.testing.expectEqual(.full_access, try workbench.taskPermissionProfile(first_id));
-    try std.testing.expectEqual(.full_access, workbench.defaultPermissionProfile());
-    try std.testing.expectEqual(.approval_required, try workbench.taskPermissionProfile(source_id));
-
-    persistence.result = .outcome_unknown;
-    const second_id = try workbench.createFullAccessSuccessor(source_id, epoch);
-    try std.testing.expect(first_id != second_id);
-    try std.testing.expect(workbench.task_persistence_health == .outcome_unknown);
-    try std.testing.expectEqual(.full_access, try workbench.taskPermissionProfile(first_id));
-    try std.testing.expectEqual(.full_access, try workbench.taskPermissionProfile(second_id));
-    try std.testing.expectEqual(.full_access, workbench.defaultPermissionProfile());
-
-    // An unknown result can already have installed the complete projection.
-    // Restore those exact bytes, without a clean-shutdown save masking rollback.
-    var restart_configuration = productControlConfiguration();
-    restart_configuration.task_persistence = persistence.capabilityRestored(history[0..persistence.len]);
-    var restored = try product_control.Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        runtime,
-        limits,
-        restart_configuration,
-    );
-    defer restored.deinit();
-    try std.testing.expectEqual(.full_access, restored.defaultPermissionProfile());
-    try std.testing.expectEqual(.full_access, try restored.taskPermissionProfile(first_id));
-    try std.testing.expectEqual(.full_access, try restored.taskPermissionProfile(second_id));
-    try std.testing.expectEqual(.approval_required, try restored.taskPermissionProfile(source_id));
-}
-
-test "full-access successor rejects active and Automatic Workspace sources" {
-    fake_core.reset();
-    const runtime = try createTestComposition(.{
-        .worker_count = 1,
-        .queue_capacity = 1,
-        .max_sessions = 3,
-    });
-    defer {
-        shutdownTestComposition(runtime) catch unreachable;
-        deinitTestComposition(runtime);
-    }
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(std.testing.io, &root_storage);
-    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(
-        std.testing.io,
-        std.testing.allocator,
-        root_storage[0..root_len],
-    );
-    defer automatic_root.deinit();
-    var workbench = try product_control.Runtime.init(
-        std.testing.allocator,
-        std.testing.io,
-        runtime,
-        .{
-            .worker_count = 1,
-            .queue_capacity = 1,
-            .max_tasks = 3,
-            .max_workspaces = 2,
-            .max_runs_per_task = 1,
-            .max_tools_per_run = 1,
-        },
-        .{
-            .directories = .{ .testing_automatic_workspace_root = &automatic_root },
-            .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
-        },
-    );
-    defer workbench.deinit();
-    try installControlExecution(&workbench);
-    const admission = workbench.newTaskAdmissionView();
-
-    const manual_workspace_id = try workbench.openWorkspace(productControlTaskInput());
-    const manual_task_id = try workbench.createTaskInWorkspace(
-        manual_workspace_id,
-        try workbench.workspaceEpoch(manual_workspace_id),
-        admission.active_generation,
-        admission.active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = .manual },
-    );
-    _ = try workbench.runTask(manual_task_id, .{ .text = "remain active" });
-    try std.testing.expectError(
-        error.TaskBusy,
-        workbench.createFullAccessSuccessor(
-            manual_task_id,
-            try workbench.taskBindingEpoch(manual_task_id),
-        ),
-    );
-
-    const automatic_task_id = try workbench.createTaskForWorkspace(
-        .automatic,
-        admission.active_generation,
-        admission.active_selection_revision,
-        null,
-        null,
-        null,
-        .{ .interactive = .manual },
-    );
-    try std.testing.expectError(
-        error.AutomaticWorkspaceUnsupported,
-        workbench.createFullAccessSuccessor(
-            automatic_task_id,
-            try workbench.taskBindingEpoch(automatic_task_id),
-        ),
-    );
-}
-
 test "Run checkpoint commits immutable blob before durable descriptor" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
@@ -2472,6 +2216,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"activeOperation\":null",
     );
     try std.testing.expectEqual(@as(u64, 2), try restored.taskBindingEpoch(task_id));
+    try std.testing.expectEqual(@as(u64, 2), restored.task_runtime.find(task_id).?.durable.checkpoint.?.anchor.binding_epoch);
     try std.testing.expectEqual(
         product_control.PermissionProfile.full_access,
         try restored.taskPermissionProfile(task_id),
@@ -6902,7 +6647,7 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
         restored_configuration,
     );
     defer restored.deinit();
-    try installControlExecution(&restored);
+    try installControlExecutionGeneration(&restored, 2);
     _ = try restored.openWorkspace(productControlTaskInput());
     try waitTaskSnapshot(
         &restored,
@@ -6918,6 +6663,33 @@ test "fresh attach preserves Product Run and UI request allocation floors" {
         "\"id\":\"1\"",
         "\"continuationAvailable\":true",
     );
+    const attached = restored.task_runtime.find(task_id).?;
+    try std.testing.expectEqual(@as(u64, 2), attached.durable.binding_epoch);
+    try std.testing.expectEqual(@as(u64, 2), attached.durable.execution_generation);
+    try std.testing.expect(attached.durable.checkpoint == null);
+    // The attachment is published only after the new binding is canonical.
+    var canonical = try product_task.history.decode(std.testing.allocator, persistence_storage[0..persistence.len], .{
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 2,
+        .max_compacts_per_task = 8,
+        .max_tools_per_run = 8,
+        .max_commentary_segments_per_run = 64,
+        .max_file_refs_per_tool = 8,
+        .max_ui_history_per_task = 8,
+        .max_workspace_bytes = 4096,
+        .max_task_title_bytes = 512,
+        .max_user_message_bytes = 4096,
+        .max_assistant_message_bytes = 4096,
+        .max_tool_field_bytes = 4096,
+        .max_file_ref_field_bytes = 4096,
+        .max_execution_model_bytes = 512,
+        .max_terminal_diagnostic_bytes = 512,
+    });
+    defer canonical.deinit();
+    const binding = canonical.value.tasks[0].binding;
+    try std.testing.expectEqual(@as(u64, 2), binding.epoch);
+    try std.testing.expectEqual(@as(u64, 2), binding.execution_generation);
     fake_core.lock();
     const restore_calls = fake_core.checkpoint_restores;
     fake_core.unlock();
@@ -7360,4 +7132,1342 @@ test "expanded text and file limits reach AgentCore intact and reject overflow b
     try std.testing.expectEqual(@as(usize, 8), fake_core.multimodal_reference_count);
     try std.testing.expect(fake_core.multimodal_prompt_bytes < limits.max_user_message_bytes + 8 * 8192);
     for (ids) |id| try std.testing.expect(!workbench.releaseAttachment(id));
+}
+
+test "approval mutation workers retain the same Session and historical Run permission facts" {
+    for ([_]bool{ true, false }) |answer_before_full| {
+        fake_core.reset();
+        fake_core.setNextPlan(.ui_wait);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoint_store.deinit();
+        const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var history = TaskPersistenceProbe{ .storage = bytes, .main_thread = std.Thread.getCurrentId() };
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        const task_id = try control.createTask(input);
+        const task = control.task_runtime.find(task_id).?;
+        const epoch = task.durable.binding_epoch;
+        const route = task.runtime.routeId();
+        var original = try task.runtime.acquireAccess();
+        const session_pointer = original.session;
+        original.deinit();
+        var expected_generation: u64 = 1;
+        for ([_]product_control.ApprovalMode{ .full_access, .manual, .auto_review, .manual }) |target| {
+            const prior_revision = task.durable.approval_revision;
+            const prior_profile = task.durable.permission_profile;
+            const ack = try control.setApprovalMode(task_id, target, epoch, prior_revision);
+            try std.testing.expectEqual(prior_revision + 1, ack);
+            try std.testing.expectEqual(prior_profile, task.durable.permission_profile);
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (task.approval_change == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(task.approval_change == null);
+            try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+            try std.testing.expectEqual(target, try control.taskApprovalMode(task_id));
+            try std.testing.expectEqual(ack, task.durable.approval_revision);
+            try std.testing.expectEqual(epoch, task.durable.binding_epoch);
+            try std.testing.expectEqual(route, task.runtime.routeId());
+            try std.testing.expectEqual(@as(u64, 0), task.durable.next_run_generation);
+            var access = try task.runtime.acquireAccess();
+            defer access.deinit();
+            try std.testing.expectEqual(session_pointer, access.session);
+            const mode: lifecycle.PermissionMode = if (target == .full_access) .full_access else .accept_edits;
+            if (prior_profile != target.profile()) expected_generation += 1;
+            const observed = try access.updatePermissionMode(mode, mode);
+            try std.testing.expect(!observed.changed);
+            try std.testing.expectEqual(expected_generation, observed.policy_generation);
+            const checkpoint = task.durable.checkpoint orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u64, 0), checkpoint.session.last_run_id);
+            var cancel: std.atomic.Value(bool) = .init(false);
+            var verified = try checkpoint_store.openVerified(checkpoint.blob, &cancel);
+            verified.deinit();
+            var canonical = try product_task.history.decode(std.testing.allocator, bytes[0..history.len], .{
+                .max_workspaces = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 8,
+                .max_compacts_per_task = 8,
+                .max_tools_per_run = 8,
+                .max_file_changes_per_run = 8,
+                .max_commentary_segments_per_run = 64,
+                .max_file_refs_per_tool = 8,
+                .max_ui_history_per_task = 8,
+                .max_workspace_bytes = 4096,
+                .max_task_title_bytes = 512,
+                .max_user_message_bytes = 4096,
+                .max_assistant_message_bytes = 4096,
+                .max_tool_field_bytes = 4096,
+                .max_file_ref_field_bytes = 4096,
+                .max_execution_model_bytes = 512,
+                .max_terminal_diagnostic_bytes = 512,
+            });
+            defer canonical.deinit();
+            try std.testing.expectEqual(ack, canonical.value.tasks[0].approval_revision);
+            try std.testing.expectEqualStrings(@tagName(target.profile()), canonical.value.tasks[0].permission_profile);
+            try std.testing.expectEqual(target == .auto_review, canonical.value.tasks[0].permission_review_delegated);
+        }
+        // A permission request after two Core mutations carries generation three.
+        // Its audit keeps the creating Run profile when the Task later changes.
+        const manual_run = try control.runTask(task_id, .{ .text = "ask at the current policy generation" });
+        try waitControlSnapshot(&control, "\"currentRunPhase\":\"waiting_ui\"");
+        const request_id = task.runtime.pending_ui_request_id;
+        {
+            var access = try task.runtime.acquireAccess();
+            defer access.deinit();
+            var pending = try access.copyPendingUiRequest(std.testing.allocator);
+            defer pending.deinit();
+            var parsed = try lifecycle.decodePermissionRequest(std.testing.allocator, pending.json);
+            defer parsed.deinit();
+            try std.testing.expectEqual(expected_generation, parsed.value().policy_generation);
+        }
+        if (answer_before_full) {
+            try control.respondUi(task_id, manual_run, request_id, .{ .permission = .deny_once });
+            try std.testing.expectEqual(.user, task.durable.ui_history[0].?.answered_by.?);
+            // The summary arrives asynchronously via Core's provenance event; wait
+            // for Product to consume that event before inspecting the durable audit.
+            for (0..2000) |_| {
+                try control.drainAgentEvents();
+                if (task.durable.ui_history[0].?.permission != null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(task.durable.ui_history[0].?.permission != null);
+            try std.testing.expectEqual(expected_generation, task.durable.ui_history[0].?.permission.?.policy_generation);
+        }
+        // Crossing the Core mode boundary cancels this controlled Run and waits for
+        // actual quiescence; it must not replay or create a replacement Session.
+        const main_commits_before_switch = history.main_commits;
+        const full_revision = try control.setApprovalMode(task_id, .full_access, epoch, task.durable.approval_revision);
+        try std.testing.expectEqual(main_commits_before_switch, history.main_commits);
+        for (0..2000) |_| {
+            try control.drainAgentEvents();
+            if (task.approval_change == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+        try std.testing.expectEqual(full_revision, task.durable.approval_revision);
+        try std.testing.expectEqual(main_commits_before_switch, history.main_commits);
+        try std.testing.expectEqual(.full_access, task.durable.permission_profile);
+        try std.testing.expectEqual(.approval_required, task.durable.runs[0].?.permission_profile);
+        try std.testing.expectEqual(.cancelled, task_state.runPhase(&task.durable.runs[0].?));
+        try std.testing.expectEqual(route, task.runtime.routeId());
+        fake_core.lock();
+        const response_valid = fake_core.permission_response_valid;
+        const creates = fake_core.session_created;
+        fake_core.unlock();
+        try std.testing.expectEqual(answer_before_full, response_valid);
+        try std.testing.expectEqual(@as(usize, 1), task.durable.ui_history_count);
+        if (!answer_before_full) {
+            try std.testing.expectEqual(.cancelled, task.durable.ui_history[0].?.state);
+            try std.testing.expect(task.durable.ui_history[0].?.answered_by == null);
+        }
+        try std.testing.expectEqual(@as(usize, 1), creates);
+        fake_core.rearmControlled();
+        for (&fake_core.sessions) |*session| {
+            session.lock();
+            if (session.in_use and !session.destroyed) session.plan = .immediate;
+            session.unlock();
+        }
+        const full_run = try control.runTask(task_id, .{ .text = "execute under the committed full access mode" });
+        // currentRunPhase projects active Runs only; completion is a durable
+        // terminal fact on the creating Run, not an active snapshot phase.
+        for (0..2000) |_| {
+            try control.drainAgentEvents();
+            if (task_state.runPhase(&task.durable.runs[1].?) == .completed) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(.completed, task_state.runPhase(&task.durable.runs[1].?));
+        try std.testing.expect(full_run != manual_run);
+        try std.testing.expectEqual(.full_access, task.durable.runs[1].?.permission_profile);
+        try std.testing.expectEqual(.approval_required, task.durable.runs[0].?.permission_profile);
+        try std.testing.expectEqual(@as(usize, 1), task.durable.ui_history_count);
+        var restart_configuration = configuration;
+        restart_configuration.task_persistence = history.capabilityRestored(bytes[0..history.len]);
+        var restarted = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 }, restart_configuration);
+        defer restarted.deinit();
+        const saved = restarted.task_runtime.find(task_id).?;
+        try std.testing.expectEqual(.full_access, try restarted.taskApprovalMode(task_id));
+        try std.testing.expectEqual(full_revision, saved.durable.approval_revision);
+        try std.testing.expectEqual(.approval_required, saved.durable.runs[0].?.permission_profile);
+        try std.testing.expectEqual(.full_access, saved.durable.runs[1].?.permission_profile);
+        if (answer_before_full) {
+            try std.testing.expectEqual(.user, saved.durable.ui_history[0].?.answered_by.?);
+            try std.testing.expectEqual(expected_generation, saved.durable.ui_history[0].?.permission.?.policy_generation);
+        } else {
+            try std.testing.expectEqual(.cancelled, saved.durable.ui_history[0].?.state);
+            try std.testing.expect(saved.durable.ui_history[0].?.answered_by == null);
+        }
+        fake_core.lock();
+        const runs = fake_core.run_calls;
+        const mutations = fake_core.permission_mode_updates;
+        const unavailable = fake_core.ui_unavailable_callbacks;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, 2), runs);
+        try std.testing.expectEqual(@as(usize, if (answer_before_full) 0 else 1), unavailable);
+        // Three real mutations plus the four no-op observations above. Neither
+        // Host delegation change invokes the official Core mutation function.
+        try std.testing.expectEqual(@as(usize, 7), mutations);
+    }
+}
+
+test "approval Core refusal and export failure keep the old mode or restore its baseline" {
+    const SyncFault = struct {
+        var remaining: std.atomic.Value(u32) = .init(0);
+        fn fileSync(context: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
+            const count = remaining.load(.acquire);
+            if (count != 0 and remaining.fetchSub(1, .acq_rel) == 1) return error.InputOutput;
+            return std.testing.io.vtable.fileSync(context, file);
+        }
+    };
+    const Case = struct {
+        mode_status: ?u32 = null,
+        close_fails: bool = false,
+        artifact_unknown: bool = false,
+        restore_required: bool = true,
+        reason: product_task.ApprovalFailureReason = .checkpoint_failed,
+    };
+    for ([_]Case{
+        .{},
+        .{ .close_fails = true },
+        .{ .mode_status = wire.STATUS_BUSY, .restore_required = false, .reason = .busy },
+        .{ .mode_status = wire.STATUS_CHECKPOINT_BUDGET_REQUIRED, .restore_required = false, .reason = .budget_required },
+        .{ .mode_status = wire.STATUS_RESOURCE_LIMIT, .restore_required = false, .reason = .mode_update_failed },
+        .{ .mode_status = wire.STATUS_CORE_ERROR, .reason = .mode_update_failed },
+        .{ .artifact_unknown = true, .reason = .recovery_failed },
+    }) |case| {
+        fake_core.reset();
+        // Official Core starts exported checkpoint generations at one.
+        fake_core.setCheckpointGeneration(1);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        SyncFault.remaining.store(0, .release);
+        defer SyncFault.remaining.store(0, .release);
+        var store_vtable = std.testing.io.vtable.*;
+        store_vtable.fileSync = SyncFault.fileSync;
+        const store_io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &store_vtable };
+        var checkpoint_store = try product_task.checkpoint_store.FileStore.init(store_io, home);
+        defer checkpoint_store.deinit();
+        const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var history = TaskPersistenceProbe{ .storage = bytes };
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 }, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        const task_id = try control.createTask(input);
+        const task = control.task_runtime.find(task_id).?;
+        const epoch = task.durable.binding_epoch;
+        const route = task.runtime.routeId();
+        _ = try control.setApprovalMode(task_id, .full_access, epoch, 1);
+        try std.testing.expectEqual(.baseline_export, task.approval_change.?.phase);
+        const baseline = pending: {
+            for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| {
+                if (slot.task_id == task_id) break :pending slot.job;
+            };
+            return error.TestUnexpectedResult;
+        };
+        for (0..2000) |_| {
+            if (baseline.completionReady()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(baseline.completionReady());
+        try std.testing.expect(baseline.outcome == .checkpoint);
+        // Baseline export is finished; configure only the following mutation
+        // or export before its job starts. No in-flight fixture field changes.
+        fake_core.lock();
+        if (case.restore_required) fake_core.session_created = 0;
+        fake_core.unlock();
+        if (case.mode_status) |status| {
+            for (&fake_core.sessions) |*session| {
+                session.lock();
+                if (session.in_use and !session.destroyed) {
+                    session.forced_permission_mode_status = status;
+                    session.permission_session_granted = true;
+                }
+                session.unlock();
+            }
+        } else if (case.artifact_unknown) {
+            fake_core.lock();
+            fake_core.checkpoint_payload = "unconfirmed-mode-artifact";
+            fake_core.unlock();
+            // Temp file sync succeeds; only the final, post-rename durability
+            // sync fails. POSIX also syncs the parent in begin(). Every other
+            // I/O operation keeps the actual filesystem implementation.
+            SyncFault.remaining.store(if (@import("builtin").os.tag == .windows) 2 else 3, .release);
+        } else fake_core.forceNextCheckpointExportStatus(wire.STATUS_RESOURCE_LIMIT);
+        if (case.close_fails) fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR);
+        for (0..5000) |_| {
+            control.syncLifecycle();
+            if (task.approval_change == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(.failed, task.approval_result.?.outcome);
+        try std.testing.expectEqual(@as(@TypeOf(task.runtime.last_restore_failure), null), task.runtime.last_restore_failure);
+        if (case.close_fails) {
+            try std.testing.expectEqual(.recovery_failed, task.approval_result.?.reason.?);
+            try std.testing.expect(task.runtime.close_failed);
+            try std.testing.expect(task.runtime.last_restore_report == null);
+            for (0..10) |_| control.syncLifecycle();
+            try std.testing.expectError(error.TaskClosing, control.runTask(task_id, .{ .text = "uncommitted mode cannot execute" }));
+            try std.testing.expectEqual(.manual, try control.taskApprovalMode(task_id));
+            try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
+            try std.testing.expectEqual(epoch, task.durable.binding_epoch);
+            try std.testing.expectEqual(@as(u64, 1), task.durable.checkpoint.?.anchor.terminal.approval);
+            fake_core.lock();
+            const restores = fake_core.checkpoint_restores;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, 0), restores);
+            continue;
+        }
+        try std.testing.expectEqual(case.reason, task.approval_result.?.reason.?);
+        try std.testing.expectEqual(.manual, try control.taskApprovalMode(task_id));
+        try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
+        try std.testing.expectEqual(epoch, task.durable.binding_epoch);
+        try std.testing.expectEqual(case.restore_required, route != task.runtime.routeId());
+        try std.testing.expectEqual(case.restore_required and !case.artifact_unknown, task.runtime.last_restore_report != null);
+        try std.testing.expect(!task.runtime.worker_leases.hasLive());
+        for (0..10) |_| control.syncLifecycle();
+        fake_core.lock();
+        const updates_before_observation = fake_core.permission_mode_updates;
+        const runs = fake_core.run_calls;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, 1), updates_before_observation);
+        try std.testing.expectEqual(@as(usize, 0), runs);
+        if (!case.restore_required) {
+            for (&fake_core.sessions) |*session| {
+                session.lock();
+                const active = session.in_use and !session.destroyed;
+                const granted = session.permission_session_granted;
+                session.unlock();
+                if (active) try std.testing.expect(granted);
+            }
+        }
+        const checkpoint = task.durable.checkpoint orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u64, 1), checkpoint.anchor.terminal.approval);
+        if (case.artifact_unknown) {
+            try std.testing.expectEqual(@as(u32, 0), SyncFault.remaining.load(.acquire));
+            try std.testing.expectEqual(.outcome_unknown, control.checkpointStoreHealth());
+            var cancelled: std.atomic.Value(bool) = .init(false);
+            var old_source = try checkpoint_store.openVerified(checkpoint.blob, &cancelled);
+            old_source.deinit();
+            const payload = "unconfirmed-mode-artifact";
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
+            const uncertain: product_task.checkpoint_store.Identity = .{
+                .task_id = task_id,
+                .generation = 1,
+                .digest = digest,
+                .byte_size = payload.len,
+            };
+            var candidate_source = try checkpoint_store.openVerified(uncertain, &cancelled);
+            candidate_source.deinit();
+            try std.testing.expectError(error.ApprovalUnavailable, control.setApprovalMode(task_id, .full_access, epoch, 1));
+            for (0..10) |_| control.syncLifecycle();
+            try std.testing.expectEqual(.outcome_unknown, control.checkpointStoreHealth());
+            // A readable file alone cannot turn an unknown durability result
+            // into a committed mode, or trigger cleanup of either recovery point.
+            var retained_source = try checkpoint_store.openVerified(uncertain, &cancelled);
+            retained_source.deinit();
+            // The existing recovery Gate requires a ready checkpoint store.
+            // Unknown durability keeps that Gate closed; do not weaken it just
+            // because its old recovery point is presently readable.
+            try std.testing.expect(!task.runtime.hasAttachedSession());
+            try std.testing.expectEqual(.none, task.runtime.active_operation);
+            try std.testing.expectError(error.TaskClosing, control.runTask(task_id, .{ .text = "unknown checkpoint store cannot execute" }));
+            try std.testing.expectError(error.RecoveryUnavailable, control.restoreTaskConversation(task_id, epoch));
+            fake_core.lock();
+            const restores = fake_core.checkpoint_restores;
+            const creates = fake_core.session_created;
+            const destroys = fake_core.session_destroyed;
+            const runs_after = fake_core.run_calls;
+            const updates_after = fake_core.permission_mode_updates;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, 0), restores);
+            try std.testing.expectEqual(@as(usize, 0), creates);
+            try std.testing.expectEqual(@as(usize, 1), destroys);
+            try std.testing.expectEqual(@as(usize, 0), runs_after);
+            try std.testing.expectEqual(@as(usize, 1), updates_after);
+            continue;
+        }
+        var access = try task.runtime.acquireAccess();
+        defer access.deinit();
+        const observed = try access.updatePermissionMode(.accept_edits, .accept_edits);
+        try std.testing.expect(!observed.changed);
+        try std.testing.expectEqual(@as(u64, 1), observed.policy_generation);
+        fake_core.lock();
+        const restores = fake_core.checkpoint_restores;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, if (case.restore_required) 1 else 0), restores);
+    }
+}
+
+test "approval fresh recovery stays queued and one failure never starts an implicit retry" {
+    const Blocker = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+        fn execute(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.entered.store(true, .release);
+            while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+        }
+        fn cancel(_: *anyopaque) void {}
+    };
+    fake_core.reset();
+    fake_core.setNextPlan(.invalid_result_layout);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer checkpoint_store.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(bytes);
+    var history = TaskPersistenceProbe{ .storage = bytes };
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = history.capability();
+    configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration);
+    defer control.deinit();
+    try installControlExecution(&control);
+    var input = productControlTaskInput();
+    input.workspace_root = home;
+    input.trust = .explicitly_trusted;
+    input.approval_mode = .manual;
+    const task_id = try control.createTask(input);
+    _ = try control.runTask(task_id, .{ .text = "fail without covering Conversation history" });
+    try waitTaskSnapshot(&control, "\"id\":\"1\"", "\"continuationRecoveryAvailable\":true");
+    const task = control.task_runtime.find(task_id).?;
+    try std.testing.expect(task.durable.checkpoint == null);
+    try std.testing.expectEqual(.excluded, task.durable.runs[0].?.coverage);
+    const epoch = task.durable.binding_epoch;
+    const attempts_before = control.task_runtime.next_restore_attempt_id;
+    var blocker = Blocker{};
+    defer blocker.released.store(true, .release);
+    try control.executor.enqueue(.{ .identity = &blocker, .context = &blocker, .execute_fn = Blocker.execute, .cancel_fn = Blocker.cancel });
+    for (0..2000) |_| {
+        if (blocker.entered.load(.acquire)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(blocker.entered.load(.acquire));
+    _ = try control.setApprovalMode(task_id, .auto_review, epoch, 1);
+    try std.testing.expectEqual(.restore, std.meta.activeTag(task.runtime.active_operation));
+    const queued = task.runtime.restore_job orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.queued, queued.state.load(.acquire));
+    fake_core.lock();
+    const created_while_queued = fake_core.session_created;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 1), created_while_queued);
+    try std.testing.expect(control.executor.cancel(queued));
+    control.syncLifecycle();
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(.failed, task.approval_result.?.outcome);
+    try std.testing.expectEqual(.recovery_failed, task.approval_result.?.reason.?);
+    try std.testing.expectEqual(attempts_before + 1, control.task_runtime.next_restore_attempt_id);
+    for (0..10) |_| control.syncLifecycle();
+    try std.testing.expectEqual(attempts_before + 1, control.task_runtime.next_restore_attempt_id);
+    try std.testing.expect(!task.runtime.worker_leases.hasLive());
+    try std.testing.expectEqual(.manual, try control.taskApprovalMode(task_id));
+    blocker.released.store(true, .release);
+
+    // A distinct explicit request may try again. A real create failure is
+    // terminal for this request, even though the next create would succeed.
+    fake_core.failNextSessionCreate();
+    _ = try control.setApprovalMode(task_id, .auto_review, epoch, 1);
+    for (0..2000) |_| {
+        control.syncLifecycle();
+        if (task.approval_change == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(.failed, task.approval_result.?.outcome);
+    try std.testing.expectEqual(.restore_rejected, task.runtime.last_restore_failure.?);
+    for (0..10) |_| control.syncLifecycle();
+    try std.testing.expectEqual(attempts_before + 2, control.task_runtime.next_restore_attempt_id);
+    try std.testing.expect(!task.runtime.hasAttachedSession());
+    try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
+
+    fake_core.setNextPlan(.immediate);
+    _ = try control.setApprovalMode(task_id, .auto_review, epoch, 1);
+    for (0..2000) |_| {
+        control.syncLifecycle();
+        if (task.approval_change == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(.completed, task.approval_result.?.outcome);
+    try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(task_id));
+    try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
+    try std.testing.expectEqual(epoch, task.durable.binding_epoch);
+    try std.testing.expectEqual(@as(u64, 1), task.durable.next_run_generation);
+    try std.testing.expectEqual(.excluded, task.durable.runs[0].?.coverage);
+    try std.testing.expect(task.runtime.last_restore_report == null);
+    try std.testing.expect(task.runtime.last_restore_permission == null);
+    try std.testing.expect(!task.runtime.worker_leases.hasLive());
+    fake_core.lock();
+    const created = fake_core.session_created;
+    const restored = fake_core.checkpoint_restores;
+    const runs = fake_core.run_calls;
+    fake_core.unlock();
+    try std.testing.expectEqual(@as(usize, 2), created);
+    try std.testing.expectEqual(@as(usize, 0), restored);
+    try std.testing.expectEqual(@as(usize, 1), runs);
+}
+
+test "recovery binding confirmation retains candidates and never writes on the main thread" {
+    const Commit = product_task.DurableCommit;
+    const Blocker = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+        fn execute(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.entered.store(true, .release);
+            while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+        }
+        fn cancel(_: *anyopaque) void {}
+    };
+    const Harness = struct {
+        storage: []u8,
+        candidate: []u8,
+        main_thread: std.Thread.Id,
+        len: usize = 0,
+        candidate_len: usize = 0,
+        main_commits: usize = 0,
+        worker_commits: usize = 0,
+        resolutions: usize = 0,
+        recoveries: usize = 0,
+        result: Commit,
+        resolved: Commit,
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+        close_entered: std.atomic.Value(bool) = .init(false),
+        close_released: std.atomic.Value(bool) = .init(false),
+        main_closes: std.atomic.Value(usize) = .init(0),
+        close_calls: std.atomic.Value(usize) = .init(0),
+        hold_close: bool = false,
+        fn observeClose(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            _ = self.close_calls.fetchAdd(1, .acq_rel);
+            if (std.Thread.getCurrentId() == self.main_thread) {
+                _ = self.main_closes.fetchAdd(1, .acq_rel);
+                return;
+            }
+            self.close_entered.store(true, .release);
+            while (self.hold_close and !self.close_released.load(.acquire)) std.Thread.yield() catch {};
+        }
+        fn save(context: ?*anyopaque, bytes: []const u8) Commit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.Thread.getCurrentId() == self.main_thread) {
+                self.main_commits += 1;
+            } else {
+                self.worker_commits += 1;
+                if (self.worker_commits == 1) {
+                    @memcpy(self.candidate[0..bytes.len], bytes);
+                    self.candidate_len = bytes.len;
+                    self.entered.store(true, .release);
+                    while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+                    if (self.result == .failed or (self.result == .outcome_unknown and self.resolved == .failed)) return self.result;
+                    @memcpy(self.storage[0..bytes.len], bytes);
+                    self.len = bytes.len;
+                    return self.result;
+                }
+            }
+            @memcpy(self.storage[0..bytes.len], bytes);
+            self.len = bytes.len;
+            return .committed;
+        }
+        fn resolve(context: ?*anyopaque, bytes: []const u8) Commit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            std.debug.assert(std.Thread.getCurrentId() != self.main_thread);
+            std.debug.assert(std.mem.eql(u8, bytes, self.candidate[0..self.candidate_len]));
+            self.resolutions += 1;
+            if (self.resolutions == 1) return .outcome_unknown;
+            std.debug.assert((self.resolved == .committed) == std.mem.eql(u8, bytes, self.storage[0..self.len]));
+            return self.resolved;
+        }
+        fn recover(context: ?*anyopaque, _: []const u8) Commit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.recoveries += 1;
+            return .failed;
+        }
+        fn capability(self: *@This(), restored: ?[]const u8) product_task.history.Capability {
+            return .{ .context = self, .enabled = true, .restored_bytes = restored, .commit_fn = save, .confirmed_commit_fn = save, .resolve_commit_fn = resolve, .recover_fn = recover };
+        }
+        fn wake(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    const HeldExecutor = struct {
+        context: ?*anyopaque = null,
+        cancel_fn: ?*const fn (*anyopaque) void = null,
+        fn enqueue(context: *anyopaque, _: *anyopaque, job: *anyopaque, _: *const fn (*anyopaque) void, cancellation: *const fn (*anyopaque) void) error{ ExecutorShuttingDown, QueueFull }!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.context = job;
+            self.cancel_fn = cancellation;
+        }
+        fn cancel(context: *anyopaque, _: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.cancel_fn.?(self.context.?);
+            self.context = null;
+            return true;
+        }
+    };
+    const cases = [_]struct { result: Commit, resolved: Commit = .committed, stale: bool = false, shutdown: bool = false, hold_close: bool = false, close_failure: bool = false, cancel_binding: bool = false }{
+        .{ .result = .committed },
+        .{ .result = .committed, .cancel_binding = true },
+        .{ .result = .committed, .stale = true, .hold_close = true },
+        .{ .result = .committed, .stale = true, .hold_close = true, .close_failure = true },
+        .{ .result = .failed },
+        .{ .result = .outcome_unknown },
+        .{ .result = .outcome_unknown, .resolved = .failed },
+        .{ .result = .committed, .shutdown = true },
+        .{ .result = .outcome_unknown, .shutdown = true },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(storage);
+    const candidate_bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(candidate_bytes);
+    for (cases) |case| {
+        fake_core.reset();
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var history = Harness{ .storage = storage, .candidate = candidate_bytes, .main_thread = std.Thread.getCurrentId(), .result = case.result, .resolved = case.resolved, .hold_close = case.hold_close };
+        var checkpoint_store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoint_store.deinit();
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability(null);
+        configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
+        const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1 };
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        var task_id: u64 = undefined;
+        {
+            var seed = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+            defer seed.deinit();
+            try installControlExecution(&seed);
+            task_id = try seed.createTask(input);
+        }
+        const old_frame = try std.testing.allocator.dupe(u8, storage[0..history.len]);
+        defer std.testing.allocator.free(old_frame);
+        configuration.task_persistence = history.capability(old_frame);
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        defer control.deinit();
+        defer history.released.store(true, .release);
+        defer {
+            fake_core.lock();
+            fake_core.session_destroy_probe = null;
+            fake_core.unlock();
+        }
+        defer history.close_released.store(true, .release);
+        try installControlExecutionGeneration(&control, 2);
+        _ = try control.openWorkspace(input);
+        const task = control.task_runtime.find(task_id).?;
+        const main_commits = history.main_commits;
+        fake_core.lock();
+        fake_core.session_destroy_probe = .{ .context = &history, .observe_fn = Harness.observeClose };
+        fake_core.unlock();
+        const attempt_id = if (case.close_failure) approval: {
+            _ = try control.setApprovalMode(task_id, .auto_review, 1, 1);
+            break :approval task.runtime.restore_job.?.attempt.attempt_id;
+        } else try control.restoreTaskConversation(task_id, 1);
+        if (case.cancel_binding) {
+            const restore = task.runtime.restore_job.?;
+            for (0..2000) |_| {
+                if (restore.completionReady()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(restore.completionReady());
+            try std.testing.expectEqual(.candidate, std.meta.activeTag(restore.outcome));
+            var blocker = Blocker{};
+            defer blocker.released.store(true, .release);
+            try control.approval_executor.enqueue(.{ .identity = &blocker, .context = &blocker, .execute_fn = Blocker.execute, .cancel_fn = Blocker.cancel });
+            for (0..2000) |_| {
+                if (blocker.entered.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(blocker.entered.load(.acquire));
+            control.syncLifecycle();
+            const writer = queued: {
+                for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.restore_attempt_id == attempt_id) break :queued slot.job;
+                return error.TestUnexpectedResult;
+            };
+            try std.testing.expectEqual(.queued, writer.state.load(.acquire));
+            try std.testing.expect(control.approval_executor.cancel(writer));
+            try std.testing.expectEqual(.cancelled, writer.outcome.failure.reason);
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (task.runtime.restore_job == null and task.runtime.close_thread == null and !task.runtime.hasClosingSession()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(task.runtime.restore_job == null);
+            try std.testing.expect(task.runtime.attachment == .detached);
+            try std.testing.expect(!task.runtime.worker_leases.hasLive());
+            try std.testing.expectEqual(.cancelled, task.runtime.last_restore_failure.?);
+            try std.testing.expectEqual(.ready, control.task_persistence_health);
+            try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
+            try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
+            for (0..10) |_| control.syncLifecycle();
+            try std.testing.expectEqual(@as(usize, 0), history.worker_commits);
+            try std.testing.expectEqual(main_commits, history.main_commits);
+            try std.testing.expectEqual(@as(usize, 0), history.main_closes.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 1), history.close_calls.load(.acquire));
+            continue;
+        }
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (history.entered.load(.acquire)) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(history.entered.load(.acquire));
+        const restore = task.runtime.restore_job orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(attempt_id, restore.attempt.attempt_id);
+        try std.testing.expectEqual(.pending, restore.binding_commit);
+        try std.testing.expectEqual(.candidate, std.meta.activeTag(restore.outcome));
+        try std.testing.expect(task.runtime.attachment == .detached);
+        try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
+        try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
+        try std.testing.expect(task.runtime.worker_leases.hasLive());
+        try std.testing.expect(control.task_runtime.approvalHistoryBlocked());
+        if (!case.shutdown) try control.renameTask(task_id, "changed during binding confirmation");
+        if (case.stale) try installControlExecutionGeneration(&control, 3);
+        try std.testing.expectEqual(main_commits, history.main_commits);
+        if (case.close_failure) fake_core.failNextSessionDestroy();
+        history.released.store(true, .release);
+        if (case.hold_close) {
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (history.close_entered.load(.acquire)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(history.close_entered.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 0), history.main_closes.load(.acquire));
+            try std.testing.expect(task.runtime.close_thread != null);
+            try std.testing.expect(task.runtime.hasClosingSession());
+            try std.testing.expect(task.runtime.discarding_restore);
+            try std.testing.expectEqual(@as(usize, 0), task.runtime.live().?.execution.secret.len);
+            try std.testing.expect(task.runtime.restore_job == null);
+            try std.testing.expect(!task.runtime.worker_leases.hasLive());
+            try std.testing.expectEqual(@as(u64, 2), task.durable.binding_epoch);
+            try std.testing.expectError(error.TaskClosing, control.runTask(task_id, .{ .text = "a rejected candidate cannot run" }));
+            history.close_released.store(true, .release);
+        }
+        if (case.shutdown) {
+            const history_job = pending: {
+                for (control.task_runtime.approval_jobs) |entry| if (entry) |slot|
+                    if (slot.restore_attempt_id == attempt_id) break :pending slot.job;
+                return error.TestUnexpectedResult;
+            };
+            for (0..2000) |_| {
+                if (history_job.completionReady()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(history_job.completionReady());
+            // Skip normal publication; shutdown must consume a completed writer.
+            control.shutdownExecutor();
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (task.runtime.close_thread == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(task.runtime.restore_job == null);
+            try std.testing.expect(!task.runtime.worker_leases.hasLive());
+            try std.testing.expect(task.runtime.attachment == .detached);
+            try std.testing.expectEqual(@as(u64, if (case.result == .committed) 2 else 1), task.durable.binding_epoch);
+            if (case.result == .outcome_unknown) {
+                try std.testing.expectEqual(.outcome_unknown, control.task_persistence_health);
+                try std.testing.expectEqual(main_commits, history.main_commits);
+                try std.testing.expectEqual(@as(usize, 1), history.worker_commits);
+                try std.testing.expectEqual(@as(usize, 0), history.resolutions);
+            }
+            continue;
+        }
+        if (case.result == .outcome_unknown) {
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (restore.binding_commit == .outcome_unknown) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expectEqual(.outcome_unknown, restore.binding_commit);
+            const retained = restore.unknown_history orelse return error.TestUnexpectedResult;
+            for (0..10) |_| control.syncLifecycle();
+            try std.testing.expectEqual(@as(usize, 1), history.worker_commits);
+            try std.testing.expectEqual(@as(usize, 0), history.resolutions);
+            var held = HeldExecutor{};
+            const copy = try std.testing.allocator.dupe(u8, retained);
+            try control.task_runtime.queueRecoveryHistory(task_id, copy, history.capability(null), true, .{ .context = &held, .enqueue_fn = HeldExecutor.enqueue, .cancel_fn = HeldExecutor.cancel }, .{ .notify_fn = Harness.wake });
+            try std.testing.expect(HeldExecutor.cancel(&held, held.context.?));
+            control.syncLifecycle();
+            try std.testing.expectEqual(retained.ptr, restore.unknown_history.?.ptr);
+            try std.testing.expectEqual(.outcome_unknown, restore.binding_commit);
+            for (0..2) |resolution| {
+                try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+                for (0..2000) |_| {
+                    control.syncLifecycle();
+                    if (history.resolutions == resolution + 1 and !control.task_runtime.approvalHistoryWorkerActive()) break;
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                }
+                try std.testing.expectEqual(resolution + 1, history.resolutions);
+                if (resolution == 0) try std.testing.expectEqual(retained.ptr, restore.unknown_history.?.ptr);
+            }
+        }
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (task.runtime.restore_job == null and task.runtime.close_thread == null and (!task.runtime.hasClosingSession() or task.runtime.close_failed) and !control.task_runtime.approvalHistoryBlocked()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(task.runtime.restore_job == null);
+        try std.testing.expect(!task.runtime.worker_leases.hasLive());
+        const committed = case.result == .committed or (case.result == .outcome_unknown and case.resolved == .committed);
+        try std.testing.expectEqual(@as(u64, if (committed) 2 else 1), task.durable.binding_epoch);
+        try std.testing.expectEqual(@as(u64, if (committed) 2 else 1), task.durable.execution_generation);
+        if (case.close_failure) {
+            try std.testing.expect(task.runtime.close_failed);
+            try std.testing.expect(task.runtime.discarding_restore);
+            try std.testing.expectEqual(.session_poisoned, task.runtime.liveConst().?.health);
+            try std.testing.expectEqual(@as(usize, 0), task.runtime.executionConst().?.secret.len);
+            try std.testing.expectEqual(.candidate_cleanup_failed, task.runtime.last_restore_failure.?);
+            try std.testing.expect(task.approval_change == null);
+            try std.testing.expectEqual(.failed, task.approval_result.?.outcome);
+            try std.testing.expectEqual(.recovery_failed, task.approval_result.?.reason.?);
+            try std.testing.expectEqual(.manual, try control.taskApprovalMode(task_id));
+            try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
+            try std.testing.expectError(error.TaskClosing, control.runTask(task_id, .{ .text = "a close failure cannot install a rejected candidate" }));
+        } else try std.testing.expectEqual(committed and !case.stale, task.runtime.hasAttachedSession());
+        try std.testing.expectEqual(@as(usize, 0), history.main_closes.load(.acquire));
+        if (!committed) try std.testing.expectEqual(.binding_persistence_failed, task.runtime.last_restore_failure.?);
+        try std.testing.expectEqual(main_commits, history.main_commits);
+        try std.testing.expectEqual(@as(usize, 0), history.recoveries);
+        for (0..10) |_| control.syncLifecycle();
+        if (case.close_failure) try std.testing.expectEqual(@as(usize, 1), history.close_calls.load(.acquire));
+        const commits_after = history.worker_commits;
+        try std.testing.expectEqual(@as(usize, if (case.result == .failed) 1 else 2), commits_after);
+        fake_core.lock();
+        const created = fake_core.session_created;
+        const runs = fake_core.run_calls;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, 2), created);
+        try std.testing.expectEqual(@as(usize, 0), runs);
+        // Read canonical facts through the normal startup codec, not string
+        // matching. A stale Session must not roll back its confirmed binding.
+        configuration.task_persistence = history.capability(storage[0..history.len]);
+        var restarted = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        defer restarted.deinit();
+        const durable = restarted.task_runtime.find(task_id).?;
+        try std.testing.expectEqual(task.durable.binding_epoch, durable.durable.binding_epoch);
+        try std.testing.expectEqual(task.durable.execution_generation, durable.durable.execution_generation);
+        if (case.result != .failed) try std.testing.expectEqualStrings("changed during binding confirmation", durable.durable.title);
+        if (case.close_failure) {
+            // The ordinary Host close action can retry; polling cannot.
+            try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, task_id));
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (!task.runtime.hasClosingSession() and task.runtime.close_thread == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(task.runtime.attachment == .detached);
+            try std.testing.expect(!task.runtime.discarding_restore);
+            try std.testing.expectEqual(@as(usize, 2), history.close_calls.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 0), history.main_closes.load(.acquire));
+        }
+    }
+}
+
+test "approval delegation can change while the only Run worker waits for permission" {
+    for ([_]bool{ false, true }) |completed_before_manual| {
+        fake_core.reset();
+        fake_core.setNextPlan(.ui_wait);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        const bytes = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(bytes);
+        var history = TaskPersistenceProbe{ .storage = bytes };
+        var transport = ReviewerTransport{ .hold_cancel_cleanup = true };
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        configuration.completion_factory = .{ .context = &transport, .create_fn = ReviewerTransport.create };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 2, .max_tasks = 1, .max_workspaces = 1 }, configuration);
+        defer control.deinit();
+        defer transport.released.store(true, .release);
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        const task_id = try control.createTask(input);
+        const task = control.task_runtime.find(task_id).?;
+        const route = task.runtime.routeId();
+        const run_id = try control.runTask(task_id, .{ .text = "review this pending operation explicitly" });
+        try waitControlSnapshot(&control, "\"currentRunPhase\":\"waiting_ui\"");
+        const request_id = task.runtime.pending_ui_request_id;
+        try std.testing.expect(request_id != 0);
+        try std.testing.expectEqual(@as(u64, 2), try control.setApprovalMode(task_id, .auto_review, 1, 1));
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (task.approval_change == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(.auto_review, try control.taskApprovalMode(task_id));
+        try transport.awaitEntered(&control);
+        const old_review = task.runtime.permission_review.identity.?;
+        if (completed_before_manual) {
+            transport.released.store(true, .release);
+            try waitReviewerJobDone(&control);
+            try std.testing.expect(transport.exited.load(.acquire));
+        }
+        // Switching back must invalidate the result immediately. A transport
+        // deliberately holding cancellation cleanup cannot make this call join.
+        try std.testing.expectEqual(@as(u64, 3), try control.setApprovalMode(task_id, .manual, 1, 2));
+        try std.testing.expect(!task.runtime.permission_review.matches(old_review));
+        try std.testing.expectEqual(.needs_user, task.permissionReviewPhase());
+        try std.testing.expectEqual(completed_before_manual, transport.exited.load(.acquire));
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (task.approval_change == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(.manual, try control.taskApprovalMode(task_id));
+        try std.testing.expectEqual(route, task.runtime.routeId());
+        try std.testing.expectEqual(run_id, task.runtime.active_operation.run);
+        try std.testing.expectEqual(request_id, task.runtime.pending_ui_request_id);
+        try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
+        transport.released.store(true, .release);
+        if (!completed_before_manual) try waitReviewerJobDone(&control);
+        control.syncLifecycle();
+        try std.testing.expectEqual(@as(usize, 0), task.durable.ui_history_count);
+        try std.testing.expectEqual(request_id, task.runtime.pending_ui_request_id);
+        try std.testing.expectEqual(@as(usize, 1), transport.calls.load(.acquire));
+        try control.respondUi(task_id, run_id, request_id, .{ .permission = .deny_once });
+        try std.testing.expectEqual(.user, task.durable.ui_history[0].?.answered_by.?);
+        fake_core.lock();
+        const creates = fake_core.session_created;
+        const mutations = fake_core.permission_mode_updates;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, 1), creates);
+        try std.testing.expectEqual(@as(usize, 0), mutations);
+    }
+}
+test "approval metadata outcomes retain both checkpoints until canonical readback decides" {
+    const Commit = product_task.history.Commit;
+    const Harness = struct {
+        storage: []u8,
+        candidate: []u8,
+        main_thread: std.Thread.Id,
+        result: Commit,
+        candidate_is_canonical: bool,
+        fault_baseline: bool,
+        injected: bool = false,
+        len: usize = 0,
+        candidate_len: usize = 0,
+        main_writes: usize = 0,
+        mode_writes: usize = 0,
+        resolutions: usize = 0,
+        recoveries: usize = 0,
+
+        fn commit(context: ?*anyopaque, bytes: []const u8) Commit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (std.Thread.getCurrentId() == self.main_thread) self.main_writes += 1;
+            var parsed = product_task.history.decode(std.testing.allocator, bytes, .{
+                .max_workspaces = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 8,
+                .max_compacts_per_task = 8,
+                .max_tools_per_run = 8,
+                .max_commentary_segments_per_run = 64,
+                .max_file_refs_per_tool = 8,
+                .max_ui_history_per_task = 8,
+                .max_workspace_bytes = 4096,
+                .max_task_title_bytes = 512,
+                .max_user_message_bytes = 4096,
+                .max_assistant_message_bytes = 4096,
+                .max_tool_field_bytes = 4096,
+                .max_file_ref_field_bytes = 4096,
+                .max_execution_model_bytes = 512,
+                .max_terminal_diagnostic_bytes = 512,
+            }) catch return .failed;
+            defer parsed.deinit();
+            const tasks = parsed.value.tasks;
+            const full = tasks.len != 0 and std.mem.eql(u8, tasks[0].permission_profile, "full_access");
+            const baseline = self.fault_baseline and tasks.len != 0 and tasks[0].checkpoint != null;
+            if (full or baseline) {
+                self.mode_writes += 1;
+                if (bytes.len > self.candidate.len) return .failed;
+                @memcpy(self.candidate[0..bytes.len], bytes);
+                self.candidate_len = bytes.len;
+                if (self.result != .committed and !self.injected) {
+                    self.injected = true;
+                    if (self.candidate_is_canonical) {
+                        if (bytes.len > self.storage.len) return .failed;
+                        @memcpy(self.storage[0..bytes.len], bytes);
+                        self.len = bytes.len;
+                    }
+                    return self.result;
+                }
+            }
+            if (bytes.len > self.storage.len) return .failed;
+            @memcpy(self.storage[0..bytes.len], bytes);
+            self.len = bytes.len;
+            return .committed;
+        }
+
+        fn resolve(context: ?*anyopaque, expected: []const u8) Commit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            std.debug.assert(std.Thread.getCurrentId() != self.main_thread);
+            std.debug.assert(std.mem.eql(u8, expected, self.candidate[0..self.candidate_len]));
+            self.resolutions += 1;
+            if (self.resolutions == 1) return .outcome_unknown;
+            return if (std.mem.eql(u8, self.storage[0..self.len], expected)) .committed else .failed;
+        }
+
+        fn recover(context: ?*anyopaque, _: []const u8) Commit {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.recoveries += 1;
+            return .failed;
+        }
+
+        fn capability(self: *@This(), restored: ?[]const u8) product_task.history.Capability {
+            return .{ .context = self, .enabled = true, .restored_bytes = restored, .commit_fn = commit, .confirmed_commit_fn = commit, .resolve_commit_fn = resolve, .recover_fn = recover };
+        }
+    };
+    const Case = struct { result: Commit, candidate_is_canonical: bool, fault_baseline: bool = false };
+    for ([_]Case{
+        .{ .result = .failed, .candidate_is_canonical = false },
+        .{ .result = .outcome_unknown, .candidate_is_canonical = false },
+        .{ .result = .outcome_unknown, .candidate_is_canonical = true },
+        .{ .result = .failed, .candidate_is_canonical = false, .fault_baseline = true },
+        .{ .result = .outcome_unknown, .candidate_is_canonical = false, .fault_baseline = true },
+        .{ .result = .outcome_unknown, .candidate_is_canonical = true, .fault_baseline = true },
+    }) |case| {
+        fake_core.reset();
+        fake_core.setCheckpointGeneration(1);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer store.deinit();
+        const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(storage);
+        const candidate = try std.testing.allocator.alloc(u8, 1024 * 1024);
+        defer std.testing.allocator.free(candidate);
+        var history = Harness{ .storage = storage, .candidate = candidate, .main_thread = std.Thread.getCurrentId(), .result = case.result, .candidate_is_canonical = case.candidate_is_canonical, .fault_baseline = case.fault_baseline };
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability(null);
+        configuration.checkpoint_store = .{ .file_store = &store };
+        const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1 };
+        var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        defer control.deinit();
+        try installControlExecution(&control);
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        const task_id = try control.createTask(input);
+        const task = control.task_runtime.find(task_id).?;
+        const route = task.runtime.routeId();
+        const main_writes = history.main_writes;
+        _ = try control.setApprovalMode(task_id, .full_access, 1, 1);
+        try std.testing.expectEqual(.baseline_export, task.approval_change.?.phase);
+        const baseline_job = pending: {
+            for (control.task_runtime.approval_jobs) |entry| if (entry) |slot| if (slot.task_id == task_id) break :pending slot.job;
+            return error.TestUnexpectedResult;
+        };
+        for (0..2000) |_| {
+            if (baseline_job.completionReady()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(baseline_job.completionReady());
+        try std.testing.expect(baseline_job.outcome == .checkpoint);
+        const baseline = baseline_job.outcome.checkpoint.blob;
+        // The fake exporter uses explicit fixture payload/generation and its
+        // restore derives the logical ID from the creation counter. Configure
+        // these before the next job starts; official Core reads them from blob.
+        fake_core.lock();
+        fake_core.checkpoint_payload = "mode-candidate-checkpoint";
+        if (!case.candidate_is_canonical) fake_core.session_created = 0;
+        fake_core.unlock();
+        if (case.fault_baseline) {
+            for (0..5000) |_| {
+                control.syncLifecycle();
+                if (task.approval_change == null or task.approval_change.?.phase == .outcome_unknown) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            // Core cannot change until canonical metadata confirms the old
+            // recovery point. Unknown readback is an explicit, read-only step.
+            try std.testing.expectEqual(.manual, try control.taskApprovalMode(task_id));
+            try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
+            try std.testing.expect(task.durable.checkpoint == null);
+            try std.testing.expectEqual(route, task.runtime.routeId());
+            fake_core.lock();
+            const premature_updates = fake_core.permission_mode_updates;
+            const premature_restores = fake_core.checkpoint_restores;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, 0), premature_updates);
+            try std.testing.expectEqual(@as(usize, 0), premature_restores);
+            if (case.result == .outcome_unknown) {
+                try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
+                const retained = task.approval_change.?.unknown_history.?.bytes;
+                var cancelled: std.atomic.Value(bool) = .init(false);
+                var source = try store.openVerified(baseline, &cancelled);
+                source.deinit();
+                try std.testing.expectError(error.TaskBusy, control.runTask(task_id, .{ .text = "unconfirmed baseline cannot execute" }));
+                for (0..10) |_| control.syncLifecycle();
+                try std.testing.expectEqual(@as(usize, 1), history.mode_writes);
+                try std.testing.expectEqual(@as(usize, 0), history.resolutions);
+                try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+                for (0..2000) |_| {
+                    control.syncLifecycle();
+                    if (!control.task_runtime.approvalJobFor(task_id)) break;
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                }
+                try std.testing.expectEqual(@as(usize, 1), history.resolutions);
+                try std.testing.expectEqual(retained.ptr, task.approval_change.?.unknown_history.?.bytes.ptr);
+                try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
+                fake_core.lock();
+                const still_no_updates = fake_core.permission_mode_updates;
+                fake_core.unlock();
+                try std.testing.expectEqual(@as(usize, 0), still_no_updates);
+                try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+                for (0..5000) |_| {
+                    control.syncLifecycle();
+                    if (task.approval_change == null) break;
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                }
+                try std.testing.expectEqual(@as(usize, 2), history.resolutions);
+            }
+            try std.testing.expect(task.approval_change == null);
+            try std.testing.expectEqual(@as(@TypeOf(task.approval_result.?.outcome), if (case.candidate_is_canonical) .completed else .failed), task.approval_result.?.outcome);
+            if (!case.candidate_is_canonical) try std.testing.expectEqual(.persistence_failed, task.approval_result.?.reason.?);
+            try std.testing.expectEqual(@as(product_control.ApprovalMode, if (case.candidate_is_canonical) .full_access else .manual), try control.taskApprovalMode(task_id));
+            try std.testing.expectEqual(@as(u64, if (case.candidate_is_canonical) 2 else 1), task.durable.approval_revision);
+            try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
+            try std.testing.expectEqual(route, task.runtime.routeId());
+            try std.testing.expect(!task.runtime.worker_leases.hasLive());
+            try std.testing.expectEqual(@as(usize, if (case.candidate_is_canonical) 2 else 1), history.mode_writes);
+            try std.testing.expectEqual(@as(usize, 0), history.recoveries);
+            try std.testing.expectEqual(main_writes, history.main_writes);
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (!control.task_runtime.approval_cleanup_leases.hasLive()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(!control.task_runtime.approval_cleanup_leases.hasLive());
+            if (!case.candidate_is_canonical) {
+                var cancelled: std.atomic.Value(bool) = .init(false);
+                try std.testing.expectError(error.BlobMissing, store.openVerified(baseline, &cancelled));
+                try std.testing.expect(task.durable.checkpoint == null);
+            } else try std.testing.expectEqual(@as(u64, 2), task.durable.checkpoint.?.anchor.terminal.approval);
+            for (0..10) |_| control.syncLifecycle();
+            fake_core.lock();
+            const updates = fake_core.permission_mode_updates;
+            const restores = fake_core.checkpoint_restores;
+            const runs = fake_core.run_calls;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, if (case.candidate_is_canonical) 1 else 0), updates);
+            try std.testing.expectEqual(@as(usize, 0), restores);
+            try std.testing.expectEqual(@as(usize, 0), runs);
+            continue;
+        }
+        for (0..5000) |_| {
+            control.syncLifecycle();
+            if (task.approval_change == null or task.approval_change.?.phase == .outcome_unknown) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        if (case.result == .outcome_unknown) {
+            try std.testing.expect(task.approval_change != null);
+            try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
+            const retained = task.approval_change.?.unknown_history.?.bytes;
+            const pending_blob = task.approval_change.?.candidate.?.blob;
+            try std.testing.expect(!std.meta.eql(baseline, pending_blob));
+            try std.testing.expectEqual(.manual, try control.taskApprovalMode(task_id));
+            try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
+            try std.testing.expectEqual(baseline, task.durable.checkpoint.?.blob);
+            var cancelled: std.atomic.Value(bool) = .init(false);
+            var old_source = try store.openVerified(baseline, &cancelled);
+            old_source.deinit();
+            var new_source = try store.openVerified(pending_blob, &cancelled);
+            new_source.deinit();
+            try std.testing.expectError(error.TaskBusy, control.runTask(task_id, .{ .text = "unknown mode cannot execute" }));
+            const writes = history.mode_writes;
+            for (0..10) |_| control.syncLifecycle();
+            try std.testing.expectEqual(writes, history.mode_writes);
+            try std.testing.expectEqual(@as(usize, 0), history.resolutions);
+            fake_core.lock();
+            const premature_restores = fake_core.checkpoint_restores;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, 0), premature_restores);
+            {
+                var access = try task.runtime.acquireAccess();
+                defer access.deinit();
+                const actual = try access.updatePermissionMode(.full_access, .full_access);
+                try std.testing.expect(!actual.changed);
+                try std.testing.expectEqual(@as(u64, 2), actual.policy_generation);
+            }
+            // Restart reads canonical disk facts while the old process still
+            // keeps both recovery points. It must not invent the old memory mode.
+            {
+                // Observe a frozen canonical snapshot through an independent
+                // store. A second Host writer cannot share the live unknown
+                // transaction's capability or alter its retained witness.
+                const restart_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+                defer std.testing.allocator.free(restart_storage);
+                var restart_history = TaskPersistenceProbe{ .storage = restart_storage };
+                var restarted_configuration = configuration;
+                restarted_configuration.task_persistence = restart_history.capabilityRestored(storage[0..history.len]);
+                var restarted = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, restarted_configuration);
+                defer restarted.deinit();
+                try std.testing.expectEqual(@as(product_control.ApprovalMode, if (case.candidate_is_canonical) .full_access else .manual), try restarted.taskApprovalMode(task_id));
+                const saved = restarted.task_runtime.find(task_id).?;
+                try std.testing.expectEqual(@as(u64, if (case.candidate_is_canonical) 2 else 1), saved.durable.approval_revision);
+                try std.testing.expect(!saved.runtime.hasAttachedSession());
+            }
+            try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (!control.task_runtime.approvalJobFor(task_id)) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expectEqual(@as(usize, 1), history.resolutions);
+            try std.testing.expectEqual(retained.ptr, task.approval_change.?.unknown_history.?.bytes.ptr);
+            try std.testing.expectEqual(.outcome_unknown, task.approval_change.?.phase);
+            try std.testing.expectEqual(writes, history.mode_writes);
+            try std.testing.expectEqual(.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+            for (0..5000) |_| {
+                control.syncLifecycle();
+                if (task.approval_change == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expectEqual(@as(usize, 2), history.resolutions);
+        }
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(@as(@TypeOf(task.approval_result.?.outcome), if (case.candidate_is_canonical) .completed else .failed), task.approval_result.?.outcome);
+        try std.testing.expectEqual(@as(product_control.ApprovalMode, if (case.candidate_is_canonical) .full_access else .manual), try control.taskApprovalMode(task_id));
+        try std.testing.expectEqual(@as(u64, if (case.candidate_is_canonical) 2 else 1), task.durable.approval_revision);
+        try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
+        try std.testing.expect(task.runtime.hasAttachedSession());
+        try std.testing.expectEqual(case.candidate_is_canonical, route == task.runtime.routeId());
+        try std.testing.expect(!task.runtime.worker_leases.hasLive());
+        try std.testing.expectEqual(@as(usize, 1), history.mode_writes);
+        try std.testing.expectEqual(@as(usize, 0), history.recoveries);
+        try std.testing.expectEqual(main_writes, history.main_writes);
+        for (0..2000) |_| {
+            control.syncLifecycle();
+            if (!control.task_runtime.approval_cleanup_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(!control.task_runtime.approval_cleanup_leases.hasLive());
+        if (!case.candidate_is_canonical) {
+            // A definitively rejected candidate has no canonical reference.
+            // Its immutable file needs the same retirement owner as an old
+            // checkpoint after a successful mode commit.
+            var rejected = try product_task.history.decode(std.testing.allocator, candidate[0..history.candidate_len], .{
+                .max_workspaces = 1,
+                .max_tasks = 1,
+                .max_runs_per_task = 8,
+                .max_compacts_per_task = 8,
+                .max_tools_per_run = 8,
+                .max_commentary_segments_per_run = 64,
+                .max_file_refs_per_tool = 8,
+                .max_ui_history_per_task = 8,
+                .max_workspace_bytes = 4096,
+                .max_task_title_bytes = 512,
+                .max_user_message_bytes = 4096,
+                .max_assistant_message_bytes = 4096,
+                .max_tool_field_bytes = 4096,
+                .max_file_ref_field_bytes = 4096,
+                .max_execution_model_bytes = 512,
+                .max_terminal_diagnostic_bytes = 512,
+            });
+            defer rejected.deinit();
+            const blob = rejected.value.tasks[0].checkpoint.?.blob;
+            var digest: [32]u8 = undefined;
+            _ = try std.fmt.hexToBytes(&digest, blob.digest);
+            const identity: product_task.checkpoint_store.Identity = .{ .task_id = task_id, .generation = blob.generation, .digest = digest, .byte_size = blob.byte_size };
+            var cancelled: std.atomic.Value(bool) = .init(false);
+            try std.testing.expectError(error.BlobMissing, store.openVerified(identity, &cancelled));
+            var old_source = try store.openVerified(baseline, &cancelled);
+            old_source.deinit();
+        }
+        fake_core.lock();
+        const restores = fake_core.checkpoint_restores;
+        const runs = fake_core.run_calls;
+        const updates = fake_core.permission_mode_updates;
+        fake_core.unlock();
+        try std.testing.expectEqual(@as(usize, if (case.candidate_is_canonical) 0 else 1), restores);
+        try std.testing.expectEqual(@as(usize, 0), runs);
+        // Only the original mutation and the unknown-state no-op observation:
+        // rollback must restore the old baseline, never reverse-mutate grants.
+        try std.testing.expectEqual(@as(usize, if (case.result == .outcome_unknown) 2 else 1), updates);
+        var access = try task.runtime.acquireAccess();
+        defer access.deinit();
+        const mode: lifecycle.PermissionMode = if (case.candidate_is_canonical) .full_access else .accept_edits;
+        const actual = try access.updatePermissionMode(mode, mode);
+        try std.testing.expect(!actual.changed);
+        try std.testing.expectEqual(@as(u64, if (case.candidate_is_canonical) 2 else 1), actual.policy_generation);
+    }
 }

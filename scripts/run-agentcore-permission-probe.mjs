@@ -573,7 +573,7 @@ pub fn build(b: *std.Build) void {
   );
   if (requestError) throw requestError;
   // Four additional Runs plus a Read before the restored Write exercise scope and tool admission.
-  const expectedRequestCount = process.platform === "win32" ? 66 : 70;
+  const expectedRequestCount = process.platform === "win32" ? 82 : 86;
   if (requestCount !== expectedRequestCount)
     throw new Error(
       `permission probe observed ${requestCount} provider requests instead of ${expectedRequestCount}`,

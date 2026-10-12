@@ -389,6 +389,8 @@ fn readWorkspace(row: Record) !wire.WorkspaceWire {
 }
 
 fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
+    const approval = if (v.checkpoint) |cp| std.mem.eql(u8, cp.anchor.terminal.kind, "approval") else false;
+    const checkpoint = if (approval) null else v.checkpoint;
     try batch.add("tasks", .{
         .ordinal = try integer(ordinal),
         .id = try batch.u(v.id),
@@ -403,6 +405,7 @@ fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
         .permission_profile = t(v.permission_profile),
         .permission_interaction = t(v.permission_interaction),
         .permission_review_delegated = boolean(v.permission_review_delegated),
+        .approval_revision = try batch.u(v.approval_revision),
         .binding_epoch = try batch.u(v.binding.epoch),
         .execution_generation = try batch.u(v.binding.execution_generation),
         .protocol = t(v.binding.protocol),
@@ -412,16 +415,22 @@ fn writeTask(batch: *Batch, v: wire.TaskWire, ordinal: usize) !void {
         .checkpoint_attempt = t(v.checkpoint_attempt),
         .active_operation_kind = ot(if (v.active_operation) |op| op.kind else null),
         .active_operation_id = try batch.ou(if (v.active_operation) |op| op.id else null),
-        .checkpoint_generation = try batch.ou(if (v.checkpoint) |cp| cp.blob.generation else null),
-        .checkpoint_byte_size = try batch.ou(if (v.checkpoint) |cp| cp.blob.byte_size else null),
-        .checkpoint_digest = try batch.odigest(if (v.checkpoint) |cp| cp.blob.digest else null),
-        .checkpoint_logical_session_id = ob(if (v.checkpoint) |cp| cp.session.logical_session_id else null),
-        .checkpoint_last_run_id = try batch.ou(if (v.checkpoint) |cp| cp.session.last_run_id else null),
-        .checkpoint_last_compact_id = try batch.ou(if (v.checkpoint) |cp| cp.session.last_compact_id else null),
-        .checkpoint_model = ob(if (v.checkpoint) |cp| cp.session.model else null),
-        .checkpoint_terminal_kind = ot(if (v.checkpoint) |cp| cp.anchor.terminal.kind else null),
-        .checkpoint_terminal_id = try batch.ou(if (v.checkpoint) |cp| cp.anchor.terminal.id else null),
-        .checkpoint_binding_epoch = try batch.ou(if (v.checkpoint) |cp| cp.anchor.binding_epoch else null),
+        .checkpoint_generation = try batch.ou(if (checkpoint) |cp| cp.blob.generation else null),
+        .checkpoint_byte_size = try batch.ou(if (checkpoint) |cp| cp.blob.byte_size else null),
+        .checkpoint_digest = try batch.odigest(if (checkpoint) |cp| cp.blob.digest else null),
+        .checkpoint_logical_session_id = ob(if (checkpoint) |cp| cp.session.logical_session_id else null),
+        .checkpoint_last_run_id = try batch.ou(if (checkpoint) |cp| cp.session.last_run_id else null),
+        .checkpoint_last_compact_id = try batch.ou(if (checkpoint) |cp| cp.session.last_compact_id else null),
+        .checkpoint_model = ob(if (checkpoint) |cp| cp.session.model else null),
+        .checkpoint_terminal_kind = ot(if (checkpoint) |cp| cp.anchor.terminal.kind else null),
+        .checkpoint_terminal_id = try batch.ou(if (checkpoint) |cp| cp.anchor.terminal.id else null),
+        .checkpoint_approval_revision = try batch.ou(if (approval) v.checkpoint.?.anchor.terminal.id else null),
+        .checkpoint_approval_json = if (approval) try batch.json(ApprovalCheckpointPayload{
+            .blob = v.checkpoint.?.blob,
+            .session = v.checkpoint.?.session,
+            .binding_epoch = v.checkpoint.?.anchor.binding_epoch,
+        }) else .null_value,
+        .checkpoint_binding_epoch = try batch.ou(if (checkpoint) |cp| cp.anchor.binding_epoch else null),
         .ui_history_json = try batch.json(v.ui_history),
         .compacts_json = try batch.json(v.compacts),
     });
@@ -442,6 +451,7 @@ fn readTask(row: Record) !wire.TaskWire {
     v.permission_profile = try row.t("permission_profile");
     v.permission_interaction = try row.t("permission_interaction");
     v.permission_review_delegated = try row.boolean("permission_review_delegated");
+    v.approval_revision = try row.u("approval_revision");
     v.binding.epoch = try row.u("binding_epoch");
     v.binding.execution_generation = try row.u("execution_generation");
     v.binding.protocol = try row.t("protocol");
@@ -616,8 +626,24 @@ fn readChange(row: Record) !wire.FileChangeWire {
     return v;
 }
 
+const ApprovalCheckpointPayload = struct {
+    blob: wire.CheckpointBlobWire,
+    session: wire.CheckpointSessionWire,
+    binding_epoch: u64,
+};
+
 fn readCheckpoint(row: Record) !?wire.CheckpointWire {
     try row.optionalGroup(.{ "checkpoint_generation", "checkpoint_byte_size", "checkpoint_digest", "checkpoint_logical_session_id", "checkpoint_last_run_id", "checkpoint_last_compact_id", "checkpoint_model", "checkpoint_terminal_kind", "checkpoint_terminal_id", "checkpoint_binding_epoch" });
+    try row.optionalGroup(.{ "checkpoint_approval_revision", "checkpoint_approval_json" });
+    if (try row.ou("checkpoint_approval_revision")) |revision| {
+        if (!try row.isNull("checkpoint_generation")) return error.Invalid;
+        const payload = try row.json(ApprovalCheckpointPayload, "checkpoint_approval_json");
+        return .{
+            .blob = payload.blob,
+            .session = payload.session,
+            .anchor = .{ .terminal = .{ .kind = "approval", .id = revision }, .binding_epoch = payload.binding_epoch },
+        };
+    }
     if (try row.isNull("checkpoint_generation")) return null;
     var v: wire.CheckpointWire = undefined;
     v.blob.generation = try row.u("checkpoint_generation");
@@ -637,7 +663,7 @@ comptime {
     if (std.meta.fields(wire.StateWire).len != 9) @compileError("Review every history SQL field mapping after StateWire changes");
     if (std.meta.fields(wire.TaskFailureWire).len != 3) @compileError("Review every history SQL field mapping after TaskFailureWire changes");
     if (std.meta.fields(wire.WorkspaceWire).len != 7) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
-    if (std.meta.fields(wire.TaskWire).len != 21) @compileError("Review every history SQL field mapping after TaskWire changes");
+    if (std.meta.fields(wire.TaskWire).len != 22) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.RunWire).len != 29) @compileError("Review every history SQL field mapping after RunWire changes");
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");
     if (std.meta.fields(wire.FileChangeWire).len != 11) @compileError("Review every history SQL field mapping after FileChangeWire changes");

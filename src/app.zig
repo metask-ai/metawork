@@ -547,6 +547,8 @@ pub fn run(init: std.process.Init) !void {
             .restored_bytes = stores_state.task_restored_bytes,
             .restore_failed = stores_state.task_restore_failed,
             .commit_fn = app_stores.commitTaskStore,
+            .confirmed_commit_fn = app_stores.commitConfirmedTaskStore,
+            .resolve_commit_fn = app_stores.resolveTaskStoreCommit,
             .recover_fn = app_stores.recoverTaskStore,
         },
         .checkpoint_store = .{

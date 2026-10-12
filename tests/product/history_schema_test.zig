@@ -407,6 +407,80 @@ const Sequence = struct {
     }
 };
 
+test "history schema preserves approval revisions and the approval checkpoint union case" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const state = try history.fixture(allocator);
+    state.tasks[0].approval_revision = std.math.maxInt(u64);
+    state.tasks[0].checkpoint.?.anchor.terminal = .{ .kind = "approval", .id = std.math.maxInt(u64) };
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    _ = try save(allocator, database.capability(), state);
+    try expectSame(allocator, database.capability(), state);
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{
+        .sql = "UPDATE tasks SET approval_revision=X'0000000000000000'",
+    } }}));
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{
+        .sql = "UPDATE tasks SET approval_revision=X'0000000000000001'",
+    } }}));
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{
+        .sql = "UPDATE tasks SET checkpoint_terminal_kind='run',checkpoint_terminal_id=X'0000000000000001'",
+    } }}));
+    try expectSame(allocator, database.capability(), state);
+    for ([_][]const u8{
+        "UPDATE tasks SET approval_revision=1",
+        "UPDATE tasks SET approval_revision=X'01'",
+        "UPDATE tasks SET checkpoint_approval_revision=X'0000000000000000'",
+        "UPDATE tasks SET checkpoint_approval_revision=NULL",
+        "UPDATE tasks SET checkpoint_approval_json=NULL",
+        "UPDATE tasks SET checkpoint_approval_json=X'7b7d'",
+        "UPDATE tasks SET checkpoint_approval_json='{'",
+    }) |statement| {
+        try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = statement } }}));
+        try expectSame(allocator, database.capability(), state);
+    }
+}
+
+test "history schema upgrades v3 without changing existing checkpoint constraints or rows" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const path = try temporaryPath(allocator, temporary.dir);
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..3]);
+        defer database.destroy() catch unreachable;
+        var statements = std.mem.splitScalar(u8, @embedFile("history_schema_minimal.sql"), ';');
+        while (statements.next()) |raw| {
+            const statement = std.mem.trim(u8, raw, " \r\n\t");
+            if (statement.len == 0) continue;
+            try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = statement } }}));
+        }
+        try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{
+            .sql = "UPDATE tasks SET checkpoint_anchor='available',checkpoint_generation=X'FFFFFFFFFFFFFFFF',checkpoint_byte_size=X'0000000000000001',checkpoint_digest=zeroblob(32),checkpoint_logical_session_id=X'61',checkpoint_last_run_id=X'0000000000000001',checkpoint_last_compact_id=X'0000000000000000',checkpoint_model=X'61',checkpoint_terminal_kind='run',checkpoint_terminal_id=X'0000000000000001',checkpoint_binding_epoch=X'0000000000000001'",
+        } }}));
+    }
+    // First open upgrades; the next re-open verifies the exact migration
+    // prefix identity and that the old row remains intact on disk.
+    for (0..2) |_| {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+        defer database.destroy() catch unreachable;
+        try std.testing.expectEqual(@as(u32, 4), database.schemaVersion());
+        var count: Count = .{};
+        try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query(
+            "SELECT COUNT(*) FROM tasks WHERE approval_revision=X'0000000000000001' AND checkpoint_approval_revision IS NULL AND checkpoint_approval_json IS NULL AND checkpoint_generation=X'FFFFFFFFFFFFFFFF' AND checkpoint_digest=zeroblob(32) AND checkpoint_terminal_kind='run' AND checkpoint_terminal_id=X'0000000000000001' AND checkpoint_model=X'61' AND title=X'61'",
+            &.{},
+            count.receiver(),
+        ));
+        try std.testing.expectEqual(@as(?i64, 1), count.value);
+        try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE tasks SET checkpoint_digest=NULL" } }}));
+        try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE tasks SET checkpoint_approval_revision=X'0000000000000001',checkpoint_approval_json='{}'" } }}));
+        try std.testing.expectEqual(sql.MutationOutcome.rejected, database.capability().mutate(&.{.{ .statement = .{ .sql = "PRAGMA quick_check(tasks)" } }}));
+    }
+}
+
 fn populated(allocator: std.mem.Allocator, tool_count: usize, change_count: usize, ui_count: usize) !history.wire.StateWire {
     const state = try history.fixture(allocator);
     const task = &state.tasks[0];

@@ -43,10 +43,10 @@ schema 1 manifest 还必须包含精确的 `shared_library = { path, entry_point
 接受的 ABI identity 为：
 
 - `binary_abi_version = 1`；
-- `binary_abi_revision = 18`；
+- `binary_abi_revision = 19`；
 - discovery symbol 仅为 `metask_agentcore_get_api`；
 - root `binary_abi_table_size = 64`；
-- Runtime、Session、SessionControl、Skill、MCP 子表大小依次为 24、40、72、32、40 bytes；
+- Runtime、Session、SessionControl、Skill、MCP 子表大小依次为 24、40、80、32、40 bytes；
 - root 与全部五个子表均为 mandatory；struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零。
 
 `ApiV1` surface 为：
@@ -54,7 +54,7 @@ schema 1 manifest 还必须包含精确的 `shared_library = { path, entry_point
 - root：owned buffer release，以及 Runtime、Session、SessionControl、Skill、MCP 子表指针；
 - Runtime：create、destroy；
 - Session：create、destroy、typed Run、Run abort；
-- SessionControl：restore、describe、model、Permission rules、manual compact/abort、checkpoint export、idle-only prompt profile replacement；
+- SessionControl：restore、describe、model、Permission rules、manual compact/abort、checkpoint export、idle-only prompt profile replacement、idle-only Permission mode replacement；
 - Skill：Workspace catalog resolve/release、Skill policy bind；
 - MCP：Runtime configuration apply/refresh/describe、Session selection replacement。
 
@@ -62,13 +62,15 @@ schema 1 manifest 还必须包含精确的 `shared_library = { path, entry_point
 
 revision 18 的 `SessionCreateConfigV1.prompt_profile` 与 `RunOptionsV1.context_blocks/context_block_count` 分别占用原 reserved words，其他 reserved 字段必须继续为零；不得用旧 struct layout 调用新 ABI。`set_prompt_profile` 是 mandatory entry，但 MetaWork 当前不开放 prompt customization，Session 创建传入 Agent-owned 固定产品身份 profile（见 [集成契约](agentcore-integration.md#session-产品身份)）。每次普通文本或多模态 Run 通过官方 `ContextBlockV1` 传入唯一 label 为 `metawork-time-context` 的 Host 时间事实，`context_block_count` 为一；label/text 与 block 均同步借用至 Core 调用返回，不改写用户原始输入；时间事实不写入 Session prompt profile，也不建立私有协议。Skill Run 必须传 null blocks 与零 count。Core 将其作为 Run 用户记录的 system-reminder 消费，Conversation/checkpoint 保留遵循官方语义；它不是 system-role 指令。采样与失败语义由 [AgentCore 集成契约](agentcore-integration.md#每-run-时间上下文) 定义。官方 SDK 完整校验 `describe.prompt` 与 `prompt_manifest` observation，Agent 明确消费该 observation 而不投影或持久化它；这不建立产品 prompt editor 或提示审计能力。
 
+`update_permission_mode` 是 revision 19 新增的 mandatory entry。只能在 Session idle，且 Run、Permission callback、compact、export、mutation 和取消排空均已静止时调用。真正变化必须推进 `policy_generation`、撤销全部 Session-scoped allow/deny grants，并保留显式 deny、Skill、sandbox 和其他安全约束；相同 mode 是 no-op，保留 generation 和 grants。明确拒绝（含 `checkpoint_budget_required`）不得改变 mode、generation、grants 或 policy fingerprint。成功后 Host 必须通过官方 typed `describe.permission_mode` 和 `policy_generation` 核对结果。产品切换、恢复和提交职责由 [AgentCore 集成契约](agentcore-integration.md)定义。
+
 Runtime 只有一个 `create` entry，第二个参数是可空 `RuntimePluginConfigV1`；不得为不同 plugin 配置建立第二条 create ABI 路径。MCP `apply_configuration` 接受完整 declarative replacement：Host 必须使用非零 desired revision，并校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 转移 replacement ownership，`SUPERSEDED` 或 `REJECTED` 不得取得该 ownership，malformed report 必须 fail closed。
 
-当前 `SessionHostConfigV1.protocol_kind_code` 将调用方明确选择的协议映射为对应 ABI 编码：`openai_responses` 使用 `OPENAI_PROTOCOL_RESPONSES`；`openai_chat_completions`、`anthropic_messages` 和 `gemini_native` 使用 `PROTOCOL_DEFAULT`。这里的 `PROTOCOL_DEFAULT` 只表示 ABI 编码，不定义 MetaWork 的默认协议；协议选择合同见 [Completion 架构](completion-architecture.md#3-provider-与协议)。`RunInputV1` 的 parts/count 与 reserved layout 由官方 helper 构造；revision 18 只定义文本与图片 part，不定义 document part、文档输入上限或文档能力拒绝 status。公共输入、ownership 和预算合同见 [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入)。
+当前 `SessionHostConfigV1.protocol_kind_code` 将调用方明确选择的协议映射为对应 ABI 编码：`openai_responses` 使用 `OPENAI_PROTOCOL_RESPONSES`；`openai_chat_completions`、`anthropic_messages` 和 `gemini_native` 使用 `PROTOCOL_DEFAULT`。这里的 `PROTOCOL_DEFAULT` 只表示 ABI 编码，不定义 MetaWork 的默认协议；协议选择合同见 [Completion 架构](completion-architecture.md#3-provider-与协议)。`RunInputV1` 的 parts/count 与 reserved layout 由官方 helper 构造；revision 19 只定义文本与图片 part，不定义 document part、文档输入上限或文档能力拒绝 status。公共输入、ownership 和预算合同见 [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入)。
 
-ABI revision 18 将 `image_input_unsupported` 定义为本次 Run 含图片时的 admission 拒绝；在 Text、Skill、仅文本 parts、compact、mutation、export、describe 或 restore 路径出现时属于 dependency contract failure。不能因为 SDK 认识该值就在错误的 operation 或输入形状上放行。
+ABI revision 19 将 `image_input_unsupported` 定义为本次 Run 含图片时的 admission 拒绝；在 Text、Skill、仅文本 parts、compact、mutation、export、describe 或 restore 路径出现时属于 dependency contract failure。不能因为 SDK 认识该值就在错误的 operation 或输入形状上放行。
 
-本次 revision hard cut 不提供旧 checkpoint 的兼容适配、迁移或跨 revision 恢复承诺；不主动删除或改写已有产品历史或 checkpoint，无法恢复时沿现有 typed failure 路径明确失败。当前 revision 的 export/restore 完整性与生命周期验证仍为必需。
+binary ABI 接受政策只接受当前 revision，不建立旧 ABI 调用路径。升级必须保留已有产品历史与 checkpoint；旧 checkpoint 只交由当前官方 Core 的 restore 消费，不建立 Host 兼容 parser 或迁移格式。替换 artifact 的恢复 Gate 必须使用上一版 Core 导出的非空原始 checkpoint，核对 Session identity、运行与 checkpoint 元数据，并以恢复后的实际 Run 证明旧 Conversation 被消费；仅空 Session 恢复不足以通过。无法恢复时沿 typed failure 明确失败，保留原始 bytes，不静默创建空 Conversation。该 Gate 不承诺任意未来 revision 的跨版本恢复；当前 revision 的 export/restore 完整性与生命周期验证仍为必需。
 
 该 ABI 不包含 AgentCore Completion handle、request/result/event、stop reason、status 或 function entry。MetaWork 不为已删除表面保留 adapter、fixture slot、类型映射或 fallback；MetaWork-owned Completion 不是本 ABI 的一部分，其合同见 [Completion 架构](completion-architecture.md)。
 
@@ -98,9 +100,9 @@ Host 必须先校验 function `Status`，再按该 operation 的合法 status se
 - 其他非 OK status：除该 status 明示的 partial result 外，不读取 result 字段，只读取并释放 diagnostic；
 - unknown status、属于其他 operation 的 known status、unknown enum/flag 或跨字段矛盾都属于 dependency contract failure。
 
-Run、manual compact、Session Skill mutation、checkpoint export、Session describe 与 checkpoint restore 必须分别维护 operation-specific disposition；不能从“SDK 认识某个 status”推断所有 entry 都接受它，也不能用全局 allowlist 代替。
+Run、manual compact、Session Skill mutation、Permission mode mutation、checkpoint export、Session describe 与 checkpoint restore 必须分别维护 operation-specific disposition；不能从“SDK 认识某个 status”推断所有 entry 都接受它，也不能用全局 allowlist 代替。
 
-- Run、manual compact 与 Session Skill mutation 接受各自合同中的 `checkpoint_budget_required`，操作失败但 Session 保持 reusable；
+- Run、manual compact、Session Skill mutation 与 Permission mode mutation 接受各自合同中的 `checkpoint_budget_required`，操作失败但 Session 保持 reusable；
 - export 中只有经本地 sink 原因验证的 `checkpoint_io` 可作为不污染 Session 的 I/O 失败；restore-only status 不能作为 export 结果；
 - describe 的 resource、busy 与 argument failure 可重试；export/describe 的 `checkpoint_budget_required`、malformed OK 或非法 status 必须按 dependency contract failure 处理；
 - export/describe 的 `out_of_memory`、`core_error`，以及 callback/dependency contract failure，必须保守关闭 Session admission；

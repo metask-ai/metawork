@@ -205,6 +205,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-task-deletion", .root_module = test_modules.product_task_deletion },
         .{ .name = "metawork-product-task-recovery", .root_module = test_modules.product_task_recovery },
         .{ .name = "metawork-product-task-recovery-job", .root_module = test_modules.product_task_recovery_job },
+        .{ .name = "metawork-product-task-approval-job", .root_module = test_modules.product_task_approval_job },
         .{ .name = "metawork-product-task-state", .root_module = test_modules.product_task_state },
         .{ .name = "metawork-product-task-policy", .root_module = test_modules.product_task_policy },
         .{ .name = "metawork-product-task-execution", .root_module = test_modules.product_task_execution },
@@ -224,6 +225,7 @@ pub fn build(b: *std.Build) void {
     const task_permission_step = b.step("test-task-permission", "Run Task permission state, history and approval tests");
     for ([_]*std.Build.Module{
         test_modules.product_task_attachment,
+        test_modules.product_task_approval_job,
         test_modules.product_task_state,
         test_modules.product_task_persistence,
         test_modules.product_task_runtime,
@@ -506,6 +508,7 @@ const WiredModules = struct {
     product_task_deletion: *std.Build.Module,
     product_task_recovery: *std.Build.Module,
     product_task_recovery_job: *std.Build.Module,
+    product_task_approval_job: *std.Build.Module,
     product_task_state: *std.Build.Module,
     product_task_policy: *std.Build.Module,
     product_task_execution: *std.Build.Module,
@@ -1521,12 +1524,25 @@ fn wireAgentCore(
     task_policy.addImport("product_task_attachment", task_attachment);
     task_policy.addImport("product_task_recovery", task_recovery);
     task_policy.addImport("product_task_checkpoint_record", checkpoint_record);
+    const task_approval_job = b.createModule(.{
+        .root_source_file = b.path("src/product/task/approval_job.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    task_approval_job.addImport("metawork_agent", agent);
+    task_approval_job.addImport("product_task_agent_session", task_agent_session);
+    task_approval_job.addImport("product_task_checkpoint_record", checkpoint_record);
+    task_approval_job.addImport("product_task_checkpoint_store", checkpoint_store);
+    task_approval_job.addImport("product_task_persistence", task_persistence);
+    task_approval_job.addImport("product_task_state", task_state);
+    task_approval_job.addImport("product_task_worker_lease", task_worker_lease);
     const task_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/task/runtime.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
     task_runtime.addImport("product_task_state", task_state);
+    task_runtime.addImport("product_task_approval_job", task_approval_job);
     task_runtime.addImport("product_permission_review", product_permission_review);
     task_runtime.addImport("product_task_persistence", task_persistence);
     task_runtime.addImport("metawork_agent", agent);
@@ -1535,6 +1551,7 @@ fn wireAgentCore(
     task_runtime.addImport("metawork_product_skill", product_skill);
     task_runtime.addImport("product_task_recovery_job", task_recovery_job);
     task_runtime.addImport("product_task_checkpoint_store", checkpoint_store);
+    task_runtime.addImport("product_task_checkpoint_record", checkpoint_record);
     task_runtime.addImport("product_task_file_change_store", file_change_store);
     task_runtime.addImport("product_task_attachment", task_attachment);
     task_runtime.addImport("product_task_deletion", task_deletion);
@@ -1988,6 +2005,7 @@ fn wireAgentCore(
         .product_task_deletion = task_deletion,
         .product_task_recovery = task_recovery,
         .product_task_recovery_job = task_recovery_job,
+        .product_task_approval_job = task_approval_job,
         .product_task_state = task_state,
         .product_task_policy = task_policy,
         .product_task_execution = task_execution,

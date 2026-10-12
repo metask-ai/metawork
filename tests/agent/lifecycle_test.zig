@@ -872,7 +872,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects missing revision 18 child tables and entries" {
+test "Runtime rejects missing revision 19 child tables and entries" {
     var api = fake_api;
     api.skill = null;
     try std.testing.expectError(
@@ -924,7 +924,15 @@ test "Runtime rejects missing revision 18 child tables and entries" {
         .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
     ));
     session_control_api = fake_api.session_control.?.*;
-    session_control_api.struct_size = 64;
+    session_control_api.update_permission_mode = null;
+    try std.testing.expectError(error.UnsupportedAbi, lifecycle.Runtime.initWithApi(
+        std.testing.io,
+        std.testing.allocator,
+        &api,
+        .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
+    ));
+    session_control_api = fake_api.session_control.?.*;
+    session_control_api.struct_size = 72;
     try std.testing.expectError(error.UnsupportedAbi, lifecycle.Runtime.initWithApi(
         std.testing.io,
         std.testing.allocator,
@@ -4001,5 +4009,87 @@ test "identity update refusal and malformed results never publish a usable resto
         }
         try runtime.shutdown();
         try std.testing.expectEqual(fake_core.session_created, fake_core.session_destroyed);
+    }
+}
+
+test "idle permission mode mutation validates authority and preserves same-mode generation" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const noop = try session.updatePermissionMode(.default, .default);
+    try std.testing.expect(!noop.changed);
+    try std.testing.expectEqual(@as(u64, 1), noop.policy_generation);
+    const changed = try session.updatePermissionMode(.default, .full_access);
+    try std.testing.expect(changed.changed);
+    try std.testing.expectEqual(@as(u64, 2), changed.policy_generation);
+    const restored = try session.updatePermissionMode(.full_access, .accept_edits);
+    try std.testing.expectEqual(@as(u64, 3), restored.policy_generation);
+}
+
+test "permission mode mutation rejects queued work and mismatched authority" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "hold admission" });
+    try std.testing.expectError(error.SessionNotIdle, session.updatePermissionMode(.default, .full_access));
+    try session.cancelPreparedRun(id);
+    try std.testing.expectError(error.PermissionModeUpdateFailed, session.updatePermissionMode(.accept_edits, .full_access));
+    try std.testing.expectEqual(lifecycle.SessionState.poisoned, session.snapshot().state);
+}
+
+test "permission mode failures preserve authority or close admission without reverse mutation" {
+    const cases = [_]struct { status: u32, expected: anyerror, poisoned: bool = false }{
+        .{ .status = wire.STATUS_BUSY, .expected = error.SessionNotIdle },
+        .{ .status = wire.STATUS_INVALID_ARGUMENT, .expected = error.PermissionModeUpdateFailed },
+        .{ .status = wire.STATUS_OUT_OF_MEMORY, .expected = error.PermissionModeUpdateFailed },
+        .{ .status = wire.STATUS_RESOURCE_LIMIT, .expected = error.PermissionModeUpdateFailed },
+        .{ .status = wire.STATUS_CHECKPOINT_BUDGET_REQUIRED, .expected = error.PermissionModeBudgetRequired },
+        .{ .status = wire.STATUS_INVALID_STATE, .expected = error.PermissionModeUpdateFailed, .poisoned = true },
+        .{ .status = wire.STATUS_CORE_ERROR, .expected = error.PermissionModeUpdateFailed, .poisoned = true },
+        .{ .status = wire.STATUS_STALE_RUN, .expected = error.PermissionModeUpdateFailed, .poisoned = true },
+        .{ .status = 0xffff, .expected = error.PermissionModeUpdateFailed, .poisoned = true },
+    };
+    for (cases) |case| {
+        fake_core.reset();
+        const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const raw: *fixture.FakeSession = @ptrCast(@alignCast(session.raw.?));
+        raw.lock();
+        raw.permission_session_granted = true;
+        raw.forced_permission_mode_status = case.status;
+        raw.unlock();
+        try std.testing.expectError(case.expected, session.updatePermissionMode(.default, .full_access));
+        try std.testing.expectEqual(@as(lifecycle.SessionState, if (case.poisoned) .poisoned else .idle), session.snapshot().state);
+        raw.lock();
+        const mode = raw.permission_mode_code;
+        const generation = raw.policy_generation;
+        const grant = raw.permission_session_granted;
+        const consumed = raw.forced_permission_mode_status == null;
+        raw.unlock();
+        try std.testing.expectEqual(wire.PERMISSION_DEFAULT, mode);
+        try std.testing.expectEqual(@as(u64, 1), generation);
+        try std.testing.expect(grant and consumed);
+        if (case.poisoned) {
+            try std.testing.expectError(error.SessionPoisoned, session.updatePermissionMode(.default, .default));
+        } else {
+            const unchanged = try session.updatePermissionMode(.default, .default);
+            try std.testing.expect(!unchanged.changed);
+            try std.testing.expectEqual(@as(u64, 1), unchanged.policy_generation);
+            const changed = try session.updatePermissionMode(.default, .full_access);
+            try std.testing.expect(changed.changed);
+            try std.testing.expectEqual(@as(u64, 2), changed.policy_generation);
+        }
     }
 }

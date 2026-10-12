@@ -14,6 +14,10 @@ pub const migrations: []const sql.Migration = &.{ .{
     .version = 3,
     .name = "approval_mode",
     .sql = @embedFile("migrations/0003_approval_mode.sql"),
+}, .{
+    .version = 4,
+    .name = "task_approval_revision",
+    .sql = @embedFile("migrations/0004_task_approval_revision.sql"),
 } };
 
 comptime {

@@ -182,6 +182,16 @@ pub fn commitTaskStore(
     return .committed;
 }
 
+pub fn resolveTaskStoreCommit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+    const store: *product_task.history.FileStore = @ptrCast(@alignCast(context orelse return .outcome_unknown));
+    return store.resolveCommit(std.heap.c_allocator, bytes);
+}
+
+pub fn commitConfirmedTaskStore(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+    const store: *product_task.history.FileStore = @ptrCast(@alignCast(context orelse return .failed));
+    return store.commitConfirmed(std.heap.c_allocator, bytes);
+}
+
 pub fn recoverTaskStore(
     context: ?*anyopaque,
     bytes: []const u8,

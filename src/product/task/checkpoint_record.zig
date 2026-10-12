@@ -15,6 +15,7 @@ pub const SessionBinding = struct {
 pub const Terminal = union(enum) {
     run: u64,
     compact: u64,
+    approval: u64,
 
     pub fn id(self: Terminal) u64 {
         return switch (self) {
@@ -71,6 +72,7 @@ pub const Record = struct {
         switch (self.anchor.terminal) {
             .run => |id| if (self.session.last_run_id != id) return error.InvalidRecord,
             .compact => |id| if (self.session.last_compact_id != id) return error.InvalidRecord,
+            .approval => {},
         }
     }
 

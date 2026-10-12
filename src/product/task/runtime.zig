@@ -11,15 +11,18 @@ const task_persistence = @import("product_task_persistence");
 const task_policy = @import("product_task_policy");
 const task_view = @import("product_task_view");
 const checkpoint_store = @import("product_task_checkpoint_store");
+const checkpoint_record = @import("product_task_checkpoint_record");
 const file_change_store = @import("product_task_file_change_store");
 const task_execution = @import("product_task_execution");
 const task_attachment = @import("product_task_attachment");
 const task_deletion = @import("product_task_deletion");
 const task_recovery = @import("product_task_recovery");
 const task_agent_session = @import("product_task_agent_session");
+const worker_lease = @import("product_task_worker_lease");
 const owned_task_execution = @import("product_task_execution_binding");
 const product_skill = @import("metawork_product_skill");
 const recovery_job = @import("product_task_recovery_job");
+pub const approval_job = @import("product_task_approval_job");
 const agent_protocol = @import("product_agent_protocol_adapter");
 const permission_review = @import("product_permission_review");
 
@@ -34,12 +37,6 @@ pub const ExecutionIdentity = struct {
     generation: u64,
     protocol: task_state.Protocol,
     model: []const u8,
-};
-
-pub const FullAccessSuccessorSource = struct {
-    workspace_id: u64,
-    workspace_epoch: u64,
-    execution: models_contract.ConfigInput,
 };
 
 pub const FileLocatorKind = enum { workspace_path, absolute_path, uri };
@@ -463,31 +460,10 @@ pub const RecoveryStartInput = struct {
     workspace_kind: recovery_job.WorkspaceKind,
     execution: models_contract.ConfigInput,
     agent_runtime: *agent.Runtime,
-    checkpoint_store: *checkpoint_store.FileStore,
+    checkpoint_store: ?*checkpoint_store.FileStore,
     checkpoint_limits: agent.CheckpointLimits,
     notifier: task_execution.Notifier,
     executor: ExecutorPort,
-};
-
-pub const FreshConversationCommitEffect = struct {
-    context: *anyopaque,
-    commit_fn: *const fn (*anyopaque) DurableCommit,
-
-    fn commit(self: FreshConversationCommitEffect) DurableCommit {
-        return self.commit_fn(self.context);
-    }
-};
-
-pub const FreshConversationStartInput = struct {
-    expected_binding_epoch: u64,
-    workspace_id: u64,
-    workspace_epoch: u64,
-    workspace_root: []const u8,
-    canonical_user_home: []const u8,
-    workspace_trust: RecoveryWorkspaceTrust,
-    execution: models_contract.ConfigInput,
-    agent_runtime: *agent.Runtime,
-    commit_binding: FreshConversationCommitEffect,
 };
 
 pub const RecoveryStartError = agent.Error || std.mem.Allocator.Error || error{
@@ -963,7 +939,7 @@ pub const RecoveryEffects = struct {
         *anyopaque,
         RecoveryAuthorityQuery,
     ) RecoveryExternalAuthority,
-    commit_binding_fn: *const fn (*anyopaque) DurableCommit,
+    queue_binding_fn: *const fn (*anyopaque, u64) anyerror!?DurableCommit,
 
     fn authority(
         self: RecoveryEffects,
@@ -972,8 +948,8 @@ pub const RecoveryEffects = struct {
         return self.authority_fn(self.context, query);
     }
 
-    fn commitBinding(self: RecoveryEffects) DurableCommit {
-        return self.commit_binding_fn(self.context);
+    fn queueBinding(self: RecoveryEffects, task_id: u64) !?DurableCommit {
+        return self.queue_binding_fn(self.context, task_id);
     }
 };
 
@@ -1089,6 +1065,376 @@ pub const Runtime = struct {
     recovery_poisoned: bool = false,
     agent_runtime_shutdown_complete: bool = false,
     permission_reviews_closed: bool = false,
+    approval_cleanup_leases: worker_lease.WorkerLeaseSet = .{},
+    approval_jobs: [approval_job.max_operations]?struct { task_id: u64, restore_attempt_id: ?u64 = null, job: *approval_job.Job } = @splat(null),
+
+    pub const ApprovalError = error{
+        UnknownTask,
+        BindingEpochMismatch,
+        ApprovalRevisionMismatch,
+        ApprovalRevisionExhausted,
+        ReviewGenerationExhausted,
+        TaskBusy,
+        TaskClosing,
+        UnsupportedPermissionProfile,
+        ApprovalUnavailable,
+    };
+
+    /// Projection and commands share the same per-target admission decision.
+    fn approvalChangeRevision(
+        self: *const Runtime,
+        task: *const task_state.Task,
+        expected_binding_epoch: u64,
+        expected_revision: u64,
+        target: task_state.ApprovalMode,
+        authority: ProjectionAuthority,
+    ) ApprovalError!u64 {
+        if (expected_binding_epoch == 0 or expected_binding_epoch != task.durable.binding_epoch)
+            return error.BindingEpochMismatch;
+        if (expected_revision == 0 or expected_revision != task.durable.approval_revision)
+            return error.ApprovalRevisionMismatch;
+        if (task.approval_change != null) return error.TaskBusy;
+        if (task.durable.permission_interaction != .interactive) return error.UnsupportedPermissionProfile;
+        if (task_policy.taskLifecycle(task) != .open or task.durable.archived or task.deletion != .idle)
+            return error.TaskClosing;
+        const current = task_state.ApprovalMode.fromFacts(task.durable.permission_profile, task.durable.permission_review_delegated);
+        if (current == target) return task.durable.approval_revision;
+        if (self.permission_reviews_closed or task.runtime.active_operation == .compact or task.runtime.active_operation == .restore)
+            return error.TaskBusy;
+        if (authority.shutting_down or !authority.task_persistence_ready or
+            !authority.workspace_identity_exact or !authority.automatic_owner_exact or !authority.authority_stable)
+            return error.ApprovalUnavailable;
+        if (!task.runtime.hasAttachedSession() and
+            (authority.execution_admission != .available or authority.runtime_admission != .available))
+            return error.ApprovalUnavailable;
+        if ((current.profile() != target.profile() or !task.runtime.hasAttachedSession()) and !authority.checkpoint_store_ready)
+            return error.ApprovalUnavailable;
+        var pending_count: usize = 0;
+        for (self.tasks) |entry| if (entry) |item| if (item.approval_change != null) {
+            pending_count += 1;
+        };
+        if (pending_count >= approval_job.max_operations) return error.TaskBusy;
+        if (target == .auto_review and (task.runtime.permission_review.exhausted or
+            task.runtime.permission_review.generation == std.math.maxInt(u64)))
+            return error.ReviewGenerationExhausted;
+        return std.math.add(u64, task.durable.approval_revision, 1) catch return error.ApprovalRevisionExhausted;
+    }
+
+    fn availableApprovalModes(self: *const Runtime, task: *const task_state.Task, authority: ProjectionAuthority, buffer: *[3]task_state.ApprovalMode) []const task_state.ApprovalMode {
+        if (authority.shutting_down) return &.{};
+        var count: usize = 0;
+        for (std.enums.values(task_state.ApprovalMode)) |mode| {
+            _ = self.approvalChangeRevision(task, task.durable.binding_epoch, task.durable.approval_revision, mode, authority) catch continue;
+            buffer[count] = mode;
+            count += 1;
+        }
+        return buffer[0..count];
+    }
+
+    pub fn beginApprovalChange(
+        self: *Runtime,
+        task_id: u64,
+        expected_binding_epoch: u64,
+        expected_revision: u64,
+        target: task_state.ApprovalMode,
+        effects: RecoveryAdmissionEffects,
+    ) ApprovalError!u64 {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const revision = try self.approvalChangeRevision(task, expected_binding_epoch, expected_revision, target, effects.authority(projectionAuthorityQuery(task)));
+        if (revision == task.durable.approval_revision) return revision;
+        task.runtime.permission_review.invalidate();
+        if (target == .manual and task.runtime.pending_ui_request_id != 0) {
+            task.runtime.permission_review.phase = .needs_user;
+            task.runtime.permission_review.settled_request_id = task.runtime.pending_ui_request_id;
+        }
+        task.approval_result = null;
+        task.approval_change = .{ .revision = revision, .binding_epoch = task.durable.binding_epoch, .target = target };
+        return revision;
+    }
+
+    fn approvalJobSlot(self: *Runtime) error{QueueFull}!usize {
+        for (self.approval_jobs, 0..) |entry, index| if (entry == null) return index;
+        return error.QueueFull;
+    }
+
+    pub fn approvalJobFor(self: *const Runtime, task_id: u64) bool {
+        for (self.approval_jobs) |entry| if (entry) |slot| if (slot.task_id == task_id) return true;
+        return false;
+    }
+
+    pub fn approvalHistoryWorkerActive(self: *const Runtime) bool {
+        for (self.approval_jobs) |entry| if (entry) |slot| if (slot.job.work == .history) return true;
+        return false;
+    }
+
+    pub fn approvalHistoryBlocked(self: *const Runtime) bool {
+        if (self.approvalHistoryWorkerActive()) return true;
+        for (self.tasks) |entry| if (entry) |task| {
+            if (task.approval_change) |change| if (change.phase == .outcome_unknown) return true;
+            if (task.runtime.restore_job) |job| if (job.binding_commit != .not_started) return true;
+        };
+        return false;
+    }
+
+    pub fn approvalCoreIdle(self: *const Runtime, task_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        return task.runtime.active_operation == .none and
+            !task.runtime.worker_leases.hasLive() and !task_state.hasUnfinalizedTerminalEvents(task);
+    }
+
+    pub fn queueApprovalCheckpoint(self: *Runtime, task_id: u64, mutate: bool, resources: task_execution.CheckpointResources, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const change = task.approval_change orelse return error.TaskBusy;
+        if (self.approvalJobFor(task_id) or task.runtime.active_operation != .none or
+            task.runtime.worker_leases.hasLive() or task_state.hasUnfinalizedTerminalEvents(task)) return error.TaskBusy;
+        const store = resources.store orelse return error.ApprovalUnavailable;
+        const slot = try self.approvalJobSlot();
+        var access = try task.runtime.acquireAccess();
+        var access_live = true;
+        errdefer if (access_live) access.deinit();
+        const model = try self.allocator.dupe(u8, task.durable.execution_model);
+        errdefer self.allocator.free(model);
+        var lease = try task.runtime.worker_leases.acquire();
+        var lease_live = true;
+        errdefer if (lease_live) lease.deinit();
+        const job = try self.allocator.create(approval_job.Job);
+        errdefer self.allocator.destroy(job);
+        job.* = .{
+            .allocator = self.allocator,
+            .lease = lease.take(),
+            .notifier = .{ .context = notifier.context, .notify_fn = notifier.notify_fn },
+            .work = .{ .checkpoint = .{
+                .access = access.take(),
+                .model = model,
+                .store = store,
+                .store_health = resources.store_health,
+                .limits = resources.limits,
+                .task_id = task_id,
+                .binding_epoch = task.durable.binding_epoch,
+                .approval_revision = if (mutate) change.revision else task.durable.approval_revision,
+                .last_run_id = task_policy.lastConversationRunId(task) orelse 0,
+                .last_compact_id = task_policy.lastConversationCompactId(task),
+                .expected_mode = agentSessionPermission(task.durable.permission_profile, task.durable.permission_interaction).mode,
+                .target_mode = agentSessionPermission(change.target.profile(), task.durable.permission_interaction).mode,
+                .mutate = mutate,
+            } },
+        };
+        // The job owns resources even if executor admission rejects it.
+        access_live = false;
+        lease_live = false;
+        executor.enqueue(job, job, approval_job.Job.execute, approval_job.Job.cancelQueued) catch |err| {
+            job.work.checkpoint.access.deinit();
+            job.lease.deinit();
+            return err;
+        };
+        self.approval_jobs[slot] = .{ .task_id = task_id, .job = job };
+        task.approval_change.?.phase = if (mutate) .mutation_export else .baseline_export;
+    }
+
+    pub fn queueApprovalHistory(self: *Runtime, task_id: u64, bytes: []u8, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        if (self.approvalHistoryBlocked()) return error.TaskBusy;
+        return self.queueApprovalHistoryWork(task_id, null, bytes, capability, false, executor, notifier);
+    }
+
+    pub fn queueApprovalResolution(self: *Runtime, task_id: u64, capability: task_persistence.Capability, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        if (self.approvalHistoryWorkerActive()) return error.TaskBusy;
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const change = task.approval_change orelse return error.TaskBusy;
+        if (change.phase != .outcome_unknown) return error.TaskBusy;
+        const history = change.unknown_history orelse return error.ApprovalUnavailable;
+        const bytes = try self.allocator.dupe(u8, history.bytes);
+        errdefer self.allocator.free(bytes);
+        try self.queueApprovalHistoryWork(task_id, null, bytes, capability, true, executor, notifier);
+    }
+
+    /// A post-commit projection uses the same bounded writer and outlives the
+    /// completed Task intent, like retirement of its superseded checkpoint.
+    pub fn queueApprovalProjection(self: *Runtime, bytes: []u8, capability: task_persistence.Capability, resolve_only: bool, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        if (self.approvalHistoryWorkerActive()) return error.TaskBusy;
+        return self.queueApprovalHistoryWork(0, null, bytes, capability, resolve_only, executor, notifier);
+    }
+
+    /// Recovery binding confirmation shares the same single history writer.
+    /// Only immutable bytes and capabilities cross into that worker.
+    pub fn queueRecoveryHistory(self: *Runtime, task_id: u64, bytes: []u8, capability: task_persistence.Capability, resolve_only: bool, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        if (self.approvalHistoryWorkerActive() or (!resolve_only and self.approvalHistoryBlocked())) return error.TaskBusy;
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const restore = task.runtime.restore_job orelse return error.TaskBusy;
+        if (resolve_only and (restore.binding_commit != .outcome_unknown or restore.unknown_history == null)) return error.TaskBusy;
+        try self.queueApprovalHistoryWork(task_id, restore.attempt.attempt_id, bytes, capability, resolve_only, executor, notifier);
+    }
+
+    fn queueApprovalHistoryWork(self: *Runtime, task_id: u64, restore_attempt_id: ?u64, bytes: []u8, capability: task_persistence.Capability, resolve_only: bool, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        const leases = if (task_id == 0) &self.approval_cleanup_leases else leases: {
+            const task = self.find(task_id) orelse return error.UnknownTask;
+            break :leases &task.runtime.worker_leases;
+        };
+        const slot = try self.approvalJobSlot();
+        var lease = try leases.acquire();
+        var lease_live = true;
+        errdefer if (lease_live) lease.deinit();
+        const job = try self.allocator.create(approval_job.Job);
+        errdefer self.allocator.destroy(job);
+        job.* = .{
+            .allocator = self.allocator,
+            .lease = lease.take(),
+            .notifier = .{ .context = notifier.context, .notify_fn = notifier.notify_fn },
+            .work = .{ .history = .{ .bytes = bytes, .capability = capability, .resolve_only = resolve_only } },
+        };
+        lease_live = false;
+        executor.enqueue(job, job, approval_job.Job.execute, approval_job.Job.cancelQueued) catch |err| {
+            job.lease.deinit();
+            return err;
+        };
+        self.approval_jobs[slot] = .{ .task_id = task_id, .restore_attempt_id = restore_attempt_id, .job = job };
+    }
+
+    pub fn queueApprovalRetirement(self: *Runtime, store: *checkpoint_store.FileStore, identity: checkpoint_store.Identity, executor: ExecutorPort, notifier: task_execution.Notifier) !void {
+        const slot = try self.approvalJobSlot();
+        var lease = try self.approval_cleanup_leases.acquire();
+        var lease_live = true;
+        errdefer if (lease_live) lease.deinit();
+        const job = try self.allocator.create(approval_job.Job);
+        errdefer self.allocator.destroy(job);
+        job.* = .{
+            .allocator = self.allocator,
+            .lease = lease.take(),
+            .notifier = .{ .context = notifier.context, .notify_fn = notifier.notify_fn },
+            .work = .{ .retire = .{ .store = store, .identity = identity } },
+        };
+        lease_live = false;
+        executor.enqueue(job, job, approval_job.Job.execute, approval_job.Job.cancelQueued) catch |err| {
+            job.lease.deinit();
+            return err;
+        };
+        self.approval_jobs[slot] = .{ .task_id = 0, .job = job };
+    }
+
+    pub const PreparedApprovalCommit = struct {
+        task: *task_state.Task,
+        previous_profile: task_state.PermissionProfile,
+        previous_delegated: bool,
+        previous_revision: u64,
+        coverage: ?CheckpointCoverageOverlay,
+        checkpoint: ?*const checkpoint_record.Record,
+
+        pub fn rollback(self: PreparedApprovalCommit) void {
+            self.task.durable.permission_profile = self.previous_profile;
+            self.task.durable.permission_review_delegated = self.previous_delegated;
+            self.task.durable.approval_revision = self.previous_revision;
+            if (self.coverage) |overlay| rollbackCheckpointCoverageOverlay(self.task, overlay);
+        }
+    };
+
+    pub fn prepareApprovalCommit(self: *Runtime, task_id: u64) !PreparedApprovalCommit {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const change = task.approval_change orelse return error.TaskBusy;
+        var prepared = PreparedApprovalCommit{
+            .task = task,
+            .previous_profile = task.durable.permission_profile,
+            .previous_delegated = task.durable.permission_review_delegated,
+            .previous_revision = task.durable.approval_revision,
+            .coverage = null,
+            .checkpoint = null,
+        };
+        if (change.phase == .mode_commit) {
+            task.durable.permission_profile = change.target.profile();
+            task.durable.permission_review_delegated = change.target == .auto_review;
+            task.durable.approval_revision = change.revision;
+        }
+        errdefer prepared.rollback();
+        if (task.approval_change.?.candidate) |*record| {
+            const candidate = task_state.CheckpointCandidate{ .record = record.*, .metrics = .{ .chunk_count = 0, .export_duration_ns = 0 } };
+            prepared.coverage = beginCheckpointCoverageOverlay(task, &candidate) orelse return error.ApprovalUnavailable;
+            prepared.checkpoint = record;
+        }
+        return prepared;
+    }
+
+    pub fn recordApprovalCheckpoint(self: *Runtime, task_id: u64, record: checkpoint_record.Record) void {
+        const task = self.find(task_id) orelse unreachable;
+        const change = &task.approval_change.?;
+        std.debug.assert(change.candidate == null);
+        change.candidate = record;
+        change.phase = switch (change.phase) {
+            .baseline_export => .baseline_commit,
+            .mutation_export => .mode_commit,
+            else => unreachable,
+        };
+    }
+
+    pub fn failApprovalChange(self: *Runtime, task_id: u64, reason: task_state.ApprovalFailureReason, restore_required: bool) void {
+        const task = self.find(task_id) orelse return;
+        const change = &(task.approval_change orelse return);
+        const revision = change.revision;
+        if (task.approval_change.?.unknown_history) |history| self.allocator.free(history.bytes);
+        task.approval_change.?.unknown_history = null;
+        if (task.approval_change.?.candidate) |*record| record.deinit(self.allocator);
+        task.approval_change.?.candidate = null;
+        if (restore_required) {
+            task.approval_change.?.failure = reason;
+            task.approval_change.?.phase = .recovering;
+        } else {
+            task.approval_result = .{ .revision = revision, .outcome = .failed, .reason = reason };
+            task.approval_change = null;
+        }
+    }
+
+    /// A failed close cannot make a mutated, uncommitted Session reusable.
+    /// Keep the existing explicit close-retry path and end this approval intent.
+    pub fn failApprovalRecovery(self: *Runtime, task_id: u64) void {
+        const task = self.find(task_id) orelse return;
+        if (task.runtime.attached()) |attached| attached.health = .session_poisoned;
+        task.runtime.close_failed = true;
+        self.failApprovalChange(task_id, .recovery_failed, false);
+    }
+
+    pub fn markApprovalUnknown(self: *Runtime, task_id: u64, bytes: ?[]u8) void {
+        const task = self.find(task_id) orelse unreachable;
+        const change = &task.approval_change.?;
+        if (bytes) |candidate| {
+            std.debug.assert(change.unknown_history == null);
+            change.unknown_history = .{ .bytes = candidate, .mode_commit = change.phase == .mode_commit };
+        }
+        change.phase = .outcome_unknown;
+        change.failure = .outcome_unknown;
+    }
+
+    pub fn resumeApprovalConfirmation(self: *Runtime, task_id: u64) !void {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const change = &(task.approval_change orelse return error.TaskBusy);
+        if (change.phase != .outcome_unknown) return;
+        const history = change.unknown_history orelse return error.ApprovalUnavailable;
+        task.approval_change.?.phase = if (history.mode_commit) .mode_commit else .baseline_commit;
+    }
+
+    pub fn acceptApprovalCommit(self: *Runtime, task_id: u64) !?checkpoint_store.Identity {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        const prepared = try self.prepareApprovalCommit(task_id);
+        // The same candidate was durably confirmed; retain this overlay.
+        var old_identity: ?checkpoint_store.Identity = null;
+        if (task.approval_change.?.candidate) |record| {
+            if (task.durable.checkpoint) |*old| {
+                if (!std.meta.eql(old.blob, record.blob)) old_identity = old.blob;
+                old.deinit(self.allocator);
+            }
+            task.durable.checkpoint = record;
+            task.approval_change.?.candidate = null;
+            task.durable.checkpoint_anchor = .available;
+            task.durable.checkpoint_attempt = .none;
+        }
+        _ = prepared;
+        if (task.approval_change.?.unknown_history) |history| self.allocator.free(history.bytes);
+        task.approval_change.?.unknown_history = null;
+        if (task.approval_change.?.phase == .baseline_commit) {
+            task.approval_change.?.baseline_confirmed = true;
+            task.approval_change.?.phase = .waiting;
+        } else {
+            task.approval_result = .{ .revision = task.durable.approval_revision, .outcome = .completed };
+            task.approval_change = null;
+        }
+        return old_identity;
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1103,6 +1449,8 @@ pub const Runtime = struct {
     /// Composition must first drain/deinitialize every Task record because
     /// bounded projection allocations remain in the shared root budget.
     pub fn deinitStorage(self: *Runtime) void {
+        for (self.approval_jobs) |entry| std.debug.assert(entry == null);
+        std.debug.assert(!self.approval_cleanup_leases.hasLive());
         for (self.tasks) |entry| std.debug.assert(entry == null);
         self.allocator.free(self.tasks);
         for (self.failures.items) |failure| self.allocator.free(failure.reason);
@@ -1871,6 +2219,7 @@ pub const Runtime = struct {
         max_model_id_bytes: usize,
     ) ModelError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.approval_change != null) return error.TaskBusy;
         if (!std.mem.eql(u8, expected_model, task.durable.execution_model))
             return error.TaskModelMismatch;
         if (task_policy.hasActiveOperation(task)) {
@@ -2047,41 +2396,6 @@ pub const Runtime = struct {
             .generation = task.durable.execution_generation,
             .protocol = task.durable.execution_protocol,
             .model = task.durable.execution_model,
-        };
-    }
-
-    /// Borrows the exact live execution owned by an idle interactive
-    /// approval-required Task. The caller must consume the returned slices
-    /// synchronously; no Session, Conversation, Run, checkpoint, pending UI,
-    /// or permission rule is included in this source.
-    pub fn fullAccessSuccessorSource(
-        self: *const Runtime,
-        task_id: u64,
-        expected_binding_epoch: u64,
-    ) error{
-        UnknownTask,
-        BindingEpochMismatch,
-        TaskBusy,
-        TaskClosing,
-        UnsupportedPermissionProfile,
-        ExecutionUnavailable,
-        ExecutionGenerationMismatch,
-    }!FullAccessSuccessorSource {
-        const task = self.findConst(task_id) orelse return error.UnknownTask;
-        if (expected_binding_epoch == 0 or
-            task.durable.binding_epoch != expected_binding_epoch)
-            return error.BindingEpochMismatch;
-        if (task_policy.taskLifecycle(task) != .open or
-            task.durable.archived or task.deletion != .idle)
-            return error.TaskClosing;
-        if (task_policy.hasActiveOperation(task)) return error.TaskBusy;
-        if (task.durable.permission_profile != .approval_required or
-            task.durable.permission_interaction != .interactive)
-            return error.UnsupportedPermissionProfile;
-        return .{
-            .workspace_id = task.durable.workspace_id,
-            .workspace_epoch = task.durable.workspace_epoch,
-            .execution = try taskExecutionInput(task),
         };
     }
 
@@ -3057,7 +3371,12 @@ pub const Runtime = struct {
     pub fn prepareShutdown(
         self: *Runtime,
         executor: ExecutorCancellation,
+        approval_executor: ExecutorCancellation,
     ) void {
+        for (self.approval_jobs) |entry| if (entry) |slot| {
+            slot.job.requestCancellation();
+            _ = approval_executor.cancel(slot.job);
+        };
         self.permission_reviews_closed = true;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
@@ -3385,11 +3704,14 @@ pub const Runtime = struct {
             count += 1;
             const external = effects.authority(projectionAuthorityQuery(task));
             const recovery = self.recoveryProjectionWithAuthority(task, external);
+            var available_modes: [3]task_state.ApprovalMode = undefined;
+            const modes = self.availableApprovalModes(task, external, &available_modes);
             task_view.writeProjection(writer, .{
                 .task = task,
                 .now_ms = effects.now_ms,
                 .recovery = recovery,
                 .model_selection_availability = external.model_selection_availability,
+                .available_approval_modes = modes,
                 .shutting_down = external.shutting_down,
                 .text = effects.text,
                 .catalog = effects.catalog,
@@ -3426,124 +3748,8 @@ pub const Runtime = struct {
         };
     }
 
-    /// Installs a new empty AgentCore Conversation for a detached Task whose
-    /// entire visible history is explicitly excluded from Conversation
-    /// recovery. Product history ids remain consumed through the allocation
-    /// floor; no historical operation is replayed.
-    pub fn startFreshConversation(
-        self: *Runtime,
-        task_id: u64,
-        input: FreshConversationStartInput,
-    ) RecoveryStartError!u64 {
-        const task = self.find(task_id) orelse return error.UnknownTask;
-        if (input.expected_binding_epoch == 0 or
-            input.expected_binding_epoch != task.durable.binding_epoch)
-            return error.BindingEpochMismatch;
-        if (!freshConversationAllowed(task) or
-            input.workspace_id != task.durable.workspace_id or
-            input.workspace_epoch != task.durable.workspace_epoch or
-            input.execution.execution_generation == 0 or
-            input.execution.target.protocol != task.durable.execution_protocol or
-            task.runtime.active_operation != .none or
-            task.runtime.liveConst() != null)
-            return error.RecoveryUnavailable;
-        if (self.next_restore_attempt_id == 0 or
-            self.next_restore_attempt_id == std.math.maxInt(u64))
-            return error.RestoreAttemptExhausted;
-
-        var execution_input = input.execution;
-        execution_input.target.model = task.durable.execution_model;
-        var execution = try owned_task_execution.OwnedTaskExecution.clone(
-            self.allocator,
-            execution_input,
-        );
-        errdefer execution.deinit();
-        var epoch_storage: [32]u8 = undefined;
-        const epoch_token = std.fmt.bufPrint(
-            &epoch_storage,
-            "{d}",
-            .{input.workspace_epoch},
-        ) catch unreachable;
-        const permission = agentSessionPermission(
-            task.durable.permission_profile,
-            task.durable.permission_interaction,
-        );
-        var binding = try task_agent_session.Binding.open(input.agent_runtime, .{
-            .model_binding = .{
-                .target = .{
-                    .provider_id = execution_input.target.provider_id,
-                    .protocol = agent_protocol.toAgent(execution_input.target.protocol),
-                    .base_url = execution_input.target.base_url,
-                    .model = task.durable.execution_model,
-                },
-                .credential = execution_input.api_key,
-            },
-            .permission_mode = permission.mode,
-            .shell_policy = permission.shell,
-            .permission_interaction = permission.interaction,
-            .workspace = .{
-                .canonical_root = input.workspace_root,
-                .trust = switch (input.workspace_trust) {
-                    .explicitly_trusted => .explicitly_trusted,
-                    .temporary => .{ .temporary = input.workspace_root },
-                },
-            },
-            .canonical_user_home = input.canonical_user_home,
-            .workspace_epoch = if (input.canonical_user_home.len != 0)
-                epoch_token
-            else
-                "",
-            .skill_catalog = null,
-            .skill_policy = null,
-            .mcp_selection = null,
-            .operation_id_floor = .{
-                .last_run_id = task_policy.runHistoryHighWater(task),
-                .last_compact_id = task_policy.compactHistoryHighWater(task),
-                .last_ui_request_id = task_policy.uiRequestHistoryHighWater(task),
-            },
-        });
-        var binding_live = true;
-        errdefer if (binding_live and !discardFreshBinding(&binding)) {
-            self.recovery_poisoned = true;
-        };
-
-        if (input.execution.execution_generation != task.durable.execution_generation) {
-            if (task.durable.binding_epoch == std.math.maxInt(u64))
-                return error.BindingEpochExhausted;
-            const previous_generation = task.durable.execution_generation;
-            const previous_epoch = task.durable.binding_epoch;
-            task.durable.execution_generation = input.execution.execution_generation;
-            task.durable.binding_epoch = previous_epoch + 1;
-            switch (input.commit_binding.commit()) {
-                .committed => {},
-                .failed, .outcome_unknown => |outcome| {
-                    task.durable.execution_generation = previous_generation;
-                    task.durable.binding_epoch = previous_epoch;
-                    return switch (outcome) {
-                        .failed => error.TaskPersistenceFailed,
-                        .outcome_unknown => error.TaskPersistenceOutcomeUnknown,
-                        .committed => unreachable,
-                    };
-                },
-            }
-        }
-
-        const attempt_id = self.next_restore_attempt_id;
-        task.runtime.attachment = .{ .attached = .{
-            .binding = binding.take(),
-            .execution = execution.take(),
-            .pinned_catalog = null,
-        } };
-        binding_live = false;
-        task.runtime.mcp_authority_at_creation = .unavailable;
-        task.runtime.last_restore_failure = null;
-        task.runtime.last_restore_report = null;
-        task.runtime.last_restore_permission = null;
-        task.conversation_observation = .{};
-        self.next_restore_attempt_id += 1;
-        return attempt_id;
-    }
-
+    /// Enqueues attachment reconstruction from a checkpoint or an empty
+    /// Conversation. Excluded Product history supplies only allocation floors.
     pub fn startRecovery(
         self: *Runtime,
         task_id: u64,
@@ -3553,7 +3759,11 @@ pub const Runtime = struct {
         if (input.expected_binding_epoch == 0 or
             input.expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
-        const checkpoint = task.durable.checkpoint orelse
+        const checkpoint = task.durable.checkpoint;
+        if (input.workspace_id != task.durable.workspace_id or
+            input.workspace_epoch != task.durable.workspace_epoch or
+            (checkpoint == null and !freshConversationAllowed(task)) or
+            (checkpoint != null and input.checkpoint_store == null))
             return error.RecoveryUnavailable;
         if (input.execution.execution_generation == 0 or
             input.execution.target.protocol != task.durable.execution_protocol)
@@ -3565,9 +3775,9 @@ pub const Runtime = struct {
             self.next_restore_attempt_id == std.math.maxInt(u64))
             return error.RestoreAttemptExhausted;
         const attempt_id = self.next_restore_attempt_id;
-        var checkpoint_copy = try checkpoint.clone(self.allocator);
+        var checkpoint_copy = if (checkpoint) |record| try record.clone(self.allocator) else null;
         var checkpoint_live = true;
-        errdefer if (checkpoint_live) checkpoint_copy.deinit(self.allocator);
+        errdefer if (checkpoint_live) if (checkpoint_copy) |*record| record.deinit(self.allocator);
         var epoch_storage: [32]u8 = undefined;
         const epoch_token = std.fmt.bufPrint(
             &epoch_storage,
@@ -3578,7 +3788,7 @@ pub const Runtime = struct {
             self.allocator,
             input.workspace_root,
             input.canonical_user_home,
-            epoch_token,
+            if (input.canonical_user_home.len != 0) epoch_token else "",
             switch (input.workspace_trust) {
                 .explicitly_trusted => .explicitly_trusted,
                 .temporary => .temporary,
@@ -3973,8 +4183,9 @@ pub const Runtime = struct {
                     task.runtime.close_requested = false;
                     task.runtime.close_failed = true;
                     if (task.deletion == .deleting) task.deletion = .failed;
+                    if (task.runtime.discarding_restore) task.runtime.last_restore_failure = .candidate_cleanup_failed;
                     switch (completion) {
-                        .failed_reusable => task.runtime.restoreCloseFailure(.available),
+                        .failed_reusable => task.runtime.restoreCloseFailure(if (task.runtime.discarding_restore) .session_poisoned else .available),
                         .failed_poisoned => task.runtime.restoreCloseFailure(.session_poisoned),
                         .failed_closing => {},
                         else => unreachable,
@@ -4019,8 +4230,7 @@ pub const Runtime = struct {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             if (!task.runtime.close_requested or !closeReady(task)) continue;
-            const retrying = task.runtime.close_failed and
-                task.runtime.hasClosingSession();
+            const retrying = task.runtime.hasClosingSession();
             startCloseWorker(task, notifier, retrying) catch {
                 task.runtime.close_requested = false;
                 task.runtime.close_failed = true;
@@ -4033,6 +4243,7 @@ pub const Runtime = struct {
     pub fn syncRecoveryCompletions(
         self: *Runtime,
         effects: RecoveryEffects,
+        release: ReleaseEffects,
     ) RecoverySync {
         var result: RecoverySync = .{};
         for (self.tasks) |*entry| {
@@ -4051,12 +4262,17 @@ pub const Runtime = struct {
                 .restore => |attempt| attempt.id,
                 .none, .run, .compact => null,
             };
-            if (job.takeCandidate()) |candidate_value| {
-                var candidate = candidate_value;
-                const checkpoint_matches = if (task.durable.checkpoint) |record|
-                    checkpointIdentityEqual(record.blob, job.attempt.checkpoint.blob)
+            if (job.outcome == .candidate) {
+                const checkpoint_matches = if (job.attempt.checkpoint) |expected|
+                    if (task.durable.checkpoint) |record|
+                        checkpointIdentityEqual(record.blob, expected.blob) and task_policy.checkpointMatchesCurrentHistory(task, record)
+                    else
+                        false
                 else
-                    false;
+                    freshConversationAllowed(task) and
+                        task_policy.runHistoryHighWater(task) == job.attempt.run_id_floor and
+                        task_policy.compactHistoryHighWater(task) == job.attempt.compact_id_floor and
+                        task_policy.uiRequestHistoryHighWater(task) == job.attempt.ui_request_id_floor;
                 const allowed = recovery_job.commitAllowed(
                     &job.attempt,
                     .{
@@ -4081,52 +4297,68 @@ pub const Runtime = struct {
                     },
                 );
                 var install_candidate = allowed;
-                if (install_candidate and
-                    job.attempt.source_execution_generation !=
-                        job.attempt.target_execution_generation)
-                adoption: {
-                    if (task.durable.binding_epoch == std.math.maxInt(u64)) {
-                        task.runtime.last_restore_failure = .binding_epoch_exhausted;
-                        install_candidate = false;
-                        break :adoption;
-                    }
-                    const previous_generation = task.durable.execution_generation;
-                    const previous_epoch = task.durable.binding_epoch;
-                    const next_epoch = previous_epoch + 1;
-                    const checkpoint = &(task.durable.checkpoint orelse {
-                        task.runtime.last_restore_failure = .binding_persistence_failed;
-                        install_candidate = false;
-                        break :adoption;
-                    });
-                    checkpoint.adoptBindingEpoch(previous_epoch, next_epoch) catch {
-                        task.runtime.last_restore_failure = .binding_persistence_failed;
-                        install_candidate = false;
-                        break :adoption;
-                    };
-                    task.durable.execution_generation =
-                        job.attempt.target_execution_generation;
-                    task.durable.binding_epoch = next_epoch;
-                    switch (effects.commitBinding()) {
-                        .committed => {},
-                        .failed, .outcome_unknown => |outcome| {
-                            task.durable.execution_generation = previous_generation;
-                            task.durable.binding_epoch = previous_epoch;
-                            checkpoint.anchor.binding_epoch = previous_epoch;
-                            task.runtime.last_restore_failure = switch (outcome) {
-                                .failed => .binding_persistence_failed,
-                                .outcome_unknown => .binding_persistence_unknown,
-                                .committed => unreachable,
+                if (job.attempt.source_execution_generation != job.attempt.target_execution_generation) {
+                    switch (job.binding_commit) {
+                        .pending, .outcome_unknown => continue,
+                        .not_started => if (allowed) adoption: {
+                            const previous_epoch = task.durable.binding_epoch;
+                            if (previous_epoch == std.math.maxInt(u64)) {
+                                task.runtime.last_restore_failure = .binding_epoch_exhausted;
+                                install_candidate = false;
+                                break :adoption;
+                            }
+                            const next_epoch = previous_epoch + 1;
+                            if (task.durable.checkpoint) |*record| {
+                                record.adoptBindingEpoch(previous_epoch, next_epoch) catch {
+                                    task.runtime.last_restore_failure = .binding_persistence_failed;
+                                    install_candidate = false;
+                                    break :adoption;
+                                };
+                            }
+                            task.durable.execution_generation = job.attempt.target_execution_generation;
+                            task.durable.binding_epoch = next_epoch;
+                            const commit = effects.queueBinding(task.durable.id) catch |err| failed: {
+                                if (err == error.TaskBusy or err == error.QueueFull) break :failed null;
+                                break :failed @as(?DurableCommit, .failed);
                             };
+                            task.durable.execution_generation = job.attempt.source_execution_generation;
+                            task.durable.binding_epoch = previous_epoch;
+                            if (task.durable.checkpoint) |*record| record.anchor.binding_epoch = previous_epoch;
+                            // null means an accepted worker or temporarily full
+                            // writer. Composition marks pending upon admission.
+                            if (commit) |outcome| job.binding_commit = switch (outcome) {
+                                .committed => .committed,
+                                .failed => .failed,
+                                .outcome_unknown => .outcome_unknown,
+                            };
+                            if (job.binding_commit != .not_started) result.changed = true;
+                            continue;
+                        },
+                        .committed => {
+                            // Durable truth must be adopted even if external
+                            // authority became stale after the writer started.
+                            std.debug.assert(task.durable.binding_epoch == job.attempt.binding_epoch);
+                            std.debug.assert(task.durable.execution_generation == job.attempt.source_execution_generation);
+                            const next_epoch = task.durable.binding_epoch + 1;
+                            if (task.durable.checkpoint) |*record| record.adoptBindingEpoch(task.durable.binding_epoch, next_epoch) catch unreachable;
+                            task.durable.binding_epoch = next_epoch;
+                            task.durable.execution_generation = job.attempt.target_execution_generation;
+                        },
+                        .failed => {
+                            if (task.runtime.last_restore_failure != .binding_persistence_unknown and task.runtime.last_restore_failure != .cancelled)
+                                task.runtime.last_restore_failure = .binding_persistence_failed;
                             install_candidate = false;
                         },
                     }
                 }
+                var candidate = job.takeCandidate().?;
                 if (install_candidate) {
                     task.runtime.last_restore_report = candidate.report;
-                    task.runtime.last_restore_permission = .{
-                        .restored_rules = candidate.report.restored_permission_rules,
-                        .invalidated_rules = candidate.report.invalidated_permission_rules,
-                    };
+                    task.runtime.last_restore_permission = if (candidate.report) |report| .{
+                        .restored_rules = report.restored_permission_rules,
+                        .invalidated_rules = report.invalidated_permission_rules,
+                    } else null;
+                    task.runtime.mcp_authority_at_creation = .unavailable;
                     task.runtime.attachment = .{ .attached = .{
                         .binding = candidate.takeBinding(),
                         .execution = candidate.takeExecution(),
@@ -4135,10 +4367,20 @@ pub const Runtime = struct {
                     task.conversation_observation = .{};
                     task.runtime.last_restore_failure = null;
                 } else {
-                    if (!candidate.discard()) {
-                        self.recovery_poisoned = true;
-                        task.runtime.last_restore_failure = .candidate_cleanup_failed;
-                    }
+                    std.debug.assert(task.runtime.attachment == .detached);
+                    release.redactAll(candidate.execution.input().api_key);
+                    candidate.execution.clearCredential();
+                    // Only the ordinary close worker receives this binding.
+                    // It is never published as an executable attachment.
+                    task.runtime.attachment = .{ .attached = .{
+                        .binding = candidate.takeBinding(),
+                        .execution = candidate.takeExecution(),
+                        .pinned_catalog = null,
+                        .health = .session_poisoned,
+                    } };
+                    std.debug.assert(task.runtime.beginClosing());
+                    task.runtime.discarding_restore = true;
+                    task.runtime.close_requested = true;
                 }
             } else if (job.failure()) |failure| {
                 task.runtime.last_restore_failure = failure;
@@ -4183,7 +4425,7 @@ pub const Runtime = struct {
         result.changed = titles.changed;
         result.durable_changed = titles.durable_changed;
 
-        const recovery = self.syncRecoveryCompletions(effects.recovery);
+        const recovery = self.syncRecoveryCompletions(effects.recovery, effects.release);
         result.changed = recovery.changed or result.changed;
         result.durable_changed = recovery.durable_changed or result.durable_changed;
         result.mcp_refresh_needed = recovery.mcp_refresh_needed;
@@ -5396,15 +5638,6 @@ fn freshConversationAllowed(task: *const task_state.Task) bool {
         !task_policy.hasPendingConversationCoverage(task);
 }
 
-fn discardFreshBinding(binding: *task_agent_session.Binding) bool {
-    switch (binding.closeOutcome(.session_close)) {
-        .closed => {},
-        .failure => return false,
-    }
-    binding.releaseClosed() catch return false;
-    return true;
-}
-
 fn taskExecutionInput(
     task: *const task_state.Task,
 ) error{ ExecutionUnavailable, ExecutionGenerationMismatch }!models_contract.ConfigInput {
@@ -6018,6 +6251,7 @@ fn failUiRequestIdentityCollision(
 }
 
 fn reviewTaskEligible(task: *const task_state.Task) bool {
+    if (task.approval_change != null) return false;
     const attached = task.runtime.attachedConst() orelse return false;
     return task.durable.permission_review_delegated and
         task.durable.permission_profile == .approval_required and
@@ -6407,6 +6641,10 @@ fn deinitTask(
     releaseProjectedSlice(self, effects, task.durable.title);
     if (task.durable.checkpoint) |*checkpoint|
         checkpoint.deinit(self.allocator);
+    if (task.approval_change) |*change| {
+        if (change.candidate) |*candidate| candidate.deinit(self.allocator);
+        if (change.unknown_history) |history| self.allocator.free(history.bytes);
+    }
     if (task.runtime.pending_model) |model| self.allocator.free(model);
     task.* = undefined;
 }
@@ -6614,4 +6852,141 @@ test "permission review intent includes only bounded explicit Skill and multimod
     defer decoded.deinit();
     try std.testing.expect(decoded.value.object.get("text").? == .null);
     try std.testing.expectEqualStrings("instructions.txt", decoded.value.object.get("attachments").?.array.items[0].object.get("display_name").?.string);
+}
+
+test "approval intent CAS, no-op, delegation commit and history authority stay distinct" {
+    const Harness = struct {
+        fn authority(context: *anyopaque, _: ProjectionAuthorityQuery) ProjectionAuthority {
+            const facts: *const ProjectionAuthority = @ptrCast(@alignCast(context));
+            return facts.*;
+        }
+    };
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = .{
+        .durable = .{
+            .id = 1,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .openai_responses,
+            .execution_model = @constCast("m"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 1,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &.{},
+            .compacts = &.{},
+            .ui_history = &.{},
+        },
+        .runtime = .{ .attachment = .{ .attached = .{
+            .binding = task_agent_session.Binding.testFixture(1),
+            .execution = undefined,
+            .pinned_catalog = null,
+        } } },
+    };
+    defer runtime.tasks[0] = null;
+
+    const task = runtime.find(1).?;
+    var authority = ProjectionAuthority{ .shutting_down = false, .task_persistence_ready = true, .checkpoint_store_ready = true, .execution_admission = .available, .workspace_identity_exact = true, .automatic_owner_exact = true, .runtime_admission = .available, .authority_stable = true, .model_selection_availability = .runtime_detached };
+    const effects = RecoveryAdmissionEffects{ .context = &authority, .authority_fn = Harness.authority };
+    const generation = task.runtime.permission_review.generation;
+    var mode_buffer: [3]task_state.ApprovalMode = undefined;
+    try std.testing.expectEqualSlices(task_state.ApprovalMode, &.{ .manual, .auto_review, .full_access }, runtime.availableApprovalModes(task, authority, &mode_buffer));
+    authority.checkpoint_store_ready = false;
+    try std.testing.expectEqualSlices(task_state.ApprovalMode, &.{ .manual, .auto_review }, runtime.availableApprovalModes(task, authority, &mode_buffer));
+    authority.checkpoint_store_ready = true;
+    task.durable.permission_interaction = .noninteractive;
+    try std.testing.expectEqual(@as(usize, 0), runtime.availableApprovalModes(task, authority, &mode_buffer).len);
+    task.durable.permission_interaction = .interactive;
+    authority.shutting_down = true;
+    try std.testing.expectEqual(@as(usize, 0), runtime.availableApprovalModes(task, authority, &mode_buffer).len);
+    authority.shutting_down = false;
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(generation, task.runtime.permission_review.generation);
+    try std.testing.expectEqual(@as(u64, 1), try runtime.beginApprovalChange(1, 1, 1, .manual, effects));
+    try std.testing.expectEqual(generation, task.runtime.permission_review.generation);
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectError(error.BindingEpochMismatch, runtime.beginApprovalChange(1, 2, 1, .auto_review, effects));
+    try std.testing.expectError(error.ApprovalRevisionMismatch, runtime.beginApprovalChange(1, 1, 2, .auto_review, effects));
+    try std.testing.expectEqual(@as(u64, 2), try runtime.beginApprovalChange(1, 1, 1, .auto_review, effects));
+    try std.testing.expect(task_policy.hasActiveOperation(task));
+    try std.testing.expect(!task.durable.permission_review_delegated);
+    try std.testing.expectEqual(@as(usize, 0), runtime.availableApprovalModes(task, authority, &mode_buffer).len);
+    try std.testing.expectError(error.TaskBusy, runtime.beginApprovalChange(1, 1, 1, .manual, effects));
+    task.approval_change.?.phase = .mode_commit;
+    const prepared = try runtime.prepareApprovalCommit(1);
+    try std.testing.expect(task.durable.permission_review_delegated);
+    try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
+    prepared.rollback();
+    try std.testing.expect(!task.durable.permission_review_delegated);
+    try std.testing.expectEqual(@as(u64, 1), task.durable.approval_revision);
+    try std.testing.expectEqual(null, try runtime.acceptApprovalCommit(1));
+    try std.testing.expect(task.durable.permission_review_delegated);
+    try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
+    try std.testing.expect(task.approval_change == null);
+    task.runtime.pending_ui_request_id = 7;
+    _ = try runtime.beginApprovalChange(1, 1, 2, .manual, effects);
+    try std.testing.expectEqual(.needs_user, task.runtime.permission_review.phase);
+    try std.testing.expectEqual(@as(u64, 7), task.runtime.permission_review.settled_request_id);
+    task.approval_change.?.phase = .outcome_unknown;
+    try std.testing.expect(runtime.approvalHistoryBlocked());
+    task.approval_change.?.phase = .mode_commit;
+    try std.testing.expectEqual(null, try runtime.acceptApprovalCommit(1));
+    try std.testing.expectEqual(@as(u64, 3), task.durable.approval_revision);
+    try std.testing.expect(!task.durable.permission_review_delegated);
+    // A -> B -> A returns to the same mode, but an old intent remains stale,
+    // including an otherwise harmless no-op or delayed duplicate.
+    const settled_generation = task.runtime.permission_review.generation;
+    try std.testing.expectError(error.ApprovalRevisionMismatch, runtime.beginApprovalChange(1, 1, 1, .manual, effects));
+    try std.testing.expectError(error.ApprovalRevisionMismatch, runtime.beginApprovalChange(1, 1, 2, .auto_review, effects));
+    try std.testing.expectError(error.BindingEpochMismatch, runtime.beginApprovalChange(1, 0, 3, .auto_review, effects));
+    try std.testing.expectEqual(@as(u64, 3), try runtime.beginApprovalChange(1, 1, 3, .manual, effects));
+    try std.testing.expectEqual(settled_generation, task.runtime.permission_review.generation);
+    const ready_authority = authority;
+    const invalid = enum { shutdown, persistence, workspace, automatic_owner, unstable, checkpoint, execution, runtime };
+    for (std.enums.values(invalid)) |failure| {
+        authority = ready_authority;
+        const attached = task.runtime.attachment;
+        switch (failure) {
+            .shutdown => authority.shutting_down = true,
+            .persistence => authority.task_persistence_ready = false,
+            .workspace => authority.workspace_identity_exact = false,
+            .automatic_owner => authority.automatic_owner_exact = false,
+            .unstable => authority.authority_stable = false,
+            .checkpoint => authority.checkpoint_store_ready = false,
+            .execution => {
+                task.runtime.attachment = .{ .detached = .cold_start };
+                authority.execution_admission = .unavailable;
+            },
+            .runtime => {
+                task.runtime.attachment = .{ .detached = .cold_start };
+                authority.runtime_admission = .unavailable;
+            },
+        }
+        try std.testing.expectError(error.ApprovalUnavailable, runtime.beginApprovalChange(1, 1, 3, .full_access, effects));
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(@as(u64, 3), task.durable.approval_revision);
+        try std.testing.expectEqual(settled_generation, task.runtime.permission_review.generation);
+        task.runtime.attachment = attached;
+    }
+    authority = ready_authority;
+    task.durable.archived = true;
+    try std.testing.expectError(error.TaskClosing, runtime.beginApprovalChange(1, 1, 3, .auto_review, effects));
+    task.durable.archived = false;
+    task.deletion = .deleting;
+    try std.testing.expectError(error.TaskClosing, runtime.beginApprovalChange(1, 1, 3, .auto_review, effects));
+    task.deletion = .idle;
+    task.runtime.active_operation = .{ .compact = 7 };
+    try std.testing.expectError(error.TaskBusy, runtime.beginApprovalChange(1, 1, 3, .auto_review, effects));
+    task.runtime.active_operation = .{ .restore = .{ .id = 7 } };
+    try std.testing.expectError(error.TaskBusy, runtime.beginApprovalChange(1, 1, 3, .auto_review, effects));
+    task.runtime.active_operation = .none;
+    runtime.permission_reviews_closed = true;
+    try std.testing.expectError(error.TaskBusy, runtime.beginApprovalChange(1, 1, 3, .auto_review, effects));
+    runtime.permission_reviews_closed = false;
+    task.durable.permission_interaction = .noninteractive;
+    try std.testing.expectError(error.UnsupportedPermissionProfile, runtime.beginApprovalChange(1, 1, 3, .full_access, effects));
+    try std.testing.expect(task.approval_change == null);
+    try std.testing.expectEqual(settled_generation, task.runtime.permission_review.generation);
 }

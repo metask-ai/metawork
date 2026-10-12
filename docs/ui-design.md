@@ -847,8 +847,6 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
 
 审批卡只在当前权限请求需要人工决定时显示，不仅按 Task 的审批模式判断。自动评审期间不显示审批卡、参数或批准与拒绝按钮，仅在执行状态中以 `aria-live` 说明“自动评审中”；用户仍可停止任务。评审中计入处理中，不计入人工关注数、不按人工待处理置顶，也不显示“需要你处理”的定位提醒；评审无法决定、失败或超时转人工后，立即显示审批卡并恢复人工关注与提醒，人工按钮与键盘决定保持可用。不改变底层 Run 等待审批的事实。不显示伪倒计时、自动重试或“已验证安全”。有效人工决定与自动结果仍由谁先被 Host 接纳谁生效，后来的回答按过期处理。审核器已允许或拒绝的请求不显示审批卡；其记录在所属 Run 中默认折叠，摘要只展示来源、可用的工具名称和本次结果，展开后展示 Host 脱敏理由，不重放参数。
 
-在完全访问新任务中继续的流程按源 Task 隔离恢复状态，不冻结其他 Task。停止未确认必须与创建结果未知区分：停止可显式重试，且仍等待同一 Run 的真实 terminal；明确创建拒绝可显式重试，创建结果未知只能核对任务列表或关闭提示，不自动重发。已取得新 Task identity 后，视图同步失败只提供同步恢复，不得改判为创建未知或再次创建。关闭提示不撤销已发送的 Host 操作，旧连接或已退出流程的异步回复不得恢复提示或改变 Task 选择。
-
 ### 10.2 审批模式
 
 New task 的模式菜单只展示三个真实选项：
@@ -863,7 +861,11 @@ New task 的模式菜单只展示三个真实选项：
 - `自动评审`：按任务意图评审本次内置工具请求，不确定或失败时转人工；菜单明确使用 Task 模型并产生额外 usage 费用，同时说明不是安全保证、MCP 请求仍需人工；
 - `完全访问`：MetaWork 不再为常规工具操作请求批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。它不是 root、Sandbox 或“信任 Workspace”。
 
-New task 直接显示 Host 发布的默认审批模式，并允许在发送前修改本次选择；首次默认值、选择记忆、授权与恢复边界由[产品需求](requirements.md#55-审批与输入)定义，不叠加第二个确认 modal 或独立委托开关。自动评审被预选时，费用、非安全保证及转人工说明仍须可见。帮助文字明确“已有会话暂不支持切换”；Task 信息只读显示原模式，不受新默认值影响。Settings 不提供权限入口。
+New task 直接显示 Host 发布的默认审批模式，并允许在发送前修改本次选择；首次默认值、选择记忆、授权与恢复边界由[产品需求](requirements.md#55-审批与输入)定义，不叠加第二个确认 modal 或独立委托开关。自动评审被预选时，费用、非安全保证及转人工说明仍须可见。已有交互式 Task 在 Composer 显示同一三档菜单，Task 信息显示当前模式，不受新 Task 默认值影响。Settings 不提供权限入口。
+
+已有 Task 的菜单只消费 Host `availableApprovalModes`，保留当前模式文字；不具备切换 authority 时只读。切换请求受理后显示忙碌状态并禁用重复选择，直到 canonical Snapshot 确认当前模式及 revision；不能乐观切换。跨完全访问边界且已有 Run 时，目标选项明确“先停止当前运行，再切换；不会自动重启运行”。Renderer 不另建 stop-then-switch 编排，也不重发当前输入。
+
+恢复原会话、结果未知与失败各自提供真实状态文字。超时或断连不能呈现成功，结果未确认时提供显式“刷新状态”，只刷新 Snapshot；用户查看最新模式后才可再次选择。菜单使用既有键盘导航、可见 focus 与 Escape/选择后 trigger 焦点恢复，费用及完全访问边界说明保持可读；390px 窄窗控件换行且不得遮挡发送/停止动作。
 
 Renderer 只显示 Host capability projection 声明的模式，不独立审核或更改 authority。Scheduled Task 继续采用其固定非交互 PermissionProfile，不显示自动评审选择；对应映射及授权语义由[产品需求](requirements.md#55-审批与输入)唯一拥有。
 
@@ -1014,7 +1016,7 @@ Providers（capability-gated）
 
 设置树只列当前阶段已经完整设计并通过 capability gate 的项目。显示密度不作为设置；`Appearance` 只有在第二套主题完成设计、可访问性和平台验收后才能加入，首个浅色版本不显示空入口。
 
-设置树不提供权限分区或权限设置项。New task 只显示 Host 声明的审批模式并记住成功创建 Task 时的选择，既有 Task 只读展示其已采用模式；具体交互见[审批模式](#102-审批模式)。
+设置树不提供权限分区或权限设置项。New task 只显示 Host 声明的审批模式并记住成功创建 Task 时的选择，既有 Task 的会话模式选择与当前值展示见[审批模式](#102-审批模式)。
 
 `Providers` 只有在 management、API Key 写入系统 credential storage、模型测试和已开放 protocol admission 共同可用时才整体进入设置树；它与 `Models` 平级，不是 Models 的下一级。不能只显示不可完成的空壳或“能力不可用”页面。Host 按当次运行时 capability 决定是否开放，不按 Windows/macOS 平台名建立静态 allowlist；目标平台尚未形成完整验收证据时由验证规范保留风险事实，不把已有运行能力永久屏蔽为产品缺失。
 
@@ -1346,7 +1348,6 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 权限卡片只显示当前 request 支持的 once/Session choice，不显示跨 Session 持久授权；
 - 权限卡每次只有一个智能紫主操作：默认为“允许一次”；仅当 request 提供 `allow_session` 时，在该主操作的分裂展开菜单中显示“本会话允许相同参数”。拒绝是视觉中性但语义清晰的独立操作，`deny_session` 如存在放在其自身展开选项中；不得并列多个紫色主按钮；
 - 同一 Task 内出现与已解决 occurrence 相同的 tool binding 和 canonical arguments digest 时，卡片显示简短的“为什么又请求”说明，优先区分上次只允许一次、policy generation/candidate 已变化、Session grant 未恢复或无 Session choice。不显示 digest/rule ID 原值，不声称已证明真实 effect；
-- 重复请求时，Manual Workspace 的 `approval_required` Task 可显示次级动作“在完全访问新任务中继续”。点击后先请求停止当前 Run，按钮进入有文字的处理状态；只在 snapshot 证明 Run terminal 后创建并选中新的 idle `full_access` Task，由用户编辑草稿并明确发送，不自动重放原指令。Automatic Workspace 或 execution 不可用时不显示可点的伪入口；若已向用户提出该路径，必须就地说明不可用原因；
 - stale、duplicate、expired 和错误 Task/Run/request 响应必须被拒绝；
 - Renderer reload 后当前请求状态从 Host 恢复，已响应或取消的请求不得重新可操作。
 

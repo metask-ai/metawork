@@ -214,6 +214,14 @@ pub const Access = struct {
         return self.get().setModel(model);
     }
 
+    pub fn sessionState(self: *Access) agent.SessionState {
+        return self.get().snapshot().state;
+    }
+
+    pub fn updatePermissionMode(self: *Access, expected: agent.PermissionMode, target: agent.PermissionMode) !agent.PermissionModeUpdate {
+        return self.get().updatePermissionMode(expected, target);
+    }
+
     pub fn prepareRun(self: *Access, input: agent.RunInput) !u64 {
         return self.get().prepareRun(input);
     }

@@ -773,7 +773,7 @@ export const zhCN: Record<MessageId, string> = {
     "当前 {current} tokens · {compact} 时自动压缩 · 上限 {limit}",
   "task.information": "任务信息",
   "task.information_scope":
-    "MCP 表示创建任务时的工具选择，不代表当前连接状态；已有会话暂不支持切换审批模式。",
+    "MCP 表示创建任务时的工具选择，不代表当前连接状态；审批模式显示此会话当前设置。",
   "conversation.context_observed": "当前会话最近一次观测，不是实时用量。",
   "task_panel.title": "右侧栏",
   "task_panel.empty": "从对话中打开文件或审查更改。",
@@ -814,26 +814,6 @@ export const zhCN: Record<MessageId, string> = {
     "恢复时有部分会话规则失效，MetaWork 无法确认它们是否与本次请求有关。",
   "approval.reason_session_grant_missed":
     "本次请求与上次会话规则相符，但 AgentCore 仍再次询问；先前授权可能未被应用。",
-  "approval.full_access_continue": "在完全访问新任务中继续",
-  "approval.full_access_stopping": "正在停止当前运行…",
-  "approval.full_access_stop_failed": "未能确认停止请求，尚未请求创建新任务。",
-  "approval.full_access_retry_stop": "重试停止",
-  "approval.full_access_sync_pending": "完全访问新任务已创建，界面仍需同步。",
-  "approval.full_access_retry_sync": "重试同步",
-  "approval.full_access_dismiss": "关闭此提示",
-  "approval.full_access_creating": "正在创建完全访问新任务…",
-  "approval.full_access_failed": "未能创建完全访问新任务。",
-  "approval.full_access_outcome_unknown":
-    "MetaWork 无法确认完全访问新任务是否已创建。请先检查任务列表，再选择其他路径。",
-  "approval.full_access_retry": "重试创建任务",
-  "approval.full_access_source_changed": "源任务已发生变化，请先检查最新状态。",
-  "approval.full_access_source_busy": "源任务仍在运行，请等待停止完成。",
-  "approval.full_access_source_unavailable": "源任务已无法用于此操作。",
-  "approval.full_access_workspace_unsupported":
-    "此操作仅适用于手动 Workspace。",
-  "approval.full_access_execution_unavailable": "源任务的执行配置已不可用。",
-  "approval.full_access_task_capacity": "当前没有容量创建更多任务。",
-  "approval.full_access_persistence_failed": "MetaWork 无法安全保存新任务。",
   "approval.response_failed": "未能发送回复，请重试。",
   "approval.response_sent": "回复已发送。",
   "approval.sending": "正在发送回复…",
@@ -997,12 +977,52 @@ export const zhCN: Record<MessageId, string> = {
     "MetaWork 跳过常规工具操作的批准；AgentCore 核心保护及系统或服务权限仍可阻止操作。",
   "permission.new_task.label": "审批模式",
   "permission.new_task.help":
-    "记住本次选择，重启后用于新任务。已有会话暂不支持切换。",
+    "记住本次选择，重启后用于新任务。已有会话可单独切换。",
   "permission.task.label": "审批模式",
-  "permission.task.help":
-    "显示此会话实际采用的审批模式；暂不支持在已有会话中切换。",
+  "permission.task.help": "显示此会话当前采用的审批模式；可在输入区切换。",
   "permission.task.full_access.help":
     "此会话采用完全访问；跳过常规批准，但 AgentCore 与系统保护仍然有效。",
+  "permission.task.menu_help": "切换本会话的审批模式，保留工作区、附件和对话。",
+  "permission.change.stop_help": "将先停止当前运行，再切换；不会自动重启运行。",
+  "permission.change.pending": "正在切换审批模式…",
+  "permission.change.recovering": "切换未完成，正在恢复原会话…",
+  "permission.change.sync_required": "暂时无法确认切换结果，请刷新状态。",
+  "permission.change.refresh": "刷新状态",
+  "permission.change.completed": "审批模式已切换。",
+  "permission.change.not_confirmed":
+    "未确认此次切换，请查看当前模式后重新选择。",
+  "permission.change.failure.cancelled": "切换已取消。",
+  "permission.change.failure.busy": "会话尚未空闲，审批模式未切换。",
+  "permission.change.failure.budget_required":
+    "当前调用预算不足，审批模式未切换。",
+  "permission.change.failure.mode_update_failed":
+    "审批模式切换失败，请确认当前模式。",
+  "permission.change.failure.checkpoint_failed":
+    "无法保存会话，审批模式未切换。",
+  "permission.change.failure.persistence_failed":
+    "无法保存审批模式，请确认当前模式后重试。",
+  "permission.change.failure.outcome_unknown":
+    "无法确认保存结果，请恢复任务记录后刷新状态。",
+  "permission.change.failure.recovery_failed":
+    "原会话恢复失败，请处理会话恢复提示后继续。",
+  "permission.change.failure.dependency_contract":
+    "会话执行组件暂不支持此次切换。",
+  "permission.change.rejection.task_not_found": "该任务已不存在。",
+  "permission.change.rejection.stale_binding":
+    "会话已变化，请查看最新状态后选择。",
+  "permission.change.rejection.stale_revision":
+    "审批模式已变化，请查看最新模式后选择。",
+  "permission.change.rejection.busy": "已有操作正在推进，请稍后选择。",
+  "permission.change.rejection.task_closed": "该任务已关闭或归档。",
+  "permission.change.rejection.unsupported_interaction":
+    "此任务不支持交互式审批切换。",
+  "permission.change.rejection.unavailable":
+    "当前会话无法切换审批模式，请查看恢复提示。",
+  "permission.change.rejection.revision_exhausted":
+    "该会话无法继续切换审批模式。",
+  "permission.change.rejection.review_exhausted": "该会话无法启用自动评审。",
+  "permission.change.rejection.shutting_down":
+    "MetaWork 正在关闭，请重启后选择。",
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
     "完全访问会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",

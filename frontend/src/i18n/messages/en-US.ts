@@ -857,7 +857,7 @@ export const enUS = {
     "{current} tokens now · auto-compact at {compact} · limit {limit}",
   "task.information": "Task information",
   "task.information_scope":
-    "MCP describes tool selection at task creation, not current connection status. Switching existing sessions is not supported yet.",
+    "MCP describes tool selection at task creation, not current connection status. Approval mode shows the current conversation setting.",
   "conversation.context_observed":
     "Latest observation for this conversation, not a live usage meter.",
   "task_panel.title": "Side panel",
@@ -905,34 +905,6 @@ export const enUS = {
     "Some session rules were invalidated during restoration. MetaWork cannot tell whether they relate to this request.",
   "approval.reason_session_grant_missed":
     "This request matches the previous session rule, but AgentCore asked again. The earlier grant may not have been applied.",
-  "approval.full_access_continue": "Continue in a new full-access task",
-  "approval.full_access_stopping": "Stopping the current run…",
-  "approval.full_access_stop_failed":
-    "The stop request could not be confirmed. No new task has been requested yet.",
-  "approval.full_access_retry_stop": "Try stopping again",
-  "approval.full_access_sync_pending":
-    "The full-access task was created. Its view still needs to synchronize.",
-  "approval.full_access_retry_sync": "Retry synchronization",
-  "approval.full_access_dismiss": "Dismiss this notice",
-  "approval.full_access_creating": "Creating a new full-access task…",
-  "approval.full_access_failed": "The full-access task was not created.",
-  "approval.full_access_outcome_unknown":
-    "MetaWork could not confirm whether the full-access task was created. Check the task list before trying another path.",
-  "approval.full_access_retry": "Try creating the task again",
-  "approval.full_access_source_changed":
-    "The source task changed. Review its latest state before trying again.",
-  "approval.full_access_source_busy":
-    "The source task is still active. Wait for it to finish stopping.",
-  "approval.full_access_source_unavailable":
-    "The source task is no longer available for this action.",
-  "approval.full_access_workspace_unsupported":
-    "This action is available only for a Manual Workspace.",
-  "approval.full_access_execution_unavailable":
-    "The source task's execution configuration is no longer available.",
-  "approval.full_access_task_capacity":
-    "There is no capacity for another task right now.",
-  "approval.full_access_persistence_failed":
-    "MetaWork could not safely save the new task.",
   "approval.response_failed": "The response could not be sent. Try again.",
   "approval.response_sent": "Response sent.",
   "approval.sending": "Sending your response…",
@@ -1102,12 +1074,60 @@ export const enUS = {
     "MetaWork skips approval for routine tool operations. AgentCore protections and system or service permissions can still block them.",
   "permission.new_task.label": "Approval mode",
   "permission.new_task.help":
-    "Remembered across restarts for new Tasks. Existing sessions cannot switch modes yet.",
+    "Remembered across restarts for new Tasks. Existing conversations can change their own mode.",
   "permission.task.label": "Approval mode",
   "permission.task.help":
-    "Shows the mode this session actually adopted. Switching existing sessions is not supported yet.",
+    "Shows the current mode of this conversation. Change it in the composer.",
   "permission.task.full_access.help":
     "This session uses full access. Routine approval is skipped; AgentCore and system protections still apply.",
+  "permission.task.menu_help":
+    "Change approval mode for this conversation, keeping the workspace, attachments and history.",
+  "permission.change.stop_help":
+    "Stops the current run before switching; the run will not restart automatically.",
+  "permission.change.pending": "Changing approval mode…",
+  "permission.change.recovering":
+    "The change did not complete. Restoring the original conversation…",
+  "permission.change.sync_required":
+    "The change is not yet confirmed. Refresh its status.",
+  "permission.change.refresh": "Refresh status",
+  "permission.change.completed": "Approval mode changed.",
+  "permission.change.not_confirmed":
+    "This change was not confirmed. Check the current mode before choosing again.",
+  "permission.change.failure.cancelled": "The change was cancelled.",
+  "permission.change.failure.busy":
+    "The conversation is still busy. Approval mode did not change.",
+  "permission.change.failure.budget_required":
+    "The current call budget cannot cover this change.",
+  "permission.change.failure.mode_update_failed":
+    "Approval mode could not be changed. Check the current mode.",
+  "permission.change.failure.checkpoint_failed":
+    "The conversation could not be saved. Approval mode did not change.",
+  "permission.change.failure.persistence_failed":
+    "Approval mode could not be saved. Check the current mode before retrying.",
+  "permission.change.failure.outcome_unknown":
+    "The saved result is unknown. Recover task records, then refresh status.",
+  "permission.change.failure.recovery_failed":
+    "The original conversation could not be restored. Resolve the recovery notice to continue.",
+  "permission.change.failure.dependency_contract":
+    "The conversation runtime cannot perform this change.",
+  "permission.change.rejection.task_not_found": "This task no longer exists.",
+  "permission.change.rejection.stale_binding":
+    "The conversation changed. Check its latest state before choosing.",
+  "permission.change.rejection.stale_revision":
+    "Approval mode changed. Check the latest mode before choosing.",
+  "permission.change.rejection.busy":
+    "Another operation is in progress. Choose again when it finishes.",
+  "permission.change.rejection.task_closed": "This task is closed or archived.",
+  "permission.change.rejection.unsupported_interaction":
+    "This task does not support interactive approval changes.",
+  "permission.change.rejection.unavailable":
+    "This conversation cannot change approval mode right now. Check its recovery notice.",
+  "permission.change.rejection.revision_exhausted":
+    "This conversation cannot change approval mode again.",
+  "permission.change.rejection.review_exhausted":
+    "This conversation cannot enable automatic review.",
+  "permission.change.rejection.shutting_down":
+    "MetaWork is closing. Restart before choosing.",
   "permission.menu_help":
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":

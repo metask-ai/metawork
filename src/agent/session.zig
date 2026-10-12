@@ -92,6 +92,11 @@ pub const Protocol = @import("agent_protocol").Protocol;
 pub const PermissionMode = session_control.PermissionMode;
 pub const ShellPolicy = session_control.ShellPolicy;
 
+pub const PermissionModeUpdate = struct {
+    changed: bool,
+    policy_generation: u64,
+};
+
 pub const PermissionInteraction = enum {
     interactive,
     noninteractive,
@@ -455,6 +460,8 @@ pub const Error = error{
     UnknownSession,
     SessionNotClosed,
     CoreCallFailed,
+    PermissionModeUpdateFailed,
+    PermissionModeBudgetRequired,
     QueueFull,
     SessionNotIdle,
     SessionPoisoned,
@@ -969,6 +976,102 @@ pub const Session = struct {
             .invalid_state => self.failModelUpdateContract(),
             else => error.CoreCallFailed,
         };
+    }
+
+    /// Product owns persistence; this changes only idle Core authority.
+    pub fn updatePermissionMode(self: *Session, expected: PermissionMode, target: PermissionMode) Error!PermissionModeUpdate {
+        self.lock();
+        defer self.unlock();
+        if (self.agent_runtime.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
+        switch (self.state) {
+            .idle => {},
+            .poisoned => return error.SessionPoisoned,
+            .closing, .closed => return error.SessionClosing,
+            else => return error.SessionNotIdle,
+        }
+        if (self.core_call_in_progress or self.active_callback_refs != 0 or self.abort_calls_in_progress != 0)
+            return error.SessionNotIdle;
+        const before = try self.permissionObservationLocked();
+        if (before.mode != expected) return self.failPermissionModeContract();
+        var diagnostic = emptyOwnedBytes();
+        const code = self.agent_runtime.api.sessionControl().updatePermissionMode()(self.raw, permissionModeCode(target), &diagnostic);
+        releaseOwned(self.agent_runtime.api, &diagnostic);
+        const status = sdk.Status.fromCode(code) catch return self.failPermissionModeContract();
+        switch (status) {
+            .ok => {},
+            .busy => return error.SessionNotIdle,
+            .invalid_argument, .out_of_memory, .resource_limit => return error.PermissionModeUpdateFailed,
+            .checkpoint_budget_required => return error.PermissionModeBudgetRequired,
+            .invalid_state, .core_error => return self.poisonPermissionModeUpdate(),
+            else => return self.failPermissionModeContract(),
+        }
+        // A failure after OK must close admission: Product restores its old
+        // confirmed checkpoint instead of reversing a grant-revoking change.
+        const after = self.permissionObservationLocked() catch return self.poisonPermissionModeUpdate();
+        const changed = expected != target;
+        const generation = if (changed)
+            std.math.add(u64, before.policy_generation, 1) catch return self.failPermissionModeContract()
+        else
+            before.policy_generation;
+        if (after.mode != target or after.policy_generation != generation)
+            return self.failPermissionModeContract();
+        return .{ .changed = changed, .policy_generation = after.policy_generation };
+    }
+
+    const PermissionObservation = struct { mode: PermissionMode, policy_generation: u64 };
+
+    fn permissionObservationLocked(self: *Session) Error!PermissionObservation {
+        var encoded = emptyOwnedBytes();
+        defer releaseOwned(self.agent_runtime.api, &encoded);
+        var diagnostic = emptyOwnedBytes();
+        defer releaseOwned(self.agent_runtime.api, &diagnostic);
+        const code = self.agent_runtime.api.sessionControl().describe()(self.raw, &encoded, &diagnostic);
+        const status = sdk.Status.fromCode(code) catch return self.failPermissionModeContract();
+        if (status != .ok) {
+            if (encoded.ptr != null or encoded.len != 0) return self.failPermissionModeContract();
+            return switch (status) {
+                .busy => error.SessionNotIdle,
+                .invalid_argument, .resource_limit => error.PermissionModeUpdateFailed,
+                .out_of_memory, .core_error, .invalid_state => self.poisonPermissionModeUpdate(),
+                else => self.failPermissionModeContract(),
+            };
+        }
+        const bytes = sdk.borrowedBytes(.{ .ptr = encoded.ptr, .len = encoded.len }) catch return self.failPermissionModeContract();
+        var parsed = sdk.decodeSessionDescription(self.agent_runtime.allocator, bytes) catch |err| {
+            if (err == error.OutOfMemory) return error.PermissionModeUpdateFailed;
+            return self.failPermissionModeContract();
+        };
+        defer parsed.deinit();
+        const value = parsed.value;
+        if (value.lifecycle != .idle or !value.registered or value.session_id.len == 0 or value.session_id.len > max_core_session_id_bytes)
+            return self.failPermissionModeContract();
+        switch (self.core_session_identity) {
+            .unbound => {
+                var identity = CoreSessionIdentity{ .bound = .{ .len = value.session_id.len, .bytes = [_]u8{0} ** max_core_session_id_bytes } };
+                @memcpy(identity.bound.bytes[0..value.session_id.len], value.session_id);
+                self.core_session_identity = identity;
+            },
+            .bound => |identity| if (!std.mem.eql(u8, identity.bytes[0..identity.len], value.session_id)) return self.failPermissionModeContract(),
+            .failed => return self.failPermissionModeContract(),
+        }
+        return .{ .mode = switch (value.permission_mode) {
+            .default => .default,
+            .accept_edits => .accept_edits,
+            .auto => .auto,
+            .dont_ask => .dont_ask,
+            .full_access => .full_access,
+        }, .policy_generation = value.policy_generation };
+    }
+
+    fn poisonPermissionModeUpdate(self: *Session) Error {
+        self.state = .poisoned;
+        self.broadcast();
+        return error.PermissionModeUpdateFailed;
+    }
+
+    fn failPermissionModeContract(self: *Session) Error {
+        self.dependency_contract_failure = true;
+        return self.poisonPermissionModeUpdate();
     }
 
     fn failModelUpdateContract(self: *Session) Error {

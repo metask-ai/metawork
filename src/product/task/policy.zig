@@ -420,6 +420,7 @@ pub fn currentRunPhase(task: *const task_state.Task) ?task_state.RunPhase {
 }
 
 pub fn hasActiveOperation(task: *const task_state.Task) bool {
+    if (task.approval_change != null) return true;
     return switch (task.runtime.active_operation) {
         .none => false,
         .run => |id| if (task_state.findRun(task.durable.runs, id)) |run|
@@ -573,6 +574,8 @@ pub fn checkpointMatchesCurrentHistory(
                     task_state.productTerminalFacts(run) != null
             else
                 false,
+        .approval => |revision| revision <= task.durable.approval_revision and
+            std.mem.eql(u8, record.session.model, task.durable.execution_model),
         .compact => |id| id == record.session.last_compact_id and
             if (task_state.findCompact(task.durable.compacts, id)) |compact|
                 compact.coverage == .covered and

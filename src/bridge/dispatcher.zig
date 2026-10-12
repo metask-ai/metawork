@@ -370,13 +370,13 @@ pub const Dispatcher = struct {
             .{ .name = commands.custom_model_remove, .function = customModelRemove },
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
-            .{ .name = commands.create_full_access_successor, .function = createFullAccessSuccessor },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.release_attachment, .function = releaseAttachment },
             .{ .name = commands.begin_attachment_receive, .function = beginAttachmentReceive },
             .{ .name = commands.append_attachment_receive, .function = appendAttachmentReceive },
             .{ .name = commands.finish_attachment_receive, .function = finishAttachmentReceive },
             .{ .name = commands.cancel_attachment_receive, .function = cancelAttachmentReceive },
+            .{ .name = commands.set_approval_mode, .function = setApprovalMode },
             .{ .name = commands.select_task_model, .function = selectTaskModel },
             .{ .name = commands.restore_task, .function = restoreTask },
             .{ .name = commands.compact, .function = compactTask },
@@ -2910,48 +2910,6 @@ pub const Dispatcher = struct {
         );
     }
 
-    fn createFullAccessSuccessor(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.TaskCreateFullAccessSuccessor,
-            invocation.request.payload,
-        );
-        defer parsed.deinit();
-        const source_task_id = try handlers.parseWireId(parsed.value.sourceTaskId);
-        const binding_epoch = try handlers.parseWireId(
-            parsed.value.expectedBindingEpoch,
-        );
-        const task_id = (try self.requireProductControl()).createFullAccessSuccessor(
-            source_task_id,
-            binding_epoch,
-        ) catch |err| {
-            if (taskSuccessorRejection(err)) |reason|
-                return encodeTaskSuccessorResult(
-                    output,
-                    false,
-                    source_task_id,
-                    null,
-                    reason,
-                );
-            return err;
-        };
-        self.notifyCommitted();
-        return encodeTaskSuccessorResult(
-            output,
-            true,
-            source_task_id,
-            task_id,
-            null,
-        );
-    }
-
     fn runTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
@@ -3065,6 +3023,30 @@ pub const Dispatcher = struct {
         else
             false;
         return std.fmt.bufPrint(output, "{{\"released\":{}}}", .{released});
+    }
+
+    fn setApprovalMode(
+        context: *anyopaque,
+        invocation: native_sdk.bridge.Invocation,
+        output: []u8,
+    ) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.TaskApprovalMode, invocation.request.payload);
+        defer parsed.deinit();
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const epoch = try handlers.parseWireId(parsed.value.expectedBindingEpoch);
+        const expected_revision = try handlers.parseWireId(parsed.value.expectedApprovalRevision);
+        if (task_id == 0 or epoch == 0 or expected_revision == 0) return error.InvalidBridgeId;
+        const revision = (try self.requireProductControl()).setApprovalMode(task_id, parsed.value.targetMode, epoch, expected_revision) catch |err| {
+            if (taskApprovalModeRejection(err)) |reason|
+                return encodeTaskApprovalModeResult(output, task_id, null, reason);
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeTaskApprovalModeResult(output, task_id, revision, null);
     }
 
     fn selectTaskModel(
@@ -4955,35 +4937,6 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
     };
 }
 
-fn taskSuccessorRejection(err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.BindingEpochMismatch => "source_changed",
-        error.TaskBusy => "source_busy",
-        error.UnknownTask,
-        error.TaskClosing,
-        error.UnsupportedPermissionProfile,
-        error.UnknownWorkspace,
-        error.WorkspaceUnavailable,
-        error.WorkspaceIdentityUntrusted,
-        error.WorkspaceRemovalInProgress,
-        error.WorkspaceEpochMismatch,
-        => "source_unavailable",
-        error.AutomaticWorkspaceUnsupported => "workspace_unsupported",
-        error.ExecutionUnavailable,
-        error.ExecutionGenerationMismatch,
-        => "execution_unavailable",
-        error.TaskCapacity,
-        error.ProjectionCapacity,
-        error.SessionCapacity,
-        => "task_capacity",
-        error.TaskPersistenceUnavailable,
-        error.TaskPersistenceFailed,
-        => "persistence_failed",
-        error.ExecutorShuttingDown => "source_unavailable",
-        else => null,
-    };
-}
-
 fn taskRunRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.BindingEpochMismatch => "binding_changed",
@@ -5001,6 +4954,22 @@ fn taskRunRejection(err: anyerror) ?[]const u8 {
         error.MissingInstruction => "missing_instruction",
         error.UnsupportedType => "unsupported_attachment",
         error.RunCapacity, error.QueueFull, error.ProjectionCapacity => "capacity_reached",
+        error.ExecutorShuttingDown => "shutting_down",
+        else => null,
+    };
+}
+
+fn taskApprovalModeRejection(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.UnknownTask => "task_not_found",
+        error.BindingEpochMismatch => "stale_binding",
+        error.ApprovalRevisionMismatch => "stale_revision",
+        error.TaskBusy => "busy",
+        error.TaskClosing => "task_closed",
+        error.UnsupportedPermissionProfile => "unsupported_interaction",
+        error.ApprovalUnavailable => "unavailable",
+        error.ApprovalRevisionExhausted => "revision_exhausted",
+        error.ReviewGenerationExhausted => "review_exhausted",
         error.ExecutorShuttingDown => "shutting_down",
         else => null,
     };
@@ -5202,36 +5171,6 @@ fn encodeTaskCreateResult(
     return writer.buffered();
 }
 
-fn encodeTaskSuccessorResult(
-    output: []u8,
-    accepted: bool,
-    source_task_id: u64,
-    task_id: ?u64,
-    reason: ?[]const u8,
-) ![]const u8 {
-    const valid = source_task_id != 0 and if (accepted)
-        task_id != null and task_id.? != 0 and reason == null
-    else
-        task_id == null and reason != null;
-    if (!valid) return error.InvalidTaskSuccessorResult;
-    var writer = std.Io.Writer.fixed(output);
-    writer.print(
-        "{{\"accepted\":{},\"sourceTaskId\":\"{d}\",\"taskId\":",
-        .{ accepted, source_task_id },
-    ) catch return error.NoSpaceLeft;
-    if (task_id) |value|
-        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
-    else
-        writer.writeAll("null") catch return error.NoSpaceLeft;
-    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
-    if (reason) |value|
-        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
-    else
-        writer.writeAll("null") catch return error.NoSpaceLeft;
-    writer.writeByte('}') catch return error.NoSpaceLeft;
-    return writer.buffered();
-}
-
 fn scheduledTaskDefinition(
     title: []const u8,
     binding: handlers.ScheduledTaskBinding,
@@ -5288,6 +5227,18 @@ fn encodeTaskRunResult(
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeByte('}') catch return error.NoSpaceLeft;
+    return writer.buffered();
+}
+
+fn encodeTaskApprovalModeResult(output: []u8, task_id: u64, revision: ?u64, reason: ?[]const u8) ![]const u8 {
+    if (task_id == 0 or (revision != null) == (reason != null) or (revision != null and revision.? == 0))
+        return error.InvalidTaskApprovalModeResult;
+    var writer = std.Io.Writer.fixed(output);
+    writer.print("{{\"accepted\":{},\"taskId\":\"{d}\",\"approvalRevision\":", .{ revision != null, task_id }) catch return error.NoSpaceLeft;
+    if (revision) |value| writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft else writer.writeAll("null") catch return error.NoSpaceLeft;
+    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
+    if (reason) |value| std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft else writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeByte('}') catch return error.NoSpaceLeft;
     return writer.buffered();
 }
@@ -5877,19 +5828,6 @@ test "mutation response encoders reject every inconsistent success and rejection
     try std.testing.expectEqualStrings(
         "{\"accepted\":true,\"taskId\":\"1\",\"bindingEpoch\":\"1\",\"mcpAuthority\":{\"kind\":\"unavailable\",\"selection\":null},\"reason\":null}",
         task_create,
-    );
-    try std.testing.expectError(
-        error.InvalidTaskSuccessorResult,
-        encodeTaskSuccessorResult(&output, true, 1, null, null),
-    );
-    try std.testing.expectError(
-        error.InvalidTaskSuccessorResult,
-        encodeTaskSuccessorResult(&output, false, 1, 2, "source_busy"),
-    );
-    const successor = try encodeTaskSuccessorResult(&output, true, 1, 2, null);
-    try std.testing.expectEqualStrings(
-        "{\"accepted\":true,\"sourceTaskId\":\"1\",\"taskId\":\"2\",\"reason\":null}",
-        successor,
     );
     try std.testing.expectError(
         error.InvalidTaskRunResult,
@@ -7033,26 +6971,16 @@ test "Dispatcher validates authority before domain calls and preserves committed
     try std.testing.expect(workbench.currentRevision() > 0);
     try std.testing.expect(harness.wake_calls >= 2);
 
-    const stale_successor = native_dispatcher.dispatch(
-        "{\"id\":\"stale-successor\",\"command\":\"metawork.tasks.createFullAccessSuccessor\",\"payload\":{\"sourceTaskId\":\"1\",\"expectedBindingEpoch\":\"99\"}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        stale_successor,
-        "\"reason\":\"source_changed\"",
-    ) != null);
-    const successor = native_dispatcher.dispatch(
-        "{\"id\":\"successor\",\"command\":\"metawork.tasks.createFullAccessSuccessor\",\"payload\":{\"sourceTaskId\":\"1\",\"expectedBindingEpoch\":\"1\"}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        successor,
-        "\"accepted\":false,\"sourceTaskId\":\"1\",\"taskId\":null,\"reason\":\"task_capacity\"",
-    ) != null);
+    const approval_requests = [_]struct { payload: []const u8, expected: []const u8 }{
+        .{ .payload = "{\"id\":\"mode-noop\",\"command\":\"metawork.tasks.setApprovalMode\",\"payload\":{\"taskId\":\"1\",\"targetMode\":\"manual\",\"expectedBindingEpoch\":\"1\",\"expectedApprovalRevision\":\"1\"}}", .expected = "\"accepted\":true,\"taskId\":\"1\",\"approvalRevision\":\"1\",\"reason\":null" },
+        .{ .payload = "{\"id\":\"mode-stale-binding\",\"command\":\"metawork.tasks.setApprovalMode\",\"payload\":{\"taskId\":\"1\",\"targetMode\":\"auto_review\",\"expectedBindingEpoch\":\"99\",\"expectedApprovalRevision\":\"1\"}}", .expected = "\"approvalRevision\":null,\"reason\":\"stale_binding\"" },
+        .{ .payload = "{\"id\":\"mode-stale-revision\",\"command\":\"metawork.tasks.setApprovalMode\",\"payload\":{\"taskId\":\"1\",\"targetMode\":\"auto_review\",\"expectedBindingEpoch\":\"1\",\"expectedApprovalRevision\":\"99\"}}", .expected = "\"reason\":\"stale_revision\"" },
+        .{ .payload = "{\"id\":\"mode-missing\",\"command\":\"metawork.tasks.setApprovalMode\",\"payload\":{\"taskId\":\"99\",\"targetMode\":\"full_access\",\"expectedBindingEpoch\":\"1\",\"expectedApprovalRevision\":\"1\"}}", .expected = "\"reason\":\"task_not_found\"" },
+    };
+    for (approval_requests) |approval_request| {
+        const result = native_dispatcher.dispatch(approval_request.payload, source, &response);
+        try std.testing.expect(std.mem.indexOf(u8, result, approval_request.expected) != null);
+    }
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);
