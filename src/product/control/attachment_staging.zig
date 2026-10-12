@@ -34,7 +34,7 @@ pub const Executor = struct {
         return self.enqueue_fn(self.context, job);
     }
 };
-pub const Error = std.mem.Allocator.Error || error{ ShuttingDown, Capacity, InvalidInput };
+pub const Error = std.mem.Allocator.Error || error{ ShuttingDown, Capacity, InvalidInput, TooManyFiles };
 const Job = struct {
     lane: *Lane,
     completion_id: u64,
@@ -161,7 +161,8 @@ pub const Lane = struct {
         };
     }
     pub fn begin(self: *Lane, input: Input) Error!void {
-        if (input.path_count == 0 or input.path_count > input.limits.max_files or input.paths.len == 0) return error.InvalidInput;
+        if (input.path_count > input.limits.max_files) return error.TooManyFiles;
+        if (input.path_count == 0 or input.paths.len == 0) return error.InvalidInput;
         const job = try self.allocate(input.completion_id, input.file_store);
         errdefer self.release(.{ .job = job, .completion = undefined });
         job.paths = try self.allocator.dupe(u8, input.paths);
@@ -284,6 +285,11 @@ test "path probe reserves before copy and cancellation joins the writer" {
         lane.deinit();
     }
     const limits: attachment.Limits = .{ .max_files = 2, .max_display_name_bytes = 64, .max_file_bytes = 64, .max_staged_bytes = 128 };
+    try std.testing.expectError(error.TooManyFiles, lane.begin(.{ .completion_id = 1, .path_count = limits.max_files + 1, .paths = path, .limits = limits, .file_store = &store }));
+    try std.testing.expectError(error.InvalidInput, lane.begin(.{ .completion_id = 1, .path_count = 0, .paths = path, .limits = limits, .file_store = &store }));
+    try std.testing.expectError(error.InvalidInput, lane.begin(.{ .completion_id = 1, .path_count = 1, .paths = &.{}, .limits = limits, .file_store = &store }));
+    try std.testing.expectEqual(@as(usize, 0), lane.active_count);
+    try std.testing.expect(queue.pending == null);
     var runtime = try attachment.Runtime.init(std.testing.allocator, limits, &store, .{});
     defer runtime.deinit();
     const id = try runtime.beginPreparing();

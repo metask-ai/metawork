@@ -1314,7 +1314,11 @@ pub const Dispatcher = struct {
             return;
         }
         var path_storage: [native_sdk.platform.max_drop_paths_bytes]u8 = undefined;
-        const paths = if (source.kind == .native_paths) try addPaths(source.paths.?, &path_storage) else &.{};
+        const paths = if (source.kind == .native_paths) addPaths(source.paths.?, &path_storage) catch |err| {
+            if (err != error.TooManyFiles) return err;
+            respondAddError(responder, invocation.request.id, err);
+            return;
+        } else &.{};
         const product_id = workbench.prepareAttachmentAdd() catch |err| {
             respondAddError(responder, invocation.request.id, err);
             return;
@@ -7169,6 +7173,9 @@ test "unified add async jobs join cancellation and freeze their protocol produce
             @memset(out, 7);
             return true;
         }
+        fn picker(_: ?*anyopaque, _: native_sdk.platform.OpenDialogOptions, _: []u8) anyerror!native_sdk.platform.OpenDialogResult {
+            return .{ .count = attachment_grant.max_grants + 1, .paths = "/ignored" };
+        }
     };
     fixture.fake_core.reset();
     const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
@@ -7185,8 +7192,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
         .random_fn = Host.random,
         .now_fn = Host.now,
         .on_main_thread_fn = Host.main,
-        // This test dispatches only the byte-input commands, never OS effects.
-        .show_open_dialog_fn = undefined,
+        .show_open_dialog_fn = Host.picker,
         .canonicalize_directory_fn = undefined,
         .window_chrome_connect_fn = undefined,
         .window_chrome_refresh_fn = undefined,
@@ -7286,4 +7292,27 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"1\",\"batchId\":\"4\"}");
     try capture.expect("\"status\":\"cleaned\"");
     try std.testing.expect(dispatcher.receive_active == null);
+    // All three source adapters reject an oversized batch before any I/O.
+    const too_many_paths = [_][]const u8{"/ignored"} ** (attachment_grant.max_grants + 1);
+    const TooManyFile = struct { name: []const u8 = "a.txt", sizeBytes: []const u8 = "3" };
+    const too_many_files = [_]TooManyFile{.{}} ** (attachment_grant.max_grants + 1);
+    const inputs = [_][]const u8{
+        try std.json.Stringify.valueAlloc(fixture_arena.allocator(), .{ .generation = "1", .batchId = "5", .source = .{ .kind = "picker" } }, .{}),
+        try std.json.Stringify.valueAlloc(fixture_arena.allocator(), .{ .generation = "1", .batchId = "6", .source = .{ .kind = "native_paths", .paths = too_many_paths } }, .{}),
+        try std.json.Stringify.valueAlloc(fixture_arena.allocator(), .{ .generation = "1", .batchId = "7", .source = .{ .kind = "file_bytes", .files = too_many_files } }, .{}),
+    };
+    for (inputs, 0..) |input, index| {
+        dispatcher.platform.attachment_input = if (index == 1) .native_paths else .file_bytes;
+        try capture.invoke(native, source, commands.begin_attachment_add, input);
+        try capture.expect("\"reason\":\"too_many_files\"");
+        try std.testing.expect(workbench.attachments.preparing == null);
+        try std.testing.expect(workbench.attachment_io == null);
+        try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+        var key_buffer: [80]u8 = undefined;
+        const cancel_key = try std.fmt.bufPrint(&key_buffer, "{{\"generation\":\"1\",\"batchId\":\"{d}\"}}", .{index + 5});
+        try capture.invoke(native, source, commands.cancel_attachment_add, cancel_key);
+        try capture.expect("\"status\":\"cleaned\"");
+        try capture.expect("\"released\":false");
+        try std.testing.expect(dispatcher.receive_active == null);
+    }
 }
