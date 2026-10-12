@@ -714,13 +714,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
           mcpAuthority: { kind: "ready", selection: "none" },
           reason: null,
         };
-      if (command === "metawork.tasks.createFullAccessSuccessor")
-        return {
-          accepted: true,
-          sourceTaskId: "11",
-          taskId: "12",
-          reason: null,
-        };
       if (command === "metawork.tasks.run")
         return {
           accepted: true,
@@ -811,12 +804,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
       reason: null,
     },
   );
-  assert.deepEqual(await client.createFullAccessSuccessor("11", "13"), {
-    accepted: true,
-    sourceTaskId: "11",
-    taskId: "12",
-    reason: null,
-  });
   assert.deepEqual(await client.compact("11", "13"), {
     accepted: true,
     taskId: "11",
@@ -901,10 +888,6 @@ test("the fixed revision 1 contract keeps Models selection separate from Product
           argumentValues: ["src/main.zig"],
         },
       },
-    },
-    {
-      command: "metawork.tasks.createFullAccessSuccessor",
-      payload: { sourceTaskId: "11", expectedBindingEpoch: "13" },
     },
     {
       command: "metawork.tasks.compact",

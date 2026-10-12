@@ -7176,33 +7176,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-weight: 650;
 }
 
-.approval-successor-action,
-.approval-successor-notice {
-  display: grid;
-  justify-items: start;
-  gap: 8px;
-}
-
-.approval-successor-action {
-  margin-top: 4px;
-}
-
-.approval-successor-notice {
-  margin: 16px 0;
-  padding: 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 8px;
-  background: var(--ui-surface-muted);
-  color: var(--ui-content-muted);
-  font-size: var(--text-label);
-  line-height: 1.55;
-}
-
-.approval-successor-notice strong {
-  color: var(--ui-content-primary);
-  font-weight: 650;
-}
-
 .approval-action-cluster {
   display: inline-flex;
   min-height: 44px;
@@ -7270,13 +7243,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   .ai-intervention-actions > button,
   .approval-action-cluster,
   .approval-action-cluster .approval-split-main {
-    width: 100%;
-  }
-
-  .approval-successor-action,
-  .approval-successor-action > button,
-  .approval-successor-notice,
-  .approval-successor-notice > button {
     width: 100%;
   }
 }

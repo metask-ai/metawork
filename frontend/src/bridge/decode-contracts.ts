@@ -73,7 +73,6 @@ import {
   type SkillCatalogRefreshResult,
   type TaskView,
   type TaskCreateResult,
-  type TaskFullAccessSuccessorResult,
   type TaskCompactResult,
   type TaskRestoreResult,
   type TaskRunResult,
@@ -354,15 +353,6 @@ const taskCreateReasons = [
   "stale_catalog",
   "capacity_reached",
   "shutting_down",
-] as const;
-const taskFullAccessSuccessorReasons = [
-  "source_changed",
-  "source_busy",
-  "source_unavailable",
-  "workspace_unsupported",
-  "execution_unavailable",
-  "task_capacity",
-  "persistence_failed",
 ] as const;
 const taskRunReasons = [
   "binding_changed",
@@ -5523,38 +5513,6 @@ export function decodeTaskCreateResult(value: unknown): TaskCreateResult {
     bindingEpoch: null,
     mcpAuthority: null,
     reason: enumValue(item.reason, "$.reason", taskCreateReasons),
-  };
-}
-
-export function decodeTaskFullAccessSuccessorResult(
-  value: unknown,
-  expectedSourceTaskId: string,
-): TaskFullAccessSuccessorResult {
-  const item = object(value, "$", [
-    "accepted",
-    "sourceTaskId",
-    "taskId",
-    "reason",
-  ]);
-  const accepted = booleanValue(item.accepted, "$.accepted");
-  const sourceTaskId = positiveWireId(item.sourceTaskId, "$.sourceTaskId");
-  if (sourceTaskId !== expectedSourceTaskId)
-    fail("$.sourceTaskId", "response identity mismatch");
-  if (accepted) {
-    if (item.reason !== null) fail("$.reason", "expected null");
-    return {
-      accepted: true,
-      sourceTaskId,
-      taskId: positiveWireId(item.taskId, "$.taskId"),
-      reason: null,
-    };
-  }
-  if (item.taskId !== null) fail("$.taskId", "expected null");
-  return {
-    accepted: false,
-    sourceTaskId,
-    taskId: null,
-    reason: enumValue(item.reason, "$.reason", taskFullAccessSuccessorReasons),
   };
 }
 

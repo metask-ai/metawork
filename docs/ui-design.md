@@ -847,8 +847,6 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
 
 审批卡只在当前权限请求需要人工决定时显示，不仅按 Task 的审批模式判断。自动评审期间不显示审批卡、参数或批准与拒绝按钮，仅在执行状态中以 `aria-live` 说明“自动评审中”；用户仍可停止任务。评审中计入处理中，不计入人工关注数、不按人工待处理置顶，也不显示“需要你处理”的定位提醒；评审无法决定、失败或超时转人工后，立即显示审批卡并恢复人工关注与提醒，人工按钮与键盘决定保持可用。不改变底层 Run 等待审批的事实。不显示伪倒计时、自动重试或“已验证安全”。有效人工决定与自动结果仍由谁先被 Host 接纳谁生效，后来的回答按过期处理。审核器已允许或拒绝的请求不显示审批卡；其记录在所属 Run 中默认折叠，摘要只展示来源、可用的工具名称和本次结果，展开后展示 Host 脱敏理由，不重放参数。
 
-在完全访问新任务中继续的流程按源 Task 隔离恢复状态，不冻结其他 Task。停止未确认必须与创建结果未知区分：停止可显式重试，且仍等待同一 Run 的真实 terminal；明确创建拒绝可显式重试，创建结果未知只能核对任务列表或关闭提示，不自动重发。已取得新 Task identity 后，视图同步失败只提供同步恢复，不得改判为创建未知或再次创建。关闭提示不撤销已发送的 Host 操作，旧连接或已退出流程的异步回复不得恢复提示或改变 Task 选择。
-
 ### 10.2 审批模式
 
 New task 的模式菜单只展示三个真实选项：
@@ -1350,7 +1348,6 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 权限卡片只显示当前 request 支持的 once/Session choice，不显示跨 Session 持久授权；
 - 权限卡每次只有一个智能紫主操作：默认为“允许一次”；仅当 request 提供 `allow_session` 时，在该主操作的分裂展开菜单中显示“本会话允许相同参数”。拒绝是视觉中性但语义清晰的独立操作，`deny_session` 如存在放在其自身展开选项中；不得并列多个紫色主按钮；
 - 同一 Task 内出现与已解决 occurrence 相同的 tool binding 和 canonical arguments digest 时，卡片显示简短的“为什么又请求”说明，优先区分上次只允许一次、policy generation/candidate 已变化、Session grant 未恢复或无 Session choice。不显示 digest/rule ID 原值，不声称已证明真实 effect；
-- 重复请求时，Manual Workspace 的 `approval_required` Task 可显示次级动作“在完全访问新任务中继续”。点击后先请求停止当前 Run，按钮进入有文字的处理状态；只在 snapshot 证明 Run terminal 后创建并选中新的 idle `full_access` Task，由用户编辑草稿并明确发送，不自动重放原指令。Automatic Workspace 或 execution 不可用时不显示可点的伪入口；若已向用户提出该路径，必须就地说明不可用原因；
 - stale、duplicate、expired 和错误 Task/Run/request 响应必须被拒绝；
 - Renderer reload 后当前请求状态从 Host 恢复，已响应或取消的请求不得重新可操作。
 

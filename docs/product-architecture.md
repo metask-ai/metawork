@@ -151,8 +151,6 @@ Product Control 拥有审批事务与有界 worker；Agent 是官方 Session mod
 
 权限诊断是 Product Task history 的有界审计投影，不是第二个 policy engine。Pending request 与 resolved occurrence 可以投影 AgentCore 已提供的 canonical arguments digest、policy generation 和 candidate/rule identity，并与既有 tool identity、decision source、Session rule 命中和 restore 结果共同用于解释重复请求。Product 不记录原始参数、credential 或可重放 response，不从 digest/tool text 推断 effect，也不自行匹配或生成 grant。
 
-`full_access` successor 由 Product Control 作为独立 Task create transaction 拥有。它只接受已收口、interactive `approval_required`、Manual Workspace 且 live execution attachment 仍精确的源 Task；以 source Task identity/binding epoch 做 CAS，在同一 Manual Workspace authority 中克隆 exact owned ExecutionConfig，按当前 Workspace catalog 与 MCP new-task authority 创建独立 `full_access` Task/Session，并按普通交互式 Task 更新默认 profile。它不克隆 Conversation、Run、checkpoint、pending UI 或 Session grant，不使用当前 global execution 代替源 binding，也不开放 Automatic Workspace ownership 转移。Renderer 负责先请求停止当前 Run、从 snapshot 观测 terminal，再发起 successor command；Product 不把 cancel acknowledgement 当作 terminal 事实。
-
 Automatic Workspace record 只有在 owning Task 已物理删除且相关 Run event、worker、Session 和 catalog lease 全部 quiescent 后才能释放。真实目录不因 Task 删除、shutdown 或重启被递归删除，也不能通过扫描遗留目录猜测或恢复 Product record。
 
 automatic-root 配置不进入 `workbench-history.store`、checkpoint 或 file-change blob，也不改变其 schema。A→B 切换后，既有 Task/Workspace 继续使用已记录的 A child，只有后续新 Task 从 B 分配；A 不可用时历史仍可读，但需要该路径的 restore/run 明确不可用。Scheduled occurrence 每次触发都通过同一当前 allocator admission，不在 definition 中固化 automatic root。

@@ -93,7 +93,6 @@
             .{ .name = "metawork.models.customModels.replace", .origins = .{"zero://app"} },
             .{ .name = "metawork.models.customModels.remove", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.create", .origins = .{"zero://app"} },
-            .{ .name = "metawork.tasks.createFullAccessSuccessor", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.run", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.setApprovalMode", .origins = .{"zero://app"} },
             .{ .name = "metawork.tasks.selectModel", .origins = .{"zero://app"} },

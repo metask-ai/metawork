@@ -370,7 +370,6 @@ pub const Dispatcher = struct {
             .{ .name = commands.custom_model_remove, .function = customModelRemove },
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
-            .{ .name = commands.create_full_access_successor, .function = createFullAccessSuccessor },
             .{ .name = commands.run, .function = runTask },
             .{ .name = commands.release_attachment, .function = releaseAttachment },
             .{ .name = commands.begin_attachment_receive, .function = beginAttachmentReceive },
@@ -2911,48 +2910,6 @@ pub const Dispatcher = struct {
         );
     }
 
-    fn createFullAccessSuccessor(
-        context: *anyopaque,
-        invocation: native_sdk.bridge.Invocation,
-        output: []u8,
-    ) anyerror![]const u8 {
-        const self: *Dispatcher = @ptrCast(@alignCast(context));
-        var callback = try self.callbacks.enter();
-        defer callback.deinit();
-        try self.requireWindow(invocation.source.window_id);
-        var parsed = try handlers.parsePayload(
-            handlers.TaskCreateFullAccessSuccessor,
-            invocation.request.payload,
-        );
-        defer parsed.deinit();
-        const source_task_id = try handlers.parseWireId(parsed.value.sourceTaskId);
-        const binding_epoch = try handlers.parseWireId(
-            parsed.value.expectedBindingEpoch,
-        );
-        const task_id = (try self.requireProductControl()).createFullAccessSuccessor(
-            source_task_id,
-            binding_epoch,
-        ) catch |err| {
-            if (taskSuccessorRejection(err)) |reason|
-                return encodeTaskSuccessorResult(
-                    output,
-                    false,
-                    source_task_id,
-                    null,
-                    reason,
-                );
-            return err;
-        };
-        self.notifyCommitted();
-        return encodeTaskSuccessorResult(
-            output,
-            true,
-            source_task_id,
-            task_id,
-            null,
-        );
-    }
-
     fn runTask(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
         const self: *Dispatcher = @ptrCast(@alignCast(context));
         var callback = try self.callbacks.enter();
@@ -4980,35 +4937,6 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
     };
 }
 
-fn taskSuccessorRejection(err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.BindingEpochMismatch => "source_changed",
-        error.TaskBusy => "source_busy",
-        error.UnknownTask,
-        error.TaskClosing,
-        error.UnsupportedPermissionProfile,
-        error.UnknownWorkspace,
-        error.WorkspaceUnavailable,
-        error.WorkspaceIdentityUntrusted,
-        error.WorkspaceRemovalInProgress,
-        error.WorkspaceEpochMismatch,
-        => "source_unavailable",
-        error.AutomaticWorkspaceUnsupported => "workspace_unsupported",
-        error.ExecutionUnavailable,
-        error.ExecutionGenerationMismatch,
-        => "execution_unavailable",
-        error.TaskCapacity,
-        error.ProjectionCapacity,
-        error.SessionCapacity,
-        => "task_capacity",
-        error.TaskPersistenceUnavailable,
-        error.TaskPersistenceFailed,
-        => "persistence_failed",
-        error.ExecutorShuttingDown => "source_unavailable",
-        else => null,
-    };
-}
-
 fn taskRunRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.BindingEpochMismatch => "binding_changed",
@@ -5234,36 +5162,6 @@ fn encodeTaskCreateResult(
             "{\"kind\":\"unavailable\",\"selection\":null}",
         ) catch return error.NoSpaceLeft,
     } else writer.writeAll("null") catch return error.NoSpaceLeft;
-    writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
-    if (reason) |value|
-        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
-    else
-        writer.writeAll("null") catch return error.NoSpaceLeft;
-    writer.writeByte('}') catch return error.NoSpaceLeft;
-    return writer.buffered();
-}
-
-fn encodeTaskSuccessorResult(
-    output: []u8,
-    accepted: bool,
-    source_task_id: u64,
-    task_id: ?u64,
-    reason: ?[]const u8,
-) ![]const u8 {
-    const valid = source_task_id != 0 and if (accepted)
-        task_id != null and task_id.? != 0 and reason == null
-    else
-        task_id == null and reason != null;
-    if (!valid) return error.InvalidTaskSuccessorResult;
-    var writer = std.Io.Writer.fixed(output);
-    writer.print(
-        "{{\"accepted\":{},\"sourceTaskId\":\"{d}\",\"taskId\":",
-        .{ accepted, source_task_id },
-    ) catch return error.NoSpaceLeft;
-    if (task_id) |value|
-        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
-    else
-        writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
     if (reason) |value|
         std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
@@ -5930,19 +5828,6 @@ test "mutation response encoders reject every inconsistent success and rejection
     try std.testing.expectEqualStrings(
         "{\"accepted\":true,\"taskId\":\"1\",\"bindingEpoch\":\"1\",\"mcpAuthority\":{\"kind\":\"unavailable\",\"selection\":null},\"reason\":null}",
         task_create,
-    );
-    try std.testing.expectError(
-        error.InvalidTaskSuccessorResult,
-        encodeTaskSuccessorResult(&output, true, 1, null, null),
-    );
-    try std.testing.expectError(
-        error.InvalidTaskSuccessorResult,
-        encodeTaskSuccessorResult(&output, false, 1, 2, "source_busy"),
-    );
-    const successor = try encodeTaskSuccessorResult(&output, true, 1, 2, null);
-    try std.testing.expectEqualStrings(
-        "{\"accepted\":true,\"sourceTaskId\":\"1\",\"taskId\":\"2\",\"reason\":null}",
-        successor,
     );
     try std.testing.expectError(
         error.InvalidTaskRunResult,
@@ -7096,27 +6981,6 @@ test "Dispatcher validates authority before domain calls and preserves committed
         const result = native_dispatcher.dispatch(approval_request.payload, source, &response);
         try std.testing.expect(std.mem.indexOf(u8, result, approval_request.expected) != null);
     }
-
-    const stale_successor = native_dispatcher.dispatch(
-        "{\"id\":\"stale-successor\",\"command\":\"metawork.tasks.createFullAccessSuccessor\",\"payload\":{\"sourceTaskId\":\"1\",\"expectedBindingEpoch\":\"99\"}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        stale_successor,
-        "\"reason\":\"source_changed\"",
-    ) != null);
-    const successor = native_dispatcher.dispatch(
-        "{\"id\":\"successor\",\"command\":\"metawork.tasks.createFullAccessSuccessor\",\"payload\":{\"sourceTaskId\":\"1\",\"expectedBindingEpoch\":\"1\"}}",
-        source,
-        &response,
-    );
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        successor,
-        "\"accepted\":false,\"sourceTaskId\":\"1\",\"taskId\":null,\"reason\":\"task_capacity\"",
-    ) != null);
 
     var snapshot_storage: [128 * 1024]u8 = undefined;
     const snapshot = try workbench.writeSnapshot(&snapshot_storage);

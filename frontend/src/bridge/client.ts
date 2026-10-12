@@ -40,7 +40,6 @@ import {
   decodeRendererBridgeConnect,
   decodeRevisionNotification,
   decodeTaskCreateResult,
-  decodeTaskFullAccessSuccessorResult,
   decodeTaskCompactResult,
   decodeTaskRestoreResult,
   decodeTaskRunResult,
@@ -809,19 +808,6 @@ export class BridgeClient {
         expectedSkillSelectionRevision,
         approvalMode,
       }),
-    );
-  }
-
-  async createFullAccessSuccessor(
-    sourceTaskId: string,
-    expectedBindingEpoch: string,
-  ) {
-    return decodeTaskFullAccessSuccessorResult(
-      await this.invoke(commands.createFullAccessSuccessor, {
-        sourceTaskId,
-        expectedBindingEpoch,
-      }),
-      sourceTaskId,
     );
   }
 

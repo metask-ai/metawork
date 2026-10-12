@@ -208,8 +208,6 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 - 当前 permission 卡只能提交 AgentCore 当次 request 真实发布的 choice。主操作固定为“允许一次”；当 request 提供 Session scope candidate 时，按 candidate scope 将“本会话允许相同参数”或“本会话允许该工具修改此文件”放在同一批准操作的展开选项中；文件作用域只覆盖当前工具对同一文件的后续修改，可包含不同内容，不跨 Write/Edit 工具、不跨文件，目标必须来自 Host typed projection，拒绝保持独立操作。不得为了减少点击而伪造 request 未提供的 Session 或跨 Session 范围；
 - Product 必须保留足以解释重复请求的有界诊断事实：Task/Run/request identity、tool identity/binding、canonical arguments digest、policy generation、candidate/rule identity、decision source、Session rule 命中与 restore 结果。它们只能来自 AgentCore typed request/provenance，不得记录原始参数、credential 或可重放 response，也不得用 tool 文本推断 effect；
 - Renderer 可以用同一 Task 内的该诊断事实说明“为什么又请求”，但不维护本地 grant cache，不自行决定允许或实现自动评审。相同 digest 不等于可绕过 AgentCore；
-- `approval_required` 的 Manual Workspace Task 可在当前 Run 已真实 terminal 后创建一个“以完全访问继续”的新 Task。新 Task 复用同一 Workspace identity 和源 Task 的 exact owned ExecutionConfig，profile 固定为 `full_access`，但必须创建独立 Session，不继承 Conversation、Run history、pending request 或 Session grant。这是停止后的新 Task，不是原 Task 热切换；
-- Automatic Workspace 为单 Task 独占 authority，不得为此流程共享、转移、复制或偷换为新 Workspace。源 Task 不是 Manual Workspace、execution attachment 不可用、Run 未收口或 identity 已变化时，产品必须禁用该入口并说明原因，不回退到普通 New task 或当前默认模型；
 - 审批和回答必须绑定 Task、Run 和请求标识，拒绝过期或重复响应；
 - 同步等待必须支持 deadline、用户取消、Task close 和 Application shutdown 唤醒；
 - 同步等待区间发生 Host/Core crash 后，Run 标记 `interrupted`，工具不得自动执行；
