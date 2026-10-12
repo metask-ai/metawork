@@ -177,7 +177,10 @@ pub const Job = struct {
                     work.model,
                 ) catch return fail(.checkpoint_failed, mutated or work.access.sessionState() == .poisoned);
                 defer outcome.deinit();
-                if (outcome == .failure) return fail(.checkpoint_failed, mutated or outcome.failure.disposition == .poisoned);
+                if (outcome == .failure) return fail(
+                    if (outcome.failure.reason == .busy) .busy else .checkpoint_failed,
+                    mutated or outcome.failure.disposition == .poisoned,
+                );
                 const success = &outcome.success;
                 if (generation) |expected| if (success.description.policy_generation != expected)
                     return fail(.dependency_contract, true);
