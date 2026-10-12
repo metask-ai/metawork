@@ -872,7 +872,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects missing revision 18 child tables and entries" {
+test "Runtime rejects missing revision 19 child tables and entries" {
     var api = fake_api;
     api.skill = null;
     try std.testing.expectError(
@@ -924,7 +924,15 @@ test "Runtime rejects missing revision 18 child tables and entries" {
         .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
     ));
     session_control_api = fake_api.session_control.?.*;
-    session_control_api.struct_size = 64;
+    session_control_api.update_permission_mode = null;
+    try std.testing.expectError(error.UnsupportedAbi, lifecycle.Runtime.initWithApi(
+        std.testing.io,
+        std.testing.allocator,
+        &api,
+        .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
+    ));
+    session_control_api = fake_api.session_control.?.*;
+    session_control_api.struct_size = 72;
     try std.testing.expectError(error.UnsupportedAbi, lifecycle.Runtime.initWithApi(
         std.testing.io,
         std.testing.allocator,

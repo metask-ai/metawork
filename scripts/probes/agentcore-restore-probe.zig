@@ -200,11 +200,24 @@ fn releaseOwned(api: agentcore.Api, bytes: *wire.OwnedBytesV1) void {
     if (bytes.ptr != null or bytes.len != 0) api.bufferRelease()(bytes);
 }
 
-pub fn main() !void {
+fn runText(api: agentcore.Api, session: *wire.SessionHandle, id: u64, text: []const u8) !void {
+    var options = std.mem.zeroes(wire.RunOptionsV1);
+    options.struct_size = @sizeOf(wire.RunOptionsV1);
+    options.max_turns = 1;
+    var result = std.mem.zeroes(wire.RunResultV1);
+    var diagnostic = emptyOwnedBytes();
+    defer releaseOwned(api, &diagnostic);
+    try expectStatus(api, "conversation_run", api.session().runText(session, id, agentcore.bytesView(text), &options, &result, &diagnostic));
+    if (try agentcore.StopReason.fromCode(result.stop_reason_code) != .end_turn)
+        return error.ConversationRunFailed;
+}
+
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.c_allocator;
     const api = try agentcore.Api.discover();
     const callbacks = makeCallbacks();
-    const host = makeHostConfig();
+    var host = makeHostConfig();
+    host.base_url = agentcore.bytesView(init.environ_map.get("METAWORK_RESTORE_PROBE_URL") orelse return error.MissingFixtureUrl);
     const limits = makeLimits();
 
     const first_runtime = try makeRuntime(api);
@@ -255,6 +268,8 @@ pub fn main() !void {
     var first_session_live = true;
     defer if (first_session_live) destroySession(api, session) catch {};
 
+    try runText(api, session, 1, "checkpoint original conversation");
+
     var sink_context = Sink{};
     var sink = std.mem.zeroes(wire.CheckpointSinkV1);
     sink.struct_size = @sizeOf(wire.CheckpointSinkV1);
@@ -276,10 +291,50 @@ pub fn main() !void {
         export_result.chunk_count != sink_context.calls)
         return error.InvalidCheckpointExport;
 
-    const expected = try describe(allocator, api, session);
+    var expected = try describe(allocator, api, session);
     defer expected.deinit(allocator);
     if (expected.checkpoint_generation != export_result.checkpoint_generation)
         return error.InvalidCheckpointGeneration;
+
+    // Cross-revision evidence uses unchanged checkpoint bytes plus the
+    // producer's observations; each executable still discovers its own SDK.
+    if (init.environ_map.get("METAWORK_CHECKPOINT_EXPORT")) |file_path| {
+        try std.Io.Dir.cwd().writeFile(init.io, .{
+            .sub_path = file_path,
+            .data = sink_context.bytes[0..sink_context.len],
+        });
+        const metadata_path = try std.fmt.allocPrint(allocator, "{s}.json", .{file_path});
+        defer allocator.free(metadata_path);
+        const metadata = try std.json.Stringify.valueAlloc(allocator, expected, .{});
+        defer allocator.free(metadata);
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = metadata_path, .data = metadata });
+    }
+    if (init.environ_map.get("METAWORK_CHECKPOINT_RESTORE")) |file_path| {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, file_path, allocator, .limited(checkpoint_capacity));
+        defer allocator.free(bytes);
+        const metadata_path = try std.fmt.allocPrint(allocator, "{s}.json", .{file_path});
+        defer allocator.free(metadata_path);
+        const metadata = try std.Io.Dir.cwd().readFileAlloc(init.io, metadata_path, allocator, .limited(64 * 1024));
+        defer allocator.free(metadata);
+        var parsed = try std.json.parseFromSlice(Description, allocator, metadata, .{});
+        defer parsed.deinit();
+        const imported = imported: {
+            const imported_session_id = try allocator.dupe(u8, parsed.value.session_id);
+            errdefer allocator.free(imported_session_id);
+            break :imported Description{
+                .session_id = imported_session_id,
+                .model = try allocator.dupe(u8, parsed.value.model),
+                .last_run_id = parsed.value.last_run_id,
+                .last_compact_id = parsed.value.last_compact_id,
+                .checkpoint_generation = parsed.value.checkpoint_generation,
+            };
+        };
+        expected.deinit(allocator);
+        expected = imported;
+        @memcpy(sink_context.bytes[0..bytes.len], bytes);
+        sink_context.len = bytes.len;
+        export_result.checkpoint_generation = expected.checkpoint_generation;
+    }
 
     try destroySession(api, session);
     first_session_live = false;
@@ -336,6 +391,8 @@ pub fn main() !void {
         actual.last_compact_id != expected.last_compact_id or
         actual.checkpoint_generation != expected.checkpoint_generation)
         return error.InvalidRestoredDescription;
+
+    try runText(api, restored, expected.last_run_id + 1, "checkpoint restored continuation");
 
     try destroySession(api, restored);
     restored_session_live = false;

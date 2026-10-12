@@ -528,6 +528,73 @@ fn runSessionGrant(
         return error.SessionDenyNotReused;
 }
 
+fn describeSession(api: agentcore.Api, session: *wire.SessionHandle) !agentcore.ParsedSessionDescription {
+    var encoded = emptyOwned();
+    defer releaseOwned(api, &encoded);
+    var diagnostic = emptyOwned();
+    defer releaseOwned(api, &diagnostic);
+    try expectOk(api, "describe_mode", api.sessionControl().describe()(session, &encoded, &diagnostic), &diagnostic);
+    return agentcore.decodeSessionDescription(std.heap.c_allocator, try agentcore.borrowedBytes(.{ .ptr = encoded.ptr, .len = encoded.len }));
+}
+
+fn runModeMutation(api: agentcore.Api, runtime: *wire.RuntimeHandle, allowed_tools: *const [4]wire.BytesViewV1, grant: UiBehavior) !void {
+    const host = makeHost(wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, null, allowed_tools);
+    var probe = Probe{ .behavior = grant };
+    const callbacks = makeCallbacks(&probe);
+    var diagnostic = emptyOwned();
+    defer releaseOwned(api, &diagnostic);
+    const session = try createSession(api, runtime, &host, &callbacks, &diagnostic);
+    var session_live = true;
+    defer if (session_live) {
+        _ = api.session().destroy()(session, null);
+    };
+    const seed = if (grant == .allow_session) "session_grant" else "session_grant_denied";
+    const changed = if (grant == .allow_session) "session_grant_changed" else "session_grant_denied_changed";
+    _ = try run(api, session, 1, seed, &diagnostic);
+    var before = try describeSession(api, session);
+    defer before.deinit();
+    const invalid = try agentcore.Status.fromCode(api.sessionControl().updatePermissionMode()(session, std.math.maxInt(u32), &diagnostic));
+    if (invalid != .invalid_argument) return error.InvalidModeAccepted;
+    releaseOwned(api, &diagnostic);
+    try expectOk(api, "mode_noop", api.sessionControl().updatePermissionMode()(session, wire.PERMISSION_ACCEPT_EDITS, &diagnostic), &diagnostic);
+    var unchanged = try describeSession(api, session);
+    defer unchanged.deinit();
+    if (unchanged.value.permission_mode != .accept_edits or unchanged.value.policy_generation != before.value.policy_generation)
+        return error.ModeNoopChangedPolicy;
+    _ = try run(api, session, 2, changed, &diagnostic);
+    if (probe.ui_calls != 1 or probe.sourceCount(if (grant == .allow_session) .session_allow else .session_deny) != 1)
+        return error.ModeNoopRevokedGrant;
+    for ([_]u32{ wire.PERMISSION_FULL_ACCESS, wire.PERMISSION_ACCEPT_EDITS }, 0..) |mode, index| {
+        try expectOk(api, "mode_change", api.sessionControl().updatePermissionMode()(session, mode, &diagnostic), &diagnostic);
+        var after = try describeSession(api, session);
+        defer after.deinit();
+        const expected_mode: agentcore.protocol.PermissionMode = if (mode == wire.PERMISSION_FULL_ACCESS) .full_access else .accept_edits;
+        if (after.value.permission_mode != expected_mode or
+            after.value.policy_generation != before.value.policy_generation + index + 1 or
+            !std.mem.eql(u8, after.value.session_id, before.value.session_id))
+            return error.ModeMutationNotApplied;
+    }
+    probe.behavior = if (grant == .allow_session) .allow_once else .deny_once;
+    _ = try run(api, session, 3, changed, &diagnostic);
+    if (probe.ui_calls != 2 or probe.last_source != .callback)
+        return error.ModeMutationKeptGrant;
+    const storage = try std.heap.c_allocator.alloc(u8, checkpoint_capacity);
+    defer std.heap.c_allocator.free(storage);
+    const checkpoint = try exportCheckpoint(api, session, storage, &diagnostic);
+    try expectOk(api, "mode_destroy", api.session().destroy()(session, &diagnostic), &diagnostic);
+    session_live = false;
+    const restored = try restoreSession(api, runtime, &host, &callbacks, checkpoint, 0, &diagnostic);
+    defer _ = api.session().destroy()(restored, null);
+    var actual = try describeSession(api, restored);
+    defer actual.deinit();
+    if (actual.value.permission_mode != .accept_edits or actual.value.policy_generation != before.value.policy_generation + 2)
+        return error.ModeCheckpointLostPolicy;
+    _ = try run(api, restored, 4, changed, &diagnostic);
+    if (probe.ui_calls != 3 or probe.last_source != .callback)
+        return error.ModeRestoreRevivedGrant;
+    std.debug.print("scenario=mode_mutation grant={s} noop_preserved=true changed_revoked=true restored_generation={d}\n", .{ @tagName(grant), actual.value.policy_generation });
+}
+
 fn runRestore(
     api: agentcore.Api,
     runtime: *wire.RuntimeHandle,
@@ -689,6 +756,8 @@ pub fn main() !void {
     try runFresh(api, core_runtime, &builtin_tools, "ask_over_allow_bash", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .ask_allow_bash, .allow_once, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "deny_over_ask_allow_bash", wire.PERMISSION_FULL_ACCESS, wire.SHELL_UNRESTRICTED, .deny_ask_allow_bash, .unavailable, 0, 1, .explicit_deny);
     try runSessionGrant(api, core_runtime, &builtin_tools);
+    try runModeMutation(api, core_runtime, &builtin_tools, .allow_session);
+    try runModeMutation(api, core_runtime, &builtin_tools, .deny_session);
     try runFresh(api, core_runtime, &builtin_tools, "unavailable_accept_write", wire.PERMISSION_ACCEPT_EDITS, wire.SHELL_UNRESTRICTED, .none, .unavailable, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "auto_write", wire.PERMISSION_AUTO, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);
     try runFresh(api, core_runtime, &builtin_tools, "auto_bash", wire.PERMISSION_AUTO, wire.SHELL_UNRESTRICTED, .none, .allow_once, 1, 1, .callback);

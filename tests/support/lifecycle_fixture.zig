@@ -216,6 +216,8 @@ pub const FakeSession = struct {
     condition: std.Io.Condition = .init,
     description_buffer: [8192]u8 = [_]u8{0} ** 8192,
     permission_session_granted: bool = false,
+    permission_mode_code: u32 = wire.PERMISSION_DEFAULT,
+    policy_generation: u64 = 1,
     model: [256]u8 = [_]u8{0} ** 256,
     model_len: usize = 0,
 
@@ -967,6 +969,7 @@ pub fn sessionCreate(
                 .session_id = session_id,
                 .session_id_len = id.len,
                 .catalog = bound_catalog,
+                .permission_mode_code = host.permission_mode_code,
             };
             @memcpy(session.model[0..model.len], model);
             session.model_len = model.len;
@@ -1440,6 +1443,7 @@ pub fn sessionRestore(
         session.* = .{
             .in_use = true,
             .restored = true,
+            .permission_mode_code = host.permission_mode_code,
             .prompt_profile = fake_core.restored_prompt_profile,
             .restore_degraded = restore_degraded,
             .callbacks = callbacks.?.*,
@@ -1537,26 +1541,30 @@ pub fn sessionDescribe(
         (if (session.restore_degraded)
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
                     session.run_id,
                     session.compact_id,
                     generation,
+                    permissionModeName(session.permission_mode_code),
+                    session.policy_generation,
                     profile_json,
                 },
             )
         else
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"policy_generation\":1,\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
                     session.run_id,
                     session.compact_id,
                     generation,
+                    permissionModeName(session.permission_mode_code),
+                    session.policy_generation,
                     profile_json,
                 },
             )) catch {
@@ -2369,6 +2377,37 @@ fn sessionSetPromptProfile(handle: ?*wire.SessionHandle, profile: ?*const wire.P
     return wire.STATUS_OK;
 }
 
+fn permissionModeName(code: u32) []const u8 {
+    const mode: sdk.protocol.PermissionMode = switch (code) {
+        wire.PERMISSION_DEFAULT => .default,
+        wire.PERMISSION_ACCEPT_EDITS => .accept_edits,
+        wire.PERMISSION_AUTO => .auto,
+        wire.PERMISSION_DONT_ASK => .dont_ask,
+        wire.PERMISSION_FULL_ACCESS => .full_access,
+        else => unreachable,
+    };
+    return @tagName(mode);
+}
+
+pub fn sessionUpdatePermissionMode(handle: ?*wire.SessionHandle, code: u32, out_error: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    const session: *FakeSession = @ptrCast(@alignCast(handle orelse return wire.STATUS_INVALID_ARGUMENT));
+    switch (code) {
+        wire.PERMISSION_DEFAULT, wire.PERMISSION_ACCEPT_EDITS, wire.PERMISSION_AUTO, wire.PERMISSION_DONT_ASK, wire.PERMISSION_FULL_ACCESS => {},
+        else => return wire.STATUS_INVALID_ARGUMENT,
+    }
+    session.lock();
+    defer session.unlock();
+    if (!session.in_use or session.destroyed) return wire.STATUS_INVALID_STATE;
+    if (session.running or session.compacting) return wire.STATUS_BUSY;
+    if (session.permission_mode_code != code) {
+        session.permission_mode_code = code;
+        session.policy_generation += 1;
+        session.permission_session_granted = false;
+    }
+    return wire.STATUS_OK;
+}
+
 const fake_session_control_api = wire.SessionControlApiV1{
     .struct_size = @sizeOf(wire.SessionControlApiV1),
     .reserved0 = 0,
@@ -2380,6 +2419,7 @@ const fake_session_control_api = wire.SessionControlApiV1{
     .abort_compact = sessionAbortCompact,
     .export_checkpoint = sessionExportCheckpoint,
     .set_prompt_profile = sessionSetPromptProfile,
+    .update_permission_mode = sessionUpdatePermissionMode,
 };
 
 const fake_skill_api = wire.SkillApiV1{
