@@ -30,6 +30,7 @@ import {
 } from "./window-top-resize-paint.mjs";
 import { probeWindowChromeUi } from "./window-chrome-ui.mjs";
 import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
+import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -488,42 +489,36 @@ try {
     expectedRevision: sourceRevision,
   });
   assert.equal(sourceCommit.applied, true);
-  const expectedExecutionGeneration =
-    afterChoose.newTaskAdmission.activeGeneration;
-  const expectedSelectionRevision =
-    afterChoose.newTaskAdmission.activeSelectionRevision;
-  if (!isWireId(expectedExecutionGeneration))
-    throw new Error("snapshot omitted the current execution generation");
-  if (!isWireId(expectedSelectionRevision))
-    throw new Error("snapshot omitted the current selection revision");
-  const catalogSnapshot = await poll(
-    async () => {
-      const current = await snapshot();
-      const selected = current.workspaces.find(
-        (item) => item.id === workspaceId,
-      );
-      const catalog = selected?.skillCatalog;
-      if (
-        (catalog?.availability !== "ready" &&
-          catalog?.availability !== "degraded") ||
-        !isOpaqueRevision(catalog.revision) ||
-        !isWireId(catalog.selectionRevision)
-      )
-        throw new Error(
-          `Workspace Skill catalog is not ready: ${JSON.stringify(catalog)}`,
+  const readCatalog = () =>
+    poll(
+      async () => {
+        const current = await snapshot();
+        const selected = current.workspaces.find(
+          (item) => item.id === workspaceId,
         );
-      const skill = catalog.skills.find(
-        (item) => item.invocationName === "review",
-      );
-      if (!skill)
-        throw new Error(
-          `Workspace Skill catalog omitted review: ${JSON.stringify(catalog)}`,
+        const catalog = selected?.skillCatalog;
+        if (
+          (catalog?.availability !== "ready" &&
+            catalog?.availability !== "degraded") ||
+          !isOpaqueRevision(catalog.revision) ||
+          !isWireId(catalog.selectionRevision)
+        )
+          throw new Error(
+            `Workspace Skill catalog is not ready: ${JSON.stringify(catalog)}`,
+          );
+        const skill = catalog.skills.find(
+          (item) => item.invocationName === "review",
         );
-      return { catalog, skill };
-    },
-    commandTimeoutMs,
-    "Workspace Skill catalog",
-  );
+        if (!skill)
+          throw new Error(
+            `Workspace Skill catalog omitted review: ${JSON.stringify(catalog)}`,
+          );
+        return { catalog, skill };
+      },
+      commandTimeoutMs,
+      "Workspace Skill catalog",
+    );
+  let catalogSnapshot = await readCatalog();
   if (
     !/^[0-9a-f]{64}$/.test(catalogSnapshot.skill.skillId) ||
     catalogSnapshot.skill.displayName !== "Review" ||
@@ -532,6 +527,61 @@ try {
     throw new Error(
       `Workspace catalog omitted the review Skill projection: ${JSON.stringify(catalogSnapshot)}`,
     );
+  const finishApprovalRestart =
+    process.platform === "win32"
+      ? await runApprovalModeVertical({
+          invoke: invokeBridge,
+          snapshot,
+          poll,
+          provider,
+          toolSse,
+          textSse,
+          backgroundTool: toolSseFromBackgroundJob,
+          checkpoint: readCheckpointEvidence,
+          checkpointHealth: readCheckpointHealth,
+          workspaceId,
+          workspaceEpoch: expectedWorkspaceEpoch,
+          markerPath: join(
+            canonicalWorkspace,
+            "mode-cancel-must-not-execute.txt",
+          ),
+          expectMissing,
+          selectRenderedMode,
+        })
+      : null;
+  if (finishApprovalRestart) {
+    await stopApplication("approval checkpoint restart stop");
+    await rm(automationDir, { recursive: true, force: true });
+    startApplication();
+    await waitForBridge();
+    const beforeReauthorization = (await snapshot()).workspaces.find(
+      (workspace) => workspace.id === workspaceId,
+    );
+    assert.equal(
+      beforeReauthorization.authorization,
+      "reauthorization_required",
+    );
+    const reauthorized = await invokeBridge("metawork.workspaces.choose", {});
+    if (reauthorized !== null) {
+      assert.equal(reauthorized.selected, true);
+      assert.equal(reauthorized.workspaceId, workspaceId);
+    }
+    const authorizedWorkspace = (await snapshot()).workspaces.find(
+      (workspace) => workspace.id === workspaceId,
+    );
+    assert.equal(authorizedWorkspace.authorization, "available");
+    assert.equal(authorizedWorkspace.epoch, expectedWorkspaceEpoch);
+    assert.equal(authorizedWorkspace.canonicalRoot, canonicalWorkspace);
+    await finishApprovalRestart();
+    catalogSnapshot = await readCatalog();
+  }
+  const currentAdmission = (await snapshot()).newTaskAdmission;
+  const expectedExecutionGeneration = currentAdmission.activeGeneration;
+  const expectedSelectionRevision = currentAdmission.activeSelectionRevision;
+  if (!isWireId(expectedExecutionGeneration))
+    throw new Error("snapshot omitted the current execution generation");
+  if (!isWireId(expectedSelectionRevision))
+    throw new Error("snapshot omitted the current selection revision");
   const createResult = await invokeBridge("metawork.tasks.create", {
     workspace: {
       kind: "manual",
@@ -2077,6 +2127,7 @@ async function readCheckpointEvidence(
     byteSize: blobDescriptor.byte_size,
     generation: blobDescriptor.generation,
     historyByteSize: historyBytes.length,
+    sessionId: descriptor.session.logical_session_id,
   };
 }
 
@@ -2558,6 +2609,102 @@ async function probeWindowsClipboard({
   }
 }
 
+async function selectRenderedMode(taskId, targetMode) {
+  const webview = await connectTestWebView(chromeProbePort);
+  try {
+    await poll(
+      async () =>
+        webview.evaluate(`(() => {
+      const row = document.querySelector('.task-list-item[data-task-id="${taskId}"]');
+      if (!row) return false;
+      row.click(); return true;
+    })()`),
+      commandTimeoutMs,
+      "approval Task Renderer row",
+    );
+    const triggerPoint = await poll(
+      async () =>
+        webview.evaluate(`(() => {
+      const trigger = document.getElementById('task-approval-mode-${taskId}');
+      if (!trigger || trigger.disabled) return null;
+      const rect = trigger.getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    })()`),
+      commandTimeoutMs,
+      "approval Renderer menu",
+    );
+    await webview.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      button: "left",
+      clickCount: 1,
+      ...triggerPoint,
+    });
+    await webview.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      button: "left",
+      clickCount: 1,
+      ...triggerPoint,
+    });
+    const labels = {
+      manual: ["人工审批", "Manual approval"],
+      auto_review: ["自动评审", "Automatic review"],
+      full_access: ["完全访问", "Full access"],
+    }[targetMode];
+    const choice = await poll(
+      async () =>
+        webview.evaluate(`(() => {
+      const labels = ${JSON.stringify(labels)};
+      const choice = [...document.querySelectorAll('.task-approval-menu [role="option"]')].find(option => labels.includes(option.querySelector('.selection-menu-item-copy')?.firstElementChild?.textContent));
+      if (!choice || choice.getAttribute('aria-disabled') === 'true') return null;
+      choice.scrollIntoView({ block: 'nearest' });
+      const rect = choice.getBoundingClientRect();
+      if (rect.y < 0 || rect.bottom > innerHeight) return null;
+      return { label: choice.textContent, viewport: [innerWidth, innerHeight], overflow: document.documentElement.scrollWidth > innerWidth, point: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+    })()`),
+      commandTimeoutMs,
+      "approval Renderer choice",
+    );
+    assert.equal(choice.overflow, false);
+    assert.match(choice.label, /先停止当前运行|Stops the current run/);
+    const evidence = join(root, ".zig-cache", "agentcore-r19");
+    await mkdir(evidence, { recursive: true });
+    const image = await webview.send("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: false,
+    });
+    await writeFile(
+      join(evidence, "approval-menu-live.png"),
+      Buffer.from(image.data, "base64"),
+    );
+    console.log(
+      `AgentCore approval Renderer evidence: ${JSON.stringify(choice)}`,
+    );
+    await webview.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      button: "left",
+      clickCount: 1,
+      ...choice.point,
+    });
+    await webview.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      button: "left",
+      clickCount: 1,
+      ...choice.point,
+    });
+    await poll(
+      () =>
+        webview.evaluate(`(() => {
+      const menu = document.querySelector('.task-approval-menu');
+      return !menu || menu.getBoundingClientRect().width === 0;
+    })()`),
+      commandTimeoutMs,
+      "approval menu dismissed after selection",
+    );
+  } finally {
+    webview.close();
+  }
+}
+
 async function captureVisual(
   name,
   width,
@@ -2777,6 +2924,8 @@ async function removeWorkspaceWithRetry() {
 function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let served = 0;
   let titleCompletions = 0;
+  let reviewRequests = 0;
+  let releaseReview = null;
   let providerError = null;
   const requests = [];
   const server = createServer((request, response) => {
@@ -2795,6 +2944,56 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
         if (request.method !== "POST" || request.url !== "/v1/messages")
           throw new Error("AgentCore used an unexpected provider endpoint");
         const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (
+          typeof payload.system === "string" &&
+          payload.system.startsWith("你是独立的权限评审器")
+        ) {
+          assert.equal(
+            request.headers["x-api-key"],
+            "metawork-agentcore-vertical-fixture-key",
+          );
+          assert.equal(request.headers.authorization, undefined);
+          assert.equal(payload.model, "claude-sonnet-4-20250514");
+          assert.equal(payload.stream, undefined);
+          assert.equal(payload.tools, undefined);
+          const review = JSON.parse(payload.messages[0].content);
+          assert.equal(
+            review.evidence.user_intent,
+            "mode-review-current-request",
+          );
+          assert.equal(review.host.delegation, "current_request_only");
+          assert.equal(review.evidence.request.tool_name, "Bash");
+          reviewRequests++;
+          assert.equal(
+            reviewRequests,
+            1,
+            "current request was automatically reviewed twice",
+          );
+          await new Promise((resolve) => {
+            releaseReview = resolve;
+          });
+          response.writeHead(200, {
+            "content-type": "application/json",
+            connection: "close",
+          });
+          response.end(
+            JSON.stringify({
+              type: "message",
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    decision: "allow_once",
+                    reason: "bounded fixture command",
+                  }),
+                },
+              ],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+          );
+          return;
+        }
         if (request.headers["x-api-key"] !== undefined) {
           if (
             request.headers["x-api-key"] !==
@@ -2869,6 +3068,17 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     });
   });
   return {
+    enqueue(...fixtures) {
+      queue.splice(served, 0, ...fixtures);
+    },
+    get reviewRequests() {
+      return reviewRequests;
+    },
+    releaseReview() {
+      assert.ok(releaseReview, "review fixture was not admitted");
+      releaseReview();
+      releaseReview = null;
+    },
     get served() {
       return served;
     },
@@ -2891,6 +3101,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
       });
     },
     close() {
+      releaseReview?.();
       return new Promise((resolve) => server.close(resolve));
     },
   };
@@ -2973,7 +3184,7 @@ function toolSse(messageId, toolId, name, input, commentary = null) {
 
 function toolSseFromBackgroundJob(messageId, toolId, name, input = {}) {
   return (payload) => {
-    const jobId = findJsonField(payload, "job_id");
+    const jobId = findJsonField(payload.messages.at(-1), "job_id");
     if (typeof jobId !== "string" || jobId.length === 0)
       throw new Error(
         `provider fixture did not receive a background job id for ${name}`,
