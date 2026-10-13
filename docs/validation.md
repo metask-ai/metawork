@@ -252,6 +252,11 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 picker 使用 automation 路径注入，DOM File 由隔离 WebView 的 CDP file input 注入；这些证明真实文件、浏览器字节提取、Host worker、分类及取消链路，不证明真实系统 picker 或 OS 拖拽手势、键盘/焦点/窄窗体验、峰值内存或 codec 的独立主线程阻塞时间。macOS 和其他 Windows 环境仍需独立验收。**完整 desktop vertical 失败。**该轮通过真实 Skill、多模态 Run、70 KiB 回复的完整 plain/HTML 复制与代码的 plain-only 复制，但后续 256 KiB 回复复制探针未找到 UIA 的“复制回复”入口，未到达其后的重启、Task 删除和正常退出阶段。未修改或跳过该断言，也未将这一结果归因于附件实现；不能仅凭附件专项通过宣称整轮通过。
 
+### E-WIN-METASK-MODEL-CATALOG-20261013
+
+2026-10-13，在 Windows x86_64 的 automation Debug artifact 上，由用户通过真实 Account 登录并调用真实 Metask 目录与对话服务。证据绑定源码 revision `4e230d3e56c764203fef64abcc16994248783cce`、exe SHA-256 `3fd3c35a6033686a0da84b8aef3ead9298090b499eb294e31cc1da6c7020e992` 和 canonical AgentCore；平台、依赖 identity 与脱敏 typed Snapshot 摘要见[原始证据](evidence/metask-model-catalog-windows-20261013.json)。构建入口为仓库 `buildAutomationDebugArtifact`；观察通过官方 `native automate bridge` 与已有 Workbench snapshot/chunk 合同，不读取 OAuth credential 到测试脚本。运行时仅启用既有 transport harness，Account 与 Models 使用真实平台服务，不注入 fixture 账号、目录或 Provider。
+
+真实目录发布 3 个可选模型及其 metadata，Account 保持 authenticated、Models ready 且 error 为 none。显式 `metawork.models.refreshCatalog` 成功推进 catalog generation，global default 仍为 `MiniMax-M3`，新 Task admission 保持 available。用户发送的文本 Run 已在该模型与 `anthropic_messages` protocol 下 completed，返回非空远端文本并有 usage；再次刷新后该 Task/Run 的 execution 与 terminal 保留。该证据证明此 artifact 对当时真实后端目录的接纳、刷新与一次远端文本对话，不替代媒体输出排除、非法响应、空目录、失格 intent、CAS 和 pending lifecycle 的确定性回归，也不证明后续后端部署、其他模型、平台或完整桌面体验。
 ## 未闭合验证缺口
 
 本节只防止错误能力声明。行为、边界和产品开放条件仍由所列真源定义；测试清单和逐项断言不在这里维护。
