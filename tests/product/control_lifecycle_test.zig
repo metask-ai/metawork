@@ -4170,8 +4170,8 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     ) != null);
 
     const text_files = [_]product_control.AttachmentCandidate{.{
-        .display_name = "notes.md",
-        .bytes = "untrusted reference text",
+        .display_name = "report.docx",
+        .bytes = "PK\x03\x04\x00\xffbinary",
     }};
     var text_descriptor_storage: [1]product_control.AttachmentDescriptor = undefined;
     const text_descriptors = try workbench.stageAttachments(
@@ -4203,9 +4203,9 @@ test "Product multimodal admission consumes staging and publishes metadata-only 
     try std.testing.expect(std.mem.indexOf(
         u8,
         text_snapshot,
-        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize this file\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"notes.md\",\"sizeBytes\":\"24\",\"redacted\":false}],\"redacted\":false}",
+        "\"input\":{\"kind\":\"multimodal\",\"text\":\"Summarize this file\",\"attachments\":[{\"kind\":\"file\",\"displayName\":\"report.docx\",\"sizeBytes\":\"12\",\"redacted\":false}],\"redacted\":false}",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, text_snapshot, "untrusted reference text") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text_snapshot, "PK\x03\x04\x00\xffbinary") == null);
     try std.testing.expect(!workbench.releaseAttachment(retry_ids[0]));
 }
 

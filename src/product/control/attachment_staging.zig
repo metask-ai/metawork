@@ -101,7 +101,6 @@ const Job = struct {
             .validated => for (self.targets) |file| {
                 try self.check();
                 try self.file_store.finish(file);
-                try attachment.validateOriginal(self.file_store, file, &self.cancelled);
             },
         }
         try self.check();
@@ -255,12 +254,12 @@ pub const Lane = struct {
 test "path probe reserves before copy and cancellation joins the writer" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.txt", .data = "original content" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source.zip", .data = "PK\x03\x04\x00\xffbinary" });
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
     var store = try attachment.FileStore.init(std.testing.io, std.testing.allocator, root[0..len]);
     defer store.deinit();
-    const path = try std.fs.path.join(std.testing.allocator, &.{ root[0..len], "source.txt" });
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root[0..len], "source.zip" });
     defer std.testing.allocator.free(path);
     const Queue = struct {
         pending: ?ExecutorJob = null,
@@ -331,6 +330,6 @@ test "path probe reserves before copy and cancellation joins the writer" {
     const ready = try runtime.finishValidated(next_id, &output);
     const original = try store.readAlloc(std.testing.allocator, runtime.slots[0].?.file);
     defer std.testing.allocator.free(original);
-    try std.testing.expectEqualStrings("original content", original);
+    try std.testing.expectEqualStrings("PK\x03\x04\x00\xffbinary", original);
     try std.testing.expect(runtime.release(ready[0].id));
 }

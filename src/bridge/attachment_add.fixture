@@ -6,7 +6,7 @@
       "kind": "file_bytes",
       "files": [
         {
-          "name": "a.txt",
+          "name": "archive.zip",
           "sizeBytes": "3"
         }
       ]
@@ -17,7 +17,7 @@
     "batchId": "3",
     "fileIndex": 0,
     "offset": "0",
-    "dataBase64": "YWJj"
+    "dataBase64": "/wBi"
   },
   "key": {
     "generation": "1",
@@ -32,7 +32,7 @@
       {
         "token": "070707070707070707070707070707070707070707070707",
         "kind": "file",
-        "displayName": "a.txt",
+        "displayName": "archive.zip",
         "sizeBytes": "3"
       }
     ]

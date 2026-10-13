@@ -7,8 +7,36 @@ pub const File = struct {
     name: [32]u8,
     task_id: u64 = 0,
     size: usize,
-    extension: enum { txt, png, jpg, webp } = .txt,
+    extension: Extension = .{},
 };
+
+/// Only a bounded ASCII suffix reaches the owned random filename. The user's
+/// display name never becomes a storage path or a format authority.
+pub const Extension = struct {
+    pub const max_bytes = 16;
+    bytes: [max_bytes]u8 = .{ 'b', 'i', 'n' } ++ .{0} ** (max_bytes - 3),
+    len: usize = 3,
+
+    pub fn slice(self: *const Extension) []const u8 {
+        return self.bytes[0..self.len];
+    }
+    pub fn fromName(name: []const u8) Extension {
+        const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return .{};
+        return fromSuffix(name[dot + 1 ..]) catch .{};
+    }
+    pub fn fromSuffix(suffix: []const u8) error{UnsupportedType}!Extension {
+        if (suffix.len == 0 or suffix.len > max_bytes) return error.UnsupportedType;
+        var result: Extension = .{};
+        for (suffix, 0..) |byte, index| {
+            if (!std.ascii.isAlphanumeric(byte)) return error.UnsupportedType;
+            result.bytes[index] = std.ascii.toLower(byte);
+        }
+        result.len = suffix.len;
+        return result;
+    }
+};
+const max_relative_bytes = 20 + 1 + 32 + 1 + Extension.max_bytes;
+const max_filename_bytes = 32 + 1 + Extension.max_bytes;
 
 pub const Source = struct {
     handle: std.Io.File,
@@ -47,7 +75,7 @@ pub const FileStore = struct {
     }
 
     fn relative(file: File, buffer: []u8) Error![]const u8 {
-        return std.fmt.bufPrint(buffer, "{d}/{s}.{s}", .{ file.task_id, file.name, @tagName(file.extension) }) catch error.WriteFailed;
+        return std.fmt.bufPrint(buffer, "{d}/{s}.{s}", .{ file.task_id, file.name, file.extension.slice() }) catch error.WriteFailed;
     }
 
     pub fn allocate(self: *FileStore, size: usize) Error!File {
@@ -59,8 +87,8 @@ pub const FileStore = struct {
     pub fn create(self: *FileStore, value: File) Error!void {
         var dir = self.root.createDirPathOpen(self.io, "0", .{ .open_options = .{ .follow_symlinks = false }, .permissions = directoryPermissions() }) catch return error.WriteFailed;
         defer dir.close(self.io);
-        var name_buffer: [40]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buffer, "{s}.{s}", .{ value.name, @tagName(value.extension) }) catch return error.WriteFailed;
+        var name_buffer: [max_filename_bytes]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buffer, "{s}.{s}", .{ value.name, value.extension.slice() }) catch return error.WriteFailed;
         const file = dir.createFile(self.io, name, .{ .exclusive = true, .permissions = filePermissions(), .resolve_beneath = true }) catch return error.WriteFailed;
         file.close(self.io);
     }
@@ -73,7 +101,7 @@ pub const FileStore = struct {
 
     pub fn append(self: *FileStore, value: File, offset: usize, bytes: []const u8) Error!void {
         if (offset > value.size or bytes.len > value.size - offset) return error.WriteFailed;
-        var buffer: [80]u8 = undefined;
+        var buffer: [max_relative_bytes]u8 = undefined;
         const path = try relative(value, &buffer);
         const file = positionalHandle(self.root.openFile(self.io, path, .{ .mode = .read_write, .follow_symlinks = false, .resolve_beneath = true }) catch return error.WriteFailed);
         defer file.close(self.io);
@@ -81,7 +109,7 @@ pub const FileStore = struct {
     }
 
     pub fn finish(self: *FileStore, value: File) Error!void {
-        var buffer: [80]u8 = undefined;
+        var buffer: [max_relative_bytes]u8 = undefined;
         const file = positionalHandle(self.root.openFile(self.io, try relative(value, &buffer), .{ .mode = .read_write, .follow_symlinks = false, .resolve_beneath = true }) catch return error.WriteFailed);
         defer file.close(self.io);
         const stat = file.stat(self.io) catch return error.WriteFailed;
@@ -140,7 +168,7 @@ pub const FileStore = struct {
     }
 
     pub fn read(self: *FileStore, value: File, offset: usize, bytes: []u8) Error!usize {
-        var buffer: [80]u8 = undefined;
+        var buffer: [max_relative_bytes]u8 = undefined;
         const file = positionalHandle(self.root.openFile(self.io, try relative(value, &buffer), .{ .follow_symlinks = false, .resolve_beneath = true }) catch return error.ReadFailed);
         defer file.close(self.io);
         return file.readPositionalAll(self.io, bytes, offset) catch error.ReadFailed;
@@ -159,16 +187,17 @@ pub const FileStore = struct {
         try self.rename(value, target);
     }
 
-    pub fn setExtension(self: *FileStore, value: *File, extension: @TypeOf(@as(File, undefined).extension)) Error!void {
+    pub fn setExtension(self: *FileStore, value: *File, extension: []const u8) Error!void {
         var target = value.*;
-        target.extension = extension;
+        target.extension = try Extension.fromSuffix(extension);
+        if (std.mem.eql(u8, value.extension.slice(), target.extension.slice())) return;
         try self.rename(value, target);
     }
 
     fn rename(self: *FileStore, value: *File, target: File) Error!void {
         const task_id = target.task_id;
-        var source_buffer: [80]u8 = undefined;
-        var target_buffer: [80]u8 = undefined;
+        var source_buffer: [max_relative_bytes]u8 = undefined;
+        var target_buffer: [max_relative_bytes]u8 = undefined;
         var dir_buffer: [32]u8 = undefined;
         const task_dir = std.fmt.bufPrint(&dir_buffer, "{d}", .{task_id}) catch return error.WriteFailed;
         var dir = self.root.createDirPathOpen(self.io, task_dir, .{ .open_options = .{ .follow_symlinks = false }, .permissions = directoryPermissions() }) catch return error.WriteFailed;
@@ -184,7 +213,7 @@ pub const FileStore = struct {
     }
 
     pub fn pathAlloc(self: *FileStore, allocator: std.mem.Allocator, value: File) Error![]u8 {
-        var buffer: [80]u8 = undefined;
+        var buffer: [max_relative_bytes]u8 = undefined;
         return std.fs.path.join(allocator, &.{ self.directory, try relative(value, &buffer) });
     }
 
@@ -193,7 +222,7 @@ pub const FileStore = struct {
     }
 
     pub fn deleteChecked(self: *FileStore, value: File) Error!void {
-        var buffer: [80]u8 = undefined;
+        var buffer: [max_relative_bytes]u8 = undefined;
         self.root.deleteFile(self.io, try relative(value, &buffer)) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return error.DeleteFailed,
@@ -231,6 +260,8 @@ test "accepted originals survive reopening and Task deletion removes them" {
     const directory = path_buffer[0..path_len];
     var initial = try FileStore.init(std.testing.io, std.testing.allocator, directory);
     var accepted = try initial.put("complete original\nsecond line\n");
+    // Existing checkpoint references with a .txt path remain readable.
+    try initial.setExtension(&accepted, "txt");
     try initial.move(&accepted, 42);
     const abandoned = try initial.put("unaccepted draft");
     initial.deinit();
@@ -286,4 +317,18 @@ test "copy rejects a changed source using the original open handle" {
     const target = try file_store.begin(3);
     defer file_store.delete(target);
     try std.testing.expectError(error.FileChanged, file_store.copySource(source, target, null));
+}
+
+test "owned suffix preserves document types without admitting user paths" {
+    for ([_][]const u8{ "DOCX", "xlsx", "pptx", "zip", "1234567890abcdef" }) |suffix| {
+        var ext = try Extension.fromSuffix(suffix);
+        try std.testing.expectEqual(suffix.len, ext.slice().len);
+    }
+    var office = Extension.fromName("report.DOCX");
+    try std.testing.expectEqualStrings("docx", office.slice());
+    for ([_][]const u8{ "no-extension", "report.", "a.1234567890abcdefg", "a.bad/slash", "a.bad\\slash", "a.é" }) |name| {
+        var ext = Extension.fromName(name);
+        try std.testing.expectEqualStrings("bin", ext.slice());
+    }
+    try std.testing.expectError(error.UnsupportedType, Extension.fromSuffix("../zip"));
 }

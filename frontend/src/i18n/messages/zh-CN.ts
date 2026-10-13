@@ -591,15 +591,14 @@ export const zhCN: Record<MessageId, string> = {
   "attachment.selected": "已选择的附件",
   "attachment.remove": "移除 {name}",
   "attachment.type.image": "图片",
-  "attachment.type.file": "文本文件",
+  "attachment.type.file": "文件",
   "attachment.reload_required":
     "未发送的附件不会在重新载入后保留，请重新添加后再发送。",
   "attachment.skill_conflict":
     "请先移除附件再选择 Skill，或将开头的斜杠改写为普通文本。",
   "attachment.model_warning.image":
     "此模型声明不支持图片输入；仍可发送，并以实际返回结果为准。",
-  "attachment.error.unsupported_type":
-    "所选文件不是支持的图片，也不是有效的 UTF-8 文本。",
+  "attachment.error.unsupported_type": "所选文件为空、无效或无法解码为图片。",
   "attachment.error.file_too_large":
     "所选文件超过单文件大小上限（{limit} MB）。",
   "attachment.error.too_many_files": "最多可添加 8 个文件。",
@@ -1198,8 +1197,7 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.skill_unavailable": "所选 Skill 已在当前任务中禁用。",
   "mutation.reason.invalid_skill_arguments": "请检查 Skill 参数后重试。",
   "mutation.reason.missing_instruction": "请说明希望 Agent 如何处理所附文本。",
-  "mutation.reason.unsupported_attachment":
-    "附件已不再是支持的图片或 UTF-8 文本文件。",
+  "mutation.reason.unsupported_attachment": "附件已不可用或无效。",
   "mutation.reason.capacity_reached":
     "MetaWork 当前容量已满，请结束部分工作后重试。",
   "mutation.reason.shutting_down": "MetaWork 正在关闭，请重启后重试。",

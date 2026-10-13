@@ -7203,7 +7203,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.expect("accepted");
     const legacy = native.dispatch("{\"id\":\"r\",\"command\":\"metawork.attachments.finishReceive\",\"payload\":{\"generation\":\"1\",\"batchId\":\"3\"}}", source, &output);
     try std.testing.expect(std.mem.indexOf(u8, legacy, "invalid_transfer") != null);
-    try capture.invoke(native, source, commands.append_attachment_add, "{\"generation\":\"1\",\"batchId\":\"3\",\"fileIndex\":0,\"offset\":\"0\",\"dataBase64\":\"YWJj\"}");
+    try capture.invoke(native, source, commands.append_attachment_add, "{\"generation\":\"1\",\"batchId\":\"3\",\"fileIndex\":0,\"offset\":\"0\",\"dataBase64\":\"/wBi\"}");
     try capture.wait(&workbench, &dispatcher, 6);
     try capture.expect("accepted");
     try capture.invoke(native, source, commands.finish_attachment_add, key3);
