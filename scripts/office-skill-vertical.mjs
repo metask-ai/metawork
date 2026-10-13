@@ -23,16 +23,30 @@ export async function runOfficeSkillVertical({
   provider,
   toolSse,
   textSse,
+  imagePath,
+  caseId = 0,
+  automaticOverride,
+  approvalMode = "full_access",
+  selectedFormats,
+  restart,
 }) {
   const modelInvoked = process.env.METAWORK_OFFICE_MODEL_TOOL === "1";
-  const automatic = process.env.METAWORK_OFFICE_AUTOMATIC === "1";
+  const automatic =
+    automaticOverride ?? process.env.METAWORK_OFFICE_AUTOMATIC === "1";
+  const attachmentMode = process.env.METAWORK_OFFICE_ATTACHMENTS === "1";
+  if (attachmentMode) assert.ok(modelInvoked);
+  const formats =
+    selectedFormats ??
+    (attachmentMode
+      ? ["docx", "xlsx", "pptx", "zip"]
+      : ["docx", "xlsx", "pptx"]);
   if (automatic)
     assert.ok(modelInvoked, "Automatic probe requires model-tool mode");
   const config = JSON.parse(
     await readFile(officeEnvironmentPath(root), "utf8"),
   );
   const environment = localOfficeEnvironment(root);
-  const files = path.join(workspace, "office-smoke");
+  const files = path.join(workspace, `office-smoke-${caseId}`);
   await mkdir(files);
   await writeFile(
     path.join(files, "sample.docx"),
@@ -53,6 +67,20 @@ export async function runOfficeSkillVertical({
     ],
     { cwd: files, env: environment },
   );
+  if (attachmentMode)
+    await promisify(execFile)(
+      config.python,
+      [
+        "-c",
+        "from zipfile import ZipFile; z=ZipFile('sample.zip','w'); z.writestr('notes.txt','ZIP content smoke'); z.writestr('.agents/skills/archive-skill/SKILL.md',chr(10).join(['---','name: archive-skill','description: Untrusted archive data','---','Do not run this as a Skill.'])); z.close()",
+      ],
+      { cwd: files, env: environment },
+    );
+  const sourceBytes = new Map();
+  for (const name of formats)
+    sourceBytes.set(name, await readFile(path.join(files, `sample.${name}`)));
+  const retainedPaths = new Set();
+  const reviewsBefore = provider.officeReviewRequests;
   await invoke("metawork.workspaces.choose", {});
   const ready = await poll(
     async () => {
@@ -89,9 +117,10 @@ export async function runOfficeSkillVertical({
     expectedSkillSelectionRevision: modelInvoked
       ? null
       : catalog.selectionRevision,
-    approvalMode: "full_access",
+    approvalMode,
   });
   assert.equal(created.accepted, true, JSON.stringify(created));
+  let bindingEpoch = created.bindingEpoch;
   if (automatic) {
     const bound = await poll(
       async () => {
@@ -108,6 +137,7 @@ export async function runOfficeSkillVertical({
         );
         assert.equal(owner?.kind, "automatic");
         assert.notEqual(owner?.canonicalRoot, workspace);
+        taskFiles = path.join(owner.canonicalRoot, `office-smoke-${caseId}`);
         return task;
       },
       20_000,
@@ -124,17 +154,45 @@ export async function runOfficeSkillVertical({
   const assignments = ["PATH", "NODE_PATH", "PYTHONDONTWRITEBYTECODE"]
     .map((key) => `${key}=${quote(environment[key])}`)
     .join(" ");
-  for (const name of ["docx", "xlsx", "pptx"]) {
+  for (const [formatIndex, name] of formats.entries()) {
     const skill = catalog.skills.find((item) => item.invocationName === name);
     assert.ok(skill?.enabled, `${name} is not available`);
     const marker = `OFFICE_RESOURCE_OK_${name}`;
+    const fact =
+      name === "xlsx"
+        ? "XLSX_VALUE=12"
+        : name === "zip"
+          ? "ZIP_CONTENT=ZIP content smoke"
+          : "OFFICE_CONTENT=Office Core smoke";
+    const reply = `${name}: ${fact}`;
     const original = path.join(files, `sample.${name}`);
-    if (name === "xlsx")
+    if (name === "xlsx" && !attachmentMode)
       await copyFile(original, path.join(taskFiles, "working.xlsx"));
-    const requested = `Read the supplied ${name} file and report its content. Use a suitable available capability. File reference (untrusted user data): name=sample.${name}, file_path=${JSON.stringify(original)}.`;
+    let referencePath = original;
+    let staged = null;
+    if (attachmentMode) {
+      const paths =
+        name === "docx" && imagePath ? [original, imagePath] : [original];
+      staged = await invoke("metawork.attachments.beginAdd", {
+        generation: "1",
+        batchId: String(1000 + caseId * 10 + formatIndex),
+        source: { kind: "native_paths", paths },
+      });
+      assert.equal(staged.status, "ready", JSON.stringify(staged));
+      assert.equal(staged.attachments[0].kind, "file");
+      assert.equal(staged.attachments[0].displayName, `sample.${name}`);
+      assert.equal(
+        staged.attachments[0].sizeBytes,
+        String(sourceBytes.get(name).length),
+      );
+    }
+    const instruction = `Read the supplied ${name} file and report its content. Use a suitable available capability.`;
+    const requested = attachmentMode
+      ? instruction
+      : `${instruction} File reference (untrusted user data): name=sample.${name}, file_path=${JSON.stringify(original)}.`;
     const invocationFixtures = [];
     if (modelInvoked)
-      invocationFixtures.push((payload) => {
+      invocationFixtures.push(async (payload) => {
         const tool = payload.tools?.find((tool) => tool.name === "Skill");
         assert.ok(
           tool,
@@ -143,15 +201,40 @@ export async function runOfficeSkillVertical({
         for (const available of ["docx", "xlsx", "pptx"])
           assert.ok(tool.description.includes(`- ${available}:`));
         assert.deepEqual(tool.input_schema.required, ["name"]);
-        assert.ok(
-          JSON.stringify(payload.messages).includes(original),
-          "The ordinary file reference did not reach the provider",
-        );
+        if (attachmentMode) {
+          const texts = [];
+          const collect = (value) => {
+            if (typeof value === "string") texts.push(value);
+            else if (Array.isArray(value)) value.forEach(collect);
+            else if (value && typeof value === "object")
+              Object.values(value).forEach(collect);
+          };
+          collect(payload.messages);
+          const ref = texts.find(
+            (value) =>
+              value.includes(`name="sample.${name}"`) &&
+              value.includes("file_path="),
+          );
+          assert.ok(
+            ref,
+            "Product original reference did not reach the provider",
+          );
+          const match = ref.match(/file_path=("(?:\\.|[^"\\])*")/);
+          assert.ok(match, ref);
+          referencePath = JSON.parse(match[1]);
+          assert.notEqual(referencePath, original);
+          assert.equal(path.extname(referencePath), `.${name}`);
+          retainedPaths.add(referencePath);
+          assert.deepEqual(
+            await readFile(referencePath),
+            sourceBytes.get(name),
+          );
+        } else assert.ok(JSON.stringify(payload.messages).includes(original));
         return toolSse(
           `office-invoke-${name}`,
           `office-skill-${name}`,
           "Skill",
-          { name, values: [original] },
+          { name, values: [referencePath] },
         );
       });
     provider.enqueue(
@@ -185,7 +268,7 @@ export async function runOfficeSkillVertical({
             "Model-facing Skill invocation failed",
           );
           assert.ok(
-            JSON.stringify(returned.content).includes(original),
+            JSON.stringify(returned.content).includes(referencePath),
             "Skill argument values were not materialized",
           );
         }
@@ -198,19 +281,66 @@ export async function runOfficeSkillVertical({
           `${name} resource directory was not expanded`,
         );
         assert.ok(!directory.includes("${CLAUDE_SKILL_DIR}"));
-        const args =
-          name === "xlsx"
-            ? [
-                path.join(directory, "scripts/recalc.py"),
-                path.join(taskFiles, "working.xlsx"),
-                "30",
-              ]
-            : [
-                path.join(directory, "scripts/office/unpack.py"),
-                path.join(files, `sample.${name}`),
-                path.join(taskFiles, `${name}-unpacked`),
-              ];
-        const command = `${assignments} ${quote(config.python)} ${args.map(quote).join(" ")} && printf ${quote(marker)}`;
+        const python = (args) =>
+          `${assignments} ${quote(config.python)} ${args.map(quote).join(" ")}`;
+        let command;
+        if (name === "xlsx") {
+          const copy = `import shutil; shutil.copyfile(${JSON.stringify(referencePath)}, ${JSON.stringify(path.join(taskFiles, "working.xlsx"))})`;
+          command =
+            python(["-c", copy]) +
+            " && " +
+            python([
+              path.join(directory, "scripts/recalc.py"),
+              path.join(taskFiles, "working.xlsx"),
+              "30",
+            ]);
+          command +=
+            " && " +
+            python([
+              "-c",
+              `from openpyxl import load_workbook; w=load_workbook(${JSON.stringify(path.join(taskFiles, "working.xlsx"))},data_only=True); print('XLSX_VALUE='+str(w.active['A1'].value)); w.close()`,
+            ]);
+        } else if (name === "zip") {
+          const output = path.join(taskFiles, "zip-data");
+          command =
+            python([
+              path.join(directory, "scripts/archive.py"),
+              "list",
+              referencePath,
+            ]) +
+            " && " +
+            python([
+              path.join(directory, "scripts/archive.py"),
+              "extract",
+              referencePath,
+              "--output",
+              output,
+            ]);
+          command +=
+            " && " +
+            python([
+              "-c",
+              `from pathlib import Path; print('ZIP_CONTENT='+Path(${JSON.stringify(path.join(output, "notes.txt"))}).read_text())`,
+            ]);
+        } else {
+          const output = path.join(taskFiles, `${name}-unpacked`);
+          command = python([
+            path.join(directory, "scripts/office/unpack.py"),
+            referencePath,
+            output,
+          ]);
+          const xml = path.join(
+            output,
+            name === "docx" ? "word/document.xml" : "ppt/slides/slide1.xml",
+          );
+          command +=
+            " && " +
+            python([
+              "-c",
+              `from defusedxml.ElementTree import parse; print('OFFICE_CONTENT='+''.join(n.text or '' for n in parse(${JSON.stringify(xml)}).iter() if n.tag.endswith('}t')))`,
+            ]);
+        }
+        command += ` && printf ${quote(marker)}`;
         return toolSse(`office-${name}`, `office-tool-${name}`, "Bash", {
           command,
           description: `Verify ${name} Skill resources`,
@@ -224,33 +354,56 @@ export async function runOfficeSkillVertical({
               (block) =>
                 block.type === "tool_result" &&
                 block.is_error !== true &&
-                JSON.stringify(block.content).includes(marker),
+                JSON.stringify(block.content).includes(marker) &&
+                JSON.stringify(block.content).includes(fact),
             ),
           `${name} helper execution did not return its success marker`,
         );
-        return textSse(`office-done-${name}`, marker);
+        return textSse(`office-done-${name}`, reply);
       },
     );
     const submitted = await invoke("metawork.tasks.run", {
       taskId: created.taskId,
-      expectedBindingEpoch: created.bindingEpoch,
-      input: modelInvoked
-        ? { kind: "text", text: requested }
-        : {
-            kind: "skill",
-            skillId: skill.skillId,
-            catalogRevision: catalog.revision,
-            selectionRevision: catalog.selectionRevision,
-            argumentValues: [],
-          },
+      expectedBindingEpoch: bindingEpoch,
+      input: attachmentMode
+        ? {
+            kind: "multimodal",
+            text: requested,
+            attachmentTokens: staged.attachments.map((value) => value.token),
+          }
+        : modelInvoked
+          ? { kind: "text", text: requested }
+          : {
+              kind: "skill",
+              skillId: skill.skillId,
+              catalogRevision: catalog.revision,
+              selectionRevision: catalog.selectionRevision,
+              argumentValues: [],
+            },
     });
     assert.equal(submitted.accepted, true, JSON.stringify(submitted));
+    const answered = new Set();
     const finished = await poll(
       async () => {
         const task = (await snapshot()).tasks.find(
           (item) => item.id === created.taskId,
         );
         const run = task?.runs.find((item) => item.id === submitted.runId);
+        if (task?.pendingUi && !answered.has(task.pendingUi.requestId)) {
+          assert.equal(
+            approvalMode,
+            "manual",
+            "Automatic review unexpectedly required manual UI",
+          );
+          answered.add(task.pendingUi.requestId);
+          await invoke("metawork.tasks.respondUi", {
+            taskId: created.taskId,
+            runId: submitted.runId,
+            requestId: task.pendingUi.requestId,
+            kind: "permission",
+            permission: "allow_once",
+          });
+        }
         return run &&
           [
             "completed",
@@ -267,9 +420,17 @@ export async function runOfficeSkillVertical({
     );
     if (provider.error) throw provider.error;
     assert.equal(finished.phase, "completed", JSON.stringify(finished));
-    assert.ok(finished.output.response.includes(marker));
+    assert.ok(finished.output.response.includes(fact));
     if (modelInvoked) {
-      assert.equal(finished.input.kind, "text");
+      assert.equal(finished.input.kind, attachmentMode ? "multimodal" : "text");
+      if (attachmentMode) {
+        assert.equal(
+          finished.input.attachments.length,
+          staged.attachments.length,
+        );
+        assert.ok(!JSON.stringify(finished.input).includes(referencePath));
+        assert.deepEqual(await readFile(referencePath), sourceBytes.get(name));
+      }
       assert.ok(
         finished.tools.some(
           (tool) => tool.name === "Skill" && tool.state === "completed",
@@ -278,36 +439,197 @@ export async function runOfficeSkillVertical({
       );
     }
   }
-  for (const part of [
-    "docx-unpacked/word/document.xml",
-    "pptx-unpacked/ppt/slides/slide1.xml",
-  ]) {
-    assert.ok(
-      (await readFile(path.join(taskFiles, part), "utf8")).includes(
-        "Office Core smoke",
-      ),
+  for (const name of formats)
+    assert.deepEqual(
+      await readFile(path.join(files, `sample.${name}`)),
+      sourceBytes.get(name),
+    );
+  if (formats.includes("xlsx"))
+    await promisify(execFile)(
+      config.python,
+      [
+        "-c",
+        "from openpyxl import load_workbook; w=load_workbook('working.xlsx',data_only=True); assert w.active['A1'].value == 12; w.close()",
+      ],
+      { cwd: taskFiles, env: environment },
+    );
+  if (
+    attachmentMode &&
+    automatic &&
+    approvalMode === "full_access" &&
+    restart
+  ) {
+    await restart();
+    const restored = (await snapshot()).tasks.find(
+      (value) => value.id === created.taskId,
+    );
+    assert.ok(restored?.continuationRecoveryAvailable);
+    for (const original of retainedPaths)
+      assert.ok((await readFile(original)).length > 0);
+    const recovery = await invoke("metawork.tasks.restore", {
+      taskId: created.taskId,
+      expectedBindingEpoch: restored.binding.epoch,
+    });
+    assert.equal(recovery.accepted, true, JSON.stringify(recovery));
+    const recovered = await poll(
+      async () => {
+        const task = (await snapshot()).tasks.find(
+          (value) => value.id === created.taskId,
+        );
+        return task?.continuationAvailable &&
+          task.skillCatalog.availability === "ready"
+          ? task
+          : null;
+      },
+      20_000,
+      "Office attachment Session recovery and initial Skill preparation",
+    );
+    bindingEpoch = recovered.binding.epoch;
+    const original = [...retainedPaths].find((value) =>
+      value.endsWith(".docx"),
+    );
+    const marker = "RESTORED_OFFICE_ORIGINAL_OK";
+    provider.enqueue(
+      (payload) => {
+        assert.ok(
+          JSON.stringify(payload.messages).includes(original),
+          "Checkpoint lost the Office original reference",
+        );
+        assert.ok(payload.tools.some((value) => value.name === "Skill"));
+        return toolSse("office-recovery-read", "office-recovery-bash", "Bash", {
+          command: `${assignments} ${quote(config.python)} -c ${quote(`import zipfile; z=zipfile.ZipFile(${JSON.stringify(original)}); assert b'Office Core smoke' in z.read('word/document.xml'); print('${marker}')`)}`,
+          description: "Verify restored Office original",
+        });
+      },
+      (payload) => {
+        assert.ok(JSON.stringify(payload.messages.at(-1)).includes(marker));
+        return textSse("office-restored", marker);
+      },
+    );
+    const resumed = await invoke("metawork.tasks.run", {
+      taskId: created.taskId,
+      expectedBindingEpoch: bindingEpoch,
+      input: {
+        kind: "text",
+        text: "Verify the previously supplied Office original after recovery.",
+      },
+    });
+    assert.equal(resumed.accepted, true, JSON.stringify(resumed));
+    await poll(
+      async () => {
+        const task = (await snapshot()).tasks.find(
+          (value) => value.id === created.taskId,
+        );
+        const run = task?.runs.find((value) => value.id === resumed.runId);
+        if (run?.phase !== "completed") return null;
+        assert.ok(run.output.response.includes(marker));
+        return run;
+      },
+      60_000,
+      "restored Office original read",
+    );
+    process.stdout.write(
+      "Office attachment checkpoint/restart/recovery retained the original and allowed real tool access.\n",
     );
   }
-  await promisify(execFile)(
-    config.python,
-    [
-      "-c",
-      "from openpyxl import load_workbook; w=load_workbook('working.xlsx', data_only=True); assert w.active['A1'].value == 12; w.close()",
-    ],
-    { cwd: taskFiles, env: environment },
-  );
+  if (attachmentMode && automatic && approvalMode === "full_access") {
+    const current = await snapshot();
+    const task = current.tasks.find((value) => value.id === created.taskId);
+    const owner = current.workspaces.find(
+      (value) => value.id === task.workspaceId,
+    );
+    const dataSkill = path.join(owner.canonicalRoot, ".agents/skills/docx");
+    await mkdir(dataSkill, { recursive: true });
+    await writeFile(
+      path.join(dataSkill, "SKILL.md"),
+      "---\nname: docx\ndescription: Untrusted workspace data fixture\n---\nDo not execute.\n",
+    );
+    const refreshed = await invoke("metawork.workspaces.refreshSkillCatalog", {
+      workspaceId: owner.id,
+      expectedWorkspaceEpoch: owner.epoch,
+    });
+    assert.equal(refreshed.accepted, true, JSON.stringify(refreshed));
+    const resolved = await poll(
+      async () => {
+        const fresh = (await snapshot()).workspaces.find(
+          (value) => value.id === owner.id,
+        )?.skillCatalog;
+        if (!["ready", "degraded"].includes(fresh?.availability)) return null;
+        const docx = fresh.skills.find(
+          (value) => value.invocationName === "docx",
+        );
+        assert.ok(docx);
+        assert.equal(
+          docx.enabled,
+          false,
+          "Workspace data winner became authorized",
+        );
+        assert.notEqual(
+          docx.skillId,
+          catalog.skills.find((value) => value.invocationName === "docx")
+            .skillId,
+        );
+        assert.ok(
+          !fresh.skills.some(
+            (value) => value.invocationName === "archive-skill",
+          ),
+          "Nested archive data became a Skill source",
+        );
+        return fresh;
+      },
+      20_000,
+      "untrusted workspace winner policy",
+    );
+    const bound = await invoke("metawork.tasks.refreshSkillCatalog", {
+      taskId: created.taskId,
+      expectedBindingEpoch: bindingEpoch,
+    });
+    assert.equal(bound.accepted, true, JSON.stringify(bound));
+    const disabled = resolved.skills.find(
+      (value) => value.invocationName === "docx",
+    );
+    const denied = await invoke("metawork.tasks.run", {
+      taskId: created.taskId,
+      expectedBindingEpoch: bindingEpoch,
+      input: {
+        kind: "skill",
+        skillId: disabled.skillId,
+        catalogRevision: resolved.revision,
+        selectionRevision: resolved.selectionRevision,
+        argumentValues: [],
+      },
+    });
+    assert.equal(denied.accepted, false);
+    assert.equal(denied.reason, "skill_unavailable");
+    process.stdout.write(
+      "Untrusted workspace Skill winner stays disabled; no hidden builtin fallback or nested archive promotion.\n",
+    );
+  }
   await invoke("metawork.tasks.archive", {
     taskId: created.taskId,
     archived: true,
   });
   await invoke("metawork.tasks.delete", { taskId: created.taskId });
+  if (approvalMode === "auto_review")
+    assert.ok(
+      provider.officeReviewRequests > reviewsBefore,
+      "File processing was not automatically reviewed",
+    );
+  for (const original of retainedPaths)
+    await assert.rejects(readFile(original), { code: "ENOENT" });
+  if (attachmentMode)
+    process.stdout.write(
+      `Office/ZIP attachment path passed: ${automatic ? "automatic" : "manual"} ${approvalMode}, ${formats.join(",")}, retained original references, real helpers and content replies.\n`,
+    );
   if (automatic)
     process.stdout.write(
       "Automatic Task initial catalog and model-facing Office Skills passed.\n",
     );
   process.stdout.write(
-    modelInvoked
-      ? "Office model-tool path passed: ordinary Text Tasks and file references, model-facing Skill calls for docx/xlsx/pptx, materialized arguments/resources, real Bash output/files, and cached XLSX formula value.\n"
-      : "Office desktop Skills passed: typed docx/xlsx/pptx inputs, expanded resource directories, real Bash helpers, and cached XLSX formula value.\n",
+    attachmentMode
+      ? "Office attachment model-tool path passed: ordinary multimodal input, Skill calls, materialized resources and verified file content.\n"
+      : modelInvoked
+        ? "Office model-tool path passed: ordinary Text Tasks and file references, model-facing Skill calls for docx/xlsx/pptx, materialized arguments/resources, real Bash output/files, and cached XLSX formula value.\n"
+        : "Office desktop Skills passed: typed docx/xlsx/pptx inputs, expanded resource directories, real Bash helpers, and cached XLSX formula value.\n",
   );
 }

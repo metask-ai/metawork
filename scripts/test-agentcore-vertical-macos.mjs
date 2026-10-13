@@ -256,33 +256,39 @@ const responses = [
       { file_path: fixturePath },
       "I’m checking the workspace before making changes.",
     ),
-    350,
+    process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 1_000 : 350,
   ),
-  toolSse(
-    "m2",
-    "bash-1",
-    "Bash",
-    {
-      command:
-        process.platform === "win32"
-          ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
-          : officeModelToolProbe
-            ? "sleep 2; echo agentcore-vertical-bash-ok"
-            : "sleep 0.4; echo agentcore-vertical-bash-ok",
-      description: "Check the command output",
-    },
-    "I’ve checked the input; now I’m running a focused verification.",
+  streamedSse(
+    toolSse(
+      "m2",
+      "bash-1",
+      "Bash",
+      {
+        command:
+          process.platform === "win32"
+            ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
+            : officeModelToolProbe
+              ? "sleep 2; echo agentcore-vertical-bash-ok"
+              : "sleep 0.4; echo agentcore-vertical-bash-ok",
+        description: "Check the command output",
+      },
+      "I’ve checked the input; now I’m running a focused verification.",
+    ),
+    process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 1_000 : 80,
   ),
-  toolSse(
-    "m3",
-    "edit-1",
-    "Edit",
-    {
-      file_path: fixturePath,
-      old_string: "agentcore-vertical-before",
-      new_string: "agentcore-vertical-after",
-    },
-    "The verification passed; now I’m applying the change.",
+  streamedSse(
+    toolSse(
+      "m3",
+      "edit-1",
+      "Edit",
+      {
+        file_path: fixturePath,
+        old_string: "agentcore-vertical-before",
+        new_string: "agentcore-vertical-after",
+      },
+      "The verification passed; now I’m applying the change.",
+    ),
+    process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 1_000 : 80,
   ),
   ...(process.platform === "win32"
     ? [
@@ -364,7 +370,7 @@ const responses = [
 const provider = createProvider(responses, {
   // CLI snapshot polling needs an observation window during this larger probe.
   initialDelayMs: visualCaptureDir || officeModelToolProbe ? 1_500 : 120,
-  frameDelayMs: 80,
+  frameDelayMs: process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 300 : 80,
 });
 const baseUrl = await provider.listen();
 const chromeProbePort =
@@ -1573,17 +1579,44 @@ try {
   if (process.env.METAWORK_OFFICE_VERTICAL === "1") {
     assert.equal(process.platform, "darwin");
     assert.ok(process.env.METAWORK_LOCAL_SKILL_ROOT);
-    await runOfficeSkillVertical({
-      root,
-      workspace: canonicalWorkspace,
-      workspaceId,
-      invoke: invokeBridge,
-      snapshot,
-      poll,
-      provider,
-      toolSse,
-      textSse,
-    });
+    const cases =
+      process.env.METAWORK_OFFICE_ATTACHMENTS === "1"
+        ? [
+            { automaticOverride: true, approvalMode: "full_access" },
+            { automaticOverride: false, approvalMode: "full_access" },
+            {
+              automaticOverride: true,
+              approvalMode: "manual",
+              selectedFormats: ["docx"],
+            },
+            {
+              automaticOverride: true,
+              approvalMode: "auto_review",
+              selectedFormats: ["zip"],
+            },
+          ]
+        : [{}];
+    for (const [caseId, options] of cases.entries())
+      await runOfficeSkillVertical({
+        root,
+        workspace: canonicalWorkspace,
+        workspaceId,
+        invoke: invokeBridge,
+        snapshot,
+        poll,
+        provider,
+        toolSse,
+        textSse,
+        imagePath: attachmentPngPath,
+        restart: async () => {
+          await stopApplication("Office attachment restart");
+          await rm(automationDir, { recursive: true, force: true });
+          startApplication();
+          await waitForBridge();
+        },
+        caseId,
+        ...options,
+      });
   }
   await stopApplication("app stop");
 
@@ -2982,6 +3015,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let served = 0;
   let titleCompletions = 0;
   let reviewRequests = 0;
+  let officeReviewRequests = 0;
   let releaseReview = null;
   let providerError = null;
   const requests = [];
@@ -3014,6 +3048,49 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           assert.equal(payload.stream, undefined);
           assert.equal(payload.tools, undefined);
           const review = JSON.parse(payload.messages[0].content);
+          let officeIntent = null;
+          try {
+            const candidate = JSON.parse(review.evidence.user_intent);
+            if (
+              candidate.kind === "explicit_multimodal_input" &&
+              candidate.text.startsWith("Read the supplied")
+            )
+              officeIntent = candidate;
+          } catch {}
+          if (process.env.METAWORK_OFFICE_ATTACHMENTS === "1" && officeIntent) {
+            assert.equal(officeIntent.attachments[0].kind, "file");
+            assert.equal(
+              officeIntent.attachments[0].display_name,
+              "sample.zip",
+            );
+            assert.ok(!review.evidence.user_intent.includes("file_path="));
+            assert.equal(review.host.delegation, "current_request_only");
+            assert.ok(
+              ["Bash", "Skill"].includes(review.evidence.request.tool_name),
+            );
+            officeReviewRequests++;
+            response.writeHead(200, {
+              "content-type": "application/json",
+              connection: "close",
+            });
+            response.end(
+              JSON.stringify({
+                type: "message",
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      decision: "allow_once",
+                      reason: "bounded Office fixture operation",
+                    }),
+                  },
+                ],
+                stop_reason: "end_turn",
+                usage: { input_tokens: 1, output_tokens: 1 },
+              }),
+            );
+            return;
+          }
           assert.equal(
             review.evidence.user_intent,
             "mode-review-current-request",
@@ -3130,6 +3207,9 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     },
     get reviewRequests() {
       return reviewRequests;
+    },
+    get officeReviewRequests() {
+      return officeReviewRequests;
     },
     releaseReview() {
       assert.ok(releaseReview, "review fixture was not admitted");
