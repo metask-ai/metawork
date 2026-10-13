@@ -164,6 +164,7 @@ import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
 import { PendingScopes } from "../workbench/pendingScopes.ts";
 import { taskModelSelectionPolicy } from "./task-model-selection.ts";
+import { SkillPreparationCoordinator } from "./skill-preparation.ts";
 import { ConversationRecoveryCoordinator } from "./conversation-recovery.ts";
 
 function errorText(error: unknown) {
@@ -352,6 +353,7 @@ export default function App() {
   const taskPanelOpeners = useRef(new Map<string, HTMLButtonElement>());
   const composer = useRef<HTMLTextAreaElement>(null);
   const conversationRecovery = useRef(new ConversationRecoveryCoordinator());
+  const skillPreparation = useRef(new SkillPreparationCoordinator());
 
   function setStatus(status: ShellStatus) {
     setStatuses((current) => publishStatus(current, status));
@@ -876,6 +878,8 @@ export default function App() {
     (!newTaskDraftActive || newTaskWorkspaceReady) &&
     (!newTaskDraftActive || newTaskModelState.valid) &&
     !taskOperationInFlight &&
+    (newTaskDraftActive ||
+      activeTask?.skillCatalog.availability !== "loading") &&
     composerDraftHasContent(composerDraft) &&
     composerRunInput !== null &&
     composerDraftWithinLimits(composerDraft) &&
@@ -970,6 +974,7 @@ export default function App() {
       onSnapshot: (next, generation) => {
         if (!cancelled) {
           conversationRecovery.current.observeSnapshot(next, generation);
+          skillPreparation.current.observeSnapshot(next, generation);
           observeUiResponseSnapshot(next);
           approvalSnapshotRef.current = next;
           publishApprovalObservations(
@@ -1020,6 +1025,7 @@ export default function App() {
       onGeneration: (generation) => {
         if (!cancelled) {
           conversationRecovery.current.resetGeneration(generation);
+          skillPreparation.current.resetGeneration(generation);
           bridgeGenerationRef.current = generation;
           approvalRequestsRef.current.reset(generation);
           approvalSnapshotRef.current = null;
@@ -1053,6 +1059,7 @@ export default function App() {
     return () => {
       cancelled = true;
       conversationRecovery.current.dispose();
+      skillPreparation.current.dispose();
       if (connection.current === current) connection.current = null;
       setBridgeReady(false);
       setRootRenderBlockReason(null);
@@ -1093,6 +1100,7 @@ export default function App() {
     setConfirmDelete(false);
     taskPanelOpeners.current.clear();
     conversationRecovery.current.cancelExceptTask(activeTask?.id ?? null);
+    skillPreparation.current.cancelExceptTask(activeTask?.id ?? null);
   }, [activeTask?.id]);
 
   useEffect(() => {
@@ -1846,6 +1854,11 @@ export default function App() {
           activeTask?.continuationRecoveryAvailable,
         ),
         ensureContinuation: ensureTaskContinuation,
+        ensureSkills: (taskId, bindingEpoch) =>
+          skillPreparation.current.wait(
+            { taskId, bindingEpoch, generation: bridgeGenerationRef.current },
+            continuationWaitTimeoutMs,
+          ),
         onTaskCreated: (taskId) => {
           setNewTaskApprovalOverride(null);
           setNewTaskRequestedModel(null);

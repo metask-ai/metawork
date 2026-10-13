@@ -1413,6 +1413,7 @@ export type TaskRunReason =
   | "workspace_unavailable"
   | "workspace_changed"
   | "workspace_removing"
+  | "catalog_loading"
   | "catalog_unavailable"
   | "stale_catalog"
   | "skill_not_found"

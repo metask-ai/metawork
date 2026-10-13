@@ -25,6 +25,9 @@ export async function runOfficeSkillVertical({
   textSse,
 }) {
   const modelInvoked = process.env.METAWORK_OFFICE_MODEL_TOOL === "1";
+  const automatic = process.env.METAWORK_OFFICE_AUTOMATIC === "1";
+  if (automatic)
+    assert.ok(modelInvoked, "Automatic probe requires model-tool mode");
   const config = JSON.parse(
     await readFile(officeEnvironmentPath(root), "utf8"),
   );
@@ -67,13 +70,15 @@ export async function runOfficeSkillVertical({
     20_000,
     "Office Workspace reauthorization and catalog",
   );
-  const catalog = ready.selected.skillCatalog;
+  let catalog = ready.selected.skillCatalog;
   const created = await invoke("metawork.tasks.create", {
-    workspace: {
-      kind: "manual",
-      workspaceId,
-      expectedWorkspaceEpoch: ready.selected.epoch,
-    },
+    workspace: automatic
+      ? { kind: "automatic" }
+      : {
+          kind: "manual",
+          workspaceId,
+          expectedWorkspaceEpoch: ready.selected.epoch,
+        },
     expectedExecutionGeneration:
       ready.current.newTaskAdmission.activeGeneration,
     expectedSelectionRevision:
@@ -86,6 +91,29 @@ export async function runOfficeSkillVertical({
     approvalMode: "full_access",
   });
   assert.equal(created.accepted, true, JSON.stringify(created));
+  if (automatic) {
+    const bound = await poll(
+      async () => {
+        const current = await snapshot();
+        const task = current.tasks.find((value) => value.id === created.taskId);
+        if (task?.skillCatalog.availability === "loading") return null;
+        assert.equal(
+          task?.skillCatalog.availability,
+          "ready",
+          JSON.stringify(task?.skillCatalog),
+        );
+        const owner = current.workspaces.find(
+          (value) => value.id === task.workspaceId,
+        );
+        assert.equal(owner?.kind, "automatic");
+        assert.notEqual(owner?.canonicalRoot, workspace);
+        return task;
+      },
+      20_000,
+      "Automatic initial Skill catalog binding",
+    );
+    catalog = bound.skillCatalog;
+  }
   await invoke("metawork.tasks.rename", {
     taskId: created.taskId,
     title: "Local Office smoke",
@@ -269,6 +297,10 @@ export async function runOfficeSkillVertical({
     archived: true,
   });
   await invoke("metawork.tasks.delete", { taskId: created.taskId });
+  if (automatic)
+    process.stdout.write(
+      "Automatic Task initial catalog and model-facing Office Skills passed.\n",
+    );
   process.stdout.write(
     modelInvoked
       ? "Office model-tool path passed: ordinary Text Tasks and file references, model-facing Skill calls for docx/xlsx/pptx, materialized arguments/resources, real Bash output/files, and cached XLSX formula value.\n"

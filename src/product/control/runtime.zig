@@ -3153,6 +3153,7 @@ pub const Runtime = struct {
             .id = workspace.id,
             .epoch = workspace.epoch,
             .catalog_authorized = workspaceSkillCatalogAuthorized(workspace),
+            .personal_only = workspace.kind == .automatic,
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
         skill_root_owned = false;
@@ -3206,6 +3207,57 @@ pub const Runtime = struct {
             catalogSnapshotLimits(self.limits),
             self.schedule.now(),
         );
+    }
+
+    /// Runs only after Task/Session publication; prepared Schedule workspaces
+    /// never acquire a catalog or a job and keep required durable admission.
+    fn syncInitialAutomaticCatalogsNoFail(self: *Runtime) bool {
+        if (self.shutting_down) return false;
+        var changed = false;
+        for (0..self.workspace.slotCount()) |index| {
+            const workspace = self.workspace.factsAt(index) orelse continue;
+            if (workspace.kind != .automatic or workspace.automatic_task_id == 0) continue;
+            const task_id = workspace.automatic_task_id;
+            const projection = self.task_runtime.catalogProjection(task_id) orelse continue;
+            if (self.task_runtime.initialCatalogNeeded(task_id)) {
+                self.task_runtime.markInitialCatalog(task_id, true);
+                changed = true;
+                if (self.canonical_user_home == null or workspace.authorization != .available) {
+                    self.task_runtime.markInitialCatalog(task_id, false);
+                    continue;
+                }
+                self.skill.setWorkspaceCatalogAuthorized(workspace.id, workspace.epoch, true, self.skillProjectionBudget()) catch {
+                    self.task_runtime.markInitialCatalog(task_id, false);
+                    continue;
+                };
+                self.skill.ensureWorkspaceCatalog(workspace.id, workspace.epoch, self.skillProjectionBudget()) catch {
+                    self.task_runtime.markInitialCatalog(task_id, false);
+                    continue;
+                };
+            } else if (projection.availability != .loading) continue;
+            const authority = self.skill.workspaceCatalogAuthority(workspace.id, workspace.epoch) catch {
+                self.task_runtime.markInitialCatalog(task_id, false);
+                changed = true;
+                continue;
+            };
+            switch (authority) {
+                .loading => {},
+                .ready, .degraded => {
+                    const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse continue;
+                    // The public refresh transaction consumes the same binding
+                    // identity, but sync must not recursively invoke lifecycle.
+                    self.installTaskCatalog(task_id, binding_epoch) catch {
+                        self.task_runtime.markInitialCatalog(task_id, false);
+                    };
+                    changed = true;
+                },
+                .uninitialized, .unavailable => {
+                    self.task_runtime.markInitialCatalog(task_id, false);
+                    changed = true;
+                },
+            }
+        }
+        return changed;
     }
 
     pub fn workspaceCatalog(
@@ -3318,10 +3370,12 @@ pub const Runtime = struct {
         self.syncLifecycle();
         const workspace = self.workspace.facts(workspace_id) orelse
             return error.UnknownWorkspace;
-        if (workspace.kind != .manual) return error.WorkspaceUnavailable;
         if (workspace.epoch != expected_workspace_epoch)
             return error.WorkspaceEpochMismatch;
-        if (!workspace.visible or workspace.authorization != .available)
+        if ((workspace.kind == .manual and !workspace.visible) or workspace.authorization != .available)
+            return error.WorkspaceUnavailable;
+        if (workspace.kind == .automatic and (self.task_runtime.taskPermissionInteraction(workspace.automatic_task_id) != .interactive or
+            !self.task_runtime.continuationAvailable(workspace.automatic_task_id, self.taskRuntimeProjectionEffects())))
             return error.WorkspaceUnavailable;
         try self.skill.refreshWorkspace(workspace.id, workspace.epoch);
         self.bumpRevision();
@@ -3334,6 +3388,10 @@ pub const Runtime = struct {
     ) Error!void {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
+        try self.installTaskCatalog(task_id, expected_binding_epoch);
+    }
+
+    fn installTaskCatalog(self: *Runtime, task_id: u64, expected_binding_epoch: u64) Error!void {
         const facts = try self.task_runtime.catalogRefreshFacts(
             task_id,
             expected_binding_epoch,
@@ -3342,7 +3400,6 @@ pub const Runtime = struct {
             return error.WorkspaceUnavailable;
         if (!self.skill.enablementTrusted())
             return error.RecoveryUnavailable;
-        if (workspace.kind != .manual) return error.CatalogUnavailable;
         if (workspace.epoch != facts.workspace_epoch)
             return error.WorkspaceEpochMismatch;
         const authority = switch (try self.skill.workspaceCatalogAuthority(
@@ -3469,6 +3526,7 @@ pub const Runtime = struct {
             .id = workspace.id,
             .epoch = workspace.epoch,
             .catalog_authorized = workspaceSkillCatalogAuthorized(workspace),
+            .personal_only = workspace.kind == .automatic,
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
         skill_root_owned = false;
@@ -3820,6 +3878,7 @@ pub const Runtime = struct {
         );
         self.workspace.setAutomaticOwner(workspace.id, task_id);
         automatic.complete(self);
+        _ = self.syncInitialAutomaticCatalogsNoFail();
         return task_id;
     }
 
@@ -4385,8 +4444,8 @@ pub const Runtime = struct {
             workspace_id,
             task_workspace_epoch,
         );
-        if (workspace.kind == .automatic and input == .skill)
-            return error.CatalogUnavailable;
+        if ((self.task_runtime.catalogProjection(task_id) orelse return error.UnknownTask).availability == .loading)
+            return error.CatalogLoading;
         var borrowed_parts: [lifecycle.multimodal_input_limits.max_parts]product_attachment.BorrowedPart = undefined;
         var borrowed_indices: [lifecycle.multimodal_input_limits.max_parts]usize = undefined;
         var multimodal_items: [lifecycle.multimodal_input_limits.max_parts]task_runtime.MultimodalAttachment = undefined;
@@ -4779,6 +4838,13 @@ pub const Runtime = struct {
     pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
         self.syncLifecycle();
         const requested = try self.task_runtime.requestDeletion(task_id);
+        if (self.task_runtime.taskWorkspaceId(task_id)) |id| {
+            if (self.workspace.facts(id)) |workspace| {
+                if (workspace.kind == .automatic)
+                    self.skill.setWorkspaceCatalogAuthorized(id, workspace.epoch, false, self.skillProjectionBudget()) catch unreachable;
+            }
+        }
+
         const deletion = self.task_runtime.syncDeletions(
             self.checkpoint_store_health.load(.acquire) != .unavailable,
             self.taskRuntimeDeletionEffects(),
@@ -5092,6 +5158,7 @@ pub const Runtime = struct {
             },
         });
         changed = task_sync.changed or changed;
+        changed = self.syncInitialAutomaticCatalogsNoFail() or changed;
         changed = self.syncApprovalChanges() or changed;
         var durable_changed = task_sync.durable_changed;
         if (self.finalizeWorkspaceRemovalsNoFail()) {
@@ -6205,12 +6272,7 @@ pub const Runtime = struct {
         const self: *const Runtime = @ptrCast(@alignCast(context));
         const workspace = self.workspace.facts(workspace_id) orelse unreachable;
         std.debug.assert(workspace.epoch == workspace_epoch);
-        // Automatic Workspaces have no catalog; unavailable is a Manual
-        // Workspace authority state, not their presentation state.
-        const projection: CatalogProjection = if (workspace.kind == .automatic)
-            .{ .availability = .uninitialized }
-        else
-            self.skill.workspaceCatalogProjection(workspace_id, workspace_epoch) catch unreachable;
+        const projection = self.skill.workspaceCatalogProjection(workspace_id, workspace_epoch) catch unreachable;
         skill_runtime.Runtime.writeCatalogProjection(
             writer,
             self.skillTextProjection(),
@@ -7117,6 +7179,7 @@ pub const Runtime = struct {
                 .id = restored.id,
                 .epoch = restored.epoch,
                 .catalog_authorized = workspaceSkillCatalogAuthorized(restored),
+                .personal_only = restored.kind == .automatic,
                 .canonical_root = skill_root,
             }, self.skillProjectionBudget());
             skill_root_owned = false;
@@ -7420,11 +7483,19 @@ pub const Runtime = struct {
         if (self.attachments.file_store) |store| store.deleteTask(task_id);
     }
 
+    fn taskResourcesQuiescent(context: *anyopaque, task_id: u64, workspace_id: u64) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const workspace = self.workspace.facts(workspace_id) orelse return false;
+        return (workspace.kind != .automatic or !self.skill.hasWorkspaceJob(workspace_id)) and
+            (if (self.file_change_lane) |lane| !lane.hasTaskJob(task_id) else true);
+    }
+
     fn taskRuntimeDeletionEffects(self: *Runtime) task_runtime.DeletionEffects {
         return .{
             .context = self,
             .release_session_fn = releaseTaskRuntimeSession,
             .commit_without_task_fn = commitTaskRuntimeWithoutTask,
+            .resources_quiescent_fn = taskResourcesQuiescent,
             .delete_checkpoint_task_fn = deleteTaskRuntimeCheckpointTask,
             .delete_file_change_task_fn = deleteTaskRuntimeFileChanges,
             .delete_attachment_task_fn = deleteTaskRuntimeAttachments,
@@ -7739,6 +7810,7 @@ pub const Runtime = struct {
             .id = workspace.id,
             .epoch = workspace.epoch,
             .catalog_authorized = workspaceSkillCatalogAuthorized(workspace),
+            .personal_only = workspace.kind == .automatic,
             .canonical_root = skill_root,
         }, self.skillProjectionBudget());
         return .{ .workspace = preparation };
@@ -10826,7 +10898,7 @@ fn testAttachmentPreview(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []
     return allocator.dupe(u8, bytes);
 }
 
-test "Automatic Workspace snapshot matches the catalog-free Renderer fixture variant" {
+test "Automatic Workspace snapshot exposes unavailable Skill authority with no query authorization" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -10845,6 +10917,7 @@ test "Automatic Workspace snapshot matches the catalog-free Renderer fixture var
     const workspace = &fixture.value.object.getPtr("workspaces").?.array.items[0];
     workspace.object.getPtr("kind").?.* = .{ .string = "automatic" };
     workspace.object.getPtr("recentOrder").?.* = .{ .string = "0" };
+    workspace.object.getPtr("skillCatalog").?.object.getPtr("availability").?.* = .{ .string = "unavailable" };
     const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, fixture.value, .{});
     defer std.testing.allocator.free(expected);
     var storage: [8192]u8 = undefined;
@@ -16931,7 +17004,7 @@ test "Runtime cleans file change orphans only from healthy task history" {
     try std.testing.expectEqualStrings("preserved", restored);
 }
 
-test "Task deletion removes installed and late file change artifacts" {
+test "Task deletion waits for FileChange workers before removing retained artifacts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_storage: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -16980,13 +17053,16 @@ test "Task deletion removes installed and late file change artifacts" {
     try control.setTaskArchived(3, true);
     control.releaseTaskAttachmentNoFail(task, .cold_start);
     try control.deleteTask(3);
-    try std.testing.expect(control.task_runtime.tasks[0] == null);
+    try std.testing.expect(control.task_runtime.tasks[0] != null);
+    try std.testing.expectEqual(@as(@TypeOf(control.task_runtime.tasks[0].?.deletion), .deleting), control.task_runtime.tasks[0].?.deletion);
 
     control.shutdownFileChangeExecutor();
     control.drainFileChangeCompletions(.{
         .context = &control,
         .complete_fn = discardFileChangeDiffCompletion,
     });
+    control.syncLifecycle();
+    try std.testing.expect(control.task_runtime.tasks[0] == null);
     try std.testing.expectError(
         error.BlobMissing,
         store.readAlloc(

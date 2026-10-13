@@ -362,6 +362,7 @@ const taskRunReasons = [
   "workspace_unavailable",
   "workspace_changed",
   "workspace_removing",
+  "catalog_loading",
   "catalog_unavailable",
   "stale_catalog",
   "skill_not_found",
@@ -3714,10 +3715,12 @@ function decodeWorkspace(value: unknown, path: string): WorkspaceView {
     kind === "automatic" &&
     (recentOrder !== "0" ||
       authorization !== "available" ||
-      lastRemovalFailure !== null ||
-      skillCatalog.availability !== "uninitialized")
+      lastRemovalFailure !== null)
   )
-    fail(path, "automatic Workspace must remain Task-owned and catalog-free");
+    fail(
+      path,
+      "automatic Workspace must remain Task-owned without project source settings",
+    );
   return {
     id: positiveWireId(item.id, `${path}.id`),
     epoch: positiveWireId(item.epoch, `${path}.epoch`),

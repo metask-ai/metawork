@@ -1788,7 +1788,10 @@ async function assertUnifiedStagedOriginals() {
   const expected = new Map([
     [".png", createHash("sha256").update(attachmentPngBytes).digest("hex")],
     [".jpg", createHash("sha256").update(attachmentJpegBytes).digest("hex")],
-    [".txt", createHash("sha256").update(attachmentLogText).digest("hex")],
+    [
+      path.extname(attachmentLogPath),
+      createHash("sha256").update(attachmentLogText).digest("hex"),
+    ],
   ]);
   for (const name of originals) {
     const extension = path.extname(name);

@@ -68,6 +68,7 @@ export async function submitTaskInstruction({
   input,
   continuationRecoveryAvailable = false,
   ensureContinuation,
+  ensureSkills,
   onTaskCreated,
 }: {
   client: TaskSubmissionClient;
@@ -84,6 +85,10 @@ export async function submitTaskInstruction({
     taskId: string,
     expectedBindingEpoch: string,
   ) => Promise<EnsureTaskContinuationResult>;
+  ensureSkills?: (
+    taskId: string,
+    bindingEpoch: string,
+  ) => Promise<{ kind: "ready" } | { kind: "failed"; error: unknown }>;
   onTaskCreated: (taskId: string) => void;
 }): Promise<TaskSubmissionResult> {
   let targetTaskId = taskId;
@@ -152,6 +157,20 @@ export async function submitTaskInstruction({
         error: continuation.error,
       };
     targetBindingEpoch = continuation.bindingEpoch;
+  }
+  if (ensureSkills) {
+    try {
+      const skills = await ensureSkills(targetTaskId, targetBindingEpoch);
+      if (skills.kind === "failed")
+        return {
+          kind: "run_failed",
+          taskId: targetTaskId,
+          created,
+          error: skills.error,
+        };
+    } catch (error) {
+      return { kind: "run_failed", taskId: targetTaskId, created, error };
+    }
   }
   try {
     const run = await client.run(targetTaskId, targetBindingEpoch, input);

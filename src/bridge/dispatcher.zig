@@ -4946,6 +4946,7 @@ fn taskRunRejection(err: anyerror) ?[]const u8 {
         error.UnknownWorkspace, error.WorkspaceUnavailable, error.WorkspaceIdentityUntrusted => "workspace_unavailable",
         error.WorkspaceEpochMismatch => "workspace_changed",
         error.WorkspaceRemovalInProgress => "workspace_removing",
+        error.CatalogLoading => "catalog_loading",
         error.CatalogUnavailable => "catalog_unavailable",
         error.StaleCatalog => "stale_catalog",
         error.SkillNotFound => "skill_not_found",

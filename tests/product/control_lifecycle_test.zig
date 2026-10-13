@@ -1114,6 +1114,7 @@ const WorkspaceSkillQueryProbe = struct {
     catalog: product_skill.ports.Catalog = undefined,
     root_checks: std.atomic.Value(usize) = .init(0),
     queries: std.atomic.Value(usize) = .init(0),
+    hold_queries: std.atomic.Value(bool) = .init(false),
 
     fn attach(self: *@This(), workbench: *product_control.Runtime) void {
         self.catalog = workbench.skill.ports.catalog;
@@ -1129,7 +1130,11 @@ const WorkspaceSkillQueryProbe = struct {
 
     fn query(context: *anyopaque, input: lifecycle.CatalogQuery) anyerror!lifecycle.CatalogAcquisition {
         const self: *@This() = @ptrCast(@alignCast(context));
-        if (input.target == .workspace) _ = self.queries.fetchAdd(1, .release);
+        if (input.target == .workspace) {
+            _ = self.queries.fetchAdd(1, .release);
+            while (self.hold_queries.load(.acquire))
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
         return self.catalog.query(input);
     }
 
@@ -1155,6 +1160,14 @@ fn settleWorkspaceSkillQueries(workbench: *product_control.Runtime, id: u64) !vo
     return error.TestUnexpectedResult;
 }
 
+fn waitInitialTaskCatalog(workbench: *product_control.Runtime, task_id: u64) !void {
+    for (0..5000) |_| {
+        if ((try workbench.taskCatalog(task_id)).availability != .loading) return;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn expectWorkspaceSkillProjection(workbench: *product_control.Runtime, id: u64, present: bool) !void {
     var storage: [256 * 1024]u8 = undefined;
     const bytes = try workbench.writeSnapshot(&storage);
@@ -1164,9 +1177,9 @@ fn expectWorkspaceSkillProjection(workbench: *product_control.Runtime, id: u64, 
         if (try std.fmt.parseInt(u64, workspace.object.get("id").?.string, 10) != id) continue;
         try std.testing.expectEqual(present, workspace.object.get("skillSourceDiscovery").? != .null);
         const automatic = std.mem.eql(u8, "automatic", workspace.object.get("kind").?.string);
-        if (automatic or !present) {
+        if (!automatic and !present) {
             const catalog = workspace.object.get("skillCatalog").?;
-            try std.testing.expectEqualStrings(if (automatic) "uninitialized" else "unavailable", catalog.object.get("availability").?.string);
+            try std.testing.expectEqualStrings("unavailable", catalog.object.get("availability").?.string);
             try std.testing.expect(!catalog.object.get("redacted").?.bool);
             try std.testing.expect(catalog.object.get("revision").? == .null);
             try std.testing.expect(catalog.object.get("selectionRevision").? == .null);
@@ -1242,7 +1255,7 @@ test "Skill source authorization excludes restored Manual roots until explicit r
     }
 }
 
-test "Skill source authorization keeps new and restored Automatic snapshots catalog-free" {
+test "Automatic catalog uses personal discovery after creation and waits for Session recovery" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
     defer {
@@ -1265,6 +1278,8 @@ test "Skill source authorization keeps new and restored Automatic snapshots cata
             var automatic_root = try product_control.AutomaticWorkspaceRoot.open(std.testing.io, std.testing.allocator, home);
             defer automatic_root.deinit();
             try store.commit(.{});
+            var enablement_store = try product_skill.enablement.FileStore.init(std.testing.io, home);
+            defer enablement_store.deinit();
             var probe: WorkspaceSkillQueryProbe = .{};
             var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
                 .worker_count = 1,
@@ -1276,13 +1291,27 @@ test "Skill source authorization keeps new and restored Automatic snapshots cata
             }, .{
                 .directories = .{ .canonical_user_home = home, .testing_automatic_workspace_root = if (restore_workspace) null else &automatic_root },
                 .task_persistence = if (restore_workspace) persistence.capabilityRestored(restored_bytes.?) else persistence.capability(),
+                .skill_enablement = .{ .file_store = &enablement_store },
                 .skill_sources = .{ .file_store = &store, .restored = if (recover_sources) .read_failed else .{ .loaded = .{ .ready = .{} } } },
             });
             defer workbench.deinit();
             probe.attach(&workbench);
+            defer probe.hold_queries.store(false, .release);
+            if (!restore_workspace and !recover_sources) probe.hold_queries.store(true, .release);
             try installControlExecution(&workbench);
             if (!restore_workspace) {
                 task_id = try workbench.createTaskForWorkspace(.automatic, 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = null });
+                if (!recover_sources) {
+                    for (0..5000) |_| {
+                        if (probe.queries.load(.acquire) > 0) break;
+                        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                    }
+                    try std.testing.expect(probe.queries.load(.acquire) > 0);
+                    try std.testing.expectEqual(product_control.CatalogAvailability.loading, (try workbench.taskCatalog(task_id)).availability);
+                    try std.testing.expectError(error.CatalogLoading, workbench.runTask(task_id, .{ .text = "wait before first Run" }));
+                    probe.hold_queries.store(false, .release);
+                    try waitInitialTaskCatalog(&workbench, task_id);
+                }
                 restored_bytes = try std.testing.allocator.dupe(u8, history[0..persistence.len]);
             }
             const workspace_id = try workbench.taskWorkspaceId(task_id);
@@ -1295,10 +1324,87 @@ test "Skill source authorization keeps new and restored Automatic snapshots cata
             try expectWorkspaceSkillProjection(&workbench, workspace_id, false);
             try settleWorkspaceSkillQueries(&workbench, workspace_id);
             try expectWorkspaceSkillProjection(&workbench, workspace_id, false);
-            try probe.expectQueries(0);
-            try std.testing.expectError(error.WorkspaceUnavailable, workbench.refreshWorkspaceCatalog(workspace_id, try workbench.workspaceEpoch(workspace_id)));
+            try std.testing.expectEqual(@as(usize, 0), probe.root_checks.load(.acquire));
+            if (restore_workspace) {
+                try std.testing.expectEqual(@as(usize, 0), probe.queries.load(.acquire));
+            } else {
+                try std.testing.expect(probe.queries.load(.acquire) > 0);
+                try workbench.refreshTaskCatalog(task_id, try workbench.taskBindingEpoch(task_id));
+                const pinned = try workbench.taskCatalog(task_id);
+                try std.testing.expect(pinned.availability == .ready or pinned.availability == .degraded);
+                // The fixture winner is workspace-local data and must not be granted.
+                try std.testing.expectEqual(@as(usize, 1), pinned.skills.len);
+                try std.testing.expect(!pinned.skills[0].enabled);
+            }
+            if (restore_workspace)
+                try std.testing.expectError(error.WorkspaceUnavailable, workbench.refreshWorkspaceCatalog(workspace_id, try workbench.workspaceEpoch(workspace_id)))
+            else {
+                try workbench.refreshWorkspaceCatalog(workspace_id, try workbench.workspaceEpoch(workspace_id));
+                try settleWorkspaceSkillQueries(&workbench, workspace_id);
+            }
         }
     }
+}
+
+test "Automatic deletion retains Workspace authority until the catalog worker drains" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var automatic_root = try product_control.AutomaticWorkspaceRoot.open(std.testing.io, std.testing.allocator, home);
+    defer automatic_root.deinit();
+    var enablement_store = try product_skill.enablement.FileStore.init(std.testing.io, home);
+    defer enablement_store.deinit();
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, .{
+        .directories = .{ .canonical_user_home = home, .testing_automatic_workspace_root = &automatic_root },
+        .skill_enablement = .{ .file_store = &enablement_store },
+        .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+    });
+    defer workbench.deinit();
+    var probe: WorkspaceSkillQueryProbe = .{};
+    probe.attach(&workbench);
+    probe.hold_queries.store(true, .release);
+    defer probe.hold_queries.store(false, .release);
+    try installControlExecution(&workbench);
+    const id = try workbench.createTaskForWorkspace(.automatic, 1, workbench.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = .full_access });
+    for (0..5000) |_| {
+        if (probe.queries.load(.acquire) > 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(probe.queries.load(.acquire) > 0);
+    const workspace_id = try workbench.taskWorkspaceId(id);
+    const root = try std.testing.allocator.dupe(u8, workbench.workspace.facts(workspace_id).?.canonical_root);
+    defer std.testing.allocator.free(root);
+    try workbench.setTaskArchived(id, true);
+    try workbench.deleteTask(id);
+    try std.testing.expectEqual(workspace_id, try workbench.taskWorkspaceId(id));
+    var retained = try std.Io.Dir.openDirAbsolute(std.testing.io, root, .{});
+    retained.close(std.testing.io);
+    probe.hold_queries.store(false, .release);
+    for (0..5000) |_| {
+        workbench.syncLifecycle();
+        if (workbench.task_runtime.taskWorkspaceId(id) == null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(workbench.task_runtime.taskWorkspaceId(id) == null);
+    try std.testing.expect(!workbench.skill.hasWorkspaceJob(workspace_id));
+    try std.testing.expect(workbench.workspace.facts(workspace_id) == null);
+    // Product deletion retires records; the actual Automatic work directory is retained.
+    var preserved = try std.Io.Dir.openDirAbsolute(std.testing.io, root, .{});
+    preserved.close(std.testing.io);
 }
 
 test "Skill source authorization returns after close failures and checkpoint interleaving" {
@@ -2541,6 +2647,7 @@ test "automatic Task binding adoption survives another restart and admits a seco
         null,
         .{ .interactive = null },
     );
+    try waitInitialTaskCatalog(&first, task_id);
     _ = try first.runTask(task_id, .{ .text = "automatic first run" });
     try waitCheckpointRecord(&first, &persistence);
     const restart_history = try std.testing.allocator.dupe(
@@ -2679,8 +2786,9 @@ test "automatic Task binding adoption survives another restart and admits a seco
         "\"continuationAvailable\":true",
     );
     try std.testing.expectEqual(@as(u64, 2), try continued.taskBindingEpoch(task_id));
+    try waitInitialTaskCatalog(&continued, task_id);
     try std.testing.expectEqual(
-        product_control.CatalogAvailability.uninitialized,
+        product_control.CatalogAvailability.unavailable,
         (try continued.taskCatalog(task_id)).availability,
     );
     _ = try continued.runTask(task_id, .{ .text = "automatic second run" });
@@ -4581,7 +4689,7 @@ test "Idle Task model persistence failure keeps the selected model and Session u
     }
 }
 
-test "automatic Workspace admission is Task-owned and Text-only" {
+test "automatic Workspace admission is Task-owned with explicit Skill unavailability" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -4662,7 +4770,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         try workbench.workspaceKind(first_workspace),
     );
     try std.testing.expectEqual(
-        product_control.CatalogAvailability.uninitialized,
+        product_control.CatalogAvailability.unavailable,
         (try workbench.taskCatalog(first_task)).availability,
     );
     const after_first = try workbench.copyWorkspaceProjections(&user_projection_storage);
@@ -4788,7 +4896,7 @@ test "automatic Workspace admission is Task-owned and Text-only" {
         try workbench.workspaceKind(second_workspace),
     );
     try std.testing.expectEqual(
-        product_control.CatalogAvailability.uninitialized,
+        product_control.CatalogAvailability.unavailable,
         (try workbench.taskCatalog(second_task)).availability,
     );
 }

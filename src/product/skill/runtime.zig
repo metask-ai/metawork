@@ -111,6 +111,8 @@ pub const WorkspaceBinding = struct {
     epoch: u64,
     /// Control grants catalog access independently of registry membership.
     catalog_authorized: bool,
+    /// Automatic data workspaces use personal policy and exclude local sources.
+    personal_only: bool = false,
     /// Ownership transfers to Runtime on entry.
     canonical_root: []u8,
 };
@@ -137,6 +139,7 @@ const CatalogJob = struct {
     io: std.Io,
     source_roots: ports.SourceRoots,
     selection: sources.Selection,
+    personal_only: bool = false,
     root_checks: ?sources.RootChecks = null,
     verification: ?state.Reconciliation = null,
     catalog_port: ports.Catalog,
@@ -169,7 +172,7 @@ const CatalogJob = struct {
             self.io,
             self.allocator,
             self.canonical_user_home,
-            if (self.scope == .personal) null else self.canonical_root,
+            if (self.scope == .personal or self.personal_only) null else self.canonical_root,
             self.selection,
         ) catch return;
         defer discovery.deinit();
@@ -223,6 +226,7 @@ const WorkspaceCatalog = struct {
     job: ?*CatalogJob = null,
     reschedule_pending: bool = false,
     authorized: bool,
+    personal_only: bool = false,
 
     fn deinit(
         self: *WorkspaceCatalog,
@@ -345,7 +349,7 @@ pub const Runtime = struct {
     pub fn workspaceSourceDiscovery(self: *const Runtime, id: u64, epoch: u64) ?SourceDiscoveryView {
         const settings = self.state.source_settings orelse return null;
         const workspace = self.findWorkspaceConst(id) orelse return null;
-        if (workspace.epoch != epoch or !workspace.authorized or self.canonical_user_home == null) return null;
+        if (workspace.epoch != epoch or !workspace.authorized or workspace.personal_only or self.canonical_user_home == null) return null;
         return .{ .selection = settings.selection, .checks = workspace.control.source_checks, .checking = workspace.job != null or workspace.reschedule_pending };
     }
 
@@ -410,7 +414,7 @@ pub const Runtime = struct {
         if (self.state.source_recovery_generation == std.math.maxInt(u64) or
             (personal_changed and self.state.catalog.request_generation == std.math.maxInt(u64))) return false;
         for (self.workspaces) |entry| if (entry) |workspace| {
-            if (workspace.authorized and workspace.control.request_generation == std.math.maxInt(u64)) return false;
+            if (workspace.authorized and (!workspace.personal_only or personal_changed) and workspace.control.request_generation == std.math.maxInt(u64)) return false;
         };
         return true;
     }
@@ -440,7 +444,7 @@ pub const Runtime = struct {
             self.personal_reschedule_pending = true;
         }
         for (self.workspaces) |*entry| if (entry.*) |*workspace| {
-            if (!workspace.authorized) continue;
+            if (!workspace.authorized or (workspace.personal_only and !personal_changed)) continue;
             self.invalidateSourceControl(&workspace.control, budget);
             workspace.reschedule_pending = true;
         };
@@ -485,6 +489,7 @@ pub const Runtime = struct {
             if (workspace.epoch == binding.epoch and
                 std.mem.eql(u8, workspace.canonical_root, binding.canonical_root))
             {
+                std.debug.assert(workspace.personal_only == binding.personal_only);
                 self.allocator.free(binding.canonical_root);
                 self.setWorkspaceCatalogAuthorized(binding.id, binding.epoch, binding.catalog_authorized, budget) catch unreachable;
                 return;
@@ -493,6 +498,7 @@ pub const Runtime = struct {
             workspace.canonical_root = binding.canonical_root;
             workspace.epoch = binding.epoch;
             workspace.authorized = binding.catalog_authorized;
+            workspace.personal_only = binding.personal_only;
             self.invalidateSourceControl(&workspace.control, budget);
             workspace.control.slot = .uninitialized;
             workspace.reschedule_pending = binding.catalog_authorized and self.state.source_settings != null;
@@ -506,6 +512,7 @@ pub const Runtime = struct {
             .epoch = binding.epoch,
             .canonical_root = binding.canonical_root,
             .authorized = binding.catalog_authorized,
+            .personal_only = binding.personal_only,
         };
     }
 
@@ -1401,7 +1408,7 @@ pub const Runtime = struct {
         defer self.clearJobVerification(job);
         const current = job.request_generation == control.request_generation and
             !self.shutting_down and self.state.source_settings != null and
-            job.selection.eql(self.state.source_settings.?.selection.relevant(if (scope == .personal) .user else .workspace));
+            job.selection.eql(self.state.source_settings.?.selection.relevant(if (scope == .personal or self.personalOnly(scope)) .user else .workspace));
         if (current) control.source_checks = job.root_checks;
         switch (job.state.load(.acquire)) {
             .completed => switch (job.outcome) {
@@ -1410,12 +1417,12 @@ pub const Runtime = struct {
                         old.projected_bytes
                     else
                         0;
-                    const snapshot = policy.compileCatalogSnapshot(
+                    var snapshot = policy.compileCatalogSnapshot(
                         self.allocator,
                         acquisition.projection,
                         &self.state.enablement_store,
                         self.state.enablement_health,
-                        scope.managementScope(),
+                        if (job.personal_only) .personal else scope.managementScope(),
                         snapshot_limits,
                         budget.available(old_bytes),
                     ) catch {
@@ -1430,6 +1437,7 @@ pub const Runtime = struct {
                         job.outcome = .failure;
                         return;
                     };
+                    if (job.personal_only) policy.restrictToPersonalSources(&snapshot);
                     acquisition.projection.deinit();
                     var old_slot = control.slot;
                     control.slot = .{ .committed = .{
@@ -1480,11 +1488,12 @@ pub const Runtime = struct {
             self.allocator,
             current,
             store_candidate,
-            scope,
+            if (scope == .project and self.personalOnly(.{ .workspace = .{ .id = scope.project.workspace_id, .epoch = scope.project.workspace_epoch } })) .personal else scope,
             snapshot_limits,
             current.projected_bytes,
         );
         errdefer replacement.deinit();
+        if (scope == .project and self.personalOnly(.{ .workspace = .{ .id = scope.project.workspace_id, .epoch = scope.project.workspace_epoch } })) policy.restrictToPersonalSources(&replacement);
         try candidates.append(self.allocator, .{
             .control = control,
             .snapshot = replacement,
@@ -1684,7 +1693,8 @@ pub const Runtime = struct {
             .allocator = self.allocator,
             .io = self.io,
             .source_roots = owned_source_roots,
-            .selection = self.state.source_settings.?.selection.relevant(if (scope == .personal) .user else .workspace),
+            .selection = self.state.source_settings.?.selection.relevant(if (scope == .personal or self.personalOnly(scope)) .user else .workspace),
+            .personal_only = self.personalOnly(scope),
             .verification = verification,
             .catalog_port = self.ports.catalog,
             .notifier = self.ports.notifier,
@@ -1695,6 +1705,13 @@ pub const Runtime = struct {
             .epoch_token = owned_epoch,
         };
         return job;
+    }
+
+    fn personalOnly(self: *const Runtime, scope: Scope) bool {
+        return switch (scope) {
+            .personal => false,
+            .workspace => |identity| if (self.findWorkspaceConst(identity.id)) |workspace| workspace.personal_only else false,
+        };
     }
 
     fn enqueue(self: *Runtime, job: *CatalogJob) error{ ExecutorShuttingDown, QueueFull }!void {

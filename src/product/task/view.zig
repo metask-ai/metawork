@@ -1135,7 +1135,11 @@ pub fn catalogProjection(task: *const task_state.Task) product_skill.catalog.Cat
     return if (task.runtime.pinnedCatalogConst()) |snapshot|
         snapshot.view()
     else
-        .{ .availability = .uninitialized };
+        .{ .availability = switch (task.initial_catalog_preparation) {
+            .uninitialized => .uninitialized,
+            .loading => .loading,
+            .unavailable => .unavailable,
+        } };
 }
 
 fn jsonValue(writer: *std.Io.Writer, value: anytype) !void {

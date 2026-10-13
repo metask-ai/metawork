@@ -384,3 +384,56 @@ test "catalog compilation applies user and Workspace enablement policy" {
     try std.testing.expectEqual(personal.selection_revision, after_write_failure.selection_revision);
     try std.testing.expect(!after_write_failure.skills[0].enabled);
 }
+
+/// Core keeps winner/conflict ownership. Never select a hidden alternative
+/// when the resolved winner came from workspace data.
+pub fn restrictToPersonalSources(snapshot: *catalog.Snapshot) void {
+    for (snapshot.skills) |*skill| {
+        const known_personal = if (sources.findId(skill.source_instance_id)) |id|
+            sources.definition(id).scope == .user
+        else
+            std.mem.eql(u8, skill.source_instance_id, "agents.user.default") or
+                std.mem.eql(u8, skill.source_instance_id, sources.builtin_source_instance_id);
+        skill.enabled = skill.enabled and skill.source_scope == .user and
+            std.mem.eql(u8, skill.provider_id, "agents.directory") and known_personal;
+    }
+}
+
+test "Automatic policy grants only eligible resolved personal winners" {
+    const template: catalog.SkillProjection = .{
+        .skill_id = "id",
+        .skill_policy_key = "docx",
+        .invocation_name = "docx",
+        .provider_id = "agents.directory",
+        .source_scope = .user,
+        .source_instance_id = sources.builtin_source_instance_id,
+        .contribution_id = "contribution",
+        .content_revision = "revision",
+        .display_name = "Word",
+        .description = "",
+        .argument_names = &.{},
+        .max_values = 64,
+    };
+    var skills = [_]catalog.SkillProjection{template} ** 6;
+    skills[1].source_scope = .workspace;
+    skills[1].source_instance_id = "agents.workspace.default";
+    skills[2].enabled = false;
+    skills[3].source_instance_id = "unknown.user";
+    skills[4].provider_id = "unknown.provider";
+    skills[5].source_instance_id = sources.definition(.codex_user).source_instance_id;
+    var snapshot: catalog.Snapshot = .{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .revision = "revision",
+        .health = .healthy,
+        .skills = &skills,
+        .issues = &.{},
+        .projected_bytes = 0,
+        .selection_revision = 1,
+    };
+    defer snapshot.arena.deinit();
+    restrictToPersonalSources(&snapshot);
+    try std.testing.expect(skills[0].enabled);
+    for (skills[1..5]) |skill| try std.testing.expect(!skill.enabled);
+    try std.testing.expect(skills[5].enabled);
+    try std.testing.expectEqualStrings("agents.workspace.default", skills[1].source_instance_id);
+}
