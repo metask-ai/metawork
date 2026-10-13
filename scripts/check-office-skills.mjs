@@ -50,6 +50,11 @@ run(config.python, [
   path.join(root, "scripts", "check-office-failures.py"),
   assets,
 ]);
+run(process.execPath, [
+  path.join(root, "scripts/sync-office-archive.mjs"),
+  "--check",
+]);
+run(config.python, [path.join(root, "scripts/check-office-archives.py")]);
 const marker = "MetaWork Office smoke";
 run(process.execPath, [
   "-e",
@@ -115,6 +120,16 @@ run(config.python, [
   "-c",
   "from openpyxl import load_workbook; w=load_workbook('sample.xlsx', data_only=True); assert w.active['C2'].value == 22; w.close(); w=load_workbook('sample.xlsx'); assert w.active['C2'].value == '=A2+B2'; w.close()",
 ]);
+helper("xlsx", "office/unpack.py", [
+  workbook,
+  path.join(output, "xlsx-unpacked"),
+]);
+assert.ok(
+  readFileSync(
+    path.join(output, "xlsx-unpacked/xl/worksheets/sheet1.xml"),
+    "utf8",
+  ).includes("22"),
+);
 for (const [skill, filename] of [
   ["docx", "edited.docx"],
   ["pptx", "edited.pptx"],

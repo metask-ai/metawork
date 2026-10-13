@@ -119,7 +119,7 @@ appEnvironment.PATH =
     : "/usr/bin:/bin";
 
 const builtinSkillNames = process.env.METAWORK_LOCAL_SKILL_ROOT
-  ? ["docx", "pptx", "xlsx"]
+  ? ["docx", "pptx", "xlsx", "zip"]
   : [];
 const officeModelToolProbe = process.env.METAWORK_OFFICE_MODEL_TOOL === "1";
 const commandTimeoutMs = 20_000;

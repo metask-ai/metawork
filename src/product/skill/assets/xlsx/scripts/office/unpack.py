@@ -20,6 +20,8 @@ from pathlib import Path
 
 import defusedxml.minidom
 
+from archive import safe_extract
+
 from helpers.merge_runs import merge_runs as do_merge_runs
 from helpers.simplify_redlines import simplify_redlines as do_simplify_redlines
 
@@ -48,10 +50,7 @@ def unpack(
         return None, f"Error: {input_file} must be a .docx, .pptx, or .xlsx file"
 
     try:
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        with zipfile.ZipFile(input_path, "r") as zf:
-            zf.extractall(output_path)
+        safe_extract(input_path, output_path)
 
         xml_files = list(output_path.rglob("*.xml")) + list(output_path.rglob("*.rels"))
         for xml_file in xml_files:
@@ -59,7 +58,10 @@ def unpack(
 
         message = f"Unpacked {input_file} ({len(xml_files)} XML files)"
 
-        if suffix == ".docx":
+        document = output_path / "word/document.xml"
+        if suffix == ".docx" and document.exists() and document.stat().st_size > 4 * 1024 * 1024:
+            message += "; large document XML kept intact without normalization"
+        elif suffix == ".docx":
             if simplify_redlines:
                 simplify_count, _ = do_simplify_redlines(str(output_path))
                 message += f", simplified {simplify_count} tracked changes"
@@ -81,6 +83,8 @@ def unpack(
 
 def _pretty_print_xml(xml_file: Path) -> None:
     try:
+        if xml_file.stat().st_size > 4 * 1024 * 1024:
+            return  # Keep large XML intact; use bounded Read/Grep instead of a DOM copy.
         content = xml_file.read_text(encoding="utf-8")
         dom = defusedxml.minidom.parseString(content)
         xml_file.write_bytes(dom.toprettyxml(indent="  ", encoding="utf-8"))
@@ -90,6 +94,8 @@ def _pretty_print_xml(xml_file: Path) -> None:
 
 def _escape_smart_quotes(xml_file: Path) -> None:
     try:
+        if xml_file.stat().st_size > 4 * 1024 * 1024:
+            return  # Keep large XML intact; use bounded Read/Grep instead of a DOM copy.
         content = xml_file.read_text(encoding="utf-8")
         for char, entity in SMART_QUOTE_REPLACEMENTS.items():
             content = content.replace(char, entity)

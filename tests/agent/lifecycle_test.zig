@@ -4094,7 +4094,7 @@ test "permission mode failures preserve authority or close admission without rev
     }
 }
 
-test "canonical AgentCore loads migrated Office resources and binds their policy to a Session" {
+test "canonical AgentCore loads builtin document and ZIP resources and binds their policy to a Session" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(std.testing.io, "home");
@@ -4118,10 +4118,10 @@ test "canonical AgentCore loads migrated Office resources and binds their policy
     defer acquired.projection.deinit();
     defer runtime.releaseSkillCatalog(acquired.lease) catch unreachable;
     try std.testing.expectEqual(lifecycle.CatalogHealth.healthy, acquired.projection.health);
-    try std.testing.expectEqual(@as(usize, 3), acquired.projection.skills.len);
-    var ids: [3][]const u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), acquired.projection.skills.len);
+    var ids: [4][]const u8 = undefined;
     for (acquired.projection.skills, 0..) |skill, index| {
-        try std.testing.expect(std.mem.eql(u8, skill.invocation_name, "docx") or std.mem.eql(u8, skill.invocation_name, "xlsx") or std.mem.eql(u8, skill.invocation_name, "pptx"));
+        try std.testing.expect(std.mem.eql(u8, skill.invocation_name, "docx") or std.mem.eql(u8, skill.invocation_name, "xlsx") or std.mem.eql(u8, skill.invocation_name, "pptx") or std.mem.eql(u8, skill.invocation_name, "zip"));
         try std.testing.expectEqualStrings("office-test", skill.source_instance_id);
         try std.testing.expectEqual(lifecycle.CatalogSourceScope.user, skill.source_scope);
         ids[index] = skill.skill_id;

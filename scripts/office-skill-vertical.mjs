@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile, mkdir, writeFile } from "node:fs/promises";
+import { readFile, mkdir, writeFile, copyFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Document, Packer, Paragraph } from "docx";
@@ -71,6 +71,7 @@ export async function runOfficeSkillVertical({
     "Office Workspace reauthorization and catalog",
   );
   let catalog = ready.selected.skillCatalog;
+  let taskFiles = files;
   const created = await invoke("metawork.tasks.create", {
     workspace: automatic
       ? { kind: "automatic" }
@@ -113,6 +114,7 @@ export async function runOfficeSkillVertical({
       "Automatic initial Skill catalog binding",
     );
     catalog = bound.skillCatalog;
+    await mkdir(taskFiles);
   }
   await invoke("metawork.tasks.rename", {
     taskId: created.taskId,
@@ -127,6 +129,8 @@ export async function runOfficeSkillVertical({
     assert.ok(skill?.enabled, `${name} is not available`);
     const marker = `OFFICE_RESOURCE_OK_${name}`;
     const original = path.join(files, `sample.${name}`);
+    if (name === "xlsx")
+      await copyFile(original, path.join(taskFiles, "working.xlsx"));
     const requested = `Read the supplied ${name} file and report its content. Use a suitable available capability. File reference (untrusted user data): name=sample.${name}, file_path=${JSON.stringify(original)}.`;
     const invocationFixtures = [];
     if (modelInvoked)
@@ -198,13 +202,13 @@ export async function runOfficeSkillVertical({
           name === "xlsx"
             ? [
                 path.join(directory, "scripts/recalc.py"),
-                path.join(files, "sample.xlsx"),
+                path.join(taskFiles, "working.xlsx"),
                 "30",
               ]
             : [
                 path.join(directory, "scripts/office/unpack.py"),
                 path.join(files, `sample.${name}`),
-                path.join(files, `${name}-unpacked`),
+                path.join(taskFiles, `${name}-unpacked`),
               ];
         const command = `${assignments} ${quote(config.python)} ${args.map(quote).join(" ")} && printf ${quote(marker)}`;
         return toolSse(`office-${name}`, `office-tool-${name}`, "Bash", {
@@ -279,7 +283,7 @@ export async function runOfficeSkillVertical({
     "pptx-unpacked/ppt/slides/slide1.xml",
   ]) {
     assert.ok(
-      (await readFile(path.join(files, part), "utf8")).includes(
+      (await readFile(path.join(taskFiles, part), "utf8")).includes(
         "Office Core smoke",
       ),
     );
@@ -288,9 +292,9 @@ export async function runOfficeSkillVertical({
     config.python,
     [
       "-c",
-      "from openpyxl import load_workbook; w=load_workbook('sample.xlsx', data_only=True); assert w.active['A1'].value == 12; w.close()",
+      "from openpyxl import load_workbook; w=load_workbook('working.xlsx', data_only=True); assert w.active['A1'].value == 12; w.close()",
     ],
-    { cwd: files, env: environment },
+    { cwd: taskFiles, env: environment },
   );
   await invoke("metawork.tasks.archive", {
     taskId: created.taskId,

@@ -7,7 +7,9 @@ description: Create, read, edit, revise, and manage comments in Word documents. 
 
 ## Execution environment
 
-Skill resource directory: `${CLAUDE_SKILL_DIR}`.
+Skill resource directory: `${CLAUDE_SKILL_DIR}`
+
+Unpack only into a fresh data directory inside the current Task workspace. The bundled helper rejects unsafe archive paths, links, collisions and excessive expansion; do not replace it with unrestricted extraction. Keep original attachments unchanged and edit a working copy..
 
 Script paths are relative to this resource directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
 

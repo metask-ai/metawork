@@ -233,6 +233,8 @@ staging 状态精确为 `staging | ready | borrowed | consumed | released | fail
 
 已接纳原件完整保留在 Task namespace，文件名由 Host 随机 identity 与有界 ASCII 安全后缀构成；非图片保留原名称的安全后缀，缺失或不安全后缀使用中性后缀，图片使用已识别格式；既有持久化原件路径保持不变，Model 引用指向 owned copy，不指向用户源文件；附件输入历史只投影原名称、类型、原图片格式、原大小和顺序。Task 删除必须在 Session、executor 和 worker lease 静止后释放整个 Task 原件目录。Product 不解析 opaque checkpoint，不从模型文本反推附件 identity，也不自动将路径或原件正文写入附件输入 Snapshot、Task history metadata 或日志；Agent 按需读取产生的 Tool 记录继续遵守既有有界投影与脱敏合同。恢复继续使用原 checkpoint 中的引用与保留的原件；原件无法读取时明确失败，不能改读用户源路径或伪造空内容。
 
+受支持的 ZIP 与 Office 解包流程使用自包含的有界 helper：在库分配成员 metadata 前限制目录与真实成员数，校验路径、类型、碰撞和压缩方式，并对实际解压字节计数，不能只相信归档声明的大小。输出必须是 Task 工作区中新建的数据子目录，不能合并或覆盖既有目标；失败清理本次创建的目录，保留输入原件。归档中的 SKILL.md 是普通数据，不能被解包流程安装、执行或提升为授权来源；Automatic winner 授权继续遵守 §2.4。该流程不构成对任意 Bash 代码或完整进程资源隔离的安全承诺。
+
 ### 2.7 Identity 与 credential redaction
 
 Product Task identity、Agent Session route identity、execution generation、Workspace identity、Skill policy identity 和 MCP server identity 各自属于对应 owner，不共享生成器，也不能依赖数值相等。跨边界只传递完成当前校验所需的稳定 identity 和 generation，不传递内部指针或 secret-bearing owner。
