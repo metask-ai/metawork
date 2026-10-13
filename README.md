@@ -35,6 +35,20 @@ npm run dev
 
 安装器与 Authenticode 要求见 [Windows 分发](docs/windows-distribution.md)。
 
+### 本地开发 Office Skills
+
+`npm run dev` 自动加载仓库中的 Word、Excel 和 PowerPoint Skills。处理文件前，准备 Python 3.12、LibreOffice 和 Poppler，并显式选择其可执行文件：
+
+```bash
+npm run office:setup -- --python /absolute/path/to/python3.12 --soffice /absolute/path/to/soffice --pdftoppm /absolute/path/to/pdftoppm
+npm run office:check
+npm run dev
+```
+
+setup 将 Python 依赖安装在当前 checkout 的 `.zig-cache` 内；Node 依赖由 `npm ci` 安装。需要 Pandoc 提取 Word 内容时另加 `--pandoc /absolute/path/to/pandoc`；未安装时可用解包 XML 的读取流程。
+
+在项目目录的 Manual Workspace 中创建 Task，通过 Skill 选择器调用 `docx`、`xlsx` 或 `pptx`，处理该 Workspace 内的文件。此入口尚未放开 Office/ZIP 附件上传、Automatic Workspace Skill 或安装包内置运行环境。来源 authority 见 [Product 架构](docs/product-architecture.md#24-skill-authority-与本地资产)，验证边界见 [验证规范](docs/validation.md#标准入口)。
+
 ## 工程入口
 
 `package.json` 提供以下正式入口：

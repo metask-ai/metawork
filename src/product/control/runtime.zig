@@ -349,6 +349,7 @@ pub const Configuration = struct {
     skill_management: SkillManagementConfiguration = .{},
     skill_enablement: SkillEnablementConfiguration = .{},
     skill_sources: skill_runtime.SourceConfiguration = .{},
+    builtin_skill_root: ?[]const u8 = null,
     custom_providers: CustomProviderCapabilities = .{},
     mcp: McpStartupConfiguration = .{},
     completion_factory: CompletionFactory = .{},
@@ -1387,10 +1388,12 @@ pub const Runtime = struct {
                 fileChangeExecutor(file_executor),
             );
         }
+        var configured_skill_ports = productSkillPorts(executor, agent_runtime, configuration.change_notifier);
+        configured_skill_ports.source_roots.builtin_root = configuration.builtin_skill_root;
         var skill = try skill_runtime.Runtime.init(
             io,
             allocator,
-            productSkillPorts(executor, agent_runtime, configuration.change_notifier),
+            configured_skill_ports,
             .{
                 .state = .{
                     .management = configuration.skill_management,

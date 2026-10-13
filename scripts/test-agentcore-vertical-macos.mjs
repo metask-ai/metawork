@@ -1,3 +1,4 @@
+import { runOfficeSkillVertical } from "./office-skill-vertical.mjs";
 import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { createReadStream } from "node:fs";
@@ -117,6 +118,10 @@ appEnvironment.PATH =
       ].join(path.delimiter)
     : "/usr/bin:/bin";
 
+const builtinSkillNames = process.env.METAWORK_LOCAL_SKILL_ROOT
+  ? ["docx", "pptx", "xlsx"]
+  : [];
+const officeModelToolProbe = process.env.METAWORK_OFFICE_MODEL_TOOL === "1";
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
@@ -261,7 +266,9 @@ const responses = [
       command:
         process.platform === "win32"
           ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
-          : "sleep 0.4; echo agentcore-vertical-bash-ok",
+          : officeModelToolProbe
+            ? "sleep 2; echo agentcore-vertical-bash-ok"
+            : "sleep 0.4; echo agentcore-vertical-bash-ok",
       description: "Check the command output",
     },
     "I’ve checked the input; now I’m running a focused verification.",
@@ -355,7 +362,8 @@ const responses = [
   ),
 ];
 const provider = createProvider(responses, {
-  initialDelayMs: visualCaptureDir ? 1_500 : 120,
+  // CLI snapshot polling needs an observation window during this larger probe.
+  initialDelayMs: visualCaptureDir || officeModelToolProbe ? 1_500 : 120,
   frameDelayMs: 80,
 });
 const baseUrl = await provider.listen();
@@ -519,6 +527,19 @@ try {
       "Workspace Skill catalog",
     );
   let catalogSnapshot = await readCatalog();
+  if (process.env.METAWORK_LOCAL_SKILL_ROOT) {
+    for (const name of ["docx", "xlsx", "pptx"]) {
+      const office = catalogSnapshot.catalog.skills.find(
+        (item) => item.invocationName === name,
+      );
+      assert.ok(office, `Local Office catalog omitted ${name}`);
+      assert.equal(office.displayName, name);
+      assert.equal(office.enabled, true);
+    }
+    process.stdout.write(
+      "Local Office Skills reached the desktop Workspace catalog through canonical AgentCore.\n",
+    );
+  }
   if (
     !/^[0-9a-f]{64}$/.test(catalogSnapshot.skill.skillId) ||
     catalogSnapshot.skill.displayName !== "Review" ||
@@ -1054,7 +1075,9 @@ try {
       const pinned = current.tasks.find(
         (item) => item.id === taskId,
       )?.skillCatalog;
-      return pinned?.availability === "ready" && pinned.skills.length === 0
+      if (pinned?.availability !== "ready") return null;
+      const names = pinned.skills.map((item) => item.invocationName).sort();
+      return JSON.stringify(names) === JSON.stringify(builtinSkillNames)
         ? true
         : null;
     },
@@ -1075,10 +1098,12 @@ try {
       )?.skillCatalog;
       if (!effective?.skills.some((item) => item.invocationName === "review"))
         return null;
-      assert.equal(
-        current.tasks.find((item) => item.id === taskId)?.skillCatalog.skills
-          .length,
-        0,
+      assert.deepEqual(
+        current.tasks
+          .find((item) => item.id === taskId)
+          ?.skillCatalog.skills.map((item) => item.invocationName)
+          .sort(),
+        builtinSkillNames,
       );
       return true;
     },
@@ -1136,7 +1161,7 @@ try {
         project?.skillCatalog.availability !== "ready"
       )
         return null;
-      const expected = ["codex-proof", "review"];
+      const expected = [...builtinSkillNames, "codex-proof", "review"].sort();
       assert.deepEqual(
         current.skillCatalog.skills.map((skill) => skill.invocationName).sort(),
         expected,
@@ -1151,10 +1176,15 @@ try {
         ),
       );
       for (const asset of current.skillManagement.assets) {
-        assert.equal(
-          asset.origin.scope,
-          asset.scope.kind === "personal" ? "personal" : "project",
-        );
+        if (builtinSkillNames.includes(asset.invocationName)) {
+          assert.equal(asset.origin, null);
+          assert.equal(asset.managementState, "externally_managed");
+        } else {
+          assert.equal(
+            asset.origin.scope,
+            asset.scope.kind === "personal" ? "personal" : "project",
+          );
+        }
         assert.equal(
           asset.canExport || asset.canReimport || asset.canUninstall,
           false,
@@ -1540,6 +1570,21 @@ try {
   for (const originalPath of retainedAttachmentPaths)
     await expectMissing(originalPath);
   await expectMissing(compactCheckpoint.blobPath);
+  if (process.env.METAWORK_OFFICE_VERTICAL === "1") {
+    assert.equal(process.platform, "darwin");
+    assert.ok(process.env.METAWORK_LOCAL_SKILL_ROOT);
+    await runOfficeSkillVertical({
+      root,
+      workspace: canonicalWorkspace,
+      workspaceId,
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      toolSse,
+      textSse,
+    });
+  }
   await stopApplication("app stop");
 
   process.stdout.write(

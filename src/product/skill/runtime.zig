@@ -173,6 +173,7 @@ const CatalogJob = struct {
             self.selection,
         ) catch return;
         defer discovery.deinit();
+        if (self.source_roots.builtin_root) |root| discovery.appendBuiltin(self.io, root) catch return;
         self.root_checks = discovery.rootChecks();
         const additional = discovery.additionalSources() catch return;
         self.outcome = if (self.catalog_port.query(.{
@@ -204,6 +205,7 @@ const CatalogJob = struct {
     }
 
     fn deinit(self: *CatalogJob) void {
+        if (self.source_roots.builtin_root) |root| self.allocator.free(root);
         self.allocator.free(self.epoch_token);
         self.allocator.free(self.canonical_user_home);
         self.allocator.free(self.canonical_root);
@@ -1670,11 +1672,18 @@ pub const Runtime = struct {
         errdefer self.allocator.free(owned_home);
         const owned_epoch = try self.allocator.dupe(u8, epoch);
         errdefer self.allocator.free(owned_epoch);
+        const builtin_root = if (self.ports.source_roots.builtin_root) |value|
+            try self.allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (builtin_root) |value| self.allocator.free(value);
+        var owned_source_roots = self.ports.source_roots;
+        owned_source_roots.builtin_root = builtin_root;
         const job = try self.allocator.create(CatalogJob);
         job.* = .{
             .allocator = self.allocator,
             .io = self.io,
-            .source_roots = self.ports.source_roots,
+            .source_roots = owned_source_roots,
             .selection = self.state.source_settings.?.selection.relevant(if (scope == .personal) .user else .workspace),
             .verification = verification,
             .catalog_port = self.ports.catalog,
@@ -1810,8 +1819,11 @@ const TestHarness = struct {
     last_epoch: [32]u8 = undefined,
     last_epoch_len: usize = 0,
     last_source_count: usize = 0,
-    last_source_ids: [sources.definitions.len]sources.Id = undefined,
-    last_source_scopes: [sources.definitions.len]agent.CatalogSourceScope = undefined,
+    last_source_ids: [sources.definitions.len + 1]sources.Id = undefined,
+    last_source_scopes: [sources.definitions.len + 1]agent.CatalogSourceScope = undefined,
+
+    last_builtin_root: [4096]u8 = undefined,
+    last_builtin_root_len: usize = 0,
 
     fn effectPorts(self: *TestHarness) ports.Ports {
         return .{
@@ -1883,7 +1895,12 @@ const TestHarness = struct {
         self.query_count += 1;
         self.last_source_count = input.additional_sources.len;
         for (input.additional_sources, 0..) |source, index| {
-            self.last_source_ids[index] = sources.findId(source.source_instance_id).?;
+            if (std.mem.eql(u8, source.source_instance_id, sources.builtin_source_instance_id)) {
+                @memcpy(self.last_builtin_root[0..source.canonical_root.len], source.canonical_root);
+                self.last_builtin_root_len = source.canonical_root.len;
+            } else {
+                self.last_source_ids[index] = sources.findId(source.source_instance_id).?;
+            }
             self.last_source_scopes[index] = source.scope;
         }
         std.debug.assert(input.workspaceRoot().len <= self.last_root.len);
@@ -3105,4 +3122,33 @@ test "source pending dispatch allocation failure is explicit and not automatical
     try std.testing.expectEqual(catalog.CatalogAvailability.unavailable, runtime.personalCatalogProjection().availability);
     try std.testing.expect(!runtime.sync(harness.budget(), test_snapshot_limits, null));
     try std.testing.expectEqual(@as(usize, 0), harness.query_count);
+}
+
+test "builtin source path is frozen before worker dispatch and missing root blocks Core query" {
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const borrowed = try std.testing.allocator.dupe(u8, root);
+    defer std.testing.allocator.free(borrowed);
+    runtime.ports.source_roots.builtin_root = borrowed;
+    try runtime.refreshPersonal();
+    @memset(borrowed, 'x');
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(@as(usize, 1), harness.query_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.last_source_count);
+    try std.testing.expectEqualStrings(root, harness.last_builtin_root[0..harness.last_builtin_root_len]);
+    try std.testing.expectEqual(agent.CatalogSourceScope.user, harness.last_source_scopes[0]);
+    try std.testing.expectEqual(sources.RootCheck.checked, runtime.state.catalog.source_checks.?.builtin);
+    runtime.ports.source_roots.builtin_root = borrowed;
+    try runtime.refreshPersonal();
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(@as(usize, 1), harness.query_count);
+    try std.testing.expectEqual(sources.RootFailure.unreadable, runtime.state.catalog.source_checks.?.builtin.blocked);
+    try std.testing.expectEqual(catalog.CatalogAvailability.unavailable, runtime.personalCatalogProjection().availability);
 }

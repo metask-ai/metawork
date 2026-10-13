@@ -5,7 +5,9 @@ description: Create, read, edit, clean, format, calculate, and convert spreadshe
 
 # Execution environment
 
-Script paths are relative to this Skill directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
+Skill resource directory: `${CLAUDE_SKILL_DIR}`.
+
+Script paths are relative to this resource directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
 
 Check the dependencies needed by the selected workflow before starting. Use the runtime and tools available to the Task; if a dependency is missing, report it and stop that workflow. Dependency installation is a separate setup task; do not modify the global environment during spreadsheet processing.
 
@@ -78,7 +80,7 @@ A user may ask you to create, edit, or analyze the contents of an .xlsx file. Yo
 
 ## Important Requirements
 
-**LibreOffice Required for Formula Recalculation**: Verify that LibreOffice is available before using `scripts/recalc.py`. The script configures a LibreOffice macro on first run; that is a separate environment setup operation. Verify its platform paths and timeout behavior for the execution environment, and do not claim recalculation succeeded from cached values alone.
+**LibreOffice Required for Formula Recalculation**: Verify that LibreOffice is available before using `scripts/recalc.py`. The helper recalculates `.xlsx` files through an isolated LibreOffice conversion with a private profile and a timeout. Conversion failures and formula errors must be reported; do not claim recalculation succeeded from old cached values alone. Use a working copy because LibreOffice can alter workbook features during conversion.
 
 ## Reading and analyzing data
 
@@ -225,11 +227,11 @@ python scripts/recalc.py output.xlsx 30
 ```
 
 The script:
-- Automatically sets up LibreOffice macro on first run
+- Uses a temporary LibreOffice profile without installing user macros
 - Recalculates all formulas in all sheets
 - Scans ALL cells for Excel errors (#REF!, #DIV/0!, etc.)
 - Returns JSON with detailed error locations and counts
-- Works on both Linux and macOS
+- Requires a working LibreOffice executable in the Task environment
 
 ## Formula Verification Checklist
 

@@ -10,6 +10,8 @@
   ],
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "office:setup": "node scripts/setup-office-environment.mjs",
+    "office:check": "node scripts/check-office-skills.mjs",
     "check": "node scripts/verify-staged-agentcore-bundle.mjs && npm --workspace @metawork/renderer run check && native check . --strict",
     "test": "node scripts/run-tests.mjs",
     "build:debug": "node scripts/build.mjs debug",
@@ -21,6 +23,8 @@
   },
   "devDependencies": {
     "@native-sdk/cli": "0.10.1",
+    "docx": "9.6.1",
+    "pptxgenjs": "4.0.1",
     "prettier": "3.9.5"
   }
 }

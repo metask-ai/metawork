@@ -7,7 +7,9 @@ description: Create, read, edit, combine, split, and refine PowerPoint presentat
 
 ## Execution environment
 
-Script paths are relative to this Skill directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
+Skill resource directory: `${CLAUDE_SKILL_DIR}`.
+
+Script paths are relative to this resource directory. Resolve them from the Skill's location, and write working files and outputs in the Task workspace. Work on a copy of an attachment original when editing.
 
 Check the dependencies needed by the selected workflow before starting. Use the runtime and tools available to the Task; if a dependency is missing, report it and stop that workflow. Dependency installation is a separate setup task; do not modify the global environment during presentation processing.
 

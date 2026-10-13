@@ -7,6 +7,9 @@ const sources = @import("product_skill_sources");
 
 /// Bounded filesystem observation, independently injectable from Core queries.
 pub const SourceRoots = struct {
+    /// Application-owned immutable root, valid until Runtime shutdown joins
+    /// all catalog jobs. Each job copies it before leaving the owner thread.
+    builtin_root: ?[]const u8 = null,
     context: ?*anyopaque = null,
     discover_fn: *const fn (?*anyopaque, std.Io, std.mem.Allocator, []const u8, ?[]const u8, sources.Selection) anyerror!sources.Discovery = discover,
 
