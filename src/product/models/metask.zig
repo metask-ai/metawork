@@ -22,7 +22,6 @@ pub const Error = error{
     ProtocolInvalid,
     CatalogTooLarge,
     CatalogFieldTooLarge,
-    NoModels,
     ModelNotFound,
     SourceCandidateInvalid,
     OutOfMemory,
@@ -39,7 +38,6 @@ pub fn errorCode(err: Error) contract.ModelsError {
         error.ProtocolInvalid => .catalog_invalid,
         error.CatalogTooLarge => .catalog_too_large,
         error.CatalogFieldTooLarge => .catalog_too_large,
-        error.NoModels => .no_models,
         error.ModelNotFound,
         error.SourceCandidateInvalid,
         => .catalog_invalid,
@@ -283,29 +281,16 @@ pub const CatalogSession = struct {
 };
 
 pub const OwnedCatalogCompletion = struct {
-    allocator: std.mem.Allocator,
     session: CatalogSession,
-    selected_model_id: []u8,
     owned: bool = true,
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        session: *CatalogSession,
-        selected_model_id: []const u8,
-    ) Error!OwnedCatalogCompletion {
-        if (!session.hasModel(selected_model_id)) return error.ModelNotFound;
-        const model = allocator.dupe(u8, selected_model_id) catch return error.OutOfMemory;
-        return .{
-            .allocator = allocator,
-            .session = session.take(),
-            .selected_model_id = model,
-        };
+    pub fn init(session: *CatalogSession) OwnedCatalogCompletion {
+        return .{ .session = session.take() };
     }
 
     pub fn deinit(self: *OwnedCatalogCompletion) void {
         if (!self.owned) return;
         self.session.deinit();
-        self.allocator.free(self.selected_model_id);
         self.* = undefined;
     }
 
@@ -485,6 +470,8 @@ const ModelWire = struct {
 const CapabilityWire = struct { supported: ?bool = null };
 
 const ModelCapabilitiesWire = struct {
+    image_output: ?CapabilityWire = null,
+    video_output: ?CapabilityWire = null,
     image_input: ?CapabilityWire = null,
     pdf_input: ?CapabilityWire = null,
     batch: ?CapabilityWire = null,
@@ -520,23 +507,31 @@ const ModelCapabilitiesWire = struct {
             .citations = supported(self.citations),
             .code_execution = supported(self.code_execution),
             .structured_outputs = supported(self.structured_outputs),
+            .thinking = .{ .supported = false, .adaptive = false, .enabled = false },
+            .effort = .{ .supported = false, .low = false, .medium = false, .high = false, .max = false },
+            .context_management = .{
+                .supported = false,
+                .clear_thinking_20251015 = false,
+                .clear_tool_uses_20250919 = false,
+                .compact_20260112 = false,
+            },
         };
         if (self.thinking) |thinking| {
-            result.thinking.supported = thinking.supported;
+            result.thinking.supported = thinking.supported orelse false;
             if (thinking.types) |types| {
                 result.thinking.adaptive = supported(types.adaptive);
                 result.thinking.enabled = supported(types.enabled);
             }
         }
         if (self.effort) |effort| result.effort = .{
-            .supported = effort.supported,
+            .supported = effort.supported orelse false,
             .low = supported(effort.low),
             .medium = supported(effort.medium),
             .high = supported(effort.high),
             .max = supported(effort.max),
         };
         if (self.context_management) |context| result.context_management = .{
-            .supported = context.supported,
+            .supported = context.supported orelse false,
             .clear_thinking_20251015 = supported(context.clear_thinking_20251015),
             .clear_tool_uses_20250919 = supported(context.clear_tool_uses_20250919),
             .compact_20260112 = supported(context.compact_20260112),
@@ -545,8 +540,8 @@ const ModelCapabilitiesWire = struct {
     }
 };
 
-fn supported(capability: ?CapabilityWire) ?bool {
-    return if (capability) |value| value.supported else null;
+fn supported(capability: ?CapabilityWire) bool {
+    return if (capability) |value| value.supported orelse false else false;
 }
 
 fn tokenLimit(value: std.json.Value) Error!?u64 {
@@ -595,26 +590,30 @@ fn parseModels(
 
     var result: ParsedModels = .{ .allocator = allocator };
     errdefer result.deinit();
-    for (response.data) |model| {
+    for (response.data, 0..) |model, index| {
         if (!std.mem.eql(u8, model.object, "model") or
             !std.mem.eql(u8, model.type, "model"))
             return error.ProtocolInvalid;
         const id = try ModelId.init(model.id);
-        for (result.entries.items) |*existing| {
-            if (std.mem.eql(u8, existing.id.view(), id.view()))
+        for (response.data[0..index]) |existing| {
+            if (std.mem.eql(u8, existing.id, id.view()))
                 return error.ProtocolInvalid;
         }
-        result.entries.append(allocator, .{
+        const capabilities: ModelCapabilitiesWire = model.capabilities orelse .{};
+        const entry: ModelEntry = .{
             .id = id,
             .display_name = try .optional(model.display_name orelse ""),
             .metadata = .{
                 .max_input_tokens = try tokenLimit(model.max_input_tokens),
                 .max_output_tokens = try tokenLimit(model.max_tokens),
-                .capabilities = if (model.capabilities) |value| value.projection() else .{},
+                .capabilities = capabilities.projection(),
             },
-        }) catch return error.OutOfMemory;
+        };
+        // Dialogue is the catalog's base contract. Media generation is an
+        // explicit extension, including models which also emit text.
+        if (supported(capabilities.image_output) or supported(capabilities.video_output)) continue;
+        result.entries.append(allocator, entry) catch return error.OutOfMemory;
     }
-    if (result.entries.items.len == 0) return error.NoModels;
     return result;
 }
 
@@ -758,17 +757,23 @@ test "model declarations survive owned catalog copies and never leak into a repl
     session.models = parsed.entries;
     parsed.entries = .empty;
     committed.replaceFromSession(&session);
-    try std.testing.expectEqualDeep(contract.ModelMetadata{}, committed.modelViews()[0].metadata);
+    try std.testing.expectEqualDeep(contract.ModelMetadata{ .capabilities = (ModelCapabilitiesWire{}).projection() }, committed.modelViews()[0].metadata);
 }
 
-test "model declarations distinguish unknown, supported, and unsupported without coercion" {
+test "Metask capabilities default to unsupported without coercion" {
     const prefix = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\"";
+    const unsupported_metadata: contract.ModelMetadata = .{ .capabilities = (ModelCapabilitiesWire{}).projection() };
+    const image_capabilities = blk: {
+        var capabilities = (ModelCapabilitiesWire{}).projection();
+        capabilities.image_input = true;
+        break :blk capabilities;
+    };
     const cases = [_]struct { fields: []const u8, expected: contract.ModelMetadata }{
-        .{ .fields = "", .expected = .{} },
-        .{ .fields = ",\"max_input_tokens\":null,\"max_tokens\":0,\"capabilities\":null", .expected = .{} },
-        .{ .fields = ",\"capabilities\":{\"image_input\":null,\"pdf_input\":{},\"thinking\":{\"types\":null},\"effort\":null}", .expected = .{} },
-        .{ .fields = ",\"capabilities\":{\"image_input\":{\"supported\":true},\"pdf_input\":{\"supported\":false},\"batch\":{\"supported\":null}}", .expected = .{ .capabilities = .{ .image_input = true, .pdf_input = false } } },
-        .{ .fields = ",\"max_input_tokens\":18446744073709551615,\"max_tokens\":1", .expected = .{ .max_input_tokens = std.math.maxInt(u64), .max_output_tokens = 1 } },
+        .{ .fields = "", .expected = unsupported_metadata },
+        .{ .fields = ",\"max_input_tokens\":null,\"max_tokens\":0,\"capabilities\":null", .expected = unsupported_metadata },
+        .{ .fields = ",\"capabilities\":{\"image_input\":null,\"pdf_input\":{},\"thinking\":{\"types\":null},\"effort\":null}", .expected = unsupported_metadata },
+        .{ .fields = ",\"capabilities\":{\"image_input\":{\"supported\":true},\"pdf_input\":{\"supported\":false},\"batch\":{\"supported\":null}}", .expected = .{ .capabilities = image_capabilities } },
+        .{ .fields = ",\"max_input_tokens\":18446744073709551615,\"max_tokens\":1", .expected = .{ .max_input_tokens = std.math.maxInt(u64), .max_output_tokens = 1, .capabilities = unsupported_metadata.capabilities } },
     };
     for (cases) |case| {
         const body = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}}}]}}", .{ prefix, case.fields });
@@ -931,4 +936,64 @@ test "catalog status mapping is fail closed" {
         requireSuccess(503),
     );
     try std.testing.expectError(error.ProtocolInvalid, requireSuccess(302));
+}
+
+test "empty catalog is a valid authoritative result" {
+    var models = try parseModels(std.testing.allocator, "{\"object\":\"list\",\"has_more\":false,\"data\":[]}");
+    defer models.deinit();
+    try std.testing.expectEqual(@as(usize, 0), models.entries.items.len);
+}
+
+test "Metask catalog excludes every declared image or video output model" {
+    const cases = [_]struct { fields: []const u8, count: usize }{
+        .{ .fields = "", .count = 1 },
+        .{ .fields = ",\"capabilities\":null", .count = 1 },
+        .{ .fields = ",\"capabilities\":{}", .count = 1 },
+        .{ .fields = ",\"capabilities\":{\"image_output\":null,\"video_output\":{}}", .count = 1 },
+        .{ .fields = ",\"capabilities\":{\"image_output\":{\"supported\":null}}", .count = 1 },
+        .{ .fields = ",\"capabilities\":{\"image_output\":{\"supported\":false},\"video_output\":{\"supported\":false}}", .count = 1 },
+        .{ .fields = ",\"capabilities\":{\"image_input\":{\"supported\":true}}", .count = 1 },
+        .{ .fields = ",\"capabilities\":{\"image_output\":{\"supported\":true}}", .count = 0 },
+        .{ .fields = ",\"capabilities\":{\"video_output\":{\"supported\":true}}", .count = 0 },
+        .{ .fields = ",\"capabilities\":{\"image_output\":{\"supported\":true},\"video_output\":{\"supported\":true},\"text_output\":{\"supported\":true}}", .count = 0 },
+    };
+    for (cases) |case| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"object\":\"list\",\"has_more\":false,\"data\":[{{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\"{s}}}]}}", .{case.fields});
+        defer std.testing.allocator.free(body);
+        var parsed = try parseModels(std.testing.allocator, body);
+        defer parsed.deinit();
+        try std.testing.expectEqual(case.count, parsed.entries.items.len);
+    }
+}
+
+test "excluded media models cannot hide invalid catalog metadata or duplicate identity" {
+    const prefix = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\"";
+    const cases = [_][]const u8{
+        ",\"capabilities\":{\"image_output\":{\"supported\":\"true\"}}}]}",
+        ",\"capabilities\":{\"video_output\":true}}]}",
+        ",\"max_tokens\":-1,\"capabilities\":{\"image_output\":{\"supported\":true}}}]}",
+        ",\"capabilities\":{\"image_output\":{\"supported\":true}}},{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\"}]}",
+    };
+    for (cases) |suffix| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}", .{ prefix, suffix });
+        defer std.testing.allocator.free(body);
+        try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
+    }
+}
+
+test "media output models are absent from source resolution and public catalog" {
+    var session = CatalogSession.init(std.testing.allocator);
+    defer session.deinit();
+    session.owner_account_id = try .init("account-1");
+    session.credential = try Secret.init(std.testing.allocator, "oauth-access");
+    var parsed = try parseModels(std.testing.allocator, "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"image_output\":{\"supported\":true}}},{\"id\":\"chat\",\"object\":\"model\",\"type\":\"model\"}]}");
+    session.models = parsed.entries;
+    parsed.entries = .empty;
+    try std.testing.expect(!session.hasModel("media"));
+    try std.testing.expectError(error.ModelNotFound, session.prepareSourceCandidate("media", 1));
+    try std.testing.expectEqualStrings("chat", session.firstModelId().?);
+    var catalog: PublicCatalog = .{};
+    catalog.replaceFromSession(&session);
+    try std.testing.expectEqual(@as(usize, 1), catalog.modelViews().len);
+    try std.testing.expectEqualStrings("chat", catalog.modelViews()[0].id);
 }

@@ -15,6 +15,32 @@ pub const StartError = error{
 pub const DefaultBinding = registry_impl.Registry.DefaultBinding;
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn refreshMetaskCatalog(
+        runtime: *Runtime,
+        principal_ref: []const u8,
+        models: []const contract.ModelView,
+    ) !contract.ModelsError {
+        const preparation = switch (runtime.prepareMetaskCatalogRefresh(principal_ref, 17)) {
+            .ready => |value| value,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        var session = metask_provider.CatalogSession.init(runtime.allocator);
+        defer session.deinit();
+        try metask_provider.TestSupport.replaceOwnedCatalog(
+            &session,
+            principal_ref,
+            "refreshed-secret",
+            models,
+        );
+        var completion = metask_provider.OwnedCatalogCompletion.init(&session);
+        var port = completion.ownedPort();
+        return runtime.completeMetaskCatalogRefresh(
+            preparation.attempt_id,
+            preparation.authorization_generation,
+            &port,
+        );
+    }
+
     pub fn installMetaskDefault(
         runtime: *Runtime,
         principal_ref: []const u8,
@@ -266,16 +292,10 @@ pub const Runtime = struct {
         self.metask_catalog_state = .loading;
         self.metask_error = .none;
         self.metask_safe_diagnostic.len = 0;
-        const intent = self.registry.metaskIntent();
-        const same_principal = if (intent) |value|
-            std.mem.eql(u8, value.principal_ref, principal_ref)
-        else
-            false;
         return .{ .ready = .{
             .attempt_id = attempt_id,
             .principal_ref = self.catalog_attempt.?.principal_ref.view(),
             .authorization_generation = authorization_generation,
-            .preferred_model_id = if (same_principal) intent.?.model_id else "",
         } };
     }
 
@@ -295,13 +315,12 @@ pub const Runtime = struct {
         };
         defer completion_port.deinit();
         const session = &completion.session;
-        const selected_model_id = completion.selected_model_id;
         const attempt = self.catalog_attempt orelse return .catalog_invalid;
-        self.catalog_attempt = null;
         if (attempt.id != attempt_id or
-            attempt.authorization_generation != authorization_generation or
-            !std.mem.eql(u8, attempt.principal_ref.view(), session.ownerAccountId()))
-        {
+            attempt.authorization_generation != authorization_generation)
+            return .catalog_invalid;
+        self.catalog_attempt = null;
+        if (!std.mem.eql(u8, attempt.principal_ref.view(), session.ownerAccountId())) {
             self.metask_catalog_state = .needs_authentication;
             self.metask_error = .authorization_unavailable;
             return self.metask_error;
@@ -311,93 +330,100 @@ pub const Runtime = struct {
             self.metask_error = .catalog_invalid;
             return self.metask_error;
         };
-        if (!session.hasModel(selected_model_id)) {
-            self.metask_catalog_state = .failed;
-            self.metask_error = .catalog_invalid;
-            return self.metask_error;
-        }
-
-        var candidate = self.registry.clone() catch {
-            self.metask_catalog_state = .failed;
-            self.metask_error = .local_resource_exhausted;
+        const public_catalog = self.metask_public_catalog orelse {
+            self.metask_catalog_state = .unavailable;
+            self.metask_error = .persistence_unavailable;
             return self.metask_error;
         };
-        defer candidate.deinit();
-        const current = candidate.metaskIntent();
-        const same_selection = if (current) |value|
-            std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
-                std.mem.eql(u8, value.model_id, selected_model_id)
-        else
-            false;
-        const same_authority = if (current) |value|
-            std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
-                value.protocol == protocol and value.source_generation != 0
-        else
-            false;
-        const source_generation = if (same_authority)
-            current.?.source_generation
-        else
-            self.freshGeneration(if (current) |value| value.source_generation else 0) catch {
-                self.metask_catalog_state = .failed;
-                self.metask_error = .local_resource_exhausted;
-                return self.metask_error;
-            };
-        const selection_revision = if (same_selection and current.?.selection_revision != 0)
-            current.?.selection_revision
-        else
-            self.freshGeneration(if (current) |value| value.selection_revision else 0) catch {
-                self.metask_catalog_state = .failed;
-                self.metask_error = .local_resource_exhausted;
-                return self.metask_error;
-            };
-        // Finish all fallible generation allocation before committing durable
-        // intent. A catalog refresh must not persist a new selection and then
-        // fail to install the matching in-memory catalog generation.
         const catalog_generation = self.freshGeneration(self.metask_catalog_generation) catch {
             self.metask_catalog_state = .failed;
             self.metask_error = .local_resource_exhausted;
             return self.metask_error;
         };
-        const updates_default = candidate.metaskChangeUpdatesDefault(selected_model_id);
-        const default_selection_revision = if (updates_default)
-            self.freshGeneration(candidate.selection_revision) catch {
+        // Selection belongs to Models, not the network worker. Preserve an
+        // existing intent even when the authoritative catalog excludes it.
+        const current_intent = self.registry.metaskIntent();
+        const restored_model_id = if (current_intent) |intent|
+            if (std.mem.eql(u8, intent.principal_ref, attempt.principal_ref.view()))
+                intent.model_id
+            else
+                session.firstModelId()
+        else
+            session.firstModelId();
+        const keeps_authority = if (current_intent) |intent|
+            std.mem.eql(u8, intent.principal_ref, attempt.principal_ref.view()) and
+                intent.protocol == protocol and intent.source_generation != 0
+        else
+            false;
+        if (!keeps_authority) if (restored_model_id) |selected_model_id| {
+            var candidate = self.registry.clone() catch {
                 self.metask_catalog_state = .failed;
                 self.metask_error = .local_resource_exhausted;
                 return self.metask_error;
+            };
+            defer candidate.deinit();
+            const current = candidate.metaskIntent();
+            const same_selection = if (current) |value|
+                std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
+                    std.mem.eql(u8, value.model_id, selected_model_id)
+            else
+                false;
+            const same_authority = if (current) |value|
+                std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
+                    value.protocol == protocol and value.source_generation != 0
+            else
+                false;
+            const source_generation = if (same_authority)
+                current.?.source_generation
+            else
+                self.freshGeneration(if (current) |value| value.source_generation else 0) catch {
+                    self.metask_catalog_state = .failed;
+                    self.metask_error = .local_resource_exhausted;
+                    return self.metask_error;
+                };
+            const selection_revision = if (same_selection and current.?.selection_revision != 0)
+                current.?.selection_revision
+            else
+                self.freshGeneration(if (current) |value| value.selection_revision else 0) catch {
+                    self.metask_catalog_state = .failed;
+                    self.metask_error = .local_resource_exhausted;
+                    return self.metask_error;
+                };
+            const updates_default = candidate.metaskChangeUpdatesDefault(selected_model_id);
+            const default_selection_revision = if (updates_default)
+                self.freshGeneration(candidate.selection_revision) catch {
+                    self.metask_catalog_state = .failed;
+                    self.metask_error = .local_resource_exhausted;
+                    return self.metask_error;
+                }
+            else
+                null;
+            candidate.configureMetask(
+                attempt.principal_ref.view(),
+                selected_model_id,
+                protocol,
+                source_generation,
+                selection_revision,
+                default_selection_revision,
+            ) catch {
+                self.metask_catalog_state = .failed;
+                self.metask_error = .catalog_invalid;
+                return self.metask_error;
+            };
+            const committed = self.commitCandidate(&candidate, true);
+            if (!committed.accepted) {
+                self.metask_catalog_state = .failed;
+                self.metask_error = .persistence_unavailable;
+                return self.metask_error;
             }
-        else
-            null;
-        candidate.configureMetask(
-            attempt.principal_ref.view(),
-            selected_model_id,
-            protocol,
-            source_generation,
-            selection_revision,
-            default_selection_revision,
-        ) catch {
-            self.metask_catalog_state = .failed;
-            self.metask_error = .catalog_invalid;
-            return self.metask_error;
         };
-        const committed = self.commitCandidate(&candidate, true);
-        if (!committed.accepted) {
-            self.metask_catalog_state = .failed;
-            self.metask_error = .persistence_unavailable;
-            return self.metask_error;
-        }
         self.metask_catalog.deinit();
         self.metask_catalog = session.take();
-        const public_catalog = self.metask_public_catalog orelse {
-            self.metask_catalog.deinit();
-            self.metask_catalog = metask_provider.CatalogSession.init(self.allocator);
-            self.metask_catalog_state = .unavailable;
-            self.metask_error = .persistence_unavailable;
-            return self.metask_error;
-        };
         public_catalog.replaceFromSession(&self.metask_catalog);
         self.metask_catalog_generation = catalog_generation;
         self.metask_catalog_state = .ready;
-        self.metask_error = .none;
+        self.metask_error = if (public_catalog.model_count == 0) .no_models else .none;
+        self.metask_safe_diagnostic.len = 0;
         return .none;
     }
 
@@ -1925,11 +1951,7 @@ test "Models owns Metask catalog authority without changing global default" {
         "model-secret",
         &.{.{ .id = "model-1", .display_name = "Model One" }},
     );
-    var completion = try metask_provider.OwnedCatalogCompletion.init(
-        std.testing.allocator,
-        &catalog,
-        "model-1",
-    );
+    var completion = metask_provider.OwnedCatalogCompletion.init(&catalog);
     var completion_port = completion.ownedPort();
     try std.testing.expectEqual(
         contract.ModelsError.none,
@@ -1955,7 +1977,6 @@ test "Models owns Metask catalog authority without changing global default" {
         .ready => |value| value,
         .rejected => return error.TestUnexpectedResult,
     };
-    try std.testing.expectEqualStrings("model-1", refreshed.preferred_model_id);
     var same_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
     try metask_provider.TestSupport.replaceOwnedCatalog(
         &same_catalog,
@@ -1963,11 +1984,7 @@ test "Models owns Metask catalog authority without changing global default" {
         "rotated-model-secret",
         &.{.{ .id = "model-1", .display_name = "Model One" }},
     );
-    var refreshed_completion = try metask_provider.OwnedCatalogCompletion.init(
-        std.testing.allocator,
-        &same_catalog,
-        "model-1",
-    );
+    var refreshed_completion = metask_provider.OwnedCatalogCompletion.init(&same_catalog);
     var refreshed_completion_port = refreshed_completion.ownedPort();
     try std.testing.expectEqual(
         contract.ModelsError.none,
@@ -2068,11 +2085,7 @@ test "Metask catalog drift keeps a tracked global default durable" {
             "initial-secret",
             &.{.{ .id = "model-1", .display_name = "Model One" }},
         );
-        var initial_completion = try metask_provider.OwnedCatalogCompletion.init(
-            std.testing.allocator,
-            &initial_catalog,
-            "model-1",
-        );
+        var initial_completion = metask_provider.OwnedCatalogCompletion.init(&initial_catalog);
         var initial_completion_port = initial_completion.ownedPort();
         try std.testing.expectEqual(
             contract.ModelsError.none,
@@ -2095,7 +2108,6 @@ test "Metask catalog drift keeps a tracked global default durable" {
             .ready => |value| value,
             .rejected => return error.TestUnexpectedResult,
         };
-        try std.testing.expectEqualStrings("model-1", refresh.preferred_model_id);
         var replacement_catalog = metask_provider.CatalogSession.init(std.testing.allocator);
         defer replacement_catalog.deinit();
         try metask_provider.TestSupport.replaceOwnedCatalog(
@@ -2104,11 +2116,7 @@ test "Metask catalog drift keeps a tracked global default durable" {
             "replacement-secret",
             &.{.{ .id = "model-2", .display_name = "Model Two" }},
         );
-        var replacement_completion = try metask_provider.OwnedCatalogCompletion.init(
-            std.testing.allocator,
-            &replacement_catalog,
-            "model-2",
-        );
+        var replacement_completion = metask_provider.OwnedCatalogCompletion.init(&replacement_catalog);
         var replacement_completion_port = replacement_completion.ownedPort();
         try std.testing.expectEqual(
             contract.ModelsError.none,
@@ -2122,10 +2130,14 @@ test "Metask catalog drift keeps a tracked global default durable" {
         const drifted = runtime.view();
         try std.testing.expect(runtime.store_healthy);
         try std.testing.expectEqualStrings("metask", drifted.metask_selection.?.source_id);
-        try std.testing.expectEqualStrings("model-2", drifted.metask_selection.?.model_id);
+        try std.testing.expectEqualStrings("model-1", drifted.metask_selection.?.model_id);
         try std.testing.expectEqualStrings("metask", drifted.default_selection.?.source_id);
-        try std.testing.expectEqualStrings("model-2", drifted.default_selection.?.model_id);
-        try std.testing.expect(drifted.selection_revision != previous_selection_revision);
+        try std.testing.expectEqualStrings("model-1", drifted.default_selection.?.model_id);
+        try std.testing.expectEqual(previous_selection_revision, drifted.selection_revision);
+        try std.testing.expectEqual(contract.CatalogState.ready, drifted.providers[0].catalog_state);
+        try std.testing.expectEqualStrings("model-2", drifted.providers[0].models[0].id);
+        try std.testing.expect(!runtime.defaultResolvable());
+        try std.testing.expect((try runtime.resolveDefault()) == null);
         committed_selection_revision = drifted.selection_revision;
     }
 
@@ -2144,9 +2156,9 @@ test "Metask catalog drift keeps a tracked global default durable" {
         );
         try std.testing.expectEqual(@as(usize, 0), restored.providers[0].models.len);
         try std.testing.expectEqualStrings("metask", restored.metask_selection.?.source_id);
-        try std.testing.expectEqualStrings("model-2", restored.metask_selection.?.model_id);
+        try std.testing.expectEqualStrings("model-1", restored.metask_selection.?.model_id);
         try std.testing.expectEqualStrings("metask", restored.default_selection.?.source_id);
-        try std.testing.expectEqualStrings("model-2", restored.default_selection.?.model_id);
+        try std.testing.expectEqualStrings("model-1", restored.default_selection.?.model_id);
         try std.testing.expectEqual(committed_selection_revision, restored.selection_revision);
     }
 }
@@ -2380,4 +2392,92 @@ fn writeTestFile(dir: *std.Io.Dir, name: []const u8, bytes: []const u8) !void {
     defer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, bytes);
     try file.sync(std.testing.io);
+}
+
+test "successful empty Metask catalog preserves intent but removes all resolvable members" {
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    defer runtime.deinit();
+    try TestSupport.installMetaskDefault(
+        &runtime,
+        "principal-1",
+        "old-secret",
+        &.{.{ .id = "model-1", .display_name = "Model One" }},
+        "model-1",
+        1,
+        2,
+        3,
+        4,
+    );
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, "principal-1", &.{}));
+    const view = runtime.view();
+    try std.testing.expectEqual(contract.CatalogState.ready, view.providers[0].catalog_state);
+    try std.testing.expectEqual(contract.ModelsError.no_models, view.providers[0].error_code);
+    try std.testing.expectEqual(@as(usize, 0), view.providers[0].models.len);
+    try std.testing.expect(view.providers[0].catalog_generation != 4);
+    try std.testing.expectEqual(@as(u64, 1), view.providers[0].source_generation);
+    try std.testing.expectEqual(@as(u64, 2), view.metask_selection_revision);
+    try std.testing.expectEqual(@as(u64, 3), view.selection_revision);
+    try std.testing.expectEqualStrings("model-1", view.metask_selection.?.model_id);
+    try std.testing.expectEqualStrings("model-1", view.default_selection.?.model_id);
+    try std.testing.expect(!runtime.defaultResolvable());
+    try std.testing.expect((try runtime.resolveDefault()) == null);
+    try std.testing.expect(!runtime.configureMetaskSelection(.{
+        .selection = .{ .source_id = "metask", .model_id = "model-1" },
+        .expected_metask_selection_revision = view.metask_selection_revision,
+        .expected_catalog_generation = view.providers[0].catalog_generation,
+    }).accepted);
+}
+
+test "first empty Metask catalog has no inferred selection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(path[0..length], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, "principal-1", &.{}));
+    const view = runtime.view();
+    try std.testing.expectEqual(contract.CatalogState.ready, view.providers[0].catalog_state);
+    try std.testing.expectEqual(contract.ModelsError.no_models, view.providers[0].error_code);
+    try std.testing.expect(view.providers[0].catalog_generation != 0);
+    try std.testing.expect(view.metask_selection == null);
+    try std.testing.expect(view.default_selection == null);
+    try std.testing.expect(!runtime.defaultResolvable());
+    // A later populated catalog is still the first selection initialization.
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalog(&runtime, "principal-1", &.{.{ .id = "model-2", .display_name = "Model Two" }}));
+    try std.testing.expectEqualStrings("model-2", runtime.view().metask_selection.?.model_id);
+    try std.testing.expect(runtime.view().default_selection == null);
+}
+
+test "stale Metask completion leaves the current catalog attempt intact" {
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    defer runtime.deinit();
+    try TestSupport.installMetaskDefault(
+        &runtime,
+        "principal-1",
+        "old-secret",
+        &.{.{ .id = "model-1", .display_name = "Model One" }},
+        "model-1",
+        1,
+        2,
+        3,
+        4,
+    );
+    const preparation = switch (runtime.prepareMetaskCatalogRefresh("principal-1", 17)) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var session = metask_provider.CatalogSession.init(std.testing.allocator);
+    try metask_provider.TestSupport.replaceOwnedCatalog(&session, "principal-1", "stale-secret", &.{});
+    var completion = metask_provider.OwnedCatalogCompletion.init(&session);
+    var port = completion.ownedPort();
+    try std.testing.expectEqual(contract.ModelsError.catalog_invalid, runtime.completeMetaskCatalogRefresh(preparation.attempt_id, 16, &port));
+    try std.testing.expectEqual(preparation.attempt_id, runtime.catalog_attempt.?.id);
+    try std.testing.expectEqual(contract.CatalogState.loading, runtime.view().providers[0].catalog_state);
+    try std.testing.expectEqual(@as(u64, 4), runtime.view().providers[0].catalog_generation);
 }

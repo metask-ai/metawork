@@ -18811,3 +18811,26 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         try std.testing.expect(!control.task_runtime.approval_cleanup_leases.hasLive());
     }
 }
+
+test "authoritative empty catalog closes new default admission and preserves Task execution" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task_id = control.task_runtime.tasks[0].?.durable.id;
+    const old_admission = control.newTaskAdmissionView();
+    try std.testing.expect(old_admission.available);
+    try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalog(&control.custom_providers, "account-1", &.{}));
+    control.reconcileModelsDefaultNoFail(true, false);
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(!control.newTaskAdmissionView().available);
+    try std.testing.expect(!control.validNewTaskAdmission(old_admission.active_generation, old_admission.active_selection_revision));
+    try std.testing.expect(!control.scheduleExecutionBinding().available);
+    try std.testing.expectError(error.ExecutionUnavailable, control.createTask(.{
+        .workspace_root = "/must-not-be-opened",
+        .trust = .explicitly_trusted,
+    }));
+    const pinned = try control.task_runtime.testExecutionInput(task_id);
+    try std.testing.expectEqualStrings("fixture-model", pinned.target.model);
+    try std.testing.expectEqualStrings("SECRET-KEY", pinned.api_key);
+    try std.testing.expectEqual(old_admission.active_generation, pinned.execution_generation);
+    try std.testing.expectEqual(@as(@TypeOf(control.accountView().state), .authenticated), control.accountView().state);
+}

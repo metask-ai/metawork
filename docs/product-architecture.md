@@ -59,6 +59,8 @@ Custom Provider 使用显式的 `openai_responses | openai_chat_completions | an
 
 Models registry 与 Account identity 独立。不同 Provider 即使 credential 相同也保持不同 Provider id；更新名称、endpoint、protocol、credential 或模型保留 Provider id，但影响 source authority 的变化产生新的 source generation。首次成功的 Agent-owned one-shot Completion test 使当前 generation ready；失败重测只更新 latest test status，不撤销已 ready generation或已交付 binding。Models 的 Provider edit/delete 不查询 Task/Session/Run 等消费者，也不以 `execution_in_use` 拒绝；Product Control 只在 desired commit 后独立 reconcile 新 admission 与 active default，既有消费者保持自己的 owned binding。
 
+Metask catalog completion 只交付完整 owned 目录与 transient credential，不在 Application worker 选择模型。Models 负责恢复 intent：同一 principal 的已存选择仍保留，目录移除或排除它时不得静默换模型；只有当前 principal 无历史 intent 时才从合格目录初始化首项。目录成功接纳与 intent 当前可解析性分别判断，失格 intent 不阻止发布可供重新选择的目录。合法空目录推进 catalog generation 并发布 `no_models`，不得解释成普通 transport failure 或复用旧目录给新的 resolve 放行。Product Control 在成功目录 completion 后重新 reconcile，即使 desired selection 未变化也必须关闭不可解析默认的 New Task 与 Schedule admission；已有消费者的 owned binding 与已接纳 pending mutation 按原生命周期保留。
+
 Account authorization 与 Models catalog 的 committed-state 路径为：
 
 ```text

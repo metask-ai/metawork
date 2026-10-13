@@ -173,7 +173,6 @@ pub const CatalogRefreshPreparation = struct {
     attempt_id: u64,
     principal_ref: []const u8,
     authorization_generation: u64,
-    preferred_model_id: []const u8,
 };
 
 pub const CatalogRefreshPrepareResult = union(enum) {
