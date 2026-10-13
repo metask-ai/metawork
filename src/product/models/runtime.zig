@@ -41,6 +41,23 @@ pub const TestSupport = if (builtin.is_test) struct {
         );
     }
 
+    pub fn refreshMetaskCatalogResponse(
+        runtime: *Runtime,
+        principal_ref: []const u8,
+        response_body: []const u8,
+    ) !contract.ModelsError {
+        const preparation = switch (runtime.prepareMetaskCatalogRefresh(principal_ref, 17)) {
+            .ready => |value| value,
+            .rejected => return error.TestUnexpectedResult,
+        };
+        var session = metask_provider.CatalogSession.init(runtime.allocator);
+        defer session.deinit();
+        try metask_provider.TestSupport.loadCatalogResponse(&session, principal_ref, "refreshed-secret", response_body);
+        var completion = metask_provider.OwnedCatalogCompletion.init(&session);
+        var port = completion.ownedPort();
+        return runtime.completeMetaskCatalogRefresh(preparation.attempt_id, preparation.authorization_generation, &port);
+    }
+
     pub fn installMetaskDefault(
         runtime: *Runtime,
         principal_ref: []const u8,
@@ -325,11 +342,6 @@ pub const Runtime = struct {
             self.metask_error = .authorization_unavailable;
             return self.metask_error;
         }
-        const protocol = session.selectedProtocol() orelse {
-            self.metask_catalog_state = .failed;
-            self.metask_error = .catalog_invalid;
-            return self.metask_error;
-        };
         const public_catalog = self.metask_public_catalog orelse {
             self.metask_catalog_state = .unavailable;
             self.metask_error = .persistence_unavailable;
@@ -350,12 +362,14 @@ pub const Runtime = struct {
                 session.firstModelId()
         else
             session.firstModelId();
+        const protocol = if (restored_model_id) |model_id| session.modelProtocol(model_id) else null;
         const keeps_authority = if (current_intent) |intent|
             std.mem.eql(u8, intent.principal_ref, attempt.principal_ref.view()) and
                 intent.protocol == protocol and intent.source_generation != 0
         else
             false;
-        if (!keeps_authority) if (restored_model_id) |selected_model_id| {
+        if (!keeps_authority) if (protocol) |selected_protocol| {
+            const selected_model_id = restored_model_id.?;
             var candidate = self.registry.clone() catch {
                 self.metask_catalog_state = .failed;
                 self.metask_error = .local_resource_exhausted;
@@ -368,19 +382,11 @@ pub const Runtime = struct {
                     std.mem.eql(u8, value.model_id, selected_model_id)
             else
                 false;
-            const same_authority = if (current) |value|
-                std.mem.eql(u8, value.principal_ref, attempt.principal_ref.view()) and
-                    value.protocol == protocol and value.source_generation != 0
-            else
-                false;
-            const source_generation = if (same_authority)
-                current.?.source_generation
-            else
-                self.freshGeneration(if (current) |value| value.source_generation else 0) catch {
-                    self.metask_catalog_state = .failed;
-                    self.metask_error = .local_resource_exhausted;
-                    return self.metask_error;
-                };
+            const source_generation = self.freshGeneration(if (current) |value| value.source_generation else 0) catch {
+                self.metask_catalog_state = .failed;
+                self.metask_error = .local_resource_exhausted;
+                return self.metask_error;
+            };
             const selection_revision = if (same_selection and current.?.selection_revision != 0)
                 current.?.selection_revision
             else
@@ -401,7 +407,7 @@ pub const Runtime = struct {
             candidate.configureMetask(
                 attempt.principal_ref.view(),
                 selected_model_id,
-                protocol,
+                selected_protocol,
                 source_generation,
                 selection_revision,
                 default_selection_revision,
@@ -469,8 +475,8 @@ pub const Runtime = struct {
         const current_revision = if (current) |value| value.selection_revision else 0;
         if (command.expected_metask_selection_revision != current_revision)
             return .rejected(.generation_mismatch);
-        const protocol = self.metask_catalog.selectedProtocol() orelse
-            return .rejected(.invalid_provider);
+        const protocol = self.metask_catalog.modelProtocol(command.selection.model_id) orelse
+            return .rejected(.model_not_found);
         if (!std.mem.eql(u8, command.selection.source_id, contract.metask_source_id) or
             !self.metask_catalog.hasModel(command.selection.model_id))
             return .rejected(.model_not_found);
@@ -640,7 +646,7 @@ pub const Runtime = struct {
                     self.metask_catalog.ownsSourceSelection(
                         intent.principal_ref,
                         intent.model_id,
-                    ) and self.metask_catalog.selectedProtocol() == intent.protocol;
+                    ) and self.metask_catalog.modelProtocol(intent.model_id) == intent.protocol;
             },
             .custom_provider => self.credential_vault != null and
                 self.registry.defaultBinding() != null,
@@ -655,7 +661,7 @@ pub const Runtime = struct {
     ) bool {
         self.assertMainThread();
         if (self.metask_catalog_state != .ready or
-            self.metask_catalog.selectedProtocol() != protocol or
+            self.metask_catalog.modelProtocol(model_id) != protocol or
             !self.metask_catalog.hasModel(model_id))
             return false;
         if (expected_catalog_generation) |expected|
@@ -1147,7 +1153,7 @@ pub const Runtime = struct {
                     !self.metask_catalog.ownsSourceSelection(
                         intent.principal_ref,
                         intent.model_id,
-                    ) or self.metask_catalog.selectedProtocol() != intent.protocol)
+                    ) or self.metask_catalog.modelProtocol(intent.model_id) != intent.protocol)
                     return null;
                 return self.metask_catalog.prepareSourceCandidate(
                     intent.model_id,
@@ -2480,4 +2486,63 @@ test "stale Metask completion leaves the current catalog attempt intact" {
     try std.testing.expectEqual(preparation.attempt_id, runtime.catalog_attempt.?.id);
     try std.testing.expectEqual(contract.CatalogState.loading, runtime.view().providers[0].catalog_state);
     try std.testing.expectEqual(@as(u64, 4), runtime.view().providers[0].catalog_generation);
+}
+
+test "declared protocol refresh changes default authority and preserves old owned candidates" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path);
+    var vault: TestVault = .{};
+    var runtime = Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId());
+    try runtime.start(path[0..length], vault.port());
+    defer {
+        runtime.stop();
+        runtime.deinit();
+    }
+    const initial =
+        \\{"object":"list","has_more":false,"data":[{"id":"model-1","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":true}}}}]}
+    ;
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-1", initial));
+    const initial_view = runtime.view();
+    try std.testing.expect(runtime.selectMetaskDefault(.{
+        .selection = .{ .source_id = "metask", .model_id = "model-1" },
+        .expected_selection_revision = initial_view.selection_revision,
+        .expected_source_generation = initial_view.providers[0].source_generation,
+        .expected_catalog_generation = initial_view.providers[0].catalog_generation,
+    }).accepted);
+    const old_source = runtime.defaultAuthority().?.source_generation;
+    const old_selection = runtime.view().selection_revision;
+    const old_local_selection = runtime.view().metask_selection_revision;
+    var old_owned = (try runtime.resolveDefault()).?;
+    defer old_owned.deinit();
+
+    const replacement =
+        \\{"object":"list","has_more":false,"data":[{"id":"model-1","object":"model","type":"model","capabilities":{"endpoints":{"messages":{"supported":false,"status":"unknown"},"chat_completions":{"supported":true}}}},{"id":"model-2","object":"model","type":"model","capabilities":{"endpoints":{"responses":{"supported":true},"chat_completions":{"supported":true}}}}]}
+    ;
+    try std.testing.expectEqual(contract.ModelsError.none, try TestSupport.refreshMetaskCatalogResponse(&runtime, "principal-1", replacement));
+    const current = runtime.view();
+    try std.testing.expectEqualStrings("model-1", current.default_selection.?.model_id);
+    try std.testing.expectEqual(old_local_selection, current.metask_selection_revision);
+    try std.testing.expectEqual(old_selection, current.selection_revision);
+    try std.testing.expect(current.providers[0].source_generation != old_source);
+    try std.testing.expectEqual(contract.Protocol.openai_chat_completions, runtime.defaultAuthority().?.protocol);
+    try std.testing.expect(!runtime.metaskSourceModelAvailable(.{ .source_id = "metask", .model_id = "model-1" }, old_source, current.providers[0].catalog_generation, .anthropic_messages));
+    try std.testing.expect(runtime.metaskSourceModelAvailable(.{ .source_id = "metask", .model_id = "model-1" }, current.providers[0].source_generation, current.providers[0].catalog_generation, .openai_chat_completions));
+    try std.testing.expect(!runtime.metaskModelAvailable(null, .openai_chat_completions, "model-2"));
+    try std.testing.expect(runtime.metaskModelAvailable(null, .openai_responses, "model-2"));
+    var new_owned = (try runtime.resolveDefault()).?;
+    defer new_owned.deinit();
+    try std.testing.expectEqual(contract.Protocol.openai_chat_completions, new_owned.input().target.protocol);
+    try std.testing.expectEqualStrings(contract.metaskEndpoint(.openai_chat_completions).?, new_owned.input().target.base_url);
+    try std.testing.expectEqual(contract.Protocol.anthropic_messages, old_owned.input().target.protocol);
+    try std.testing.expectEqualStrings(contract.metaskEndpoint(.anthropic_messages).?, old_owned.input().target.base_url);
+
+    try std.testing.expect(runtime.configureMetaskSelection(.{
+        .selection = .{ .source_id = "metask", .model_id = "model-2" },
+        .expected_metask_selection_revision = current.metask_selection_revision,
+        .expected_catalog_generation = current.providers[0].catalog_generation,
+    }).accepted);
+    try std.testing.expectEqual(contract.Protocol.openai_responses, runtime.defaultAuthority().?.protocol);
+    try std.testing.expectEqualStrings("model-2", runtime.view().default_selection.?.model_id);
 }
