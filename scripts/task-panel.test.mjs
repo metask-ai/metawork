@@ -4804,6 +4804,7 @@ test("App switches the current Task only after Host commits and preserves its dr
   await publishAppFixture(fixture);
   fireEvent.click(await findRecentTaskButton(/First task/));
   const composer = screen.getByRole("combobox", { name: "" });
+  await waitFor(() => assert.ok(document.activeElement === composer));
   fireEvent.change(composer, { target: { value: "Keep this unsent draft" } });
   const trigger = screen.getByRole("combobox", { name: "Approval mode" });
   const user = userEvent.setup({ document: dom.window.document });
