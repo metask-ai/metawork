@@ -1940,22 +1940,8 @@ function decodeModels(value: unknown, path: string): ModelsView {
     item.defaultSelection,
     `${path}.defaultSelection`,
   );
-  for (const [name, selection] of [
-    ["metaskSelection", metaskSelection],
-    ["defaultSelection", defaultSelection],
-  ] as const) {
-    if (selection && selection.sourceId === "metask") {
-      const provider = providers.find((candidate) => candidate.id === "metask");
-      if (
-        provider?.catalogState === "ready" &&
-        !provider.models.some((model) => model.id === selection.modelId)
-      )
-        fail(
-          `${path}.${name}`,
-          "the selected Metask model must belong to its ready catalog",
-        );
-    }
-  }
+  // Durable selections are intent. An authoritative ready catalog can
+  // exclude them; Host admission and commands validate current membership.
   return {
     availability: enumValue(
       item.availability,

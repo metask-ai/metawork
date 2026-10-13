@@ -369,6 +369,10 @@ export function SettingsPage({
           (model) => model.id === models.defaultSelection?.modelId,
         )
     : null;
+  const metaskDefaultUnavailable =
+    models.defaultSelection?.sourceId === "metask" &&
+    metaskCatalogState === "ready" &&
+    !committedDefaultModel;
   const currentDefaultLabel = models.defaultSelection
     ? `${
         committedProviderId === "metask"
@@ -465,24 +469,8 @@ export function SettingsPage({
             label: model.displayName || model.id,
             disabled: !model.ready,
           }));
-    if (
-      selectedProviderId === "metask" &&
-      requestedModel &&
-      !options.some((option) => option.value === requestedModel.selectionId)
-    ) {
-      options.unshift({
-        value: requestedModel.selectionId,
-        label: requestedModel.label,
-      });
-    }
     return options;
-  }, [
-    metaskModels,
-    requestedModel,
-    selectedCustomProvider,
-    selectedProviderId,
-    t,
-  ]);
+  }, [metaskModels, selectedCustomProvider, selectedProviderId, t]);
   const customProviderProtocolOptions = useMemo<SelectionMenuOption[]>(
     () =>
       (
@@ -1743,16 +1731,25 @@ export function SettingsPage({
                   />
                 )}
 
-                {models.errorCode !== "none" &&
-                  models.errorCode !== "authorization_unavailable" && (
-                    <div className="settings-error" role="alert">
-                      <Icon name="warning" />
-                      <span className="settings-error-copy">
-                        <strong>{t("settings.models_error")}</strong>
-                        <span>{t("settings.models_error_help")}</span>
+                {((models.errorCode !== "none" &&
+                  models.errorCode !== "authorization_unavailable") ||
+                  metaskDefaultUnavailable) && (
+                  <div className="settings-error" role="alert">
+                    <Icon name="warning" />
+                    <span className="settings-error-copy">
+                      <strong>{t("settings.models_error")}</strong>
+                      <span>
+                        {t(
+                          models.errorCode === "no_models"
+                            ? "account.error.no_models"
+                            : metaskDefaultUnavailable
+                              ? "settings.default_model_unavailable"
+                              : "settings.models_error_help",
+                        )}
                       </span>
-                    </div>
-                  )}
+                    </span>
+                  </div>
+                )}
               </div>
             </section>
           )}

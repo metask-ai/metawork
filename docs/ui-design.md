@@ -1072,6 +1072,8 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 
 Account与 Models状态在设置中分别投影：Account按 `checking | signed_out | authorizing | authenticated`显示 identity action，并在authenticated时直接消费Host发布的summary子投影；Models独立按 `needs_authentication | loading | choosing | ready | failed | unavailable`显示provider配置。Account authenticated不能被summary或Models失败伪装成未登录，Account signed_out也不能隐藏Custom Provider。Renderer不从任一公开状态恢复内部operation，也不区分或展示credential persistence子步骤。
 
+Models 设置与 Composer 的候选只来自 Host 按[产品模型范围](requirements.md#52-账号provider模型与执行配置)发布的合格目录，不把失格的历史或 Renderer 请求项补回可选菜单。ready 目录允许保留已失格的 default intent；设置保留其身份并明确提示重新选择，合格候选仍可操作。合法空目录禁用模型选择并提示“没有可用的对话模型”，保留重新同步入口与 Account 登录状态。
+
 `Providers` 规则：
 
 > 该入口按完整 Host capability gate 开放；支持的桌面平台只要三项运行能力同时可用即可导航。

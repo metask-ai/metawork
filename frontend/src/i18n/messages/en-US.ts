@@ -67,7 +67,7 @@ export const enUS = {
     "Complete authorization in your browser if it is still open. MetaWork will continue automatically.",
   "account.action_failed": "Account action needs attention",
   "account.error.no_models":
-    "No models are available for this Metask account. Refresh the catalog or check the account in Metask and retry.",
+    "No conversation models are available for this Metask account. Refresh the catalog or check the account in Metask and retry.",
   "account.error.deadline":
     "Metask did not respond in time. Check your connection.",
   "account.error.browser":
@@ -1146,6 +1146,8 @@ export const enUS = {
   "settings.open_models": "Open Models",
   "settings.default_selection_missing":
     "No executable default model is selected",
+  "settings.default_model_unavailable":
+    "The previous default model is no longer in the available catalog. Choose another default model.",
   "settings.providers_help":
     "Manage the model services, endpoints, and API keys available to MetaWork. Choose the default model on the Models page.",
   "settings.providers_empty": "No custom APIs yet.",
