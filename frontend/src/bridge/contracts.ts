@@ -895,6 +895,7 @@ export type TaskView = {
     | "workspace_unavailable"
     | "authority_unavailable"
     | "runtime_unavailable"
+    | "history_read_only"
     | null;
   continuationRecoveryAvailable: boolean;
   archived: boolean;
@@ -943,6 +944,8 @@ export type WorkbenchSnapshot = {
       | "write_failed"
       | "outcome_unknown";
     taskHistoryRecoveryAvailable: boolean;
+    /** Saved Tasks this version cannot open; kept unchanged on disk. */
+    retainedTaskHistoryCount: string;
     conversationRecovery: boolean;
     executionRebind: boolean;
     structuredPlan: boolean;

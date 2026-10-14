@@ -20,6 +20,7 @@ export function TaskList({
   onTaskAction,
   taskMutationDisabled,
   synchronized = true,
+  retainedTaskCount = 0,
 }: {
   tasks: TaskView[];
   workspaces: WorkspaceView[];
@@ -31,6 +32,7 @@ export function TaskList({
   onTaskAction: (task: TaskView, action: TaskMenuAction) => void;
   taskMutationDisabled: boolean;
   synchronized?: boolean;
+  retainedTaskCount?: number;
 }) {
   const { locale, t } = useI18n();
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
@@ -50,6 +52,8 @@ export function TaskList({
     menuTaskId === null
       ? null
       : (tasks.find((task) => task.id === menuTaskId) ?? null);
+  const menuTaskReadOnly =
+    menuTask?.continuationUnavailableReason === "history_read_only";
 
   function openTaskMenu(event: MouseEvent<HTMLButtonElement>, taskId: string) {
     event.preventDefault();
@@ -135,6 +139,11 @@ export function TaskList({
           {tasks.length > 0 ? t("task.archived_hidden") : t("task.no_tasks")}
         </p>
       )}
+      {retainedTaskCount > 0 && (
+        <p className="task-list-empty">
+          {t("task.history_retained", { count: retainedTaskCount })}
+        </p>
+      )}
       {archivedCount > 0 && (
         <button
           className="archived-toggle focus-ring"
@@ -171,6 +180,7 @@ export function TaskList({
                     className="task-menu-item"
                     disabled={
                       taskMutationDisabled ||
+                      menuTaskReadOnly ||
                       menuTask.deletionStatus === "deleting"
                     }
                     onClick={() => onTaskAction(menuTask, "rename")}
@@ -181,6 +191,7 @@ export function TaskList({
                     className="task-menu-item"
                     disabled={
                       taskMutationDisabled ||
+                      menuTaskReadOnly ||
                       menuTask.activeOperation !== null ||
                       menuTask.lifecycle === "closing"
                     }
@@ -192,6 +203,7 @@ export function TaskList({
                     className="task-menu-item is-danger"
                     disabled={
                       taskMutationDisabled ||
+                      menuTaskReadOnly ||
                       !menuTask.archived ||
                       menuTask.deletionStatus === "deleting" ||
                       (menuTask.lifecycle === "closing" &&

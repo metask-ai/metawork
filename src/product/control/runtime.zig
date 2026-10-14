@@ -57,6 +57,7 @@ pub const Error = task_runtime.Runtime.ApprovalError || attachment_staging.Error
     CloseInProgress,
     TaskBusy,
     TaskNotArchived,
+    TaskReadOnly,
     InvalidTaskTitle,
     InvalidScheduledTaskInput,
     ScheduleTimerUnavailable,
@@ -4051,7 +4052,7 @@ pub const Runtime = struct {
         defer scratch.deinit();
         const output = try self.allocator.alloc(u8, task_persistence.max_store_bytes);
         defer self.allocator.free(output);
-        const bytes = try task_persistence.encode(output, scratch.state, self.taskPersistenceLimits());
+        const bytes = try task_persistence.encodePreserving(output, scratch.state, scratch.preserved, self.taskPersistenceLimits());
         if (self.containsKnownCredential(bytes)) return error.TaskStoreEncodeFailed;
         return self.allocator.dupe(u8, bytes);
     }
@@ -4924,9 +4925,10 @@ pub const Runtime = struct {
         const output = self.allocator.alloc(u8, task_persistence.max_store_bytes) catch
             return .failed;
         defer self.allocator.free(output);
-        const bytes = task_persistence.encode(
+        const bytes = task_persistence.encodePreserving(
             output,
             scratch.state,
+            scratch.preserved,
             self.taskPersistenceLimits(),
         ) catch
             return .failed;
@@ -5810,11 +5812,12 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
             self.taskHistoryRecoveryAvailable(),
+            self.task_runtime.retainedTaskCount(),
             permission_profiles_available,
             self.automaticWorkspacesAvailable(),
             self.schedule.timerEnabled() and schedule_persistence_ready and
@@ -7151,18 +7154,30 @@ pub const Runtime = struct {
             self.taskPersistenceLimits(),
         );
         defer recovered.deinit();
+        // Defaults are a preference, not history; an unreadable value falls
+        // back instead of discarding every restorable record.
+        const default_profile = task_persistence.parseEnum(PermissionProfile, recovered.value.default_permission_profile) orelse profile: {
+            recovered.degraded = true;
+            break :profile PermissionProfile.approval_required;
+        };
         self.default_approval_mode = if (recovered.value.default_approval_mode) |mode|
-            task_persistence.parseEnum(ApprovalMode, mode) orelse return error.TaskStoreCorrupt
+            task_persistence.parseEnum(ApprovalMode, mode) orelse mode: {
+                recovered.degraded = true;
+                break :mode ApprovalMode.fromFacts(default_profile, false);
+            }
         else
-            ApprovalMode.fromFacts(task_persistence.parseEnum(PermissionProfile, recovered.value.default_permission_profile) orelse return error.TaskStoreCorrupt, false);
+            ApprovalMode.fromFacts(default_profile, false);
         for (recovered.value.failures) |failure|
             try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
-        for (recovered.value.workspaces) |workspace| {
+        for (recovered.preserved.retained) |record|
+            try self.task_runtime.retainRecord(record);
+        for (recovered.value.workspaces, recovered.workspace_frames) |workspace, frame| {
             const skill_root = try self.allocator.dupe(u8, workspace.canonical_root);
             var skill_root_owned = true;
             defer if (skill_root_owned) self.allocator.free(skill_root);
             const kind = task_persistence.parseEnum(WorkspaceKind, workspace.kind) orelse {
                 recovered.dropped_workspaces += 1;
+                try self.task_runtime.retainRecord(frame);
                 continue;
             };
             self.workspace.restore(.{
@@ -7177,6 +7192,7 @@ pub const Runtime = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
                     recovered.dropped_workspaces += 1;
+                    try self.task_runtime.retainRecord(frame);
                     continue;
                 },
             };
@@ -7192,6 +7208,8 @@ pub const Runtime = struct {
         }
         recovered.dropped_tasks += try self.task_runtime.restoreTasks(
             recovered.value.tasks,
+            recovered.task_frames,
+            recovered.preserved.read_only_tasks,
             self.taskRestoreProjection(),
         );
         for (recovered.value.tasks) |task|
@@ -7200,6 +7218,13 @@ pub const Runtime = struct {
         for (0..self.workspace.slotCount()) |index| {
             const workspace = self.workspace.automaticBindingAt(index) orelse continue;
             if (self.task_runtime.taskCountInWorkspace(workspace.id) == 1) continue;
+            // The owner Task was retained, so its automatic scope is too.
+            for (recovered.value.workspaces, recovered.workspace_frames) |value, frame| {
+                if (value.id == workspace.id) {
+                    try self.task_runtime.retainRecord(frame);
+                    break;
+                }
+            }
             std.debug.assert(self.skill.unregisterWorkspace(
                 workspace.id,
                 self.skillProjectionBudget(),
@@ -7259,6 +7284,7 @@ pub const Runtime = struct {
             ));
         }
         self.workspace.reset(self.workspaceStorage());
+        self.task_runtime.clearRetained();
         self.task_runtime.resetIdentity();
     }
 
@@ -7300,6 +7326,11 @@ pub const Runtime = struct {
             .allocated_workspaces = workspaces,
             .allocated_tasks = task_frames.tasks,
             .allocated_failures = task_frames.failures,
+            .allocated_read_only_tasks = task_frames.read_only_tasks,
+            .preserved = .{
+                .read_only_tasks = task_frames.read_only_tasks,
+                .retained = task_frames.retained,
+            },
             .state = .{
                 .default_permission_profile = @tagName(self.default_approval_mode.profile()),
                 .default_approval_mode = @tagName(self.default_approval_mode),
@@ -7756,7 +7787,7 @@ pub const Runtime = struct {
             return err;
         };
         defer self.allocator.free(output);
-        const bytes = task_persistence.encode(output, scratch.state, persistence_limits) catch |err| {
+        const bytes = task_persistence.encodePreserving(output, scratch.state, scratch.preserved, persistence_limits) catch |err| {
             self.markTaskPersistenceWriteFailed();
             return err;
         };
@@ -11083,6 +11114,56 @@ test "Restore permission stats are projected as runtime health" {
         std.mem.indexOf(u8, snapshot, "\"restorePermission\":{\"restoredRules\":\"2\",\"invalidatedRules\":\"1\"}") != null,
     );
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"permission_provenance\"") == null);
+}
+
+test "a Task saved by a newer build restores read-only and commits keep its frame" {
+    const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TestTaskPersistence{ .storage = persistence_storage };
+    {
+        var source = try testRuntime();
+        defer source.deinit();
+        try source.replaceTracked(
+            &source.task_runtime.tasks[0].?.durable.workspace_root,
+            "/tmp/metawork-test",
+            source.limits.max_workspace_bytes,
+        );
+        source.task_runtime.next_recent_order = 2;
+        source.task_persistence = persistence.capability(null);
+        source.task_persistence_health = .ready;
+        try source.commitTaskState();
+    }
+    const newer_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(newer_storage);
+    const newer = try task_persistence.testing.addTaskField(
+        newer_storage,
+        persistence.storage[0..persistence.len],
+        "\"newer_field\":1",
+    );
+
+    var restored = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        testLimits(),
+        .{ .task_persistence = persistence.capability(newer) },
+    );
+    defer restored.deinit();
+    try std.testing.expectEqual(TaskPersistenceHealth.degraded, restored.task_persistence_health);
+    const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(task.read_only_history != null);
+    try std.testing.expectError(error.TaskReadOnly, restored.renameTask(3, "renamed"));
+    try std.testing.expectError(error.TaskReadOnly, restored.setTaskArchived(3, true));
+    try std.testing.expectError(error.TaskReadOnly, restored.deleteTask(3));
+
+    const commits = persistence.commits;
+    try restored.commitTaskState();
+    try std.testing.expectEqual(commits + 1, persistence.commits);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence.storage[0..persistence.len],
+        "\"newer_field\":1",
+    ) != null);
 }
 
 test "Task state round trip restores product history without fabricating a Session" {

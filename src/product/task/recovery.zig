@@ -21,6 +21,7 @@ pub const UnavailableReason = enum {
     workspace_unavailable,
     authority_unavailable,
     runtime_unavailable,
+    history_read_only,
 };
 
 pub const Capability = union(enum) { available, unavailable: UnavailableReason };
@@ -59,11 +60,13 @@ pub const RecoveryAdmissionFacts = struct {
     execution_admission: ExecutionAdmission = .unavailable,
     core: CoreRecoveryAuthority = .{},
     recovery_failed: bool = false,
+    history_read_only: bool = false,
 };
 
 pub const AdmissionDecision = union(enum) { admitted, denied: UnavailableReason };
 
 pub fn evaluateRecoveryAdmission(facts: RecoveryAdmissionFacts) AdmissionDecision {
+    if (facts.history_read_only) return .{ .denied = .history_read_only };
     if (facts.operation == .restore) return .{ .denied = .session_recovery_in_progress };
     if (facts.operation != .none) return .{ .denied = .authority_unavailable };
     if (facts.archived) return .{ .denied = .task_archived };
@@ -155,6 +158,14 @@ test "failed recovery remains one retryable continuation state" {
     const result = project(facts);
     try std.testing.expect(result.recovery_available);
     try std.testing.expectEqual(UnavailableReason.session_recovery_failed, result.continuation.unavailable);
+}
+
+test "read-only history never offers recovery" {
+    var facts = eligibleFacts();
+    facts.history_read_only = true;
+    const result = project(facts);
+    try std.testing.expect(!result.recovery_available);
+    try std.testing.expectEqual(UnavailableReason.history_read_only, result.continuation.unavailable);
 }
 
 test "fresh Conversation recovery does not require a checkpoint store" {

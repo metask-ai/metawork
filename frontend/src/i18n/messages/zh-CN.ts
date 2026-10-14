@@ -486,6 +486,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.no_tasks": "从新建任务开始；需要目录时，发送前再选择。",
   "task.archived_hidden": "已归档任务当前隐藏。",
   "task.show_archived": "显示已归档（{count}）",
+  "task.history_retained": "{count} 个任务无法在当前版本打开，已原样保留。",
   "task.hide_archived": "隐藏已归档",
   "task.archived": "已归档",
   "task.ready": "就绪",
@@ -574,6 +575,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_unavailable": "当前会话暂时无法继续，请检查恢复状态后重试",
   "run.placeholder_execution_rebind_required":
     "当前执行配置无法承载此会话，请切换到支持该任务模型的账号或连接",
+  "run.placeholder_history_read_only":
+    "此任务含当前版本无法识别的内容，只能查看；请使用更新的 MetaWork 继续",
   "run.draft_only": "已在本地保存为草稿。当前工作结束后即可发送。",
   "run.started": "工作已开始。",
   "run.start_failed": "未能开始工作，请检查连接后重试。",

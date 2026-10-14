@@ -482,6 +482,7 @@ pub const MutationError = std.mem.Allocator.Error || error{
     ProjectionCapacity,
     UnknownTask,
     TaskBusy,
+    TaskReadOnly,
     InvalidTaskTitle,
     TaskPersistenceFailed,
     TaskPersistenceOutcomeUnknown,
@@ -490,6 +491,7 @@ pub const MutationError = std.mem.Allocator.Error || error{
 pub const DeletionError = error{
     UnknownTask,
     TaskNotArchived,
+    TaskReadOnly,
     TaskPersistenceFailed,
     TaskPersistenceOutcomeUnknown,
 };
@@ -1027,12 +1029,16 @@ pub const HistoryFrames = struct {
     allocator: std.mem.Allocator,
     tasks: []task_persistence.TaskWire,
     failures: []task_persistence.TaskFailureWire,
+    /// Borrowed from the Runtime; valid until its history next changes.
+    read_only_tasks: []task_persistence.ReadOnlyPayload,
+    retained: []const task_persistence.RetainedRecord,
     next_task_id: u64,
     next_recent_order: u64,
 
     pub fn deinit(self: *HistoryFrames) void {
         task_persistence.deinitTaskWires(self.allocator, self.tasks);
         self.allocator.free(self.failures);
+        self.allocator.free(self.read_only_tasks);
         self.* = undefined;
     }
 };
@@ -1059,6 +1065,9 @@ pub const Runtime = struct {
     allocator: std.mem.Allocator,
     tasks: []?task_state.Task,
     failures: std.ArrayList(FailureRecord) = .empty,
+    /// History frames this build cannot restore; payloads are owned and are
+    /// written back unchanged by every commit.
+    retained: std.ArrayList(task_persistence.RetainedRecord) = .empty,
     next_task_id: u64 = 1,
     next_recent_order: u64 = 1,
     next_restore_attempt_id: u64 = 1,
@@ -1141,6 +1150,7 @@ pub const Runtime = struct {
         effects: RecoveryAdmissionEffects,
     ) ApprovalError!u64 {
         const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null) return error.TaskClosing;
         const revision = try self.approvalChangeRevision(task, expected_binding_epoch, expected_revision, target, effects.authority(projectionAuthorityQuery(task)));
         if (revision == task.durable.approval_revision) return revision;
         task.runtime.permission_review.invalidate();
@@ -1456,6 +1466,8 @@ pub const Runtime = struct {
         self.allocator.free(self.tasks);
         for (self.failures.items) |failure| self.allocator.free(failure.reason);
         self.failures.deinit(self.allocator);
+        self.clearRetained();
+        self.retained.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -2220,6 +2232,7 @@ pub const Runtime = struct {
         max_model_id_bytes: usize,
     ) ModelError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null) return error.TaskClosing;
         if (task.approval_change != null) return error.TaskBusy;
         if (!std.mem.eql(u8, expected_model, task.durable.execution_model))
             return error.TaskModelMismatch;
@@ -2526,6 +2539,7 @@ pub const Runtime = struct {
         text: TextProjection,
     ) MutationError!void {
         const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null) return error.TaskReadOnly;
         if (task.deletion == .deleting) return error.TaskBusy;
         const trimmed = std.mem.trim(u8, title, " \t\r\n");
         if (trimmed.len == 0 or trimmed.len > max_title_bytes or
@@ -2557,6 +2571,7 @@ pub const Runtime = struct {
         archived: bool,
     ) MutationError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null) return error.TaskReadOnly;
         if (task.deletion == .deleting or
             task_policy.taskLifecycle(task) == .closing or
             task_policy.hasActiveOperation(task))
@@ -2601,7 +2616,7 @@ pub const Runtime = struct {
     pub fn markCompletionSeen(self: *Runtime, task_id: u64, run_id: u64) bool {
         if (run_id == 0) return false;
         const task = self.find(task_id) orelse return false;
-        if (task.durable.archived or task.deletion == .deleting) return false;
+        if (task.read_only_history != null or task.durable.archived or task.deletion == .deleting) return false;
         const latest = task_policy.latestTerminalRun(task.durable.runs) orelse return false;
         const terminal = task_state.productTerminalFacts(latest) orelse unreachable;
         if (latest.id != run_id or terminal.outcome != .completed or
@@ -2613,6 +2628,7 @@ pub const Runtime = struct {
 
     pub fn requestDeletion(self: *Runtime, task_id: u64) DeletionError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null) return error.TaskReadOnly;
         if (!task.durable.archived) return error.TaskNotArchived;
         if (task.deletion == .deleting) return false;
         task.runtime.permission_review.invalidate();
@@ -2820,18 +2836,64 @@ pub const Runtime = struct {
             task_persistence.TaskFailureWire,
             self.failures.items.len,
         );
+        errdefer self.allocator.free(failures);
         for (self.failures.items, failures) |failure, *target| target.* = .{
             .task_id = failure.task_id,
             .recent_order = failure.recent_order,
             .reason = failure.reason,
         };
+        var read_only_count: usize = 0;
+        for (self.tasks) |entry| if (entry) |task| if (task.read_only_history != null) {
+            read_only_count += 1;
+        };
+        const read_only_tasks = try self.allocator.alloc(
+            task_persistence.ReadOnlyPayload,
+            read_only_count,
+        );
+        var read_only_index: usize = 0;
+        for (self.tasks) |entry| if (entry) |task| if (task.read_only_history) |history| {
+            read_only_tasks[read_only_index] = .{
+                .task_id = task.durable.id,
+                .recent_order = history.recent_order,
+                .payload = history.payload,
+            };
+            read_only_index += 1;
+        };
         return .{
             .allocator = self.allocator,
             .tasks = tasks,
             .failures = failures,
+            .read_only_tasks = read_only_tasks,
+            .retained = self.retained.items,
             .next_task_id = self.next_task_id,
             .next_recent_order = self.next_recent_order,
         };
+    }
+
+    /// Keeps a history frame this build cannot restore so later commits write
+    /// it back unchanged.
+    pub fn retainRecord(
+        self: *Runtime,
+        record: task_persistence.RetainedRecord,
+    ) std.mem.Allocator.Error!void {
+        const payload = try self.allocator.dupe(u8, record.payload);
+        errdefer self.allocator.free(payload);
+        var owned = record;
+        owned.payload = payload;
+        try self.retained.append(self.allocator, owned);
+    }
+
+    pub fn retainedTaskCount(self: *const Runtime) usize {
+        var count: usize = 0;
+        for (self.retained.items) |record| {
+            if (record.kind == .task) count += 1;
+        }
+        return count;
+    }
+
+    pub fn clearRetained(self: *Runtime) void {
+        for (self.retained.items) |record| self.allocator.free(record.payload);
+        self.retained.clearRetainingCapacity();
     }
 
     pub fn recordFailure(
@@ -2855,28 +2917,45 @@ pub const Runtime = struct {
         });
     }
 
+    /// `frames` holds the original frame of each wire. A Task that cannot be
+    /// restored keeps that frame; a Task listed in `read_only` is restored
+    /// read-only and keeps its frame for commits.
     pub fn restoreTasks(
         self: *Runtime,
         wires: []const task_persistence.TaskWire,
+        frames: []const task_persistence.RetainedRecord,
+        read_only: []const task_persistence.ReadOnlyPayload,
         projection: task_persistence.RestoreProjection,
     ) RestoreError!usize {
+        std.debug.assert(wires.len == frames.len);
         for (self.tasks) |entry| std.debug.assert(entry == null);
         var restored_count: usize = 0;
-        var dropped: usize = 0;
-        for (wires) |wire| {
-            const restored = task_persistence.restoreTask(projection, wire) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => {
-                    dropped += 1;
-                    try self.recordFailure(wire.id, wire.recent_order, "task_restore");
-                    continue;
-                },
+        var retained: usize = 0;
+        for (wires, frames) |wire, frame| {
+            const original: ?task_persistence.ReadOnlyPayload = for (read_only) |value| {
+                if (value.task_id == wire.id) break value;
+            } else null;
+            const payload = if (original) |value| try self.allocator.dupe(u8, value.payload) else null;
+            var restored = task_persistence.restoreTask(projection, wire) catch |err| {
+                if (payload) |bytes| self.allocator.free(bytes);
+                switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {
+                        retained += 1;
+                        try self.retainRecord(frame);
+                        continue;
+                    },
+                }
+            };
+            if (original) |value| restored.read_only_history = .{
+                .recent_order = value.recent_order,
+                .payload = payload.?,
             };
             std.debug.assert(restored_count < self.tasks.len);
             self.tasks[restored_count] = restored;
             restored_count += 1;
         }
-        return dropped;
+        return retained;
     }
 
     pub fn restoreIdentityState(
@@ -3974,6 +4053,7 @@ pub const Runtime = struct {
                 .authority_stable = !self.recovery_poisoned and external.authority_stable,
             },
             .recovery_failed = task.runtime.last_restore_failure != null,
+            .history_read_only = task.read_only_history != null,
         };
     }
 
@@ -6665,6 +6745,7 @@ fn deinitTask(
         if (change.unknown_history) |history| self.allocator.free(history.bytes);
     }
     if (task.runtime.pending_model) |model| self.allocator.free(model);
+    if (task.read_only_history) |history| self.allocator.free(history.payload);
     task.* = undefined;
 }
 
