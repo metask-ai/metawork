@@ -639,6 +639,9 @@ export const enUS = {
   "run.activity.unsynchronized": "Status not synchronized",
   "run.activity.requesting_stop": "Requesting stop…",
   "attachment.add": "Add files",
+  "attachment.removing": "Removing file…",
+  "attachment.error.release_unconfirmed":
+    "File cleanup could not be confirmed. Restoring the connection; unsent files need to be selected again.",
   "attachment.cancelling": "Cancelling file addition…",
   "attachment.error.input_busy":
     "Files are still being processed. Try adding again shortly.",

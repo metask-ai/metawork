@@ -764,6 +764,8 @@ Composer 工具带在模型控件之前提供一个使用加号图标、带可�
 
 ready 附件按选择顺序显示可换行的紧凑 chip，包含经过 Host 校验的 basename、文件类别与格式化大小，并提供逐项移除按钮。图片额外显示已识别格式；其他文件使用通用文件图标。chip 不显示绝对路径、缩略图、hash、上传进度或 provider wire。文件名保持原文且服从普通用户内容方向规则；超长名称截断，完整安全名称通过 title 与可访问名称提供。键盘焦点按选择顺序进入移除按钮，删除后移到相邻 chip 或“添加文件”。窄窗不得因附件列表产生页面横向滚动。
 
+逐项移除在开始时同步更新所属草稿，保留最新文字和其他附件；Host 回包只结算原操作，不能覆盖草稿或将结果写到其他 Task。移除等待期间文字编辑和 Task 切换仍可用，添加、重复移除和发送保持互斥，并以“正在移除文件”区别于添加/取消添加。操作及反馈绑定草稿 scope、连接 generation 和操作 identity，切走再返回也不接纳旧反馈；旧操作收尾不能解除新操作的互斥，焦点不能迁移到其他草稿。release=false 遵守既有幂等语义，不恢复旧 token；无法确认清理结果时明确提示，并复用连接恢复、清除旧连接未发送附件和保留文字/重选提示的规则，不能猜测删除成功或恢复可能已撤销的 token。
+
 Text draft 可以为空，只要附件全部是 ready 图片；非空文字固定先于全部附件提交，chip 顺序就是 input part 顺序。经 Host 按[产品输入限制](requirements.md#53-task)接纳的非图片文件以“文件”展示并可与图片混合发送；草稿只要含非图片文件，去除首尾空白后的用户指令就必须非空，否则发送按钮保持禁用，不额外显示常驻提示。空文件、超限或无法解码的已识别图片在整批 staging 时以 typed reason 拒绝，不发布部分 chip。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应图片媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
 
 附件 token 与 metadata 只保存在当前 Renderer connection 的内存草稿；Task 切换可以保留，document generation replacement、reload 或 disconnect 后必须清除。Renderer 只允许保存一个不含名称、大小、类型和 token 的 generic marker，使 reload 后能提示“未发送的附件需要重新选择”。文字/Skill 仍按既有 tagged session storage 保存。New task 已创建但 Run 尚未接纳时，附件草稿和文字一起迁移到真实 Task；Run 被 Product 接纳后立即清空 draft chip，timeout 先 resync snapshot且不得自动重放。
