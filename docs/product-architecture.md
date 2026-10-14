@@ -61,6 +61,8 @@ Models registry 与 Account identity 独立。不同 Provider 即使 credential 
 
 Metask catalog completion 只交付完整 owned 目录与 transient credential，不在 Application worker 选择模型。Models 负责恢复 intent：同一 principal 的已存选择仍保留，目录移除或排除它时不得静默换模型；只有当前 principal 无历史 intent 时才从合格目录初始化首项。同一模型的声明使选定 protocol 改变时，保留模型 intent 与 selection revision，更新 source authority 并由 Product Control 为新的默认执行建立新 generation；已有 Task/Run/pending 的 owned protocol 不热切换。新 Task override 与已有 Task 模型切换仍须匹配各自当前 execution protocol，不把其他协议的模型放入该 execution。目录成功接纳与 intent 当前可解析性分别判断，失格 intent 不阻止发布可供重新选择的目录。合法空目录推进 catalog generation 并发布 `no_models`，不得解释成普通 transport failure 或复用旧目录给新的 resolve 放行。Product Control 在成功目录 completion 后重新 reconcile，即使 desired selection 未变化也必须关闭不可解析默认的 New Task 与 Schedule admission；已有消费者的 owned binding 与已接纳 pending mutation 按原生命周期保留。
 
+Metask 的图片与 PDF 输入声明仅分别来自 `capabilities.input.image.supported` 与 `capabilities.input.pdf.supported`，只接纳 boolean true；缺失、null、false 均投影为不支持，非法已消费字段类型使目录响应无效。不得从旧 `image_input/pdf_input`、`input.document`、document formats 或端点内部 input/output 推断或回退。Models 保留现有 metadata 投影字段作为下游合同；这些声明不改变端点用途判定、执行 protocol 或 MetaWork 已开放的附件范围。
+
 Account authorization 与 Models catalog 的 committed-state 路径为：
 
 ```text

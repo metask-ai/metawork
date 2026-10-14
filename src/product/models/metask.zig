@@ -505,8 +505,10 @@ const ModelEndpointsWire = struct {
 
 const ModelCapabilitiesWire = struct {
     endpoints: ?ModelEndpointsWire = null,
-    image_input: ?CapabilityWire = null,
-    pdf_input: ?CapabilityWire = null,
+    input: ?struct {
+        image: ?CapabilityWire = null,
+        pdf: ?CapabilityWire = null,
+    } = null,
     batch: ?CapabilityWire = null,
     citations: ?CapabilityWire = null,
     code_execution: ?CapabilityWire = null,
@@ -534,8 +536,8 @@ const ModelCapabilitiesWire = struct {
 
     fn projection(self: ModelCapabilitiesWire) contract.ModelCapabilities {
         var result: contract.ModelCapabilities = .{
-            .image_input = supported(self.image_input),
-            .pdf_input = supported(self.pdf_input),
+            .image_input = if (self.input) |input| supported(input.image) else false,
+            .pdf_input = if (self.input) |input| supported(input.pdf) else false,
             .batch = supported(self.batch),
             .citations = supported(self.citations),
             .code_execution = supported(self.code_execution),
@@ -745,7 +747,7 @@ const declared_model_fixture =
     \\{"object":"list","has_more":false,"data":[{
     \\"id":"model-1","object":"model","type":"model","display_name":"Model 1",
     \\"max_input_tokens":1048576,"max_tokens":64000,"capabilities":{"endpoints":{"messages":{"supported":true}},
-    \\"image_input":{"supported":false},"pdf_input":{"supported":false},
+    \\"input":{"image":{"supported":true},"pdf":{"supported":true}},
     \\"batch":{"supported":false},"citations":{"supported":false},
     \\"code_execution":{"supported":false},"structured_outputs":{"supported":true},
     \\"thinking":{"supported":true,"types":{"adaptive":{"supported":false},"enabled":{"supported":true}}},
@@ -759,8 +761,8 @@ test "model declarations survive owned catalog copies and never leak into a repl
         .max_input_tokens = 1048576,
         .max_output_tokens = 64000,
         .capabilities = .{
-            .image_input = false,
-            .pdf_input = false,
+            .image_input = true,
+            .pdf_input = true,
             .batch = false,
             .citations = false,
             .code_execution = false,
@@ -807,8 +809,8 @@ test "Metask capabilities default to unsupported without coercion" {
     const cases = [_]struct { fields: []const u8, expected: contract.ModelMetadata, eligible: bool = true }{
         .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}", .expected = unsupported_metadata },
         .{ .fields = ",\"max_input_tokens\":null,\"max_tokens\":0,\"capabilities\":null", .expected = unsupported_metadata, .eligible = false },
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_input\":null,\"pdf_input\":{},\"thinking\":{\"types\":null},\"effort\":null}", .expected = unsupported_metadata },
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_input\":{\"supported\":true},\"pdf_input\":{\"supported\":false},\"batch\":{\"supported\":null}}", .expected = .{ .capabilities = image_capabilities } },
+        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"input\":{\"image\":null,\"pdf\":{}},\"thinking\":{\"types\":null},\"effort\":null}", .expected = unsupported_metadata },
+        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"input\":{\"image\":{\"supported\":true},\"pdf\":{\"supported\":false}},\"batch\":{\"supported\":null}}", .expected = .{ .capabilities = image_capabilities } },
         .{ .fields = ",\"max_input_tokens\":18446744073709551615,\"max_tokens\":1,\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}", .expected = .{ .max_input_tokens = std.math.maxInt(u64), .max_output_tokens = 1, .capabilities = unsupported_metadata.capabilities } },
     };
     for (cases) |case| {
@@ -829,8 +831,8 @@ test "Metask capabilities default to unsupported without coercion" {
         ",\"max_tokens\":true",
         ",\"max_input_tokens\":{}",
         ",\"capabilities\":false",
-        ",\"capabilities\":{\"image_input\":true}",
-        ",\"capabilities\":{\"pdf_input\":{\"supported\":1}}",
+        ",\"capabilities\":{\"input\":{\"image\":true}}",
+        ",\"capabilities\":{\"input\":{\"pdf\":{\"supported\":1}}}",
         ",\"capabilities\":{\"thinking\":{\"types\":{\"adaptive\":{\"supported\":\"true\"}}}}",
         ",\"capabilities\":{\"effort\":{\"low\":{\"supported\":[]}}}",
         ",\"capabilities\":{\"context_management\":{\"compact_20260112\":{\"supported\":{}}}}",
@@ -1089,5 +1091,44 @@ test "only endpoints decide admission despite redundant output declarations" {
         var parsed = try parseModels(std.testing.allocator, case.body);
         defer parsed.deinit();
         try std.testing.expectEqual(case.count, parsed.entries.items.len);
+    }
+}
+
+test "input image and pdf declarations are authoritative without legacy or document fallback" {
+    const cases = [_]struct { body: []const u8, image: bool, pdf: bool }{
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":null,\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{\"image\":null,\"pdf\":{\"supported\":null}},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{\"image\":{\"supported\":true},\"pdf\":{\"supported\":true}},\"image_input\":{\"supported\":false},\"pdf_input\":{\"supported\":false},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = true, .pdf = true },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{\"image\":{\"supported\":false},\"pdf\":{\"supported\":false},\"document\":{\"supported\":true}},\"image_input\":{\"supported\":true},\"pdf_input\":{\"supported\":true},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{\"image\":{\"supported\":true},\"document\":{\"supported\":true}},\"pdf_input\":{\"supported\":true},\"limits\":{\"document\":{\"formats\":[\"application/pdf\"]}},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = true, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"image_input\":{\"supported\":true},\"pdf_input\":{\"supported\":true},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true,\"input\":[\"image\",\"pdf\"]}}}}]}", .image = false, .pdf = false },
+    };
+    for (cases) |case| {
+        var parsed = try parseModels(std.testing.allocator, case.body);
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(usize, 1), parsed.entries.items.len);
+        const caps = parsed.entries.items[0].metadata.capabilities;
+        try std.testing.expectEqual(@as(?bool, case.image), caps.image_input);
+        try std.testing.expectEqual(@as(?bool, case.pdf), caps.pdf_input);
+    }
+}
+
+test "input declarations reject malformed known fields" {
+    const inputs = [_][]const u8{
+        "true",
+        "[]",
+        "{\"image\":false}",
+        "{\"image\":{\"supported\":1}}",
+        "{\"pdf\":true}",
+        "{\"pdf\":{\"supported\":\"true\"}}",
+        "{\"pdf\":{\"supported\":[]}}",
+    };
+    for (inputs) |input| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"object\":\"list\",\"has_more\":false,\"data\":[{{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{{\"input\":{s},\"endpoints\":{{\"messages\":{{\"supported\":true}}}}}}}}]}}", .{input});
+        defer std.testing.allocator.free(body);
+        try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
     }
 }
