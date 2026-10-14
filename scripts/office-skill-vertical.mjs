@@ -240,7 +240,7 @@ export async function runOfficeSkillVertical({
         } else assert.ok(JSON.stringify(payload.messages).includes(original));
         if (name === "zip") {
           const text = JSON.stringify(payload.messages);
-          // The exact invocation is supplied by Product, not by the fixture.
+          // Product supplies the helper even without a selected interpreter.
           const strings = [];
           const visit = (value) => {
             if (typeof value === "string") strings.push(value);
@@ -255,10 +255,14 @@ export async function runOfficeSkillVertical({
           assert.ok(metadata, text.slice(0, 1024));
           const parsePath = (key) =>
             JSON.parse(
-              metadata.match(new RegExp(key + '=("(?:\\\\.|[^"\\\\])*")'))[1],
+              metadata.match(
+                new RegExp(key + '=(null|"(?:\\\\.|[^"\\\\])*")'),
+              )[1],
             );
+          assert.equal(parsePath("python_path"), null);
+          assert.ok(metadata.includes("Python 3.9 or newer"));
           archiveTool = {
-            python: parsePath("python_path"),
+            python: config.python,
             helper: parsePath("helper_path"),
           };
           archiveInvocation = archiveTool;
@@ -717,6 +721,95 @@ export async function runOfficeSkillVertical({
       ],
       { cwd: taskFiles, env: environment },
     );
+  if (attachmentMode && caseId === 0) {
+    const source = path.join(files, "missing-python.zip");
+    const bytes = sourceBytes.get("zip");
+    await writeFile(source, bytes);
+    const staged = await invoke("metawork.attachments.beginAdd", {
+      generation: "1",
+      batchId: "2001",
+      source: { kind: "native_paths", paths: [source] },
+    });
+    assert.equal(staged.status, "ready", JSON.stringify(staged));
+    const emptyPath = path.join(files, "empty-path");
+    await mkdir(emptyPath);
+    provider.enqueue(
+      async (payload) => {
+        const text = payload.messages
+          .findLast((message) => message.role === "user")
+          .content.find(
+            (part) =>
+              part.type === "text" &&
+              part.text.includes('name="missing-python.zip"'),
+          ).text;
+        assert.ok(text.includes("python_path=null"));
+        assert.ok(text.includes("helper_path="));
+        const original = JSON.parse(
+          text.match(/file_path=("(?:\\.|[^"\\])*")/)[1],
+        );
+        retainedPaths.add(original);
+        retainedBytes.set(original, bytes);
+        assert.deepEqual(await readFile(original), bytes);
+        return toolSse("missing-python", "missing-python-tool", "Bash", {
+          command: `/usr/bin/env PATH=${quote(emptyPath)} /bin/sh -c ${quote(
+            ["python3", "-B", archiveInvocation.helper, "list", original]
+              .map(quote)
+              .join(" "),
+          )}`,
+          description: "Attempt archive inspection with no Python on PATH",
+        });
+      },
+      (payload) => {
+        const result = payload.messages
+          .at(-1)
+          .content.find(
+            (part) =>
+              part.type === "tool_result" &&
+              part.tool_use_id === "missing-python-tool",
+          );
+        assert.ok(result);
+        assert.match(
+          JSON.stringify(result.content),
+          /python3.*(?:not found|No such file)/,
+        );
+        return textSse(
+          "python-unavailable",
+          "PYTHON_UNAVAILABLE: 当前执行环境找不到 Python，暂时无法读取 ZIP；原文件已保留。",
+        );
+      },
+    );
+    const submitted = await invoke("metawork.tasks.run", {
+      taskId: created.taskId,
+      expectedBindingEpoch: bindingEpoch,
+      input: {
+        kind: "multimodal",
+        text: "Inspect this ZIP and explain any missing dependency using the actual tool result.",
+        attachmentTokens: staged.attachments.map((value) => value.token),
+      },
+    });
+    assert.equal(submitted.accepted, true, JSON.stringify(submitted));
+    await poll(
+      async () => {
+        const run = (await snapshot()).tasks
+          .find((value) => value.id === created.taskId)
+          ?.runs.find((value) => value.id === submitted.runId);
+        if (run?.phase !== "completed") return null;
+        assert.ok(run.output.response.includes("PYTHON_UNAVAILABLE"));
+        assert.deepEqual(
+          run.tools.map((tool) => tool.name),
+          ["Bash"],
+        );
+        assert.equal(run.tools[0].bash.result.exitCode, 127);
+        return run;
+      },
+      60_000,
+      "Python dependency failure through real Bash",
+    );
+    assert.deepEqual(await readFile(source), bytes);
+    process.stdout.write(
+      "Missing Python was reported through real Bash and a conversation response; the ZIP original remains intact.\n",
+    );
+  }
   if (
     attachmentMode &&
     automatic &&

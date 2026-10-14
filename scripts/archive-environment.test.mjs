@@ -22,14 +22,17 @@ function fixture(t) {
   return { root, filename, helper, config: { schema: 1, python } };
 }
 
-test("unprepared archive environment does not advertise inherited capabilities", (t) => {
-  const { root } = fixture(t);
+test("unconfigured Python keeps the checkout helper available without inheriting another interpreter", (t) => {
+  const { root, helper } = fixture(t);
   const inherited = {
     KEEP: "value",
     METAWORK_LOCAL_ARCHIVE_HELPER: "other checkout",
     METAWORK_LOCAL_ARCHIVE_PYTHON: "ambient",
   };
-  assert.deepEqual(localArchiveEnvironment(root, inherited), { KEEP: "value" });
+  assert.deepEqual(localArchiveEnvironment(root, inherited), {
+    KEEP: "value",
+    METAWORK_LOCAL_ARCHIVE_HELPER: helper,
+  });
   assert.equal(inherited.METAWORK_LOCAL_ARCHIVE_PYTHON, "ambient");
 });
 
@@ -61,5 +64,13 @@ test("configured archive environment fails closed on invalid metadata or missing
   }
   writeFileSync(filename, JSON.stringify(config));
   rmSync(helper);
-  assert.throws(() => localArchiveEnvironment(root), /environment is invalid/);
+  assert.throws(
+    () => localArchiveEnvironment(root),
+    /helper is missing or invalid/,
+  );
+  rmSync(filename);
+  assert.throws(
+    () => localArchiveEnvironment(root),
+    /helper is missing or invalid/,
+  );
 });

@@ -475,14 +475,14 @@ pub fn run(init: std.process.Init) !void {
         const python = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_PYTHON");
         const helper = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_HELPER");
         if (python == null and helper == null) break :configured null;
-        if (python == null or helper == null) return error.InvalidArchiveConfiguration;
-        const python_path = try canonicalArchiveFile(init.io, python.?);
-        errdefer std.heap.c_allocator.free(python_path);
+        if (helper == null) return error.InvalidArchiveConfiguration;
+        const python_path = if (python) |path| try canonicalArchiveFile(init.io, path) else null;
+        errdefer if (python_path) |path| std.heap.c_allocator.free(path);
         const helper_path = try canonicalArchiveFile(init.io, helper.?);
         break :configured .{ .python = python_path, .helper = helper_path };
     } else null;
     defer if (archive_tool) |tool| {
-        std.heap.c_allocator.free(tool.python);
+        if (tool.python) |path| std.heap.c_allocator.free(path);
         std.heap.c_allocator.free(tool.helper);
     };
     var paths_state: app_paths.Paths = undefined;

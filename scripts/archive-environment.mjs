@@ -22,12 +22,15 @@ export function localArchiveEnvironment(root, inherited = process.env) {
   // accidentally advertise a helper inherited from a different checkout.
   delete result.METAWORK_LOCAL_ARCHIVE_PYTHON;
   delete result.METAWORK_LOCAL_ARCHIVE_HELPER;
+  const helper = archiveHelperPath(root);
+  if (!existsSync(helper) || !statSync(helper).isFile())
+    throw new Error("Local archive helper is missing or invalid.");
+  result.METAWORK_LOCAL_ARCHIVE_HELPER = helper;
   const filename = archiveEnvironmentPath(root);
   if (!existsSync(filename)) return result;
   if (!statSync(filename).isFile() || statSync(filename).size > 16 * 1024)
     throw new Error("Local archive environment is invalid; run archive:setup.");
   const config = JSON.parse(readFileSync(filename, "utf8"));
-  const helper = archiveHelperPath(root);
   if (
     !config ||
     config.schema !== 1 ||
@@ -37,9 +40,7 @@ export function localArchiveEnvironment(root, inherited = process.env) {
     config.python.includes("\0") ||
     Buffer.byteLength(config.python) > 4096 ||
     !existsSync(config.python) ||
-    !statSync(config.python).isFile() ||
-    !existsSync(helper) ||
-    !statSync(helper).isFile()
+    !statSync(config.python).isFile()
   )
     throw new Error("Local archive environment is invalid; run archive:setup.");
   return {

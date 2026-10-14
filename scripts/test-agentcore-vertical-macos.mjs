@@ -104,10 +104,11 @@ await verifyAgentCoreRuntimeAssets(bundle, path.dirname(binary));
 const appEnvironment = { ...process.env };
 if (process.env.METAWORK_OFFICE_ATTACHMENTS === "1") {
   Object.assign(appEnvironment, localArchiveEnvironment(root, appEnvironment));
-  assert.ok(
-    appEnvironment.METAWORK_LOCAL_ARCHIVE_PYTHON,
-    "Prepare archive:setup before the ZIP attachment probe",
-  );
+  // Exercise Application -> Product with helper-only configuration. The
+  // scripted provider selects a fixture interpreter, just as Agent would
+  // select an available interpreter through Bash; archive:setup is optional.
+  delete appEnvironment.METAWORK_LOCAL_ARCHIVE_PYTHON;
+  assert.ok(appEnvironment.METAWORK_LOCAL_ARCHIVE_HELPER);
 }
 for (const key of Object.keys(appEnvironment)) {
   if (key.toUpperCase() === "PATH" || key.toUpperCase() === "RG_BIN")
