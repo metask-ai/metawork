@@ -1014,7 +1014,10 @@ export default function App() {
       onStatus: (next) => {
         if (!cancelled) {
           if (next.kind === "connected") setRootRenderBlockReason(null);
-          else if (next.failure === "bootstrap_failed")
+          else if (
+            next.kind !== "recovering" &&
+            next.failure === "bootstrap_failed"
+          )
             setRootRenderBlockReason("bootstrap_failed");
           setStatus(connectionStatus(next));
         }

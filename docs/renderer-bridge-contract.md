@@ -29,7 +29,15 @@ Windows 窗口动作执行前读取 SDK 当前窗口事实：connect/refresh 要
 
 ## 2. ProductDelivery 与 Snapshot transport
 
-Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 64 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Models provider/API Key/model catalog、bounded Custom Provider projection、Workspace/Task Skill catalog 结构、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*product_control.Runtime`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 `app.zig`。Product Control writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Product Control borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。revision 通知和 snapshot 拉取分别保留 pending/retry 状态，瞬时发送或读取失败不能把旧视图标记为最新。revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。新 event generation 建立时会使旧 snapshot descriptor 失效；Renderer 若仍持有旧 generation Promise，必须在旧 Promise 退出后继续完成新 generation 的实际 resync，不能把等待旧 Promise 误判为同步成功。Bridge 异步保留的 payload 必须自有；Application 在 shutdown 时先 stop Bridge ingress，在 Native platform loop 上确认同步 handler quiescence，再关闭 delivery connection、取消 timer，并 detach Product Control；随后依次收口 Account/Models coordinator、Product Control 与 Agent，完成 terminal drain/lifecycle sync，最后才独立释放 delivery buffers。
+Host view snapshot 使用 Bridge `Dispatcher` 内部 `ProductDelivery` 独占的 64 MiB 有界存储，不受 Bridge 单次 1 MiB result 上限反向约束。该容量覆盖 512 KiB Task projection、最大 Models provider/API Key/model catalog、bounded Custom Provider projection、Workspace/Task Skill catalog 结构、JSON 最坏转义和全部结构上界。Dispatcher 同时拥有 callback gate、workspace grants、handler registry 和 `*product_control.Runtime`，产品 command 的 decode、authority、domain call 与 response encode 不再经过 `app.zig`。Product Control writer 只能在同步调用期间借用这块 output buffer；返回后 Bridge 独占 encoded bytes，禁止保存 Product Control borrowed view。Renderer 通过带 snapshot identity 的 256 KiB 分块读取完成 resync；begin 写入前先使旧 descriptor 失效，序列化失败后旧 identity 必须保持 stale，不能继续读取已被部分覆盖的 store。Host 独占 revision 通知投递的 pending/retry 状态；Renderer 独占快照拉取的需求合并、在途读取与有限重试。Host revision retry 同时受 attempt 和 deadline 预算约束，耗尽或 retry timer 不可用时当前 event connection fail closed，但不终止后台 Agent Run。
+
+Renderer 在读取开始时冻结该次 revision 目标，读取期间的新通知只产生后续需求；合格读取无需追上未来通知，也不因正常滞后消耗失败预算。空闲后的通知按固定窗口合并，持续通知不能推迟首次读取。显式刷新只有在调用之后开始的合格读取被当前连接消费后才能完成，不等待整条追赶链；在途失败与退避期间到达的等待者共享同一份有限重试预算。预算耗尽、合同故障、停止、断开及等待期间 generation 被替换均须明确拒绝，不得零读取返回成功或把旧等待者转移到新连接。
+
+连接层独占 readiness：新 generation 必须完成有效握手、真实首读与 ping，不能把等待旧 Promise 误判为同步成功；后续正常 pending 不撤销已确认的 readiness，最终命令 admission 仍属于 Host。新 event generation 建立时使旧 snapshot descriptor 失效；读取与 ACK、ping、定时及清理回调均须校验所属连接，旧异步结果不能影响新连接、复活 stopped 连接或清除合同故障。
+
+显式恢复先在现有 generation 内进行一轮有界同步；普通读取失败升级为一次连接重建与新首读、ping，不依赖错误字符串判断 Host 是否仍保有连接，不嵌套重建循环。断开或明确要求连接替换时直接重建；合同故障不按普通读取故障自动重试。普通刷新不隐式重建。保留 generation 的恢复不取消在途附件或重置审批观测，真正重建沿用 connection-bound authority 的撤销语义。恢复升级之间不发布中间终态故障；全部恢复失败才发布最终故障，合同故障仍及时呈现。
+
+Bridge 异步保留的 payload 必须自有；Application 在 shutdown 时先 stop Bridge ingress，在 Native platform loop 上确认同步 handler quiescence，再关闭 delivery connection、取消 timer，并 detach Product Control；随后依次收口 Account/Models coordinator、Product Control 与 Agent，完成 terminal drain/lifecycle sync，最后才独立释放 delivery buffers。
 
 ## 3. Renderer Bridge wire contract
 

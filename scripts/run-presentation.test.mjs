@@ -8,7 +8,6 @@ import {
   observeRunProcessDisclosure,
   toggleRunProcessDisclosure,
 } from "../frontend/src/features/tasks/run-presentation.ts";
-import { RevisionNotificationQueue } from "../frontend/src/bridge/revision-notification.ts";
 
 function terminal(outcome, cause = null) {
   return { outcome, cause, diagnosticDisposition: "absent" };
@@ -241,26 +240,4 @@ test("Run disclosure remains collapsed unless the user explicitly opens it", () 
     expanded: true,
   });
   assert.equal(observeRunProcessDisclosure(manual).expanded, true);
-});
-
-test("revision delivery coalesces bursts but releases spaced preterminal updates", async () => {
-  const previousWindow = globalThis.window;
-  globalThis.window = { setTimeout, clearTimeout };
-  try {
-    const revisions = [];
-    const queue = new RevisionNotificationQueue(
-      (revision) => revisions.push(revision),
-      5,
-    );
-    queue.push("2");
-    queue.push("3");
-    await new Promise((resolve) => setTimeout(resolve, 12));
-    queue.push("4");
-    await new Promise((resolve) => setTimeout(resolve, 12));
-    queue.stop();
-    assert.deepEqual(revisions, ["3", "4"]);
-  } finally {
-    if (previousWindow === undefined) delete globalThis.window;
-    else globalThis.window = previousWindow;
-  }
 });
