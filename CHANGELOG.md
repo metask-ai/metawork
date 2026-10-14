@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-14
+
+### Added
+
+- 既有 Task 现在可以在同一 Session 中切换“人工审批 / 自动评审 / 完全访问”，保留 Task、Conversation 与历史身份，并以持久化的 approval revision 防止陈旧或重复提交；旧的“以完全访问继续”successor Task 流程已移除。
+- 附件新增 DOCX、XLSX、PPTX 与 ZIP 原件支持；内置本地 Office Skills 和有界归档资源，通过既有 Skill/Bash 路径完成读取、编辑、校验与解包，不引入通用文档输入协议。
+- 含未知字段但仍可校验的已保存 Task 现在以只读状态打开；当前版本完全无法读取的记录继续原样保留，并在左栏说明未打开的 Task 数量。
+
+### Changed
+
+- AgentCore 升级至 `0.6.0-dev+c4b0af79fe20` / ABI revision 19，并刷新 Windows x86_64 与 macOS x86_64/ARM64 bundles；Windows ARM64 继续使用 revision 18。
+- Metask 模型目录以声明的 endpoint protocol 作为准入真源，完整保留输入模态与根级 token limits；不可用的既有模型 intent 保持可见，并提供当前合格替代项。
+- Composer 附件统一为异步批次接收协议，系统选择器与拖放共享预留、传输、取消和草稿移除生命周期。
+- 托盘退出不再显示额外确认，仍按既有 shutdown 流程安全收口。
+
+### Fixed
+
+- 修复 Workbench snapshot 刷新可能无界等待或接纳旧 generation、同步恢复动作未稳定保留在命令栏，以及启动失败与已提交结果显示不准确的问题。
+- 修复附件不完整读取、Windows positional I/O、跨草稿移除、批次取消和关闭竞态，确保未完整传输的文件不会发布、Task 原件不会被迟到操作误删。
+
 ## [0.2.2] - 2026-10-10
 
 ### Added
@@ -344,7 +364,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.2...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/metask-ai/metawork/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/metask-ai/metawork/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/metask-ai/metawork/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/metask-ai/metawork/compare/v0.1.12...v0.2.0
