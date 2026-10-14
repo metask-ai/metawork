@@ -8,13 +8,14 @@ import struct
 import sys
 import subprocess
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("bounded_archive", ROOT / "src/product/skill/assets/zip/scripts/archive.py")
+SPEC = importlib.util.spec_from_file_location("bounded_archive", ROOT / "src/product/control/resources/archive.py")
 archive = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = archive
 SPEC.loader.exec_module(archive)
@@ -152,6 +153,57 @@ class Archives(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(Path(f"unpacked-{skill}").exists())
             self.assertFalse(Path("escape").exists())
+
+    def test_explicit_workspace_is_independent_of_cwd_and_rejects_outside_output(self):
+        source = self.make([("data", b"content")]).resolve()
+        workspace = Path("task workspace").resolve()
+        workspace.mkdir()
+        result = archive.safe_extract(source, "data", workspace=workspace)
+        self.assertEqual(Path(result["directory"]), workspace / "data")
+        self.assertFalse((workspace / "data" / archive.INCOMPLETE).exists())
+        with self.assertRaises(ValueError):
+            archive.safe_extract(source, Path.cwd() / "outside", workspace=workspace)
+        self.assertFalse(Path("outside").exists())
+        self.rejected(self.make([(archive.INCOMPLETE, b"spoof")]))
+
+    @unittest.skipIf(os.name == "nt", "SIGTERM semantics require the current POSIX platform")
+    def test_terminated_extraction_stays_marked_incomplete_and_is_not_reused(self):
+        source = self.make([("large", b"x" * 262144)], zipfile.ZIP_STORED).resolve()
+        runner = """
+import importlib.util, os, sys, time
+spec = importlib.util.spec_from_file_location('interrupted_archive', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+original = module._chunks
+def slow(*args):
+    for chunk in original(*args):
+        yield chunk
+        time.sleep(30)
+module._chunks = slow
+module.safe_extract(sys.argv[2], 'partial')
+"""
+        child = subprocess.Popen([sys.executable, "-B", "-c", runner, str(ROOT / "src/product/control/resources/archive.py"), str(source)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            target = Path("partial/large")
+            deadline = time.monotonic() + 5
+            while (not target.exists() or target.stat().st_size == 0) and time.monotonic() < deadline:
+                if child.poll() is not None:
+                    self.fail(child.stderr.read().decode())
+                time.sleep(0.02)
+            self.assertTrue(target.exists() and target.stat().st_size > 0)
+            child.terminate()
+            child.wait(timeout=5)
+            self.assertNotEqual(child.returncode, 0)
+            self.assertTrue(Path("partial", archive.INCOMPLETE).exists())
+            with self.assertRaises(FileExistsError):
+                archive.safe_extract(source, "partial")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+            child.stdout.close()
+            child.stderr.close()
 
 
 

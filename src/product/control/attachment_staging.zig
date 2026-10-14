@@ -289,7 +289,7 @@ test "path probe reserves before copy and cancellation joins the writer" {
     try std.testing.expectError(error.InvalidInput, lane.begin(.{ .completion_id = 1, .path_count = 1, .paths = &.{}, .limits = limits, .file_store = &store }));
     try std.testing.expectEqual(@as(usize, 0), lane.active_count);
     try std.testing.expect(queue.pending == null);
-    var runtime = try attachment.Runtime.init(std.testing.allocator, limits, &store, .{});
+    var runtime = try attachment.Runtime.init(std.testing.allocator, limits, &store, .{}, null);
     defer runtime.deinit();
     const id = try runtime.beginPreparing();
     try lane.begin(.{ .completion_id = 1, .path_count = 1, .paths = path, .limits = limits, .file_store = &store });
