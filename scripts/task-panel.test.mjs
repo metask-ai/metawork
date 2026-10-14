@@ -5671,3 +5671,88 @@ test("file Session approval names the tool and target in both locales and submit
     cleanup();
   }
 });
+
+test("App exposes one compact sync recovery, retains draft and never marks a pending recovery ready", async (ctx) => {
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(
+    ctx,
+    390,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
+  fireEvent.click(await findRecentTaskButton(/First task/));
+  fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
+  const draft = screen.getByRole("combobox", { name: "" });
+  fireEvent.change(draft, { target: { value: "Keep this local draft" } });
+  setSnapshotFailure(true);
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  await waitFor(() => assert.ok(document.querySelector(".commandbar-alert")), {
+    timeout: 3500,
+  });
+  const notice = document.querySelector(".commandbar-alert");
+  assert.equal(document.querySelector(".task-sync-failure"), null);
+  assert.equal(document.querySelectorAll(".commandbar-alert").length, 1);
+  assert.equal(draft.value, "Keep this local draft");
+  fireEvent.click(notice.querySelector("summary"));
+  const retry = screen.getByRole("button", { name: "Retry syncing" });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let release;
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "fetchSnapshot",
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  retry.focus();
+  fireEvent.click(retry);
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".commandbar-alert").dataset.recovering,
+      "true",
+    ),
+  );
+  assert.equal(
+    document
+      .querySelector(".commandbar-alert")
+      .textContent.includes("Restoring sync"),
+    true,
+  );
+  assert.equal(draft.value, "Keep this local draft");
+  const newTask = document.querySelector(".sidebar-capability");
+  assert.equal(newTask.disabled, true);
+  await act(async () => release(structuredClone(snapshot)));
+  await waitFor(() =>
+    assert.equal(document.querySelector(".commandbar-alert"), null),
+  );
+  assert.equal(newTask.disabled, false);
+  assert.equal(draft.value, "Keep this local draft");
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("button", { name: "Search" }),
+  );
+});
+
+test("connection details close with Escape and return focus to their summary", async (ctx) => {
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(ctx);
+  const sidebarToggle = screen.getByRole("button", {
+    name: "Toggle task sidebar",
+  });
+  if (sidebarToggle.getAttribute("aria-expanded") === "false")
+    fireEvent.click(sidebarToggle);
+  await findRecentTaskButton(/First task/);
+  setSnapshotFailure(true);
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  await waitFor(() => assert.ok(document.querySelector(".commandbar-alert")), {
+    timeout: 3500,
+  });
+  const details = document.querySelector(".commandbar-alert"),
+    summary = details.querySelector("summary");
+  fireEvent.click(summary);
+  const retry = screen.getByRole("button", { name: "Retry syncing" });
+  retry.focus();
+  fireEvent.keyDown(retry, { key: "Escape" });
+  assert.equal(details.open, false);
+  assert.equal(document.activeElement, summary);
+});

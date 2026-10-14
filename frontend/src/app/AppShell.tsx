@@ -152,6 +152,8 @@ export function AppShell({
   contextContent,
   headerActions,
   attentionNotice,
+  attentionContent,
+  attentionBusy = false,
   onSearch,
   left,
   rightPanel,
@@ -168,6 +170,8 @@ export function AppShell({
   contextContent?: ReactNode;
   headerActions?: ReactNode;
   attentionNotice: string | null;
+  attentionContent?: ReactNode;
+  attentionBusy?: boolean;
   onSearch: () => void;
   left: ReactNode | null;
   rightPanel: ReactNode | null;
@@ -219,6 +223,15 @@ export function AppShell({
     overlayOpen: Boolean(overlay),
   });
   const attentionDetails = useRef<HTMLDetailsElement>(null);
+  const attentionHadFocus = useRef(false);
+  const searchButton = useRef<HTMLButtonElement>(null);
+
+  useLayoutEffect(() => {
+    if (!attentionNotice && attentionHadFocus.current) {
+      attentionHadFocus.current = false;
+      searchButton.current?.focus();
+    }
+  }, [attentionNotice]);
 
   useLayoutEffect(() => {
     onTaskStageExposureChange?.(taskStageExposed);
@@ -321,6 +334,12 @@ export function AppShell({
         } as CSSProperties
       }
       onKeyDown={(event) => {
+        if (event.key === "Escape" && attentionDetails.current?.open) {
+          event.preventDefault();
+          attentionDetails.current.open = false;
+          attentionDetails.current.querySelector("summary")?.focus();
+          return;
+        }
         const target = event.target as HTMLElement;
         if (
           target.closest('[role="dialog"], [role="menu"], [role="alertdialog"]')
@@ -361,6 +380,7 @@ export function AppShell({
             )}
             <button
               className="icon-button focus-ring"
+              ref={searchButton}
               aria-label={t("search.open")}
               onClick={onSearch}
             >
@@ -417,12 +437,36 @@ export function AppShell({
               {attentionNotice ?? ""}
             </span>
             {attentionNotice && (
-              <details ref={attentionDetails} className="commandbar-alert">
+              <details
+                ref={attentionDetails}
+                className="commandbar-alert"
+                data-recovering={attentionBusy}
+                onFocusCapture={() => {
+                  attentionHadFocus.current = true;
+                }}
+                onBlurCapture={(event) => {
+                  if (
+                    !event.currentTarget.contains(
+                      event.relatedTarget as Node | null,
+                    )
+                  )
+                    attentionHadFocus.current = false;
+                }}
+              >
                 <summary aria-label={attentionNotice}>
-                  <Icon name="warning" />
+                  {attentionBusy ? (
+                    <i
+                      className="connection-recovery-mark"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <Icon name="warning" />
+                  )}
                   <span>{attentionNotice}</span>
                 </summary>
-                <p>{attentionNotice}</p>
+                <div className="commandbar-alert-content">
+                  {attentionContent ?? <p>{attentionNotice}</p>}
+                </div>
               </details>
             )}
           </div>

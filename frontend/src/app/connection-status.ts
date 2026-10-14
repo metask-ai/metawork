@@ -16,7 +16,7 @@ export function connectionStatus(
   status: WorkbenchConnectionStatus,
 ): ShellStatus {
   if (status.kind === "recovering")
-    return quietStatus("connection.retrying", { scope: "connection" });
+    return quietStatus("connection.sync_retrying", { scope: "connection" });
   if (status.kind === "connected")
     return quietStatus(
       status.recovered ? "connection.recovered" : "connection.connected",
