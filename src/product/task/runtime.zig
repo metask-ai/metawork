@@ -1027,6 +1027,8 @@ pub const HistoryFrames = struct {
     allocator: std.mem.Allocator,
     tasks: []task_persistence.TaskWire,
     failures: []task_persistence.TaskFailureWire,
+    /// Borrowed from the Runtime; valid until its history next changes.
+    retained: []const task_persistence.RetainedRecord,
     next_task_id: u64,
     next_recent_order: u64,
 
@@ -1059,6 +1061,9 @@ pub const Runtime = struct {
     allocator: std.mem.Allocator,
     tasks: []?task_state.Task,
     failures: std.ArrayList(FailureRecord) = .empty,
+    /// History frames this build cannot restore; payloads are owned and are
+    /// written back unchanged by every commit.
+    retained: std.ArrayList(task_persistence.RetainedRecord) = .empty,
     next_task_id: u64 = 1,
     next_recent_order: u64 = 1,
     next_restore_attempt_id: u64 = 1,
@@ -1456,6 +1461,8 @@ pub const Runtime = struct {
         self.allocator.free(self.tasks);
         for (self.failures.items) |failure| self.allocator.free(failure.reason);
         self.failures.deinit(self.allocator);
+        self.clearRetained();
+        self.retained.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -2829,9 +2836,28 @@ pub const Runtime = struct {
             .allocator = self.allocator,
             .tasks = tasks,
             .failures = failures,
+            .retained = self.retained.items,
             .next_task_id = self.next_task_id,
             .next_recent_order = self.next_recent_order,
         };
+    }
+
+    /// Keeps a history frame this build cannot restore so later commits write
+    /// it back unchanged.
+    pub fn retainRecord(
+        self: *Runtime,
+        record: task_persistence.RetainedRecord,
+    ) std.mem.Allocator.Error!void {
+        const payload = try self.allocator.dupe(u8, record.payload);
+        errdefer self.allocator.free(payload);
+        var owned = record;
+        owned.payload = payload;
+        try self.retained.append(self.allocator, owned);
+    }
+
+    pub fn clearRetained(self: *Runtime) void {
+        for (self.retained.items) |record| self.allocator.free(record.payload);
+        self.retained.clearRetainingCapacity();
     }
 
     pub fn recordFailure(
@@ -2855,20 +2881,24 @@ pub const Runtime = struct {
         });
     }
 
+    /// `frames` holds the original frame of each wire; a Task that cannot be
+    /// restored keeps that frame instead of being dropped.
     pub fn restoreTasks(
         self: *Runtime,
         wires: []const task_persistence.TaskWire,
+        frames: []const task_persistence.RetainedRecord,
         projection: task_persistence.RestoreProjection,
     ) RestoreError!usize {
+        std.debug.assert(wires.len == frames.len);
         for (self.tasks) |entry| std.debug.assert(entry == null);
         var restored_count: usize = 0;
-        var dropped: usize = 0;
-        for (wires) |wire| {
+        var retained: usize = 0;
+        for (wires, frames) |wire, frame| {
             const restored = task_persistence.restoreTask(projection, wire) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
-                    dropped += 1;
-                    try self.recordFailure(wire.id, wire.recent_order, "task_restore");
+                    retained += 1;
+                    try self.retainRecord(frame);
                     continue;
                 },
             };
@@ -2876,7 +2906,7 @@ pub const Runtime = struct {
             self.tasks[restored_count] = restored;
             restored_count += 1;
         }
-        return dropped;
+        return retained;
     }
 
     pub fn restoreIdentityState(

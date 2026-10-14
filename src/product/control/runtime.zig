@@ -4051,7 +4051,7 @@ pub const Runtime = struct {
         defer scratch.deinit();
         const output = try self.allocator.alloc(u8, task_persistence.max_store_bytes);
         defer self.allocator.free(output);
-        const bytes = try task_persistence.encode(output, scratch.state, self.taskPersistenceLimits());
+        const bytes = try task_persistence.encodePreserving(output, scratch.state, scratch.preserved, self.taskPersistenceLimits());
         if (self.containsKnownCredential(bytes)) return error.TaskStoreEncodeFailed;
         return self.allocator.dupe(u8, bytes);
     }
@@ -4924,9 +4924,10 @@ pub const Runtime = struct {
         const output = self.allocator.alloc(u8, task_persistence.max_store_bytes) catch
             return .failed;
         defer self.allocator.free(output);
-        const bytes = task_persistence.encode(
+        const bytes = task_persistence.encodePreserving(
             output,
             scratch.state,
+            scratch.preserved,
             self.taskPersistenceLimits(),
         ) catch
             return .failed;
@@ -7157,12 +7158,15 @@ pub const Runtime = struct {
             ApprovalMode.fromFacts(task_persistence.parseEnum(PermissionProfile, recovered.value.default_permission_profile) orelse return error.TaskStoreCorrupt, false);
         for (recovered.value.failures) |failure|
             try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
-        for (recovered.value.workspaces) |workspace| {
+        for (recovered.preserved.retained) |record|
+            try self.task_runtime.retainRecord(record);
+        for (recovered.value.workspaces, recovered.workspace_frames) |workspace, frame| {
             const skill_root = try self.allocator.dupe(u8, workspace.canonical_root);
             var skill_root_owned = true;
             defer if (skill_root_owned) self.allocator.free(skill_root);
             const kind = task_persistence.parseEnum(WorkspaceKind, workspace.kind) orelse {
                 recovered.dropped_workspaces += 1;
+                try self.task_runtime.retainRecord(frame);
                 continue;
             };
             self.workspace.restore(.{
@@ -7177,6 +7181,7 @@ pub const Runtime = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
                     recovered.dropped_workspaces += 1;
+                    try self.task_runtime.retainRecord(frame);
                     continue;
                 },
             };
@@ -7192,6 +7197,7 @@ pub const Runtime = struct {
         }
         recovered.dropped_tasks += try self.task_runtime.restoreTasks(
             recovered.value.tasks,
+            recovered.task_frames,
             self.taskRestoreProjection(),
         );
         for (recovered.value.tasks) |task|
@@ -7200,6 +7206,13 @@ pub const Runtime = struct {
         for (0..self.workspace.slotCount()) |index| {
             const workspace = self.workspace.automaticBindingAt(index) orelse continue;
             if (self.task_runtime.taskCountInWorkspace(workspace.id) == 1) continue;
+            // The owner Task was retained, so its automatic scope is too.
+            for (recovered.value.workspaces, recovered.workspace_frames) |value, frame| {
+                if (value.id == workspace.id) {
+                    try self.task_runtime.retainRecord(frame);
+                    break;
+                }
+            }
             std.debug.assert(self.skill.unregisterWorkspace(
                 workspace.id,
                 self.skillProjectionBudget(),
@@ -7259,6 +7272,7 @@ pub const Runtime = struct {
             ));
         }
         self.workspace.reset(self.workspaceStorage());
+        self.task_runtime.clearRetained();
         self.task_runtime.resetIdentity();
     }
 
@@ -7300,6 +7314,7 @@ pub const Runtime = struct {
             .allocated_workspaces = workspaces,
             .allocated_tasks = task_frames.tasks,
             .allocated_failures = task_frames.failures,
+            .preserved = .{ .retained = task_frames.retained },
             .state = .{
                 .default_permission_profile = @tagName(self.default_approval_mode.profile()),
                 .default_approval_mode = @tagName(self.default_approval_mode),
@@ -7756,7 +7771,7 @@ pub const Runtime = struct {
             return err;
         };
         defer self.allocator.free(output);
-        const bytes = task_persistence.encode(output, scratch.state, persistence_limits) catch |err| {
+        const bytes = task_persistence.encodePreserving(output, scratch.state, scratch.preserved, persistence_limits) catch |err| {
             self.markTaskPersistenceWriteFailed();
             return err;
         };
