@@ -4478,7 +4478,12 @@ async function findRecentTaskButton(name) {
   return waitFor(() => recentTaskButton(name));
 }
 
-async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
+async function renderAppFixture(
+  ctx,
+  width = 1440,
+  runOverrides = {},
+  clientOverrides = {},
+) {
   Object.defineProperty(window, "innerWidth", {
     configurable: true,
     value: width,
@@ -4571,6 +4576,7 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
       new Promise((resolve, reject) => previews.push({ ids, resolve, reject })),
     fileChangeDiff: (...ids) =>
       new Promise((resolve, reject) => diffs.push({ ids, resolve, reject })),
+    ...clientOverrides,
   }))
     ctx.mock.method(BridgeClient.prototype, name, fn);
   render(localizedView(createElement(App)));
@@ -5671,3 +5677,259 @@ test("file Session approval names the tool and target in both locales and submit
     cleanup();
   }
 });
+
+test("App exposes one compact sync recovery, retains draft and never marks a pending recovery ready", async (ctx) => {
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(
+    ctx,
+    390,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
+  fireEvent.click(await findRecentTaskButton(/First task/));
+  fireEvent.click(screen.getByRole("button", { name: "Toggle task sidebar" }));
+  const draft = screen.getByRole("combobox", { name: "" });
+  fireEvent.change(draft, { target: { value: "Keep this local draft" } });
+  setSnapshotFailure(true);
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  await waitFor(() => assert.ok(document.querySelector(".commandbar-alert")), {
+    timeout: 3500,
+  });
+  const notice = document.querySelector(".commandbar-alert");
+  assert.equal(document.querySelector(".task-sync-failure"), null);
+  assert.equal(document.querySelectorAll(".commandbar-alert").length, 1);
+  assert.equal(draft.value, "Keep this local draft");
+  fireEvent.click(notice.querySelector("summary"));
+  const retry = screen.getByRole("button", { name: "Retry syncing" });
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let release;
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "fetchSnapshot",
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  retry.focus();
+  fireEvent.click(retry);
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".commandbar-alert").dataset.recovering,
+      "true",
+    ),
+  );
+  assert.equal(
+    document
+      .querySelector(".commandbar-alert")
+      .textContent.includes("Restoring sync"),
+    true,
+  );
+  assert.equal(draft.value, "Keep this local draft");
+  const newTask = document.querySelector(".sidebar-capability");
+  assert.equal(newTask.disabled, true);
+  await act(async () => release(structuredClone(snapshot)));
+  await waitFor(() =>
+    assert.equal(document.querySelector(".commandbar-alert"), null),
+  );
+  assert.equal(newTask.disabled, false);
+  assert.equal(draft.value, "Keep this local draft");
+  assert.equal(
+    document.activeElement,
+    screen.getByRole("button", { name: "Search" }),
+  );
+});
+
+test("a committed Skill mutation is not reported as failed when the follow-up refresh fails", async (ctx) => {
+  let uninstalls = 0;
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(
+    ctx,
+    1440,
+    {},
+    {
+      skillDetail: async () => ({ available: false }),
+      uninstallSkill: async () => {
+        uninstalls++;
+        return {
+          accepted: true,
+          installId: "aabbccdd",
+          verificationPending: false,
+          reason: null,
+        };
+      },
+    },
+  );
+  const sidebarToggle = screen.getByRole("button", {
+    name: "Toggle task sidebar",
+  });
+  if (sidebarToggle.getAttribute("aria-expanded") === "false")
+    fireEvent.click(sidebarToggle);
+  await findRecentTaskButton(/First task/);
+  snapshot.skillManagement.availability = "ready";
+  snapshot.skillManagement.assets = [
+    {
+      installId: "aabbccdd",
+      sourceKind: "local_package",
+      origin: null,
+      scope: { kind: "personal", workspaceId: null },
+      managementState: "ready",
+      skillId: "skill-review",
+      skillPolicyKey: "skill-review",
+      invocationName: "code-review",
+      displayName: "Review code changes",
+      description: "",
+      argumentNames: [],
+      maxValues: 64,
+      canExport: false,
+      canReimport: false,
+      canUninstall: true,
+      canRetry: false,
+      enabled: null,
+      enablementState: null,
+      canSetEnabled: false,
+      selectionRevision: null,
+      issueCodes: [],
+    },
+  ];
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  fireEvent.click(screen.getByRole("button", { name: "Skills", exact: true }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: /Review code changes/ }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
+  setSnapshotFailure(true);
+  fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
+  // The connection owner reports the sync failure once the bounded reads end.
+  await waitFor(() => assert.ok(document.querySelector(".commandbar-alert")), {
+    timeout: 3500,
+  });
+  await act(async () => {});
+  assert.equal(uninstalls, 1);
+  assert.doesNotMatch(
+    document.body.textContent,
+    /The Skill change could not be completed/,
+  );
+});
+
+test("connection details close with Escape and return focus to their summary", async (ctx) => {
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(ctx);
+  const sidebarToggle = screen.getByRole("button", {
+    name: "Toggle task sidebar",
+  });
+  if (sidebarToggle.getAttribute("aria-expanded") === "false")
+    fireEvent.click(sidebarToggle);
+  await findRecentTaskButton(/First task/);
+  setSnapshotFailure(true);
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  await waitFor(() => assert.ok(document.querySelector(".commandbar-alert")), {
+    timeout: 3500,
+  });
+  const details = document.querySelector(".commandbar-alert"),
+    summary = details.querySelector("summary");
+  fireEvent.click(summary);
+  const retry = screen.getByRole("button", { name: "Retry syncing" });
+  retry.focus();
+  fireEvent.keyDown(retry, { key: "Escape" });
+  assert.equal(details.open, false);
+  assert.equal(document.activeElement, summary);
+});
+
+test("bootstrap retry retains the root failure screen until fresh data and ping confirm readiness", async (ctx) => {
+  let connects = 0,
+    release;
+  const f = await renderAppFixture(
+    ctx,
+    1440,
+    {},
+    {
+      connect: async () => {
+        if (++connects === 1) throw new Error("bootstrap unavailable");
+        return "2";
+      },
+      fetchSnapshot: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    },
+  );
+  await screen.findByRole("heading", {
+    name: "Workbench connection unavailable",
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+  await waitFor(() => assert.ok(release));
+  assert.ok(document.querySelector(".connection-failure-screen"));
+  assert.equal(document.querySelector(".app-window"), null);
+  await act(async () => release(structuredClone(f.snapshot)));
+  await waitFor(() => assert.ok(document.querySelector(".app-window")));
+  assert.equal(document.querySelector(".connection-failure-screen"), null);
+});
+
+for (const outcome of ["committed", "timeout"]) {
+  test(`in-flight ${outcome} stop cannot claim a successful refresh after the read budget exhausts`, async (ctx) => {
+    const f = await renderAppFixture(ctx, 1440, {
+      elapsedMs: "10000",
+      phase: "running",
+      terminal: null,
+      activity: { kind: "waiting_model" },
+    });
+    const sidebar = screen.getByRole("button", { name: "Toggle task sidebar" });
+    if (sidebar.getAttribute("aria-expanded") === "false")
+      fireEvent.click(sidebar);
+    fireEvent.click(await findRecentTaskButton(/First task/));
+    const { BridgeClient, BridgeCommandTimeoutError } =
+      await vite.ssrLoadModule("/src/bridge/client.ts");
+    let resolveStop,
+      rejectStop,
+      calls = 0,
+      reads = 0;
+    ctx.mock.method(BridgeClient.prototype, "cancel", () => {
+      calls++;
+      return new Promise((resolve, reject) => {
+        resolveStop = resolve;
+        rejectStop = reject;
+      });
+    });
+    ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () => {
+      reads++;
+      throw new Error("read unavailable");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+    f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+    await act(async () => f.publish());
+    await waitFor(
+      () => assert.ok(document.querySelector(".commandbar-alert")),
+      { timeout: 3500 },
+    );
+    assert.equal(reads, 5);
+    await act(async () =>
+      outcome === "committed"
+        ? resolveStop()
+        : rejectStop(
+            new BridgeCommandTimeoutError("metawork.tasks.cancel", 10000),
+          ),
+    );
+    assert.equal(reads, 5);
+    ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () =>
+      structuredClone(f.snapshot),
+    );
+    fireEvent.click(document.querySelector(".commandbar-alert > summary"));
+    fireEvent.click(screen.getByRole("button", { name: "Retry syncing" }));
+    await waitFor(() =>
+      assert.ok(
+        document.querySelector('.commandbar-alert[data-recovering="false"]'),
+      ),
+    );
+    const text = document.querySelector(
+      ".commandbar-alert > summary",
+    ).textContent;
+    assert.match(
+      text,
+      outcome === "committed"
+        ? /succeeded, but the latest state has not loaded/
+        : /latest state could not be confirmed/,
+    );
+    assert.doesNotMatch(text, /checked the current Host state/);
+    assert.equal(calls, 1);
+  });
+}

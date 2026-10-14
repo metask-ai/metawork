@@ -497,9 +497,11 @@ Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显
 | Active Run phase     | `none / queued / running / waiting_user / stopping`   | `run` operation 的调度、工作或等待状态          |
 | Active compact phase | `none / queued / compacting / stopping`               | `compact` operation 的调度、工作或取消状态      |
 | Last Run outcome     | `none / completed / cancelled / failed / interrupted` | 最近一次 terminal Run 的结果，不关闭 Task       |
-| View sync            | `ready / syncing / failed`                            | Renderer 是否拥有可安全 mutation 的最新投影视图 |
+| View sync            | `ready / syncing / failed`                            | 当前连接已确认、最近一次合格读取成功且无故障 |
 
 `draft` 是进入 Workbench 后、尚未创建真实 Task 的 Renderer 临时页面，不进入 Host Task lifecycle。它默认持有 Automatic Workspace intent，也可以切换到 Manual Workspace identity，并可持有不修改 global default 的 runtime-only 同源模型选择；发送前必须同时满足相应 Workspace admission、默认执行配置与所选模型 authority。一次 Run 完成后 `Active operation` 与 `Active Run phase` 回到 `none`，`Last Run outcome` 保留结果。Manual compact 完成后 active operation 同样回到 `none`，其 outcome 进入独立、有界、append-only 的 maintenance history，不改写最近一次 Run outcome。Conversation restore 完成后 active operation 回到 `none`；成功只改变 runtime attachment/continuation，失败只改变派生的 unavailable reason，二者都不新增 Run、消息或 maintenance history。
+
+正常通知滞后不构成 View sync 故障：一次合格快照被当前连接消费后，后续仍有更新需求不撤销 readiness；命令的最终接纳仍由 Host 校验。显式恢复在顶栏既有状态入口轻量显示“正在恢复同步”，普通读取失败自动升级一次重建时不闪中间故障；最终失败在同一入口提供“重试同步”和可折叠技术详情，不在对话正文叠加故障卡或重复横幅。恢复动作可直接使用键盘，窄窗保持可访问名称与安全换行；已收到内容和本地草稿保留。启动时尚无可信视图仍使用根连接失败页面。
 
 Execution binding availability 是下一次 admission 的独立前置事实，不得塞入上述四个状态轴或改写最近一次 Run 结果。Host projection 只发布 `available / rebind_required / unavailable` 及脱敏原因；Renderer 不根据当前默认模型自行判断能否继续。
 
@@ -508,7 +510,7 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 | 条件                                         | English UI           | 中文 UI      | 主要动作                    |
 | -------------------------------------------- | -------------------- | ------------ | --------------------------- |
 | draft page                                   | New task             | 新建任务     | 输入并发送                  |
-| view sync = failed                           | View unavailable     | 视图暂不可用 | 重试同步，禁止危险 mutation |
+| view sync = failed                           | Workbench is not synced | 工作台尚未同步 | 重试同步，禁用依赖 Host 的操作 |
 | waiting_user + permission review = reviewing | Automatic review     | 自动评审中   | 可直接批准、拒绝或停止      |
 | waiting_user + no active permission review   | Needs your attention | 需要你处理   | 回答、批准、拒绝或停止      |
 | run phase = stopping                         | Stopping             | 正在停止     | 等待真实结果                |

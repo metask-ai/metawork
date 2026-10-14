@@ -3553,7 +3553,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   white-space: nowrap;
 }
 
-.commandbar-alert > p {
+.commandbar-alert > .commandbar-alert-content {
   position: absolute;
   z-index: 70;
   top: calc(100% + 10px);
@@ -3571,7 +3571,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.5;
 }
 
-.commandbar-alert[open] > p {
+.commandbar-alert[open] > .commandbar-alert-content {
   display: block;
 }
 
@@ -9509,44 +9509,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 18px;
 }
 
-.task-sync-failure {
-  margin: 12px 24px 0;
-}
-
-.sync-failure {
-  margin-top: 18px;
-  padding: 12px;
-  border: 1px solid var(--ui-action-danger-border);
-  border-radius: 10px;
-  background: var(--ui-surface-canvas);
-}
-
-.sync-failure h3,
-.sync-failure p {
-  margin: 0;
-}
-
-.sync-failure h3 {
-  color: var(--metask-state-error);
-  font-size: var(--text-control);
-}
-
-.sync-failure p,
-.sync-failure details {
-  margin-top: 5px;
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  line-height: 1.5;
-}
-
-.sync-failure > button {
-  margin-top: 10px;
-}
-
-.sync-failure summary {
-  cursor: pointer;
-}
-
 .panel-scrim {
   display: none;
 }
@@ -9641,7 +9603,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     white-space: nowrap;
   }
 
-  .commandbar-alert > p {
+  .commandbar-alert > .commandbar-alert-content {
     position: fixed;
     top: calc(var(--window-bar-height) + env(safe-area-inset-top, 0px));
     right: 10px;
@@ -9749,4 +9711,43 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   font-size: var(--text-label);
   color: var(--ui-content-muted);
   line-height: 1.6;
+}
+
+.commandbar-alert-content > p {
+  margin: 0;
+}
+
+.commandbar-alert-content > button {
+  min-height: 44px;
+  margin-top: 12px;
+}
+
+.commandbar-alert[data-recovering="true"] summary {
+  color: var(--ui-content-muted);
+}
+
+.connection-recovery-mark {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--metask-primary);
+}
+
+.commandbar-alert .connection-diagnostic {
+  margin-top: 8px;
+  color: var(--ui-content-muted);
+}
+
+.commandbar-alert .connection-diagnostic summary {
+  min-height: 44px;
+  width: auto;
+  padding: 0;
+  color: inherit;
+}
+
+.connection-diagnostic p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
 }

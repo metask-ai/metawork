@@ -951,8 +951,16 @@ export default function App() {
 
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
-    return current ? current.refresh() : Promise.resolve();
+    return current
+      ? current.refresh()
+      : Promise.reject(new Error("Workbench connection is unavailable"));
   }, []);
+
+  // The Host result is already committed. A failed follow-up refresh is
+  // published by the connection owner, never reported as a failed operation.
+  async function refreshCommittedView() {
+    await refreshSnapshot().catch(() => undefined);
+  }
 
   useEffect(() => {
     const errorCode = snapshot.account.errorCode;
@@ -1014,8 +1022,12 @@ export default function App() {
       onStatus: (next) => {
         if (!cancelled) {
           if (next.kind === "connected") setRootRenderBlockReason(null);
-          else if (next.failure === "bootstrap_failed")
+          else if (
+            next.kind !== "recovering" &&
+            next.failure === "bootstrap_failed"
+          )
             setRootRenderBlockReason("bootstrap_failed");
+          setConnectionBusy(next.kind === "recovering");
           setStatus(connectionStatus(next));
         }
       },
@@ -1038,7 +1050,6 @@ export default function App() {
           }
           dispatchWorkbench({ type: "generation.started", generation });
           setBridgeGeneration(generation);
-          if (generation !== "0") setRootRenderBlockReason(null);
         }
       },
       onViewSyncFailed: (failed) => {
@@ -1046,11 +1057,7 @@ export default function App() {
       },
     });
     connection.current = current;
-    void current.start().catch((error) => {
-      if (!cancelled) {
-        setViewSyncFailed(true);
-      }
-    });
+    void current.start().catch(() => undefined);
 
     const onPageHide = () => {
       void current.stop();
@@ -1259,17 +1266,12 @@ export default function App() {
     const promise = (async () => {
       connectionBusyRef.current = true;
       setConnectionBusy(true);
-      setViewSyncFailed(false);
-      if (replaceConnection) setBridgeReady(false);
       try {
         const current = connection.current;
         if (!current) throw new Error("Workbench connection is not available");
         await current.retry({ replaceConnection });
-        setBridgeReady(true);
-        setStatus(quietStatus("connection.recovered", { scope: "connection" }));
       } catch {
-        setViewSyncFailed(true);
-        setBridgeReady(false);
+        // The connection owner publishes the final failure and readiness.
       } finally {
         connectionBusyRef.current = false;
         setConnectionBusy(false);
@@ -1402,9 +1404,7 @@ export default function App() {
     if (bridgeUnavailable) return false;
     try {
       const result = await invoke();
-      if (result.outcome === "applied") {
-        await refreshSnapshot();
-      }
+      if (result.outcome === "applied") await refreshCommittedView();
       return result.outcome;
     } catch {
       await refreshSnapshot().catch(() => undefined);
@@ -2409,7 +2409,7 @@ export default function App() {
     mutation: () => Promise<SkillMutationResult>,
   ): Promise<SkillMutationResult> {
     const result = await mutation();
-    if (result.accepted) await refreshSnapshot();
+    if (result.accepted) await refreshCommittedView();
     return result;
   }
 
@@ -2433,7 +2433,7 @@ export default function App() {
       expectedCatalogRevision,
       expectedSelectionRevision,
     );
-    await refreshSnapshot();
+    await refreshCommittedView();
     return result;
   }
 
@@ -2442,7 +2442,7 @@ export default function App() {
   ): Promise<McpMutationResult> {
     try {
       const result = await mutation();
-      if (result.outcome !== "unchanged") await refreshSnapshot();
+      if (result.outcome !== "unchanged") await refreshCommittedView();
       return result;
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
@@ -2453,7 +2453,7 @@ export default function App() {
   async function refreshMcpCatalog(): Promise<McpRefreshResult> {
     try {
       const result = await client.refreshMcpCatalog();
-      await refreshSnapshot();
+      await refreshCommittedView();
       return result;
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
@@ -2464,7 +2464,7 @@ export default function App() {
   async function applyMcpConfiguration(): Promise<McpConfigurationApplyResult> {
     try {
       const result = await client.applyMcpConfiguration();
-      await refreshSnapshot();
+      await refreshCommittedView();
       return result;
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
@@ -2481,7 +2481,7 @@ export default function App() {
         expectedGeneration,
         serverId,
       );
-      await refreshSnapshot();
+      await refreshCommittedView();
       return result;
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
@@ -3202,9 +3202,44 @@ export default function App() {
       }
       onSearch={() => setSearchOpen(true)}
       attentionNotice={
-        commandBarStatus
-          ? t(commandBarStatus.id, commandBarStatus.values)
-          : null
+        connectionBusy
+          ? t("connection.sync_retrying")
+          : commandBarStatus
+            ? t(commandBarStatus.id, commandBarStatus.values)
+            : null
+      }
+      attentionBusy={connectionBusy}
+      attentionContent={
+        connectionBusy ? (
+          <p>{t("connection.sync_retrying")}</p>
+        ) : commandBarStatus?.audience.scope === "connection" ? (
+          <>
+            <p>{t(connectionFailure.helpId)}</p>
+            {connectionRetryable && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => void retryViewSynchronization()}
+              >
+                {t("connection.retry_sync")}
+              </Button>
+            )}
+            {connectionShellStatus?.diagnostic && (
+              <details className="connection-diagnostic">
+                <summary className="focus-ring">
+                  {t("connection.details")}
+                </summary>
+                <p>
+                  {connectionShellStatus.sourceId
+                    ? `${t(connectionShellStatus.sourceId)}: `
+                    : ""}
+                  {connectionShellStatus.diagnostic}
+                </p>
+              </details>
+            )}
+          </>
+        ) : undefined
       }
       left={
         <div className="sidebar-frame">
@@ -3763,36 +3798,6 @@ export default function App() {
                 </AlertDialog.Popup>
               </AlertDialog.Portal>
             </AlertDialog.Root>
-          )}
-
-          {viewSyncFailed && (
-            <section className="sync-failure task-sync-failure" role="alert">
-              <h3>{t(connectionFailure.titleId)}</h3>
-              <p>{t(connectionFailure.helpId)}</p>
-              {connectionRetryable && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={connectionBusy}
-                  onClick={() => void retryViewSynchronization()}
-                >
-                  {connectionBusy
-                    ? t("connection.retrying")
-                    : t("connection.retry")}
-                </Button>
-              )}
-              {connectionShellStatus?.diagnostic && (
-                <details>
-                  <summary>{t("connection.details")}</summary>
-                  <p>
-                    {connectionShellStatus.sourceId
-                      ? `${t(connectionShellStatus.sourceId)}: `
-                      : ""}
-                    {connectionShellStatus.diagnostic}
-                  </p>
-                </details>
-              )}
-            </section>
           )}
 
           {newTaskDraftActive ? (
