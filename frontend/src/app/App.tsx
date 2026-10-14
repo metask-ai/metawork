@@ -1044,7 +1044,6 @@ export default function App() {
           }
           dispatchWorkbench({ type: "generation.started", generation });
           setBridgeGeneration(generation);
-          if (generation !== "0") setRootRenderBlockReason(null);
         }
       },
       onViewSyncFailed: (failed) => {

@@ -93,14 +93,18 @@ export class WorkbenchConnection {
 
   async start() {
     if (this.stopped) throw new Error("Workbench connection is stopped");
-    if (!this.client.available())
-      throw new Error("Workbench connection is unavailable");
+    if (!this.client.available()) {
+      const error = new Error("Workbench connection is unavailable");
+      this.failConnection("bootstrap_failed", error);
+      throw error;
+    }
     this.removeWorkbench ??= this.client.onWorkbenchRevision(
       (revision) => this.notify(revision),
       (error) => this.failContract("revision", error),
     );
     this.removeHostSignal ??= this.client.onHostSignal(
       (signal) => {
+        if (this.stopped || this.contractFault || !this.state) return;
         const state = this.state;
         const operation = this.operation;
         void this.client.acknowledgeSignal(signal.sequence).catch((error) => {
@@ -163,7 +167,7 @@ export class WorkbenchConnection {
     const value = BigInt(revision);
     if (value > this.pendingRevision) this.pendingRevision = value;
     const state = this.state;
-    if (!state || state.fault) return;
+    if (!state) return;
     if (value > state.requested) state.requested = value;
     this.schedule(state, 32);
   }
@@ -351,7 +355,14 @@ export class WorkbenchConnection {
     operation: number,
     recovered: boolean,
   ) {
-    await this.client.ping();
+    try {
+      await this.client.ping();
+    } catch (error) {
+      this.checkOperation(operation);
+      if (this.state === state && error instanceof RendererBridgeContractError)
+        this.failContract("bootstrap", error);
+      throw error;
+    }
     this.checkOperation(operation);
     if (!this.active(state))
       throw (

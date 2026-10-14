@@ -714,9 +714,10 @@ test("waiters before a transient failure and during backoff share the same succe
 test("exhausted reads reject zero-read refresh and passive notifications until explicit same-generation recovery", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let healthy = true;
+  let revision = "9";
   const f = fixture(async () => {
     if (!healthy) throw new Error("read unavailable");
-    return snapshot("9");
+    return snapshot(revision);
   });
   await f.connection.start();
   healthy = false;
@@ -735,6 +736,7 @@ test("exhausted reads reject zero-read refresh and passive notifications until e
   await flush();
   assert.equal(f.reads(), 6);
   healthy = true;
+  revision = "10";
   await f.connection.retry();
   assert.equal(f.reads(), 7);
   assert.deepEqual(f.generations, ["1"]);
@@ -866,4 +868,40 @@ test("a target known before reading remains enforced and stale reads exhaust a b
   );
   assert.equal(f.failures.at(-1), true);
   await f.connection.stop();
+});
+
+test("a confirmation contract failure is published and cannot leave an unconfirmed view ready", async () => {
+  const f = fixture();
+  f.client.ping = async () => {
+    throw new RendererBridgeContractError("invalid_response", "invalid ping");
+  };
+  await assert.rejects(f.connection.start(), RendererBridgeContractError);
+  assert.equal(f.statuses.at(-1).kind, "contract_failed");
+  assert.equal(f.statuses.at(-1).source, "bootstrap");
+  assert.equal(f.ready.at(-1), false);
+  assert.equal(f.failures.at(-1), true);
+  await f.connection.stop();
+});
+
+test("an unavailable bridge publishes a bootstrap failure rather than leaving a quiet disabled view", async () => {
+  const f = fixture();
+  f.client.available = () => false;
+  await assert.rejects(f.connection.start(), /unavailable/);
+  assert.equal(f.reads(), 0);
+  assert.equal(f.statuses.at(-1).failure, "bootstrap_failed");
+  assert.equal(f.failures.at(-1), true);
+  await f.connection.stop();
+});
+
+test("queued Host signals after stop do not issue late ACK commands", async () => {
+  const f = fixture();
+  let acknowledgements = 0;
+  f.client.acknowledgeSignal = async () => {
+    acknowledgements++;
+  };
+  await f.connection.start();
+  await f.connection.stop();
+  f.signal({ sequence: 4 });
+  await flush();
+  assert.equal(acknowledgements, 0);
 });

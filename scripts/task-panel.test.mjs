@@ -4478,7 +4478,12 @@ async function findRecentTaskButton(name) {
   return waitFor(() => recentTaskButton(name));
 }
 
-async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
+async function renderAppFixture(
+  ctx,
+  width = 1440,
+  runOverrides = {},
+  clientOverrides = {},
+) {
   Object.defineProperty(window, "innerWidth", {
     configurable: true,
     value: width,
@@ -4571,6 +4576,7 @@ async function renderAppFixture(ctx, width = 1440, runOverrides = {}) {
       new Promise((resolve, reject) => previews.push({ ids, resolve, reject })),
     fileChangeDiff: (...ids) =>
       new Promise((resolve, reject) => diffs.push({ ids, resolve, reject })),
+    ...clientOverrides,
   }))
     ctx.mock.method(BridgeClient.prototype, name, fn);
   render(localizedView(createElement(App)));
@@ -5756,3 +5762,102 @@ test("connection details close with Escape and return focus to their summary", a
   assert.equal(details.open, false);
   assert.equal(document.activeElement, summary);
 });
+
+test("bootstrap retry retains the root failure screen until fresh data and ping confirm readiness", async (ctx) => {
+  let connects = 0,
+    release;
+  const f = await renderAppFixture(
+    ctx,
+    1440,
+    {},
+    {
+      connect: async () => {
+        if (++connects === 1) throw new Error("bootstrap unavailable");
+        return "2";
+      },
+      fetchSnapshot: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    },
+  );
+  await screen.findByRole("heading", {
+    name: "Workbench connection unavailable",
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+  await waitFor(() => assert.ok(release));
+  assert.ok(document.querySelector(".connection-failure-screen"));
+  assert.equal(document.querySelector(".app-window"), null);
+  await act(async () => release(structuredClone(f.snapshot)));
+  await waitFor(() => assert.ok(document.querySelector(".app-window")));
+  assert.equal(document.querySelector(".connection-failure-screen"), null);
+});
+
+for (const outcome of ["committed", "timeout"]) {
+  test(`in-flight ${outcome} stop cannot claim a successful refresh after the read budget exhausts`, async (ctx) => {
+    const f = await renderAppFixture(ctx, 1440, {
+      elapsedMs: "10000",
+      phase: "running",
+      terminal: null,
+      activity: { kind: "waiting_model" },
+    });
+    const sidebar = screen.getByRole("button", { name: "Toggle task sidebar" });
+    if (sidebar.getAttribute("aria-expanded") === "false")
+      fireEvent.click(sidebar);
+    fireEvent.click(await findRecentTaskButton(/First task/));
+    const { BridgeClient, BridgeCommandTimeoutError } =
+      await vite.ssrLoadModule("/src/bridge/client.ts");
+    let resolveStop,
+      rejectStop,
+      calls = 0,
+      reads = 0;
+    ctx.mock.method(BridgeClient.prototype, "cancel", () => {
+      calls++;
+      return new Promise((resolve, reject) => {
+        resolveStop = resolve;
+        rejectStop = reject;
+      });
+    });
+    ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () => {
+      reads++;
+      throw new Error("read unavailable");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+    f.snapshot.revision = String(BigInt(f.snapshot.revision) + 1n);
+    await act(async () => f.publish());
+    await waitFor(
+      () => assert.ok(document.querySelector(".commandbar-alert")),
+      { timeout: 3500 },
+    );
+    assert.equal(reads, 5);
+    await act(async () =>
+      outcome === "committed"
+        ? resolveStop()
+        : rejectStop(
+            new BridgeCommandTimeoutError("metawork.tasks.cancel", 10000),
+          ),
+    );
+    assert.equal(reads, 5);
+    ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () =>
+      structuredClone(f.snapshot),
+    );
+    fireEvent.click(document.querySelector(".commandbar-alert > summary"));
+    fireEvent.click(screen.getByRole("button", { name: "Retry syncing" }));
+    await waitFor(() =>
+      assert.ok(
+        document.querySelector('.commandbar-alert[data-recovering="false"]'),
+      ),
+    );
+    const text = document.querySelector(
+      ".commandbar-alert > summary",
+    ).textContent;
+    assert.match(
+      text,
+      outcome === "committed"
+        ? /succeeded, but the latest state has not loaded/
+        : /latest state could not be confirmed/,
+    );
+    assert.doesNotMatch(text, /checked the current Host state/);
+    assert.equal(calls, 1);
+  });
+}
