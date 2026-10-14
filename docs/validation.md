@@ -49,6 +49,8 @@ npm run check
 npm test
 ```
 
+模型元数据的定向 Native 入口为 `zig build test-model-metadata`，使用同一 canonical bundle 与正式 module graph，覆盖 Models parser/合同/持久化和受影响的 Host serializer、Bridge 入站 fixture。Renderer 侧运行 typecheck 与 `scripts/workbench-contract.test.mjs`、`scripts/new-task-model-selection.test.mjs`。纯模型字段解析修正可用此入口观察完整字段、ownership、严格 wire 与刷新行为，避免重复无关生命周期测试。
+
 `npm test` 必须校验 canonical staged AgentCore bundle、执行 Renderer typecheck，并运行自动发现的 Node tests 与正式 Native test graph。Node 和 Native 阶段都必须得到结果；一侧失败不得遮蔽另一侧。bundle 缺失或不匹配时必须明确失败，不能跳过 AgentCore 用例后报告成功。
 
 candidate probe、真实桌面验收、签名、公证和发布验证不属于 `npm test`，也不得被其结果替代。定向入口只缩短开发反馈；提交前仍运行能覆盖受影响失败模式的完整关联 root。

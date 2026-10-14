@@ -3070,3 +3070,63 @@ test("ready Metask catalog can retain unavailable desired selections", () => {
     assert.equal(decoded.newTaskAdmission.available, false);
   }
 });
+
+test("complete model declarations and limits survive the shared Host fixture", () => {
+  const metadata = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/model-metadata.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const candidate = clone(fixture);
+  candidate.models.providers[0].models[0].metadata = metadata;
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(candidate).models.providers[0].models[0].metadata,
+    metadata,
+  );
+});
+
+test("model limits reject missing keys, invalid numbers and unbounded collections", () => {
+  for (const invalid of [undefined, null, true, [], {}]) {
+    const candidate = clone(fixture);
+    candidate.models.providers[0].models[0].metadata.limits = invalid;
+    assert.throws(() => decodeWorkbenchSnapshot(candidate));
+  }
+  for (const key of ["contextWindow", "requestMaxBytes"]) {
+    for (const invalid of [
+      undefined,
+      12,
+      "0",
+      "01",
+      "-1",
+      "1.5",
+      "18446744073709551616",
+    ]) {
+      const candidate = clone(fixture);
+      candidate.models.providers[0].models[0].metadata.limits[key] = invalid;
+      assert.throws(() => decodeWorkbenchSnapshot(candidate));
+    }
+  }
+  for (const kind of ["image", "pdf", "document", "audio", "video"]) {
+    for (const key of ["formats", "sources"]) {
+      for (const invalid of [
+        undefined,
+        "image/*",
+        [1],
+        [[]],
+        [""],
+        Array(9).fill("a"),
+        ["a".repeat(65)],
+        ["a".repeat(64), "b".repeat(64), "c"],
+      ]) {
+        const candidate = clone(fixture);
+        candidate.models.providers[0].models[0].metadata.limits[kind][key] =
+          invalid;
+        assert.throws(() => decodeWorkbenchSnapshot(candidate));
+      }
+    }
+  }
+});

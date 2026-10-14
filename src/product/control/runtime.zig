@@ -5860,6 +5860,16 @@ pub const Runtime = struct {
             return error.SnapshotTooLarge;
     }
 
+    const ModelLimitDecimal = struct {
+        value: ?u64,
+        pub fn jsonStringify(self: @This(), writer: anytype) !void {
+            if (self.value) |value| {
+                var buffer: [20]u8 = undefined;
+                try writer.write(std.fmt.bufPrint(&buffer, "{d}", .{value}) catch unreachable);
+            } else try writer.write(null);
+        }
+    };
+
     fn writeModelMetadata(writer: *std.Io.Writer, metadata: models_contract.ModelMetadata) Error!void {
         var input_buffer: [20]u8 = undefined;
         var output_buffer: [20]u8 = undefined;
@@ -5875,7 +5885,26 @@ pub const Runtime = struct {
         std.json.Stringify.value(.{
             .maxInputTokens = input,
             .maxOutputTokens = output,
+            .limits = .{
+                .contextWindow = ModelLimitDecimal{ .value = metadata.limits.context_window },
+                .requestMaxBytes = ModelLimitDecimal{ .value = metadata.limits.request_max_bytes },
+                .image = metadata.limits.image,
+                .pdf = metadata.limits.pdf,
+                .document = metadata.limits.document,
+                .audio = metadata.limits.audio,
+                .video = metadata.limits.video,
+                .imagesGenerations = .{ .maxN = ModelLimitDecimal{ .value = metadata.limits.images_generations.max_n } },
+                .videos = .{
+                    .defaultDurationSeconds = ModelLimitDecimal{ .value = metadata.limits.videos.default_duration_seconds },
+                    .maxDurationSeconds = ModelLimitDecimal{ .value = metadata.limits.videos.max_duration_seconds },
+                    .maxFirstFrameImages = ModelLimitDecimal{ .value = metadata.limits.videos.max_first_frame_images },
+                },
+            },
             .capabilities = .{
+                .textInput = caps.text_input,
+                .audioInput = caps.audio_input,
+                .videoInput = caps.video_input,
+                .output = caps.output,
                 .imageInput = caps.image_input,
                 .pdfInput = caps.pdf_input,
                 .batch = caps.batch,
@@ -10934,7 +10963,7 @@ test "Product Control snapshot serializer preserves complete Account summary his
             },
         },
     });
-    var storage: [8192]u8 = undefined;
+    var storage: [16 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&storage);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
@@ -18833,4 +18862,44 @@ test "authoritative empty catalog closes new default admission and preserves Tas
     try std.testing.expectEqualStrings("SECRET-KEY", pinned.api_key);
     try std.testing.expectEqual(old_admission.active_generation, pinned.execution_generation);
     try std.testing.expectEqual(@as(@TypeOf(control.accountView().state), .authenticated), control.accountView().state);
+}
+
+test "complete model metadata Host projection matches the Renderer fixture" {
+    var metadata: models_contract.ModelMetadata = .{
+        .max_input_tokens = 1000000,
+        .max_output_tokens = 131072,
+        .capabilities = .{
+            .text_input = true,
+            .image_input = true,
+            .pdf_input = true,
+            .audio_input = true,
+            .video_input = true,
+            .output = .{ .text = true, .image = true, .audio = true, .video = true, .embedding = true },
+            .batch = false,
+            .citations = false,
+            .code_execution = false,
+            .structured_outputs = true,
+            .thinking = .{ .supported = true, .adaptive = false, .enabled = true },
+            .effort = .{ .supported = false, .low = false, .medium = false, .high = false, .max = false },
+            .context_management = .{ .supported = false, .clear_thinking_20251015 = false, .clear_tool_uses_20250919 = false, .compact_20260112 = false },
+        },
+        .limits = .{
+            .context_window = 1048576,
+            .request_max_bytes = 33554432,
+            .images_generations = .{ .max_n = 4 },
+            .videos = .{ .default_duration_seconds = 5, .max_duration_seconds = 600, .max_first_frame_images = 1 },
+        },
+    };
+    inline for (.{ .{ "image", "image/*" }, .{ "pdf", "application/pdf" }, .{ "document", "text/*" }, .{ "audio", "audio/*" }, .{ "video", "video/*" } }) |pair| {
+        var formats: models_contract.ModelLimitStrings = .{};
+        try formats.append(pair[1]);
+        var sources: models_contract.ModelLimitStrings = .{};
+        try sources.append("data");
+        try sources.append("url");
+        @field(metadata.limits, pair[0]) = .{ .formats = formats, .sources = sources };
+    }
+    var storage: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try Runtime.writeModelMetadata(&writer, metadata);
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, contract_fixture.model_metadata, "\r\n"), writer.buffered());
 }

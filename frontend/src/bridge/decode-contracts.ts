@@ -1203,14 +1203,97 @@ function modelTokenLimit(value: unknown, path: string): string | null {
   return result;
 }
 
+function modelLimitStrings(value: unknown, path: string): string[] | null {
+  if (value === null) return null;
+  const result = arrayValue(value, path, (entry, entryPath) => {
+    const text = stringValue(entry, entryPath);
+    if (text.length === 0 || new TextEncoder().encode(text).length > 64)
+      fail(path, "expected bounded nonempty limit string");
+    return text;
+  });
+  if (
+    result.length > 8 ||
+    result.reduce(
+      (sum, text) => sum + new TextEncoder().encode(text).length,
+      0,
+    ) > 128
+  )
+    fail(path, "limit string collection exceeds bound");
+  return result;
+}
+
+function decodeModelMediaLimits(value: unknown, path: string) {
+  const item = object(value, path, ["formats", "sources"]);
+  return {
+    formats: modelLimitStrings(item.formats, `${path}.formats`),
+    sources: modelLimitStrings(item.sources, `${path}.sources`),
+  };
+}
+
+function decodeModelLimits(value: unknown, path: string) {
+  const item = object(value, path, [
+    "contextWindow",
+    "requestMaxBytes",
+    "image",
+    "pdf",
+    "document",
+    "audio",
+    "video",
+    "imagesGenerations",
+    "videos",
+  ]);
+  const images = object(item.imagesGenerations, `${path}.imagesGenerations`, [
+    "maxN",
+  ]);
+  const videos = object(item.videos, `${path}.videos`, [
+    "defaultDurationSeconds",
+    "maxDurationSeconds",
+    "maxFirstFrameImages",
+  ]);
+  return {
+    contextWindow: modelTokenLimit(item.contextWindow, `${path}.contextWindow`),
+    requestMaxBytes: modelTokenLimit(
+      item.requestMaxBytes,
+      `${path}.requestMaxBytes`,
+    ),
+    image: decodeModelMediaLimits(item.image, `${path}.image`),
+    pdf: decodeModelMediaLimits(item.pdf, `${path}.pdf`),
+    document: decodeModelMediaLimits(item.document, `${path}.document`),
+    audio: decodeModelMediaLimits(item.audio, `${path}.audio`),
+    video: decodeModelMediaLimits(item.video, `${path}.video`),
+    imagesGenerations: {
+      maxN: modelTokenLimit(images.maxN, `${path}.imagesGenerations.maxN`),
+    },
+    videos: {
+      defaultDurationSeconds: modelTokenLimit(
+        videos.defaultDurationSeconds,
+        `${path}.videos.defaultDurationSeconds`,
+      ),
+      maxDurationSeconds: modelTokenLimit(
+        videos.maxDurationSeconds,
+        `${path}.videos.maxDurationSeconds`,
+      ),
+      maxFirstFrameImages: modelTokenLimit(
+        videos.maxFirstFrameImages,
+        `${path}.videos.maxFirstFrameImages`,
+      ),
+    },
+  };
+}
+
 function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
   const item = object(value, path, [
     "maxInputTokens",
     "maxOutputTokens",
+    "limits",
     "capabilities",
   ]);
   const capsPath = `${path}.capabilities`;
   const caps = object(item.capabilities, capsPath, [
+    "textInput",
+    "audioInput",
+    "videoInput",
+    "output",
     "imageInput",
     "pdfInput",
     "batch",
@@ -1220,6 +1303,13 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
     "thinking",
     "effort",
     "contextManagement",
+  ]);
+  const output = object(caps.output, `${capsPath}.output`, [
+    "text",
+    "image",
+    "audio",
+    "video",
+    "embedding",
   ]);
   const thinking = object(caps.thinking, `${capsPath}.thinking`, [
     "supported",
@@ -1244,6 +1334,7 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
     ],
   );
   return {
+    limits: decodeModelLimits(item.limits, `${path}.limits`),
     maxInputTokens: modelTokenLimit(
       item.maxInputTokens,
       `${path}.maxInputTokens`,
@@ -1253,6 +1344,19 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
       `${path}.maxOutputTokens`,
     ),
     capabilities: {
+      textInput: nullableBoolean(caps.textInput, `${capsPath}.textInput`),
+      audioInput: nullableBoolean(caps.audioInput, `${capsPath}.audioInput`),
+      videoInput: nullableBoolean(caps.videoInput, `${capsPath}.videoInput`),
+      output: {
+        text: nullableBoolean(output.text, `${capsPath}.output.text`),
+        image: nullableBoolean(output.image, `${capsPath}.output.image`),
+        audio: nullableBoolean(output.audio, `${capsPath}.output.audio`),
+        video: nullableBoolean(output.video, `${capsPath}.output.video`),
+        embedding: nullableBoolean(
+          output.embedding,
+          `${capsPath}.output.embedding`,
+        ),
+      },
       imageInput: nullableBoolean(caps.imageInput, `${capsPath}.imageInput`),
       pdfInput: nullableBoolean(caps.pdfInput, `${capsPath}.pdfInput`),
       batch: nullableBoolean(caps.batch, `${capsPath}.batch`),

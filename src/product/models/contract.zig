@@ -105,6 +105,16 @@ pub const ModelsError = enum {
 
 /// Provider declarations, not MetaWork feature gates. null means unknown.
 pub const ModelCapabilities = struct {
+    text_input: ?bool = null,
+    audio_input: ?bool = null,
+    video_input: ?bool = null,
+    output: struct {
+        text: ?bool = null,
+        image: ?bool = null,
+        audio: ?bool = null,
+        video: ?bool = null,
+        embedding: ?bool = null,
+    } = .{},
     image_input: ?bool = null,
     pdf_input: ?bool = null,
     batch: ?bool = null,
@@ -131,10 +141,78 @@ pub const ModelCapabilities = struct {
     } = .{},
 };
 
+/// Owned, bounded declaration list; safe to copy with catalog metadata.
+/// JSON remains an array of strings, never the storage representation.
+pub const ModelLimitStrings = struct {
+    pub const max_entries = 8;
+    pub const max_bytes = 128;
+    bytes: [max_bytes]u8 = @splat(0),
+    ends: [max_entries]u8 = @splat(0),
+    count: u8 = 0,
+
+    pub fn fromValue(value: std.json.Value) !ModelLimitStrings {
+        if (value != .array) return error.UnexpectedToken;
+        var result: ModelLimitStrings = .{};
+        for (value.array.items) |element| {
+            if (element != .string) return error.UnexpectedToken;
+            try result.append(element.string);
+        }
+        return result;
+    }
+
+    pub fn append(self: *ModelLimitStrings, value: []const u8) !void {
+        const start: usize = if (self.count == 0) 0 else self.ends[self.count - 1];
+        if (self.count == max_entries or value.len == 0 or value.len > 64 or
+            start + value.len > max_bytes or !std.unicode.utf8ValidateSlice(value))
+            return error.InvalidMetadata;
+        @memcpy(self.bytes[start..][0..value.len], value);
+        self.ends[self.count] = @intCast(start + value.len);
+        self.count += 1;
+    }
+
+    pub fn item(self: *const ModelLimitStrings, index: usize) []const u8 {
+        std.debug.assert(index < self.count);
+        const start: usize = if (index == 0) 0 else self.ends[index - 1];
+        return self.bytes[start..self.ends[index]];
+    }
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ModelLimitStrings {
+        return fromValue(try std.json.innerParse(std.json.Value, allocator, source, options)) catch return error.UnexpectedToken;
+    }
+
+    pub fn jsonStringify(self: ModelLimitStrings, writer: anytype) !void {
+        try writer.beginArray();
+        for (0..self.count) |i| try writer.write(self.item(i));
+        try writer.endArray();
+    }
+};
+
+pub const ModelMediaLimits = struct {
+    formats: ?ModelLimitStrings = null,
+    sources: ?ModelLimitStrings = null,
+};
+
+pub const ModelLimits = struct {
+    context_window: ?u64 = null,
+    request_max_bytes: ?u64 = null,
+    image: ModelMediaLimits = .{},
+    pdf: ModelMediaLimits = .{},
+    document: ModelMediaLimits = .{},
+    audio: ModelMediaLimits = .{},
+    video: ModelMediaLimits = .{},
+    images_generations: struct { max_n: ?u64 = null } = .{},
+    videos: struct {
+        default_duration_seconds: ?u64 = null,
+        max_duration_seconds: ?u64 = null,
+        max_first_frame_images: ?u64 = null,
+    } = .{},
+};
+
 pub const ModelMetadata = struct {
     max_input_tokens: ?u64 = null,
     max_output_tokens: ?u64 = null,
     capabilities: ModelCapabilities = .{},
+    limits: ModelLimits = .{},
 };
 
 pub const ModelMetadataProvenance = enum {
@@ -760,6 +838,9 @@ pub fn validateCustomModelInput(model: CustomModelInput) ValidationError!void {
     if ((model.metadata.max_input_tokens orelse 1) == 0 or
         (model.metadata.max_output_tokens orelse 1) == 0)
         return error.InvalidMetadata;
+    const limits = model.metadata.limits;
+    for ([_]?u64{ limits.context_window, limits.request_max_bytes, limits.images_generations.max_n, limits.videos.default_duration_seconds, limits.videos.max_duration_seconds, limits.videos.max_first_frame_images }) |value|
+        if ((value orelse 1) == 0) return error.InvalidMetadata;
 }
 
 pub fn validateCustomProviderSpec(spec: CustomProviderSpec) ValidationError!void {
@@ -1274,4 +1355,25 @@ test "ready custom provider view requires a ready credential and exact model pro
         .source_generation = 2,
         .catalog_generation = 3,
     });
+}
+
+test "owned model limit strings roundtrip as bounded JSON arrays" {
+    var list: ModelLimitStrings = .{};
+    try list.append("image/png");
+    try list.append("image/webp");
+    const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, list, .{});
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("[\"image/png\",\"image/webp\"]", bytes);
+    var parsed = try std.json.parseFromSlice(ModelLimitStrings, std.testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualDeep(list, parsed.value);
+    inline for (.{ "true", "1", "\"image/png\"", "[1]", "[[1]]", "[\"\"]" }) |invalid|
+        try std.testing.expectError(error.UnexpectedToken, std.json.parseFromSlice(ModelLimitStrings, std.testing.allocator, invalid, .{}));
+    var full: ModelLimitStrings = .{};
+    try full.append("a" ** 64);
+    try full.append("b" ** 64);
+    try std.testing.expectError(error.InvalidMetadata, full.append("c"));
+    var entries: ModelLimitStrings = .{};
+    for (0..ModelLimitStrings.max_entries) |_| try entries.append("x");
+    try std.testing.expectError(error.InvalidMetadata, entries.append("x"));
 }

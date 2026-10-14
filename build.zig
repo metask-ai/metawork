@@ -216,6 +216,18 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
     }
+    const model_metadata_step = b.step("test-model-metadata", "Run Models declarations and their Host/Renderer contract tests");
+    for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers }) |module| {
+        model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
+    }
+    model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = test_modules.product_control_runtime,
+        .filters = &.{ "complete model metadata", "snapshot serializer", "Automatic Workspace snapshot" },
+    })).step);
+    model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = test_modules.bridge,
+        .filters = &.{"complete model metadata"},
+    })).step);
     const permission_review_tests = b.addTest(.{
         .name = "metawork-product-permission-review-focused",
         .root_module = test_modules.product_permission_review,
@@ -1769,6 +1781,7 @@ fn wireAgentCore(
         ),
     );
     const product_control_contract_fixture = b.addOptions();
+    product_control_contract_fixture.addOption([]const u8, "model_metadata", @embedFile("frontend/src/bridge/__fixtures__/model-metadata.fixture"));
     product_control_contract_fixture.addOption(
         []const u8,
         "snapshot",

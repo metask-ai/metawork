@@ -480,8 +480,6 @@ const ModelWire = struct {
     object: []const u8,
     type: []const u8,
     display_name: ?[]const u8 = null,
-    max_input_tokens: std.json.Value = .null,
-    max_tokens: std.json.Value = .null,
     capabilities: ?ModelCapabilitiesWire = null,
 };
 
@@ -506,9 +504,20 @@ const ModelEndpointsWire = struct {
 const ModelCapabilitiesWire = struct {
     endpoints: ?ModelEndpointsWire = null,
     input: ?struct {
+        text: ?CapabilityWire = null,
+        audio: ?CapabilityWire = null,
+        video: ?CapabilityWire = null,
         image: ?CapabilityWire = null,
         pdf: ?CapabilityWire = null,
     } = null,
+    output: ?struct {
+        text: ?CapabilityWire = null,
+        image: ?CapabilityWire = null,
+        audio: ?CapabilityWire = null,
+        video: ?CapabilityWire = null,
+        embedding: ?CapabilityWire = null,
+    } = null,
+    limits: ?ModelLimitsWire = null,
     batch: ?CapabilityWire = null,
     citations: ?CapabilityWire = null,
     code_execution: ?CapabilityWire = null,
@@ -536,6 +545,16 @@ const ModelCapabilitiesWire = struct {
 
     fn projection(self: ModelCapabilitiesWire) contract.ModelCapabilities {
         var result: contract.ModelCapabilities = .{
+            .text_input = if (self.input) |input| supported(input.text) else false,
+            .audio_input = if (self.input) |input| supported(input.audio) else false,
+            .video_input = if (self.input) |input| supported(input.video) else false,
+            .output = .{
+                .text = if (self.output) |output| supported(output.text) else false,
+                .image = if (self.output) |output| supported(output.image) else false,
+                .audio = if (self.output) |output| supported(output.audio) else false,
+                .video = if (self.output) |output| supported(output.video) else false,
+                .embedding = if (self.output) |output| supported(output.embedding) else false,
+            },
             .image_input = if (self.input) |input| supported(input.image) else false,
             .pdf_input = if (self.input) |input| supported(input.pdf) else false,
             .batch = supported(self.batch),
@@ -577,6 +596,56 @@ const ModelCapabilitiesWire = struct {
 
 fn supported(capability: ?CapabilityWire) bool {
     return if (capability) |value| value.supported orelse false else false;
+}
+
+const ModelMediaLimitsWire = struct {
+    formats: std.json.Value = .null,
+    sources: std.json.Value = .null,
+
+    fn projection(self: ModelMediaLimitsWire) Error!contract.ModelMediaLimits {
+        return .{ .formats = try limitStrings(self.formats), .sources = try limitStrings(self.sources) };
+    }
+};
+
+const ModelLimitsWire = struct {
+    context_window: std.json.Value = .null,
+    max_input_tokens: std.json.Value = .null,
+    max_output_tokens: std.json.Value = .null,
+    request_max_bytes: std.json.Value = .null,
+    image: ?ModelMediaLimitsWire = null,
+    pdf: ?ModelMediaLimitsWire = null,
+    document: ?ModelMediaLimitsWire = null,
+    audio: ?ModelMediaLimitsWire = null,
+    video: ?ModelMediaLimitsWire = null,
+    images_generations: ?struct { max_n: std.json.Value = .null } = null,
+    videos: ?struct {
+        default_duration_seconds: std.json.Value = .null,
+        max_duration_seconds: std.json.Value = .null,
+        max_first_frame_images: std.json.Value = .null,
+    } = null,
+
+    fn projection(self: ModelLimitsWire) Error!contract.ModelLimits {
+        return .{
+            .context_window = try tokenLimit(self.context_window),
+            .request_max_bytes = try tokenLimit(self.request_max_bytes),
+            .image = if (self.image) |limits| try limits.projection() else .{},
+            .pdf = if (self.pdf) |limits| try limits.projection() else .{},
+            .document = if (self.document) |limits| try limits.projection() else .{},
+            .audio = if (self.audio) |limits| try limits.projection() else .{},
+            .video = if (self.video) |limits| try limits.projection() else .{},
+            .images_generations = .{ .max_n = if (self.images_generations) |limits| try tokenLimit(limits.max_n) else null },
+            .videos = .{
+                .default_duration_seconds = if (self.videos) |limits| try tokenLimit(limits.default_duration_seconds) else null,
+                .max_duration_seconds = if (self.videos) |limits| try tokenLimit(limits.max_duration_seconds) else null,
+                .max_first_frame_images = if (self.videos) |limits| try tokenLimit(limits.max_first_frame_images) else null,
+            },
+        };
+    }
+};
+
+fn limitStrings(value: std.json.Value) Error!?contract.ModelLimitStrings {
+    if (value == .null) return null;
+    return contract.ModelLimitStrings.fromValue(value) catch return error.ProtocolInvalid;
 }
 
 fn tokenLimit(value: std.json.Value) Error!?u64 {
@@ -635,13 +704,15 @@ fn parseModels(
                 return error.ProtocolInvalid;
         }
         const capabilities: ModelCapabilitiesWire = model.capabilities orelse .{};
+        const limits: ModelLimitsWire = capabilities.limits orelse .{};
         var entry: ModelEntry = .{
             .id = id,
             .protocol = undefined,
             .display_name = try .optional(model.display_name orelse ""),
             .metadata = .{
-                .max_input_tokens = try tokenLimit(model.max_input_tokens),
-                .max_output_tokens = try tokenLimit(model.max_tokens),
+                .max_input_tokens = try tokenLimit(limits.max_input_tokens),
+                .max_output_tokens = try tokenLimit(limits.max_output_tokens),
+                .limits = try limits.projection(),
                 .capabilities = capabilities.projection(),
             },
         };
@@ -746,7 +817,7 @@ const model_fixture =
 const declared_model_fixture =
     \\{"object":"list","has_more":false,"data":[{
     \\"id":"model-1","object":"model","type":"model","display_name":"Model 1",
-    \\"max_input_tokens":1048576,"max_tokens":64000,"capabilities":{"endpoints":{"messages":{"supported":true}},
+    \\"capabilities":{"limits":{"max_input_tokens":1048576,"max_output_tokens":64000},"endpoints":{"messages":{"supported":true}},
     \\"input":{"image":{"supported":true},"pdf":{"supported":true}},
     \\"batch":{"supported":false},"citations":{"supported":false},
     \\"code_execution":{"supported":false},"structured_outputs":{"supported":true},
@@ -761,6 +832,10 @@ test "model declarations survive owned catalog copies and never leak into a repl
         .max_input_tokens = 1048576,
         .max_output_tokens = 64000,
         .capabilities = .{
+            .text_input = false,
+            .audio_input = false,
+            .video_input = false,
+            .output = .{ .text = false, .image = false, .audio = false, .video = false, .embedding = false },
             .image_input = true,
             .pdf_input = true,
             .batch = false,
@@ -811,7 +886,7 @@ test "Metask capabilities default to unsupported without coercion" {
         .{ .fields = ",\"max_input_tokens\":null,\"max_tokens\":0,\"capabilities\":null", .expected = unsupported_metadata, .eligible = false },
         .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"input\":{\"image\":null,\"pdf\":{}},\"thinking\":{\"types\":null},\"effort\":null}", .expected = unsupported_metadata },
         .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"input\":{\"image\":{\"supported\":true},\"pdf\":{\"supported\":false}},\"batch\":{\"supported\":null}}", .expected = .{ .capabilities = image_capabilities } },
-        .{ .fields = ",\"max_input_tokens\":18446744073709551615,\"max_tokens\":1,\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}", .expected = .{ .max_input_tokens = std.math.maxInt(u64), .max_output_tokens = 1, .capabilities = unsupported_metadata.capabilities } },
+        .{ .fields = ",\"capabilities\":{\"limits\":{\"max_input_tokens\":18446744073709551615,\"max_output_tokens\":1},\"endpoints\":{\"messages\":{\"supported\":true}}}", .expected = .{ .max_input_tokens = std.math.maxInt(u64), .max_output_tokens = 1, .capabilities = unsupported_metadata.capabilities } },
     };
     for (cases) |case| {
         const body = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}}}]}}", .{ prefix, case.fields });
@@ -822,14 +897,14 @@ test "Metask capabilities default to unsupported without coercion" {
         if (case.eligible) try std.testing.expectEqualDeep(case.expected, models.entries.items[0].metadata);
     }
     const invalid_fields = [_][]const u8{
-        ",\"max_input_tokens\":\"1024\"",
-        ",\"max_tokens\":-1",
-        ",\"max_input_tokens\":-0",
-        ",\"max_input_tokens\":1.5",
-        ",\"max_tokens\":1e3",
-        ",\"max_tokens\":18446744073709551616",
-        ",\"max_tokens\":true",
-        ",\"max_input_tokens\":{}",
+        ",\"capabilities\":{\"limits\":{\"max_input_tokens\":\"1024\"}}",
+        ",\"capabilities\":{\"limits\":{\"max_output_tokens\":-1}}",
+        ",\"capabilities\":{\"limits\":{\"max_input_tokens\":-0}}",
+        ",\"capabilities\":{\"limits\":{\"max_input_tokens\":1.5}}",
+        ",\"capabilities\":{\"limits\":{\"max_output_tokens\":1e3}}",
+        ",\"capabilities\":{\"limits\":{\"max_output_tokens\":18446744073709551616}}",
+        ",\"capabilities\":{\"limits\":{\"max_output_tokens\":true}}",
+        ",\"capabilities\":{\"limits\":{\"max_input_tokens\":{}}}",
         ",\"capabilities\":false",
         ",\"capabilities\":{\"input\":{\"image\":true}}",
         ",\"capabilities\":{\"input\":{\"pdf\":{\"supported\":1}}}",
@@ -1009,7 +1084,7 @@ test "excluded media models cannot hide invalid catalog metadata or duplicate id
     const cases = [_][]const u8{
         "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":\"true\"}}}}]}",
         "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"videos\":true}}}]}",
-        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"max_tokens\":-1,\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}",
+        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"limits\":{\"max_output_tokens\":-1},\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}",
         "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}},{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\"}]}",
     };
     for (cases) |body| {
@@ -1128,6 +1203,89 @@ test "input declarations reject malformed known fields" {
     };
     for (inputs) |input| {
         const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"object\":\"list\",\"has_more\":false,\"data\":[{{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{{\"input\":{s},\"endpoints\":{{\"messages\":{{\"supported\":true}}}}}}}}]}}", .{input});
+        defer std.testing.allocator.free(body);
+        try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
+    }
+}
+
+test "all global input and output supported declarations use exact booleans" {
+    inline for (.{ "input", "output" }) |direction| {
+        inline for (if (comptime std.mem.eql(u8, direction, "input")) .{ "text", "image", "pdf", "audio", "video" } else .{ "text", "image", "audio", "video", "embedding" }) |kind| {
+            inline for (.{ "true", "false", "null" }) |flag| {
+                const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"" ++ direction ++ "\":{\"" ++ kind ++ "\":{\"supported\":" ++ flag ++ "}}}}]}";
+                var parsed = try parseModels(std.testing.allocator, body);
+                defer parsed.deinit();
+                const caps = parsed.entries.items[0].metadata.capabilities;
+                const actual = if (comptime std.mem.eql(u8, direction, "input")) @field(caps, kind ++ "_input") else @field(caps.output, kind);
+                try std.testing.expectEqual(@as(?bool, std.mem.eql(u8, flag, "true")), actual);
+            }
+            inline for (.{ "1", "\"true\"", "[]", "{}" }) |flag| {
+                const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"" ++ direction ++ "\":{\"" ++ kind ++ "\":{\"supported\":" ++ flag ++ "}}}}]}";
+                try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
+            }
+        }
+    }
+}
+
+test "limits and full modalities survive catalog ownership and authoritative replacement" {
+    const body =
+        \\{"object":"list","has_more":false,"data":[{"id":"m","object":"model","type":"model",
+        \\"max_input_tokens":1,"max_tokens":2,"capabilities":{"endpoints":{"responses":{"supported":true}},
+        \\"input":{"text":{"supported":true},"image":{"supported":true},"pdf":{"supported":true},"audio":{"supported":true},"video":{"supported":true}},
+        \\"output":{"text":{"supported":true},"image":{"supported":true},"audio":{"supported":true},"video":{"supported":true},"embedding":{"supported":true}},
+        \\"limits":{"context_window":1048576,"max_input_tokens":1000000,"max_output_tokens":131072,"request_max_bytes":33554432,
+        \\"image":{"formats":["image/*"],"sources":["data","url"]},"pdf":{"formats":["application/pdf"],"sources":["data"]},
+        \\"document":{"formats":["text/*"],"sources":["url"]},"audio":{"formats":["audio/*"],"sources":[]},"video":{"formats":["video/*"],"sources":["url"]},
+        \\"images_generations":{"max_n":4},"videos":{"default_duration_seconds":5,"max_duration_seconds":600,"max_first_frame_images":1}}}}]}
+    ;
+    var session = CatalogSession.init(std.testing.allocator);
+    defer session.deinit();
+    const catalog = try std.testing.allocator.create(PublicCatalog);
+    defer std.testing.allocator.destroy(catalog);
+    catalog.* = .{};
+    try TestSupport.loadCatalogResponse(&session, "principal", "access", body);
+    catalog.replaceFromSession(&session);
+    session.reset();
+    const metadata = catalog.modelViews()[0].metadata;
+    try std.testing.expectEqual(@as(?u64, 1000000), metadata.max_input_tokens);
+    try std.testing.expectEqual(@as(?u64, 131072), metadata.max_output_tokens);
+    try std.testing.expectEqual(@as(?u64, 1048576), metadata.limits.context_window);
+    try std.testing.expectEqual(@as(?u64, 33554432), metadata.limits.request_max_bytes);
+    try std.testing.expectEqual(@as(?u64, 4), metadata.limits.images_generations.max_n);
+    try std.testing.expectEqual(@as(?u64, 5), metadata.limits.videos.default_duration_seconds);
+    try std.testing.expectEqual(@as(?u64, 600), metadata.limits.videos.max_duration_seconds);
+    try std.testing.expectEqual(@as(?u64, 1), metadata.limits.videos.max_first_frame_images);
+    inline for (.{ "image", "pdf", "document", "audio", "video" }) |kind| {
+        const limits = @field(metadata.limits, kind);
+        try std.testing.expectEqual(@as(u8, 1), limits.formats.?.count);
+        try std.testing.expect(limits.sources != null);
+    }
+    try std.testing.expectEqualStrings("image/*", metadata.limits.image.formats.?.item(0));
+    try std.testing.expectEqualStrings("url", metadata.limits.image.sources.?.item(1));
+    try std.testing.expectEqualStrings("application/pdf", metadata.limits.pdf.formats.?.item(0));
+    inline for (.{ "text", "image", "pdf", "audio", "video" }) |kind|
+        try std.testing.expectEqual(@as(?bool, true), @field(metadata.capabilities, kind ++ "_input"));
+    inline for (.{ "text", "image", "audio", "video", "embedding" }) |kind|
+        try std.testing.expectEqual(@as(?bool, true), @field(metadata.capabilities.output, kind));
+    try TestSupport.loadCatalogResponse(&session, "principal", "access", model_fixture);
+    catalog.replaceFromSession(&session);
+    try std.testing.expectEqualDeep(contract.ModelMetadata{ .capabilities = (ModelCapabilitiesWire{}).projection() }, catalog.modelViews()[0].metadata);
+}
+
+test "limits have no root alias fallback and reject malformed known declarations" {
+    const legacy = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"max_input_tokens\":999,\"max_tokens\":888,\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}";
+    var parsed = try parseModels(std.testing.allocator, legacy);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?u64, null), parsed.entries.items[0].metadata.max_input_tokens);
+    try std.testing.expectEqual(@as(?u64, null), parsed.entries.items[0].metadata.max_output_tokens);
+    const invalid = [_][]const u8{
+        "false",                                                          "[]",                                                                                   "{\"context_window\":\"1024\"}",            "{\"request_max_bytes\":-1}",
+        "{\"image\":true}",                                               "{\"pdf\":{\"formats\":\"application/pdf\"}}",                                          "{\"image\":{\"formats\":[1]}}",            "{\"video\":{\"sources\":[[]]}}",
+        "{\"audio\":{\"formats\":[\"\"]}}",                               "{\"document\":{\"formats\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\"]}}", "{\"images_generations\":{\"max_n\":1.5}}", "{\"videos\":{\"max_duration_seconds\":true}}",
+        "{\"videos\":{\"max_first_frame_images\":18446744073709551616}}",
+    };
+    for (invalid) |limits| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"object\":\"list\",\"has_more\":false,\"data\":[{{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{{\"limits\":{s},\"endpoints\":{{\"images_generations\":{{\"supported\":true}}}}}}}}]}}", .{limits});
         defer std.testing.allocator.free(body);
         try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
     }

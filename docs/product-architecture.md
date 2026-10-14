@@ -61,7 +61,9 @@ Models registry 与 Account identity 独立。不同 Provider 即使 credential 
 
 Metask catalog completion 只交付完整 owned 目录与 transient credential，不在 Application worker 选择模型。Models 负责恢复 intent：同一 principal 的已存选择仍保留，目录移除或排除它时不得静默换模型；只有当前 principal 无历史 intent 时才从合格目录初始化首项。同一模型的声明使选定 protocol 改变时，保留模型 intent 与 selection revision，更新 source authority 并由 Product Control 为新的默认执行建立新 generation；已有 Task/Run/pending 的 owned protocol 不热切换。新 Task override 与已有 Task 模型切换仍须匹配各自当前 execution protocol，不把其他协议的模型放入该 execution。目录成功接纳与 intent 当前可解析性分别判断，失格 intent 不阻止发布可供重新选择的目录。合法空目录推进 catalog generation 并发布 `no_models`，不得解释成普通 transport failure 或复用旧目录给新的 resolve 放行。Product Control 在成功目录 completion 后重新 reconcile，即使 desired selection 未变化也必须关闭不可解析默认的 New Task 与 Schedule admission；已有消费者的 owned binding 与已接纳 pending mutation 按原生命周期保留。
 
-Metask 的图片与 PDF 输入声明仅分别来自 `capabilities.input.image.supported` 与 `capabilities.input.pdf.supported`，只接纳 boolean true；缺失、null、false 均投影为不支持，非法已消费字段类型使目录响应无效。不得从旧 `image_input/pdf_input`、`input.document`、document formats 或端点内部 input/output 推断或回退。Models 保留现有 metadata 投影字段作为下游合同；这些声明不改变端点用途判定、执行 protocol 或 MetaWork 已开放的附件范围。
+Metask 的输入能力仅来自 `capabilities.input.{text,image,pdf,audio,video}.supported`，输出能力仅来自 `capabilities.output.{text,image,audio,video,embedding}.supported`；只有 boolean true 表示支持，缺失、null、false 均投影为不支持，非法已知字段类型使整个目录响应无效。旧 `*_input/*_output`、`input.document` 与端点内部 input/output 不解析、不回退；PDF 支持只由 `input.pdf.supported` 声明，格式列表不能授予能力。Models 有界持有全部已知声明并随目录复制和替换，下游 metadata 保存这些事实；声明不增加第二套模型用途 gate，也不自动开放 MetaWork 尚未实现的附件或输出功能。
+
+Metask 的限制值只来自 `capabilities.limits`：上下文、输入/输出 token、请求 bytes、媒体 formats/sources、图片生成数量与视频时长/首帧数量。根级 `max_input_tokens/max_tokens` 不解析、不回退。限制数值只接纳十进制非负 JSON integer，零、缺失、null 表示未知而不是无限制；负数、字符串、浮点、指数或 u64 溢出使整个目录无效。formats/sources 是有界 owned 字符串集合，缺失/null 与明确空集合分别保留。`limits.document` 仅保留文档限制，不作为 `input.pdf` 的别名或支持依据。未知新增字段可忽略，已知字段校验在模型筛选之前完成。输入/输出 token 只保存到现有 metadata token 字段，不与 limits 内维护第二份值。Custom Provider 的声明仍允许 null 表示未知，已有持久数据省略新增 metadata 字段时保持其原有声明。
 
 Account authorization 与 Models catalog 的 committed-state 路径为：
 

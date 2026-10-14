@@ -2094,3 +2094,32 @@ fn testCreate(registry: *Registry, input: TestCustomProviderCreate) !void {
         .model = input.model,
     }, 1, 3);
 }
+
+test "complete model declarations and owned limits survive registry persistence" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    var formats: contract.ModelLimitStrings = .{};
+    try formats.append("application/pdf");
+    const metadata: contract.ModelMetadata = .{
+        .max_input_tokens = 1000000,
+        .max_output_tokens = 131072,
+        .capabilities = .{ .text_input = true, .image_input = true, .pdf_input = true, .audio_input = false, .video_input = true, .output = .{ .text = true, .image = false, .audio = false, .video = false, .embedding = false } },
+        .limits = .{ .context_window = 1048576, .request_max_bytes = 33554432, .pdf = .{ .formats = formats }, .images_generations = .{ .max_n = 4 }, .videos = .{ .max_duration_seconds = 600 } },
+    };
+    try testCreate(&registry, .{
+        .provider_id = "metadata-provider",
+        .spec = .{ .display_name = "Provider", .protocol = .openai_responses, .normalized_base_url = "https://example.com/v1/responses" },
+        .credential_slot = .{ .id = "metadata-provider" },
+        .model = .{ .id = "m", .metadata = metadata },
+    });
+    const encoded = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(encoded);
+    var restored = try decode(std.testing.allocator, encoded);
+    defer restored.deinit();
+    registry.deinit();
+    registry = Registry.init(std.testing.allocator);
+    try std.testing.expectEqualDeep(metadata, restored.views()[0].models[0].metadata);
+    const again = try encodeAlloc(std.testing.allocator, &restored);
+    defer std.testing.allocator.free(again);
+    try std.testing.expectEqualStrings(encoded, again);
+}

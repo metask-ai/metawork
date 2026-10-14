@@ -2628,6 +2628,7 @@ pub const Dispatcher = struct {
             .id = value.id,
             .display_name = value.displayName,
             .metadata = .{
+                .limits = try value.metadata.limits.projection(),
                 .max_input_tokens = if (value.metadata.maxInputTokens) |token_count|
                     try handlers.parseWireId(token_count)
                 else
@@ -2637,6 +2638,10 @@ pub const Dispatcher = struct {
                 else
                     null,
                 .capabilities = .{
+                    .text_input = value.metadata.capabilities.textInput,
+                    .audio_input = value.metadata.capabilities.audioInput,
+                    .video_input = value.metadata.capabilities.videoInput,
+                    .output = value.metadata.capabilities.output,
                     .image_input = value.metadata.capabilities.imageInput,
                     .pdf_input = value.metadata.capabilities.pdfInput,
                     .batch = value.metadata.capabilities.batch,
