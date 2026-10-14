@@ -505,9 +505,6 @@ const ModelEndpointsWire = struct {
 
 const ModelCapabilitiesWire = struct {
     endpoints: ?ModelEndpointsWire = null,
-    output: ?struct { image: ?CapabilityWire = null, video: ?CapabilityWire = null } = null,
-    image_output: ?CapabilityWire = null,
-    video_output: ?CapabilityWire = null,
     image_input: ?CapabilityWire = null,
     pdf_input: ?CapabilityWire = null,
     batch: ?CapabilityWire = null,
@@ -646,12 +643,10 @@ fn parseModels(
                 .capabilities = capabilities.projection(),
             },
         };
-        // Dialogue is the catalog's base contract. Media generation is an
-        // explicit extension, including models which also emit text.
+        // Endpoint declarations own both model purpose and execution protocol.
+        // A dialogue endpoint does not admit a mixed media-generation model.
         const endpoints: ModelEndpointsWire = capabilities.endpoints orelse .{};
-        const media_output = if (capabilities.output) |output| supported(output.image) or supported(output.video) else false;
-        if (supported(capabilities.image_output) or supported(capabilities.video_output) or
-            media_output or supported(endpoints.images_generations) or supported(endpoints.videos)) continue;
+        if (supported(endpoints.images_generations) or supported(endpoints.videos)) continue;
         entry.protocol = endpoints.selectedProtocol() orelse continue;
         result.entries.append(allocator, entry) catch return error.OutOfMemory;
     }
@@ -986,19 +981,21 @@ test "empty catalog is a valid authoritative result" {
     try std.testing.expectEqual(@as(usize, 0), models.entries.items.len);
 }
 
-test "Metask catalog excludes every declared image or video output model" {
-    const cases = [_]struct { fields: []const u8, count: usize }{
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}", .count = 1 },
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_output\":null,\"video_output\":{}}", .count = 1 },
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_output\":{\"supported\":null}}", .count = 1 },
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_output\":{\"supported\":false},\"video_output\":{\"supported\":false}}", .count = 1 },
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_input\":{\"supported\":true}}", .count = 1 },
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_output\":{\"supported\":true}}", .count = 0 },
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"video_output\":{\"supported\":true}}", .count = 0 },
-        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_output\":{\"supported\":true},\"video_output\":{\"supported\":true},\"text_output\":{\"supported\":true}}", .count = 0 },
+test "endpoint declarations classify dialogue and exclude media generation models" {
+    const cases = [_]struct { endpoints: []const u8, count: usize }{
+        .{ .endpoints = "{\"messages\":{\"supported\":true}}", .count = 1 },
+        .{ .endpoints = "{\"messages\":{\"supported\":true},\"images_generations\":null,\"videos\":{}}", .count = 1 },
+        .{ .endpoints = "{\"chat_completions\":{\"supported\":true},\"images_generations\":{\"supported\":null}}", .count = 1 },
+        .{ .endpoints = "{\"responses\":{\"supported\":true},\"images_generations\":{\"supported\":false},\"videos\":{\"supported\":false}}", .count = 1 },
+        .{ .endpoints = "{\"messages\":{\"supported\":true},\"images_generations\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"chat_completions\":{\"supported\":true},\"videos\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"responses\":{\"supported\":true},\"images_generations\":{\"supported\":true},\"videos\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"images_generations\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"videos\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"embeddings\":{\"supported\":true}}", .count = 0 },
     };
     for (cases) |case| {
-        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"object\":\"list\",\"has_more\":false,\"data\":[{{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\"{s}}}]}}", .{case.fields});
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"object\":\"list\",\"has_more\":false,\"data\":[{{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{{\"endpoints\":{s}}}}}]}}", .{case.endpoints});
         defer std.testing.allocator.free(body);
         var parsed = try parseModels(std.testing.allocator, body);
         defer parsed.deinit();
@@ -1007,26 +1004,23 @@ test "Metask catalog excludes every declared image or video output model" {
 }
 
 test "excluded media models cannot hide invalid catalog metadata or duplicate identity" {
-    const prefix = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\"";
     const cases = [_][]const u8{
-        ",\"capabilities\":{\"image_output\":{\"supported\":\"true\"}}}]}",
-        ",\"capabilities\":{\"video_output\":true}}]}",
-        ",\"max_tokens\":-1,\"capabilities\":{\"image_output\":{\"supported\":true}}}]}",
-        ",\"capabilities\":{\"image_output\":{\"supported\":true}}},{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\"}]}",
+        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":\"true\"}}}}]}",
+        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"videos\":true}}}]}",
+        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"max_tokens\":-1,\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}",
+        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}},{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\"}]}",
     };
-    for (cases) |suffix| {
-        const body = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}", .{ prefix, suffix });
-        defer std.testing.allocator.free(body);
+    for (cases) |body| {
         try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
     }
 }
 
-test "media output models are absent from source resolution and public catalog" {
+test "media generation endpoints exclude source resolution and public catalog" {
     var session = CatalogSession.init(std.testing.allocator);
     defer session.deinit();
     session.owner_account_id = try .init("account-1");
     session.credential = try Secret.init(std.testing.allocator, "oauth-access");
-    var parsed = try parseModels(std.testing.allocator, "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"image_output\":{\"supported\":true}}},{\"id\":\"chat\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}");
+    var parsed = try parseModels(std.testing.allocator, "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"chat_completions\":{\"supported\":true},\"images_generations\":{\"supported\":true}}}},{\"id\":\"chat\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}");
     session.models = parsed.entries;
     parsed.entries = .empty;
     try std.testing.expect(!session.hasModel("media"));
@@ -1084,17 +1078,16 @@ test "invalid endpoint supported declarations reject the whole response" {
     }
 }
 
-test "global media output or generation endpoints exclude mixed dialogue models" {
-    for ([_][]const u8{
-        "\"output\":{\"image\":{\"supported\":true}},\"endpoints\":{\"chat_completions\":{\"supported\":true}}",
-        "\"output\":{\"video\":{\"supported\":true}},\"endpoints\":{\"messages\":{\"supported\":true}}",
-        "\"endpoints\":{\"responses\":{\"supported\":true},\"images_generations\":{\"supported\":true}}",
-        "\"endpoints\":{\"messages\":{\"supported\":true},\"videos\":{\"supported\":true}}",
-    }) |capabilities| {
-        const body = try std.mem.concat(std.testing.allocator, u8, &.{ "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"mixed\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{", capabilities, "}}]}" });
-        defer std.testing.allocator.free(body);
-        var parsed = try parseModels(std.testing.allocator, body);
+test "only endpoints decide admission despite redundant output declarations" {
+    const cases = [_]struct { body: []const u8, count: usize }{
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_output\":{\"supported\":true},\"video_output\":{\"supported\":true},\"output\":{\"image\":{\"supported\":true},\"video\":{\"supported\":true}}}}]}", .count = 1 },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"chat_completions\":{\"supported\":true,\"input\":[\"image\"],\"output\":[\"image\",\"video\"]}},\"image_input\":{\"supported\":true}}}]}", .count = 1 },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true},\"images_generations\":{\"supported\":true}},\"image_output\":{\"supported\":false},\"output\":{\"image\":{\"supported\":false}}}}]}", .count = 0 },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"image_output\":{\"supported\":false},\"text_output\":{\"supported\":true},\"output\":{\"text\":{\"supported\":true}}}}]}", .count = 0 },
+    };
+    for (cases) |case| {
+        var parsed = try parseModels(std.testing.allocator, case.body);
         defer parsed.deinit();
-        try std.testing.expectEqual(@as(usize, 0), parsed.entries.items.len);
+        try std.testing.expectEqual(case.count, parsed.entries.items.len);
     }
 }
