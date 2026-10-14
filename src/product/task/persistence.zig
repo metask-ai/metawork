@@ -2309,7 +2309,6 @@ pub fn decodeRecovering(
     var dropped_failures: usize = 0;
     var degraded = false;
     var metadata_seen = false;
-    var metadata_incompatible = false;
     var saw_frame = false;
     var offset: usize = 0;
     while (offset < input.len) {
@@ -2385,13 +2384,15 @@ pub fn decodeRecovering(
         }
         switch (kind) {
             record_meta => {
+                // Metadata only carries counters and defaults. Fields from a
+                // newer build are ignored; an unreadable frame falls back to
+                // record high-water marks instead of failing the whole store.
                 const meta = std.json.parseFromSliceLeaky(
                     MetaWire,
                     arena_allocator,
                     payload,
-                    .{ .ignore_unknown_fields = false },
+                    .{ .ignore_unknown_fields = true },
                 ) catch {
-                    metadata_incompatible = true;
                     degraded = true;
                     offset = payload_end;
                     continue;
@@ -2507,7 +2508,7 @@ pub fn decodeRecovering(
     // record high-water marks when metadata is missing or damaged. A store
     // with no recognizable current-format frame remains an unknown/retired
     // format and is rejected rather than silently treated as empty.
-    if (!saw_frame or metadata_incompatible) return error.TaskStoreCorrupt;
+    if (!saw_frame) return error.TaskStoreCorrupt;
     // Every record rejected below is retained byte-for-byte: this build may
     // not understand it, but it must never be the build that erases it.
     const workspace_storage = workspace_values.items;
@@ -3341,7 +3342,7 @@ test "task store hard cut rejects the retired provider binding" {
     );
 }
 
-test "task store hard cut rejects metadata from before permission profiles" {
+test "task store falls back to defaults when metadata is unreadable" {
     const RetiredMetaWire = struct {
         next_workspace_id: u64,
         next_workspace_recent_order: u64,
@@ -3356,10 +3357,12 @@ test "task store hard cut rejects metadata from before permission profiles" {
         .next_task_id = 1,
         .next_task_recent_order = 1,
     });
-    try std.testing.expectError(
-        error.TaskStoreCorrupt,
-        decodeRecovering(std.testing.allocator, output[0..offset], testLimits()),
-    );
+    var recovered = try decodeRecovering(std.testing.allocator, output[0..offset], testLimits());
+    defer recovered.deinit();
+    try std.testing.expect(recovered.degraded);
+    try std.testing.expectEqualStrings("approval_required", recovered.value.default_permission_profile);
+    try std.testing.expectEqual(@as(?[]const u8, null), recovered.value.default_approval_mode);
+    try std.testing.expectEqual(@as(u64, 1), recovered.value.next_task_id);
 }
 
 test "task store preserves history bound to an older Workspace epoch" {

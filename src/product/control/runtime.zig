@@ -7152,10 +7152,19 @@ pub const Runtime = struct {
             self.taskPersistenceLimits(),
         );
         defer recovered.deinit();
+        // Defaults are a preference, not history; an unreadable value falls
+        // back instead of discarding every restorable record.
+        const default_profile = task_persistence.parseEnum(PermissionProfile, recovered.value.default_permission_profile) orelse profile: {
+            recovered.degraded = true;
+            break :profile PermissionProfile.approval_required;
+        };
         self.default_approval_mode = if (recovered.value.default_approval_mode) |mode|
-            task_persistence.parseEnum(ApprovalMode, mode) orelse return error.TaskStoreCorrupt
+            task_persistence.parseEnum(ApprovalMode, mode) orelse mode: {
+                recovered.degraded = true;
+                break :mode ApprovalMode.fromFacts(default_profile, false);
+            }
         else
-            ApprovalMode.fromFacts(task_persistence.parseEnum(PermissionProfile, recovered.value.default_permission_profile) orelse return error.TaskStoreCorrupt, false);
+            ApprovalMode.fromFacts(default_profile, false);
         for (recovered.value.failures) |failure|
             try self.recordTaskFailure(failure.task_id, failure.recent_order, failure.reason);
         for (recovered.preserved.retained) |record|
