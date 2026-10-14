@@ -19,7 +19,9 @@
     "format": "zig fmt build.zig build_support src tests app.zon && prettier --write frontend scripts package.json",
     "format:check": "zig fmt --check build.zig build_support src tests app.zon && prettier --check frontend scripts package.json",
     "package:macos": "node scripts/package-macos.mjs",
-    "package:windows": "node scripts/package-windows.mjs"
+    "package:windows": "node scripts/package-windows.mjs",
+    "archive:setup": "node scripts/setup-archive-environment.mjs",
+    "archive:check": "node scripts/check-archive-environment.mjs"
   },
   "devDependencies": {
     "@native-sdk/cli": "0.10.1",

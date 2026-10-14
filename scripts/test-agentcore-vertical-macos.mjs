@@ -1,3 +1,4 @@
+import { localArchiveEnvironment } from "./archive-environment.mjs";
 import { runOfficeSkillVertical } from "./office-skill-vertical.mjs";
 import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
@@ -101,6 +102,13 @@ const bundle = await verifyStagedAgentCoreBundle(root, bundleOptions);
 await verifyAgentCoreRuntimeAssets(bundle, path.dirname(binary));
 // Exercise the shipped rg beside the Host, not an ambient development install.
 const appEnvironment = { ...process.env };
+if (process.env.METAWORK_OFFICE_ATTACHMENTS === "1") {
+  Object.assign(appEnvironment, localArchiveEnvironment(root, appEnvironment));
+  assert.ok(
+    appEnvironment.METAWORK_LOCAL_ARCHIVE_PYTHON,
+    "Prepare archive:setup before the ZIP attachment probe",
+  );
+}
 for (const key of Object.keys(appEnvironment)) {
   if (key.toUpperCase() === "PATH" || key.toUpperCase() === "RG_BIN")
     delete appEnvironment[key];
@@ -119,7 +127,7 @@ appEnvironment.PATH =
     : "/usr/bin:/bin";
 
 const builtinSkillNames = process.env.METAWORK_LOCAL_SKILL_ROOT
-  ? ["docx", "pptx", "xlsx", "zip"]
+  ? ["docx", "pptx", "xlsx"]
   : [];
 const officeModelToolProbe = process.env.METAWORK_OFFICE_MODEL_TOOL === "1";
 const commandTimeoutMs = 20_000;

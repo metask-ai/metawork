@@ -47,7 +47,7 @@ npm run dev
 
 setup 将 Python 依赖安装在当前 checkout 的 `.zig-cache` 内；Node 依赖由 `npm ci` 安装。需要 Pandoc 提取 Word 内容时另加 `--pandoc /absolute/path/to/pandoc`；未安装时可用解包 XML 的读取流程。
 
-创建普通 Task 后直接添加 Office 文件并输入处理要求，由 Agent 在普通 Run 中选择 `docx`、`xlsx` 或 `pptx`。首次发送会等待 Automatic Task 的初始 Skill 准备；也可在 Manual Workspace 中使用 Skill 选择器显式调用。附件保留本地原件，只向模型提供文件引用。ZIP 附件由内置 ZIP Skill 查看目录并有界解压到工作区数据目录。安装包内置运行环境仍待完成。来源 authority 见 [Product 架构](docs/product-architecture.md#24-skill-authority-与本地资产)，验证边界见 [验证规范](docs/validation.md#标准入口)。
+创建普通 Task 后直接添加 Office 文件并输入处理要求，由 Agent 在普通 Run 中选择 `docx`、`xlsx` 或 `pptx`。首次发送会等待 Automatic Task 的初始 Skill 准备；也可在 Manual Workspace 中使用 Skill 选择器显式调用。附件保留本地原件，只向模型提供文件引用。ZIP 附件通过既有 Bash 调用归档 helper 查看目录并按需解压。处理 ZIP 前单独执行 `npm run archive:setup -- --python /absolute/path/to/python3.9-or-newer` 和 `npm run archive:check`；它只需要 Python 标准库，可复用已准备的 Python，无需安装 Office 依赖。安装包内置运行环境仍待完成。来源 authority 见 [Product 架构](docs/product-architecture.md#24-skill-authority-与本地资产)，验证边界见 [验证规范](docs/validation.md#标准入口)。
 
 ## 工程入口
 

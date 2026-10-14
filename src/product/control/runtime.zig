@@ -206,6 +206,7 @@ pub const TaskWorkspaceRequest = union(enum) {
 };
 
 pub const AttachmentFileStore = product_attachment.FileStore;
+pub const AttachmentArchiveTool = product_attachment.ArchiveTool;
 pub const AttachmentImagePreparation = product_attachment.ImagePreparation;
 pub const max_attachment_preview_pixels = product_attachment.max_image_preview_pixels;
 pub const max_attachment_preview_bytes = product_attachment.max_image_preview_bytes;
@@ -345,6 +346,7 @@ pub const Configuration = struct {
     file_change_store: FileChangeStoreConfiguration = .{},
     attachment_store: ?*product_attachment.FileStore = null,
     attachment_images: product_attachment.ImagePreparation = .{},
+    attachment_archive_tool: ?AttachmentArchiveTool = null,
     schedule_notifier: ScheduleNotifier = .{},
     skill_management: SkillManagementConfiguration = .{},
     skill_enablement: SkillEnablementConfiguration = .{},
@@ -1279,7 +1281,7 @@ pub const Runtime = struct {
             .max_display_name_bytes = limits.max_attachment_display_name_bytes,
             .max_file_bytes = limits.max_attachment_file_bytes,
             .max_staged_bytes = limits.max_staged_attachment_bytes,
-        }, configuration.attachment_store, configuration.attachment_images);
+        }, configuration.attachment_store, configuration.attachment_images, configuration.attachment_archive_tool);
         errdefer attachments.deinit();
         var product_tasks = try task_runtime.Runtime.init(allocator, limits.max_tasks);
         errdefer product_tasks.deinitStorage();

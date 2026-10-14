@@ -36,6 +36,18 @@ const app_window = @import("app/window.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
+fn canonicalArchiveFile(io: std.Io, path: []const u8) ![]u8 {
+    if (path.len == 0 or path.len > product_control.AttachmentArchiveTool.max_path_bytes or
+        !std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path) or
+        std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidArchiveConfiguration;
+    const canonical = try std.Io.Dir.realPathFileAbsoluteAlloc(io, path, std.heap.c_allocator);
+    errdefer std.heap.c_allocator.free(canonical);
+    const file = try std.Io.Dir.openFileAbsolute(io, canonical, .{});
+    defer file.close(io);
+    if ((try file.stat(io)).kind != .file) return error.InvalidArchiveConfiguration;
+    return canonical;
+}
+
 const pending_ui_json_capacity = 256 * 1024;
 const terminal_diagnostic_capacity = 512;
 const agent_event_retry_interval: std.Io.Duration = .fromMilliseconds(5);
@@ -459,6 +471,20 @@ pub fn run(init: std.process.Init) !void {
         break :root try std.Io.Dir.realPathFileAbsoluteAlloc(init.io, root, std.heap.c_allocator);
     } else null;
     defer if (builtin_skill_root) |root| std.heap.c_allocator.free(root);
+    const archive_tool: ?product_control.AttachmentArchiveTool = if (product_identity.artifact_kind != .release) configured: {
+        const python = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_PYTHON");
+        const helper = init.environ_map.get("METAWORK_LOCAL_ARCHIVE_HELPER");
+        if (python == null and helper == null) break :configured null;
+        if (python == null or helper == null) return error.InvalidArchiveConfiguration;
+        const python_path = try canonicalArchiveFile(init.io, python.?);
+        errdefer std.heap.c_allocator.free(python_path);
+        const helper_path = try canonicalArchiveFile(init.io, helper.?);
+        break :configured .{ .python = python_path, .helper = helper_path };
+    } else null;
+    defer if (archive_tool) |tool| {
+        std.heap.c_allocator.free(tool.python);
+        std.heap.c_allocator.free(tool.helper);
+    };
     var paths_state: app_paths.Paths = undefined;
     try paths_state.init(
         init.io,
@@ -562,6 +588,7 @@ pub fn run(init: std.process.Init) !void {
         },
         .attachment_store = if (stores_state.attachments) |*store| store else null,
         .attachment_images = .{ .context = &app.platform, .prepare_fn = attachment_images.prepare },
+        .attachment_archive_tool = archive_tool,
         .file_change_store = .{
             .file_store = if (stores_state.file_change) |*store| store else null,
         },

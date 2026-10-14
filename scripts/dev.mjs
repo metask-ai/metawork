@@ -8,6 +8,7 @@ import {
   readNativePackageManifest,
 } from "./package-metadata.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
+import { localArchiveEnvironment } from "./archive-environment.mjs";
 import { localOfficeEnvironment } from "./office-environment.mjs";
 
 const repositoryRoot = path.resolve(
@@ -62,7 +63,10 @@ function run(command, args, options = {}) {
     encoding: "utf8",
     stdio: options.capture ? "pipe" : "inherit",
     env: {
-      ...localOfficeEnvironment(repositoryRoot),
+      ...localArchiveEnvironment(
+        repositoryRoot,
+        localOfficeEnvironment(repositoryRoot),
+      ),
       METAWORK_LOCAL_SKILL_ROOT: path.join(
         repositoryRoot,
         "src",
