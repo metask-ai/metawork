@@ -4564,6 +4564,7 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     "taskHistoryPersistence",
     "taskHistoryPersistenceHealth",
     "taskHistoryRecoveryAvailable",
+    "retainedTaskHistoryCount",
     "conversationRecovery",
     "executionRebind",
     "structuredPlan",
@@ -4615,6 +4616,10 @@ export function decodeWorkbenchSnapshot(value: unknown): WorkbenchSnapshot {
     taskHistoryRecoveryAvailable: booleanValue(
       capabilityItem.taskHistoryRecoveryAvailable,
       "$.capabilities.taskHistoryRecoveryAvailable",
+    ),
+    retainedTaskHistoryCount: wireId(
+      capabilityItem.retainedTaskHistoryCount,
+      "$.capabilities.retainedTaskHistoryCount",
     ),
     conversationRecovery: booleanValue(
       capabilityItem.conversationRecovery,

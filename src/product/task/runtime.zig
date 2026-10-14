@@ -2855,6 +2855,14 @@ pub const Runtime = struct {
         try self.retained.append(self.allocator, owned);
     }
 
+    pub fn retainedTaskCount(self: *const Runtime) usize {
+        var count: usize = 0;
+        for (self.retained.items) |record| {
+            if (record.kind == .task) count += 1;
+        }
+        return count;
+    }
+
     pub fn clearRetained(self: *Runtime) void {
         for (self.retained.items) |record| self.allocator.free(record.payload);
         self.retained.clearRetainingCapacity();

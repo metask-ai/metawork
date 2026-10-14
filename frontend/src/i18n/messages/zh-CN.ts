@@ -486,6 +486,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.no_tasks": "从新建任务开始；需要目录时，发送前再选择。",
   "task.archived_hidden": "已归档任务当前隐藏。",
   "task.show_archived": "显示已归档（{count}）",
+  "task.history_retained": "{count} 个任务无法在当前版本打开，已原样保留。",
   "task.hide_archived": "隐藏已归档",
   "task.archived": "已归档",
   "task.ready": "就绪",

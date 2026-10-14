@@ -20,6 +20,7 @@ export function TaskList({
   onTaskAction,
   taskMutationDisabled,
   synchronized = true,
+  retainedTaskCount = 0,
 }: {
   tasks: TaskView[];
   workspaces: WorkspaceView[];
@@ -31,6 +32,7 @@ export function TaskList({
   onTaskAction: (task: TaskView, action: TaskMenuAction) => void;
   taskMutationDisabled: boolean;
   synchronized?: boolean;
+  retainedTaskCount?: number;
 }) {
   const { locale, t } = useI18n();
   const [menuTaskId, setMenuTaskId] = useState<string | null>(null);
@@ -133,6 +135,11 @@ export function TaskList({
       {visibleTaskCount === 0 && (
         <p className="task-list-empty">
           {tasks.length > 0 ? t("task.archived_hidden") : t("task.no_tasks")}
+        </p>
+      )}
+      {retainedTaskCount > 0 && (
+        <p className="task-list-empty">
+          {t("task.history_retained", { count: retainedTaskCount })}
         </p>
       )}
       {archivedCount > 0 && (

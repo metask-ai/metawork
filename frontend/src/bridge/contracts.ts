@@ -943,6 +943,8 @@ export type WorkbenchSnapshot = {
       | "write_failed"
       | "outcome_unknown";
     taskHistoryRecoveryAvailable: boolean;
+    /** Saved Tasks this version cannot open; kept unchanged on disk. */
+    retainedTaskHistoryCount: string;
     conversationRecovery: boolean;
     executionRebind: boolean;
     structuredPlan: boolean;

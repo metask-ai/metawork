@@ -536,6 +536,8 @@ export const enUS = {
     "Start a new task; choose a folder before sending when one is needed.",
   "task.archived_hidden": "Archived tasks are hidden.",
   "task.show_archived": "Show archived ({count})",
+  "task.history_retained":
+    "Tasks this version can't open: {count}. They are kept unchanged.",
   "task.hide_archived": "Hide archived",
   "task.archived": "Archived",
   "task.ready": "Ready",

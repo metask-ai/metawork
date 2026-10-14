@@ -659,6 +659,16 @@ test("the canonical Workbench fixture decodes without normalization", () => {
   );
 });
 
+test("retained Task history count is a strict wire integer", () => {
+  const retained = clone(fixture);
+  retained.capabilities.retainedTaskHistoryCount = "3";
+  assert.deepEqual(decodeWorkbenchSnapshot(retained), retained);
+
+  const invalidCount = clone(fixture);
+  invalidCount.capabilities.retainedTaskHistoryCount = 3;
+  assert.throws(() => decodeWorkbenchSnapshot(invalidCount));
+});
+
 test("completion receipt is a strict latest terminal completed Run identity", () => {
   const completed = clone(fixture);
   const task = completed.tasks[0];

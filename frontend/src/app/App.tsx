@@ -3357,6 +3357,9 @@ export default function App() {
                 onTaskAction={handleTaskAction}
                 taskMutationDisabled={workbenchMutationDisabled}
                 synchronized={!bridgeUnavailable}
+                retainedTaskCount={Number(
+                  snapshot.capabilities.retainedTaskHistoryCount,
+                )}
               />
             </div>
           </div>

@@ -1121,6 +1121,15 @@ test("Redacted project paths do not appear in directory titles", () => {
   assert.doesNotMatch(markup, /\/private\/path/);
 });
 
+test("Task list states how many saved Tasks this version kept unopened", () => {
+  assert.doesNotMatch(renderTaskList([]), /can't open/);
+  const markup = renderTaskList([], { retainedTaskCount: 2 });
+  assert.match(
+    markup,
+    /Tasks this version can&#x27;t open: 2\. They are kept unchanged\./,
+  );
+});
+
 test("Sidebar typography reserves bold weight for the product identity", async () => {
   const stylesheet = await readFile(
     new URL("../frontend/src/index.css", import.meta.url),

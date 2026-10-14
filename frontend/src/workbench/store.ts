@@ -45,6 +45,7 @@ export const initialWorkbenchState: WorkbenchState = {
       taskHistoryPersistence: false,
       taskHistoryPersistenceHealth: "unavailable",
       taskHistoryRecoveryAvailable: false,
+      retainedTaskHistoryCount: "0",
       conversationRecovery: false,
       executionRebind: false,
       structuredPlan: false,
