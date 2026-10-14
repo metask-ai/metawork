@@ -599,7 +599,9 @@ export function ComposerFooter({
                             ? "run.placeholder"
                             : unavailableReason === "execution_rebind_required"
                               ? "run.placeholder_execution_rebind_required"
-                              : "run.placeholder_unavailable",
+                              : unavailableReason === "history_read_only"
+                                ? "run.placeholder_history_read_only"
+                                : "run.placeholder_unavailable",
                         )
                       : archived
                         ? t("run.placeholder_archived")

@@ -732,6 +732,14 @@ pub const Task = struct {
     approval_change: ?ApprovalChange = null,
     approval_result: ?ApprovalResult = null,
     deletion: task_deletion.State = .idle,
+    /// Original history frame of a Task restored by ignoring unknown fields.
+    /// Such a Task is read-only and commits write this frame back unchanged.
+    read_only_history: ?ReadOnlyHistory = null,
+
+    pub const ReadOnlyHistory = struct {
+        recent_order: u64,
+        payload: []u8,
+    };
 
     pub fn permissionReviewPhase(self: *const Task) task_attachment.PermissionReviewState.Phase {
         if (ApprovalMode.fromFacts(self.durable.permission_profile, self.durable.permission_review_delegated) != .auto_review) return .idle;

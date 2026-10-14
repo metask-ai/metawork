@@ -520,6 +520,9 @@ pub const StateWire = struct {
 /// Original frames carried beside the understood history. They are never part
 /// of `StateWire`: this build cannot model them, it only writes them back.
 pub const PreservedFrames = struct {
+    /// Tasks restored only by ignoring unknown fields. Their original payload
+    /// replaces the projection on encode so newer fields survive this build.
+    read_only_tasks: []const ReadOnlyPayload = &.{},
     /// Frames this build cannot restore, written back byte-for-byte.
     retained: []const RetainedRecord = &.{},
 };
@@ -538,6 +541,12 @@ pub const RetainedRecord = struct {
     kind: RetainedKind,
     id: u64,
     order: u64,
+    payload: []const u8,
+};
+
+pub const ReadOnlyPayload = struct {
+    task_id: u64,
+    recent_order: u64,
     payload: []const u8,
 };
 
@@ -825,6 +834,7 @@ pub const TaskStateWireScratch = struct {
     allocated_workspaces: []WorkspaceWire,
     allocated_tasks: []TaskWire,
     allocated_failures: []TaskFailureWire,
+    allocated_read_only_tasks: []ReadOnlyPayload = &.{},
     preserved: PreservedFrames = .{},
 
     pub fn deinit(self: *TaskStateWireScratch) void {
@@ -832,6 +842,7 @@ pub const TaskStateWireScratch = struct {
         self.allocator.free(self.allocated_tasks);
         self.allocator.free(self.allocated_workspaces);
         self.allocator.free(self.allocated_failures);
+        self.allocator.free(self.allocated_read_only_tasks);
         self.* = undefined;
     }
 };
@@ -2225,9 +2236,14 @@ fn encodeUncheckedImpl(output: []u8, state: StateWire, preserved: PreservedFrame
             return err;
     for (preserved.retained) |record| if (record.kind == .workspace)
         try appendRawRecord(output, &offset, record_workspace, record.id, record.order, record.payload);
-    for (state.tasks) |task|
+    for (state.tasks) |task| {
+        if (findReadOnlyPayload(preserved.read_only_tasks, task.id)) |original| {
+            try appendRawRecord(output, &offset, record_task, original.task_id, original.recent_order, original.payload);
+            continue;
+        }
         appendRecord(output, &offset, record_task, task.id, task.recent_order, task) catch |err|
             return err;
+    }
     for (preserved.retained) |record| if (record.kind == .task)
         try appendRawRecord(output, &offset, record_task, record.id, record.order, record.payload);
     if (state.failures.len > max_failure_records) return error.TaskStoreTooLarge;
@@ -2271,6 +2287,28 @@ pub const testing = if (builtin.is_test) struct {
     pub fn encodeUnchecked(output: []u8, state: StateWire) Error![]const u8 {
         return encodeUncheckedImpl(output, state, .{});
     }
+
+    /// Rewrites every Task frame as a newer build would, with one more field.
+    pub fn addTaskField(output: []u8, input: []const u8, field: []const u8) Error![]const u8 {
+        var input_offset: usize = 0;
+        var output_offset: usize = 0;
+        while (input_offset < input.len) {
+            const header = input[input_offset..][0..frame_header_bytes];
+            const payload_len = std.mem.readInt(u32, header[24..28], .little);
+            const payload = input[input_offset + frame_header_bytes ..][0..payload_len];
+            input_offset += frame_header_bytes + payload_len;
+            if (header[5] != record_task) {
+                try appendRawRecord(output, &output_offset, header[5], std.mem.readInt(u64, header[8..16], .little), std.mem.readInt(u64, header[16..24], .little), payload);
+                continue;
+            }
+            const edited_start = output_offset + frame_header_bytes;
+            const edited = std.fmt.bufPrint(output[edited_start..], "{{{s},{s}", .{ field, payload[1..] }) catch
+                return error.TaskStoreTooLarge;
+            writeFrameHeader(output[output_offset..edited_start], record_task, std.mem.readInt(u64, header[8..16], .little), std.mem.readInt(u64, header[16..24], .little), edited);
+            output_offset = edited_start + edited.len;
+        }
+        return output[0..output_offset];
+    }
 } else struct {};
 
 pub fn decodeRecovering(
@@ -2292,6 +2330,7 @@ pub fn decodeRecovering(
     var workspace_frames: std.ArrayList(RetainedRecord) = .empty;
     var task_values: std.ArrayList(TaskWire) = .empty;
     var task_frames: std.ArrayList(RetainedRecord) = .empty;
+    var task_read_only: std.ArrayList(bool) = .empty;
     var retained_values: std.ArrayList(RetainedRecord) = .empty;
     var failure_values: std.ArrayList(TaskFailureWire) = .empty;
     var next_workspace_id: u64 = 1;
@@ -2441,16 +2480,27 @@ pub fn decodeRecovering(
                     .order = order,
                     .payload = try arena_allocator.dupe(u8, payload),
                 };
+                // A Task that only gains unknown fields stays readable; any
+                // other decode failure keeps the record untouched.
+                var read_only = false;
                 const task = std.json.parseFromSliceLeaky(
                     TaskWire,
                     arena_allocator,
                     payload,
                     .{ .ignore_unknown_fields = false },
-                ) catch {
-                    degraded = true;
-                    try retained_values.append(arena_allocator, frame);
-                    offset = payload_end;
-                    continue;
+                ) catch lenient: {
+                    read_only = true;
+                    break :lenient std.json.parseFromSliceLeaky(
+                        TaskWire,
+                        arena_allocator,
+                        payload,
+                        .{ .ignore_unknown_fields = true },
+                    ) catch {
+                        degraded = true;
+                        try retained_values.append(arena_allocator, frame);
+                        offset = payload_end;
+                        continue;
+                    };
                 };
                 if (task.id != id or task.recent_order != order) {
                     dropped_tasks += 1;
@@ -2466,8 +2516,10 @@ pub fn decodeRecovering(
                     offset = payload_end;
                     continue;
                 }
+                if (read_only) degraded = true;
                 try task_values.append(arena_allocator, task);
                 try task_frames.append(arena_allocator, frame);
+                try task_read_only.append(arena_allocator, read_only);
             },
             record_task_failure => {
                 if (failure_values.items.len >= max_failure_records) {
@@ -2515,6 +2567,7 @@ pub fn decodeRecovering(
     const workspace_frame_storage = workspace_frames.items;
     const task_storage = task_values.items;
     const task_frame_storage = task_frames.items;
+    const task_read_only_storage = task_read_only.items;
     var workspace_len: usize = 0;
     for (workspace_storage, workspace_frame_storage) |workspace, frame| {
         if (workspace_len >= limits.max_workspaces or
@@ -2529,7 +2582,7 @@ pub fn decodeRecovering(
         workspace_len += 1;
     }
     var task_len: usize = 0;
-    for (task_storage, task_frame_storage) |task, frame| {
+    for (task_storage, task_frame_storage, task_read_only_storage) |task, frame, read_only| {
         if (task_len >= limits.max_tasks or
             std.meta.isError(validateRecoveredTask(task, limits, workspace_storage[0..workspace_len], task_storage[0..task_len])))
         {
@@ -2539,6 +2592,7 @@ pub fn decodeRecovering(
         }
         task_storage[task_len] = task;
         task_frame_storage[task_len] = frame;
+        task_read_only_storage[task_len] = read_only;
         task_len += 1;
     }
 
@@ -2565,12 +2619,22 @@ pub fn decodeRecovering(
     workspace_len = filtered_workspace_len;
 
     var filtered_task_len: usize = 0;
-    for (task_storage[0..task_len], task_frame_storage[0..task_len]) |task, frame| {
+    var read_only_values: std.ArrayList(ReadOnlyPayload) = .empty;
+    for (
+        task_storage[0..task_len],
+        task_frame_storage[0..task_len],
+        task_read_only_storage[0..task_len],
+    ) |task, frame, read_only| {
         if (findRecoveredWorkspace(workspace_storage[0..workspace_len], task.workspace_id) == null) {
             degraded = true;
             try retained_values.append(arena_allocator, frame);
             continue;
         }
+        if (read_only) try read_only_values.append(arena_allocator, .{
+            .task_id = frame.id,
+            .recent_order = frame.order,
+            .payload = frame.payload,
+        });
         task_storage[filtered_task_len] = task;
         task_frame_storage[filtered_task_len] = frame;
         filtered_task_len += 1;
@@ -2591,7 +2655,10 @@ pub fn decodeRecovering(
     return .{
         .arena = arena,
         .value = state,
-        .preserved = .{ .retained = retained_values.items },
+        .preserved = .{
+            .read_only_tasks = read_only_values.items,
+            .retained = retained_values.items,
+        },
         .workspace_frames = workspace_frame_storage[0..workspace_len],
         .task_frames = task_frame_storage[0..task_len],
         .dropped_workspaces = dropped_workspaces,
@@ -2672,6 +2739,11 @@ fn writeFrameHeader(header: []u8, kind: u8, id: u64, order: u64, payload: []cons
     std.mem.writeInt(u32, header[24..28], @intCast(payload.len), .little);
     std.mem.writeInt(u32, header[28..32], std.hash.Crc32.hash(header[0..28]), .little);
     std.mem.writeInt(u32, header[32..36], std.hash.Crc32.hash(payload), .little);
+}
+
+fn findReadOnlyPayload(values: []const ReadOnlyPayload, task_id: u64) ?ReadOnlyPayload {
+    for (values) |value| if (value.task_id == task_id) return value;
+    return null;
 }
 
 fn findNextFrame(input: []const u8, start: usize) ?usize {
@@ -3636,6 +3708,38 @@ fn unreadableTestMeta() MetaWire {
     };
 }
 
+test "a Task with unknown fields is restored read-only and written back unchanged" {
+    const workspace = WorkspaceWire{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 };
+    var json_buffer: [4096]u8 = undefined;
+    var json_writer = std.Io.Writer.fixed(&json_buffer);
+    try std.json.Stringify.value(unreadableTestTask(1, 1, "/tmp/repo"), .{}, &json_writer);
+    const json = json_writer.buffered();
+    var payload_buffer: [4096]u8 = undefined;
+    const payload = try std.fmt.bufPrint(&payload_buffer, "{{\"newer_field\":1,{s}", .{json[1..]});
+
+    var output: [16 * 1024]u8 = undefined;
+    var offset: usize = 0;
+    try appendRecord(&output, &offset, record_meta, 0, 0, unreadableTestMeta());
+    try appendRecord(&output, &offset, record_workspace, workspace.id, workspace.recent_order, workspace);
+    try appendRawRecord(&output, &offset, record_task, 1, 1, payload);
+
+    var recovered = try decodeRecovering(std.testing.allocator, output[0..offset], testLimits());
+    defer recovered.deinit();
+    try std.testing.expect(recovered.degraded);
+    try std.testing.expectEqual(@as(usize, 1), recovered.value.tasks.len);
+    try std.testing.expectEqual(@as(usize, 0), recovered.preserved.retained.len);
+    try std.testing.expectEqual(@as(usize, 1), recovered.preserved.read_only_tasks.len);
+    try std.testing.expectEqualStrings(payload, recovered.preserved.read_only_tasks[0].payload);
+
+    var encoded_buffer: [16 * 1024]u8 = undefined;
+    const encoded = try encodePreserving(&encoded_buffer, recovered.value, recovered.preserved, testLimits());
+    try std.testing.expect(std.mem.indexOf(u8, encoded, payload) != null);
+    var reread = try decodeRecovering(std.testing.allocator, encoded, testLimits());
+    defer reread.deinit();
+    try std.testing.expectEqual(@as(usize, 1), reread.preserved.read_only_tasks.len);
+    try std.testing.expectEqualStrings(payload, reread.preserved.read_only_tasks[0].payload);
+}
+
 test "an unrestorable Task and its automatic Workspace are written back unchanged" {
     const manual = WorkspaceWire{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 };
     const automatic = WorkspaceWire{ .id = 2, .epoch = 1, .kind = "automatic", .canonical_root = "/tmp/auto", .display_name = "auto", .visible = false, .recent_order = 0 };
@@ -3643,7 +3747,7 @@ test "an unrestorable Task and its automatic Workspace are written back unchange
     var json_writer = std.Io.Writer.fixed(&json_buffer);
     try std.json.Stringify.value(unreadableTestTask(1, 2, "/tmp/auto"), .{}, &json_writer);
     const json = json_writer.buffered();
-    // A required field is gone, so this build cannot read the record.
+    // A required field is gone, so not even the lenient decode can read it.
     var payload_buffer: [4096]u8 = undefined;
     const removed = std.mem.replace(u8, json, "\"title\":\"kept\",", "", &payload_buffer);
     try std.testing.expectEqual(@as(usize, 1), removed);

@@ -669,6 +669,23 @@ test("retained Task history count is a strict wire integer", () => {
   assert.throws(() => decodeWorkbenchSnapshot(invalidCount));
 });
 
+test("read-only Tasks expose one unavailable continuation state", () => {
+  const readOnly = clone(fixture);
+  const task = readOnly.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.runs[0].phase = "interrupted";
+  task.runs[0].activity = null;
+  task.runs[0].terminal = terminal("interrupted", "app_shutdown");
+  task.binding.availability = "unavailable";
+  task.binding.unavailableReason = "runtime_detached";
+  task.continuationAvailable = false;
+  task.continuationUnavailableReason = "history_read_only";
+  task.continuationRecoveryAvailable = false;
+  assert.deepEqual(decodeWorkbenchSnapshot(readOnly), readOnly);
+});
+
 test("completion receipt is a strict latest terminal completed Run identity", () => {
   const completed = clone(fixture);
   const task = completed.tasks[0];

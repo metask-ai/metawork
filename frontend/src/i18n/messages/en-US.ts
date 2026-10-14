@@ -632,6 +632,8 @@ export const enUS = {
     "This conversation cannot continue right now. Check recovery status and try again",
   "run.placeholder_execution_rebind_required":
     "The current execution cannot run this conversation. Switch to an account or connection that supports the task model",
+  "run.placeholder_history_read_only":
+    "This task has content this version can't read. You can view it; use a newer MetaWork to continue",
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",

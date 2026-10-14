@@ -57,6 +57,7 @@ pub const Error = task_runtime.Runtime.ApprovalError || attachment_staging.Error
     CloseInProgress,
     TaskBusy,
     TaskNotArchived,
+    TaskReadOnly,
     InvalidTaskTitle,
     InvalidScheduledTaskInput,
     ScheduleTimerUnavailable,
@@ -7208,6 +7209,7 @@ pub const Runtime = struct {
         recovered.dropped_tasks += try self.task_runtime.restoreTasks(
             recovered.value.tasks,
             recovered.task_frames,
+            recovered.preserved.read_only_tasks,
             self.taskRestoreProjection(),
         );
         for (recovered.value.tasks) |task|
@@ -7324,7 +7326,11 @@ pub const Runtime = struct {
             .allocated_workspaces = workspaces,
             .allocated_tasks = task_frames.tasks,
             .allocated_failures = task_frames.failures,
-            .preserved = .{ .retained = task_frames.retained },
+            .allocated_read_only_tasks = task_frames.read_only_tasks,
+            .preserved = .{
+                .read_only_tasks = task_frames.read_only_tasks,
+                .retained = task_frames.retained,
+            },
             .state = .{
                 .default_permission_profile = @tagName(self.default_approval_mode.profile()),
                 .default_approval_mode = @tagName(self.default_approval_mode),
@@ -11108,6 +11114,56 @@ test "Restore permission stats are projected as runtime health" {
         std.mem.indexOf(u8, snapshot, "\"restorePermission\":{\"restoredRules\":\"2\",\"invalidatedRules\":\"1\"}") != null,
     );
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\"permission_provenance\"") == null);
+}
+
+test "a Task saved by a newer build restores read-only and commits keep its frame" {
+    const persistence_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(persistence_storage);
+    var persistence = TestTaskPersistence{ .storage = persistence_storage };
+    {
+        var source = try testRuntime();
+        defer source.deinit();
+        try source.replaceTracked(
+            &source.task_runtime.tasks[0].?.durable.workspace_root,
+            "/tmp/metawork-test",
+            source.limits.max_workspace_bytes,
+        );
+        source.task_runtime.next_recent_order = 2;
+        source.task_persistence = persistence.capability(null);
+        source.task_persistence_health = .ready;
+        try source.commitTaskState();
+    }
+    const newer_storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(newer_storage);
+    const newer = try task_persistence.testing.addTaskField(
+        newer_storage,
+        persistence.storage[0..persistence.len],
+        "\"newer_field\":1",
+    );
+
+    var restored = try Runtime.init(
+        std.testing.allocator,
+        std.testing.io,
+        &test_agent_runtime,
+        testLimits(),
+        .{ .task_persistence = persistence.capability(newer) },
+    );
+    defer restored.deinit();
+    try std.testing.expectEqual(TaskPersistenceHealth.degraded, restored.task_persistence_health);
+    const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(task.read_only_history != null);
+    try std.testing.expectError(error.TaskReadOnly, restored.renameTask(3, "renamed"));
+    try std.testing.expectError(error.TaskReadOnly, restored.setTaskArchived(3, true));
+    try std.testing.expectError(error.TaskReadOnly, restored.deleteTask(3));
+
+    const commits = persistence.commits;
+    try restored.commitTaskState();
+    try std.testing.expectEqual(commits + 1, persistence.commits);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        persistence.storage[0..persistence.len],
+        "\"newer_field\":1",
+    ) != null);
 }
 
 test "Task state round trip restores product history without fabricating a Session" {

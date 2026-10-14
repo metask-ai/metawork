@@ -394,7 +394,8 @@ pub fn latestTerminalRun(
 }
 
 pub fn unreadCompletionRunId(task: *const task_state.Task) ?u64 {
-    if (task.durable.archived) return null;
+    // A read-only Task cannot record acknowledgement, so it never reminds.
+    if (task.durable.archived or task.read_only_history != null) return null;
     const run = latestTerminalRun(task.durable.runs) orelse return null;
     const terminal = task_state.productTerminalFacts(run) orelse unreachable;
     if (terminal.outcome != .completed or

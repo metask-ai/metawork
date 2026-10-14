@@ -895,6 +895,7 @@ export type TaskView = {
     | "workspace_unavailable"
     | "authority_unavailable"
     | "runtime_unavailable"
+    | "history_read_only"
     | null;
   continuationRecoveryAvailable: boolean;
   archived: boolean;

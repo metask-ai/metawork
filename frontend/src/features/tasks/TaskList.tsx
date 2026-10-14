@@ -52,6 +52,8 @@ export function TaskList({
     menuTaskId === null
       ? null
       : (tasks.find((task) => task.id === menuTaskId) ?? null);
+  const menuTaskReadOnly =
+    menuTask?.continuationUnavailableReason === "history_read_only";
 
   function openTaskMenu(event: MouseEvent<HTMLButtonElement>, taskId: string) {
     event.preventDefault();
@@ -178,6 +180,7 @@ export function TaskList({
                     className="task-menu-item"
                     disabled={
                       taskMutationDisabled ||
+                      menuTaskReadOnly ||
                       menuTask.deletionStatus === "deleting"
                     }
                     onClick={() => onTaskAction(menuTask, "rename")}
@@ -188,6 +191,7 @@ export function TaskList({
                     className="task-menu-item"
                     disabled={
                       taskMutationDisabled ||
+                      menuTaskReadOnly ||
                       menuTask.activeOperation !== null ||
                       menuTask.lifecycle === "closing"
                     }
@@ -199,6 +203,7 @@ export function TaskList({
                     className="task-menu-item is-danger"
                     disabled={
                       taskMutationDisabled ||
+                      menuTaskReadOnly ||
                       !menuTask.archived ||
                       menuTask.deletionStatus === "deleting" ||
                       (menuTask.lifecycle === "closing" &&

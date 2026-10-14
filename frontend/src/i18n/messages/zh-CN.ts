@@ -575,6 +575,8 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_unavailable": "当前会话暂时无法继续，请检查恢复状态后重试",
   "run.placeholder_execution_rebind_required":
     "当前执行配置无法承载此会话，请切换到支持该任务模型的账号或连接",
+  "run.placeholder_history_read_only":
+    "此任务含当前版本无法识别的内容，只能查看；请使用更新的 MetaWork 继续",
   "run.draft_only": "已在本地保存为草稿。当前工作结束后即可发送。",
   "run.started": "工作已开始。",
   "run.start_failed": "未能开始工作，请检查连接后重试。",

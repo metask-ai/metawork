@@ -3407,6 +3407,7 @@ function decodeTask(value: unknown, path: string): TaskView {
       "workspace_unavailable",
       "authority_unavailable",
       "runtime_unavailable",
+      "history_read_only",
     ] as const,
   );
   if (continuationAvailable !== (continuationUnavailableReason === null))
