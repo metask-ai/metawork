@@ -1203,89 +1203,10 @@ function modelTokenLimit(value: unknown, path: string): string | null {
   return result;
 }
 
-function modelLimitStrings(value: unknown, path: string): string[] | null {
-  if (value === null) return null;
-  const result = arrayValue(value, path, (entry, entryPath) => {
-    const text = stringValue(entry, entryPath);
-    if (text.length === 0 || new TextEncoder().encode(text).length > 64)
-      fail(path, "expected bounded nonempty limit string");
-    return text;
-  });
-  if (
-    result.length > 8 ||
-    result.reduce(
-      (sum, text) => sum + new TextEncoder().encode(text).length,
-      0,
-    ) > 128
-  )
-    fail(path, "limit string collection exceeds bound");
-  return result;
-}
-
-function decodeModelMediaLimits(value: unknown, path: string) {
-  const item = object(value, path, ["formats", "sources"]);
-  return {
-    formats: modelLimitStrings(item.formats, `${path}.formats`),
-    sources: modelLimitStrings(item.sources, `${path}.sources`),
-  };
-}
-
-function decodeModelLimits(value: unknown, path: string) {
-  const item = object(value, path, [
-    "contextWindow",
-    "requestMaxBytes",
-    "image",
-    "pdf",
-    "document",
-    "audio",
-    "video",
-    "imagesGenerations",
-    "videos",
-  ]);
-  const images = object(item.imagesGenerations, `${path}.imagesGenerations`, [
-    "maxN",
-  ]);
-  const videos = object(item.videos, `${path}.videos`, [
-    "defaultDurationSeconds",
-    "maxDurationSeconds",
-    "maxFirstFrameImages",
-  ]);
-  return {
-    contextWindow: modelTokenLimit(item.contextWindow, `${path}.contextWindow`),
-    requestMaxBytes: modelTokenLimit(
-      item.requestMaxBytes,
-      `${path}.requestMaxBytes`,
-    ),
-    image: decodeModelMediaLimits(item.image, `${path}.image`),
-    pdf: decodeModelMediaLimits(item.pdf, `${path}.pdf`),
-    document: decodeModelMediaLimits(item.document, `${path}.document`),
-    audio: decodeModelMediaLimits(item.audio, `${path}.audio`),
-    video: decodeModelMediaLimits(item.video, `${path}.video`),
-    imagesGenerations: {
-      maxN: modelTokenLimit(images.maxN, `${path}.imagesGenerations.maxN`),
-    },
-    videos: {
-      defaultDurationSeconds: modelTokenLimit(
-        videos.defaultDurationSeconds,
-        `${path}.videos.defaultDurationSeconds`,
-      ),
-      maxDurationSeconds: modelTokenLimit(
-        videos.maxDurationSeconds,
-        `${path}.videos.maxDurationSeconds`,
-      ),
-      maxFirstFrameImages: modelTokenLimit(
-        videos.maxFirstFrameImages,
-        `${path}.videos.maxFirstFrameImages`,
-      ),
-    },
-  };
-}
-
 function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
   const item = object(value, path, [
     "maxInputTokens",
     "maxOutputTokens",
-    "limits",
     "capabilities",
   ]);
   const capsPath = `${path}.capabilities`;
@@ -1334,7 +1255,6 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
     ],
   );
   return {
-    limits: decodeModelLimits(item.limits, `${path}.limits`),
     maxInputTokens: modelTokenLimit(
       item.maxInputTokens,
       `${path}.maxInputTokens`,

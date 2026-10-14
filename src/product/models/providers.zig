@@ -1020,10 +1020,34 @@ const ModelRefWire = struct {
     model_id: []const u8,
 };
 
+const CanonicalModelMetadata = struct {
+    value: contract.ModelMetadata,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !CanonicalModelMetadata {
+        const Stored = struct {
+            max_input_tokens: ?u64 = null,
+            max_output_tokens: ?u64 = null,
+            capabilities: contract.ModelCapabilities = .{},
+            // Retired persisted field: discard it without granting any authority.
+            limits: std.json.Value = .null,
+        };
+        const stored = try std.json.innerParse(Stored, allocator, source, options);
+        return .{ .value = .{
+            .max_input_tokens = stored.max_input_tokens,
+            .max_output_tokens = stored.max_output_tokens,
+            .capabilities = stored.capabilities,
+        } };
+    }
+
+    pub fn jsonStringify(self: CanonicalModelMetadata, writer: anytype) !void {
+        try writer.write(self.value);
+    }
+};
+
 const CanonicalModelWire = struct {
     id: []const u8,
     display_name: []const u8,
-    metadata: contract.ModelMetadata,
+    metadata: CanonicalModelMetadata,
     metadata_provenance: contract.ModelMetadataProvenance,
     test_status: contract.CustomModelTestStatus,
     ready_source_generation: u64,
@@ -1066,7 +1090,7 @@ pub fn encodeAlloc(
             model_storage[provider_index][model_index] = .{
                 .id = model.id,
                 .display_name = model.display_name,
-                .metadata = model.metadata,
+                .metadata = .{ .value = model.metadata },
                 .metadata_provenance = model.metadata_provenance,
                 .test_status = model.test_status,
                 .ready_source_generation = model.ready_source_generation,
@@ -1209,7 +1233,7 @@ pub fn decode(
             try provider.models.append(allocator, .{
                 .id = try allocator.dupe(u8, model_wire.id),
                 .display_name = try allocator.dupe(u8, model_wire.display_name),
-                .metadata = model_wire.metadata,
+                .metadata = model_wire.metadata.value,
                 .metadata_provenance = model_wire.metadata_provenance,
                 .test_status = model_wire.test_status,
                 .ready_source_generation = ready_source_generation,
@@ -2095,16 +2119,13 @@ fn testCreate(registry: *Registry, input: TestCustomProviderCreate) !void {
     }, 1, 3);
 }
 
-test "complete model declarations and owned limits survive registry persistence" {
+test "complete model declarations and tokens survive registry persistence" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
-    var formats: contract.ModelLimitStrings = .{};
-    try formats.append("application/pdf");
     const metadata: contract.ModelMetadata = .{
         .max_input_tokens = 1000000,
         .max_output_tokens = 131072,
         .capabilities = .{ .text_input = true, .image_input = true, .pdf_input = true, .audio_input = false, .video_input = true, .output = .{ .text = true, .image = false, .audio = false, .video = false, .embedding = false } },
-        .limits = .{ .context_window = 1048576, .request_max_bytes = 33554432, .pdf = .{ .formats = formats }, .images_generations = .{ .max_n = 4 }, .videos = .{ .max_duration_seconds = 600 } },
     };
     try testCreate(&registry, .{
         .provider_id = "metadata-provider",
@@ -2122,4 +2143,15 @@ test "complete model declarations and owned limits survive registry persistence"
     const again = try encodeAlloc(std.testing.allocator, &restored);
     defer std.testing.allocator.free(again);
     try std.testing.expectEqualStrings(encoded, again);
+    const with_retired_limits = try std.mem.replaceOwned(u8, std.testing.allocator, encoded, "\"metadata\":{", "\"metadata\":{\"limits\":{\"max_input_tokens\":999,\"image\":{\"formats\":[\"old\"]}},");
+    defer std.testing.allocator.free(with_retired_limits);
+    var retired = try decode(std.testing.allocator, with_retired_limits);
+    defer retired.deinit();
+    try std.testing.expectEqualDeep(metadata, retired.views()[0].models[0].metadata);
+    const cleaned = try encodeAlloc(std.testing.allocator, &retired);
+    defer std.testing.allocator.free(cleaned);
+    try std.testing.expectEqualStrings(encoded, cleaned);
+    const with_unknown = try std.mem.replaceOwned(u8, std.testing.allocator, encoded, "\"metadata\":{", "\"metadata\":{\"unexpected\":true,");
+    defer std.testing.allocator.free(with_unknown);
+    try std.testing.expectError(error.InvalidData, decode(std.testing.allocator, with_unknown));
 }

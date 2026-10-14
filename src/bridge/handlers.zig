@@ -76,43 +76,7 @@ pub const ModelCapabilities = struct {
         compact20260112: ?bool = null,
     } = .{},
 };
-pub const ModelMediaLimits = models_contract.ModelMediaLimits;
-pub const ModelLimits = struct {
-    contextWindow: ?[]const u8 = null,
-    requestMaxBytes: ?[]const u8 = null,
-    image: ModelMediaLimits = .{},
-    pdf: ModelMediaLimits = .{},
-    document: ModelMediaLimits = .{},
-    audio: ModelMediaLimits = .{},
-    video: ModelMediaLimits = .{},
-    imagesGenerations: struct { maxN: ?[]const u8 = null } = .{},
-    videos: struct {
-        defaultDurationSeconds: ?[]const u8 = null,
-        maxDurationSeconds: ?[]const u8 = null,
-        maxFirstFrameImages: ?[]const u8 = null,
-    } = .{},
-
-    pub fn projection(self: ModelLimits) !models_contract.ModelLimits {
-        return .{
-            .context_window = if (self.contextWindow) |v| try parseWireId(v) else null,
-            .request_max_bytes = if (self.requestMaxBytes) |v| try parseWireId(v) else null,
-            .image = self.image,
-            .pdf = self.pdf,
-            .document = self.document,
-            .audio = self.audio,
-            .video = self.video,
-            .images_generations = .{ .max_n = if (self.imagesGenerations.maxN) |v| try parseWireId(v) else null },
-            .videos = .{
-                .default_duration_seconds = if (self.videos.defaultDurationSeconds) |v| try parseWireId(v) else null,
-                .max_duration_seconds = if (self.videos.maxDurationSeconds) |v| try parseWireId(v) else null,
-                .max_first_frame_images = if (self.videos.maxFirstFrameImages) |v| try parseWireId(v) else null,
-            },
-        };
-    }
-};
-
 pub const ModelMetadata = struct {
-    limits: ModelLimits = .{},
     maxInputTokens: ?[]const u8 = null,
     maxOutputTokens: ?[]const u8 = null,
     capabilities: ModelCapabilities = .{},
@@ -1047,20 +1011,14 @@ test "Task approval mode payload is typed and requires both exact CAS identities
     try std.testing.expectError(error.InvalidBridgeId, parseWireId("01"));
 }
 
-test "complete model metadata incoming declarations use bounded strings and exact decimal limits" {
+test "complete model metadata incoming declarations retain capabilities and token fields" {
     var parsed = try parsePayload(ModelMetadata,
-        \\{"maxInputTokens":"1000000","capabilities":{"textInput":true,"audioInput":false,"videoInput":true,"output":{"text":true,"image":false,"audio":false,"video":false,"embedding":false}},"limits":{"contextWindow":"1048576","pdf":{"formats":["application/pdf"],"sources":["data","url"]},"imagesGenerations":{"maxN":"4"},"videos":{"maxDurationSeconds":"600"}}}
+        \\{"maxInputTokens":"1000000","maxOutputTokens":"131072","capabilities":{"textInput":true,"audioInput":false,"videoInput":true,"output":{"text":true,"image":false,"audio":false,"video":false,"embedding":false}}}
     );
     defer parsed.deinit();
-    const projected = try parsed.value.limits.projection();
-    try std.testing.expectEqual(@as(?u64, 1048576), projected.context_window);
-    try std.testing.expectEqual(@as(?u64, 4), projected.images_generations.max_n);
-    try std.testing.expectEqual(@as(?u64, 600), projected.videos.max_duration_seconds);
-    try std.testing.expectEqualStrings("application/pdf", projected.pdf.formats.?.item(0));
+    try std.testing.expectEqualStrings("1000000", parsed.value.maxInputTokens.?);
+    try std.testing.expectEqualStrings("131072", parsed.value.maxOutputTokens.?);
     try std.testing.expectEqual(@as(?bool, true), parsed.value.capabilities.output.text);
-    inline for (.{ "{\"limits\":{\"pdf\":{\"formats\":[1]}}}", "{\"capabilities\":{\"output\":{\"audio\":\"true\"}}}" }) |invalid|
+    inline for (.{ "{\"limits\":{}}", "{\"capabilities\":{\"output\":{\"audio\":\"true\"}}}" }) |invalid|
         try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ModelMetadata, invalid));
-    var invalid = try parsePayload(ModelMetadata, "{\"limits\":{\"contextWindow\":\"18446744073709551616\"}}");
-    defer invalid.deinit();
-    try std.testing.expectError(error.InvalidBridgeId, invalid.value.limits.projection());
 }

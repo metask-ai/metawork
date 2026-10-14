@@ -130,27 +130,7 @@ export type ModelRef = {
 };
 
 /** Server declarations only; null means unknown, not unsupported. */
-export type ModelMediaLimits = {
-  formats: string[] | null;
-  sources: string[] | null;
-};
-export type ModelLimits = {
-  contextWindow: string | null;
-  requestMaxBytes: string | null;
-  image: ModelMediaLimits;
-  pdf: ModelMediaLimits;
-  document: ModelMediaLimits;
-  audio: ModelMediaLimits;
-  video: ModelMediaLimits;
-  imagesGenerations: { maxN: string | null };
-  videos: {
-    defaultDurationSeconds: string | null;
-    maxDurationSeconds: string | null;
-    maxFirstFrameImages: string | null;
-  };
-};
 export type ModelMetadata = {
-  limits: ModelLimits;
   maxInputTokens: string | null;
   maxOutputTokens: string | null;
   capabilities: {

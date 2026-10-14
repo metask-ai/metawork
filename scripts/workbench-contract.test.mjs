@@ -3071,7 +3071,7 @@ test("ready Metask catalog can retain unavailable desired selections", () => {
   }
 });
 
-test("complete model declarations and limits survive the shared Host fixture", () => {
+test("complete model declarations and tokens survive the shared Host fixture", () => {
   const metadata = JSON.parse(
     readFileSync(
       new URL(
@@ -3089,44 +3089,8 @@ test("complete model declarations and limits survive the shared Host fixture", (
   );
 });
 
-test("model limits reject missing keys, invalid numbers and unbounded collections", () => {
-  for (const invalid of [undefined, null, true, [], {}]) {
-    const candidate = clone(fixture);
-    candidate.models.providers[0].models[0].metadata.limits = invalid;
-    assert.throws(() => decodeWorkbenchSnapshot(candidate));
-  }
-  for (const key of ["contextWindow", "requestMaxBytes"]) {
-    for (const invalid of [
-      undefined,
-      12,
-      "0",
-      "01",
-      "-1",
-      "1.5",
-      "18446744073709551616",
-    ]) {
-      const candidate = clone(fixture);
-      candidate.models.providers[0].models[0].metadata.limits[key] = invalid;
-      assert.throws(() => decodeWorkbenchSnapshot(candidate));
-    }
-  }
-  for (const kind of ["image", "pdf", "document", "audio", "video"]) {
-    for (const key of ["formats", "sources"]) {
-      for (const invalid of [
-        undefined,
-        "image/*",
-        [1],
-        [[]],
-        [""],
-        Array(9).fill("a"),
-        ["a".repeat(65)],
-        ["a".repeat(64), "b".repeat(64), "c"],
-      ]) {
-        const candidate = clone(fixture);
-        candidate.models.providers[0].models[0].metadata.limits[kind][key] =
-          invalid;
-        assert.throws(() => decodeWorkbenchSnapshot(candidate));
-      }
-    }
-  }
+test("model metadata excludes the deferred limits field", () => {
+  const candidate = clone(fixture);
+  candidate.models.providers[0].models[0].metadata.limits = {};
+  assert.throws(() => decodeWorkbenchSnapshot(candidate), /expected keys/);
 });

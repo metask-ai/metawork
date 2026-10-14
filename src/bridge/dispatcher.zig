@@ -2628,7 +2628,6 @@ pub const Dispatcher = struct {
             .id = value.id,
             .display_name = value.displayName,
             .metadata = .{
-                .limits = try value.metadata.limits.projection(),
                 .max_input_tokens = if (value.metadata.maxInputTokens) |token_count|
                     try handlers.parseWireId(token_count)
                 else
