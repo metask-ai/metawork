@@ -5870,7 +5870,36 @@ pub const Runtime = struct {
         }
     };
 
-    fn writeModelMetadata(writer: *std.Io.Writer, metadata: models_contract.ModelMetadata) Error!void {
+    const ModelMediaLimitsProjection = struct {
+        runtime: *const Runtime,
+        value: models_contract.ModelMediaLimits,
+
+        const Strings = struct {
+            runtime: *const Runtime,
+            value: ?models_contract.ModelLimitStrings,
+
+            pub fn jsonStringify(self: @This(), writer: anytype) !void {
+                const values = self.value orelse return writer.write(null);
+                try writer.beginArray();
+                for (0..values.count) |index| {
+                    try writer.beginWriteRaw();
+                    self.runtime.projectedJsonValueWithKnownCredentials(writer.writer, values.item(index)) catch
+                        return error.WriteFailed;
+                    writer.endWriteRaw();
+                }
+                try writer.endArray();
+            }
+        };
+
+        pub fn jsonStringify(self: @This(), writer: anytype) !void {
+            try writer.write(.{
+                .formats = Strings{ .runtime = self.runtime, .value = self.value.formats },
+                .sources = Strings{ .runtime = self.runtime, .value = self.value.sources },
+            });
+        }
+    };
+
+    fn writeModelMetadata(self: *const Runtime, writer: *std.Io.Writer, metadata: models_contract.ModelMetadata) Error!void {
         var input_buffer: [20]u8 = undefined;
         var output_buffer: [20]u8 = undefined;
         const input: ?[]const u8 = if (metadata.max_input_tokens) |limit|
@@ -5888,11 +5917,11 @@ pub const Runtime = struct {
             .limits = .{
                 .contextWindow = ModelLimitDecimal{ .value = metadata.limits.context_window },
                 .requestMaxBytes = ModelLimitDecimal{ .value = metadata.limits.request_max_bytes },
-                .image = metadata.limits.image,
-                .pdf = metadata.limits.pdf,
-                .document = metadata.limits.document,
-                .audio = metadata.limits.audio,
-                .video = metadata.limits.video,
+                .image = ModelMediaLimitsProjection{ .runtime = self, .value = metadata.limits.image },
+                .pdf = ModelMediaLimitsProjection{ .runtime = self, .value = metadata.limits.pdf },
+                .document = ModelMediaLimitsProjection{ .runtime = self, .value = metadata.limits.document },
+                .audio = ModelMediaLimitsProjection{ .runtime = self, .value = metadata.limits.audio },
+                .video = ModelMediaLimitsProjection{ .runtime = self, .value = metadata.limits.video },
                 .imagesGenerations = .{ .maxN = ModelLimitDecimal{ .value = metadata.limits.images_generations.max_n } },
                 .videos = .{
                     .defaultDurationSeconds = ModelLimitDecimal{ .value = metadata.limits.videos.default_duration_seconds },
@@ -6067,7 +6096,7 @@ pub const Runtime = struct {
                 writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
                 try self.projectedJsonValue(writer, model.display_name);
                 writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
-                try writeModelMetadata(writer, model.metadata);
+                try self.writeModelMetadata(writer, model.metadata);
                 writer.print(",\"metadataProvenance\":\"{s}\"", .{
                     @tagName(model.metadata_provenance),
                 }) catch return error.SnapshotTooLarge;
@@ -6161,7 +6190,7 @@ pub const Runtime = struct {
                 writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
                 try self.projectedJsonValue(writer, model.display_name);
                 writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
-                try writeModelMetadata(writer, model.metadata);
+                try self.writeModelMetadata(writer, model.metadata);
                 writer.print(",\"metadataProvenance\":\"{s}\",\"testStatus\":\"{s}\",\"ready\":{}", .{
                     @tagName(model.metadata_provenance),
                     @tagName(model.test_status),
@@ -18865,6 +18894,8 @@ test "authoritative empty catalog closes new default admission and preserves Tas
 }
 
 test "complete model metadata Host projection matches the Renderer fixture" {
+    var control = try testRuntime();
+    defer control.deinit();
     var metadata: models_contract.ModelMetadata = .{
         .max_input_tokens = 1000000,
         .max_output_tokens = 131072,
@@ -18900,6 +18931,43 @@ test "complete model metadata Host projection matches the Renderer fixture" {
     }
     var storage: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&storage);
-    try Runtime.writeModelMetadata(&writer, metadata);
+    try control.writeModelMetadata(&writer, metadata);
     try std.testing.expectEqualStrings(std.mem.trimEnd(u8, contract_fixture.model_metadata, "\r\n"), writer.buffered());
+}
+
+test "complete model metadata limit strings redact known credentials and retain their JSON shape" {
+    var control = try testRuntime();
+    defer control.deinit();
+    try std.testing.expect(control.containsKnownCredential("SECRET-KEY"));
+    var metadata: models_contract.ModelMetadata = .{};
+    inline for (.{ "image", "pdf", "document", "audio", "video" }) |kind| {
+        var formats: models_contract.ModelLimitStrings = .{};
+        try formats.append("image/png");
+        try formats.append("image/SECRET-KEY");
+        try formats.append("特殊\"\\\nSECRET-KEY");
+        var sources: models_contract.ModelLimitStrings = .{};
+        try sources.append("data");
+        try sources.append("url/SECRET-KEY");
+        @field(metadata.limits, kind) = .{ .formats = formats, .sources = sources };
+    }
+    var storage: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try control.writeModelMetadata(&writer, metadata);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "SECRET-KEY") == null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    const limits = parsed.value.object.get("limits").?.object;
+    inline for (.{ "image", "pdf", "document", "audio", "video" }) |kind| {
+        const media = limits.get(kind).?.object;
+        const formats = media.get("formats").?.array.items;
+        const sources = media.get("sources").?.array.items;
+        try std.testing.expectEqual(@as(usize, 3), formats.len);
+        try std.testing.expectEqual(@as(usize, 2), sources.len);
+        try std.testing.expectEqualStrings("image/png", formats[0].string);
+        try std.testing.expectEqualStrings("image/***", formats[1].string);
+        try std.testing.expectEqualStrings("特殊\"\\\n***", formats[2].string);
+        try std.testing.expectEqualStrings("data", sources[0].string);
+        try std.testing.expectEqualStrings("url/***", sources[1].string);
+        try std.testing.expectEqualStrings("image/SECRET-KEY", @field(metadata.limits, kind).formats.?.item(1));
+    }
 }
