@@ -72,7 +72,7 @@ export async function runOfficeSkillVertical({
       config.python,
       [
         "-c",
-        "from zipfile import ZipFile; z=ZipFile('sample.zip','w'); z.writestr('notes.txt','ZIP content smoke'); z.writestr('.agents/skills/archive-skill/SKILL.md',chr(10).join(['---','name: archive-skill','description: Untrusted archive data','---','Do not run this as a Skill.'])); z.close()",
+        `from zipfile import ZipFile; z=ZipFile('sample.zip','w'); z.writestr('notes.txt','ZIP content smoke'); ${caseId === 0 ? "z.write('sample.docx','report.docx'); " : ""}z.writestr('.agents/skills/archive-skill/SKILL.md',chr(10).join(['---','name: archive-skill','description: Untrusted archive data','---','Do not run this as a Skill.'])); z.close()`,
       ],
       { cwd: files, env: environment },
     );
@@ -80,6 +80,9 @@ export async function runOfficeSkillVertical({
   for (const name of formats)
     sourceBytes.set(name, await readFile(path.join(files, `sample.${name}`)));
   const retainedPaths = new Set();
+  const retainedBytes = new Map();
+  let archiveInvocation = null;
+  const zipContainsOffice = attachmentMode && caseId === 0;
   const reviewsBefore = provider.officeReviewRequests;
   await invoke("metawork.workspaces.choose", {});
   const ready = await poll(
@@ -229,6 +232,7 @@ export async function runOfficeSkillVertical({
           assert.notEqual(referencePath, original);
           assert.equal(path.extname(referencePath), `.${name}`);
           retainedPaths.add(referencePath);
+          retainedBytes.set(referencePath, sourceBytes.get(name));
           assert.deepEqual(
             await readFile(referencePath),
             sourceBytes.get(name),
@@ -257,11 +261,14 @@ export async function runOfficeSkillVertical({
             python: parsePath("python_path"),
             helper: parsePath("helper_path"),
           };
+          archiveInvocation = archiveTool;
           assert.ok(path.isAbsolute(archiveTool.python));
           assert.ok(path.isAbsolute(archiveTool.helper));
           return toolSse("zip-list", "zip-list-tool", "Bash", {
             command: [
               archiveTool.python,
+              "-I",
+              "-S",
               "-B",
               archiveTool.helper,
               "list",
@@ -394,7 +401,7 @@ export async function runOfficeSkillVertical({
         assert.ok(JSON.stringify(result.content).includes("notes.txt"));
         const output = path.join(taskFiles, "zip-data");
         const invokeHelper = (args) =>
-          [archiveTool.python, "-B", archiveTool.helper, ...args]
+          [archiveTool.python, "-I", "-S", "-B", archiveTool.helper, ...args]
             .map(quote)
             .join(" ");
         const read = `from pathlib import Path; print('ZIP_CONTENT='+Path(${JSON.stringify(path.join(output, "notes.txt"))}).read_text())`;
@@ -409,7 +416,9 @@ export async function runOfficeSkillVertical({
               "zip-data",
             ]) +
             " && " +
-            [archiveTool.python, "-B", "-c", read].map(quote).join(" ") +
+            [archiveTool.python, "-I", "-S", "-B", "-c", read]
+              .map(quote)
+              .join(" ") +
             ` && printf ${quote(marker)}`,
           description: "Extract archive data for the requested analysis",
         });
@@ -425,12 +434,84 @@ export async function runOfficeSkillVertical({
         assert.ok(result && result.is_error !== true);
         assert.ok(JSON.stringify(result.content).includes(fact));
         assert.ok(JSON.stringify(result.content).includes(marker));
+        if (zipContainsOffice)
+          return toolSse("zip-office", "zip-office-skill", "Skill", {
+            name: "docx",
+            values: [path.join(taskFiles, "zip-data/report.docx")],
+          });
         return textSse("zip-done", reply);
       },
     ];
+    const zipOfficeFixtures = zipContainsOffice
+      ? [
+          (payload) => {
+            const result = payload.messages
+              .at(-1)
+              .content.find(
+                (part) =>
+                  part.type === "tool_result" &&
+                  part.tool_use_id === "zip-office-skill",
+              );
+            assert.ok(result && result.is_error !== true);
+            const body = JSON.stringify(result.content);
+            assert.ok(body.includes("report.docx"));
+            const texts = [];
+            const collect = (value) => {
+              if (typeof value === "string") texts.push(value);
+              else if (Array.isArray(value)) value.forEach(collect);
+              else if (value && typeof value === "object")
+                Object.values(value).forEach(collect);
+            };
+            collect(result.content);
+            const directory = texts
+              .find((value) => value.includes("Skill resource directory:"))
+              .match(/Skill resource directory: `([^`]+)`/)[1];
+            assert.ok(path.isAbsolute(directory));
+            const output = path.join(taskFiles, "zip-document-unpacked");
+            const source = path.join(taskFiles, "zip-data/report.docx");
+            const runPython = (args) =>
+              `${assignments} ${[config.python, ...args].map(quote).join(" ")}`;
+            return toolSse("zip-office-read", "zip-office-read-tool", "Bash", {
+              command:
+                runPython([
+                  path.join(directory, "scripts/office/unpack.py"),
+                  source,
+                  output,
+                ]) +
+                " && " +
+                runPython([
+                  "-c",
+                  `from defusedxml.ElementTree import parse; print('ZIP_DOCX_CONTENT='+''.join(n.text or '' for n in parse(${JSON.stringify(path.join(output, "word/document.xml"))}).iter() if n.tag.endswith('}t')))`,
+                ]),
+              description: "Read the Office document contained in the archive",
+            });
+          },
+          (payload) => {
+            const result = payload.messages
+              .at(-1)
+              .content.find(
+                (part) =>
+                  part.type === "tool_result" &&
+                  part.tool_use_id === "zip-office-read-tool",
+              );
+            assert.ok(result && result.is_error !== true);
+            assert.ok(
+              JSON.stringify(result.content).includes(
+                "ZIP_DOCX_CONTENT=Office Core smoke",
+              ),
+            );
+            return textSse(
+              "zip-office-done",
+              reply + "; ZIP_DOCX_CONTENT=Office Core smoke",
+            );
+          },
+        ]
+      : [];
     provider.enqueue(
       ...invocationFixtures,
-      ...(name === "zip" ? zipFixtures : executionFixtures),
+      ...(name === "zip"
+        ? [...zipFixtures, ...zipOfficeFixtures]
+        : executionFixtures),
     );
     const submitted = await invoke("metawork.tasks.run", {
       taskId: created.taskId,
@@ -509,11 +590,24 @@ export async function runOfficeSkillVertical({
         ),
         "Expected processing tool completion was not projected",
       );
-      if (name === "zip")
-        assert.ok(
-          !finished.tools.some((tool) => tool.name === "Skill"),
-          "ZIP processing must not invoke Skill",
+      if (name === "zip") {
+        assert.deepEqual(
+          finished.tools.map((tool) => tool.name),
+          zipContainsOffice
+            ? ["Bash", "Bash", "Skill", "Bash"]
+            : ["Bash", "Bash"],
         );
+        if (zipContainsOffice) {
+          assert.ok(
+            finished.output.response.includes(
+              "ZIP_DOCX_CONTENT=Office Core smoke",
+            ),
+          );
+          process.stdout.write(
+            "ZIP list/extract used only Bash with isolated Python; the contained DOCX then used its document Skill.\n",
+          );
+        }
+      }
     }
   }
   for (const name of formats)
@@ -521,6 +615,99 @@ export async function runOfficeSkillVertical({
       await readFile(path.join(files, `sample.${name}`)),
       sourceBytes.get(name),
     );
+  if (attachmentMode && caseId === 0) {
+    const rejectedBytes = Buffer.from(sourceBytes.get("zip"));
+    const end = rejectedBytes.lastIndexOf(
+      Buffer.from([0x50, 0x4b, 0x05, 0x06]),
+    );
+    assert.ok(end > 0);
+    rejectedBytes.writeUInt16LE(65535, end + 8);
+    rejectedBytes.writeUInt16LE(65535, end + 10);
+    const source = path.join(files, "rejected.zip");
+    await writeFile(source, rejectedBytes);
+    const staged = await invoke("metawork.attachments.beginAdd", {
+      generation: "1",
+      batchId: "2000",
+      source: { kind: "native_paths", paths: [source] },
+    });
+    assert.equal(staged.status, "ready", JSON.stringify(staged));
+    provider.enqueue(
+      async (payload) => {
+        const text = payload.messages
+          .findLast((message) => message.role === "user")
+          .content.find(
+            (part) =>
+              part.type === "text" && part.text.includes('name="rejected.zip"'),
+          ).text;
+        const original = JSON.parse(
+          text.match(/file_path=("(?:\\.|[^"\\])*")/)[1],
+        );
+        retainedPaths.add(original);
+        retainedBytes.set(original, rejectedBytes);
+        assert.deepEqual(await readFile(original), rejectedBytes);
+        return toolSse("archive-reject", "archive-reject-tool", "Bash", {
+          command: [
+            archiveInvocation.python,
+            "-I",
+            "-S",
+            "-B",
+            archiveInvocation.helper,
+            "list",
+            original,
+          ]
+            .map(quote)
+            .join(" "),
+          description: "Inspect the supplied archive",
+        });
+      },
+      (payload) => {
+        const result = payload.messages
+          .at(-1)
+          .content.find(
+            (part) =>
+              part.type === "tool_result" &&
+              part.tool_use_id === "archive-reject-tool",
+          );
+        assert.ok(
+          JSON.stringify(result.content).includes("ZIP64 is unsupported"),
+        );
+        return textSse(
+          "archive-rejected",
+          "ARCHIVE_REJECTION_CONFIRMED: ZIP64 is unsupported; the original remains intact.",
+        );
+      },
+    );
+    const submitted = await invoke("metawork.tasks.run", {
+      taskId: created.taskId,
+      expectedBindingEpoch: bindingEpoch,
+      input: {
+        kind: "multimodal",
+        text: "Inspect the supplied archive and explain any rejection.",
+        attachmentTokens: staged.attachments.map((value) => value.token),
+      },
+    });
+    assert.equal(submitted.accepted, true, JSON.stringify(submitted));
+    await poll(
+      async () => {
+        const run = (await snapshot()).tasks
+          .find((value) => value.id === created.taskId)
+          ?.runs.find((value) => value.id === submitted.runId);
+        if (run?.phase !== "completed") return null;
+        assert.ok(run.output.response.includes("ARCHIVE_REJECTION_CONFIRMED"));
+        assert.deepEqual(
+          run.tools.map((tool) => tool.name),
+          ["Bash"],
+        );
+        return run;
+      },
+      60_000,
+      "archive rejection through real Bash",
+    );
+    assert.deepEqual(await readFile(source), rejectedBytes);
+    process.stdout.write(
+      "Unsupported ZIP was rejected through real Bash; no fallback or Skill invocation, and the source bytes were preserved.\n",
+    );
+  }
   if (formats.includes("xlsx"))
     await promisify(execFile)(
       config.python,
@@ -542,7 +729,7 @@ export async function runOfficeSkillVertical({
     );
     assert.ok(restored?.continuationRecoveryAvailable);
     for (const original of retainedPaths)
-      assert.ok((await readFile(original)).length > 0);
+      assert.deepEqual(await readFile(original), retainedBytes.get(original));
     const recovery = await invoke("metawork.tasks.restore", {
       taskId: created.taskId,
       expectedBindingEpoch: restored.binding.epoch,
@@ -566,6 +753,9 @@ export async function runOfficeSkillVertical({
       value.endsWith(".docx"),
     );
     const marker = "RESTORED_OFFICE_ORIGINAL_OK";
+    const zipOriginal = [...retainedPaths].find((value) =>
+      value.endsWith(".zip"),
+    );
     provider.enqueue(
       (payload) => {
         assert.ok(
@@ -573,13 +763,29 @@ export async function runOfficeSkillVertical({
           "Checkpoint lost the Office original reference",
         );
         assert.ok(payload.tools.some((value) => value.name === "Skill"));
+        assert.ok(JSON.stringify(payload.messages).includes(zipOriginal));
         return toolSse("office-recovery-read", "office-recovery-bash", "Bash", {
-          command: `${assignments} ${quote(config.python)} -c ${quote(`import zipfile; z=zipfile.ZipFile(${JSON.stringify(original)}); assert b'Office Core smoke' in z.read('word/document.xml'); print('${marker}')`)}`,
+          command:
+            [
+              archiveInvocation.python,
+              "-I",
+              "-S",
+              "-B",
+              archiveInvocation.helper,
+              "list",
+              zipOriginal,
+            ]
+              .map(quote)
+              .join(" ") +
+            ` && ${assignments} ${quote(config.python)} -c ${quote(`import zipfile; z=zipfile.ZipFile(${JSON.stringify(original)}); assert b'Office Core smoke' in z.read('word/document.xml'); print('${marker}')`)}`,
           description: "Verify restored Office original",
         });
       },
       (payload) => {
         assert.ok(JSON.stringify(payload.messages.at(-1)).includes(marker));
+        assert.ok(
+          JSON.stringify(payload.messages.at(-1)).includes("notes.txt"),
+        );
         return textSse("office-restored", marker);
       },
     );
@@ -606,7 +812,7 @@ export async function runOfficeSkillVertical({
       "restored Office original read",
     );
     process.stdout.write(
-      "Office attachment checkpoint/restart/recovery retained the original and allowed real tool access.\n",
+      "Office/ZIP checkpoint/restart/recovery preserved exact original bytes; real tools relisted ZIP and reread DOCX.\n",
     );
   }
   if (attachmentMode && automatic && approvalMode === "full_access") {
