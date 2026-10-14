@@ -16,7 +16,7 @@
 
 ### Changed
 
-- AgentCore 升级至 `0.6.0-dev+c4b0af79fe20` / ABI revision 19，并刷新 Windows x86_64 与 macOS x86_64/ARM64 bundles；Windows ARM64 继续使用 revision 18。
+- AgentCore 升级至 `0.6.0-dev+c4b0af79fe20` / ABI revision 19，并刷新 Windows 与 macOS 的 x86_64/ARM64 bundles。
 - Metask 模型目录以声明的 endpoint protocol 作为准入真源，完整保留输入模态与根级 token limits；不可用的既有模型 intent 保持可见，并提供当前合格替代项。
 - Composer 附件统一为异步批次接收协议，系统选择器与拖放共享预留、传输、取消和草稿移除生命周期。
 - 托盘退出不再显示额外确认，仍按既有 shutdown 流程安全收口。
