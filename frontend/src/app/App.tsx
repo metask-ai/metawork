@@ -166,6 +166,7 @@ import { PendingScopes } from "../workbench/pendingScopes.ts";
 import { taskModelSelectionPolicy } from "./task-model-selection.ts";
 import { SkillPreparationCoordinator } from "./skill-preparation.ts";
 import { ConversationRecoveryCoordinator } from "./conversation-recovery.ts";
+import { AttachmentRemovalCoordinator } from "./attachment-removal.ts";
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -296,7 +297,11 @@ export default function App() {
     null,
   );
   const [attachmentView, setAttachmentView] = useState<AddView | null>(null);
-  const attachmentBusy = attachmentView !== null;
+  const [attachmentRemoving, setAttachmentRemoving] = useState(false);
+  const attachmentRemoval = useRef(
+    new AttachmentRemovalCoordinator(setAttachmentRemoving),
+  );
+  const attachmentBusy = attachmentView !== null || attachmentRemoving;
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const attachmentBusyRef = useRef(false);
   const attachmentOperation = useRef<{
@@ -739,6 +744,35 @@ export default function App() {
     : `task:${activeTask?.id ?? "missing"}`;
   const composerDraftScopeRef = useRef(composerDraftScope);
   composerDraftScopeRef.current = composerDraftScope;
+  const attachmentAudience = useRef({
+    scope: composerDraftScope,
+    generation: bridgeGeneration,
+    route,
+    settingsOpen,
+    searchOpen,
+  });
+  const audience = attachmentAudience.current;
+  if (
+    audience.scope !== composerDraftScope ||
+    audience.generation !== bridgeGeneration ||
+    audience.route !== route ||
+    audience.settingsOpen !== settingsOpen ||
+    audience.searchOpen !== searchOpen
+  )
+    attachmentAudience.current = {
+      scope: composerDraftScope,
+      generation: bridgeGeneration,
+      route,
+      settingsOpen,
+      searchOpen,
+    };
+  useLayoutEffect(() => {
+    attachmentRemoval.current.resetGeneration(bridgeGeneration);
+  }, [bridgeGeneration]);
+  useLayoutEffect(() => {
+    const removal = attachmentRemoval.current;
+    return () => removal.dispose();
+  }, []);
   useEffect(() => setAttachmentError(null), [composerDraftScope]);
   useLayoutEffect(
     () => () => {
@@ -1819,7 +1853,12 @@ export default function App() {
   }
 
   async function submitRun() {
-    if (!canSubmit) return;
+    if (
+      !canSubmit ||
+      attachmentBusyRef.current ||
+      attachmentRemoval.current.busy
+    )
+      return;
     const submitted = composerDraft;
     const input = composerDraftToRunInput(submitted);
     if (!input) return;
@@ -1982,6 +2021,7 @@ export default function App() {
   ) {
     if (
       attachmentBusyRef.current ||
+      attachmentRemoval.current.busy ||
       bridgeUnavailable ||
       !snapshot.capabilities.attachments.enabled ||
       !taskCanCompose ||
@@ -2100,17 +2140,43 @@ export default function App() {
   }, [bridgeGeneration]);
 
   async function removeAttachment(token: string) {
-    const current = composerDraftRef.current;
-    if (current.kind !== "multimodal") return;
-    await client.releaseAttachment(token).catch(() => undefined);
-    const attachments = current.attachments.filter(
-      (attachment) => attachment.token !== token,
-    );
-    updateComposerDraft(
-      attachments.length === 0
-        ? { kind: "text", text: current.text }
-        : { ...current, attachments },
-    );
+    if (
+      attachmentBusyRef.current ||
+      bridgeUnavailable ||
+      !taskCanCompose ||
+      taskMutationDisabled
+    )
+      return;
+    const target = newTaskDraftActive ? newTaskDrafts : taskDrafts;
+    const targetId = newTaskDraftActive
+      ? newTaskDraftId
+      : (activeTask?.id ?? null);
+    const requestedAudience = attachmentAudience.current;
+    await attachmentRemoval.current.remove({
+      generation: bridgeGenerationRef.current,
+      targetId,
+      token,
+      target: {
+        currentDraft: target.currentDraft,
+        commitDraft: (id, next) => {
+          if (!target.commitDraft(id, next)) return false;
+          composerDraftRef.current = next;
+          setAttachmentError(null);
+          return true;
+        },
+      },
+      release: (value) => client.releaseAttachment(value),
+      unconfirmed: () => {
+        if (attachmentAudience.current === requestedAudience)
+          setAttachmentError("release_unconfirmed");
+      },
+      recover: async (generation) => {
+        if (generation !== bridgeGenerationRef.current) return;
+        taskDrafts.invalidateAttachments();
+        newTaskDrafts.invalidateAttachments();
+        await retryViewSynchronization(true, generation);
+      },
+    });
   }
 
   async function cancelRun() {
@@ -2904,10 +2970,12 @@ export default function App() {
         )}
         unavailableReason={activeTask?.continuationUnavailableReason ?? null}
         draft={composerDraft}
+        draftScope={`${bridgeGeneration}:${composerDraftScope}`}
         attachmentsEnabled={snapshot.capabilities.attachments.enabled}
         attachmentMaxFileBytes={snapshot.capabilities.attachments.maxFileBytes}
         attachmentBusy={attachmentBusy}
         attachmentCancelling={attachmentView === "cancelling"}
+        attachmentRemoving={attachmentRemoving}
         attachmentError={attachmentError}
         attachmentModelWarning={attachmentModelWarning}
         skillCatalog={skillCatalog}

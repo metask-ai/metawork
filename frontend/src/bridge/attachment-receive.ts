@@ -154,6 +154,8 @@ export class AttachmentAddOperation {
           }
           if (this.abort.signal.aborted)
             throw new Error("Attachment add cancelled");
+          if (bytes.length !== Math.min(this.chunkBytes, file.size - offset))
+            return this.failure({ status: "rejected", reason: "read_failed" });
           let binary = "";
           for (let i = 0; i < bytes.length; i += 8192)
             binary += String.fromCharCode(...bytes.subarray(i, i + 8192));

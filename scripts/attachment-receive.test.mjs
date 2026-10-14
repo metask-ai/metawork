@@ -47,6 +47,112 @@ const port = (overrides = {}) => ({
   recover: async () => {},
   ...overrides,
 });
+
+for (const [label, length] of [
+  ["empty", 0],
+  ["short", 2],
+  ["oversized", 4],
+]) {
+  test(`${label} File read cancels before any append or finish`, async () => {
+    const file = new File(["abcdefg"], "source.html");
+    file.slice = () => ({ arrayBuffer: async () => new ArrayBuffer(length) });
+    let cancels = 0;
+    const op = new AttachmentAddOperation(
+      port({
+        append: async () => assert.fail("invalid read must not reach Host"),
+        finish: async () => assert.fail("incomplete file must not finish"),
+        cancel: async () => {
+          cancels++;
+          return cleaned;
+        },
+      }),
+      3,
+    );
+    assert.deepEqual(await op.run({ kind: "file_bytes", files: [file] }), {
+      status: "rejected",
+      reason: "read_failed",
+    });
+    assert.equal(cancels, 1);
+  });
+}
+
+test("last chunk must match its remaining length after valid preceding writes", async () => {
+  const file = new File(["abcdefg"], "source.html");
+  const slice = file.slice.bind(file);
+  file.slice = (start, end) =>
+    start === 6
+      ? { arrayBuffer: async () => new ArrayBuffer(2) }
+      : slice(start, end);
+  const writes = [];
+  let cancels = 0;
+  const op = new AttachmentAddOperation(
+    port({
+      append: async (index, offset, data) => {
+        writes.push([index, offset, atob(data)]);
+        return accepted;
+      },
+      finish: async () => assert.fail("bad final read must not finish"),
+      cancel: async () => {
+        cancels++;
+        return cleaned;
+      },
+    }),
+    3,
+  );
+  assert.deepEqual(await op.run({ kind: "file_bytes", files: [file] }), {
+    status: "rejected",
+    reason: "read_failed",
+  });
+  assert.deepEqual(writes, [
+    [0, "0", "abc"],
+    [0, "3", "def"],
+  ]);
+  assert.equal(cancels, 1);
+});
+
+test("read length failure preserves cleanup failure precedence", async () => {
+  const file = new File(["abc"], "source.txt");
+  file.slice = () => ({ arrayBuffer: async () => new ArrayBuffer(0) });
+  const op = new AttachmentAddOperation(
+    port({
+      append: async () => assert.fail(),
+      finish: async () => assert.fail(),
+      cancel: async () => ({ status: "cleanup_failed" }),
+    }),
+    3,
+  );
+  assert.deepEqual(await op.run({ kind: "file_bytes", files: [file] }), {
+    status: "rejected",
+    reason: "cleanup_failed",
+  });
+});
+
+test("read length failure with unknown cleanup recovers once and exposes cleanup uncertainty", async () => {
+  const file = new File(["abc"], "source.txt");
+  file.slice = () => ({ arrayBuffer: async () => new ArrayBuffer(0) });
+  let recoveries = 0,
+    cancels = 0;
+  const op = new AttachmentAddOperation(
+    port({
+      append: async () => assert.fail(),
+      finish: async () => assert.fail(),
+      cancel: async () => {
+        cancels++;
+        throw new Error("cancel timed out");
+      },
+      recover: async () => {
+        recoveries++;
+      },
+    }),
+    3,
+  );
+  await assert.rejects(
+    op.run({ kind: "file_bytes", files: [file] }),
+    AttachmentCleanupError,
+  );
+  assert.equal(cancels, 1);
+  assert.equal(recoveries, 1);
+});
 test("legacy revision 1 receive fixture remains an exact wire contract", () => {
   assert.deepEqual(decodeAttachmentReceiveResult(oldWire.ready), oldWire.ready);
   assert.throws(() => decodeAttachmentReceiveAcceptance(oldWire.ready));

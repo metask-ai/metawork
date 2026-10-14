@@ -13,6 +13,24 @@ import {
 // Optional real-Core extension to the desktop vertical. The fixture provider
 // requests execution of the materialized Skill resources and checks tool output;
 // it does not attest to remote-model planning quality.
+export async function verifyOfficeTaskDeletion({
+  taskId,
+  originals,
+  snapshot,
+  poll,
+}) {
+  // deleting=true acknowledges intent; Session/worker retirement can finish
+  // later. Observe the committed projection before asserting physical cleanup.
+  await poll(
+    async () =>
+      (await snapshot()).tasks.some((task) => task.id === taskId) ? null : true,
+    20_000,
+    "Office Task deletion committed",
+  );
+  for (const original of originals)
+    await assert.rejects(readFile(original), { code: "ENOENT" });
+}
+
 export async function runOfficeSkillVertical({
   root,
   workspace,
@@ -991,8 +1009,12 @@ export async function runOfficeSkillVertical({
       provider.officeReviewRequests > reviewsBefore,
       "File processing was not automatically reviewed",
     );
-  for (const original of retainedPaths)
-    await assert.rejects(readFile(original), { code: "ENOENT" });
+  await verifyOfficeTaskDeletion({
+    taskId: created.taskId,
+    originals: retainedPaths,
+    snapshot,
+    poll,
+  });
   if (attachmentMode)
     process.stdout.write(
       `Office/ZIP attachment path passed: ${automatic ? "automatic" : "manual"} ${approvalMode}, ${formats.join(",")}, retained original references, real helpers and content replies.\n`,

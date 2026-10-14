@@ -77,6 +77,7 @@ function attachmentErrorMessage(reason: string): MessageId {
     stale_transfer: "attachment.error.stale_transfer",
     input_busy: "attachment.error.input_busy",
     cleanup_failed: "attachment.error.cleanup_failed",
+    release_unconfirmed: "attachment.error.release_unconfirmed",
   };
   return messages[reason] ?? "attachment.error.generic";
 }
@@ -89,10 +90,12 @@ export function ComposerFooter({
   unavailable,
   unavailableReason,
   draft,
+  draftScope = "",
   attachmentsEnabled,
   attachmentMaxFileBytes,
   attachmentBusy,
   attachmentCancelling = false,
+  attachmentRemoving = false,
   attachmentError,
   attachmentModelWarning,
   skillCatalog,
@@ -140,10 +143,12 @@ export function ComposerFooter({
   unavailable: boolean;
   unavailableReason: TaskView["continuationUnavailableReason"];
   draft: ComposerDraft;
+  draftScope?: string;
   attachmentsEnabled: boolean;
   attachmentMaxFileBytes: string;
   attachmentBusy: boolean;
   attachmentCancelling?: boolean;
+  attachmentRemoving?: boolean;
   attachmentError: string | null;
   attachmentModelWarning: "image" | null;
   skillCatalog: SkillCatalogView;
@@ -210,6 +215,7 @@ export function ComposerFooter({
   onDropFilesRef.current = onDropFiles;
   const attachmentRemoveRefs = useRef(new Map<string, HTMLElement>());
   const pendingAttachmentFocusRef = useRef<{
+    scope: string;
     removedToken: string;
     adjacentToken: string | null;
   } | null>(null);
@@ -234,7 +240,8 @@ export function ComposerFooter({
   const skillDraftCurrent =
     draft.kind !== "skill" || isSkillDraftCurrent(draft, skillCatalog);
   const draftWithinLimits = composerDraftWithinLimits(draft);
-  const sendEnabled = canSubmit && slashInput === null && draftWithinLimits;
+  const sendEnabled =
+    canSubmit && !attachmentBusy && slashInput === null && draftWithinLimits;
   const candidates = useMemo(
     () =>
       slashInput
@@ -340,6 +347,11 @@ export function ComposerFooter({
   useEffect(() => {
     const pending = pendingAttachmentFocusRef.current;
     if (!pending) return;
+    if (pending.scope !== draftScope) {
+      pendingAttachmentFocusRef.current = null;
+      return;
+    }
+    if (attachmentBusy) return;
     if (
       draft.kind === "multimodal" &&
       draft.attachments.some(
@@ -352,11 +364,11 @@ export function ComposerFooter({
       const target = pending.adjacentToken
         ? attachmentRemoveRefs.current.get(pending.adjacentToken)
         : attachmentButtonRef.current;
-      target?.focus();
+      if (target && !target.hasAttribute("disabled")) target.focus();
       pendingAttachmentFocusRef.current = null;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [draft]);
+  }, [draft, draftScope, attachmentBusy]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -415,6 +427,7 @@ export function ComposerFooter({
   }
 
   function updateText(value: string) {
+    pendingAttachmentFocusRef.current = null;
     if (draft.kind === "multimodal") {
       onDraftChange({ ...draft, text: value });
       return;
@@ -434,6 +447,7 @@ export function ComposerFooter({
         ? (draft.attachments[index + 1] ?? draft.attachments[index - 1])
         : undefined;
     pendingAttachmentFocusRef.current = {
+      scope: draftScope,
       removedToken: attachment.token,
       adjacentToken: adjacent?.token ?? null,
     };
@@ -748,18 +762,22 @@ export function ComposerFooter({
                   data-busy={attachmentBusy || undefined}
                   aria-busy={attachmentBusy || undefined}
                   aria-label={t(
-                    attachmentCancelling
-                      ? "attachment.cancelling"
-                      : attachmentBusy && onCancelAttachments
-                        ? "attachment.cancel"
-                        : "attachment.add",
+                    attachmentRemoving
+                      ? "attachment.removing"
+                      : attachmentCancelling
+                        ? "attachment.cancelling"
+                        : attachmentBusy && onCancelAttachments
+                          ? "attachment.cancel"
+                          : "attachment.add",
                   )}
                   title={t(
-                    attachmentCancelling
-                      ? "attachment.cancelling"
-                      : attachmentBusy && onCancelAttachments
-                        ? "attachment.cancel"
-                        : "attachment.add",
+                    attachmentRemoving
+                      ? "attachment.removing"
+                      : attachmentCancelling
+                        ? "attachment.cancelling"
+                        : attachmentBusy && onCancelAttachments
+                          ? "attachment.cancel"
+                          : "attachment.add",
                   )}
                   disabled={
                     composeDisabled ||
