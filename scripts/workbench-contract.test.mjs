@@ -2249,9 +2249,9 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
 
   const modelOutsideCatalog = clone(fixture);
   modelOutsideCatalog.models.metaskSelection.modelId = "missing-model";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(modelOutsideCatalog),
-    /selected Metask model must belong/,
+  assert.equal(
+    decodeWorkbenchSnapshot(modelOutsideCatalog).models.metaskSelection.modelId,
+    "missing-model",
   );
 
   const mismatchedCancellation = clone(fixture);
@@ -3051,4 +3051,45 @@ test("approval mode changes preserve historical Run permissions and reviewer pro
     () => decodeWorkbenchSnapshot(value),
     /reviewer decisions require/,
   );
+});
+
+test("ready Metask catalog can retain unavailable desired selections", () => {
+  for (const models of [[], [fixture.models.providers[0].models[0]]]) {
+    const value = clone(fixture);
+    value.models.providers[0].models = models;
+    value.models.providers[0].errorCode = models.length ? "none" : "no_models";
+    value.models.metaskSelection.modelId = "retired-model";
+    value.models.defaultSelection.modelId = "retired-model";
+    value.newTaskAdmission.available = false;
+    value.newTaskAdmission.reason = "invalid_candidate";
+    const decoded = decodeWorkbenchSnapshot(value);
+    assert.equal(decoded.models.providers[0].catalogState, "ready");
+    assert.equal(decoded.models.providers[0].models.length, models.length);
+    assert.equal(decoded.models.defaultSelection.modelId, "retired-model");
+    assert.equal(decoded.newTaskAdmission.available, false);
+  }
+});
+
+test("complete model declarations and tokens survive the shared Host fixture", () => {
+  const metadata = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/model-metadata.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const candidate = clone(fixture);
+  candidate.models.providers[0].models[0].metadata = metadata;
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(candidate).models.providers[0].models[0].metadata,
+    metadata,
+  );
+});
+
+test("model metadata excludes the deferred limits field", () => {
+  const candidate = clone(fixture);
+  candidate.models.providers[0].models[0].metadata.limits = {};
+  assert.throws(() => decodeWorkbenchSnapshot(candidate), /expected keys/);
 });

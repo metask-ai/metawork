@@ -49,6 +49,8 @@ npm run check
 npm test
 ```
 
+模型元数据的定向 Native 入口为 `zig build test-model-metadata`，使用同一 canonical bundle 与正式 module graph，覆盖 Models parser/合同/持久化和受影响的 Host serializer、Bridge 入站 fixture。Renderer 侧运行 typecheck 与 `scripts/workbench-contract.test.mjs`、`scripts/new-task-model-selection.test.mjs`。纯模型字段解析修正可用此入口观察完整字段、ownership、严格 wire 与刷新行为，避免重复无关生命周期测试。
+
 `npm test` 必须校验 canonical staged AgentCore bundle、执行 Renderer typecheck，并运行自动发现的 Node tests 与正式 Native test graph。Node 和 Native 阶段都必须得到结果；一侧失败不得遮蔽另一侧。bundle 缺失或不匹配时必须明确失败，不能跳过 AgentCore 用例后报告成功。
 
 candidate probe、真实桌面验收、签名、公证和发布验证不属于 `npm test`，也不得被其结果替代。定向入口只缩短开发反馈；提交前仍运行能覆盖受影响失败模式的完整关联 root。
@@ -253,12 +255,30 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 picker 使用 automation 路径注入，DOM File 由隔离 WebView 的 CDP file input 注入；这些证明真实文件、浏览器字节提取、Host worker、分类及取消链路，不证明真实系统 picker 或 OS 拖拽手势、键盘/焦点/窄窗体验、峰值内存或 codec 的独立主线程阻塞时间。macOS 和其他 Windows 环境仍需独立验收。**完整 desktop vertical 失败。**该轮通过真实 Skill、多模态 Run、70 KiB 回复的完整 plain/HTML 复制与代码的 plain-only 复制，但后续 256 KiB 回复复制探针未找到 UIA 的“复制回复”入口，未到达其后的重启、Task 删除和正常退出阶段。未修改或跳过该断言，也未将这一结果归因于附件实现；不能仅凭附件专项通过宣称整轮通过。
 
+### E-WIN-METASK-MODEL-CATALOG-20261013
+
+2026-10-13，在 Windows x86_64 的 automation Debug artifact 上，由用户通过真实 Account 登录并调用真实 Metask 目录与对话服务。证据绑定源码 revision `4e230d3e56c764203fef64abcc16994248783cce`、exe SHA-256 `3fd3c35a6033686a0da84b8aef3ead9298090b499eb294e31cc1da6c7020e992` 和 canonical AgentCore；平台、依赖 identity 与脱敏 typed Snapshot 摘要见[原始证据](evidence/metask-model-catalog-windows-20261013.json)。构建入口为仓库 `buildAutomationDebugArtifact`；观察通过官方 `native automate bridge` 与已有 Workbench snapshot/chunk 合同，不读取 OAuth credential 到测试脚本。运行时仅启用既有 transport harness，Account 与 Models 使用真实平台服务，不注入 fixture 账号、目录或 Provider。
+
+真实目录发布 3 个可选模型及其 metadata，Account 保持 authenticated、Models ready 且 error 为 none。显式 `metawork.models.refreshCatalog` 成功推进 catalog generation，global default 仍为 `MiniMax-M3`，新 Task admission 保持 available。用户发送的文本 Run 已在该模型与 `anthropic_messages` protocol 下 completed，返回非空远端文本并有 usage；再次刷新后该 Task/Run 的 execution 与 terminal 保留。该证据证明此 artifact 对当时真实后端目录的接纳、刷新与一次远端文本对话，不替代媒体输出排除、非法响应、空目录、失格 intent、CAS 和 pending lifecycle 的确定性回归，也不证明后续后端部署、其他模型、平台或完整桌面体验。
+### E-WIN-METASK-ENDPOINT-PROTOCOL-20261013
+
+2026-10-13，Windows x86_64 automation Debug artifact 绑定 revision `4b1a02fd28e096cc87ab2ee126f30c1d2c3ced16`、exe SHA-256 `ec2da501f9ca7a991e80fe3545243eb1f7e89bba65ba7c578c53c08e5ce90390` 与 canonical AgentCore。使用用户真实 Account 登录、真实 Models 和 AgentCore，由官方 SDK Bridge 与 canonical Workbench snapshot/chunk 观察；[证据](evidence/metask-endpoint-protocol-windows-20261013.json)记录构建、声明端点、目录刷新和模型 binding。三个对话模型均绑定 `openai_chat_completions`，目录不包含两个媒体生成模型；单 Task override 保留 global default，原 Task 的 `anthropic_messages` 历史绑定未被改写。确定性回归承担端点优先级、缺失/非法声明、媒体排除、source authority 与既有 owned candidate 边界，不能由线上单协议结果替代。
+
+MiniMax-M3 的真实文本 Run 返回 `OK`，证明这份 artifact 的 Chat 端到端对话。豆包与 GLM 的 Run 虽 completed 并有 usage，但正文为空，不能计为成功对话。独立被动诊断 artifact 只记录 Core callback 标签与长度，第二个纯文本问题仍没有 `text_chunk` 或 `thinking_chunk`；source diff、artifact hash 和计数见同一证据。诊断源码已逐字节恢复，正式 artifact 已重新启动。该观察把空正文定位到 Core callback 之前，未区分远端 SSE 与 Core 解析原因；本地真实 Agent Host 的四协议 fixture 通过不能替代这两个线上模型的非空回复验收。此证据不证明线上 Messages/Responses、图片输入理解、其他平台或完整桌面体验。
+
+### E-WIN-METASK-DIRECT-CHAT-API-20261014
+
+2026-10-14，通过临时 Application-owned HTTP 诊断直接请求真实 `/v1/chat/completions`，OAuth credential 留在 Host，不调用 AgentCore。GLM 与豆包的非流式 JSON 和流式 SSE 均 HTTP 200 且返回非空正文，详情见[直接 API 与 Core 回放证据](evidence/metask-direct-chat-api-windows-20261014.json)。线上有正文的 SSE chunk 同时携带 `usage: null`。诊断源码逐字节恢复，正式 artifact 已重新启动；没有修改 dependency、lock 或 verifier。
+
+当前 canonical AgentCore 的官方 SDK 独立消费者对照回放确认：同一文本 SSE 仅增加 `usage: null` 就会丢失全部 `text_chunk`，首轮正文断言明确失败；对照正常。锁定源 `c4b0af79fe20b1bb8e8516ec9b0fe1de8feb8644` 的 `OpenAIStream.parseChunk` 只检查 `usage` 字段存在，先返回 usage event，跳过同 chunk 的正文/思考/finish reason。该最小反例与线上 chunk 结构及此前空正文 callback 证据一致，定位当前 bundle 的解析缺陷；此前完整 fixture 通过不能宣称覆盖了此形态。依赖修复及真实 Task 非空回复仍需验证，不把直接 API 成功作为产品 Run 已修复的证明。
+
 ## 未闭合验证缺口
 
 本节只防止错误能力声明。行为、边界和产品开放条件仍由所列真源定义；测试清单和逐项断言不在这里维护。
 
 | 能力                                                                                   | 状态                                                                                                                                                       | 关闭所需证据                                                                                                                                                                      | 真源                                                                                                                                                   |
 | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Metask 豆包与 GLM 的 Chat 非空正文 | 直接 JSON/SSE 有正文；当前 canonical Core 把含 `usage: null` 的正文 chunk 当作 usage 而跳过文本，官方 SDK 对照回放已复现 | 经 canonical dependency 修复关闭 `usage: null` 最小反例，并以真实服务得到非空 Core text event 与最终 Task response；不得用 completed、usage 或直接 API 成功替代 | [Product 架构](product-architecture.md#21-models-aggregate-与-account-handoff)、[AgentCore 集成契约](agentcore-integration.md) |
 | AgentCore 独立 Worker、crash、async pending、suspend/resume、跨进程 in-flight recovery | 尚未实现                                                                                                                                                   | Worker fault-domain 与恢复 lifecycle/vertical                                                                                                                                     | [高层架构](architecture.md)、[产品需求](requirements.md)                                                                                               |
 | strict Workspace security、正式 Host tools                                             | 尚未完成安全验收                                                                                                                                           | authority、process tree、filesystem、network 与跨平台安全证据                                                                                                                     | [产品需求](requirements.md)                                                                                                                            |
 | PermissionProfile 其他平台 artifact 行为                                               | 双档产品能力已开放；当前 Windows x86_64 exact artifact probe 已通过；macOS 既有证据属于旧 revision，尚缺当前 artifact；Windows arm64 尚缺真机 probe                         | macOS 当前 revision exact artifact、probe 与 vertical；Windows arm64 exact artifact 真机 probe                                                                                                                                           | [产品需求](requirements.md)、[AgentCore 集成契约](agentcore-integration.md)                                                                            |

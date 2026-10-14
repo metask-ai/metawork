@@ -22,7 +22,6 @@ pub const Error = error{
     ProtocolInvalid,
     CatalogTooLarge,
     CatalogFieldTooLarge,
-    NoModels,
     ModelNotFound,
     SourceCandidateInvalid,
     OutOfMemory,
@@ -39,7 +38,6 @@ pub fn errorCode(err: Error) contract.ModelsError {
         error.ProtocolInvalid => .catalog_invalid,
         error.CatalogTooLarge => .catalog_too_large,
         error.CatalogFieldTooLarge => .catalog_too_large,
-        error.NoModels => .no_models,
         error.ModelNotFound,
         error.SourceCandidateInvalid,
         => .catalog_invalid,
@@ -117,6 +115,7 @@ const ModelEntry = struct {
     id: ModelId,
     display_name: ModelDisplayName,
     metadata: contract.ModelMetadata = .{},
+    protocol: contract.Protocol,
 };
 
 pub const CatalogSession = struct {
@@ -186,8 +185,8 @@ pub const CatalogSession = struct {
     ) Error!contract.OwnedSourceCandidate {
         if (metask_source_generation == 0)
             return error.SourceCandidateInvalid;
-        if (self.findModel(model_id) == null)
-            return error.ModelNotFound;
+        const model_index = self.findModel(model_id) orelse return error.ModelNotFound;
+        const protocol = self.models.items[model_index].protocol;
         if (self.credential.view().len == 0)
             return error.SourceCandidateInvalid;
 
@@ -198,7 +197,7 @@ pub const CatalogSession = struct {
         errdefer if (owned_model) |bytes| self.allocator.free(bytes);
         var owned_base_url: ?[]u8 = self.allocator.dupe(
             u8,
-            anthropic_messages_url,
+            contract.metaskEndpoint(protocol) orelse return error.SourceCandidateInvalid,
         ) catch return error.OutOfMemory;
         errdefer if (owned_base_url) |bytes| self.allocator.free(bytes);
         // The Models source retains its runtime credential so it can issue
@@ -215,7 +214,7 @@ pub const CatalogSession = struct {
         var result = contract.OwnedSourceCandidate.initOwned(
             self.allocator,
             .metask,
-            .anthropic_messages,
+            protocol,
             transferred_model,
             transferred_base_url,
             metask_source_generation,
@@ -246,8 +245,10 @@ pub const CatalogSession = struct {
         return output[0..self.models.items.len];
     }
 
-    pub fn selectedProtocol(self: *const CatalogSession) ?contract.Protocol {
-        return if (self.credential.view().len == 0) null else .anthropic_messages;
+    pub fn modelProtocol(self: *const CatalogSession, model_id: []const u8) ?contract.Protocol {
+        if (self.credential.view().len == 0) return null;
+        const index = self.findModel(model_id) orelse return null;
+        return self.models.items[index].protocol;
     }
 
     pub fn ownsSourceSelection(
@@ -283,29 +284,16 @@ pub const CatalogSession = struct {
 };
 
 pub const OwnedCatalogCompletion = struct {
-    allocator: std.mem.Allocator,
     session: CatalogSession,
-    selected_model_id: []u8,
     owned: bool = true,
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        session: *CatalogSession,
-        selected_model_id: []const u8,
-    ) Error!OwnedCatalogCompletion {
-        if (!session.hasModel(selected_model_id)) return error.ModelNotFound;
-        const model = allocator.dupe(u8, selected_model_id) catch return error.OutOfMemory;
-        return .{
-            .allocator = allocator,
-            .session = session.take(),
-            .selected_model_id = model,
-        };
+    pub fn init(session: *CatalogSession) OwnedCatalogCompletion {
+        return .{ .session = session.take() };
     }
 
     pub fn deinit(self: *OwnedCatalogCompletion) void {
         if (!self.owned) return;
         self.session.deinit();
-        self.allocator.free(self.selected_model_id);
         self.* = undefined;
     }
 
@@ -412,6 +400,20 @@ pub const PublicCatalog = struct {
 };
 
 pub const TestSupport = if (builtin.is_test) struct {
+    pub fn loadCatalogResponse(session: *CatalogSession, principal_ref: []const u8, access_token: []const u8, response_body: []const u8) !void {
+        const Fake = struct {
+            body: []const u8,
+            fn perform(context: *anyopaque, _: transport_api.Request, output: []u8) transport_api.TransportError!transport_api.Response {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                if (self.body.len > output.len) return error.ResponseTooLarge;
+                @memcpy(output[0..self.body.len], self.body);
+                return .{ .status = 200, .body = output[0..self.body.len] };
+            }
+        };
+        var fake: Fake = .{ .body = response_body };
+        try session.loadModels(.{ .context = &fake, .perform_fn = Fake.perform }, access_token, principal_ref, null);
+    }
+
     pub fn replaceOwnedCatalog(
         session: *CatalogSession,
         account_id: []const u8,
@@ -426,6 +428,7 @@ pub const TestSupport = if (builtin.is_test) struct {
                 .id = try .init(model.id),
                 .display_name = try .optional(model.display_name),
                 .metadata = model.metadata,
+                .protocol = .anthropic_messages,
             }) catch return error.OutOfMemory;
         }
     }
@@ -484,9 +487,38 @@ const ModelWire = struct {
 
 const CapabilityWire = struct { supported: ?bool = null };
 
+const ModelEndpointsWire = struct {
+    messages: ?CapabilityWire = null,
+    responses: ?CapabilityWire = null,
+    chat_completions: ?CapabilityWire = null,
+    images_generations: ?CapabilityWire = null,
+    videos: ?CapabilityWire = null,
+    embeddings: ?CapabilityWire = null,
+
+    fn selectedProtocol(self: ModelEndpointsWire) ?contract.Protocol {
+        if (supported(self.messages)) return .anthropic_messages;
+        if (supported(self.responses)) return .openai_responses;
+        if (supported(self.chat_completions)) return .openai_chat_completions;
+        return null;
+    }
+};
+
 const ModelCapabilitiesWire = struct {
-    image_input: ?CapabilityWire = null,
-    pdf_input: ?CapabilityWire = null,
+    endpoints: ?ModelEndpointsWire = null,
+    input: ?struct {
+        text: ?CapabilityWire = null,
+        audio: ?CapabilityWire = null,
+        video: ?CapabilityWire = null,
+        image: ?CapabilityWire = null,
+        pdf: ?CapabilityWire = null,
+    } = null,
+    output: ?struct {
+        text: ?CapabilityWire = null,
+        image: ?CapabilityWire = null,
+        audio: ?CapabilityWire = null,
+        video: ?CapabilityWire = null,
+        embedding: ?CapabilityWire = null,
+    } = null,
     batch: ?CapabilityWire = null,
     citations: ?CapabilityWire = null,
     code_execution: ?CapabilityWire = null,
@@ -514,29 +546,47 @@ const ModelCapabilitiesWire = struct {
 
     fn projection(self: ModelCapabilitiesWire) contract.ModelCapabilities {
         var result: contract.ModelCapabilities = .{
-            .image_input = supported(self.image_input),
-            .pdf_input = supported(self.pdf_input),
+            .text_input = if (self.input) |input| supported(input.text) else false,
+            .audio_input = if (self.input) |input| supported(input.audio) else false,
+            .video_input = if (self.input) |input| supported(input.video) else false,
+            .output = .{
+                .text = if (self.output) |output| supported(output.text) else false,
+                .image = if (self.output) |output| supported(output.image) else false,
+                .audio = if (self.output) |output| supported(output.audio) else false,
+                .video = if (self.output) |output| supported(output.video) else false,
+                .embedding = if (self.output) |output| supported(output.embedding) else false,
+            },
+            .image_input = if (self.input) |input| supported(input.image) else false,
+            .pdf_input = if (self.input) |input| supported(input.pdf) else false,
             .batch = supported(self.batch),
             .citations = supported(self.citations),
             .code_execution = supported(self.code_execution),
             .structured_outputs = supported(self.structured_outputs),
+            .thinking = .{ .supported = false, .adaptive = false, .enabled = false },
+            .effort = .{ .supported = false, .low = false, .medium = false, .high = false, .max = false },
+            .context_management = .{
+                .supported = false,
+                .clear_thinking_20251015 = false,
+                .clear_tool_uses_20250919 = false,
+                .compact_20260112 = false,
+            },
         };
         if (self.thinking) |thinking| {
-            result.thinking.supported = thinking.supported;
+            result.thinking.supported = thinking.supported orelse false;
             if (thinking.types) |types| {
                 result.thinking.adaptive = supported(types.adaptive);
                 result.thinking.enabled = supported(types.enabled);
             }
         }
         if (self.effort) |effort| result.effort = .{
-            .supported = effort.supported,
+            .supported = effort.supported orelse false,
             .low = supported(effort.low),
             .medium = supported(effort.medium),
             .high = supported(effort.high),
             .max = supported(effort.max),
         };
         if (self.context_management) |context| result.context_management = .{
-            .supported = context.supported,
+            .supported = context.supported orelse false,
             .clear_thinking_20251015 = supported(context.clear_thinking_20251015),
             .clear_tool_uses_20250919 = supported(context.clear_tool_uses_20250919),
             .compact_20260112 = supported(context.compact_20260112),
@@ -545,8 +595,8 @@ const ModelCapabilitiesWire = struct {
     }
 };
 
-fn supported(capability: ?CapabilityWire) ?bool {
-    return if (capability) |value| value.supported else null;
+fn supported(capability: ?CapabilityWire) bool {
+    return if (capability) |value| value.supported orelse false else false;
 }
 
 fn tokenLimit(value: std.json.Value) Error!?u64 {
@@ -595,26 +645,33 @@ fn parseModels(
 
     var result: ParsedModels = .{ .allocator = allocator };
     errdefer result.deinit();
-    for (response.data) |model| {
+    for (response.data, 0..) |model, index| {
         if (!std.mem.eql(u8, model.object, "model") or
             !std.mem.eql(u8, model.type, "model"))
             return error.ProtocolInvalid;
         const id = try ModelId.init(model.id);
-        for (result.entries.items) |*existing| {
-            if (std.mem.eql(u8, existing.id.view(), id.view()))
+        for (response.data[0..index]) |existing| {
+            if (std.mem.eql(u8, existing.id, id.view()))
                 return error.ProtocolInvalid;
         }
-        result.entries.append(allocator, .{
+        const capabilities: ModelCapabilitiesWire = model.capabilities orelse .{};
+        var entry: ModelEntry = .{
             .id = id,
+            .protocol = undefined,
             .display_name = try .optional(model.display_name orelse ""),
             .metadata = .{
                 .max_input_tokens = try tokenLimit(model.max_input_tokens),
                 .max_output_tokens = try tokenLimit(model.max_tokens),
-                .capabilities = if (model.capabilities) |value| value.projection() else .{},
+                .capabilities = capabilities.projection(),
             },
-        }) catch return error.OutOfMemory;
+        };
+        // Endpoint declarations own both model purpose and execution protocol.
+        // A dialogue endpoint does not admit a mixed media-generation model.
+        const endpoints: ModelEndpointsWire = capabilities.endpoints orelse .{};
+        if (supported(endpoints.images_generations) or supported(endpoints.videos)) continue;
+        entry.protocol = endpoints.selectedProtocol() orelse continue;
+        result.entries.append(allocator, entry) catch return error.OutOfMemory;
     }
-    if (result.entries.items.len == 0) return error.NoModels;
     return result;
 }
 
@@ -701,7 +758,7 @@ const model_fixture =
     \\{"object":"list","data":[{"id":"model-1","object":"model",
     \\"created":1,"owned_by":"Metask","type":"model",
     \\"display_name":"Model 1","created_at":"2026-07-20T00:00:00Z",
-    \\"max_input_tokens":0,"max_tokens":0}],
+    \\"max_input_tokens":0,"max_tokens":0,"capabilities":{"endpoints":{"messages":{"supported":true}}}}],
     \\"first_id":"model-1","last_id":"model-1","has_more":false,
     \\"remaining":0,"unit":"model"}
 ;
@@ -709,8 +766,8 @@ const model_fixture =
 const declared_model_fixture =
     \\{"object":"list","has_more":false,"data":[{
     \\"id":"model-1","object":"model","type":"model","display_name":"Model 1",
-    \\"max_input_tokens":1048576,"max_tokens":64000,"capabilities":{
-    \\"image_input":{"supported":false},"pdf_input":{"supported":false},
+    \\"max_input_tokens":1048576,"max_tokens":64000,"capabilities":{"endpoints":{"messages":{"supported":true}},
+    \\"input":{"image":{"supported":true},"pdf":{"supported":true}},
     \\"batch":{"supported":false},"citations":{"supported":false},
     \\"code_execution":{"supported":false},"structured_outputs":{"supported":true},
     \\"thinking":{"supported":true,"types":{"adaptive":{"supported":false},"enabled":{"supported":true}}},
@@ -724,8 +781,12 @@ test "model declarations survive owned catalog copies and never leak into a repl
         .max_input_tokens = 1048576,
         .max_output_tokens = 64000,
         .capabilities = .{
-            .image_input = false,
-            .pdf_input = false,
+            .text_input = false,
+            .audio_input = false,
+            .video_input = false,
+            .output = .{ .text = false, .image = false, .audio = false, .video = false, .embedding = false },
+            .image_input = true,
+            .pdf_input = true,
             .batch = false,
             .citations = false,
             .code_execution = false,
@@ -758,24 +819,31 @@ test "model declarations survive owned catalog copies and never leak into a repl
     session.models = parsed.entries;
     parsed.entries = .empty;
     committed.replaceFromSession(&session);
-    try std.testing.expectEqualDeep(contract.ModelMetadata{}, committed.modelViews()[0].metadata);
+    try std.testing.expectEqualDeep(contract.ModelMetadata{ .capabilities = (ModelCapabilitiesWire{}).projection() }, committed.modelViews()[0].metadata);
 }
 
-test "model declarations distinguish unknown, supported, and unsupported without coercion" {
+test "Metask capabilities default to unsupported without coercion" {
     const prefix = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\"";
-    const cases = [_]struct { fields: []const u8, expected: contract.ModelMetadata }{
-        .{ .fields = "", .expected = .{} },
-        .{ .fields = ",\"max_input_tokens\":null,\"max_tokens\":0,\"capabilities\":null", .expected = .{} },
-        .{ .fields = ",\"capabilities\":{\"image_input\":null,\"pdf_input\":{},\"thinking\":{\"types\":null},\"effort\":null}", .expected = .{} },
-        .{ .fields = ",\"capabilities\":{\"image_input\":{\"supported\":true},\"pdf_input\":{\"supported\":false},\"batch\":{\"supported\":null}}", .expected = .{ .capabilities = .{ .image_input = true, .pdf_input = false } } },
-        .{ .fields = ",\"max_input_tokens\":18446744073709551615,\"max_tokens\":1", .expected = .{ .max_input_tokens = std.math.maxInt(u64), .max_output_tokens = 1 } },
+    const unsupported_metadata: contract.ModelMetadata = .{ .capabilities = (ModelCapabilitiesWire{}).projection() };
+    const image_capabilities = blk: {
+        var capabilities = (ModelCapabilitiesWire{}).projection();
+        capabilities.image_input = true;
+        break :blk capabilities;
+    };
+    const cases = [_]struct { fields: []const u8, expected: contract.ModelMetadata, eligible: bool = true }{
+        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}", .expected = unsupported_metadata },
+        .{ .fields = ",\"max_input_tokens\":null,\"max_tokens\":0,\"capabilities\":null", .expected = unsupported_metadata, .eligible = false },
+        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"input\":{\"image\":null,\"pdf\":{}},\"thinking\":{\"types\":null},\"effort\":null}", .expected = unsupported_metadata },
+        .{ .fields = ",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"input\":{\"image\":{\"supported\":true},\"pdf\":{\"supported\":false}},\"batch\":{\"supported\":null}}", .expected = .{ .capabilities = image_capabilities } },
+        .{ .fields = ",\"max_input_tokens\":18446744073709551615,\"max_tokens\":1,\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}", .expected = .{ .max_input_tokens = std.math.maxInt(u64), .max_output_tokens = 1, .capabilities = unsupported_metadata.capabilities } },
     };
     for (cases) |case| {
         const body = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}}}]}}", .{ prefix, case.fields });
         defer std.testing.allocator.free(body);
         var models = try parseModels(std.testing.allocator, body);
         defer models.deinit();
-        try std.testing.expectEqualDeep(case.expected, models.entries.items[0].metadata);
+        try std.testing.expectEqual(@as(usize, if (case.eligible) 1 else 0), models.entries.items.len);
+        if (case.eligible) try std.testing.expectEqualDeep(case.expected, models.entries.items[0].metadata);
     }
     const invalid_fields = [_][]const u8{
         ",\"max_input_tokens\":\"1024\"",
@@ -787,8 +855,8 @@ test "model declarations distinguish unknown, supported, and unsupported without
         ",\"max_tokens\":true",
         ",\"max_input_tokens\":{}",
         ",\"capabilities\":false",
-        ",\"capabilities\":{\"image_input\":true}",
-        ",\"capabilities\":{\"pdf_input\":{\"supported\":1}}",
+        ",\"capabilities\":{\"input\":{\"image\":true}}",
+        ",\"capabilities\":{\"input\":{\"pdf\":{\"supported\":1}}}",
         ",\"capabilities\":{\"thinking\":{\"types\":{\"adaptive\":{\"supported\":\"true\"}}}}",
         ",\"capabilities\":{\"effort\":{\"low\":{\"supported\":[]}}}",
         ",\"capabilities\":{\"context_management\":{\"compact_20260112\":{\"supported\":{}}}}",
@@ -931,4 +999,225 @@ test "catalog status mapping is fail closed" {
         requireSuccess(503),
     );
     try std.testing.expectError(error.ProtocolInvalid, requireSuccess(302));
+}
+
+test "empty catalog is a valid authoritative result" {
+    var models = try parseModels(std.testing.allocator, "{\"object\":\"list\",\"has_more\":false,\"data\":[]}");
+    defer models.deinit();
+    try std.testing.expectEqual(@as(usize, 0), models.entries.items.len);
+}
+
+test "endpoint declarations classify dialogue and exclude media generation models" {
+    const cases = [_]struct { endpoints: []const u8, count: usize }{
+        .{ .endpoints = "{\"messages\":{\"supported\":true}}", .count = 1 },
+        .{ .endpoints = "{\"messages\":{\"supported\":true},\"images_generations\":null,\"videos\":{}}", .count = 1 },
+        .{ .endpoints = "{\"chat_completions\":{\"supported\":true},\"images_generations\":{\"supported\":null}}", .count = 1 },
+        .{ .endpoints = "{\"responses\":{\"supported\":true},\"images_generations\":{\"supported\":false},\"videos\":{\"supported\":false}}", .count = 1 },
+        .{ .endpoints = "{\"messages\":{\"supported\":true},\"images_generations\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"chat_completions\":{\"supported\":true},\"videos\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"responses\":{\"supported\":true},\"images_generations\":{\"supported\":true},\"videos\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"images_generations\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"videos\":{\"supported\":true}}", .count = 0 },
+        .{ .endpoints = "{\"embeddings\":{\"supported\":true}}", .count = 0 },
+    };
+    for (cases) |case| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"object\":\"list\",\"has_more\":false,\"data\":[{{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{{\"endpoints\":{s}}}}}]}}", .{case.endpoints});
+        defer std.testing.allocator.free(body);
+        var parsed = try parseModels(std.testing.allocator, body);
+        defer parsed.deinit();
+        try std.testing.expectEqual(case.count, parsed.entries.items.len);
+    }
+}
+
+test "excluded media models cannot hide invalid catalog metadata or duplicate identity" {
+    const cases = [_][]const u8{
+        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":\"true\"}}}}]}",
+        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"videos\":true}}}]}",
+        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"max_tokens\":-1,\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}",
+        "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}},{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\"}]}",
+    };
+    for (cases) |body| {
+        try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
+    }
+}
+
+test "media generation endpoints exclude source resolution and public catalog" {
+    var session = CatalogSession.init(std.testing.allocator);
+    defer session.deinit();
+    session.owner_account_id = try .init("account-1");
+    session.credential = try Secret.init(std.testing.allocator, "oauth-access");
+    var parsed = try parseModels(std.testing.allocator, "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"chat_completions\":{\"supported\":true},\"images_generations\":{\"supported\":true}}}},{\"id\":\"chat\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}");
+    session.models = parsed.entries;
+    parsed.entries = .empty;
+    try std.testing.expect(!session.hasModel("media"));
+    try std.testing.expectError(error.ModelNotFound, session.prepareSourceCandidate("media", 1));
+    try std.testing.expectEqualStrings("chat", session.firstModelId().?);
+    var catalog: PublicCatalog = .{};
+    catalog.replaceFromSession(&session);
+    try std.testing.expectEqual(@as(usize, 1), catalog.modelViews().len);
+    try std.testing.expectEqualStrings("chat", catalog.modelViews()[0].id);
+}
+
+test "endpoint declarations choose a deterministic protocol with no implicit support" {
+    const prefix = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"model\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":";
+    const cases = [_]struct { endpoints: []const u8, protocol: ?contract.Protocol }{
+        .{ .endpoints = "null", .protocol = null },
+        .{ .endpoints = "{}", .protocol = null },
+        .{ .endpoints = "{\"messages\":null,\"responses\":{},\"chat_completions\":{\"supported\":null}}", .protocol = null },
+        .{ .endpoints = "{\"messages\":{\"supported\":false,\"status\":\"unknown\"},\"responses\":{\"supported\":false},\"chat_completions\":{\"supported\":false}}", .protocol = null },
+        .{ .endpoints = "{\"messages\":{\"supported\":true},\"responses\":{\"supported\":true},\"chat_completions\":{\"supported\":true}}", .protocol = .anthropic_messages },
+        .{ .endpoints = "{\"responses\":{\"supported\":true},\"messages\":{\"supported\":false},\"chat_completions\":{\"supported\":true}}", .protocol = .openai_responses },
+        .{ .endpoints = "{\"chat_completions\":{\"supported\":true},\"responses\":{\"supported\":false},\"messages\":{\"supported\":false}}", .protocol = .openai_chat_completions },
+    };
+    for (cases) |case| {
+        const body = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, case.endpoints, "}}]}" });
+        defer std.testing.allocator.free(body);
+        var parsed = try parseModels(std.testing.allocator, body);
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(usize, if (case.protocol != null) 1 else 0), parsed.entries.items.len);
+        if (case.protocol) |protocol| {
+            var session = CatalogSession.init(std.testing.allocator);
+            defer session.deinit();
+            session.models = parsed.entries;
+            parsed.entries = .empty;
+            session.credential = try Secret.init(std.testing.allocator, "oauth-access");
+            session.owner_account_id = try .init("principal");
+            try std.testing.expectEqual(protocol, session.modelProtocol("model").?);
+            var candidate = try session.prepareSourceCandidate("model", 17);
+            defer candidate.deinit();
+            try std.testing.expectEqual(protocol, candidate.input().target.protocol);
+            try std.testing.expectEqualStrings(contract.metaskEndpoint(protocol).?, candidate.input().target.base_url);
+            try contract.validateMetaskSourceCandidate(candidate.input());
+        }
+    }
+    var missing = try parseModels(std.testing.allocator, "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"model\",\"object\":\"model\",\"type\":\"model\"}]}");
+    defer missing.deinit();
+    try std.testing.expectEqual(@as(usize, 0), missing.entries.items.len);
+}
+
+test "invalid endpoint supported declarations reject the whole response" {
+    const prefix = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"model\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":";
+    for ([_][]const u8{ "true", "{\"messages\":true}", "{\"responses\":{\"supported\":\"true\"}}", "{\"chat_completions\":{\"supported\":1}}" }) |endpoints| {
+        const body = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, endpoints, "}}]}" });
+        defer std.testing.allocator.free(body);
+        try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
+    }
+}
+
+test "only endpoints decide admission despite redundant output declarations" {
+    const cases = [_]struct { body: []const u8, count: usize }{
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"image_output\":{\"supported\":true},\"video_output\":{\"supported\":true},\"output\":{\"image\":{\"supported\":true},\"video\":{\"supported\":true}}}}]}", .count = 1 },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"chat_completions\":{\"supported\":true,\"input\":[\"image\"],\"output\":[\"image\",\"video\"]}},\"image_input\":{\"supported\":true}}}]}", .count = 1 },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true},\"images_generations\":{\"supported\":true}},\"image_output\":{\"supported\":false},\"output\":{\"image\":{\"supported\":false}}}}]}", .count = 0 },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"media\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"image_output\":{\"supported\":false},\"text_output\":{\"supported\":true},\"output\":{\"text\":{\"supported\":true}}}}]}", .count = 0 },
+    };
+    for (cases) |case| {
+        var parsed = try parseModels(std.testing.allocator, case.body);
+        defer parsed.deinit();
+        try std.testing.expectEqual(case.count, parsed.entries.items.len);
+    }
+}
+
+test "input image and pdf declarations are authoritative without legacy or document fallback" {
+    const cases = [_]struct { body: []const u8, image: bool, pdf: bool }{
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":null,\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{\"image\":null,\"pdf\":{\"supported\":null}},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{\"image\":{\"supported\":true},\"pdf\":{\"supported\":true}},\"image_input\":{\"supported\":false},\"pdf_input\":{\"supported\":false},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = true, .pdf = true },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{\"image\":{\"supported\":false},\"pdf\":{\"supported\":false},\"document\":{\"supported\":true}},\"image_input\":{\"supported\":true},\"pdf_input\":{\"supported\":true},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"input\":{\"image\":{\"supported\":true},\"document\":{\"supported\":true}},\"pdf_input\":{\"supported\":true},\"limits\":{\"document\":{\"formats\":[\"application/pdf\"]}},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = true, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"image_input\":{\"supported\":true},\"pdf_input\":{\"supported\":true},\"endpoints\":{\"messages\":{\"supported\":true}}}}]}", .image = false, .pdf = false },
+        .{ .body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true,\"input\":[\"image\",\"pdf\"]}}}}]}", .image = false, .pdf = false },
+    };
+    for (cases) |case| {
+        var parsed = try parseModels(std.testing.allocator, case.body);
+        defer parsed.deinit();
+        try std.testing.expectEqual(@as(usize, 1), parsed.entries.items.len);
+        const caps = parsed.entries.items[0].metadata.capabilities;
+        try std.testing.expectEqual(@as(?bool, case.image), caps.image_input);
+        try std.testing.expectEqual(@as(?bool, case.pdf), caps.pdf_input);
+    }
+}
+
+test "input declarations reject malformed known fields" {
+    const inputs = [_][]const u8{
+        "true",
+        "[]",
+        "{\"image\":false}",
+        "{\"image\":{\"supported\":1}}",
+        "{\"pdf\":true}",
+        "{\"pdf\":{\"supported\":\"true\"}}",
+        "{\"pdf\":{\"supported\":[]}}",
+    };
+    for (inputs) |input| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"object\":\"list\",\"has_more\":false,\"data\":[{{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{{\"input\":{s},\"endpoints\":{{\"messages\":{{\"supported\":true}}}}}}}}]}}", .{input});
+        defer std.testing.allocator.free(body);
+        try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
+    }
+}
+
+test "all global input and output supported declarations use exact booleans" {
+    inline for (.{ "input", "output" }) |direction| {
+        inline for (if (comptime std.mem.eql(u8, direction, "input")) .{ "text", "image", "pdf", "audio", "video" } else .{ "text", "image", "audio", "video", "embedding" }) |kind| {
+            inline for (.{ "true", "false", "null" }) |flag| {
+                const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"messages\":{\"supported\":true}},\"" ++ direction ++ "\":{\"" ++ kind ++ "\":{\"supported\":" ++ flag ++ "}}}}]}";
+                var parsed = try parseModels(std.testing.allocator, body);
+                defer parsed.deinit();
+                const caps = parsed.entries.items[0].metadata.capabilities;
+                const actual = if (comptime std.mem.eql(u8, direction, "input")) @field(caps, kind ++ "_input") else @field(caps.output, kind);
+                try std.testing.expectEqual(@as(?bool, std.mem.eql(u8, flag, "true")), actual);
+            }
+            inline for (.{ "1", "\"true\"", "[]", "{}" }) |flag| {
+                const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"" ++ direction ++ "\":{\"" ++ kind ++ "\":{\"supported\":" ++ flag ++ "}}}}]}";
+                try std.testing.expectError(error.ProtocolInvalid, parseModels(std.testing.allocator, body));
+            }
+        }
+    }
+}
+
+test "root tokens and full modalities survive catalog ownership and authoritative replacement" {
+    const body =
+        \\{"object":"list","has_more":false,"data":[{"id":"m","object":"model","type":"model",
+        \\"max_input_tokens":1000000,"max_tokens":131072,"capabilities":{"endpoints":{"responses":{"supported":true}},
+        \\"input":{"text":{"supported":true},"image":{"supported":true},"pdf":{"supported":true},"audio":{"supported":true},"video":{"supported":true}},
+        \\"output":{"text":{"supported":true},"image":{"supported":true},"audio":{"supported":true},"video":{"supported":true},"embedding":{"supported":true}},
+        \\"limits":{"max_input_tokens":1,"max_output_tokens":2}}}]}
+    ;
+    var session = CatalogSession.init(std.testing.allocator);
+    defer session.deinit();
+    const catalog = try std.testing.allocator.create(PublicCatalog);
+    defer std.testing.allocator.destroy(catalog);
+    catalog.* = .{};
+    try TestSupport.loadCatalogResponse(&session, "principal", "access", body);
+    catalog.replaceFromSession(&session);
+    session.reset();
+    const metadata = catalog.modelViews()[0].metadata;
+    try std.testing.expectEqual(@as(?u64, 1000000), metadata.max_input_tokens);
+    try std.testing.expectEqual(@as(?u64, 131072), metadata.max_output_tokens);
+    inline for (.{ "text", "image", "pdf", "audio", "video" }) |kind|
+        try std.testing.expectEqual(@as(?bool, true), @field(metadata.capabilities, kind ++ "_input"));
+    inline for (.{ "text", "image", "audio", "video", "embedding" }) |kind|
+        try std.testing.expectEqual(@as(?bool, true), @field(metadata.capabilities.output, kind));
+    try TestSupport.loadCatalogResponse(&session, "principal", "access", model_fixture);
+    catalog.replaceFromSession(&session);
+    try std.testing.expectEqualDeep(contract.ModelMetadata{ .capabilities = (ModelCapabilitiesWire{}).projection() }, catalog.modelViews()[0].metadata);
+}
+
+test "root token fields are authoritative and nested limits are ignored" {
+    const cases = [_]struct { root: []const u8, limits: []const u8, input: ?u64 = null, output: ?u64 = null }{
+        .{ .root = ",\"max_input_tokens\":12,\"max_tokens\":34", .limits = "{\"max_input_tokens\":56,\"max_output_tokens\":78}", .input = 12, .output = 34 },
+        .{ .root = "", .limits = "{\"max_input_tokens\":56,\"max_output_tokens\":78}" },
+        .{ .root = ",\"max_input_tokens\":null,\"max_tokens\":0", .limits = "{\"max_input_tokens\":56,\"max_output_tokens\":78}" },
+        .{ .root = ",\"max_input_tokens\":12,\"max_tokens\":34", .limits = "false", .input = 12, .output = 34 },
+        .{ .root = ",\"max_input_tokens\":12,\"max_tokens\":34", .limits = "{\"max_input_tokens\":-1,\"image\":{\"formats\":[1]}}", .input = 12, .output = 34 },
+    };
+    for (cases) |case| {
+        const body = try std.fmt.allocPrint(std.testing.allocator, "{{\"object\":\"list\",\"has_more\":false,\"data\":[{{\"id\":\"m\",\"object\":\"model\",\"type\":\"model\"{s},\"capabilities\":{{\"limits\":{s},\"endpoints\":{{\"messages\":{{\"supported\":true}}}}}}}}]}}", .{ case.root, case.limits });
+        defer std.testing.allocator.free(body);
+        var parsed = try parseModels(std.testing.allocator, body);
+        defer parsed.deinit();
+        try std.testing.expectEqual(case.input, parsed.entries.items[0].metadata.max_input_tokens);
+        try std.testing.expectEqual(case.output, parsed.entries.items[0].metadata.max_output_tokens);
+    }
 }

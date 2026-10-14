@@ -134,6 +134,16 @@ export type ModelMetadata = {
   maxInputTokens: string | null;
   maxOutputTokens: string | null;
   capabilities: {
+    textInput: boolean | null;
+    audioInput: boolean | null;
+    videoInput: boolean | null;
+    output: {
+      text: boolean | null;
+      image: boolean | null;
+      audio: boolean | null;
+      video: boolean | null;
+      embedding: boolean | null;
+    };
     imageInput: boolean | null;
     pdfInput: boolean | null;
     batch: boolean | null;

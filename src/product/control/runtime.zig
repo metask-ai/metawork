@@ -5946,6 +5946,10 @@ pub const Runtime = struct {
             .maxInputTokens = input,
             .maxOutputTokens = output,
             .capabilities = .{
+                .textInput = caps.text_input,
+                .audioInput = caps.audio_input,
+                .videoInput = caps.video_input,
+                .output = caps.output,
                 .imageInput = caps.image_input,
                 .pdfInput = caps.pdf_input,
                 .batch = caps.batch,
@@ -11010,7 +11014,7 @@ test "Product Control snapshot serializer preserves complete Account summary his
             },
         },
     });
-    var storage: [8192]u8 = undefined;
+    var storage: [16 * 1024]u8 = undefined;
     const snapshot = try control.writeSnapshot(&storage);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
     defer parsed.deinit();
@@ -18889,4 +18893,53 @@ test "approval projection writes deferred facts off-thread and unknown readback 
         try std.testing.expect(canonical.value.tasks[0].permission_review_delegated);
         try std.testing.expect(!control.task_runtime.approval_cleanup_leases.hasLive());
     }
+}
+
+test "authoritative empty catalog closes new default admission and preserves Task execution" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task_id = control.task_runtime.tasks[0].?.durable.id;
+    const old_admission = control.newTaskAdmissionView();
+    try std.testing.expect(old_admission.available);
+    try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalog(&control.custom_providers, "account-1", &.{}));
+    control.reconcileModelsDefaultNoFail(true, false);
+    control.finishExecutionCommitNoFail();
+    try std.testing.expect(!control.newTaskAdmissionView().available);
+    try std.testing.expect(!control.validNewTaskAdmission(old_admission.active_generation, old_admission.active_selection_revision));
+    try std.testing.expect(!control.scheduleExecutionBinding().available);
+    try std.testing.expectError(error.ExecutionUnavailable, control.createTask(.{
+        .workspace_root = "/must-not-be-opened",
+        .trust = .explicitly_trusted,
+    }));
+    const pinned = try control.task_runtime.testExecutionInput(task_id);
+    try std.testing.expectEqualStrings("fixture-model", pinned.target.model);
+    try std.testing.expectEqualStrings("SECRET-KEY", pinned.api_key);
+    try std.testing.expectEqual(old_admission.active_generation, pinned.execution_generation);
+    try std.testing.expectEqual(@as(@TypeOf(control.accountView().state), .authenticated), control.accountView().state);
+}
+
+test "complete model metadata Host projection matches the Renderer fixture" {
+    const metadata: models_contract.ModelMetadata = .{
+        .max_input_tokens = 1000000,
+        .max_output_tokens = 131072,
+        .capabilities = .{
+            .text_input = true,
+            .image_input = true,
+            .pdf_input = true,
+            .audio_input = true,
+            .video_input = true,
+            .output = .{ .text = true, .image = true, .audio = true, .video = true, .embedding = true },
+            .batch = false,
+            .citations = false,
+            .code_execution = false,
+            .structured_outputs = true,
+            .thinking = .{ .supported = true, .adaptive = false, .enabled = true },
+            .effort = .{ .supported = false, .low = false, .medium = false, .high = false, .max = false },
+            .context_management = .{ .supported = false, .clear_thinking_20251015 = false, .clear_tool_uses_20250919 = false, .compact_20260112 = false },
+        },
+    };
+    var storage: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try Runtime.writeModelMetadata(&writer, metadata);
+    try std.testing.expectEqualStrings(std.mem.trimEnd(u8, contract_fixture.model_metadata, "\r\n"), writer.buffered());
 }

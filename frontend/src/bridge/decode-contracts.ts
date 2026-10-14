@@ -1212,6 +1212,10 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
   ]);
   const capsPath = `${path}.capabilities`;
   const caps = object(item.capabilities, capsPath, [
+    "textInput",
+    "audioInput",
+    "videoInput",
+    "output",
     "imageInput",
     "pdfInput",
     "batch",
@@ -1221,6 +1225,13 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
     "thinking",
     "effort",
     "contextManagement",
+  ]);
+  const output = object(caps.output, `${capsPath}.output`, [
+    "text",
+    "image",
+    "audio",
+    "video",
+    "embedding",
   ]);
   const thinking = object(caps.thinking, `${capsPath}.thinking`, [
     "supported",
@@ -1254,6 +1265,19 @@ function decodeModelMetadata(value: unknown, path: string): ModelMetadata {
       `${path}.maxOutputTokens`,
     ),
     capabilities: {
+      textInput: nullableBoolean(caps.textInput, `${capsPath}.textInput`),
+      audioInput: nullableBoolean(caps.audioInput, `${capsPath}.audioInput`),
+      videoInput: nullableBoolean(caps.videoInput, `${capsPath}.videoInput`),
+      output: {
+        text: nullableBoolean(output.text, `${capsPath}.output.text`),
+        image: nullableBoolean(output.image, `${capsPath}.output.image`),
+        audio: nullableBoolean(output.audio, `${capsPath}.output.audio`),
+        video: nullableBoolean(output.video, `${capsPath}.output.video`),
+        embedding: nullableBoolean(
+          output.embedding,
+          `${capsPath}.output.embedding`,
+        ),
+      },
       imageInput: nullableBoolean(caps.imageInput, `${capsPath}.imageInput`),
       pdfInput: nullableBoolean(caps.pdfInput, `${capsPath}.pdfInput`),
       batch: nullableBoolean(caps.batch, `${capsPath}.batch`),
@@ -1941,22 +1965,8 @@ function decodeModels(value: unknown, path: string): ModelsView {
     item.defaultSelection,
     `${path}.defaultSelection`,
   );
-  for (const [name, selection] of [
-    ["metaskSelection", metaskSelection],
-    ["defaultSelection", defaultSelection],
-  ] as const) {
-    if (selection && selection.sourceId === "metask") {
-      const provider = providers.find((candidate) => candidate.id === "metask");
-      if (
-        provider?.catalogState === "ready" &&
-        !provider.models.some((model) => model.id === selection.modelId)
-      )
-        fail(
-          `${path}.${name}`,
-          "the selected Metask model must belong to its ready catalog",
-        );
-    }
-  }
+  // Durable selections are intent. An authoritative ready catalog can
+  // exclude them; Host admission and commands validate current membership.
   return {
     availability: enumValue(
       item.availability,

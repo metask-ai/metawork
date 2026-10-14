@@ -135,7 +135,6 @@ const CatalogJob = struct {
     notifier: ProbeNotifier,
     attempt_id: u64,
     authorization_generation: u64,
-    preferred_model_id: []u8,
     lease: account_contract.OwnedAuthorizationLease,
     lease_active: bool = true,
     cancellation: metask_transport.Cancellation,
@@ -156,8 +155,6 @@ const CatalogJob = struct {
         std.debug.assert(preparation.authorization_generation == lease.authorization_generation);
         const self = try allocator.create(CatalogJob);
         errdefer allocator.destroy(self);
-        const preferred_model_id = try allocator.dupe(u8, preparation.preferred_model_id);
-        errdefer allocator.free(preferred_model_id);
         self.* = .{
             .allocator = allocator,
             .io = io,
@@ -165,7 +162,6 @@ const CatalogJob = struct {
             .notifier = notifier,
             .attempt_id = preparation.attempt_id,
             .authorization_generation = preparation.authorization_generation,
-            .preferred_model_id = preferred_model_id,
             .lease = lease.take(),
             .cancellation = metask_transport.Cancellation.init(io),
         };
@@ -202,22 +198,7 @@ const CatalogJob = struct {
             self.error_code = models_metask.errorCode(err);
             return;
         };
-        const model_id = if (self.preferred_model_id.len != 0 and
-            session.hasModel(self.preferred_model_id))
-            self.preferred_model_id
-        else
-            session.firstModelId() orelse {
-                self.error_code = .no_models;
-                return;
-            };
-        self.completion = models_metask.OwnedCatalogCompletion.init(
-            self.allocator,
-            &session,
-            model_id,
-        ) catch |err| {
-            self.error_code = models_metask.errorCode(err);
-            return;
-        };
+        self.completion = models_metask.OwnedCatalogCompletion.init(&session);
     }
 
     fn cancel(self: *CatalogJob) void {
@@ -234,7 +215,6 @@ const CatalogJob = struct {
         std.debug.assert(self.thread == null);
         if (self.completion) |*completion| completion.deinit();
         if (self.lease_active) self.lease.deinit();
-        self.allocator.free(self.preferred_model_id);
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);

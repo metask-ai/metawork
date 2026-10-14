@@ -25,6 +25,15 @@ pub const metask_source_id = "metask";
 pub const metask_anthropic_messages_url =
     "https://app.metask-ai.com/v1/messages";
 
+pub fn metaskEndpoint(protocol: Protocol) ?[]const u8 {
+    return switch (protocol) {
+        .anthropic_messages => metask_anthropic_messages_url,
+        .openai_responses => "https://app.metask-ai.com/v1/responses",
+        .openai_chat_completions => "https://app.metask-ai.com/v1/chat/completions",
+        .gemini_native => null,
+    };
+}
+
 pub const ModelRef = struct {
     source_id: []const u8,
     model_id: []const u8,
@@ -96,6 +105,16 @@ pub const ModelsError = enum {
 
 /// Provider declarations, not MetaWork feature gates. null means unknown.
 pub const ModelCapabilities = struct {
+    text_input: ?bool = null,
+    audio_input: ?bool = null,
+    video_input: ?bool = null,
+    output: struct {
+        text: ?bool = null,
+        image: ?bool = null,
+        audio: ?bool = null,
+        video: ?bool = null,
+        embedding: ?bool = null,
+    } = .{},
     image_input: ?bool = null,
     pdf_input: ?bool = null,
     batch: ?bool = null,
@@ -173,7 +192,6 @@ pub const CatalogRefreshPreparation = struct {
     attempt_id: u64,
     principal_ref: []const u8,
     authorization_generation: u64,
-    preferred_model_id: []const u8,
 };
 
 pub const CatalogRefreshPrepareResult = union(enum) {
@@ -917,9 +935,8 @@ pub fn validateMetaskSourceCandidate(input: SourceCandidateInput) ValidationErro
     try validateSourceCandidateStructure(input);
     if (!std.mem.eql(u8, input.target.provider_id, metask_source_id))
         return error.InconsistentState;
-    if (input.target.protocol != .anthropic_messages)
-        return error.UnsupportedProtocol;
-    if (!std.mem.eql(u8, input.target.base_url, metask_anthropic_messages_url))
+    const endpoint = metaskEndpoint(input.target.protocol) orelse return error.UnsupportedProtocol;
+    if (!std.mem.eql(u8, input.target.base_url, endpoint))
         return error.InvalidBaseUrl;
 }
 

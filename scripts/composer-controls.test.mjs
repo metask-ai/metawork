@@ -2141,3 +2141,39 @@ test("approval pending, unavailable and unknown states admit no duplicate mode a
   await user.click(full);
   assert.equal(selected, 0);
 });
+
+test("Models lets an unavailable default be replaced from the current Host catalog", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  const view = renderSettings(readySettingsAccount, {
+    models: settingsModels({
+      models: [{ id: "model-2", displayName: "Model Two" }],
+    }),
+  });
+  assert.match(
+    screen.getByRole("alert").textContent,
+    /Choose another default model/,
+  );
+  assert.deepEqual(view.selections.model, []);
+  const selector = screen.getByRole("combobox", { name: "Default model" });
+  assert.equal(selector.disabled, false);
+  await user.click(selector);
+  assert.equal(screen.queryByRole("option", { name: /Model One/ }), null);
+  await user.click(await screen.findByRole("option", { name: /Model Two/ }));
+  assert.deepEqual(view.selections.model, ["model-2"]);
+});
+
+test("Models reports an authoritative empty conversation catalog without signing out", () => {
+  const view = renderSettings(readySettingsAccount, {
+    models: settingsModels(
+      { models: [], errorCode: "no_models" },
+      { errorCode: "no_models" },
+    ),
+  });
+  assert.match(screen.getByRole("alert").textContent, /No conversation models/);
+  assert.equal(
+    screen.getByRole("combobox", { name: "Default model" }).disabled,
+    true,
+  );
+  assert.ok(screen.getByRole("button", { name: "Sync again" }));
+  assert.deepEqual(view.selections.model, []);
+});

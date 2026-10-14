@@ -2637,6 +2637,10 @@ pub const Dispatcher = struct {
                 else
                     null,
                 .capabilities = .{
+                    .text_input = value.metadata.capabilities.textInput,
+                    .audio_input = value.metadata.capabilities.audioInput,
+                    .video_input = value.metadata.capabilities.videoInput,
+                    .output = value.metadata.capabilities.output,
                     .image_input = value.metadata.capabilities.imageInput,
                     .pdf_input = value.metadata.capabilities.pdfInput,
                     .batch = value.metadata.capabilities.batch,

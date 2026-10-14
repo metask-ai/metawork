@@ -67,7 +67,7 @@ export const zhCN: Record<MessageId, string> = {
     "如果浏览器中的授权页面仍然打开，请完成授权；MetaWork 随后会自动继续。",
   "account.action_failed": "账号操作需要处理",
   "account.error.no_models":
-    "这个 Metask 账号当前没有可用模型。请重新同步目录，或在 Metask 中检查账号后重试。",
+    "这个 Metask 账号当前没有可用的对话模型。请重新同步目录，或在 Metask 中检查账号后重试。",
   "account.error.deadline": "Metask 未能及时响应，请检查网络。",
   "account.error.browser": "MetaWork 无法打开登录页面，请重新打开。",
   "account.error.authorization": "未能完成 Metask 登录，请重新登录。",
@@ -1036,6 +1036,8 @@ export const zhCN: Record<MessageId, string> = {
   "settings.api_key": "API Key",
   "settings.open_models": "打开模型设置",
   "settings.default_selection_missing": "未设置可执行的默认模型",
+  "settings.default_model_unavailable":
+    "原默认模型已不在当前可用目录中。请重新选择默认模型。",
   "settings.providers_help":
     "管理 MetaWork 可用的模型服务、服务地址和 API Key。默认模型请在模型页面选择。",
   "settings.providers_empty": "还没有自定义 API。",

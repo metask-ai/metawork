@@ -1,0 +1,175 @@
+{
+  "revision": "4e230d3e56c764203fef64abcc16994248783cce",
+  "artifactHash": "3FD3C35A6033686A0DA84B8AEF3EAD9298090B499EB294E31CC1DA6C7020E992",
+  "pid": 159308,
+  "accountState": "authenticated",
+  "catalogBefore": "7135526157676187061",
+  "catalogAfter": "15181065971810833639",
+  "models": [
+    {
+      "id": "doubao-seed-2-1-pro-260628",
+      "metadata": {
+        "maxInputTokens": "256000",
+        "maxOutputTokens": "256000",
+        "capabilities": {
+          "imageInput": true,
+          "pdfInput": true,
+          "batch": false,
+          "citations": false,
+          "codeExecution": false,
+          "structuredOutputs": true,
+          "thinking": {
+            "supported": true,
+            "adaptive": false,
+            "enabled": true
+          },
+          "effort": {
+            "supported": false,
+            "low": false,
+            "medium": false,
+            "high": false,
+            "max": false
+          },
+          "contextManagement": {
+            "supported": true,
+            "clearThinking20251015": false,
+            "clearToolUses20250919": false,
+            "compact20260112": true
+          }
+        }
+      }
+    },
+    {
+      "id": "glm-5-3-flash-260828",
+      "metadata": {
+        "maxInputTokens": "1000000",
+        "maxOutputTokens": "131072",
+        "capabilities": {
+          "imageInput": true,
+          "pdfInput": true,
+          "batch": false,
+          "citations": false,
+          "codeExecution": false,
+          "structuredOutputs": true,
+          "thinking": {
+            "supported": true,
+            "adaptive": false,
+            "enabled": true
+          },
+          "effort": {
+            "supported": false,
+            "low": false,
+            "medium": false,
+            "high": false,
+            "max": false
+          },
+          "contextManagement": {
+            "supported": true,
+            "clearThinking20251015": false,
+            "clearToolUses20250919": false,
+            "compact20260112": true
+          }
+        }
+      }
+    },
+    {
+      "id": "MiniMax-M3",
+      "metadata": {
+        "maxInputTokens": "1048576",
+        "maxOutputTokens": "512000",
+        "capabilities": {
+          "imageInput": true,
+          "pdfInput": false,
+          "batch": false,
+          "citations": false,
+          "codeExecution": false,
+          "structuredOutputs": true,
+          "thinking": {
+            "supported": true,
+            "adaptive": false,
+            "enabled": true
+          },
+          "effort": {
+            "supported": false,
+            "low": false,
+            "medium": false,
+            "high": false,
+            "max": false
+          },
+          "contextManagement": {
+            "supported": true,
+            "clearThinking20251015": false,
+            "clearToolUses20250919": false,
+            "compact20260112": true
+          }
+        }
+      }
+    }
+  ],
+  "defaultSelection": {
+    "sourceId": "metask",
+    "modelId": "MiniMax-M3"
+  },
+  "newTaskAdmission": {
+    "available": true,
+    "reason": "none",
+    "activeModelRef": {
+      "sourceId": "metask",
+      "modelId": "MiniMax-M3"
+    },
+    "activeGeneration": "15857979087830687576",
+    "activeSelectionRevision": "12617893227516716414",
+    "state": "ready"
+  },
+  "remoteSmoke": {
+    "taskId": "1",
+    "runId": "1",
+    "execution": {
+      "generation": "15857979087830687576",
+      "protocol": "anthropic_messages",
+      "model": "MiniMax-M3"
+    },
+    "phase": "completed",
+    "terminal": {
+      "outcome": "completed",
+      "cause": null,
+      "diagnosticDisposition": "absent"
+    },
+    "response": "Hi! How can I help you today?",
+    "usage": {
+      "input": "7128",
+      "output": "10",
+      "cacheRead": "128",
+      "cacheCreation": "0"
+    },
+    "elapsedMs": "18598",
+    "submittedAtUnixMs": "1791875968296",
+    "finishedAtUnixMs": "1791875986917"
+  },
+  "observedAt": "2026-10-13T07:22:08.392Z",
+  "platform": {
+    "architecture": "x86_64",
+    "nativeSdk": "0.10.1",
+    "build": "19045",
+    "zig": "0.16.0",
+    "os": "Microsoft Windows 10 企业版",
+    "version": "10.0.19045"
+  },
+  "agentCore": {
+    "binaryAbiRevision": 19,
+    "lockSha256": "065C0A21D69EFF9F8D34B5B07477B73744C211FF9743E97C41D3C10E8BB2B0A9",
+    "sourceCommit": "c4b0af79fe20b1bb8e8516ec9b0fe1de8feb8644",
+    "binaryAbiVersion": 1,
+    "version": "0.6.0-dev+c4b0af79fe20"
+  },
+  "executionMode": {
+    "sourceProtocol": "anthropic_messages",
+    "accountAndModels": "real platform services",
+    "transportOnly": "METAWORK_CUSTOM_PROVIDER_READINESS=1",
+    "artifact": "automation Debug",
+    "fixtureAccountAndModels": false,
+    "observation": "official Native SDK automate bridge and typed Workbench snapshot; user login and text Run",
+    "endpoint": "https://app.metask-ai.com/v1/models"
+  },
+  "validity": "One observation on the recorded revision, artifact, platform and remote service state; later deployments and platforms require fresh evidence."
+}

@@ -1,6 +1,7 @@
 //! Strict payload records and parsing shared by Bridge handlers.
 
 const std = @import("std");
+const models_contract = @import("metawork_product_models_contract");
 const product_control = @import("metawork_product_control");
 const max_skill_argument_values: usize = 64;
 
@@ -46,6 +47,10 @@ pub const ConfigureMetaskSelection = struct {
     expectedCatalogGeneration: []const u8,
 };
 pub const ModelCapabilities = struct {
+    textInput: ?bool = null,
+    audioInput: ?bool = null,
+    videoInput: ?bool = null,
+    output: @FieldType(models_contract.ModelCapabilities, "output") = .{},
     imageInput: ?bool = null,
     pdfInput: ?bool = null,
     batch: ?bool = null,
@@ -1004,4 +1009,16 @@ test "Task approval mode payload is typed and requires both exact CAS identities
     };
     for (invalid) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(TaskApprovalMode, payload));
     try std.testing.expectError(error.InvalidBridgeId, parseWireId("01"));
+}
+
+test "complete model metadata incoming declarations retain capabilities and token fields" {
+    var parsed = try parsePayload(ModelMetadata,
+        \\{"maxInputTokens":"1000000","maxOutputTokens":"131072","capabilities":{"textInput":true,"audioInput":false,"videoInput":true,"output":{"text":true,"image":false,"audio":false,"video":false,"embedding":false}}}
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("1000000", parsed.value.maxInputTokens.?);
+    try std.testing.expectEqualStrings("131072", parsed.value.maxOutputTokens.?);
+    try std.testing.expectEqual(@as(?bool, true), parsed.value.capabilities.output.text);
+    inline for (.{ "{\"limits\":{}}", "{\"capabilities\":{\"output\":{\"audio\":\"true\"}}}" }) |invalid|
+        try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ModelMetadata, invalid));
 }

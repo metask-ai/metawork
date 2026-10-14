@@ -13,6 +13,16 @@ const metadata = {
   maxInputTokens: null,
   maxOutputTokens: null,
   capabilities: {
+    textInput: null,
+    audioInput: null,
+    videoInput: null,
+    output: {
+      text: null,
+      image: null,
+      audio: null,
+      video: null,
+      embedding: null,
+    },
     imageInput: null,
     pdfInput: null,
     batch: null,
