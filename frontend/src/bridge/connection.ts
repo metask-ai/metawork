@@ -78,6 +78,8 @@ export class WorkbenchConnection {
   private recovery: Promise<void> | null = null;
   private operation = 0;
   private stopped = false;
+  // Until one confirmed view exists, every failure leaves nothing trustworthy to show.
+  private trusted = false;
   private contractFault: RendererBridgeContractError | null = null;
   private pendingRevision = 0n;
   private removeWorkbench: (() => void) | null = null;
@@ -262,7 +264,8 @@ export class WorkbenchConnection {
     const operation = ++this.operation;
     const pending = Promise.resolve().then(async () => {
       this.checkOperation(operation);
-      this.callbacks.onStatus({ kind: "recovering" });
+      // Startup is connecting, not recovering an existing view.
+      if (recovered) this.callbacks.onStatus({ kind: "recovering" });
       this.callbacks.onReady(false);
       if (!replace && this.state && !this.contractFault) {
         const state = this.state;
@@ -371,6 +374,7 @@ export class WorkbenchConnection {
         new Error("Workbench connection generation was replaced")
       );
     state.confirmed = true;
+    this.trusted = true;
     this.callbacks.onViewSyncFailed(false);
     this.callbacks.onReady(true);
     this.callbacks.onStatus({ kind: "connected", recovered });
@@ -423,7 +427,7 @@ export class WorkbenchConnection {
       code: fault.code,
       diagnostic: errorText(fault),
       failure:
-        source === "bootstrap"
+        source === "bootstrap" || !this.trusted
           ? "bootstrap_failed"
           : source === "snapshot"
             ? "snapshot_contract_failed"

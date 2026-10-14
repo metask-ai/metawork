@@ -5739,6 +5739,78 @@ test("App exposes one compact sync recovery, retains draft and never marks a pen
   );
 });
 
+test("a committed Skill mutation is not reported as failed when the follow-up refresh fails", async (ctx) => {
+  let uninstalls = 0;
+  const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(
+    ctx,
+    1440,
+    {},
+    {
+      skillDetail: async () => ({ available: false }),
+      uninstallSkill: async () => {
+        uninstalls++;
+        return {
+          accepted: true,
+          installId: "aabbccdd",
+          verificationPending: false,
+          reason: null,
+        };
+      },
+    },
+  );
+  const sidebarToggle = screen.getByRole("button", {
+    name: "Toggle task sidebar",
+  });
+  if (sidebarToggle.getAttribute("aria-expanded") === "false")
+    fireEvent.click(sidebarToggle);
+  await findRecentTaskButton(/First task/);
+  snapshot.skillManagement.availability = "ready";
+  snapshot.skillManagement.assets = [
+    {
+      installId: "aabbccdd",
+      sourceKind: "local_package",
+      origin: null,
+      scope: { kind: "personal", workspaceId: null },
+      managementState: "ready",
+      skillId: "skill-review",
+      skillPolicyKey: "skill-review",
+      invocationName: "code-review",
+      displayName: "Review code changes",
+      description: "",
+      argumentNames: [],
+      maxValues: 64,
+      canExport: false,
+      canReimport: false,
+      canUninstall: true,
+      canRetry: false,
+      enabled: null,
+      enablementState: null,
+      canSetEnabled: false,
+      selectionRevision: null,
+      issueCodes: [],
+    },
+  ];
+  snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+  await act(async () => publish());
+  fireEvent.click(screen.getByRole("button", { name: "Skills", exact: true }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: /Review code changes/ }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
+  setSnapshotFailure(true);
+  fireEvent.click(await screen.findByRole("button", { name: "Uninstall" }));
+  // The connection owner reports the sync failure once the bounded reads end.
+  await waitFor(() => assert.ok(document.querySelector(".commandbar-alert")), {
+    timeout: 3500,
+  });
+  await act(async () => {});
+  assert.equal(uninstalls, 1);
+  assert.doesNotMatch(
+    document.body.textContent,
+    /The Skill change could not be completed/,
+  );
+});
+
 test("connection details close with Escape and return focus to their summary", async (ctx) => {
   const { snapshot, publish, setSnapshotFailure } = await renderAppFixture(ctx);
   const sidebarToggle = screen.getByRole("button", {

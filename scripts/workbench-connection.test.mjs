@@ -172,7 +172,7 @@ test("uncertain attachment cleanup replaces even a healthy snapshot connection",
   await connection.stop();
 });
 
-test("snapshot contract failure is terminal and never enters refresh retry backoff", async () => {
+test("a startup snapshot contract failure is a terminal bootstrap failure", async () => {
   let fetchCalls = 0;
   const statuses = [];
   const failed = [];
@@ -200,7 +200,8 @@ test("snapshot contract failure is terminal and never enters refresh retry backo
   await assert.rejects(connection.start(), RendererBridgeContractError);
   assert.equal(fetchCalls, 1);
   assert.equal(statuses.at(-1)?.kind, "contract_failed");
-  assert.equal(statuses.at(-1)?.failure, "snapshot_contract_failed");
+  // No trusted view exists yet, so the root failure page owns this state.
+  assert.equal(statuses.at(-1)?.failure, "bootstrap_failed");
   assert.equal(statuses.at(-1)?.source, "snapshot");
   assert.equal(statuses.at(-1)?.code, "invalid_response");
   const shellStatus = connectionStatus(statuses.at(-1));
@@ -904,4 +905,44 @@ test("queued Host signals after stop do not issue late ACK commands", async () =
   f.signal({ sequence: 4 });
   await flush();
   assert.equal(acknowledgements, 0);
+});
+
+test("startup connects without a recovery status while explicit recovery reports one", async () => {
+  const f = fixture();
+  await f.connection.start();
+  assert.deepEqual(
+    f.statuses.map((x) => x.kind),
+    ["connected"],
+  );
+  await f.connection.retry();
+  assert.deepEqual(
+    f.statuses.map((x) => x.kind),
+    ["connected", "recovering", "connected"],
+  );
+  assert.equal(f.statuses.at(-1).recovered, true);
+  await f.connection.stop();
+});
+
+test("contract failures are bootstrap failures only until a view has been trusted", async () => {
+  let malformed = true;
+  const f = fixture(async ({ reads }) => {
+    if (malformed)
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "malformed snapshot",
+      );
+    return snapshot(String(reads));
+  });
+  await assert.rejects(f.connection.start(), RendererBridgeContractError);
+  // Retrying from the root failure page still has no trusted view to keep.
+  await assert.rejects(f.connection.retry(), RendererBridgeContractError);
+  assert.equal(f.statuses.at(-1).failure, "bootstrap_failed");
+  malformed = false;
+  await f.connection.retry();
+  assert.equal(f.statuses.at(-1).kind, "connected");
+  malformed = true;
+  await assert.rejects(f.connection.refresh(), RendererBridgeContractError);
+  assert.equal(f.statuses.at(-1).failure, "snapshot_contract_failed");
+  assert.equal(f.statuses.at(-1).source, "snapshot");
+  await f.connection.stop();
 });

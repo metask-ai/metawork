@@ -956,6 +956,12 @@ export default function App() {
       : Promise.reject(new Error("Workbench connection is unavailable"));
   }, []);
 
+  // The Host result is already committed. A failed follow-up refresh is
+  // published by the connection owner, never reported as a failed operation.
+  async function refreshCommittedView() {
+    await refreshSnapshot().catch(() => undefined);
+  }
+
   useEffect(() => {
     const errorCode = snapshot.account.errorCode;
     if (errorCode === "none" || errorCode === "user_cancelled") return;
@@ -1398,9 +1404,7 @@ export default function App() {
     if (bridgeUnavailable) return false;
     try {
       const result = await invoke();
-      if (result.outcome === "applied") {
-        await refreshSnapshot();
-      }
+      if (result.outcome === "applied") await refreshCommittedView();
       return result.outcome;
     } catch {
       await refreshSnapshot().catch(() => undefined);
@@ -2405,7 +2409,7 @@ export default function App() {
     mutation: () => Promise<SkillMutationResult>,
   ): Promise<SkillMutationResult> {
     const result = await mutation();
-    if (result.accepted) await refreshSnapshot();
+    if (result.accepted) await refreshCommittedView();
     return result;
   }
 
@@ -2429,7 +2433,7 @@ export default function App() {
       expectedCatalogRevision,
       expectedSelectionRevision,
     );
-    await refreshSnapshot();
+    await refreshCommittedView();
     return result;
   }
 
@@ -2438,7 +2442,7 @@ export default function App() {
   ): Promise<McpMutationResult> {
     try {
       const result = await mutation();
-      if (result.outcome !== "unchanged") await refreshSnapshot();
+      if (result.outcome !== "unchanged") await refreshCommittedView();
       return result;
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
@@ -2449,7 +2453,7 @@ export default function App() {
   async function refreshMcpCatalog(): Promise<McpRefreshResult> {
     try {
       const result = await client.refreshMcpCatalog();
-      await refreshSnapshot();
+      await refreshCommittedView();
       return result;
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
@@ -2460,7 +2464,7 @@ export default function App() {
   async function applyMcpConfiguration(): Promise<McpConfigurationApplyResult> {
     try {
       const result = await client.applyMcpConfiguration();
-      await refreshSnapshot();
+      await refreshCommittedView();
       return result;
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
@@ -2477,7 +2481,7 @@ export default function App() {
         expectedGeneration,
         serverId,
       );
-      await refreshSnapshot();
+      await refreshCommittedView();
       return result;
     } catch (error) {
       await refreshSnapshot().catch(() => undefined);
