@@ -727,6 +727,8 @@ pub const Task = struct {
     durable: DurableTaskRecord,
     runtime: RuntimeAttachment,
     conversation_observation: ConversationObservation = .{},
+    /// Runtime-only first catalog binding; never persisted or used for recovery eligibility.
+    initial_catalog_preparation: enum { uninitialized, loading, unavailable } = .uninitialized,
     approval_change: ?ApprovalChange = null,
     approval_result: ?ApprovalResult = null,
     deletion: task_deletion.State = .idle,

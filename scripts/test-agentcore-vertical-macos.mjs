@@ -1,3 +1,4 @@
+import { runOfficeSkillVertical } from "./office-skill-vertical.mjs";
 import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { createReadStream } from "node:fs";
@@ -117,6 +118,10 @@ appEnvironment.PATH =
       ].join(path.delimiter)
     : "/usr/bin:/bin";
 
+const builtinSkillNames = process.env.METAWORK_LOCAL_SKILL_ROOT
+  ? ["docx", "pptx", "xlsx", "zip"]
+  : [];
+const officeModelToolProbe = process.env.METAWORK_OFFICE_MODEL_TOOL === "1";
 const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
@@ -251,31 +256,39 @@ const responses = [
       { file_path: fixturePath },
       "I’m checking the workspace before making changes.",
     ),
-    350,
+    process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 1_000 : 350,
   ),
-  toolSse(
-    "m2",
-    "bash-1",
-    "Bash",
-    {
-      command:
-        process.platform === "win32"
-          ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
-          : "sleep 0.4; echo agentcore-vertical-bash-ok",
-      description: "Check the command output",
-    },
-    "I’ve checked the input; now I’m running a focused verification.",
+  streamedSse(
+    toolSse(
+      "m2",
+      "bash-1",
+      "Bash",
+      {
+        command:
+          process.platform === "win32"
+            ? 'powershell -NoProfile -Command "Start-Sleep -Milliseconds 400; Write-Output agentcore-vertical-bash-ok"'
+            : officeModelToolProbe
+              ? "sleep 2; echo agentcore-vertical-bash-ok"
+              : "sleep 0.4; echo agentcore-vertical-bash-ok",
+        description: "Check the command output",
+      },
+      "I’ve checked the input; now I’m running a focused verification.",
+    ),
+    process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 1_000 : 80,
   ),
-  toolSse(
-    "m3",
-    "edit-1",
-    "Edit",
-    {
-      file_path: fixturePath,
-      old_string: "agentcore-vertical-before",
-      new_string: "agentcore-vertical-after",
-    },
-    "The verification passed; now I’m applying the change.",
+  streamedSse(
+    toolSse(
+      "m3",
+      "edit-1",
+      "Edit",
+      {
+        file_path: fixturePath,
+        old_string: "agentcore-vertical-before",
+        new_string: "agentcore-vertical-after",
+      },
+      "The verification passed; now I’m applying the change.",
+    ),
+    process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 1_000 : 80,
   ),
   ...(process.platform === "win32"
     ? [
@@ -355,8 +368,9 @@ const responses = [
   ),
 ];
 const provider = createProvider(responses, {
-  initialDelayMs: visualCaptureDir ? 1_500 : 120,
-  frameDelayMs: 80,
+  // CLI snapshot polling needs an observation window during this larger probe.
+  initialDelayMs: visualCaptureDir || officeModelToolProbe ? 1_500 : 120,
+  frameDelayMs: process.env.METAWORK_OFFICE_ATTACHMENTS === "1" ? 300 : 80,
 });
 const baseUrl = await provider.listen();
 const chromeProbePort =
@@ -519,6 +533,19 @@ try {
       "Workspace Skill catalog",
     );
   let catalogSnapshot = await readCatalog();
+  if (process.env.METAWORK_LOCAL_SKILL_ROOT) {
+    for (const name of ["docx", "xlsx", "pptx"]) {
+      const office = catalogSnapshot.catalog.skills.find(
+        (item) => item.invocationName === name,
+      );
+      assert.ok(office, `Local Office catalog omitted ${name}`);
+      assert.equal(office.displayName, name);
+      assert.equal(office.enabled, true);
+    }
+    process.stdout.write(
+      "Local Office Skills reached the desktop Workspace catalog through canonical AgentCore.\n",
+    );
+  }
   if (
     !/^[0-9a-f]{64}$/.test(catalogSnapshot.skill.skillId) ||
     catalogSnapshot.skill.displayName !== "Review" ||
@@ -1054,7 +1081,9 @@ try {
       const pinned = current.tasks.find(
         (item) => item.id === taskId,
       )?.skillCatalog;
-      return pinned?.availability === "ready" && pinned.skills.length === 0
+      if (pinned?.availability !== "ready") return null;
+      const names = pinned.skills.map((item) => item.invocationName).sort();
+      return JSON.stringify(names) === JSON.stringify(builtinSkillNames)
         ? true
         : null;
     },
@@ -1075,10 +1104,12 @@ try {
       )?.skillCatalog;
       if (!effective?.skills.some((item) => item.invocationName === "review"))
         return null;
-      assert.equal(
-        current.tasks.find((item) => item.id === taskId)?.skillCatalog.skills
-          .length,
-        0,
+      assert.deepEqual(
+        current.tasks
+          .find((item) => item.id === taskId)
+          ?.skillCatalog.skills.map((item) => item.invocationName)
+          .sort(),
+        builtinSkillNames,
       );
       return true;
     },
@@ -1136,7 +1167,7 @@ try {
         project?.skillCatalog.availability !== "ready"
       )
         return null;
-      const expected = ["codex-proof", "review"];
+      const expected = [...builtinSkillNames, "codex-proof", "review"].sort();
       assert.deepEqual(
         current.skillCatalog.skills.map((skill) => skill.invocationName).sort(),
         expected,
@@ -1151,10 +1182,15 @@ try {
         ),
       );
       for (const asset of current.skillManagement.assets) {
-        assert.equal(
-          asset.origin.scope,
-          asset.scope.kind === "personal" ? "personal" : "project",
-        );
+        if (builtinSkillNames.includes(asset.invocationName)) {
+          assert.equal(asset.origin, null);
+          assert.equal(asset.managementState, "externally_managed");
+        } else {
+          assert.equal(
+            asset.origin.scope,
+            asset.scope.kind === "personal" ? "personal" : "project",
+          );
+        }
         assert.equal(
           asset.canExport || asset.canReimport || asset.canUninstall,
           false,
@@ -1540,6 +1576,48 @@ try {
   for (const originalPath of retainedAttachmentPaths)
     await expectMissing(originalPath);
   await expectMissing(compactCheckpoint.blobPath);
+  if (process.env.METAWORK_OFFICE_VERTICAL === "1") {
+    assert.equal(process.platform, "darwin");
+    assert.ok(process.env.METAWORK_LOCAL_SKILL_ROOT);
+    const cases =
+      process.env.METAWORK_OFFICE_ATTACHMENTS === "1"
+        ? [
+            { automaticOverride: true, approvalMode: "full_access" },
+            { automaticOverride: false, approvalMode: "full_access" },
+            {
+              automaticOverride: true,
+              approvalMode: "manual",
+              selectedFormats: ["docx"],
+            },
+            {
+              automaticOverride: true,
+              approvalMode: "auto_review",
+              selectedFormats: ["zip"],
+            },
+          ]
+        : [{}];
+    for (const [caseId, options] of cases.entries())
+      await runOfficeSkillVertical({
+        root,
+        workspace: canonicalWorkspace,
+        workspaceId,
+        invoke: invokeBridge,
+        snapshot,
+        poll,
+        provider,
+        toolSse,
+        textSse,
+        imagePath: attachmentPngPath,
+        restart: async () => {
+          await stopApplication("Office attachment restart");
+          await rm(automationDir, { recursive: true, force: true });
+          startApplication();
+          await waitForBridge();
+        },
+        caseId,
+        ...options,
+      });
+  }
   await stopApplication("app stop");
 
   process.stdout.write(
@@ -1743,7 +1821,10 @@ async function assertUnifiedStagedOriginals() {
   const expected = new Map([
     [".png", createHash("sha256").update(attachmentPngBytes).digest("hex")],
     [".jpg", createHash("sha256").update(attachmentJpegBytes).digest("hex")],
-    [".txt", createHash("sha256").update(attachmentLogText).digest("hex")],
+    [
+      path.extname(attachmentLogPath),
+      createHash("sha256").update(attachmentLogText).digest("hex"),
+    ],
   ]);
   for (const name of originals) {
     const extension = path.extname(name);
@@ -2934,6 +3015,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let served = 0;
   let titleCompletions = 0;
   let reviewRequests = 0;
+  let officeReviewRequests = 0;
   let releaseReview = null;
   let providerError = null;
   const requests = [];
@@ -2966,6 +3048,49 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           assert.equal(payload.stream, undefined);
           assert.equal(payload.tools, undefined);
           const review = JSON.parse(payload.messages[0].content);
+          let officeIntent = null;
+          try {
+            const candidate = JSON.parse(review.evidence.user_intent);
+            if (
+              candidate.kind === "explicit_multimodal_input" &&
+              candidate.text.startsWith("Read the supplied")
+            )
+              officeIntent = candidate;
+          } catch {}
+          if (process.env.METAWORK_OFFICE_ATTACHMENTS === "1" && officeIntent) {
+            assert.equal(officeIntent.attachments[0].kind, "file");
+            assert.equal(
+              officeIntent.attachments[0].display_name,
+              "sample.zip",
+            );
+            assert.ok(!review.evidence.user_intent.includes("file_path="));
+            assert.equal(review.host.delegation, "current_request_only");
+            assert.ok(
+              ["Bash", "Skill"].includes(review.evidence.request.tool_name),
+            );
+            officeReviewRequests++;
+            response.writeHead(200, {
+              "content-type": "application/json",
+              connection: "close",
+            });
+            response.end(
+              JSON.stringify({
+                type: "message",
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      decision: "allow_once",
+                      reason: "bounded Office fixture operation",
+                    }),
+                  },
+                ],
+                stop_reason: "end_turn",
+                usage: { input_tokens: 1, output_tokens: 1 },
+              }),
+            );
+            return;
+          }
           assert.equal(
             review.evidence.user_intent,
             "mode-review-current-request",
@@ -3082,6 +3207,9 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     },
     get reviewRequests() {
       return reviewRequests;
+    },
+    get officeReviewRequests() {
+      return officeReviewRequests;
     },
     releaseReview() {
       assert.ok(releaseReview, "review fixture was not admitted");

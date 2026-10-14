@@ -1814,7 +1814,7 @@ test("removing the last attachment returns keyboard focus to the picker", async 
   );
 });
 
-test("validated text file drafts are sendable with an explicit instruction", () => {
+test("Office file drafts are sendable with an explicit instruction", () => {
   renderComposer({
     attachmentsEnabled: true,
     canSubmit: true,
@@ -1825,7 +1825,7 @@ test("validated text file drafts are sendable with an explicit instruction", () 
         {
           token: "a".repeat(48),
           kind: "file",
-          displayName: "notes.txt",
+          displayName: "report.docx",
           sizeBytes: "128",
         },
       ],
@@ -1835,7 +1835,7 @@ test("validated text file drafts are sendable with an explicit instruction", () 
   assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false);
 });
 
-test("text file drafts quietly require an explicit user instruction", () => {
+test("ZIP file drafts quietly require an explicit user instruction", () => {
   renderComposer({
     attachmentsEnabled: true,
     canSubmit: false,
@@ -1846,7 +1846,7 @@ test("text file drafts quietly require an explicit user instruction", () => {
         {
           token: "a".repeat(48),
           kind: "file",
-          displayName: "notes.txt",
+          displayName: "archive.zip",
           sizeBytes: "128",
         },
       ],

@@ -1131,17 +1131,16 @@ test("Task model selection availability is a strict Host-owned projection", () =
   );
 });
 
-test("Automatic Workspace catalog-free fixture variant matches the Host serializer", () => {
+test("Automatic Workspace current catalog uses the Host authority without project controls", () => {
   const automatic = clone(fixture);
   automatic.workspaces[0].kind = "automatic";
   automatic.workspaces[0].recentOrder = "0";
-  assert.deepEqual(decodeWorkbenchSnapshot(automatic), automatic);
-
   automatic.workspaces[0].skillCatalog.availability = "unavailable";
-  assert.throws(
-    () => decodeWorkbenchSnapshot(automatic),
-    /automatic Workspace must remain Task-owned and catalog-free/,
-  );
+  assert.deepEqual(decodeWorkbenchSnapshot(automatic), automatic);
+  automatic.workspaces[0].skillCatalog.availability = "loading";
+  assert.deepEqual(decodeWorkbenchSnapshot(automatic), automatic);
+  automatic.workspaces[0].recentOrder = "1";
+  assert.throws(() => decodeWorkbenchSnapshot(automatic), /Task-owned/);
 });
 
 test("automatic Workspace projection is one-to-one and capability-gated", () => {

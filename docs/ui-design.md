@@ -740,7 +740,7 @@ Command 只是现有动作的键盘入口。选择后由 `App` action controller
 
 选择 Skill 后，文本 draft 原子变为结构化 draft：左侧能力轨显示可移除的 Skill identity，右侧按 descriptor 顺序显示 positional argument 输入。Renderer 保留 catalog 的 `maxValues`，未命名的可选 positional argument 由用户逐项添加或移除，字段数不得超过该上限和产品的 64 项硬上限；发送前同时校验完整 Skill Run 输入的 64 KiB UTF-8 字节预算。`/review src/main.zig` 的可见尾随文本成为第一个参数，不实现 shell quote/escape parser；每次 Run 至多一个 Skill。Skill 原始 Slash 文本不进入 Bridge 或历史，发送只产生 `{ kind: "skill", skillId, catalogRevision, argumentValues }`。
 
-Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；既有 raw Text draft 读取后在下一次写入时单向升级为 tagged storage，暂时超过 Run 提交预算的非空 draft 不得删除已有持久值。发送失败、拒绝或 timeout reconciliation 后恢复完整 tagged draft。catalog revision 或 identity 变化时保留 token 与参数，但显示 stale 说明并禁用发送；刷新是显式动作，成功后仍要求用户从新 catalog 重新选择。已有 Task 的 Workspace current catalog 尚不可用时，同一刷新动作先刷新 Workspace；Workspace ready 后再次执行才刷新 Task binding，不隐式监听、重放或跨 revision 替换。`loading / unavailable` 只影响 Skill 候选，普通 Text 保持可编辑、可发送。
+Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；既有 raw Text draft 读取后在下一次写入时单向升级为 tagged storage，暂时超过 Run 提交预算的非空 draft 不得删除已有持久值。发送失败、拒绝或 timeout reconciliation 后恢复完整 tagged draft。catalog revision 或 identity 变化时保留 token 与参数，但显示 stale 说明并禁用发送；刷新是显式动作，成功后仍要求用户从新 catalog 重新选择。已有 Task 的 Workspace current catalog 尚不可用时，同一刷新动作先刷新 Workspace；Workspace ready 后再次执行才刷新 Task binding，不隐式监听、重放或跨 revision 替换。current Workspace 的 `loading / unavailable` 只影响 Skill 候选；Automatic Task 的初始准备 loading 另按 §8.3 阻止首个 Run，文字保持可编辑。
 
 | Task state             | Composer behavior                                                                        |
 | ---------------------- | ---------------------------------------------------------------------------------------- |
@@ -764,11 +764,11 @@ Composer 工具带在模型控件之前提供一个使用加号图标、带可�
 
 ready 附件按选择顺序显示可换行的紧凑 chip，包含经过 Host 校验的 basename、文件类别与格式化大小，并提供逐项移除按钮。图片额外显示已识别格式；其他文件使用通用文件图标。chip 不显示绝对路径、缩略图、hash、上传进度或 provider wire。文件名保持原文且服从普通用户内容方向规则；超长名称截断，完整安全名称通过 title 与可访问名称提供。键盘焦点按选择顺序进入移除按钮，删除后移到相邻 chip 或“添加文件”。窄窗不得因附件列表产生页面横向滚动。
 
-Text draft 可以为空，只要附件全部是 ready 图片；非空文字固定先于全部附件提交，chip 顺序就是 input part 顺序。经 Host 按[产品输入限制](requirements.md#53-task)校验的非空 UTF-8 无 NUL 文件以“文本文件”展示并可与图片混合发送；草稿只要含有文本附件，去除首尾空白后的用户指令就必须非空，否则发送按钮保持禁用，不额外显示常驻提示。非 UTF-8、含 NUL、超限或其他二进制内容在整批 staging 时以 typed reason 拒绝，不发布部分 chip。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应图片媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
+Text draft 可以为空，只要附件全部是 ready 图片；非空文字固定先于全部附件提交，chip 顺序就是 input part 顺序。经 Host 按[产品输入限制](requirements.md#53-task)接纳的非图片文件以“文件”展示并可与图片混合发送；草稿只要含非图片文件，去除首尾空白后的用户指令就必须非空，否则发送按钮保持禁用，不额外显示常驻提示。空文件、超限或无法解码的已识别图片在整批 staging 时以 typed reason 拒绝，不发布部分 chip。附件不能与 Skill draft 共存：选择 Skill 时若已有附件必须先由用户明确移除，附件存在时选择 Skill 也必须说明该限制，不能静默丢弃任一草稿。模型 metadata 明确声明不支持相应图片媒体时只显示非阻塞提示；发送能力和最终错误仍以 Host admission 与 AgentCore typed result 为准。
 
 附件 token 与 metadata 只保存在当前 Renderer connection 的内存草稿；Task 切换可以保留，document generation replacement、reload 或 disconnect 后必须清除。Renderer 只允许保存一个不含名称、大小、类型和 token 的 generic marker，使 reload 后能提示“未发送的附件需要重新选择”。文字/Skill 仍按既有 tagged session storage 保存。New task 已创建但 Run 尚未接纳时，附件草稿和文字一起迁移到真实 Task；Run 被 Product 接纳后立即清空 draft chip，timeout 先 resync snapshot且不得自动重放。
 
-图片模型输入可以经过缩放和 PNG 转码，原件仍完整保留；文本附件按需读取本地原件。内部预览、引用和上下文预算不作为附件类型的另一套文件大小上限展示。
+图片模型输入可以经过缩放和 PNG 转码，原件仍完整保留；其他文件由 Agent 按需选择工具或 Skill 处理本地原件。内部预览、引用和上下文预算不作为附件类型的另一套文件大小上限展示。
 
 历史用户指令的附件 chip 只显示已保存名称、类型、可选图片格式、大小和顺序，不含文本正文，不可点击、预览、下载或一键重新发送。AgentCore 返回 `image_input_unsupported` 时，该 Run 以准确 terminal notice 收口，Composer 继续可用，但附件已被已接纳 Run 消费，用户若要换模型重试必须重新选择原文件。
 
@@ -781,6 +781,9 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
         │
         ▼
 创建 Task
+        │
+        ▼
+等待 Automatic 交互 Task 的初始 Skill 准备
         │
         ▼
 启动第一个 Run
@@ -798,6 +801,8 @@ Text draft 可以为空，只要附件全部是 ready 图片；非空文字固�
 | Task 已创建，`run_failed`   | 切换到真实 Task | 恢复为该 Task 草稿            | 显示启动失败，不伪造 Running                                                    |
 | Run accepted                | 切换到真实 Task | typed command accepted 后清除 | 等待 snapshot 发布 queued、running 或 terminal                                  |
 | command timeout             | 先刷新 snapshot | 对账完成前保留                | 由 snapshot 决定留在 New task、进入空 Task 或进入 active Task，禁止自动重复提交 |
+
+初始 Skill 准备属于当前发送的内部前置步骤，Task 已创建后按同一 canonical catalog 的 loading 状态等待，并禁用重复发送；不要求用户手工选择 Skill 或项目。准备 unavailable 只表示 Skill 能力缺席，普通文本与文件引用仍可发送；超时或 authority 变化恢复完整 Task 草稿，不自动重放。该等待不创建时间线指令、运行状态或第二套准备状态。已有 pinned catalog 的目录变化不自动重绑。
 
 只有 Host 已确认创建真实 Task 后，New task 才切换成 Task 内容：行动标题淡出，Task Header 和已确认的用户输入出现，Composer 在约 220 ms 内落到底部，左栏出现真实 Task，焦点留在内容区。`prefers-reduced-motion` 下直接切换。Task 已创建但 Run 未成功启动时仍进入真实 Task，恢复 Task 草稿，不伪造 queued / running。
 

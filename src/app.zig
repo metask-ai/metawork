@@ -454,6 +454,11 @@ pub fn run(init: std.process.Init) !void {
     });
     defer app.platform.deinit();
     defer app.automation.deinit();
+    const builtin_skill_root = if (product_identity.artifact_kind != .release) root: {
+        const root = init.environ_map.get("METAWORK_LOCAL_SKILL_ROOT") orelse break :root null;
+        break :root try std.Io.Dir.realPathFileAbsoluteAlloc(init.io, root, std.heap.c_allocator);
+    } else null;
+    defer if (builtin_skill_root) |root| std.heap.c_allocator.free(root);
     var paths_state: app_paths.Paths = undefined;
     try paths_state.init(
         init.io,
@@ -580,6 +585,7 @@ pub fn run(init: std.process.Init) !void {
             .file_store = if (stores_state.skill_sources) |*store| store else null,
             .restored = stores_state.skill_sources_restored,
         },
+        .builtin_skill_root = builtin_skill_root,
         .completion_factory = .{
             .context = &app.completion_transport,
             .create_fn = completion_http_transport.Backend.createCompletion,

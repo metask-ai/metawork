@@ -111,6 +111,8 @@ pub const WorkspaceBinding = struct {
     epoch: u64,
     /// Control grants catalog access independently of registry membership.
     catalog_authorized: bool,
+    /// Automatic data workspaces use personal policy and exclude local sources.
+    personal_only: bool = false,
     /// Ownership transfers to Runtime on entry.
     canonical_root: []u8,
 };
@@ -137,6 +139,7 @@ const CatalogJob = struct {
     io: std.Io,
     source_roots: ports.SourceRoots,
     selection: sources.Selection,
+    personal_only: bool = false,
     root_checks: ?sources.RootChecks = null,
     verification: ?state.Reconciliation = null,
     catalog_port: ports.Catalog,
@@ -169,10 +172,11 @@ const CatalogJob = struct {
             self.io,
             self.allocator,
             self.canonical_user_home,
-            if (self.scope == .personal) null else self.canonical_root,
+            if (self.scope == .personal or self.personal_only) null else self.canonical_root,
             self.selection,
         ) catch return;
         defer discovery.deinit();
+        if (self.source_roots.builtin_root) |root| discovery.appendBuiltin(self.io, root) catch return;
         self.root_checks = discovery.rootChecks();
         const additional = discovery.additionalSources() catch return;
         self.outcome = if (self.catalog_port.query(.{
@@ -204,6 +208,7 @@ const CatalogJob = struct {
     }
 
     fn deinit(self: *CatalogJob) void {
+        if (self.source_roots.builtin_root) |root| self.allocator.free(root);
         self.allocator.free(self.epoch_token);
         self.allocator.free(self.canonical_user_home);
         self.allocator.free(self.canonical_root);
@@ -221,6 +226,7 @@ const WorkspaceCatalog = struct {
     job: ?*CatalogJob = null,
     reschedule_pending: bool = false,
     authorized: bool,
+    personal_only: bool = false,
 
     fn deinit(
         self: *WorkspaceCatalog,
@@ -343,7 +349,7 @@ pub const Runtime = struct {
     pub fn workspaceSourceDiscovery(self: *const Runtime, id: u64, epoch: u64) ?SourceDiscoveryView {
         const settings = self.state.source_settings orelse return null;
         const workspace = self.findWorkspaceConst(id) orelse return null;
-        if (workspace.epoch != epoch or !workspace.authorized or self.canonical_user_home == null) return null;
+        if (workspace.epoch != epoch or !workspace.authorized or workspace.personal_only or self.canonical_user_home == null) return null;
         return .{ .selection = settings.selection, .checks = workspace.control.source_checks, .checking = workspace.job != null or workspace.reschedule_pending };
     }
 
@@ -408,7 +414,7 @@ pub const Runtime = struct {
         if (self.state.source_recovery_generation == std.math.maxInt(u64) or
             (personal_changed and self.state.catalog.request_generation == std.math.maxInt(u64))) return false;
         for (self.workspaces) |entry| if (entry) |workspace| {
-            if (workspace.authorized and workspace.control.request_generation == std.math.maxInt(u64)) return false;
+            if (workspace.authorized and (!workspace.personal_only or personal_changed) and workspace.control.request_generation == std.math.maxInt(u64)) return false;
         };
         return true;
     }
@@ -438,7 +444,7 @@ pub const Runtime = struct {
             self.personal_reschedule_pending = true;
         }
         for (self.workspaces) |*entry| if (entry.*) |*workspace| {
-            if (!workspace.authorized) continue;
+            if (!workspace.authorized or (workspace.personal_only and !personal_changed)) continue;
             self.invalidateSourceControl(&workspace.control, budget);
             workspace.reschedule_pending = true;
         };
@@ -483,6 +489,7 @@ pub const Runtime = struct {
             if (workspace.epoch == binding.epoch and
                 std.mem.eql(u8, workspace.canonical_root, binding.canonical_root))
             {
+                std.debug.assert(workspace.personal_only == binding.personal_only);
                 self.allocator.free(binding.canonical_root);
                 self.setWorkspaceCatalogAuthorized(binding.id, binding.epoch, binding.catalog_authorized, budget) catch unreachable;
                 return;
@@ -491,6 +498,7 @@ pub const Runtime = struct {
             workspace.canonical_root = binding.canonical_root;
             workspace.epoch = binding.epoch;
             workspace.authorized = binding.catalog_authorized;
+            workspace.personal_only = binding.personal_only;
             self.invalidateSourceControl(&workspace.control, budget);
             workspace.control.slot = .uninitialized;
             workspace.reschedule_pending = binding.catalog_authorized and self.state.source_settings != null;
@@ -504,6 +512,7 @@ pub const Runtime = struct {
             .epoch = binding.epoch,
             .canonical_root = binding.canonical_root,
             .authorized = binding.catalog_authorized,
+            .personal_only = binding.personal_only,
         };
     }
 
@@ -1399,7 +1408,7 @@ pub const Runtime = struct {
         defer self.clearJobVerification(job);
         const current = job.request_generation == control.request_generation and
             !self.shutting_down and self.state.source_settings != null and
-            job.selection.eql(self.state.source_settings.?.selection.relevant(if (scope == .personal) .user else .workspace));
+            job.selection.eql(self.state.source_settings.?.selection.relevant(if (scope == .personal or self.personalOnly(scope)) .user else .workspace));
         if (current) control.source_checks = job.root_checks;
         switch (job.state.load(.acquire)) {
             .completed => switch (job.outcome) {
@@ -1408,12 +1417,12 @@ pub const Runtime = struct {
                         old.projected_bytes
                     else
                         0;
-                    const snapshot = policy.compileCatalogSnapshot(
+                    var snapshot = policy.compileCatalogSnapshot(
                         self.allocator,
                         acquisition.projection,
                         &self.state.enablement_store,
                         self.state.enablement_health,
-                        scope.managementScope(),
+                        if (job.personal_only) .personal else scope.managementScope(),
                         snapshot_limits,
                         budget.available(old_bytes),
                     ) catch {
@@ -1428,6 +1437,7 @@ pub const Runtime = struct {
                         job.outcome = .failure;
                         return;
                     };
+                    if (job.personal_only) policy.restrictToPersonalSources(&snapshot);
                     acquisition.projection.deinit();
                     var old_slot = control.slot;
                     control.slot = .{ .committed = .{
@@ -1478,11 +1488,12 @@ pub const Runtime = struct {
             self.allocator,
             current,
             store_candidate,
-            scope,
+            if (scope == .project and self.personalOnly(.{ .workspace = .{ .id = scope.project.workspace_id, .epoch = scope.project.workspace_epoch } })) .personal else scope,
             snapshot_limits,
             current.projected_bytes,
         );
         errdefer replacement.deinit();
+        if (scope == .project and self.personalOnly(.{ .workspace = .{ .id = scope.project.workspace_id, .epoch = scope.project.workspace_epoch } })) policy.restrictToPersonalSources(&replacement);
         try candidates.append(self.allocator, .{
             .control = control,
             .snapshot = replacement,
@@ -1670,12 +1681,20 @@ pub const Runtime = struct {
         errdefer self.allocator.free(owned_home);
         const owned_epoch = try self.allocator.dupe(u8, epoch);
         errdefer self.allocator.free(owned_epoch);
+        const builtin_root = if (self.ports.source_roots.builtin_root) |value|
+            try self.allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (builtin_root) |value| self.allocator.free(value);
+        var owned_source_roots = self.ports.source_roots;
+        owned_source_roots.builtin_root = builtin_root;
         const job = try self.allocator.create(CatalogJob);
         job.* = .{
             .allocator = self.allocator,
             .io = self.io,
-            .source_roots = self.ports.source_roots,
-            .selection = self.state.source_settings.?.selection.relevant(if (scope == .personal) .user else .workspace),
+            .source_roots = owned_source_roots,
+            .selection = self.state.source_settings.?.selection.relevant(if (scope == .personal or self.personalOnly(scope)) .user else .workspace),
+            .personal_only = self.personalOnly(scope),
             .verification = verification,
             .catalog_port = self.ports.catalog,
             .notifier = self.ports.notifier,
@@ -1686,6 +1705,13 @@ pub const Runtime = struct {
             .epoch_token = owned_epoch,
         };
         return job;
+    }
+
+    fn personalOnly(self: *const Runtime, scope: Scope) bool {
+        return switch (scope) {
+            .personal => false,
+            .workspace => |identity| if (self.findWorkspaceConst(identity.id)) |workspace| workspace.personal_only else false,
+        };
     }
 
     fn enqueue(self: *Runtime, job: *CatalogJob) error{ ExecutorShuttingDown, QueueFull }!void {
@@ -1810,8 +1836,11 @@ const TestHarness = struct {
     last_epoch: [32]u8 = undefined,
     last_epoch_len: usize = 0,
     last_source_count: usize = 0,
-    last_source_ids: [sources.definitions.len]sources.Id = undefined,
-    last_source_scopes: [sources.definitions.len]agent.CatalogSourceScope = undefined,
+    last_source_ids: [sources.definitions.len + 1]sources.Id = undefined,
+    last_source_scopes: [sources.definitions.len + 1]agent.CatalogSourceScope = undefined,
+
+    last_builtin_root: [4096]u8 = undefined,
+    last_builtin_root_len: usize = 0,
 
     fn effectPorts(self: *TestHarness) ports.Ports {
         return .{
@@ -1883,7 +1912,12 @@ const TestHarness = struct {
         self.query_count += 1;
         self.last_source_count = input.additional_sources.len;
         for (input.additional_sources, 0..) |source, index| {
-            self.last_source_ids[index] = sources.findId(source.source_instance_id).?;
+            if (std.mem.eql(u8, source.source_instance_id, sources.builtin_source_instance_id)) {
+                @memcpy(self.last_builtin_root[0..source.canonical_root.len], source.canonical_root);
+                self.last_builtin_root_len = source.canonical_root.len;
+            } else {
+                self.last_source_ids[index] = sources.findId(source.source_instance_id).?;
+            }
             self.last_source_scopes[index] = source.scope;
         }
         std.debug.assert(input.workspaceRoot().len <= self.last_root.len);
@@ -3105,4 +3139,33 @@ test "source pending dispatch allocation failure is explicit and not automatical
     try std.testing.expectEqual(catalog.CatalogAvailability.unavailable, runtime.personalCatalogProjection().availability);
     try std.testing.expect(!runtime.sync(harness.budget(), test_snapshot_limits, null));
     try std.testing.expectEqual(@as(usize, 0), harness.query_count);
+}
+
+test "builtin source path is frozen before worker dispatch and missing root blocks Core query" {
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const borrowed = try std.testing.allocator.dupe(u8, root);
+    defer std.testing.allocator.free(borrowed);
+    runtime.ports.source_roots.builtin_root = borrowed;
+    try runtime.refreshPersonal();
+    @memset(borrowed, 'x');
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(@as(usize, 1), harness.query_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.last_source_count);
+    try std.testing.expectEqualStrings(root, harness.last_builtin_root[0..harness.last_builtin_root_len]);
+    try std.testing.expectEqual(agent.CatalogSourceScope.user, harness.last_source_scopes[0]);
+    try std.testing.expectEqual(sources.RootCheck.checked, runtime.state.catalog.source_checks.?.builtin);
+    runtime.ports.source_roots.builtin_root = borrowed;
+    try runtime.refreshPersonal();
+    harness.runQueued();
+    _ = runtime.sync(harness.budget(), test_snapshot_limits, null);
+    try std.testing.expectEqual(@as(usize, 1), harness.query_count);
+    try std.testing.expectEqual(sources.RootFailure.unreadable, runtime.state.catalog.source_checks.?.builtin.blocked);
+    try std.testing.expectEqual(catalog.CatalogAvailability.unavailable, runtime.personalCatalogProjection().availability);
 }

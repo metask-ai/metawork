@@ -78,6 +78,7 @@ pub const Taken = struct {
 
 const Job = struct {
     lane: *Lane,
+    slot: usize,
     operation: union(enum) {
         write: struct {
             task_id: u64,
@@ -183,6 +184,7 @@ pub const Lane = struct {
     completion_tail: usize = 0,
     completion_count: usize = 0,
     active_count: usize = 0,
+    active_tasks: [max_in_flight]?u64 = @splat(null),
     accepting: bool = true,
 
     pub fn create(
@@ -204,11 +206,11 @@ pub const Lane = struct {
     }
 
     pub fn beginWrite(self: *Lane, input: WriteInput) Error!void {
-        try self.reserve();
-        errdefer self.unreserve();
+        const slot = try self.reserve(input.task_id);
+        errdefer self.unreserve(slot);
         const job = try self.allocator.create(Job);
         errdefer self.allocator.destroy(job);
-        job.* = .{ .lane = self, .operation = .{ .write = .{
+        job.* = .{ .lane = self, .slot = slot, .operation = .{ .write = .{
             .task_id = input.task_id,
             .run_generation = input.run_generation,
             .change_order = input.change_order,
@@ -220,11 +222,11 @@ pub const Lane = struct {
     }
 
     pub fn beginRead(self: *Lane, input: ReadInput) Error!void {
-        try self.reserve();
-        errdefer self.unreserve();
+        const slot = try self.reserve(input.identity.task_id);
+        errdefer self.unreserve(slot);
         const job = try self.allocator.create(Job);
         errdefer self.allocator.destroy(job);
-        job.* = .{ .lane = self, .operation = .{ .read = .{
+        job.* = .{ .lane = self, .slot = slot, .operation = .{ .read = .{
             .completion_id = input.completion_id,
             .identity = input.identity,
             .max_bytes = input.max_bytes,
@@ -256,8 +258,9 @@ pub const Lane = struct {
 
     pub fn release(self: *Lane, taken: Taken) void {
         const job: *Job = @ptrCast(@alignCast(taken.job));
+        const slot = job.slot;
         job.deinit();
-        self.unreserve();
+        self.unreserve(slot);
     }
 
     pub fn deinit(self: *Lane) void {
@@ -268,17 +271,31 @@ pub const Lane = struct {
         allocator.destroy(self);
     }
 
-    fn reserve(self: *Lane) Error!void {
+    pub fn hasTaskJob(self: *Lane, task_id: u64) bool {
+        self.lock();
+        defer self.unlock();
+        for (self.active_tasks) |entry| if (entry == task_id) return true;
+        return false;
+    }
+
+    fn reserve(self: *Lane, task_id: u64) Error!usize {
         self.lock();
         defer self.unlock();
         if (!self.accepting) return error.ShuttingDown;
         if (self.active_count == max_in_flight) return error.Capacity;
+        const slot = for (self.active_tasks, 0..) |entry, index| {
+            if (entry == null) break index;
+        } else unreachable;
+        self.active_tasks[slot] = task_id;
         self.active_count += 1;
+        return slot;
     }
 
-    fn unreserve(self: *Lane) void {
+    fn unreserve(self: *Lane, slot: usize) void {
         self.lock();
         std.debug.assert(self.active_count != 0);
+        std.debug.assert(self.active_tasks[slot] != null);
+        self.active_tasks[slot] = null;
         self.active_count -= 1;
         self.unlock();
     }

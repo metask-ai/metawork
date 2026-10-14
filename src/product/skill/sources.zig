@@ -8,6 +8,7 @@ const agent = @import("metawork_agent");
 
 pub const file_name = "skill-sources.json";
 pub const max_store_bytes = 4096;
+pub const builtin_source_instance_id = "metawork.builtin";
 pub const Id = enum { claude_user, claude_workspace, codex_user, codex_workspace };
 pub const Brand = enum { claude, codex };
 pub const Ecosystem = enum {
@@ -301,6 +302,7 @@ fn openCanonicalBase(io: std.Io, path: []const u8, iterate: bool) error{InvalidB
 }
 
 pub const RootChecks = struct {
+    builtin: RootCheck = .disabled,
     default_user: RootCheck,
     default_workspace: RootCheck,
     checks: [definitions.len]RootCheck,
@@ -308,14 +310,31 @@ pub const RootChecks = struct {
 
 pub const Discovery = struct {
     allocator: std.mem.Allocator,
+    builtin: RootCheck = .disabled,
     default_user: RootCheck,
     default_workspace: RootCheck,
     checks: [definitions.len]RootCheck = @splat(.disabled),
-    owned_sources: [definitions.len]agent.CatalogSource = undefined,
+    owned_sources: [definitions.len + 1]agent.CatalogSource = undefined,
     count: usize = 0,
 
     pub fn rootChecks(self: *const Discovery) RootChecks {
-        return .{ .default_user = self.default_user, .default_workspace = self.default_workspace, .checks = self.checks };
+        return .{ .builtin = self.builtin, .default_user = self.default_user, .default_workspace = self.default_workspace, .checks = self.checks };
+    }
+
+    pub fn appendBuiltin(self: *Discovery, io: std.Io, canonical_root: []const u8) std.mem.Allocator.Error!void {
+        const dir = openCanonicalBase(io, canonical_root, false) catch {
+            self.builtin = .{ .blocked = .unreadable };
+            return;
+        };
+        defer dir.close(io);
+        std.debug.assert(self.count < self.owned_sources.len);
+        self.owned_sources[self.count] = .{
+            .canonical_root = try self.allocator.dupe(u8, canonical_root),
+            .scope = .user,
+            .source_instance_id = builtin_source_instance_id,
+        };
+        self.count += 1;
+        self.builtin = .checked;
     }
 
     pub fn deinit(self: *Discovery) void {
@@ -325,6 +344,7 @@ pub const Discovery = struct {
 
     /// Refuse a partial usable list if any enabled/default root was blocked.
     pub fn additionalSources(self: *const Discovery) error{SourceUnavailable}![]const agent.CatalogSource {
+        if (self.builtin == .blocked) return error.SourceUnavailable;
         if (self.default_user == .blocked or self.default_workspace == .blocked) return error.SourceUnavailable;
         for (self.checks) |check| if (check == .blocked) return error.SourceUnavailable;
         return self.owned_sources[0..self.count];
@@ -382,6 +402,33 @@ pub fn discover(
         }
     }
     return result;
+}
+
+test "builtin root joins the canonical query and missing root rejects the entire source list" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home");
+    try tmp.dir.createDirPath(std.testing.io, "builtin/docx");
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, "builtin", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var discovery = try discover(std.testing.io, std.testing.allocator, home, null, .{});
+    defer discovery.deinit();
+    try discovery.appendBuiltin(std.testing.io, root);
+    const selected = try discovery.additionalSources();
+    try std.testing.expectEqual(@as(usize, 1), selected.len);
+    try std.testing.expectEqualStrings(root, selected[0].canonical_root);
+    try std.testing.expectEqualStrings(builtin_source_instance_id, selected[0].source_instance_id);
+    try std.testing.expectEqual(agent.CatalogSourceScope.user, selected[0].scope);
+    try std.testing.expectEqualDeep(RootCheck.checked, discovery.rootChecks().builtin);
+
+    var missing = try discover(std.testing.io, std.testing.allocator, home, null, .{});
+    defer missing.deinit();
+    const missing_path = try std.fs.path.join(std.testing.allocator, &.{ root, "missing" });
+    defer std.testing.allocator.free(missing_path);
+    try missing.appendBuiltin(std.testing.io, missing_path);
+    try std.testing.expectError(error.SourceUnavailable, missing.additionalSources());
 }
 
 test "fixed source settings round trip every selection and scope dependency" {

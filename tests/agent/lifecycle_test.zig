@@ -4093,3 +4093,50 @@ test "permission mode failures preserve authority or close admission without rev
         }
     }
 }
+
+test "canonical AgentCore loads builtin document and ZIP resources and binds their policy to a Session" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "home");
+    try tmp.dir.createDirPath(std.testing.io, "workspace");
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, "home", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, "workspace", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const assets = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, "src/product/skill/assets", std.testing.allocator);
+    defer std.testing.allocator.free(assets);
+    const runtime = try lifecycle.Runtime.init(std.testing.io, std.testing.allocator, .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    var acquired = try runtime.querySkillCatalog(.{
+        .canonical_user_home = home,
+        .target = .{ .workspace = .{ .canonical_root = root, .epoch = "office" } },
+        .additional_sources = &.{.{ .canonical_root = assets, .scope = .user, .source_instance_id = "office-test" }},
+    });
+    defer acquired.projection.deinit();
+    defer runtime.releaseSkillCatalog(acquired.lease) catch unreachable;
+    try std.testing.expectEqual(lifecycle.CatalogHealth.healthy, acquired.projection.health);
+    try std.testing.expectEqual(@as(usize, 4), acquired.projection.skills.len);
+    var ids: [4][]const u8 = undefined;
+    for (acquired.projection.skills, 0..) |skill, index| {
+        try std.testing.expect(std.mem.eql(u8, skill.invocation_name, "docx") or std.mem.eql(u8, skill.invocation_name, "xlsx") or std.mem.eql(u8, skill.invocation_name, "pptx") or std.mem.eql(u8, skill.invocation_name, "zip"));
+        try std.testing.expectEqualStrings("office-test", skill.source_instance_id);
+        try std.testing.expectEqual(lifecycle.CatalogSourceScope.user, skill.source_scope);
+        ids[index] = skill.skill_id;
+    }
+    const session = try runtime.createSession(.{
+        .model_binding = fixtureModelBinding(.anthropic_messages),
+        .permission_mode = .default,
+        .shell_policy = .unrestricted,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = home,
+        .workspace_epoch = "office",
+        .skill_catalog = acquired.lease,
+        .skill_policy = .{ .granted_skill_ids = &ids },
+    });
+    defer session.close(.session_close) catch unreachable;
+    try session.refreshSkillCatalog(acquired.lease, .{ .granted_skill_ids = &ids });
+    try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+}

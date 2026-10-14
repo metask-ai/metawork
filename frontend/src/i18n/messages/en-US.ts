@@ -653,7 +653,7 @@ export const enUS = {
   "attachment.selected": "Selected attachments",
   "attachment.remove": "Remove {name}",
   "attachment.type.image": "Image",
-  "attachment.type.file": "Text file",
+  "attachment.type.file": "File",
   "attachment.reload_required":
     "Unsent attachments are not kept after reload. Add them again before sending.",
   "attachment.skill_conflict":
@@ -661,7 +661,7 @@ export const enUS = {
   "attachment.model_warning.image":
     "This model declares that image input is unsupported. You can still send and receive the exact result.",
   "attachment.error.unsupported_type":
-    "A selected file is neither a supported image nor valid UTF-8 text.",
+    "A selected file is empty, invalid, or an image that cannot be decoded.",
   "attachment.error.file_too_large":
     "A selected file exceeds the per-file limit ({limit} MB).",
   "attachment.error.too_many_files": "You can attach up to 8 files.",
@@ -1339,7 +1339,7 @@ export const enUS = {
   "mutation.reason.missing_instruction":
     "Describe what you want the Agent to do with the attached text.",
   "mutation.reason.unsupported_attachment":
-    "The attachment is no longer a supported image or UTF-8 text file.",
+    "The attachment is no longer available or valid.",
   "mutation.reason.capacity_reached":
     "MetaWork is at capacity. Finish or close some work, then try again.",
   "mutation.reason.shutting_down":

@@ -37,7 +37,7 @@ const deferred = () => {
 };
 const byteSource = () => ({
   kind: "file_bytes",
-  files: [new File(["abc"], "a.txt")],
+  files: [new File([new Uint8Array([255, 0, 98])], "archive.zip")],
 });
 const port = (overrides = {}) => ({
   begin: async () => accepted,

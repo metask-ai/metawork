@@ -888,6 +888,7 @@ pub const DeletionEffects = struct {
     context: *anyopaque,
     release_session_fn: *const fn (*anyopaque, u64) SessionReleaseOutcome,
     commit_without_task_fn: *const fn (*anyopaque, u64) DurableCommit,
+    resources_quiescent_fn: ?*const fn (*anyopaque, u64, u64) bool = null,
     delete_checkpoint_task_fn: *const fn (*anyopaque, u64) void,
     delete_file_change_task_fn: *const fn (*anyopaque, u64) void,
     delete_attachment_task_fn: *const fn (*anyopaque, u64) void,
@@ -2459,6 +2460,20 @@ pub const Runtime = struct {
         return task_view.catalogProjection(task);
     }
 
+    pub fn initialCatalogNeeded(self: *const Runtime, task_id: u64) bool {
+        const task = self.findConst(task_id) orelse return false;
+        return task.durable.permission_interaction == .interactive and
+            !task.durable.archived and task.deletion == .idle and
+            task.runtime.hasAttachedSession() and task.runtime.pinnedCatalogConst() == null and
+            task.initial_catalog_preparation == .uninitialized and
+            task_policy.taskLifecycle(task) == .open and !task_policy.hasActiveOperation(task);
+    }
+
+    pub fn markInitialCatalog(self: *Runtime, task_id: u64, loading: bool) void {
+        const task = self.find(task_id) orelse return;
+        task.initial_catalog_preparation = if (loading) .loading else .unavailable;
+    }
+
     pub fn catalogRefreshFacts(
         self: *const Runtime,
         task_id: u64,
@@ -2647,6 +2662,8 @@ pub const Runtime = struct {
                     },
                 },
                 .commit_record_deletion => {
+                    if (effects.resources_quiescent_fn) |quiescent|
+                        if (!quiescent(effects.context, task.durable.id, task.durable.workspace_id)) continue;
                     const task_id = task.durable.id;
                     const workspace_id = task.durable.workspace_id;
                     var removed = task.*;
@@ -4359,6 +4376,7 @@ pub const Runtime = struct {
                         .invalidated_rules = report.invalidated_permission_rules,
                     } else null;
                     task.runtime.mcp_authority_at_creation = .unavailable;
+                    task.initial_catalog_preparation = .uninitialized;
                     task.runtime.attachment = .{ .attached = .{
                         .binding = candidate.takeBinding(),
                         .execution = candidate.takeExecution(),
@@ -4372,6 +4390,7 @@ pub const Runtime = struct {
                     candidate.execution.clearCredential();
                     // Only the ordinary close worker receives this binding.
                     // It is never published as an executable attachment.
+                    task.initial_catalog_preparation = .uninitialized;
                     task.runtime.attachment = .{ .attached = .{
                         .binding = candidate.takeBinding(),
                         .execution = candidate.takeExecution(),

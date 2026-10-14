@@ -136,13 +136,13 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 
 ## 文件 attachment commands
 
-根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, maxFiles, maxFileBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，表示当前可发送的图片分类；其他 limit 是 canonical decimal `u64` string。Renderer 只用该对象解释入口和本地 admission，Host 对 command 重新执行全部限制；所有已支持图片与文本文件共用 `maxFileBytes`；原件字节计入暂存配额，模型输入的预览/引用预算不投影成第二个文件大小上限。store 或图片能力不可用时 `enabled=false`。
+根 `capabilities.attachments` 精确为 `{ enabled, imageFormats, maxFiles, maxFileBytes, maxStagedBytes }`。`enabled` 为 boolean，`imageFormats` 在开放时精确为有序 `png | jpeg | webp` 数组，表示当前可发送的图片分类；其他 limit 是 canonical decimal `u64` string。Renderer 只用该对象解释入口和本地 admission，Host 对 command 重新执行全部限制；所有已支持图片与其他文件共用 `maxFileBytes`；原件字节计入暂存配额，模型输入的预览/引用预算不投影成第二个文件大小上限。store 或图片能力不可用时 `enabled=false`。
 
 成功的 `metawork.events.connect` 响应增加 `attachmentInput = { mode, maxChunkBytes }`，拒绝响应不带该字段。Application 选择 `mode = native_paths | file_bytes`；Windows 使用 `file_bytes`，其他平台使用 `native_paths`。`maxChunkBytes` 是非零 canonical decimal raw-byte 上限，不能超过单次 Bridge frame 预算；它只约束字节入口，不是 Product capability。Renderer 每个平台只消费一个拖放入口，不监听另一入口作重试或超时 fallback。
 
 新的添加操作使用 revision 1 上的四个 async command。整批 key 精确为非零 canonical decimal u64 string 的 `{ generation, batchId }`，绑定当前 window/connection。`beginAdd` 精确接收 key 与 `source`：`{ kind: "picker" }`、`{ kind: "native_paths", paths }` 或 `{ kind: "file_bytes", files: [{ name, sizeBytes }] }`；路径仅能来自当前 Native drop，DOM 字节仅能来自本次 File，模式必须匹配 handshake。picker 与路径在最终整批准备结束后返回 ready/cancelled/rejected；字节来源只有完整预留并初始化 writer 后才返回 accepted。
 
-`appendAdd` 精确接收 key、JSON u32 `fileIndex`、canonical u64 string `offset` 与 `dataBase64`，只允许连续文件、连续 offset 和单块上限；worker 实际写入完成后返回 accepted/cancelled/rejected。`finishAdd` 只接收 key，在 worker 完成同步、文本校验及 Native loop 图片准备后，整批原子发布 ready/cancelled/rejected；ready 沿用既有 descriptor。新拒绝原因在既有文件原因上增加 `invalid_transfer | stale_transfer | input_busy | cleanup_failed`，不新增 Snapshot 状态或轮询接口。
+`appendAdd` 精确接收 key、JSON u32 `fileIndex`、canonical u64 string `offset` 与 `dataBase64`，只允许连续文件、连续 offset 和单块上限；worker 实际写入完成后返回 accepted/cancelled/rejected。`finishAdd` 只接收 key，在 worker 完成原件长度校验和同步及 Native loop 图片准备后，整批原子发布 ready/cancelled/rejected；ready 沿用既有 descriptor。新拒绝原因在既有文件原因上增加 `invalid_transfer | stale_transfer | input_busy | cleanup_failed`，不新增 Snapshot 状态或轮询接口。
 
 `cancelAdd` 只接收 key。取消先撤销 writer admission，等待在途 job 关闭句柄，再撤销未消费 grants 并清理候选；只在确认静止且物理清理完成后返回 `{ status: "cleaned", released: boolean }`，删除失败返回 `{ status: "cleanup_failed" }`。未知/已清理 key 的 released=false 不得掩盖该批次的活 writer 或 cleanup debt；借用和已消费原件受 Run 所有权保护。取消先于 begin 通过有界高水位拒绝迟到请求。每个 async responder 恰好结算一次，pending 输入收到 cancelled，已完成 responder 不重复结算。begin 与 finish 无固定短超时，单块和 cancel 使用既有有界 transport budget；取消结果未知立即替换连接，Renderer 清除旧连接未发送附件并保留文字，Host ledger 不因此重置。不自动重试、重放或建立 Host TTL。
 
@@ -169,7 +169,7 @@ Product Control 使用 File Changes 专用 bounded artifact lane 按 reference �
 }
 ```
 
-通过 UTF-8 文本分类的文件 entry 不含 `format`：
+非图片文件 entry 不含 `format`：
 
 ```json
 {
@@ -204,11 +204,13 @@ cancel 释放本批 Product 接收资源或本批已发布但未消费的 grant�
 
 `metawork.attachments.release` 是同步 revision 1 command，payload 精确为 `{ token }`，返回 `{ released }`。它只撤销当前 connection 拥有且尚未 borrowed/consumed 的 grant；未知、stale 或已经释放的 token 返回 released=false，不泄露其他 connection 的存在性。disconnect、document generation replacement 与 shutdown 必须等价释放该 connection 全部 grant。
 
-`metawork.tasks.run` 在既有 `text | skill` 上原地 hard cut 增加 `{ kind: "multimodal", text, attachmentTokens }`。`text` 是 string，允许为空；`attachmentTokens` 必须为非空、有界、无重复的 string array。非空 text 成为第一个 Agent part，后续 part 按 token 数组顺序；Skill 字段和 multimodal 字段不能混合。Bridge 只校验 wire 与 grant authority，Product 决定 Task/Session admission和 token 的 borrow/consume transaction。任一 token 指向 `kind=file` 时，去除首尾空白后的 `text` 必须非空，否则 Run 返回 `reason=missing_instruction` 且保留全部 ready grant；接纳后 Product 将原件保存在 Task 本地存储，文本附件作为独立有界原件引用 text part 发送，图片为有界 PNG 加原件引用；历史 metadata 仍描述用户原文件。Run 接纳后即使 history save、enqueue、transport 或 Agent terminal 失败也不得恢复或自动重放。
+`metawork.tasks.run` 在既有 `text | skill` 上原地 hard cut 增加 `{ kind: "multimodal", text, attachmentTokens }`。`text` 是 string，允许为空；`attachmentTokens` 必须为非空、有界、无重复的 string array。非空 text 成为第一个 Agent part，后续 part 按 token 数组顺序；Skill 字段和 multimodal 字段不能混合。Bridge 只校验 wire 与 grant authority，Product 决定 Task/Session admission和 token 的 borrow/consume transaction。任一 token 指向 `kind=file` 时，去除首尾空白后的 `text` 必须非空，否则 Run 返回 `reason=missing_instruction` 且保留全部 ready grant；接纳后 Product 将原件保存在 Task 本地存储，非图片文件作为独立有界原件引用 text part 发送，图片为有界 PNG 加原件引用；历史 metadata 仍描述用户原文件。Run 接纳后即使 history save、enqueue、transport 或 Agent terminal 失败也不得恢复或自动重放。
 
-Run snapshot 的 `input` 对 multimodal 精确发布 `{ kind, text, attachments, redacted }`。`text` 为 nullable string；`attachments[]` 是严格 tagged union：图片精确为 `{ kind: "image", format, displayName, sizeBytes, redacted }`，文本附件精确为 `{ kind: "file", displayName, sizeBytes, redacted }`。顺序与已接纳 input 一致。附件输入的 Snapshot 与 persistence 不含 token、路径、文本附件正文、raw bytes、Base64、digest 或 provider wire；按需读取产生的 Tool 记录遵守既有有界投影与脱敏合同。旧 history record 没有 attachment 字段时只解释为 text/skill 旧 Run，不从正文或文件引用猜测附件。
+Run snapshot 的 `input` 对 multimodal 精确发布 `{ kind, text, attachments, redacted }`。`text` 为 nullable string；`attachments[]` 是严格 tagged union：图片精确为 `{ kind: "image", format, displayName, sizeBytes, redacted }`，非图片文件精确为 `{ kind: "file", displayName, sizeBytes, redacted }`。顺序与已接纳 input 一致。附件输入的 Snapshot 与 persistence 不含 token、路径、文件原件正文、raw bytes、Base64、digest 或 provider wire；按需读取产生的 Tool 记录遵守既有有界投影与脱敏合同。旧 history record 没有 attachment 字段时只解释为 text/skill 旧 Run，不从正文或文件引用猜测附件。
 
 当前 `metawork.tasks.run` 使用 `input.kind = text | skill | multimodal` 的唯一 tagged payload，旧 `prompt` 不兼容；Skill input 精确为 `{ kind, skillId, catalogRevision, selectionRevision, argumentValues }`，multimodal 精确遵守上节 token 合同。`tasks.create` 必须携带 `workspace = { kind: "automatic" } | { kind: "manual", workspaceId, expectedWorkspaceEpoch }`、必填 nullable `modelSelection`、nullable `expectedSkillCatalogRevision`、nullable `expectedSkillSelectionRevision` 和 `approvalMode = manual | auto_review | full_access`；Text 与 multimodal 的两个 Skill revision 均为 `null`，Skill 两者均非空，混合状态 fail closed。成功 create result 与每个 Task snapshot 都必须包含 `mcpAuthority = { kind: "ready", selection: "selected" | "none" } | { kind: "unavailable", selection: null }`；失败 create result 的该字段为 null。它只描述创建时复制的 immutable MCP authority，不包含 server/tool/credential，不授权 Renderer 热附加或推断当前 MCP 状态。Bridge 与 Product Control 直接使用同一组 `manual | automatic` admission 语义；混合、缺字段或未知 kind/mode 的 payload 一律 fail closed。不存在 `workspaces.select` 命令或 Snapshot 级 selected Workspace；Manual 选择和模型 override 只属于 Renderer New task draft，真正的 Workspace epoch/authorization/recent order 与模型 authority 在 `tasks.create` 事务中校验和提交。`automaticWorkspaces` 只声明新 Automatic Workspace 的分配能力；capability 不可用时，已恢复的 Automatic Workspace 与 owning Task 历史仍可出现在 snapshot 中。Skill 没有 `runSkill` 第二入口。Workspace/Task catalog、typed Run history 和 Skill terminal cause 只从 Product Control snapshot 发布；显式 catalog refresh 也只通过 Bridge 调用 Product Control transaction，Bridge 不持有 catalog lease、不解析 slash、不读取 Skill body。
+
+Automatic 交互 Task 的初始 Skill 准备复用 `tasks[].skillCatalog.availability = loading | ready | degraded | unavailable`，不新增平行 Task 状态对象。`tasks.run` 在 loading 时返回未接纳的 `catalog_loading`，不消费附件 token 或建立 Run。Renderer 在一次用户发送的内部前置步骤中等待同一 connection generation、taskId 与 binding epoch 的 canonical snapshot 准备收口，再仅提交一次 Run；超时、失去 Task、binding 变化或断连保留草稿并禁止自动重放。初始准备 unavailable 不阻止普通 Text/文件引用 Run；它不等同于启用某个 Skill，也不改变 Conversation restore eligibility。
 
 `metawork.tasks.compact` payload 精确为 `{ taskId, expectedBindingEpoch }`，结果精确为 `{ accepted, taskId, operationId, reason }`。`accepted=true` 表示 Product 已建立该 Compact operation identity，不承诺 executor enqueue 或 Agent compact 成功；即使紧随其后的 queue submit 失败，command 仍返回该 accepted `operationId`，随后 canonical Task snapshot 以同一 operation 发布 `phase=failed, cause=resource_limit` 并清除 active operation。Renderer 必须等待 snapshot terminal，不得把 accepted acknowledgement 改判为 command rejection、恢复旧状态或自动重放。
 
