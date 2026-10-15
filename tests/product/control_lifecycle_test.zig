@@ -42,6 +42,10 @@ const ReviewScenario = struct {
     task_id: u64,
 
     fn init() !*@This() {
+        return initWithConfiguration(productControlConfiguration());
+    }
+
+    fn initWithConfiguration(configuration: product_control.Configuration) !*@This() {
         fake_core.reset();
         fake_core.setNextPlan(.ui_wait);
         const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
@@ -53,14 +57,18 @@ const ReviewScenario = struct {
         errdefer std.testing.allocator.destroy(self);
         self.* = .{
             .runtime = runtime,
-            .control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, productControlConfiguration()),
+            .control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration),
             .task_id = 0,
         };
         errdefer self.control.deinit();
         try installControlExecution(&self.control);
         var input = productControlTaskInput();
         input.approval_mode = .manual;
-        self.task_id = try self.control.createTask(input);
+        if (configuration.directories.canonical_user_home != null) {
+            const workspace_id = try self.control.openWorkspace(input);
+            const catalog = try waitCatalogReady(&self.control, workspace_id);
+            self.task_id = try self.control.createTaskInWorkspace(workspace_id, try self.control.workspaceEpoch(workspace_id), 1, self.control.newTaskAdmissionView().active_selection_revision, null, catalog.revision, catalog.selection_revision, .{ .interactive = .manual });
+        } else self.task_id = try self.control.createTask(input);
         _ = try self.control.runTask(self.task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
         try waitControlSnapshot(&self.control, "\"currentRunPhase\":\"waiting_ui\"");
         return self;
@@ -8578,4 +8586,351 @@ test "approval metadata outcomes retain both checkpoints until canonical readbac
         try std.testing.expect(!actual.changed);
         try std.testing.expectEqual(@as(u64, if (case.candidate_is_canonical) 2 else 1), actual.policy_generation);
     }
+}
+
+fn queueScenarioInput(scenario: *ReviewScenario, operation_id: []const u8, value: []const u8) !product_task.QueuedInputResult {
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    return scenario.control.queueInput(operation_id, scenario.task_id, task.durable.binding_epoch, task.runtime.active_run_id, .{ .text = value });
+}
+
+fn waitQueuedScenarioSettled(scenario: *ReviewScenario) !void {
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        if (!task.runtime.worker_leases.hasLive() and task.runtime.active_operation == .none) return;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "queued input owns raw bytes, projects secrets, withdraws by exact identity and keeps receipt" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    var message = "next fixture-secret".*;
+    const receipt = try queueScenarioInput(scenario, "queue-owned", &message);
+    try std.testing.expectEqual(.queued, receipt.outcome);
+    @memset(&message, 'x');
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const queued = task.queued_input.?;
+    try std.testing.expectEqualStrings("next fixture-secret", queued.raw.text);
+    try std.testing.expect(std.mem.indexOf(u8, queued.input.text.value, "fixture-secret") == null);
+    try std.testing.expectError(error.QueuedInputPresent, scenario.control.runTask(scenario.task_id, .{ .text = "other" }));
+    const stale = try scenario.control.withdrawQueuedInput("withdraw-stale", scenario.task_id, queued.run_id + 1, queued.revision);
+    try std.testing.expectEqual(.rejected, stale.outcome);
+    try std.testing.expectEqual(.queued_input_changed, stale.reason.?);
+    const withdrawn = try scenario.control.withdrawQueuedInput("withdraw-owned", scenario.task_id, queued.run_id, queued.revision);
+    try std.testing.expectEqual(.withdrawn, withdrawn.outcome);
+    try std.testing.expect(task.queued_input == null);
+    try std.testing.expectEqualStrings("withdraw-owned", task.queued_input_result.?.operationId());
+    try std.testing.expect(std.mem.indexOf(u8, withdrawn.input.?.text.value, "fixture-secret") == null);
+    const requeued = try queueScenarioInput(scenario, "queue-again", "another");
+    try std.testing.expect(requeued.revision.? > receipt.revision.?);
+}
+
+test "queued input normally completes exactly once and consumes at Run acceptance" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const Clock = struct {
+        fn now(context: ?*anyopaque) ?u64 {
+            return @as(*u64, @ptrCast(@alignCast(context.?))).*;
+        }
+    };
+    var now: u64 = 100;
+    scenario.control.run_clock = .{ .context = &now, .now_ms_fn = Clock.now, .now_unix_ms_fn = Clock.now };
+    const old_run_id = task.runtime.active_run_id;
+    _ = try queueScenarioInput(scenario, "queue-success", "follow up");
+    now = 200;
+    fake_core.setSessionPlan(.immediate);
+    fake_core.releaseControlled();
+    try scenario.control.respondUi(scenario.task_id, old_run_id, task.runtime.pending_ui_request_id, .{ .permission = .allow_once });
+    try waitQueuedScenarioSettled(scenario);
+    try std.testing.expect(task.queued_input == null);
+    try std.testing.expectEqual(@as(u64, 2), task.durable.next_run_generation);
+    try std.testing.expectEqual(@as(?u64, 200), task.durable.runs[1].?.admitted_at_ms);
+    try std.testing.expectEqual(@as(?u64, 200), task.durable.runs[1].?.submitted_at_unix_ms);
+    try std.testing.expectEqualStrings("follow up", task.durable.runs[1].?.input.text.value);
+    for (0..5) |_| scenario.control.syncLifecycle();
+    try std.testing.expectEqual(@as(u64, 2), task.durable.next_run_generation);
+    try std.testing.expectEqualStrings("queue-success", task.queued_input_result.?.operationId());
+    try std.testing.expectEqual(.queued, task.queued_input_result.?.outcome);
+    // A delayed cancellation of the first Run cannot touch its successor.
+    try scenario.control.cancel(scenario.task_id, old_run_id);
+    try std.testing.expectEqual(.completed, task_state.productTerminalFacts(&task.durable.runs[1].?).?.outcome);
+}
+
+test "queued input ordinary stop holds stably and stale stop does not hold" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    _ = try queueScenarioInput(scenario, "queue-stop", "follow up");
+    try std.testing.expectError(error.NoSuchRun, scenario.control.cancel(scenario.task_id, task.runtime.active_run_id + 100));
+    try std.testing.expectEqual(.waiting, task.queued_input.?.state);
+    try scenario.control.cancel(scenario.task_id, task.runtime.active_run_id);
+    try waitQueuedScenarioSettled(scenario);
+    for (0..5) |_| scenario.control.syncLifecycle();
+    try std.testing.expectEqual(.held, task.queued_input.?.state);
+    try std.testing.expectEqual(.stopped_by_user, task.queued_input.?.held_reason.?);
+    try std.testing.expectEqual(@as(u64, 1), task.durable.next_run_generation);
+}
+
+test "queued input approval no-op preserves waiting and accepted change holds" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    _ = try queueScenarioInput(scenario, "queue-mode", "follow up");
+    _ = try scenario.control.setApprovalMode(scenario.task_id, .manual, task.durable.binding_epoch, task.durable.approval_revision);
+    try std.testing.expectEqual(.waiting, task.queued_input.?.state);
+    var history: [1024 * 1024]u8 = undefined;
+    var persistence = TaskPersistenceProbe{ .storage = &history };
+    scenario.control.task_persistence = persistence.capability();
+    scenario.control.task_persistence_health = .ready;
+    scenario.control.canonical_user_home = try std.testing.allocator.dupe(u8, "/fixture-home");
+    _ = try scenario.control.setApprovalMode(scenario.task_id, .auto_review, task.durable.binding_epoch, task.durable.approval_revision);
+    try std.testing.expectEqual(.held, task.queued_input.?.state);
+    try std.testing.expectEqual(.approval_mode_changed, task.queued_input.?.held_reason.?);
+}
+
+test "queued input capacity rejection retains message and shutdown never sends" {
+    for ([_]bool{ false, true }) |shutdown| {
+        const scenario = try ReviewScenario.init();
+        defer scenario.deinit();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        _ = try queueScenarioInput(scenario, "queue-capacity", "follow up");
+        if (shutdown) scenario.control.beginShutdown() else task.durable.next_run_generation = std.math.maxInt(u64);
+        fake_core.setSessionPlan(.immediate);
+        fake_core.releaseControlled();
+        try scenario.control.respondUi(scenario.task_id, task.runtime.active_run_id, task.runtime.pending_ui_request_id, .{ .permission = .allow_once });
+        try waitQueuedScenarioSettled(scenario);
+        try std.testing.expect(task.queued_input != null);
+        if (!shutdown) {
+            try std.testing.expectEqual(.held, task.queued_input.?.state);
+            try std.testing.expectEqual(.capacity_reached, task.queued_input.?.held_reason.?);
+        }
+    }
+}
+
+test "queued input title cleanup notifies after final lease and dispatches on that wake" {
+    const Probe = struct {
+        leases: ?*const @FieldType(task_state.RuntimeAttachment, "worker_leases") = null,
+        final_wake: std.atomic.Value(bool) = .init(false),
+        fn wake(context: ?*anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.leases) |leases| if (!leases.hasLive()) self.final_wake.store(true, .release);
+            return true;
+        }
+    };
+    var probe: Probe = .{};
+    var configuration = productControlConfiguration();
+    configuration.change_notifier = .{ .context = &probe, .wake = Probe.wake };
+    configuration.completion_factory = .{ .create_fn = fixture.createCompletion };
+    const scenario = try ReviewScenario.initWithConfiguration(configuration);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    probe.leases = &task.runtime.worker_leases;
+    _ = try queueScenarioInput(scenario, "queue-title", "after title");
+    fake_core.setCompletionTitle("queued title");
+    fake_core.controlNextCompletion();
+    defer fake_core.releaseCompletion();
+    fake_core.setSessionPlan(.immediate);
+    fake_core.releaseControlled();
+    try scenario.control.respondUi(scenario.task_id, task.runtime.active_run_id, task.runtime.pending_ui_request_id, .{ .permission = .allow_once });
+    fake_core.waitCompletionEntered();
+    try scenario.control.drainAgentEvents();
+    try std.testing.expect(task.runtime.worker_leases.hasLive());
+    try std.testing.expectEqual(.waiting, task.queued_input.?.state);
+    try std.testing.expectEqual(@as(u64, 1), task.durable.next_run_generation);
+    fake_core.releaseCompletion();
+    for (0..5000) |_| {
+        if (probe.final_wake.load(.acquire)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(probe.final_wake.load(.acquire));
+    try scenario.control.drainAgentEvents();
+    try std.testing.expectEqual(@as(u64, 2), task.durable.next_run_generation);
+    try waitQueuedScenarioSettled(scenario);
+}
+
+test "queued input rejected operations do not discard and archive discards only on success" {
+    const scenario = try ReviewScenario.init();
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const queued = try queueScenarioInput(scenario, "queue-archive", "retained");
+    try std.testing.expectError(error.TaskBusy, scenario.control.setTaskArchived(scenario.task_id, true));
+    try std.testing.expect(task.queued_input != null);
+    try std.testing.expectError(error.TaskNotArchived, scenario.control.deleteTask(scenario.task_id));
+    try std.testing.expect(task.queued_input != null);
+    const occupied = try queueScenarioInput(scenario, "queue-occupied", "duplicate");
+    try std.testing.expectEqual(.queue_occupied, occupied.reason.?);
+    try std.testing.expectEqual(queued.revision.?, task.queued_input.?.revision);
+    try scenario.control.cancel(scenario.task_id, task.runtime.active_run_id);
+    try waitQueuedScenarioSettled(scenario);
+    try scenario.control.setTaskArchived(scenario.task_id, true);
+    try std.testing.expect(task.queued_input == null);
+}
+
+const QueuedInputBlocker = struct {
+    entered: std.atomic.Value(bool) = .init(false),
+    released: std.atomic.Value(bool) = .init(false),
+    fn execute(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.entered.store(true, .release);
+        while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+    }
+    fn cancel(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.released.store(true, .release);
+    }
+    fn start(self: *@This(), control: *product_control.Runtime) !void {
+        try control.executor.enqueue(.{ .identity = self, .context = self, .execute_fn = execute, .cancel_fn = cancel });
+        for (0..5000) |_| {
+            if (self.entered.load(.acquire)) return;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestUnexpectedResult;
+    }
+};
+
+test "queued input queued cancellation and failed Product outcomes hold without replay" {
+    for ([_]?fixture.Plan{ null, .resource_limit, .callback_failed, .malformed_event_callback }) |plan| {
+        const scenario = try ReviewScenario.init();
+        defer scenario.deinit();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        try scenario.control.cancel(scenario.task_id, task.runtime.active_run_id);
+        try waitQueuedScenarioSettled(scenario);
+        fake_core.setSessionPlan(plan orelse .immediate);
+        var blocker: QueuedInputBlocker = .{};
+        defer blocker.released.store(true, .release);
+        try blocker.start(&scenario.control);
+        const second = try scenario.control.runTask(scenario.task_id, .{ .text = "next result" });
+        const result = try queueScenarioInput(scenario, "queue-failure", "retained");
+        try std.testing.expectEqual(.queued, result.outcome);
+        if (plan == null) try scenario.control.cancel(scenario.task_id, second);
+        blocker.released.store(true, .release);
+        try waitQueuedScenarioSettled(scenario);
+        try std.testing.expectEqual(.held, task.queued_input.?.state);
+        try std.testing.expectEqual(if (plan == null) product_task.QueuedInputReason.stopped_by_user else .run_not_completed, task.queued_input.?.held_reason.?);
+        try std.testing.expectEqual(@as(u64, 2), task.durable.next_run_generation);
+    }
+}
+
+test "queued input enforces size and Skill authority and owns Skill argument arrays" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var enablement = try product_skill.enablement.FileStore.init(std.testing.io, home);
+    defer enablement.deinit();
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.skill_enablement = .{ .file_store = &enablement };
+    const scenario = try ReviewScenario.initWithConfiguration(configuration);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const old_max = scenario.control.limits.max_user_message_bytes;
+    scenario.control.limits.max_user_message_bytes = 4;
+    const too_large = try queueScenarioInput(scenario, "queue-large", "too long");
+    try std.testing.expectEqual(.capacity_reached, too_large.reason.?);
+    try std.testing.expect(task.queued_input == null);
+    scenario.control.limits.max_user_message_bytes = old_max;
+    const pinned = task.runtime.pinnedCatalogConst().?;
+    var argument = "correctness".*;
+    const arguments = [_][]const u8{ "src/main.zig", &argument };
+    const input: product_control.TaskRunInput = .{ .skill = .{
+        .skill_id = fixture.fixture_skill_id,
+        .catalog_revision = pinned.revision,
+        .selection_revision = pinned.selection_revision,
+        .argument_values = &arguments,
+    } };
+    const accepted = try scenario.control.queueInput("queue-skill", scenario.task_id, task.durable.binding_epoch, task.runtime.active_run_id, input);
+    try std.testing.expectEqual(.queued, accepted.outcome);
+    @memset(&argument, 'x');
+    try std.testing.expectEqualStrings("correctness", task.queued_input.?.arguments[1]);
+    const withdrawn = try scenario.control.withdrawQueuedInput("withdraw-skill", scenario.task_id, task.runtime.active_run_id, accepted.revision.?);
+    try std.testing.expectEqualStrings("correctness", withdrawn.input.?.skill.argument_values[1]);
+    try std.testing.expectEqual(pinned.selection_revision, withdrawn.selection_revision.?);
+}
+
+test "queued input explicit commands win before automatic dispatch of an already settled Run" {
+    for ([_]enum { stop, withdraw, archive, delete, remove }{ .stop, .withdraw, .archive, .delete, .remove }) |action| {
+        const scenario = try ReviewScenario.init();
+        defer scenario.deinit();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const run_id = task.runtime.active_run_id;
+        const receipt = try queueScenarioInput(scenario, "queue-race", "must not start early");
+        // Hold a legitimate Task worker barrier while the original terminal/events settle.
+        var barrier = try task.runtime.worker_leases.acquire();
+        var barrier_owned = true;
+        defer if (barrier_owned) barrier.deinit();
+        fake_core.setSessionPlan(.immediate);
+        fake_core.releaseControlled();
+        try scenario.control.respondUi(scenario.task_id, run_id, task.runtime.pending_ui_request_id, .{ .permission = .allow_once });
+        for (0..5000) |_| {
+            try scenario.control.drainAgentEvents();
+            if (task.runtime.worker_leases.liveCount() == 1 and task.runtime.active_operation == .none) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(@as(usize, 1), task.runtime.worker_leases.liveCount());
+        try std.testing.expectEqual(.completed, task_state.productTerminalFacts(&task.durable.runs[0].?).?.outcome);
+        barrier.deinit();
+        barrier_owned = false;
+        switch (action) {
+            .stop => {
+                try scenario.control.cancel(scenario.task_id, run_id);
+                try std.testing.expectEqual(.stopped_by_user, task.queued_input.?.held_reason.?);
+            },
+            .withdraw => {
+                const result = try scenario.control.withdrawQueuedInput("withdraw-race", scenario.task_id, run_id, receipt.revision.?);
+                try std.testing.expectEqual(.withdrawn, result.outcome);
+            },
+            .archive => {
+                try scenario.control.setTaskArchived(scenario.task_id, true);
+                try std.testing.expect(task.queued_input == null);
+            },
+            .delete => {
+                try std.testing.expectError(error.TaskNotArchived, scenario.control.deleteTask(scenario.task_id));
+                try std.testing.expect(task.queued_input != null);
+            },
+            .remove => {
+                try scenario.control.removeWorkspaceAtEpoch(task.durable.workspace_id, task.durable.workspace_epoch);
+            },
+        }
+        try std.testing.expectEqual(@as(u64, 1), task.durable.next_run_generation);
+    }
+}
+
+test "queued input executor queue full after acceptance consumes without retry" {
+    var gate: TerminalPublicationGate = .{};
+    var configuration = productControlConfiguration();
+    configuration.change_notifier = .{ .context = &gate, .wake = TerminalPublicationGate.wake };
+    const scenario = try ReviewScenario.initWithConfiguration(configuration);
+    defer scenario.deinit();
+    defer gate.release();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    gate.arm(.{ .run = &task.durable.runs[0].? });
+    _ = try queueScenarioInput(scenario, "queue-full", "consumed once");
+    fake_core.setSessionPlan(.immediate);
+    fake_core.releaseControlled();
+    try scenario.control.respondUi(scenario.task_id, task.runtime.active_run_id, task.runtime.pending_ui_request_id, .{ .permission = .allow_once });
+    try gate.wait();
+    gate.release();
+    for (0..5000) |_| {
+        if (!task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(!task.runtime.worker_leases.hasLive());
+    var first: QueuedInputBlocker = .{};
+    var second: QueuedInputBlocker = .{};
+    defer first.released.store(true, .release);
+    defer second.released.store(true, .release);
+    try first.start(&scenario.control);
+    try scenario.control.executor.enqueue(.{ .identity = &second, .context = &second, .execute_fn = QueuedInputBlocker.execute, .cancel_fn = QueuedInputBlocker.cancel });
+    try scenario.control.drainAgentEvents();
+    try std.testing.expect(task.queued_input == null);
+    try std.testing.expectEqual(@as(u64, 2), task.durable.next_run_generation);
+    const terminal = task_state.productTerminalFacts(&task.durable.runs[1].?).?;
+    try std.testing.expectEqual(.interrupted, terminal.outcome);
+    try std.testing.expectEqual(.queue_capacity_failure, terminal.cause.?);
+    for (0..5) |_| scenario.control.syncLifecycle();
+    try std.testing.expectEqual(@as(u64, 2), task.durable.next_run_generation);
 }

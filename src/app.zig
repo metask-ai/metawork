@@ -282,6 +282,7 @@ const App = struct {
 
     fn stop(context: *anyopaque, native_runtime: *native_sdk.Runtime) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.control) |control| control.beginShutdown();
         if (self.single_instance) |coordinator| coordinator.stopIngress();
         if (self.dispatcher) |dispatcher| dispatcher.stopIngress();
         if (self.account_started) if (self.account_coordinator) |coordinator|
