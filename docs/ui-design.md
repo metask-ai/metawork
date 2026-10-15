@@ -756,7 +756,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
 
-输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 发送前作为独立、明确标注的选择出现，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
+输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 输入框左下角作为紧凑下拉菜单出现，紧邻模型选择，只显示当前模式名称；展开列出三种模式名称及各自一句简短说明，不在输入框上方保留独立设置区或铺开说明，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
 
 运行中的输入不会发送给当前 Run，也不使用 `UiBackend.poll()` 模拟 steering。运行中草拟与空闲时使用相同发送图标，不以“排队发送”另起按钮文案，也不常驻草拟/排队提示；已提交后的等待由顶部待发送条表达，发送被禁用时才解释具体原因。排队发送的范围与保留规则以[产品需求](requirements.md#53-task)为准；“排队中”标签仍只表示已接纳 Run 等待 executor，不指待发送槽位。附件草稿、已有槽位、停止中或尚未核对的操作禁用排队，并给出具体说明，不静默降级为普通发送。
 
@@ -867,21 +867,21 @@ New task 的模式菜单只展示三个真实选项：
 
 ```text
 人工审批
-自动评审
-完全访问
+自动审批
+直接执行
 ```
 
 - `人工审批`：常规 Workspace 编辑自动执行，当前策略未覆盖的操作请求用户决定；
-- `自动评审`：按任务意图评审本次内置工具请求，不确定或失败时转人工；菜单明确使用 Task 模型并产生额外 usage 费用，同时说明不是安全保证、MCP 请求仍需人工；
-- `完全访问`：MetaWork 不再为常规工具操作请求批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。它不是 root、Sandbox 或“信任 Workspace”。
+- `自动审批`：按任务意图评审本次内置工具请求，不确定或失败时转人工；菜单用一行说明提示模型评审、存疑转人工及额外计费；这不是安全保证，MCP 请求仍需人工；
+- `直接执行`：MetaWork 不再为常规工具操作请求批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。它不是 root、Sandbox 或“信任 Workspace”。
 
-New task 直接显示 Host 发布的默认审批模式，并允许在发送前修改本次选择；首次默认值、选择记忆、授权与恢复边界由[产品需求](requirements.md#55-审批与输入)定义，不叠加第二个确认 modal 或独立委托开关。自动评审被预选时，费用、非安全保证及转人工说明仍须可见。已有交互式 Task 在 Composer 显示同一三档菜单，Task 信息显示当前模式，不受新 Task 默认值影响。Settings 不提供权限入口。
+New task 直接显示 Host 发布的默认审批模式，并允许在发送前修改本次选择；首次默认值、选择记忆、授权与恢复边界由[产品需求](requirements.md#55-审批与输入)定义，不叠加第二个确认 modal 或独立委托开关。New task 的审批选择保持紧凑，不常驻展示模式详情、费用说明或风险说明块；这些呈现变化不改变各模式的实际权限、费用和转人工语义。已有交互式 Task 在 Composer 显示同一三档菜单，Task 信息显示当前模式，不受新 Task 默认值影响。Settings 不提供权限入口。
 
-已有 Task 的菜单只消费 Host `availableApprovalModes`，保留当前模式文字；不具备切换 authority 时只读。切换请求受理后显示忙碌状态并禁用重复选择，直到 canonical Snapshot 确认当前模式及 revision；不能乐观切换。跨完全访问边界且已有 Run 时，目标选项明确“先停止当前运行，再切换；不会自动重启运行”。Renderer 不另建 stop-then-switch 编排，也不重发当前输入。
+已有 Task 的菜单只消费 Host `availableApprovalModes`，保留当前模式文字；不具备切换 authority 时只读。切换请求受理后显示忙碌状态并禁用重复选择，直到 canonical Snapshot 确认当前模式及 revision；不能乐观切换。跨直接执行边界且已有 Run 时，目标选项明确“先停止当前运行，再切换；不会自动重启运行”。Renderer 不另建 stop-then-switch 编排，也不重发当前输入。
 
-恢复原会话、结果未知与失败各自提供真实状态文字。超时或断连不能呈现成功，结果未确认时提供显式“刷新状态”，只刷新 Snapshot；用户查看最新模式后才可再次选择。菜单使用既有键盘导航、可见 focus 与 Escape/选择后 trigger 焦点恢复，费用及完全访问边界说明保持可读；390px 窄窗控件换行且不得遮挡发送/停止动作。
+恢复原会话、结果未知与失败各自提供真实状态文字。超时或断连不能呈现成功，结果未确认时提供显式“刷新状态”，只刷新 Snapshot；用户查看最新模式后才可再次选择。菜单使用既有键盘导航、可见 focus 与 Escape/选择后 trigger 焦点恢复，费用及直接执行边界说明保持可读；390px 窄窗控件换行且不得遮挡发送/停止动作。
 
-Renderer 只显示 Host capability projection 声明的模式，不独立审核或更改 authority。Scheduled Task 继续采用其固定非交互 PermissionProfile，不显示自动评审选择；对应映射及授权语义由[产品需求](requirements.md#55-审批与输入)唯一拥有。
+Renderer 只显示 Host capability projection 声明的模式，不独立审核或更改 authority。Scheduled Task 继续采用其固定非交互 PermissionProfile，不显示自动审批选择；对应映射及授权语义由[产品需求](requirements.md#55-审批与输入)唯一拥有。
 
 ## 11. 按需详情与信息归属
 

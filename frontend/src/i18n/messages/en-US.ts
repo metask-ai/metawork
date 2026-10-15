@@ -1133,19 +1133,17 @@ export const enUS = {
     "Could not recover model configuration. Try again.",
   "permission.profile.approval_required": "Request approval",
   "permission.mode.manual": "Manual approval",
-  "permission.mode.manual.help":
-    "You approve uncovered operations; routine workspace edits proceed automatically.",
-  "permission.mode.auto_review": "Automatic review",
+  "permission.mode.manual.help": "Routine edits run; ask when needed.",
+  "permission.mode.auto_review": "Automatic approval",
   "permission.mode.auto_review.help":
-    "Review this operation against task intent; ask you when uncertain. Uses the task model and incurs additional usage charges.",
-  "permission.mode.full_access": "Full access",
-  "permission.mode.full_access.help":
-    "Routine operations proceed without approval; system and execution-layer protections still apply.",
+    "Model review; extra cost; asks if unsure.",
+  "permission.mode.full_access": "Direct execution",
+  "permission.mode.full_access.help": "No routine prompts; protections apply.",
   "permission.auto_review.boundary":
     "Automatic review uses the task model and incurs additional usage charges. It is not a safety guarantee and decides only this operation. Failure returns to manual approval. MCP requests remain manual.",
   "permission.profile.approval_required.help":
     "Routine workspace edits run automatically. Other operations outside this policy require approval.",
-  "permission.profile.full_access": "Full access",
+  "permission.profile.full_access": "Direct execution",
   "permission.profile.full_access.help":
     "MetaWork skips approval for routine tool operations. AgentCore protections and system or service permissions can still block them.",
   "permission.new_task.label": "Approval mode",
@@ -1155,7 +1153,7 @@ export const enUS = {
   "permission.task.help":
     "Shows the current mode of this conversation. Change it in the composer.",
   "permission.task.full_access.help":
-    "This session uses full access. Routine approval is skipped; AgentCore and system protections still apply.",
+    "This session uses direct execution. Routine approval is skipped; AgentCore and system protections still apply.",
   "permission.task.menu_help":
     "Change approval mode for this conversation, keeping the workspace, attachments and history.",
   "permission.change.stop_help":
@@ -1207,7 +1205,7 @@ export const enUS = {
   "permission.menu_help":
     "Choose how this Task handles operations outside its current authority.",
   "permission.full_access.boundary":
-    "Full access skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
+    "Direct execution skips MetaWork approval for routine tool operations. AgentCore protections, operating system permissions, service authorization, and process identity can still block or require action. It is not root access or a sandbox.",
   "settings.default_model_for_new_tasks": "Default model for new tasks",
   "settings.current_default": "Current",
   "settings.provider": "Provider",

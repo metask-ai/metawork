@@ -89,7 +89,10 @@ import {
   createTaskPanelReviewTab,
 } from "../features/task-panel/task-panel-state.ts";
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
-import { NewTaskView } from "../features/tasks/NewTaskView.tsx";
+import {
+  NewTaskApprovalModeMenu,
+  NewTaskView,
+} from "../features/tasks/NewTaskView.tsx";
 import { TaskContent } from "../features/tasks/TaskContent.tsx";
 import {
   useNewTaskDrafts,
@@ -3071,7 +3074,18 @@ export default function App() {
           ) : undefined
         }
         approvalModeControl={
-          activeTask ? (
+          newTaskDraftActive ? (
+            <NewTaskApprovalModeMenu
+              approvalModes={
+                snapshot.capabilities.permissionProfiles
+                  ? snapshot.permissions.availableModes
+                  : []
+              }
+              approvalMode={newTaskApprovalMode}
+              disabled={workbenchMutationDisabled}
+              onApprovalModeChange={setNewTaskApprovalOverride}
+            />
+          ) : activeTask ? (
             <ApprovalModeMenu
               task={activeTask}
               request={approvalRequests[activeTask.id] ?? null}
@@ -4049,13 +4063,6 @@ export default function App() {
             <NewTaskView
               hasWorkspace={Boolean(composerWorkspace)}
               composer={composerFooter}
-              approvalModes={
-                snapshot.capabilities.permissionProfiles
-                  ? snapshot.permissions.availableModes
-                  : []
-              }
-              approvalMode={newTaskApprovalMode}
-              onApprovalModeChange={setNewTaskApprovalOverride}
             />
           ) : (
             <>

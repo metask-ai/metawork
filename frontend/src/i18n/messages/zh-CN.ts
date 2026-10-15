@@ -1024,19 +1024,16 @@ export const zhCN: Record<MessageId, string> = {
   "settings.models_reset_failed": "模型配置恢复失败，请重试。",
   "permission.profile.approval_required": "请求批准",
   "permission.mode.manual": "人工审批",
-  "permission.mode.manual.help":
-    "未覆盖的操作由你审批，常规工作区编辑自动执行。",
-  "permission.mode.auto_review": "自动评审",
-  "permission.mode.auto_review.help":
-    "按任务意图评审本次操作；不确定时请你处理。使用任务模型，产生额外调用费用。",
-  "permission.mode.full_access": "完全访问",
-  "permission.mode.full_access.help":
-    "常规操作不请求批准；系统和执行层保护仍然有效。",
+  "permission.mode.manual.help": "常规编辑自动执行，其余按需审批。",
+  "permission.mode.auto_review": "自动审批",
+  "permission.mode.auto_review.help": "模型评审，存疑转人工，额外计费。",
+  "permission.mode.full_access": "直接执行",
+  "permission.mode.full_access.help": "常规操作免审批，系统保护仍生效。",
   "permission.auto_review.boundary":
     "自动评审使用任务模型，产生额外调用费用；不是安全保证，仅决定本次操作。评审失败转人工，MCP 请求暂由你处理。",
   "permission.profile.approval_required.help":
     "常规工作区编辑自动执行；当前策略之外的其他操作需要批准。",
-  "permission.profile.full_access": "完全访问",
+  "permission.profile.full_access": "直接执行",
   "permission.profile.full_access.help":
     "MetaWork 跳过常规工具操作的批准；AgentCore 核心保护及系统或服务权限仍可阻止操作。",
   "permission.new_task.label": "审批模式",
@@ -1045,7 +1042,7 @@ export const zhCN: Record<MessageId, string> = {
   "permission.task.label": "审批模式",
   "permission.task.help": "显示此会话当前采用的审批模式；可在输入区切换。",
   "permission.task.full_access.help":
-    "此会话采用完全访问；跳过常规批准，但 AgentCore 与系统保护仍然有效。",
+    "此会话采用直接执行；跳过常规批准，但 AgentCore 与系统保护仍然有效。",
   "permission.task.menu_help": "切换本会话的审批模式，保留工作区、附件和对话。",
   "permission.change.stop_help": "将先停止当前运行，再切换；不会自动重启运行。",
   "permission.change.pending": "正在切换审批模式…",
@@ -1084,12 +1081,12 @@ export const zhCN: Record<MessageId, string> = {
     "当前会话无法切换审批模式，请查看恢复提示。",
   "permission.change.rejection.revision_exhausted":
     "该会话无法继续切换审批模式。",
-  "permission.change.rejection.review_exhausted": "该会话无法启用自动评审。",
+  "permission.change.rejection.review_exhausted": "该会话无法启用自动审批。",
   "permission.change.rejection.shutting_down":
     "MetaWork 正在关闭，请重启后选择。",
   "permission.menu_help": "选择此 Task 如何处理当前权限之外的操作。",
   "permission.full_access.boundary":
-    "完全访问会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",
+    "直接执行会跳过 MetaWork 对常规工具操作的批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。这不是 root 权限或沙箱。",
   "settings.default_model_for_new_tasks": "新任务默认模型",
   "settings.current_default": "当前默认",
   "settings.provider": "Provider",

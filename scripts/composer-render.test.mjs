@@ -23,7 +23,7 @@ const { AppShell, resolveWorkbenchColumns } = await vite.ssrLoadModule(
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
-const { NewTaskView } = await vite.ssrLoadModule(
+const { NewTaskView, NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
   "/src/features/tasks/NewTaskView.tsx",
 );
 const { TaskList } = await vite.ssrLoadModule(
@@ -315,11 +315,18 @@ function renderNewTaskView(composer = null, overrides = {}) {
       },
       createElement(NewTaskView, {
         hasWorkspace: true,
-        composer,
-        approvalModes: [],
-        approvalMode: "manual",
-        onApprovalModeChange() {},
-        ...overrides,
+        composer:
+          composer ??
+          createElement(ComposerFooter, {
+            ...base,
+            approvalModeControl: createElement(NewTaskApprovalModeMenu, {
+              approvalModes: [],
+              approvalMode: "manual",
+              disabled: false,
+              onApprovalModeChange() {},
+              ...overrides,
+            }),
+          }),
       }),
     ),
   );
@@ -702,45 +709,27 @@ test("new Task places the Composer after the outcome prompt", () => {
   assert.doesNotMatch(markup, /task-examples|task-example/);
 });
 
-test("new Task exposes and remembers the remembered three-mode approval choice", () => {
-  const markup = renderNewTaskView(null, {
-    approvalModes: ["manual", "auto_review", "full_access"],
-    approvalMode: "manual",
-  });
-  assert.match(markup, /Approval mode/);
-  assert.match(markup, /Manual approval/);
-  assert.match(markup, /Remembered across restarts/);
-  assert.doesNotMatch(markup, /trust this workspace|alertdialog/i);
-});
-
-test("new Task explains full access without claiming to bypass core protections", () => {
-  const markup = renderNewTaskView(null, {
-    approvalModes: ["manual", "auto_review", "full_access"],
-    approvalMode: "full_access",
-  });
-  assert.match(markup, /AgentCore protections/);
-  assert.match(markup, /permission-profile-risk/);
-  assert.match(markup, /service authorization.*process identity/);
-  assert.doesNotMatch(
-    markup,
-    /grants root|bypasses AgentCore|trust this workspace/i,
-  );
-});
-
-test("new Task explains automatic review cost, uncertainty and MCP fallback", () => {
-  const markup = renderNewTaskView(null, {
-    approvalModes: ["manual", "auto_review", "full_access"],
-    approvalMode: "auto_review",
-  });
-  assert.match(markup, /Automatic review/);
-  assert.match(markup, /task model/);
-  assert.match(markup, /additional.*cost|additional.*charge/);
-  assert.match(markup, /MCP/);
-  assert.match(markup, /not a safety guarantee/);
-  const note = markup.match(
-    /<p class="permission-policy-boundary" role="note">([^<]+)<\/p>/,
-  )?.[1];
-  assert.match(note ?? "", /additional usage charges/);
+test("new Task keeps its approval choice inside the Composer toolbar without details", () => {
+  for (const [mode, label] of [
+    ["manual", "Manual approval"],
+    ["auto_review", "Automatic approval"],
+    ["full_access", "Direct execution"],
+  ]) {
+    const markup = renderNewTaskView(null, {
+      approvalModes: ["manual", "auto_review", "full_access"],
+      approvalMode: mode,
+    });
+    assert.match(markup, /aria-label="Approval mode"/);
+    assert.ok(markup.includes(label));
+    assert.ok(
+      markup.indexOf('id="new-task-permission-profile"') >
+        markup.indexOf('class="ai-composer-toolbar"'),
+    );
+    assert.doesNotMatch(
+      markup,
+      /new-task-permission"|permission-policy-boundary|Remembered across restarts|additional usage charges|AgentCore protections/,
+    );
+  }
 });
 
 test("approval surfaces keep a usable narrow mode selector and dark parameter contrast", async () => {
@@ -748,15 +737,7 @@ test("approval surfaces keep a usable narrow mode selector and dark parameter co
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",
   );
-  const narrow = css.slice(css.lastIndexOf("@media (max-width: 619px)"));
-  assert.match(
-    narrow,
-    /\.new-task-permission\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/,
-  );
-  assert.match(
-    css,
-    /\.new-task-permission \.permission-profile-trigger\s*\{[^}]*min-height:\s*44px/,
-  );
+  assert.match(css, /\.task-approval-trigger\s*\{[^}]*min-height:\s*44px/);
   assert.match(
     css,
     /\.dark \.ai-intervention \.code-block-preview\s*\{[^}]*color:\s*var\(--ui-content-primary\);[^}]*background:\s*var\(--ui-surface-panel-2\)/,
