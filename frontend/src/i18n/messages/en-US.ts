@@ -635,7 +635,6 @@ export const enUS = {
   "run.placeholder_history_read_only":
     "This task has content this version can't read. You can view it; use a newer MetaWork to continue",
   "queue.card_label": "Queued message",
-  "queue.submit": "Queue message",
   "queue.waiting_short": "Queued",
   "queue.waiting": "Send after the current Run finishes and settles",
   "queue.held": "Not sent automatically: {reason}",
@@ -664,7 +663,6 @@ export const enUS = {
   "queue.resolve_first": "Resolve the queued message status first.",
   "queue.held_first": "Edit or withdraw the queued message first.",
   "queue.stopping": "The task is stopping. Send your message afterward.",
-  "queue.draft_hint": "Draft your next message, then choose Queue message.",
   "queue.discard_on_action":
     "When this action takes effect, the queued message will be discarded.",
   "queue.archive_title": "Archive and discard the queued message?",

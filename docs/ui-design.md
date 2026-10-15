@@ -721,7 +721,7 @@ Composer 布局与输入规则：
 
 Composer 是唯一 active operation 停止入口：
 
-- `queued / running / waiting_user` 时在 Composer 发送位置显示 `Stop task`；空输入时仅显示停止，有文本或 Skill 草稿时并列主按钮“排队发送”，Enter 执行排队，保留 IME 与 Shift+Enter 换行语义；
+- `queued / running / waiting_user` 时在 Composer 发送位置显示 `Stop task`；空输入时仅显示停止，有文本或 Skill 草稿时切换为普通发送图标主按钮，隐藏停止按钮，名称沿用“发送消息”，点击或 Enter 将下一条交给 Host 待发送槽位，保留 IME 与 Shift+Enter 换行语义；
 - manual compact 为 `queued / compacting` 时在同一位置显示 `Stop compacting`，替换发送按钮；
 - `stopping` 时保留该位置的禁用停止按钮，阻止重复请求并等待真实结果；
 - 顶部命令栏不重复显示 Task Stop，窗口控制和检查器入口保持全局职责；
@@ -747,7 +747,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 | Task state             | Composer behavior |
 | --- | --- |
 | draft / idle | 文本、附件、普通发送；存在 held 时禁用发送，先编辑或撤回 |
-| queued / running | 可编辑下一条草稿；空输入仅停止，有内容时停止与排队发送并列 |
+| queued / running | 可编辑下一条草稿；空输入仅停止，有内容时只显示普通发送图标，清空后恢复停止 |
 | waiting_user | 时间线审批仍是首要处理面，底部保留“请在上方处理请求”；可草拟或排队，不能替代审批回答 |
 | stopping | 保留禁用停止按钮与停止说明，不再入队 |
 | compact queued/running | 可编辑本地草稿，不支持在 compact 后排队；保留压缩停止入口 |
@@ -758,7 +758,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 发送前作为独立、明确标注的选择出现，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
 
-运行中的输入不会发送给当前 Run，也不使用 `UiBackend.poll()` 模拟 steering。排队发送的范围与保留规则以[产品需求](requirements.md#53-task)为准；“排队中”标签仍只表示已接纳 Run 等待 executor，不指待发送槽位。附件草稿、已有槽位、停止中或尚未核对的操作禁用排队，并给出具体说明，不静默降级为普通发送。
+运行中的输入不会发送给当前 Run，也不使用 `UiBackend.poll()` 模拟 steering。运行中草拟与空闲时使用相同发送图标，不以“排队发送”另起按钮文案，也不常驻草拟/排队提示；已提交后的等待由顶部待发送条表达，发送被禁用时才解释具体原因。排队发送的范围与保留规则以[产品需求](requirements.md#53-task)为准；“排队中”标签仍只表示已接纳 Run 等待 executor，不指待发送槽位。附件草稿、已有槽位、停止中或尚未核对的操作禁用排队，并给出具体说明，不静默降级为普通发送。
 
 待发送消息以一行紧凑条贴合输入框顶部，与时间线和审批面独立。行内只显示“待发送”或“未自动发送：原因”、安全内容的单行省略预览，以及带可访问名称的编辑、撤回图标；不保留独立标题、常驻说明行或多行预览，不显示内部 identity、计时重试或虚构进度。预览的原生悬停提示包含完整内容、当前 Run 完成并收尾后发送的时机，以及消息仅在本次应用运行期间保留；完整安全预览与状态保持可供辅助技术读取。操作触控区域保持至少 44px，窄窗不换行或横向溢出。编辑只在输入框为空时可用，成功撤回后才放回草稿，普通撤回丢弃内容；归档确认和删除/移除目录确认必须说明对应丢弃行为。现有归档没有待发送消息时仍可直接执行。
 

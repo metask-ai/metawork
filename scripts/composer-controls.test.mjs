@@ -2178,7 +2178,7 @@ test("Models reports an authoritative empty conversation catalog without signing
   assert.deepEqual(view.selections.model, []);
 });
 
-test("queued Text Enter preserves IME and Shift newline while Stop remains independent", () => {
+test("queued Text switches from Send to Stop when cleared and preserves IME and Shift newline", () => {
   let queues = 0,
     stops = 0;
   const composer = renderComposer({
@@ -2200,9 +2200,15 @@ test("queued Text Enter preserves IME and Shift newline while Stop remains indep
   fireEvent.keyDown(composer.textarea, { key: "Enter" });
   assert.equal(queues, 1);
   assert.equal(composer.submissions(), 0);
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  assert.equal(queues, 2);
+  assert.equal(composer.submissions(), 0);
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  fireEvent.change(composer.textarea, { target: { value: "" } });
+  assert.equal(screen.queryByRole("button", { name: "Send" }), null);
   fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
   assert.equal(stops, 1);
-  assert.equal(queues, 1);
+  assert.equal(queues, 2);
 });
 
 test("structured Skill Enter uses Queue and confirmed queue cleanup does not steal outside focus", async () => {

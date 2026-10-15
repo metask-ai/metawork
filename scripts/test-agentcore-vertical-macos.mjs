@@ -2956,12 +2956,11 @@ async function queueInRenderer(taskId, text) {
             webview.evaluate(`(() => {
           if(innerWidth>${width} || innerWidth<${width}-32) throw new Error('queued viewport size did not follow physical resize');
           const card=document.querySelector('.queued-input-card');
-          const stop=document.querySelector('.composer-stop');
-          const queue=document.querySelector('.composer-queue');
-          if(!card || !stop || !queue) return false;
+          const action=document.querySelector('.composer-stop, .composer-queue');
+          if(!card || !action) return false;
           const r=card.getBoundingClientRect();
           if(r.width===0 || r.left < -1 || r.right>innerWidth+1) return false;
-          for(const button of [stop,queue,...card.querySelectorAll('button')]) {
+          for(const button of [action,...card.querySelectorAll('button')]) {
             const b=button.getBoundingClientRect();
             if(b.height<43 || b.left< -1 || b.right>innerWidth+1) throw new Error('queued control outside viewport or too small');
           }

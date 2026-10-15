@@ -8546,6 +8546,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .composer-queue {
+  width: 44px;
   min-height: 44px;
   white-space: nowrap;
 }

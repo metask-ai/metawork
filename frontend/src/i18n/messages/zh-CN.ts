@@ -578,7 +578,6 @@ export const zhCN: Record<MessageId, string> = {
   "run.placeholder_history_read_only":
     "此任务含当前版本无法识别的内容，只能查看；请使用更新的 MetaWork 继续",
   "queue.card_label": "待发送消息",
-  "queue.submit": "排队发送",
   "queue.waiting_short": "待发送",
   "queue.waiting": "当前 Run 完成并收尾后发送",
   "queue.held": "未自动发送：{reason}",
@@ -605,7 +604,6 @@ export const zhCN: Record<MessageId, string> = {
   "queue.resolve_first": "请先处理待发送消息的核对结果。",
   "queue.held_first": "请先编辑或撤回待发送消息。",
   "queue.stopping": "当前任务正在停止，请稍后发送。",
-  "queue.draft_hint": "可以先草拟下一条消息，再选择排队发送。",
   "queue.discard_on_action": "此操作生效时会丢弃待发送消息。",
   "queue.archive_title": "归档并丢弃待发送消息？",
   "queue.archive_confirm": "归档",

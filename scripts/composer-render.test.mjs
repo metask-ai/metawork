@@ -1229,7 +1229,7 @@ test("Task completion dot consumes only the canonical unread receipt", () => {
   );
 });
 
-test("an active Run can show Stop and a separately named Queue primary action", () => {
+test("an active Run keeps the normal Send icon and shows no queue drafting prompt", () => {
   const markup = render({
     draft: { kind: "text", text: "follow up" },
     stopAction: "run",
@@ -1237,9 +1237,24 @@ test("an active Run can show Stop and a separately named Queue primary action", 
     onQueueInput() {},
     canQueue: true,
   });
-  assert.match(markup, /aria-label="Stop task"/);
-  assert.match(markup, /aria-label="Queue message"/);
-  assert.doesNotMatch(markup, /aria-label="Send message"/);
+  assert.doesNotMatch(markup, /aria-label="Stop task"/);
+  assert.match(markup, /aria-label="Send"/);
+  assert.doesNotMatch(
+    markup,
+    /Queue message|Draft your next message|composer-draft-note/,
+  );
+  const stopping = render({
+    draft: { kind: "text", text: "follow up" },
+    stopAction: "run",
+    stopDisabled: true,
+    runInFlight: true,
+    onQueueInput() {},
+  });
+  assert.doesNotMatch(stopping, /aria-label="Send"/);
+  assert.match(
+    stopping,
+    /<button(?=[^>]*aria-label="Stop task")(?=[^>]*disabled)[^>]*>/,
+  );
   const attachments = render({
     draft: {
       kind: "multimodal",
@@ -1261,7 +1276,7 @@ test("an active Run can show Stop and a separately named Queue primary action", 
   });
   assert.match(
     attachments,
-    /<button(?=[^>]*aria-label="Queue message")(?=[^>]*disabled)[^>]*>/,
+    /<button(?=[^>]*aria-label="Send")(?=[^>]*disabled)[^>]*>/,
   );
   assert.match(attachments, /Send messages with attachments manually/);
 });
