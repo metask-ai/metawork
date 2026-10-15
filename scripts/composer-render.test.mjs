@@ -834,7 +834,7 @@ test("an active run replaces the send action with stop in the Composer", () => {
   assert.doesNotMatch(markup, /class="[^\"]*composer-send/);
 });
 
-test("an expired workspace grant preserves editable text and exposes recovery", () => {
+test("an unavailable workspace preserves editable text and offers folder reselection", () => {
   const markup = render({
     draft: { kind: "text", text: "Keep this draft" },
     accessRequired: true,
@@ -843,7 +843,7 @@ test("an expired workspace grant preserves editable text and exposes recovery", 
     workspaceTitle: "/repo/alpha",
   });
   assert.match(markup, />Keep this draft</);
-  assert.match(markup, />Confirm access</);
+  assert.match(markup, />Select folder again</);
   assert.equal(
     hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
     false,

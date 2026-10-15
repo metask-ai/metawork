@@ -41,7 +41,7 @@ MetaWork 当前不定义为：
 
 ### Workspace
 
-代表 Agent 工作所针对的本地目录、任务上下文和授权身份。Workspace 是独立产品对象，不得仅从已有 Task 的路径反向推导。Manual Workspace 由用户通过 Host 原生目录选择器明确选择或重新授权；选择器确认本身就是该目录的产品授权，不追加 `trust`、`Use this folder` 或 Renderer boolean。一个 Manual Workspace 可以承载零个、一个或多个共享文件上下文的 Task；Automatic Workspace 由 Workbench 在调用方请求系统分配时创建，一个独立目录精确归属一个 Task。两者共用同一个 Workspace registry、Task 引用和 AgentCore admission，`kind` 只表达目录取得方式；Renderer 不得从路径或目录名推断 `kind`。Workspace 当前不是 OS sandbox 或 strict security 边界；未来只有文件、进程、network、symlink 与 TOCTOU enforcement 通过独立 Gate 后，才能扩大其安全承诺。
+代表 Agent 工作所针对的本地目录、任务上下文和授权身份。Workspace 是独立产品对象，不得仅从已有 Task 的路径反向推导。Manual Workspace 首次由用户通过 Host 原生目录选择器明确选择；已保存的选择跨重启保留，Host 验证该精确目录仍存在且可打开后允许直接点选，不要求重复 picker 确认；目录失效或 canonical 路径已改变时才提示不可用并要求重新选择。选择器确认本身就是该目录的产品授权，不追加 `trust`、`Use this folder` 或 Renderer boolean。一个 Manual Workspace 可以承载零个、一个或多个共享文件上下文的 Task；Automatic Workspace 由 Workbench 在调用方请求系统分配时创建，一个独立目录精确归属一个 Task。两者共用同一个 Workspace registry、Task 引用和 AgentCore admission，`kind` 只表达目录取得方式；Renderer 不得从路径或目录名推断 `kind`。Workspace 当前不是 OS sandbox 或 strict security 边界；未来只有文件、进程、network、symlink 与 TOCTOU enforcement 通过独立 Gate 后，才能扩大其安全承诺。
 
 ### Task 与内部 Agent Session
 

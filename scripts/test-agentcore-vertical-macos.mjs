@@ -594,24 +594,12 @@ desktopVertical: try {
     await rm(automationDir, { recursive: true, force: true });
     startApplication();
     await waitForBridge();
-    const beforeReauthorization = (await snapshot()).workspaces.find(
+    const restoredWorkspace = (await snapshot()).workspaces.find(
       (workspace) => workspace.id === workspaceId,
     );
-    assert.equal(
-      beforeReauthorization.authorization,
-      "reauthorization_required",
-    );
-    const reauthorized = await invokeBridge("metawork.workspaces.choose", {});
-    if (reauthorized !== null) {
-      assert.equal(reauthorized.selected, true);
-      assert.equal(reauthorized.workspaceId, workspaceId);
-    }
-    const authorizedWorkspace = (await snapshot()).workspaces.find(
-      (workspace) => workspace.id === workspaceId,
-    );
-    assert.equal(authorizedWorkspace.authorization, "available");
-    assert.equal(authorizedWorkspace.epoch, expectedWorkspaceEpoch);
-    assert.equal(authorizedWorkspace.canonicalRoot, canonicalWorkspace);
+    assert.equal(restoredWorkspace.authorization, "available");
+    assert.equal(restoredWorkspace.epoch, expectedWorkspaceEpoch);
+    assert.equal(restoredWorkspace.canonicalRoot, canonicalWorkspace);
     await finishApprovalRestart();
     await probeWindowsWebViewFocus();
     catalogSnapshot = await readCatalog();

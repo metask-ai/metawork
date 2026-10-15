@@ -126,7 +126,7 @@ Provider 删除先提交 credential cleanup tombstone，再删除系统 credenti
 
 Workspace 是 Product Control-owned 产品对象；产品语义和用户操作以[产品需求](requirements.md)为准，wire 以[Renderer Bridge 合同](renderer-bridge-contract.md)为准。本节只定义 Workspace、Task、ExecutionConfig 与 Agent Session 之间的 admission 和提交关系。
 
-Manual Workspace 与 Automatic Workspace 共用一个 registry 和 Task 引用关系，`kind` 在 record 生命周期内不可改变。Manual intent 必须重新校验 Workspace identity、epoch 与 authorization；Automatic intent 必须取得 Workspace Runtime 当前已安装的 automatic-root capability。Renderer 不提交物理路径、automatic root 或目录授权 token。
+Manual Workspace 与 Automatic Workspace 共用一个 registry 和 Task 引用关系，`kind` 在 record 生命周期内不可改变。Manual intent 必须重新校验 Workspace identity、epoch 与 authorization；Automatic intent 必须取得 Workspace Runtime 当前已安装的 automatic-root capability。Renderer 不提交物理路径、automatic root 或目录授权 token。已严格恢复的可见 Manual record 保留用户先前的目录选择：Workspace owner 重新解析精确 canonical root 并打开目录验证实际可用性，成功恢复为 available，失败保留 record 为不可用供重新选择；不把重启本身视为撤销选择，不恢复已移除记录的可见性、不改变 epoch，也不接受路径已重定向的目录。此检查不代表后续文件访问永久成功，执行仍遵循既有准入和实际 I/O 结果。
 
 Workspace owner 以 `<MetaWork data dir>/workbench/automatic-workspace-root.store` 作为唯一 canonical 配置。文件只接受 schema 1 的 `{ mode: system_default, custom_root: null } | { mode: custom, custom_root: canonical absolute path }`，不持久 revision、effective root、Workspace identity 或 Task 引用，也不读取旧格式、不迁移、不静默 fallback。进程内非零 `generation` 只服务于 command CAS；Host 重启后由新 connection/snapshot 建立新的 freshness 边界，没有 durable object 引用该 generation。Application 只提供 Native SDK 解析的 system-default path、该文件 capability 和 Host 原生 picker；路径模式、健康、交易和是否可分配均由 Workspace owner 决定。
 

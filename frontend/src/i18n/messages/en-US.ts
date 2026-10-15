@@ -137,11 +137,11 @@ export const enUS = {
   "workspace.selection_cancelled": "Workspace selection cancelled.",
   "workspace.selection_failed":
     "The workspace could not be opened. Choose it again.",
-  "workspace.grant_confirmed": "Workspace access confirmed.",
+  "workspace.grant_confirmed": "Workspace selected.",
   "workspace.access_required":
-    "Confirm workspace access again before sending this draft.",
-  "workspace.access_required_short": "Access required",
-  "workspace.confirm_access": "Confirm access",
+    "This workspace is unavailable. Select the folder again.",
+  "workspace.access_required_short": "Directory unavailable",
+  "workspace.confirm_access": "Select folder again",
   "workspace.removing_short": "Removing",
   "task.list": "Tasks",
   "task.recent": "Recent",

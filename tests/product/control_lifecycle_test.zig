@@ -1209,7 +1209,7 @@ fn expectWorkspaceSkillProjection(workbench: *product_control.Runtime, id: u64, 
     return error.TestUnexpectedResult;
 }
 
-test "Skill source authorization excludes restored Manual roots until explicit reauthorization" {
+test "Saved Workspace selection restores usable Manual roots without a picker" {
     fake_core.reset();
     const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
     defer {
@@ -1251,19 +1251,56 @@ test "Skill source authorization excludes restored Manual roots until explicit r
         defer restored.deinit();
         probe.attach(&restored);
         try installControlExecution(&restored);
-        try std.testing.expectError(error.WorkspaceUnavailable, restored.refreshWorkspaceCatalog(workspace_id, try restored.workspaceEpoch(workspace_id)));
+        const authority = try restored.workspace.taskCreateAuthority(workspace_id, try restored.workspaceEpoch(workspace_id), false);
+        try std.testing.expectEqualStrings(home, authority.canonical_root);
         const changed = if (recover_sources)
             restored.recoverSkillSourceSettings(.reread, restored.skill.sourceSettings().recovery_token.?)
         else
             restored.setSkillSourceEnabled(.claude, true, 1);
         try std.testing.expect(changed.applied);
-        try expectWorkspaceSkillProjection(&restored, workspace_id, false);
         try settleWorkspaceSkillQueries(&restored, workspace_id);
-        try probe.expectQueries(0);
-        try std.testing.expectEqual(workspace_id, try restored.openWorkspace(input));
-        try settleWorkspaceSkillQueries(&restored, workspace_id);
-        try probe.expectQueries(1);
+        try std.testing.expect(probe.root_checks.load(.acquire) > 0);
+        try std.testing.expect(probe.queries.load(.acquire) > 0);
         try expectWorkspaceSkillProjection(&restored, workspace_id, true);
+        const task_id = try restored.createTaskInWorkspace(workspace_id, authority.epoch, restored.executionGeneration(), restored.newTaskAdmissionView().active_selection_revision, null, null, null, .{ .interactive = .manual });
+        try std.testing.expectEqual(workspace_id, try restored.taskWorkspaceId(task_id));
+    }
+}
+
+test "Saved Workspace selection rejects missing and non-directory roots after restart" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "saved", .default_dir);
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, "saved", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const history = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(history);
+    var persistence: TaskPersistenceProbe = .{ .storage = history };
+    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 1, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 };
+    var workspace_id: u64 = undefined;
+    {
+        var original = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, .{ .task_persistence = persistence.capability() });
+        defer original.deinit();
+        workspace_id = try original.openWorkspace(.{ .workspace_root = root, .trust = .explicitly_trusted });
+    }
+    const saved = try std.testing.allocator.dupe(u8, history[0..persistence.len]);
+    defer std.testing.allocator.free(saved);
+    try tmp.dir.deleteDir(std.testing.io, "saved");
+    for ([_]bool{ false, true }) |as_file| {
+        if (as_file) {
+            var file = try tmp.dir.createFile(std.testing.io, "saved", .{});
+            file.close(std.testing.io);
+        }
+        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, .{ .task_persistence = persistence.capabilityRestored(saved) });
+        defer restored.deinit();
+        try std.testing.expectError(error.WorkspaceUnavailable, restored.workspace.taskCreateAuthority(workspace_id, try restored.workspaceEpoch(workspace_id), false));
+        try expectWorkspaceSkillProjection(&restored, workspace_id, false);
     }
 }
 

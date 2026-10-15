@@ -2349,3 +2349,28 @@ test("queued card edits only an empty draft and unconfirmed reuse needs explicit
   assert.deepEqual(resolutions, [true]);
   assert.equal(dialogStates.at(-1), false);
 });
+
+test("a saved Workspace can be selected directly without opening the folder picker", async () => {
+  const selected = [];
+  let pickers = 0;
+  renderComposer({
+    workspaceEditable: true,
+    workspaceOptions: [
+      { id: "automatic", label: "Default", authorization: "available" },
+      { id: "saved", label: "/repo/saved", authorization: "available" },
+    ],
+    selectedWorkspaceOptionId: "automatic",
+    onSelectWorkspace(id) {
+      selected.push(id);
+    },
+    onConfirmAccess() {
+      pickers++;
+    },
+  });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("combobox", { name: "Switch workspace" }));
+  await user.click(await screen.findByRole("option", { name: "/repo/saved" }));
+  assert.deepEqual(selected, ["saved"]);
+  assert.equal(pickers, 0);
+  assert.equal(screen.queryByText("Directory unavailable"), null);
+});

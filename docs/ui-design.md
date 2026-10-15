@@ -216,7 +216,7 @@ Workspace
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
 - Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 Workbench 内容区的长期 surface 打开，保留窗口壳层和底层 Workbench 挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
-- 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
+- 历史 Manual 目录经 Host 恢复检查仍可用时可直接点选，不显示“需要访问权限”或要求重复目录选择器；真实失效目录才显示“目录不可用”并提供重新选择。再次打开历史 Task 只保证可浏览记录，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = degraded` 本身不显示常驻提示；`retainedTaskHistoryCount > 0` 时，左栏 Task 列表以一行静态说明告知有多少已保存 Task 无法在当前版本打开且已原样保留，不提供动作、不阻塞任何操作。`history_read_only` Task 正常出现在列表中，Composer 以 placeholder 说明只能查看，菜单中的重命名、归档与删除不可用。`read_failed / corrupt / write_failed / outcome_unknown` 显示非阻塞保存提示，但不得禁用 Composer、Task 操作、Workspace 选择、权限响应或取消。Host 发布 recovery available 时，提示内提供“使用新的存储继续”，并在就地确认中明确当前文件会保留为恢复副本；Renderer 只提交当前 snapshot revision，不选择路径或操作文件。取消不改变状态，失败保留提示，成功等待 Host snapshot 收口；
 - Task 行不保留可见的文字状态标签。运行中使用紫色旋转 loading 图标，需要处理或失败使用对应语义图标；完成使用醒目的实心提示点作为一次性未读提醒，颜色沿用主操作色。Host 只为最新 terminal `completed` Run 发布 nullable 未读 identity；后台完成时显示，用户打开该 Task 后只有中央工作面未被 Settings、搜索、窄窗左栏或非停靠 Task Panel 覆盖，且应用页面可见并获得焦点时才确认并隐藏。当前可见 Task 完成后可直接确认，不闪烁自身提示点；遮挡、失焦、Bridge 失败或 stale acknowledgement 不得提前吞掉提醒。Task 再次完成新的 Run 时重新显示；归档等价于明确处理当前完成提醒，恢复时不复活旧提示点。
@@ -715,7 +715,7 @@ Composer 布局与输入规则：
 
 - 模型控件位于输入框内部左下角，发送位于右下角；textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
 - New task 的 global `defaultSelection` 为空时，Composer 在发送位置说明“未设置可执行的默认模型”并提供“打开模型设置”动作；发送保持禁用，直到用户在 `Models` 页明确选择且 Product Control 发布 active binding。Composer 不提交或修改 global default；非默认草稿选择只随首次 Task create 提交 exact source/catalog generation，创建失败时保留以便重试，创建成功后清除；
-- New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已授权 Manual Workspace 之间切换，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
+- New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已保存且可用的 Manual Workspace 之间直接切换，也可以打开原生目录选择器添加目录或重新选择失效目录；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 

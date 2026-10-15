@@ -1015,12 +1015,35 @@ pub const Runtime = struct {
         removed.active = false;
     }
 
+    fn restoredAuthorization(self: *Runtime, fact: RestoreFact) Error!Authorization {
+        if (fact.kind == .automatic) return .available;
+        if (!fact.visible or !std.fs.path.isAbsolute(fact.canonical_root))
+            return .reauthorization_required;
+        const canonical = std.Io.Dir.realPathFileAbsoluteAlloc(
+            self.io,
+            fact.canonical_root,
+            self.allocator,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .reauthorization_required,
+        };
+        defer self.allocator.free(canonical);
+        // A saved selection authorizes its exact directory, not a new symlink target.
+        if (!automaticPathEqual(canonical, fact.canonical_root))
+            return .reauthorization_required;
+        var directory = std.Io.Dir.openDirAbsolute(self.io, canonical, .{ .iterate = true }) catch
+            return .reauthorization_required;
+        directory.close(self.io);
+        return .available;
+    }
+
     pub fn restore(
         self: *Runtime,
         fact: RestoreFact,
         storage: Storage,
     ) Error!void {
         const target = findEmpty(self.records) orelse return error.WorkspaceCapacity;
+        const authorization = try self.restoredAuthorization(fact);
         const canonical_root = try storage.copy(fact.canonical_root, self.max_workspace_bytes);
         errdefer storage.free(canonical_root);
         const projected_root = try storage.copy(fact.canonical_root, self.max_workspace_bytes);
@@ -1039,7 +1062,7 @@ pub const Runtime = struct {
             .display_name_storage = display_name,
             .display_name_len = display_name.len,
             .trust = .{ .temporary = temporary },
-            .authorization = if (fact.kind == .automatic) .available else .reauthorization_required,
+            .authorization = authorization,
             .visible = fact.visible,
             .recent_order = fact.recent_order,
         };
