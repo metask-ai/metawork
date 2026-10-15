@@ -8553,32 +8553,62 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .queued-input-card {
   display: grid;
   min-width: 0;
-  padding: 12px 16px;
-  margin-bottom: 8px;
-  gap: 8px;
+  margin: 0 12px -1px;
   border: 1px solid var(--ui-border);
-  border-radius: 12px;
+  border-bottom: 0;
+  border-radius: 12px 12px 0 0;
   background: var(--ui-surface-panel);
   color: var(--ui-content-primary);
   font-size: var(--text-label);
   overflow-wrap: anywhere;
 }
 
+.queued-input-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding: 0 4px 0 12px;
+  gap: 8px;
+}
+.queued-input-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border-radius: 6px;
+}
+.queued-input-state {
+  flex-shrink: 0;
+  max-width: 50%;
+  color: var(--ui-content-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.queued-input-state[data-held] {
+  color: var(--ui-content-warning);
+}
+.queued-input-preview {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .queued-input-card p {
   margin: 0;
 }
-.queued-input-state {
-  font-weight: 600;
+.queued-input-row > .queued-input-actions {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  gap: 0;
 }
-.queued-input-card small {
-  color: var(--ui-content-muted);
+.queued-input-row button {
+  min-width: 44px;
 }
-.queued-input-preview {
-  display: -webkit-box;
-  overflow: hidden;
-  white-space: pre-wrap;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+.queued-input-card > .queued-input-error,
+.queued-input-reconciliation {
+  padding: 8px 12px;
 }
 .queued-input-actions {
   display: flex;

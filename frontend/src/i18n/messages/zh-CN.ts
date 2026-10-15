@@ -579,6 +579,7 @@ export const zhCN: Record<MessageId, string> = {
     "此任务含当前版本无法识别的内容，只能查看；请使用更新的 MetaWork 继续",
   "queue.card_label": "待发送消息",
   "queue.submit": "排队发送",
+  "queue.waiting_short": "待发送",
   "queue.waiting": "当前 Run 完成并收尾后发送",
   "queue.held": "未自动发送：{reason}",
   "queue.memory_only": "仅在本次应用运行期间保留；退出应用后会丢失。",

@@ -636,6 +636,7 @@ export const enUS = {
     "This task has content this version can't read. You can view it; use a newer MetaWork to continue",
   "queue.card_label": "Queued message",
   "queue.submit": "Queue message",
+  "queue.waiting_short": "Queued",
   "queue.waiting": "Send after the current Run finishes and settles",
   "queue.held": "Not sent automatically: {reason}",
   "queue.memory_only":
