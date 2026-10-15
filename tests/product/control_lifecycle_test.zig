@@ -46,6 +46,10 @@ const ReviewScenario = struct {
     }
 
     fn initWithConfiguration(configuration: product_control.Configuration) !*@This() {
+        return initWithRunCapacity(configuration, 2);
+    }
+
+    fn initWithRunCapacity(configuration: product_control.Configuration, max_runs: usize) !*@This() {
         fake_core.reset();
         fake_core.setNextPlan(.ui_wait);
         const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
@@ -57,7 +61,7 @@ const ReviewScenario = struct {
         errdefer std.testing.allocator.destroy(self);
         self.* = .{
             .runtime = runtime,
-            .control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, configuration),
+            .control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = max_runs, .max_tools_per_run = 1 }, configuration),
             .task_id = 0,
         };
         errdefer self.control.deinit();
@@ -8693,11 +8697,11 @@ test "queued input approval no-op preserves waiting and accepted change holds" {
 
 test "queued input capacity rejection retains message and shutdown never sends" {
     for ([_]bool{ false, true }) |shutdown| {
-        const scenario = try ReviewScenario.init();
+        const scenario = try ReviewScenario.initWithRunCapacity(productControlConfiguration(), if (shutdown) 2 else 1);
         defer scenario.deinit();
         const task = scenario.control.task_runtime.find(scenario.task_id).?;
         _ = try queueScenarioInput(scenario, "queue-capacity", "follow up");
-        if (shutdown) scenario.control.beginShutdown() else task.durable.next_run_generation = std.math.maxInt(u64);
+        if (shutdown) scenario.control.beginShutdown();
         fake_core.setSessionPlan(.immediate);
         fake_core.releaseControlled();
         try scenario.control.respondUi(scenario.task_id, task.runtime.active_run_id, task.runtime.pending_ui_request_id, .{ .permission = .allow_once });
@@ -8792,7 +8796,7 @@ const QueuedInputBlocker = struct {
 };
 
 test "queued input queued cancellation and failed Product outcomes hold without replay" {
-    for ([_]?fixture.Plan{ null, .resource_limit, .callback_failed, .malformed_event_callback }) |plan| {
+    for ([_]?fixture.Plan{ null, .resource_limit, .max_turns, .tool_loop, .checkpoint_budget_required, .checkpoint_budget_exhausted, .checkpoint_resource_limit, .callback_failed, .malformed_event_callback }) |plan| {
         const scenario = try ReviewScenario.init();
         defer scenario.deinit();
         const task = scenario.control.task_runtime.find(scenario.task_id).?;

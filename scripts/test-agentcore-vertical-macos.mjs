@@ -33,6 +33,7 @@ import {
 import { probeWindowChromeUi } from "./window-chrome-ui.mjs";
 import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
+import { runQueuedInputVertical } from "./agentcore-queued-input-vertical.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -393,13 +394,16 @@ let exitState = null;
 let lastCheckpointObservation = null;
 let app;
 let exited;
+const queuedInputOnly = process.env.METAWORK_QUEUED_INPUT_ONLY === "1";
 startApplication();
 
-try {
+desktopVertical: try {
   await waitForBridge();
-  await captureVisual("new-task", 1320, 812);
-  await probeWindowsWebViewFocusWithColdProfileRetry();
-  await captureVisual("search-keyboard", 1320, 812, false, true);
+  if (!queuedInputOnly) {
+    await captureVisual("new-task", 1320, 812);
+    await probeWindowsWebViewFocusWithColdProfileRetry();
+    await captureVisual("search-keyboard", 1320, 812, false, true);
+  }
   const chosenWorkspace = await invokeBridge("metawork.workspaces.choose", {});
   let workspaceId;
   if (chosenWorkspace === null) {
@@ -564,7 +568,7 @@ try {
       `Workspace catalog omitted the review Skill projection: ${JSON.stringify(catalogSnapshot)}`,
     );
   const finishApprovalRestart =
-    process.platform === "win32"
+    process.platform === "win32" && !queuedInputOnly
       ? await runApprovalModeVertical({
           invoke: invokeBridge,
           snapshot,
@@ -611,6 +615,32 @@ try {
     await finishApprovalRestart();
     await probeWindowsWebViewFocus();
     catalogSnapshot = await readCatalog();
+  }
+  const verifyQueuedRestart = await runQueuedInputVertical({
+    invoke: invokeBridge,
+    snapshot,
+    poll,
+    provider,
+    textSse,
+    toolSse,
+    workspaceId,
+    workspaceEpoch: expectedWorkspaceEpoch,
+    catalog: catalogSnapshot,
+    queueInRenderer: chromeProbePort === null ? null : queueInRenderer,
+    verifyRendererDraft:
+      chromeProbePort === null ? null : verifyQueuedRendererDraft,
+  });
+  if (queuedInputOnly) {
+    await stopApplication("queued input restart");
+    await rm(automationDir, { recursive: true, force: true });
+    startApplication();
+    await waitForBridge();
+    await verifyQueuedRestart();
+    await stopApplication("queued input verification complete");
+    process.stdout.write(
+      "AgentCore queued input desktop vertical passed: Text/Skill, stop, failure, title cleanup, timeout reconciliation, draft focus and restart.\n",
+    );
+    break desktopVertical;
   }
   const currentAdmission = (await snapshot()).newTaskAdmission;
   const expectedExecutionGeneration = currentAdmission.activeGeneration;
@@ -1534,6 +1564,7 @@ try {
   startApplication();
   await waitForBridge();
   const restoredSnapshot = await snapshot();
+  await verifyQueuedRestart();
   const restoredTask = restoredSnapshot.tasks.find(
     (item) => item.id === taskId,
   );
@@ -2804,6 +2835,197 @@ async function selectRenderedMode(taskId, targetMode) {
   }
 }
 
+async function resizeQueuedVisualWindow(width, height) {
+  await execFileAsync(
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      visualCaptureScript,
+      "-ProcessId",
+      String(app.pid),
+      "-OutputPath",
+      path.join(root, ".zig-cache", "queued-input-resize.png"),
+      "-Width",
+      String(width),
+      "-Height",
+      String(height),
+    ],
+    { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
+  );
+}
+
+async function queueInRenderer(taskId, text) {
+  await resizeQueuedVisualWindow(1320, 812);
+  const webview = await connectTestWebView(chromeProbePort, {
+    requestTimeoutMs: commandTimeoutMs,
+  });
+  try {
+    await poll(
+      async () =>
+        webview.evaluate(`(() => {
+      const row=[...document.querySelectorAll('.task-list-item')].find(node=>node.dataset.taskId===${JSON.stringify(taskId)});
+      if(!row) return false;
+      if(row.getAttribute('aria-current')!=='page') {row.click();return false;}
+      return Boolean(document.querySelector('.composer-shell textarea:not(:disabled)'));
+    })()`),
+      commandTimeoutMs,
+      "queued input rendered Task selection",
+    );
+    await webview.evaluate(
+      `document.querySelector('.composer-shell textarea').focus()`,
+    );
+    await webview.send("Input.insertText", { text });
+    await poll(
+      async () =>
+        webview.evaluate(
+          `document.querySelector('.composer-queue')?.disabled===false`,
+        ),
+      commandTimeoutMs,
+      "rendered Queue primary action",
+    );
+    await webview.evaluate(`(() => {
+      const transport=window.chrome.webview;
+      const post=transport.postMessage;
+      window.__queueOriginalPost=post;
+      window.__queueInvokeCount=0;
+      window.__queueClickedAt=Date.now();
+      transport.postMessage=function(message) {
+        const envelope=typeof message==='string'?JSON.parse(message):message;
+        if(envelope.command==='metawork.tasks.queueInput') {
+          window.__queueInvokeCount++;
+          if(window.__queueInvokeCount===1) {
+            setTimeout(()=>post.call(transport,message),11000);
+            return;
+          }
+        }
+        return post.call(transport,message);
+      };
+      document.querySelector('.composer-queue').click();
+    })()`);
+    const timedOut = await webview.evaluate(`(async () => {
+      await new Promise(resolve=>setTimeout(resolve,10100));
+      const status=document.querySelector('.queued-input-reconciliation');
+      return {calls:window.__queueInvokeCount,unconfirmed:Boolean(status && /unconfirmed|尚未确认/.test(status.textContent))};
+    })()`);
+    assert.equal(timedOut.calls, 1);
+    assert.equal(timedOut.unconfirmed, true);
+    await poll(
+      async () => {
+        const task = (await snapshot()).tasks.find(
+          (item) => item.id === taskId,
+        );
+        return task?.queuedInput?.input.text === text;
+      },
+      commandTimeoutMs,
+      "Host slot after Renderer timeout",
+    );
+    await poll(
+      async () =>
+        webview.evaluate(
+          `document.querySelector('.queued-input-card')!==null && document.querySelector('.composer-shell textarea')?.value===''`,
+        ),
+      commandTimeoutMs,
+      "receipt reconciles the submitted draft",
+    );
+    await webview.evaluate(
+      `document.querySelector('.composer-shell textarea').focus()`,
+    );
+    await webview.send("Input.insertText", {
+      text: "Draft kept while queued Run starts",
+    });
+    if (visualCaptureDir) {
+      await mkdir(visualCaptureDir, { recursive: true });
+      for (const [name, width, theme] of [
+        ["queued-desktop-light", 1320, "light"],
+        ["queued-desktop-dark", 1320, "dark"],
+        ["queued-narrow-light", 390, "light"],
+        ["queued-narrow-dark", 390, "dark"],
+      ]) {
+        await resizeQueuedVisualWindow(width, 812);
+        await webview.evaluate(
+          `document.documentElement.dataset.theme=${JSON.stringify(theme)}`,
+        );
+        await webview.send("Emulation.setEmulatedMedia", {
+          features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+        });
+        await poll(
+          async () =>
+            webview.evaluate(`(() => {
+          if(innerWidth>${width} || innerWidth<${width}-32) throw new Error('queued viewport size did not follow physical resize');
+          const card=document.querySelector('.queued-input-card');
+          const stop=document.querySelector('.composer-stop');
+          const queue=document.querySelector('.composer-queue');
+          if(!card || !stop || !queue) return false;
+          const r=card.getBoundingClientRect();
+          if(r.width===0 || r.left < -1 || r.right>innerWidth+1) return false;
+          for(const button of [stop,queue,...card.querySelectorAll('button')]) {
+            const b=button.getBoundingClientRect();
+            if(b.height<43 || b.left< -1 || b.right>innerWidth+1) throw new Error('queued control outside viewport or too small');
+          }
+          if(document.documentElement.scrollWidth>innerWidth) throw new Error('queued view has horizontal overflow');
+          return true;
+        })()`),
+          commandTimeoutMs,
+          `queued input ${name} geometry`,
+        );
+        const png = await webview.send("Page.captureScreenshot", {
+          format: "png",
+          captureBeyondViewport: false,
+        });
+        await writeFile(
+          path.join(visualCaptureDir, `${name}.png`),
+          Buffer.from(png.data, "base64"),
+        );
+      }
+    }
+    await resizeQueuedVisualWindow(1320, 812);
+    await webview.evaluate(
+      `delete document.documentElement.dataset.theme;document.querySelector('.composer-shell textarea').focus()`,
+    );
+    await webview.send("Emulation.setEmulatedMedia", { features: [] });
+  } catch (error) {
+    await webview
+      .evaluate(
+        `if(window.__queueOriginalPost) window.chrome.webview.postMessage=window.__queueOriginalPost`,
+      )
+      .catch(() => {});
+    throw error;
+  } finally {
+    webview.close();
+  }
+}
+
+async function verifyQueuedRendererDraft(taskId, text) {
+  const webview = await connectTestWebView(chromeProbePort, {
+    requestTimeoutMs: commandTimeoutMs,
+  });
+  try {
+    const clickedAt = await webview.evaluate(`window.__queueClickedAt`);
+    if (Date.now() - clickedAt < 10_200)
+      await new Promise((resolve) =>
+        setTimeout(resolve, 10_200 - (Date.now() - clickedAt)),
+      );
+    const observed = await webview.evaluate(`(() => {
+      const textarea=document.querySelector('.composer-shell textarea');
+      return {text:textarea?.value,focused:document.activeElement===textarea,calls:window.__queueInvokeCount,task:document.querySelector('.task-list-item[aria-current="page"]')?.dataset.taskId};
+    })()`);
+    assert.equal(observed.text, text);
+    assert.equal(observed.focused, true);
+    assert.equal(observed.calls, 1);
+    assert.equal(observed.task, taskId);
+  } finally {
+    await webview
+      .evaluate(
+        `if(window.__queueOriginalPost) {window.chrome.webview.postMessage=window.__queueOriginalPost;delete window.__queueOriginalPost;}`,
+      )
+      .catch(() => {});
+    webview.close();
+  }
+}
+
 async function captureVisual(
   name,
   width,
@@ -3023,6 +3245,7 @@ async function removeWorkspaceWithRetry() {
 function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let served = 0;
   let titleCompletions = 0;
+  let queuedTitle = null;
   let reviewRequests = 0;
   let officeReviewRequests = 0;
   let releaseReview = null;
@@ -3139,6 +3362,34 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
         }
         if (request.headers["x-api-key"] !== undefined) {
           if (
+            queuedTitle &&
+            payload.messages?.[0]?.content === queuedTitle.input &&
+            typeof payload.system === "string" &&
+            payload.system.startsWith("Generate a concise title")
+          ) {
+            assert.equal(
+              request.headers["x-api-key"],
+              "metawork-agentcore-vertical-fixture-key",
+            );
+            assert.equal(payload.model, "claude-sonnet-4-20250514");
+            queuedTitle.entered = true;
+            await queuedTitle.promise;
+            if (response.destroyed) return;
+            response.writeHead(200, {
+              "content-type": "application/json",
+              connection: "close",
+            });
+            response.end(
+              JSON.stringify({
+                type: "message",
+                content: [{ type: "text", text: "Queued title audit" }],
+                stop_reason: "end_turn",
+                usage: { input_tokens: 1, output_tokens: 1 },
+              }),
+            );
+            return;
+          }
+          if (
             request.headers["x-api-key"] !==
               "metawork-agentcore-vertical-fixture-key" ||
             request.headers.authorization !== undefined ||
@@ -3188,6 +3439,16 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           typeof fixture === "string" ? fixture : (fixture?.body ?? null);
         if (!body) throw new Error("unexpected extra provider request");
         served += 1;
+        if (response.destroyed) return;
+        if (fixture?.status !== undefined) {
+          assert.equal(fixture.status, 400);
+          response.writeHead(fixture.status, {
+            "content-type": "application/json",
+            connection: "close",
+          });
+          response.end(body);
+          return;
+        }
         response.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",
@@ -3213,6 +3474,19 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   return {
     enqueue(...fixtures) {
       queue.splice(served, 0, ...fixtures);
+    },
+    holdQueuedTitle(input) {
+      let release;
+      const promise = new Promise((resolve) => {
+        release = resolve;
+      });
+      queuedTitle = { input, entered: false, promise, release };
+    },
+    get queuedTitleEntered() {
+      return queuedTitle?.entered === true;
+    },
+    releaseQueuedTitle() {
+      queuedTitle?.release();
     },
     get reviewRequests() {
       return reviewRequests;
@@ -3248,6 +3522,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     },
     close() {
       releaseReview?.();
+      queuedTitle?.release();
       return new Promise((resolve) => server.close(resolve));
     },
   };
