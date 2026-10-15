@@ -347,27 +347,27 @@ function assertHostIdentity(payload, child) {
 
 const timeExpectations = [
   [
-    "Run start time (system local): 2026-10-09T23:59:59+08:00",
-    "System timezone: Asia/Shanghai (IANA)",
+    "Current date (system local): 2026-10-09",
+    "System timezone: Asia/Shanghai (IANA), UTC+08:00",
   ],
   [
-    "Run start time (system local): 2026-10-10T00:00:01+08:00",
-    "System timezone: Asia/Shanghai (IANA)",
+    "Current date (system local): 2026-10-10",
+    "System timezone: Asia/Shanghai (IANA), UTC+08:00",
   ],
   [
-    "Run start time (system local): 2026-10-09T09:00:01-07:00",
-    "System timezone: Pacific Standard Time (Windows)",
+    "Current date (system local): 2026-10-09",
+    "System timezone: Pacific Standard Time (Windows), UTC-07:00",
   ],
   [
-    "Run start time (system local): 2026-10-09T21:45:01+05:45",
-    "System timezone: unavailable; the numeric offset above is known.",
+    "Current date (system local): 2026-10-09",
+    "System timezone: identity unavailable, UTC+05:45",
   ],
   [
-    "Run start time (UTC): 2026-10-10T01:00:00Z",
+    "Current date (UTC): 2026-10-10",
     "System local timezone and offset: unavailable.",
   ],
   [
-    "Current time for this Run: unavailable. Do not infer it from earlier Run snapshots.",
+    "Current date for this Run: unavailable. Do not infer it from earlier Runs.",
   ],
 ];
 
@@ -383,6 +383,7 @@ function verifyHostTime(users, expectations = timeExpectations) {
     );
     assert.ok(match, "Host time must use the official Core context wrapper");
     assert.ok(match[1].includes("# metawork-time-context\n"));
+    assert.doesNotMatch(match[1], /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     for (const expected of expectations[index])
       assert.ok(
         match[1].includes(expected),

@@ -168,7 +168,7 @@ Scheduled Task 是 Workbench-owned 的持久自动化定义，独立描述“做
 
 ### 5.4 Agent 交互
 
-- 每次普通文本或多模态 Run 开始执行时，Host 为模型提供当前系统时间快照，包含可用的系统本地日期时间、该时刻 UTC offset 与带平台类型的时区 identity；排队、跨日、系统时区变化和 Conversation 恢复后必须重新采样。用户明确指定的时区或参考日期仍有效，历史快照只描述旧 Run。该快照不是实时钟，也不能替代最新事实查询；知识截止日期不得作为当前日期参照。时区 identity 缺失但 offset 可用时提供带 offset 的本地时间；本地时区信息不可用时明确提供 UTC，时钟不可用时明确表示未知，不猜测或从历史补写。该上下文不改变用户输入、产品历史与复制内容。
+- 每次普通文本或多模态 Run 开始执行时，Host 为模型提供本轮开始时的系统本地日历日期（`YYYY-MM-DD`）与时区信息，用于解释“今天”“近期”等时间参照，不提供具体钟点。排队、跨日、系统时区变化和 Conversation 恢复后必须重新采样；同一本地日期且时区信息不变时，上下文正文不随时分秒变化。时区信息包含可用的带平台类型 identity 与该时刻 UTC offset；identity 缺失时保留已知 offset，本地时区信息不可用时明确提供 UTC 日期。用户明确指定的时区或参考日期仍有效，历史日期只描述旧 Run；该日期不能替代最新事实查询，知识截止日期不得作为当前日期参照。时钟不可用时明确表示日期未知，不猜测或从历史补写。该上下文不改变用户输入、产品历史与复制内容。
 
 - 用户可以提交普通文本，或由图片与其他文件附件组成的多模态输入并启动真实 Agent Run；大文本文件经本地引用按需读取，不等于文档解析能力。模型目录中的 `imageInput` 只提供图片发送前提示，不能替代 Product admission 或 AgentCore typed capability 判断，也不能授权 Renderer 丢弃媒体、切换模型或降级成文本。目录仍可保留上游 `pdfInput` 元数据，但 MetaWork 不据此发送 Provider 原生 PDF part；PDF 文件仍按通用文件引用处理；
 - AgentCore → Host → Bridge 持续投影 Agent 可见输出，并把 commentary、final/partial response 与 provisional 区分为稳定过程说明、安全正文和可回滚临时文本；Renderer 必须在正式 terminal fact 前随真实 Snapshot revision 持续更新 Run 的工作过程，不能把已到达的过程事实藏到终态后一次性展示；

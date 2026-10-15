@@ -56,7 +56,7 @@ test "Run time sampling occurs at Core execution and refreshes each Run" {
     terminal.deinit();
     run.deinit();
     try std.testing.expectEqual(@as(usize, 1), clock.samples);
-    try std.testing.expect(std.mem.indexOf(u8, fake_core.run_time_text[0..fake_core.run_time_text_len], "2026-10-09T09:30:00+08:00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fake_core.run_time_text[0..fake_core.run_time_text_len], "Current date (system local): 2026-10-09\n") != null);
     while (runtime.takeEvent()) |event| {
         var owned = event;
         owned.deinit();
@@ -67,7 +67,7 @@ test "Run time sampling occurs at Core execution and refreshes each Run" {
     next_terminal.deinit();
     next.deinit();
     try std.testing.expectEqual(@as(usize, 2), clock.samples);
-    try std.testing.expect(std.mem.indexOf(u8, fake_core.run_time_text[0..fake_core.run_time_text_len], "Current time for this Run: unavailable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fake_core.run_time_text[0..fake_core.run_time_text_len], "Current date for this Run: unavailable") != null);
 }
 
 test "Run time source missing is an initialization error" {

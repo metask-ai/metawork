@@ -1949,7 +1949,7 @@ async function assertMultimodalProviderRequest(payload, text) {
   );
   assert.match(
     context.text,
-    /Run start time \(system local\): \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}|Run start time \(UTC\): \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z|Current time for this Run: unavailable\./,
+    /Current date \((?:system local|UTC)\): \d{4}-\d{2}-\d{2}\n|Current date for this Run: unavailable\./,
   );
   assert.ok(
     context.text.includes(

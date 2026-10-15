@@ -270,7 +270,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 
 Application 通过 Native SDK 公开时钟读取 Unix 时间，并通过 [高层架构](architecture.md#35-native-sdk) 登记的窄 `run_local_timezone` capability 取得同一时刻的系统本地 UTC offset 与平台原生 identity；不解析本地化时间字符串、不维护时区数据库或 Windows/IANA 映射。Application 向 Agent Runtime 注入同步、有界、worker-safe 的采样 callback，context 必须存活至 Runtime shutdown 完成；缺少 callback 在初始化时拒绝。
 
-Agent 对普通文本与多模态输入，在已有执行资格和取消检查之后、实际 Core Run 调用前采样一次，不在 Session 锁内执行平台读取。两种输入路径共享同一 options，Core 调用期保持 owned 文本与 block。每个后续受支持 Run 重新采样；一个 Run 的工具循环仍使用本轮开始快照。时区 identity 缺失时保留已知 offset，本地时间/offset 不可用时明确使用 UTC，时钟不可用或超出可表示范围时明确表示未知；不以旧快照补写，也不因时间不可用终止正常 Run。block 的短正文区分当前与历史快照、开始时间与实时钟，并保留用户指定时区/参考日期的语义；产品行为见 [产品需求](requirements.md#54-agent-交互)，wire 与 label 见 [ABI 消费合同](agentcore-abi-v1.md#3-abi-identity-与-function-table)。
+Agent 对普通文本与多模态输入，在已有执行资格和取消检查之后、实际 Core Run 调用前采样一次，不在 Session 锁内执行平台读取。两种输入路径共享同一 options，Core 调用期保持 owned 文本与 block。每个后续受支持 Run 重新采样；一个 Run 的工具循环仍使用本轮开始快照。采样值仅用于计算本轮开始时的日历日期与时区信息，block 不包含具体钟点；日期精度、同日稳定性、用户参考日期与显式降级语义由 [产品需求](requirements.md#54-agent-交互)定义。时间不可用不终止正常 Run。wire 与 label 见 [ABI 消费合同](agentcore-abi-v1.md#3-abi-identity-与-function-table)。
 
 Core Conversation/checkpoint 可以保留旧时间 block。MetaWork 不改写 opaque checkpoint、不重放时间、不增加 Product history、Bridge、event 或 Snapshot 字段。Run 上下文不是 system-role 指令，fixture 请求断言只能证明传递，不能替代远端模型理解效果验证。当前 ABI 不接受 Skill Run 的 context blocks；Skill 不调用时间采样，保持 null blocks 与零 count，继续遵循官方 Skill 执行与身份继承语义。这是已登记的能力缺口，不通过改写 Skill 参数、Session profile 或 opaque checkpoint 补齐。独立 Completion 与 manual compact 不接入该采样 capability。
 
