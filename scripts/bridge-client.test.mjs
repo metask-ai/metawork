@@ -982,3 +982,99 @@ test("Run wire preserves expanded UTF-8 text with JSON escapes", async () => {
   });
   await client.run("1", "1", { kind: "text", text });
 });
+
+test("queue commands submit their exact operation identity once and never retry timeouts", async () => {
+  const calls = [];
+  const client = new BridgeClient({
+    bridge: bridgeWith(async (command, payload) => {
+      calls.push({ command, payload });
+      if (command.endsWith("queueInput"))
+        return {
+          operationId: payload.operationId,
+          taskId: payload.taskId,
+          accepted: true,
+          revision: "1",
+          reason: null,
+        };
+      return {
+        operationId: payload.operationId,
+        taskId: payload.taskId,
+        withdrawn: true,
+        revision: payload.revision,
+        reason: null,
+        input: { kind: "text", text: "follow up", redacted: false },
+      };
+    }),
+  });
+  await client.queueInput("queue-1", "1", "2", "3", {
+    kind: "text",
+    text: "follow up",
+  });
+  await client.withdrawQueuedInput("withdraw-1", "1", "3", "1");
+  assert.deepEqual(calls, [
+    {
+      command: "metawork.tasks.queueInput",
+      payload: {
+        operationId: "queue-1",
+        taskId: "1",
+        expectedBindingEpoch: "2",
+        runId: "3",
+        input: { kind: "text", text: "follow up" },
+      },
+    },
+    {
+      command: "metawork.tasks.withdrawQueuedInput",
+      payload: {
+        operationId: "withdraw-1",
+        taskId: "1",
+        runId: "3",
+        revision: "1",
+      },
+    },
+  ]);
+});
+
+test("queue and withdrawal timeout invoke Host once even when the response arrives later", async () => {
+  for (const kind of ["queue", "withdraw"]) {
+    let resolve;
+    let calls = 0;
+    const client = new BridgeClient({
+      commandTimeoutMs: 1,
+      bridge: bridgeWith(() => {
+        calls += 1;
+        return new Promise((done) => {
+          resolve = done;
+        });
+      }),
+    });
+    const operation =
+      kind === "queue"
+        ? client.queueInput("q-timeout", "1", "1", "1", {
+            kind: "text",
+            text: "next",
+          })
+        : client.withdrawQueuedInput("w-timeout", "1", "1", "1");
+    await assert.rejects(operation, BridgeCommandTimeoutError);
+    assert.equal(calls, 1);
+    resolve(
+      kind === "queue"
+        ? {
+            operationId: "q-timeout",
+            taskId: "1",
+            accepted: true,
+            revision: "1",
+            reason: null,
+          }
+        : {
+            operationId: "w-timeout",
+            taskId: "1",
+            withdrawn: true,
+            revision: "1",
+            reason: null,
+            input: { kind: "text", text: "next", redacted: false },
+          },
+    );
+    await new Promise((done) => setTimeout(done, 2));
+    assert.equal(calls, 1);
+  }
+});

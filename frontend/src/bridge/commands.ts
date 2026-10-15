@@ -82,6 +82,8 @@ export const commands = {
   accountLogout: "metawork.account.logout",
   createTask: "metawork.tasks.create",
   run: "metawork.tasks.run",
+  queueInput: "metawork.tasks.queueInput",
+  withdrawQueuedInput: "metawork.tasks.withdrawQueuedInput",
   setApprovalMode: "metawork.tasks.setApprovalMode",
   selectTaskModel: "metawork.tasks.selectModel",
   restoreTask: "metawork.tasks.restore",

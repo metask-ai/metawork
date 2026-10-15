@@ -47,6 +47,9 @@ const build_options = @import("build_options");
 
 pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 
+pub const QueuedInputResult = task_runtime.QueuedInputResult;
+pub const QueuedInputReason = task_runtime.QueuedInputReason;
+
 pub const Error = task_runtime.RunError || task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
@@ -4467,7 +4470,12 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
+    pub fn writeQueuedInputValue(self: *const Runtime, writer: *std.Io.Writer, result: QueuedInputResult) Error!void {
+        if (result.input) |input| try product_task.writeInput(writer, self.taskTextProjection(), input, result.selection_revision) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    }
+
     pub fn queueInput(self: *Runtime, operation_id: []const u8, task_id: u64, binding_epoch: u64, run_id: u64, input: TaskRunInput) Error!task_runtime.QueuedInputResult {
+        if (self.containsKnownCredential(operation_id)) return error.InvalidQueueOperation;
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         const result = try self.task_runtime.beginQueuedInputOperation(task_id, operation_id, .queue, self.taskRuntimeOperationEffects().release);
@@ -4496,6 +4504,7 @@ pub const Runtime = struct {
     }
 
     pub fn withdrawQueuedInput(self: *Runtime, operation_id: []const u8, task_id: u64, run_id: u64, revision: u64) Error!task_runtime.QueuedInputResult {
+        if (self.containsKnownCredential(operation_id)) return error.InvalidQueueOperation;
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         const result = try self.task_runtime.beginQueuedInputOperation(task_id, operation_id, .withdraw, self.taskRuntimeOperationEffects().release);

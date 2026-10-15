@@ -1332,6 +1332,8 @@ export const enUS = {
   "mutation.reason.task_unavailable": "This task is no longer available.",
   "mutation.reason.recovery_unavailable":
     "This conversation can no longer be restored from the current saved state.",
+  "mutation.reason.queued_input_present":
+    "Edit or withdraw the queued message first.",
   "mutation.reason.task_busy": "This task is already working.",
   "mutation.reason.no_history": "Run this task once before compacting context.",
   "mutation.reason.catalog_loading":

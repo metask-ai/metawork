@@ -4896,7 +4896,10 @@ fn redactTaskProjection(
     effects: RedactionEffects,
 ) void {
     if (task.queued_input) |*queued| redactInputProjection(&queued.input, credential, effects);
-    if (task.queued_input_result) |*result| if (result.input) |*input| redactInputProjection(input, credential, effects);
+    if (task.queued_input_result) |*result| {
+        _ = effects.redact(result.operation_id[0..result.operation_id_len], credential);
+        if (result.input) |*input| redactInputProjection(input, credential, effects);
+    }
     task.durable.title_redacted = effects.redact(task.durable.title, credential) or
         task.durable.title_redacted;
     _ = effects.redact(task.durable.workspace_root, credential);

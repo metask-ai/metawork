@@ -1196,6 +1196,7 @@ export const zhCN: Record<MessageId, string> = {
   "task.model.updated": "任务模型已更新。",
   "task.model_pending": "下一轮使用：{model}",
   "mutation.reason.recovery_unavailable": "当前保存状态已无法恢复此会话。",
+  "mutation.reason.queued_input_present": "请先编辑或撤回待发送消息。",
   "mutation.reason.task_busy": "该任务正在执行中。",
   "mutation.reason.no_history": "请先运行一次任务，再压缩上下文。",
   "mutation.reason.catalog_loading": "相关能力目录正在刷新，请稍后重试。",
