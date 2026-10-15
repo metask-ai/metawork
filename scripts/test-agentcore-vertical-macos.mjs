@@ -594,24 +594,12 @@ desktopVertical: try {
     await rm(automationDir, { recursive: true, force: true });
     startApplication();
     await waitForBridge();
-    const beforeReauthorization = (await snapshot()).workspaces.find(
+    const restoredWorkspace = (await snapshot()).workspaces.find(
       (workspace) => workspace.id === workspaceId,
     );
-    assert.equal(
-      beforeReauthorization.authorization,
-      "reauthorization_required",
-    );
-    const reauthorized = await invokeBridge("metawork.workspaces.choose", {});
-    if (reauthorized !== null) {
-      assert.equal(reauthorized.selected, true);
-      assert.equal(reauthorized.workspaceId, workspaceId);
-    }
-    const authorizedWorkspace = (await snapshot()).workspaces.find(
-      (workspace) => workspace.id === workspaceId,
-    );
-    assert.equal(authorizedWorkspace.authorization, "available");
-    assert.equal(authorizedWorkspace.epoch, expectedWorkspaceEpoch);
-    assert.equal(authorizedWorkspace.canonicalRoot, canonicalWorkspace);
+    assert.equal(restoredWorkspace.authorization, "available");
+    assert.equal(restoredWorkspace.epoch, expectedWorkspaceEpoch);
+    assert.equal(restoredWorkspace.canonicalRoot, canonicalWorkspace);
     await finishApprovalRestart();
     await probeWindowsWebViewFocus();
     catalogSnapshot = await readCatalog();
@@ -2956,12 +2944,11 @@ async function queueInRenderer(taskId, text) {
             webview.evaluate(`(() => {
           if(innerWidth>${width} || innerWidth<${width}-32) throw new Error('queued viewport size did not follow physical resize');
           const card=document.querySelector('.queued-input-card');
-          const stop=document.querySelector('.composer-stop');
-          const queue=document.querySelector('.composer-queue');
-          if(!card || !stop || !queue) return false;
+          const action=document.querySelector('.composer-stop, .composer-queue');
+          if(!card || !action) return false;
           const r=card.getBoundingClientRect();
           if(r.width===0 || r.left < -1 || r.right>innerWidth+1) return false;
-          for(const button of [stop,queue,...card.querySelectorAll('button')]) {
+          for(const button of [action,...card.querySelectorAll('button')]) {
             const b=button.getBoundingClientRect();
             if(b.height<43 || b.left< -1 || b.right>innerWidth+1) throw new Error('queued control outside viewport or too small');
           }

@@ -765,47 +765,8 @@ summary::-webkit-details-marker {
   box-shadow: 0 1px 2px rgba(37, 34, 45, 0.025);
 }
 
-.new-task-permission span {
-  color: var(--ui-content-muted);
-  font-size: var(--text-micro);
-  font-weight: 720;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.permission-profile-trigger {
-  width: 100%;
-  min-width: 220px;
-}
-
 .permission-profile-menu {
   width: min(360px, calc(100vw - 32px));
-}
-
-.permission-policy-boundary {
-  display: flex;
-  margin: 0;
-  padding: 11px 12px;
-  align-items: flex-start;
-  gap: 8px;
-  grid-column: 1 / -1;
-  border: 1px solid
-    color-mix(in srgb, var(--metask-state-warning) 30%, var(--settings-line));
-  border-radius: 9px;
-  color: var(--settings-muted);
-  background: color-mix(
-    in srgb,
-    var(--metask-state-warning) 7%,
-    var(--settings-paper)
-  );
-  font-size: var(--text-control);
-  line-height: 1.45;
-}
-
-.permission-policy-boundary svg {
-  flex: 0 0 auto;
-  margin-top: 2px;
-  color: var(--metask-state-warning);
 }
 
 .settings-row {
@@ -2396,13 +2357,6 @@ summary::-webkit-details-marker {
   font-weight: 620;
 }
 
-.permission-profile-risk {
-  display: inline-flex;
-  align-items: center;
-  color: var(--metask-state-warning);
-  font-size: var(--text-body);
-}
-
 @keyframes selection-trigger-spin {
   to {
     transform: rotate(360deg);
@@ -3069,14 +3023,6 @@ button.run-process-tool:hover {
   .settings-automatic-root-actions {
     max-width: none;
     justify-content: flex-start;
-  }
-
-  .new-task-permission {
-    grid-template-columns: 1fr;
-  }
-
-  .permission-profile-trigger {
-    min-width: 0;
   }
 
   .settings-field {
@@ -7764,38 +7710,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   line-height: 1.7;
 }
 
-.new-task-permission {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
-  width: min(100%, 620px);
-  margin: 22px auto 0;
-  padding: 14px 0;
-  align-items: center;
-  gap: 20px;
-  border-top: 1px solid var(--ui-border);
-  border-bottom: 1px solid var(--ui-border);
-  text-align: left;
-}
-
-.new-task-permission > div {
-  display: grid;
-  gap: 4px;
-}
-
-.new-task-permission .permission-profile-trigger {
-  min-height: 44px;
-}
-
-.new-task-permission small {
-  color: var(--ui-content-muted);
-  font-size: var(--text-control);
-  line-height: 1.45;
-}
-
-.new-task-permission + .composer-bar {
-  margin-top: 18px;
-}
-
 .new-task-content .composer-bar {
   width: 100%;
   margin-top: 28px;
@@ -8362,9 +8276,42 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .task-approval-trigger {
+  position: relative;
+  isolation: isolate;
+  height: 44px;
   min-height: 44px;
   max-width: 100%;
   flex: 0 1 auto;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--ui-content-primary);
+  background: transparent;
+  font-size: var(--text-control);
+  font-weight: 620;
+}
+
+/* Match the model chip's 32px surface while keeping a 44px hit target. */
+.task-approval-trigger::before {
+  position: absolute;
+  z-index: -1;
+  inset: 6px 0;
+  border-radius: inherit;
+  background: var(--ui-surface-panel-2);
+  content: "";
+}
+
+.task-approval-trigger:hover:not(:disabled),
+.task-approval-trigger[data-popup-open] {
+  background: transparent;
+}
+
+.task-approval-trigger:hover:not(:disabled)::before {
+  background: var(--ui-action-hover-surface);
+}
+
+.task-approval-trigger[data-popup-open]::before {
+  background: var(--ui-action-selected-surface);
 }
 
 .task-approval-menu .selection-menu-item-copy > small {
@@ -8546,6 +8493,7 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .composer-queue {
+  width: 44px;
   min-height: 44px;
   white-space: nowrap;
 }
@@ -8553,32 +8501,62 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .queued-input-card {
   display: grid;
   min-width: 0;
-  padding: 12px 16px;
-  margin-bottom: 8px;
-  gap: 8px;
+  margin: 0 12px -1px;
   border: 1px solid var(--ui-border);
-  border-radius: 12px;
+  border-bottom: 0;
+  border-radius: 12px 12px 0 0;
   background: var(--ui-surface-panel);
   color: var(--ui-content-primary);
   font-size: var(--text-label);
   overflow-wrap: anywhere;
 }
 
+.queued-input-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding: 0 4px 0 12px;
+  gap: 8px;
+}
+.queued-input-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border-radius: 6px;
+}
+.queued-input-state {
+  flex-shrink: 0;
+  max-width: 50%;
+  color: var(--ui-content-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.queued-input-state[data-held] {
+  color: var(--ui-content-warning);
+}
+.queued-input-preview {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .queued-input-card p {
   margin: 0;
 }
-.queued-input-state {
-  font-weight: 600;
+.queued-input-row > .queued-input-actions {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  gap: 0;
 }
-.queued-input-card small {
-  color: var(--ui-content-muted);
+.queued-input-row button {
+  min-width: 44px;
 }
-.queued-input-preview {
-  display: -webkit-box;
-  overflow: hidden;
-  white-space: pre-wrap;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+.queued-input-card > .queued-input-error,
+.queued-input-reconciliation {
+  padding: 8px 12px;
 }
 .queued-input-actions {
   display: flex;
@@ -9745,11 +9723,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
   .new-task-view {
     padding: 36px 16px;
-  }
-
-  .new-task-permission {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 12px;
   }
 }
 

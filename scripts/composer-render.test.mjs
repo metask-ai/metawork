@@ -23,7 +23,7 @@ const { AppShell, resolveWorkbenchColumns } = await vite.ssrLoadModule(
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
-const { NewTaskView } = await vite.ssrLoadModule(
+const { NewTaskView, NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
   "/src/features/tasks/NewTaskView.tsx",
 );
 const { TaskList } = await vite.ssrLoadModule(
@@ -315,11 +315,18 @@ function renderNewTaskView(composer = null, overrides = {}) {
       },
       createElement(NewTaskView, {
         hasWorkspace: true,
-        composer,
-        approvalModes: [],
-        approvalMode: "manual",
-        onApprovalModeChange() {},
-        ...overrides,
+        composer:
+          composer ??
+          createElement(ComposerFooter, {
+            ...base,
+            approvalModeControl: createElement(NewTaskApprovalModeMenu, {
+              approvalModes: [],
+              approvalMode: "manual",
+              disabled: false,
+              onApprovalModeChange() {},
+              ...overrides,
+            }),
+          }),
       }),
     ),
   );
@@ -702,45 +709,27 @@ test("new Task places the Composer after the outcome prompt", () => {
   assert.doesNotMatch(markup, /task-examples|task-example/);
 });
 
-test("new Task exposes and remembers the remembered three-mode approval choice", () => {
-  const markup = renderNewTaskView(null, {
-    approvalModes: ["manual", "auto_review", "full_access"],
-    approvalMode: "manual",
-  });
-  assert.match(markup, /Approval mode/);
-  assert.match(markup, /Manual approval/);
-  assert.match(markup, /Remembered across restarts/);
-  assert.doesNotMatch(markup, /trust this workspace|alertdialog/i);
-});
-
-test("new Task explains full access without claiming to bypass core protections", () => {
-  const markup = renderNewTaskView(null, {
-    approvalModes: ["manual", "auto_review", "full_access"],
-    approvalMode: "full_access",
-  });
-  assert.match(markup, /AgentCore protections/);
-  assert.match(markup, /permission-profile-risk/);
-  assert.match(markup, /service authorization.*process identity/);
-  assert.doesNotMatch(
-    markup,
-    /grants root|bypasses AgentCore|trust this workspace/i,
-  );
-});
-
-test("new Task explains automatic review cost, uncertainty and MCP fallback", () => {
-  const markup = renderNewTaskView(null, {
-    approvalModes: ["manual", "auto_review", "full_access"],
-    approvalMode: "auto_review",
-  });
-  assert.match(markup, /Automatic review/);
-  assert.match(markup, /task model/);
-  assert.match(markup, /additional.*cost|additional.*charge/);
-  assert.match(markup, /MCP/);
-  assert.match(markup, /not a safety guarantee/);
-  const note = markup.match(
-    /<p class="permission-policy-boundary" role="note">([^<]+)<\/p>/,
-  )?.[1];
-  assert.match(note ?? "", /additional usage charges/);
+test("new Task keeps its approval choice inside the Composer toolbar without details", () => {
+  for (const [mode, label] of [
+    ["manual", "Manual approval"],
+    ["auto_review", "Automatic approval"],
+    ["full_access", "Direct execution"],
+  ]) {
+    const markup = renderNewTaskView(null, {
+      approvalModes: ["manual", "auto_review", "full_access"],
+      approvalMode: mode,
+    });
+    assert.match(markup, /aria-label="Approval mode"/);
+    assert.ok(markup.includes(label));
+    assert.ok(
+      markup.indexOf('id="new-task-permission-profile"') >
+        markup.indexOf('class="ai-composer-toolbar"'),
+    );
+    assert.doesNotMatch(
+      markup,
+      /new-task-permission"|permission-policy-boundary|Remembered across restarts|additional usage charges|AgentCore protections/,
+    );
+  }
 });
 
 test("approval surfaces keep a usable narrow mode selector and dark parameter contrast", async () => {
@@ -748,15 +737,7 @@ test("approval surfaces keep a usable narrow mode selector and dark parameter co
     join(process.cwd(), "frontend/src/index.css"),
     "utf8",
   );
-  const narrow = css.slice(css.lastIndexOf("@media (max-width: 619px)"));
-  assert.match(
-    narrow,
-    /\.new-task-permission\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/,
-  );
-  assert.match(
-    css,
-    /\.new-task-permission \.permission-profile-trigger\s*\{[^}]*min-height:\s*44px/,
-  );
+  assert.match(css, /\.task-approval-trigger\s*\{[^}]*min-height:\s*44px/);
   assert.match(
     css,
     /\.dark \.ai-intervention \.code-block-preview\s*\{[^}]*color:\s*var\(--ui-content-primary\);[^}]*background:\s*var\(--ui-surface-panel-2\)/,
@@ -834,7 +815,7 @@ test("an active run replaces the send action with stop in the Composer", () => {
   assert.doesNotMatch(markup, /class="[^\"]*composer-send/);
 });
 
-test("an expired workspace grant preserves editable text and exposes recovery", () => {
+test("an unavailable workspace preserves editable text and offers folder reselection", () => {
   const markup = render({
     draft: { kind: "text", text: "Keep this draft" },
     accessRequired: true,
@@ -843,7 +824,7 @@ test("an expired workspace grant preserves editable text and exposes recovery", 
     workspaceTitle: "/repo/alpha",
   });
   assert.match(markup, />Keep this draft</);
-  assert.match(markup, />Confirm access</);
+  assert.match(markup, />Select folder again</);
   assert.equal(
     hasBooleanAttribute(markup.match(/<textarea[^>]*>/)?.[0] ?? "", "disabled"),
     false,
@@ -1229,7 +1210,7 @@ test("Task completion dot consumes only the canonical unread receipt", () => {
   );
 });
 
-test("an active Run can show Stop and a separately named Queue primary action", () => {
+test("an active Run keeps the normal Send icon and shows no queue drafting prompt", () => {
   const markup = render({
     draft: { kind: "text", text: "follow up" },
     stopAction: "run",
@@ -1237,9 +1218,24 @@ test("an active Run can show Stop and a separately named Queue primary action", 
     onQueueInput() {},
     canQueue: true,
   });
-  assert.match(markup, /aria-label="Stop task"/);
-  assert.match(markup, /aria-label="Queue message"/);
-  assert.doesNotMatch(markup, /aria-label="Send message"/);
+  assert.doesNotMatch(markup, /aria-label="Stop task"/);
+  assert.match(markup, /aria-label="Send"/);
+  assert.doesNotMatch(
+    markup,
+    /Queue message|Draft your next message|composer-draft-note/,
+  );
+  const stopping = render({
+    draft: { kind: "text", text: "follow up" },
+    stopAction: "run",
+    stopDisabled: true,
+    runInFlight: true,
+    onQueueInput() {},
+  });
+  assert.doesNotMatch(stopping, /aria-label="Send"/);
+  assert.match(
+    stopping,
+    /<button(?=[^>]*aria-label="Stop task")(?=[^>]*disabled)[^>]*>/,
+  );
   const attachments = render({
     draft: {
       kind: "multimodal",
@@ -1261,7 +1257,7 @@ test("an active Run can show Stop and a separately named Queue primary action", 
   });
   assert.match(
     attachments,
-    /<button(?=[^>]*aria-label="Queue message")(?=[^>]*disabled)[^>]*>/,
+    /<button(?=[^>]*aria-label="Send")(?=[^>]*disabled)[^>]*>/,
   );
   assert.match(attachments, /Send messages with attachments manually/);
 });

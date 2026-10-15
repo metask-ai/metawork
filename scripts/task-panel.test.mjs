@@ -68,7 +68,7 @@ const { ToolDetailView } = await vite.ssrLoadModule(
 const { TaskInformation } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskInformation.tsx",
 );
-const { NewTaskView } = await vite.ssrLoadModule(
+const { NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
   "/src/features/tasks/NewTaskView.tsx",
 );
 const { ConversationContext } = await vite.ssrLoadModule(
@@ -3463,9 +3463,8 @@ test("new Task approval menu selects all three real modes without another confir
   const selected = [];
   function ModeDraft() {
     const [mode, setMode] = useState("manual");
-    return createElement(NewTaskView, {
-      hasWorkspace: true,
-      composer: null,
+    return createElement(NewTaskApprovalModeMenu, {
+      disabled: false,
       approvalModes: ["manual", "auto_review", "full_access"],
       approvalMode: mode,
       onApprovalModeChange(value) {
@@ -3474,7 +3473,7 @@ test("new Task approval menu selects all three real modes without another confir
       },
     });
   }
-  for (const label of [/Automatic review/, /Full access/]) {
+  for (const label of [/Automatic approval/, /Direct execution/]) {
     render(
       createElement(
         I18nContext.Provider,
@@ -3495,11 +3494,6 @@ test("new Task approval menu selects all three real modes without another confir
     await screen.findByRole("listbox");
     assert.equal(screen.getAllByRole("option").length, 3);
     await user.click(screen.getByRole("option", { name: label }));
-    if (selected.at(-1) === "auto_review")
-      assert.match(
-        screen.getByRole("note").textContent,
-        /additional usage charges/,
-      );
     assert.equal(screen.queryByRole("alertdialog"), null);
     cleanup();
   }
@@ -4337,7 +4331,7 @@ test("task information keeps the full-access boundary visible without a mutation
     ),
   );
   await user.click(screen.getByRole("button", { name: "Task information" }));
-  assert.ok(screen.getByText("Full access"));
+  assert.ok(screen.getByText("Direct execution"));
   assert.match(
     document.body.textContent,
     /Routine approval is skipped.*AgentCore and system protections still apply/,
@@ -4816,7 +4810,9 @@ test("App switches the current Task only after Host commits and preserves its dr
   fireEvent.change(composer, { target: { value: "Keep this unsent draft" } });
   const trigger = screen.getByRole("combobox", { name: "Approval mode" });
   await user.click(trigger);
-  await user.click(await screen.findByRole("option", { name: /Full access/ }));
+  await user.click(
+    await screen.findByRole("option", { name: /Direct execution/ }),
+  );
   await waitFor(() => assert.equal(calls.length, 1));
   assert.deepEqual(calls[0], [
     source.id,
@@ -4850,7 +4846,7 @@ test("App switches the current Task only after Host commits and preserves its dr
     activeOperation: null,
   });
   await publishAppFixture(fixture);
-  await waitFor(() => assert.match(trigger.textContent, /Full access/));
+  await waitFor(() => assert.match(trigger.textContent, /Direct execution/));
   assert.equal(trigger.disabled, false);
   assert.equal(composer.value, "Keep this unsent draft");
   assert.equal(fixture.snapshot.tasks.length, 2);

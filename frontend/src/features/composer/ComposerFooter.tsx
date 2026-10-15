@@ -256,6 +256,7 @@ export function ComposerFooter({
   const showQueueAction = Boolean(
     onQueueInput &&
     stopAction === "run" &&
+    !stopDisabled &&
     (composerDraftHasContent(draft) ||
       (draft.kind === "multimodal" && draft.attachments.length > 0)),
   );
@@ -844,36 +845,37 @@ export function ComposerFooter({
             </div>
             {stopAction ? (
               <div className="composer-run-actions">
-                <Button
-                  type="button"
-                  variant="danger"
-                  size="icon"
-                  ref={stopButtonRef}
-                  className="composer-stop"
-                  aria-label={t(
-                    stopAction === "compact" ? "compact.stop" : "task.stop",
-                  )}
-                  title={t(
-                    stopAction === "compact" ? "compact.stop" : "task.stop",
-                  )}
-                  disabled={stopDisabled}
-                  onClick={onStop}
-                >
-                  <Icon name="stop" />
-                </Button>
-                {showQueueAction && (
+                {showQueueAction ? (
                   <Button
                     type="button"
                     variant="primary"
-                    size="sm"
+                    size="icon"
                     ref={sendButtonRef}
-                    className="composer-queue"
-                    aria-label={t("queue.submit")}
-                    title={t(queueDisabledReason ?? "queue.submit")}
+                    className="composer-send composer-queue"
+                    aria-label={t("run.submit")}
+                    title={t(queueDisabledReason ?? "run.submit")}
                     disabled={!sendEnabled}
                     onClick={onQueueInput}
                   >
-                    {t("queue.submit")}
+                    <Icon name="send" />
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="danger"
+                    size="icon"
+                    ref={stopButtonRef}
+                    className="composer-stop"
+                    aria-label={t(
+                      stopAction === "compact" ? "compact.stop" : "task.stop",
+                    )}
+                    title={t(
+                      stopAction === "compact" ? "compact.stop" : "task.stop",
+                    )}
+                    disabled={stopDisabled}
+                    onClick={onStop}
+                  >
+                    <Icon name="stop" />
                   </Button>
                 )}
               </div>
@@ -932,15 +934,17 @@ export function ComposerFooter({
           onSelect={onSelectWorkspace}
         />
       </div>
-      {runInFlight && (
-        <p className="composer-draft-note">
-          {t(
-            onQueueInput && stopAction === "run"
-              ? (queueDisabledReason ?? "queue.draft_hint")
-              : "run.draft_only",
-          )}
-        </p>
-      )}
+      {runInFlight &&
+        (onQueueInput && stopAction === "run" ? (
+          showQueueAction &&
+          queueDisabledReason && (
+            <p className="composer-draft-note" role="status">
+              {t(queueDisabledReason)}
+            </p>
+          )
+        ) : (
+          <p className="composer-draft-note">{t("run.draft_only")}</p>
+        ))}
       {!runInFlight && sendDisabledReason && (
         <p className="composer-draft-note" role="status">
           {t(sendDisabledReason)}

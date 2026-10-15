@@ -2078,7 +2078,8 @@ test("existing conversation approval selection is Host-controlled and restores k
   trigger.focus();
   await user.keyboard("{Enter}");
   assert.match(
-    (await screen.findByRole("option", { name: /Full access/ })).textContent,
+    (await screen.findByRole("option", { name: /Direct execution/ }))
+      .textContent,
     /Stops the current run/,
   );
   await user.keyboard("{ArrowDown}{Enter}");
@@ -2092,7 +2093,7 @@ test("existing conversation approval selection is Host-controlled and restores k
       approvalRevision: "2",
     }),
   );
-  assert.match(trigger.textContent, /Automatic review/);
+  assert.match(trigger.textContent, /Automatic approval/);
   await user.keyboard("{Enter}{Escape}");
   assert.equal(document.activeElement, trigger);
 });
@@ -2136,7 +2137,7 @@ test("approval pending, unavailable and unknown states admit no duplicate mode a
     }),
   );
   await user.click(trigger);
-  const full = await screen.findByRole("option", { name: /Full access/ });
+  const full = await screen.findByRole("option", { name: /Direct execution/ });
   assert.equal(full.getAttribute("aria-disabled"), "true");
   await user.click(full);
   assert.equal(selected, 0);
@@ -2178,7 +2179,7 @@ test("Models reports an authoritative empty conversation catalog without signing
   assert.deepEqual(view.selections.model, []);
 });
 
-test("queued Text Enter preserves IME and Shift newline while Stop remains independent", () => {
+test("queued Text switches from Send to Stop when cleared and preserves IME and Shift newline", () => {
   let queues = 0,
     stops = 0;
   const composer = renderComposer({
@@ -2200,9 +2201,15 @@ test("queued Text Enter preserves IME and Shift newline while Stop remains indep
   fireEvent.keyDown(composer.textarea, { key: "Enter" });
   assert.equal(queues, 1);
   assert.equal(composer.submissions(), 0);
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  assert.equal(queues, 2);
+  assert.equal(composer.submissions(), 0);
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  fireEvent.change(composer.textarea, { target: { value: "" } });
+  assert.equal(screen.queryByRole("button", { name: "Send" }), null);
   fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
   assert.equal(stops, 1);
-  assert.equal(queues, 1);
+  assert.equal(queues, 2);
 });
 
 test("structured Skill Enter uses Queue and confirmed queue cleanup does not steal outside focus", async () => {
@@ -2342,4 +2349,66 @@ test("queued card edits only an empty draft and unconfirmed reuse needs explicit
   );
   assert.deepEqual(resolutions, [true]);
   assert.equal(dialogStates.at(-1), false);
+});
+
+test("a saved Workspace can be selected directly without opening the folder picker", async () => {
+  const selected = [];
+  let pickers = 0;
+  renderComposer({
+    workspaceEditable: true,
+    workspaceOptions: [
+      { id: "automatic", label: "Default", authorization: "available" },
+      { id: "saved", label: "/repo/saved", authorization: "available" },
+    ],
+    selectedWorkspaceOptionId: "automatic",
+    onSelectWorkspace(id) {
+      selected.push(id);
+    },
+    onConfirmAccess() {
+      pickers++;
+    },
+  });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("combobox", { name: "Switch workspace" }));
+  await user.click(await screen.findByRole("option", { name: "/repo/saved" }));
+  assert.deepEqual(selected, ["saved"]);
+  assert.equal(pickers, 0);
+  assert.equal(screen.queryByText("Directory unavailable"), null);
+});
+
+test("new Task approval menu explains each mode only when opened and changes the draft choice", async () => {
+  const { NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
+    "/src/features/tasks/NewTaskView.tsx",
+  );
+  const choices = [];
+  renderComposer({
+    approvalModeControl: createElement(NewTaskApprovalModeMenu, {
+      approvalModes: ["manual", "auto_review", "full_access"],
+      approvalMode: "auto_review",
+      disabled: false,
+      onApprovalModeChange(mode) {
+        choices.push(mode);
+      },
+    }),
+  });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("combobox", { name: "Approval mode" }));
+  const options = await screen.findAllByRole("option");
+  assert.deepEqual(
+    options.map((option) =>
+      option
+        .querySelector(".selection-menu-item-copy > :first-child")
+        .textContent.trim(),
+    ),
+    ["Manual approval", "Automatic approval", "Direct execution"],
+  );
+  assert.ok(
+    options.every((option) =>
+      option.querySelector("small")?.textContent.trim(),
+    ),
+  );
+  assert.match(options[1].textContent, /extra cost/);
+  assert.equal(document.querySelector(".permission-policy-boundary"), null);
+  await user.click(screen.getByRole("option", { name: /^Manual approval/ }));
+  assert.deepEqual(choices, ["manual"]);
 });

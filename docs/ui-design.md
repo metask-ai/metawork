@@ -216,7 +216,7 @@ Workspace
 - New task 草稿按 Workspace 隔离。未绑定 Workspace 的临时草稿只在目标 Workspace 没有草稿时迁移；目标已有草稿时保留两边内容并打开目标草稿，不能覆盖或丢弃任一份；
 - Workspace projection 的 `kind` 是 Host 事实；一个 Manual Workspace 可以承载多个 Task，Automatic Workspace 精确归属一个 Task；
 - Composer 的工作目录控件只选择、添加或重新授权 New task 路径；设置页不提供 Workspace 生命周期管理。设置作为覆盖整个 Workbench 内容区的长期 surface 打开，保留窗口壳层和底层 Workbench 挂载，拥有自己的分区导航与内容滚动，关闭后恢复原工作面；
-- 再次打开历史 Task 只保证可浏览记录；需要访问原目录时重新选择或授权，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
+- 历史 Manual 目录经 Host 恢复检查仍可用时可直接点选，不显示“需要访问权限”或要求重复目录选择器；真实失效目录才显示“目录不可用”并提供重新选择。再次打开历史 Task 只保证可浏览记录，能否继续执行还必须服从 §6.4 的 Conversation 与 execution binding 规则；
 - MetaWork 重启后，左栏直接使用 Workbench 恢复的 Task 列表和顺序；点击 Task 打开其已保存时间线，不自动创建新 Task、不重放最后一次输入，也不把恢复的 `interrupted` 显示成仍在运行；
 - `taskHistoryPersistenceHealth = degraded` 本身不显示常驻提示；`retainedTaskHistoryCount > 0` 时，左栏 Task 列表以一行静态说明告知有多少已保存 Task 无法在当前版本打开且已原样保留，不提供动作、不阻塞任何操作。`history_read_only` Task 正常出现在列表中，Composer 以 placeholder 说明只能查看，菜单中的重命名、归档与删除不可用。`read_failed / corrupt / write_failed / outcome_unknown` 显示非阻塞保存提示，但不得禁用 Composer、Task 操作、Workspace 选择、权限响应或取消。Host 发布 recovery available 时，提示内提供“使用新的存储继续”，并在就地确认中明确当前文件会保留为恢复副本；Renderer 只提交当前 snapshot revision，不选择路径或操作文件。取消不改变状态，失败保留提示，成功等待 Host snapshot 收口；
 - Task 行不保留可见的文字状态标签。运行中使用紫色旋转 loading 图标，需要处理或失败使用对应语义图标；完成使用醒目的实心提示点作为一次性未读提醒，颜色沿用主操作色。Host 只为最新 terminal `completed` Run 发布 nullable 未读 identity；后台完成时显示，用户打开该 Task 后只有中央工作面未被 Settings、搜索、窄窗左栏或非停靠 Task Panel 覆盖，且应用页面可见并获得焦点时才确认并隐藏。当前可见 Task 完成后可直接确认，不闪烁自身提示点；遮挡、失焦、Bridge 失败或 stale acknowledgement 不得提前吞掉提醒。Task 再次完成新的 Run 时重新显示；归档等价于明确处理当前完成提醒，恢复时不复活旧提示点。
@@ -715,13 +715,13 @@ Composer 布局与输入规则：
 
 - 模型控件位于输入框内部左下角，发送位于右下角；textarea 与底部工具带共同组成一个完整圆角容器，不得拆成相互竞争的表单块。Workspace 位于容器外下方的轻量 breadcrumb 行，不能做成第二个有边框卡片，也不能放回输入框上方形成第二条上下文栏；
 - New task 的 global `defaultSelection` 为空时，Composer 在发送位置说明“未设置可执行的默认模型”并提供“打开模型设置”动作；发送保持禁用，直到用户在 `Models` 页明确选择且 Product Control 发布 active binding。Composer 不提交或修改 global default；非默认草稿选择只随首次 Task create 提交 exact source/catalog generation，创建失败时保留以便重试，创建成功后清除；
-- New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已授权 Manual Workspace 之间切换，也可以打开原生目录选择器添加或重新授权；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
+- New task 的 Workspace breadcrumb 默认选中“默认”，并可以在 Automatic 与已保存且可用的 Manual Workspace 之间直接切换，也可以打开原生目录选择器添加目录或重新选择失效目录；已有 Task 只显示其绑定 Workspace 事实，不提供虚假的切换；
 - 输入框不允许用户拖拽改变大小。它随内容自动增高，达到约 7–8 行或视口高度的 28% 后改为内部滚动；
 - Automatic intent 不是 Workspace 缺失；`automaticWorkspaces` 可用时普通 Text 可以直接发送。只有所选 Manual Workspace 缺失或授权失效时发送才保持禁用，并在 breadcrumb 中提供明确恢复动作；Workspace 选择和发送是两个独立动作。
 
 Composer 是唯一 active operation 停止入口：
 
-- `queued / running / waiting_user` 时在 Composer 发送位置显示 `Stop task`；空输入时仅显示停止，有文本或 Skill 草稿时并列主按钮“排队发送”，Enter 执行排队，保留 IME 与 Shift+Enter 换行语义；
+- `queued / running / waiting_user` 时在 Composer 发送位置显示 `Stop task`；空输入时仅显示停止，有文本或 Skill 草稿时切换为普通发送图标主按钮，隐藏停止按钮，名称沿用“发送消息”，点击或 Enter 将下一条交给 Host 待发送槽位，保留 IME 与 Shift+Enter 换行语义；
 - manual compact 为 `queued / compacting` 时在同一位置显示 `Stop compacting`，替换发送按钮；
 - `stopping` 时保留该位置的禁用停止按钮，阻止重复请求并等待真实结果；
 - 顶部命令栏不重复显示 Task Stop，窗口控制和检查器入口保持全局职责；
@@ -747,7 +747,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 | Task state             | Composer behavior |
 | --- | --- |
 | draft / idle | 文本、附件、普通发送；存在 held 时禁用发送，先编辑或撤回 |
-| queued / running | 可编辑下一条草稿；空输入仅停止，有内容时停止与排队发送并列 |
+| queued / running | 可编辑下一条草稿；空输入仅停止，有内容时只显示普通发送图标，清空后恢复停止 |
 | waiting_user | 时间线审批仍是首要处理面，底部保留“请在上方处理请求”；可草拟或排队，不能替代审批回答 |
 | stopping | 保留禁用停止按钮与停止说明，不再入队 |
 | compact queued/running | 可编辑本地草稿，不支持在 compact 后排队；保留压缩停止入口 |
@@ -756,11 +756,11 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
 
-输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 发送前作为独立、明确标注的选择出现，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
+输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 输入框左下角作为紧凑下拉菜单出现，紧邻模型选择，只显示当前模式名称；展开列出三种模式名称及各自一句简短说明，不在输入框上方保留独立设置区或铺开说明，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
 
-运行中的输入不会发送给当前 Run，也不使用 `UiBackend.poll()` 模拟 steering。排队发送的范围与保留规则以[产品需求](requirements.md#53-task)为准；“排队中”标签仍只表示已接纳 Run 等待 executor，不指待发送槽位。附件草稿、已有槽位、停止中或尚未核对的操作禁用排队，并给出具体说明，不静默降级为普通发送。
+运行中的输入不会发送给当前 Run，也不使用 `UiBackend.poll()` 模拟 steering。运行中草拟与空闲时使用相同发送图标，不以“排队发送”另起按钮文案，也不常驻草拟/排队提示；已提交后的等待由顶部待发送条表达，发送被禁用时才解释具体原因。排队发送的范围与保留规则以[产品需求](requirements.md#53-task)为准；“排队中”标签仍只表示已接纳 Run 等待 executor，不指待发送槽位。附件草稿、已有槽位、停止中或尚未核对的操作禁用排队，并给出具体说明，不静默降级为普通发送。
 
-待发送卡片贴在输入框上方，与时间线和审批面独立。只展示安全内容预览与“当前 Run 完成并收尾后发送”或“未自动发送：原因”，不显示内部 identity、计时重试或虚构进度。提供“编辑”和“撤回”；编辑只在输入框为空时可用，成功撤回后才放回草稿，普通撤回丢弃内容。卡片说明消息仅在本次应用运行期间保留；归档确认和删除/移除目录确认必须说明对应丢弃行为。现有归档没有待发送消息时仍可直接执行。
+待发送消息以一行紧凑条贴合输入框顶部，与时间线和审批面独立。行内只显示“待发送”或“未自动发送：原因”、安全内容的单行省略预览，以及带可访问名称的编辑、撤回图标；不保留独立标题、常驻说明行或多行预览，不显示内部 identity、计时重试或虚构进度。预览的原生悬停提示包含完整内容、当前 Run 完成并收尾后发送的时机，以及消息仅在本次应用运行期间保留；完整安全预览与状态保持可供辅助技术读取。操作触控区域保持至少 44px，窄窗不换行或横向溢出。编辑只在输入框为空时可用，成功撤回后才放回草稿，普通撤回丢弃内容；归档确认和删除/移除目录确认必须说明对应丢弃行为。现有归档没有待发送消息时仍可直接执行。
 
 命令超时后以 [Bridge 对账合同](renderer-bridge-contract.md)为唯一依据：没有匹配证据时显示“消息去向尚未确认”，提供刷新，不自动恢复成可重发消息；再次使用原输入必须明确确认可能重复。成功回执不清除较新草稿，编辑撤回与新输入竞争时保留撤回内容供用户显式放回或舍弃，不覆盖新草稿。正常自动发出的 Run 不抢焦点、不强制滚动或打开右栏；左侧不新增排队槽位图标，既有未读 completion receipt 不改变，Schedule 完成确认及通知先于自动续跑。
 
@@ -867,21 +867,21 @@ New task 的模式菜单只展示三个真实选项：
 
 ```text
 人工审批
-自动评审
-完全访问
+自动审批
+直接执行
 ```
 
 - `人工审批`：常规 Workspace 编辑自动执行，当前策略未覆盖的操作请求用户决定；
-- `自动评审`：按任务意图评审本次内置工具请求，不确定或失败时转人工；菜单明确使用 Task 模型并产生额外 usage 费用，同时说明不是安全保证、MCP 请求仍需人工；
-- `完全访问`：MetaWork 不再为常规工具操作请求批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。它不是 root、Sandbox 或“信任 Workspace”。
+- `自动审批`：按任务意图评审本次内置工具请求，不确定或失败时转人工；菜单用一行说明提示模型评审、存疑转人工及额外计费；这不是安全保证，MCP 请求仍需人工；
+- `直接执行`：MetaWork 不再为常规工具操作请求批准；AgentCore 核心保护、操作系统权限、服务授权和进程身份仍可拒绝或要求处理。它不是 root、Sandbox 或“信任 Workspace”。
 
-New task 直接显示 Host 发布的默认审批模式，并允许在发送前修改本次选择；首次默认值、选择记忆、授权与恢复边界由[产品需求](requirements.md#55-审批与输入)定义，不叠加第二个确认 modal 或独立委托开关。自动评审被预选时，费用、非安全保证及转人工说明仍须可见。已有交互式 Task 在 Composer 显示同一三档菜单，Task 信息显示当前模式，不受新 Task 默认值影响。Settings 不提供权限入口。
+New task 直接显示 Host 发布的默认审批模式，并允许在发送前修改本次选择；首次默认值、选择记忆、授权与恢复边界由[产品需求](requirements.md#55-审批与输入)定义，不叠加第二个确认 modal 或独立委托开关。New task 的审批选择保持紧凑，不常驻展示模式详情、费用说明或风险说明块；这些呈现变化不改变各模式的实际权限、费用和转人工语义。已有交互式 Task 在 Composer 显示同一三档菜单，Task 信息显示当前模式，不受新 Task 默认值影响。Settings 不提供权限入口。
 
-已有 Task 的菜单只消费 Host `availableApprovalModes`，保留当前模式文字；不具备切换 authority 时只读。切换请求受理后显示忙碌状态并禁用重复选择，直到 canonical Snapshot 确认当前模式及 revision；不能乐观切换。跨完全访问边界且已有 Run 时，目标选项明确“先停止当前运行，再切换；不会自动重启运行”。Renderer 不另建 stop-then-switch 编排，也不重发当前输入。
+已有 Task 的菜单只消费 Host `availableApprovalModes`，保留当前模式文字；不具备切换 authority 时只读。切换请求受理后显示忙碌状态并禁用重复选择，直到 canonical Snapshot 确认当前模式及 revision；不能乐观切换。跨直接执行边界且已有 Run 时，目标选项明确“先停止当前运行，再切换；不会自动重启运行”。Renderer 不另建 stop-then-switch 编排，也不重发当前输入。
 
-恢复原会话、结果未知与失败各自提供真实状态文字。超时或断连不能呈现成功，结果未确认时提供显式“刷新状态”，只刷新 Snapshot；用户查看最新模式后才可再次选择。菜单使用既有键盘导航、可见 focus 与 Escape/选择后 trigger 焦点恢复，费用及完全访问边界说明保持可读；390px 窄窗控件换行且不得遮挡发送/停止动作。
+恢复原会话、结果未知与失败各自提供真实状态文字。超时或断连不能呈现成功，结果未确认时提供显式“刷新状态”，只刷新 Snapshot；用户查看最新模式后才可再次选择。菜单使用既有键盘导航、可见 focus 与 Escape/选择后 trigger 焦点恢复，费用及直接执行边界说明保持可读；390px 窄窗控件换行且不得遮挡发送/停止动作。
 
-Renderer 只显示 Host capability projection 声明的模式，不独立审核或更改 authority。Scheduled Task 继续采用其固定非交互 PermissionProfile，不显示自动评审选择；对应映射及授权语义由[产品需求](requirements.md#55-审批与输入)唯一拥有。
+Renderer 只显示 Host capability projection 声明的模式，不独立审核或更改 authority。Scheduled Task 继续采用其固定非交互 PermissionProfile，不显示自动审批选择；对应映射及授权语义由[产品需求](requirements.md#55-审批与输入)唯一拥有。
 
 ## 11. 按需详情与信息归属
 

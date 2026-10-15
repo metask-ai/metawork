@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { QueuedInput, QueuedInputReason } from "../../bridge/contracts.ts";
 import { AlertDialog } from "../../components/ui/alert-dialog.tsx";
 import { Button } from "../../components/ui/button.tsx";
+import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 import type { QueuedOperation } from "./queued-input.ts";
 
@@ -53,44 +54,62 @@ export function QueuedInputCard({
     : restore
       ? "queue.use_original"
       : "queue.continue";
+  const preview = queued
+    ? queued.input.kind === "text"
+      ? queued.input.text
+      : `/${queued.input.invocationName} ${queued.input.argumentValues.join(" ")}`
+    : "";
+  const stateLabel =
+    queued?.state === "held"
+      ? t("queue.held", { reason: t(`queue.reason.${queued.heldReason!}`) })
+      : t("queue.waiting");
   return (
     <section className="queued-input-card" aria-label={t("queue.card_label")}>
       {queued && (
-        <>
-          <p className="queued-input-state" role="status">
-            {queued.state === "waiting"
-              ? t("queue.waiting")
-              : t("queue.held", {
-                  reason: t(`queue.reason.${queued.heldReason!}`),
-                })}
-          </p>
-          <p className="queued-input-preview" dir="auto">
-            {queued.input.kind === "text"
-              ? queued.input.text
-              : `/${queued.input.invocationName} ${queued.input.argumentValues.join(" ")}`}
-          </p>
-          <small>{t("queue.memory_only")}</small>
+        <div className="queued-input-row">
+          <div
+            className="queued-input-copy"
+            title={`${stateLabel}\n${preview}\n${t("queue.memory_only")}`}
+          >
+            <span
+              className="queued-input-state"
+              data-held={queued.state === "held" || undefined}
+              role="status"
+              aria-label={stateLabel}
+            >
+              {queued.state === "waiting"
+                ? t("queue.waiting_short")
+                : stateLabel}
+            </span>
+            <span className="queued-input-preview" dir="auto">
+              {preview}
+            </span>
+          </div>
           <div className="queued-input-actions">
             <Button
               type="button"
-              variant="secondary"
-              size="sm"
+              variant="ghost"
+              size="icon"
+              aria-label={t("queue.edit")}
+              title={t("queue.edit")}
               disabled={disabled || Boolean(pending) || !draftEmpty}
               onClick={onEdit}
             >
-              {t("queue.edit")}
+              <Icon name="new-task" />
             </Button>
             <Button
               type="button"
               variant="ghost"
-              size="sm"
+              size="icon"
+              aria-label={t("queue.withdraw")}
+              title={t("queue.withdraw")}
               disabled={disabled || Boolean(pending)}
               onClick={onWithdraw}
             >
-              {t("queue.withdraw")}
+              <Icon name="trash" />
             </Button>
           </div>
-        </>
+        </div>
       )}
       {error && (
         <p role="alert" className="queued-input-error">
