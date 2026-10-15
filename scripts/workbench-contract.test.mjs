@@ -1,3 +1,7 @@
+import {
+  decodeQueueInputResult,
+  decodeWithdrawQueuedInputResult,
+} from "../frontend/src/bridge/decode-contracts.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -3119,4 +3123,65 @@ test("model metadata excludes the deferred limits field", () => {
   const candidate = clone(fixture);
   candidate.models.providers[0].models[0].metadata.limits = {};
   assert.throws(() => decodeWorkbenchSnapshot(candidate), /expected keys/);
+});
+
+test("queued input shared wire fixture preserves receipt and safe editable input", () => {
+  const wire = JSON.parse(
+    readFileSync(
+      new URL("../src/bridge/queued_input.fixture", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(
+    decodeQueueInputResult(wire.queued, "1", "queue-1"),
+    wire.queued,
+  );
+  assert.deepEqual(
+    decodeWithdrawQueuedInputResult(wire.withdrawn, "1", "withdraw-1"),
+    wire.withdrawn,
+  );
+  const snapshot = structuredClone(fixture);
+  const task = snapshot.tasks[0];
+  task.id = "1";
+  task.currentRunId = "1";
+  task.activeOperation.id = "1";
+  task.runs[0].id = "1";
+  task.queuedInput = wire.waiting;
+  task.queuedInputResult = wire.receipt;
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(snapshot).tasks[0].queuedInput,
+    wire.waiting,
+  );
+  for (const change of [
+    (queued) => (queued.state = "held"),
+    (queued) => (queued.heldReason = "stopped_by_user"),
+    (queued) => (queued.runId = "99"),
+    (queued) =>
+      (queued.input = {
+        kind: "multimodal",
+        text: "",
+        attachments: [],
+        redacted: false,
+      }),
+  ]) {
+    const bad = structuredClone(snapshot);
+    change(bad.tasks[0].queuedInput);
+    assert.throws(() => decodeWorkbenchSnapshot(bad));
+  }
+  snapshot.tasks[0].queuedInput = null;
+  assert.equal(
+    decodeWorkbenchSnapshot(snapshot).tasks[0].queuedInputResult.outcome,
+    "queued",
+  );
+  assert.throws(() => decodeQueueInputResult(wire.queued, "1", "other"));
+  assert.throws(() =>
+    decodeWithdrawQueuedInputResult(
+      { ...wire.withdrawn, input: null },
+      "1",
+      "withdraw-1",
+    ),
+  );
+  assert.throws(() =>
+    decodeQueueInputResult({ ...wire.queued, accepted: false }, "1", "queue-1"),
+  );
 });

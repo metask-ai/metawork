@@ -165,6 +165,18 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         if (result.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"queuedInput\":") catch return error.SnapshotTooLarge;
+    if (task.queued_input) |queued| {
+        writer.print("{{\"revision\":\"{d}\",\"runId\":\"{d}\",\"input\":", .{ queued.revision, queued.run_id }) catch return error.SnapshotTooLarge;
+        try writeInput(writer, input.text, queued.input, queued.selection_revision);
+        writer.print(",\"state\":\"{s}\",\"heldReason\":", .{@tagName(queued.state)}) catch return error.SnapshotTooLarge;
+        if (queued.held_reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"queuedAtUnixMs\":") catch return error.SnapshotTooLarge;
+        if (queued.queued_at_unix_ms) |at| writer.print("\"{d}\"", .{at}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"queuedInputResult\":") catch return error.SnapshotTooLarge;
+    if (task.queued_input_result) |result| try writeQueuedInputResult(writer, input.text, result) else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"approvalMode\":\"{s}\",\"permissionReviewState\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"protocol\":\"{s}\",\"model\":", .{
         task.durable.workspace_id,
         @tagName(task.durable.permission_profile),
@@ -377,41 +389,8 @@ pub fn writePendingUi(
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
-fn writeRun(
-    writer: *std.Io.Writer,
-    text_projection: TextProjection,
-    run: *const task_state.RunRecord,
-    projection: task_state.RunProjectionFacts,
-    now_ms: ?u64,
-) Error!void {
-    const terminal = projection.terminal;
-    writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
-        run.id,
-        if (run.coverage == .excluded) "excluded" else "included",
-        @tagName(projection.phase),
-        @tagName(run.permission_profile),
-        @tagName(run.permission_interaction),
-        run.execution_generation,
-        @tagName(run.execution_protocol),
-    }) catch return error.SnapshotTooLarge;
-    try text_projection.writeJson(writer, run.execution_model);
-    writer.writeAll("},\"elapsedMs\":") catch return error.SnapshotTooLarge;
-    if (task_state.runElapsedMs(run, now_ms)) |elapsed|
-        writer.print("\"{d}\"", .{elapsed}) catch return error.SnapshotTooLarge
-    else
-        writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"submittedAtUnixMs\":") catch return error.SnapshotTooLarge;
-    if (run.submitted_at_unix_ms) |submitted_at|
-        writer.print("\"{d}\"", .{submitted_at}) catch return error.SnapshotTooLarge
-    else
-        writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"finishedAtUnixMs\":") catch return error.SnapshotTooLarge;
-    if (terminal != null and run.finished_at_unix_ms != null)
-        writer.print("\"{d}\"", .{run.finished_at_unix_ms.?}) catch return error.SnapshotTooLarge
-    else
-        writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
-    switch (run.input) {
+pub fn writeInput(writer: *std.Io.Writer, text_projection: TextProjection, input: task_state.RunInputRecord, selection_revision: ?u64) Error!void {
+    switch (input) {
         .text => |text| {
             writer.writeAll("{\"kind\":\"text\",\"text\":") catch
                 return error.SnapshotTooLarge;
@@ -450,6 +429,7 @@ fn writeRun(
             writer.writeAll(",\"catalogRevision\":") catch
                 return error.SnapshotTooLarge;
             try text_projection.writeJson(writer, skill.catalog_revision);
+            if (selection_revision) |revision| writer.print(",\"selectionRevision\":\"{d}\"", .{revision}) catch return error.SnapshotTooLarge;
             writer.writeAll(",\"invocationName\":") catch
                 return error.SnapshotTooLarge;
             try text_projection.writeJson(writer, skill.invocation_name);
@@ -467,6 +447,55 @@ fn writeRun(
                 return error.SnapshotTooLarge;
         },
     }
+}
+
+pub fn writeQueuedInputResult(writer: *std.Io.Writer, text: TextProjection, result: task_state.QueuedInputResult) Error!void {
+    writer.writeAll("{\"operationId\":") catch return error.SnapshotTooLarge;
+    try text.writeJson(writer, result.operationId());
+    writer.print(",\"kind\":\"{s}\",\"outcome\":\"{s}\",\"revision\":", .{ @tagName(result.kind), @tagName(result.outcome) }) catch return error.SnapshotTooLarge;
+    if (result.revision) |revision| writer.print("\"{d}\"", .{revision}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
+    if (result.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
+    if (result.input) |value| try writeInput(writer, text, value, result.selection_revision) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeByte('}') catch return error.SnapshotTooLarge;
+}
+
+fn writeRun(
+    writer: *std.Io.Writer,
+    text_projection: TextProjection,
+    run: *const task_state.RunRecord,
+    projection: task_state.RunProjectionFacts,
+    now_ms: ?u64,
+) Error!void {
+    const terminal = projection.terminal;
+    writer.print("{{\"id\":\"{d}\",\"conversationCoverage\":\"{s}\",\"phase\":\"{s}\",\"permissionProfile\":\"{s}\",\"permissionInteraction\":\"{s}\",\"execution\":{{\"generation\":\"{d}\",\"protocol\":\"{s}\",\"model\":", .{
+        run.id,
+        if (run.coverage == .excluded) "excluded" else "included",
+        @tagName(projection.phase),
+        @tagName(run.permission_profile),
+        @tagName(run.permission_interaction),
+        run.execution_generation,
+        @tagName(run.execution_protocol),
+    }) catch return error.SnapshotTooLarge;
+    try text_projection.writeJson(writer, run.execution_model);
+    writer.writeAll("},\"elapsedMs\":") catch return error.SnapshotTooLarge;
+    if (task_state.runElapsedMs(run, now_ms)) |elapsed|
+        writer.print("\"{d}\"", .{elapsed}) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"submittedAtUnixMs\":") catch return error.SnapshotTooLarge;
+    if (run.submitted_at_unix_ms) |submitted_at|
+        writer.print("\"{d}\"", .{submitted_at}) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"finishedAtUnixMs\":") catch return error.SnapshotTooLarge;
+    if (terminal != null and run.finished_at_unix_ms != null)
+        writer.print("\"{d}\"", .{run.finished_at_unix_ms.?}) catch return error.SnapshotTooLarge
+    else
+        writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
+    try writeInput(writer, text_projection, run.input, null);
     try writeRunOutput(writer, text_projection, run);
     writer.writeAll(",\"activity\":") catch return error.SnapshotTooLarge;
     try writeRunActivity(writer, projection.activity);

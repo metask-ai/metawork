@@ -371,6 +371,8 @@ pub const Dispatcher = struct {
             .{ .name = commands.account_logout, .function = accountLogout },
             .{ .name = commands.create_task, .function = createTask },
             .{ .name = commands.run, .function = runTask },
+            .{ .name = commands.queue_input, .function = queueInput },
+            .{ .name = commands.withdraw_queued_input, .function = withdrawQueuedInput },
             .{ .name = commands.release_attachment, .function = releaseAttachment },
             .{ .name = commands.begin_attachment_receive, .function = beginAttachmentReceive },
             .{ .name = commands.append_attachment_receive, .function = appendAttachmentReceive },
@@ -2991,6 +2993,63 @@ pub const Dispatcher = struct {
         );
     }
 
+    fn queueInput(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayloadWithLimit(handlers.TaskQueueInput, invocation.request.payload, native_sdk.bridge.max_message_bytes);
+        defer parsed.deinit();
+        try handlers.validateQueueOperationId(parsed.value.operationId);
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const epoch = try handlers.parseWireId(parsed.value.expectedBindingEpoch);
+        const run_id = try handlers.parseWireId(parsed.value.runId);
+        if (task_id == 0 or epoch == 0 or run_id == 0) return error.InvalidBridgePayload;
+        _ = self.delivery.connectedGeneration() orelse return error.NoConnection;
+        var input = try handlers.parseTaskRunInput(parsed.value.input);
+        defer input.deinit();
+        const task_input: product_control.TaskRunInput = switch (input.value) {
+            .text => |text| value: {
+                if (text.len == 0) return error.EmptyPrompt;
+                break :value .{ .text = text };
+            },
+            .skill => |skill| .{ .skill = .{ .skill_id = skill.skill_id, .catalog_revision = skill.catalog_revision, .selection_revision = skill.selection_revision, .argument_values = skill.argument_values } },
+            // Unsupported input is a product rejection. No attachment grants are borrowed.
+            .multimodal => |multimodal| .{ .multimodal = .{ .text = multimodal.text, .attachment_ids = &.{} } },
+        };
+        const control = try self.requireProductControl();
+        const result = control.queueInput(parsed.value.operationId, task_id, epoch, run_id, task_input) catch |err| {
+            if (err == error.InvalidQueueOperation) return error.InvalidBridgePayload;
+            if (err == error.UnknownTask) return encodeQueuedInputResult(output, control, task_id, rejectedQueueOperation(parsed.value.operationId, .queue, .task_unavailable));
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeQueuedInputResult(output, control, task_id, result);
+    }
+
+    fn withdrawQueuedInput(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {
+        const self: *Dispatcher = @ptrCast(@alignCast(context));
+        var callback = try self.callbacks.enter();
+        defer callback.deinit();
+        try self.requireWindow(invocation.source.window_id);
+        var parsed = try handlers.parsePayload(handlers.TaskWithdrawQueuedInput, invocation.request.payload);
+        defer parsed.deinit();
+        try handlers.validateQueueOperationId(parsed.value.operationId);
+        const task_id = try handlers.parseWireId(parsed.value.taskId);
+        const run_id = try handlers.parseWireId(parsed.value.runId);
+        const revision = try handlers.parseWireId(parsed.value.revision);
+        if (task_id == 0 or run_id == 0 or revision == 0) return error.InvalidBridgePayload;
+        _ = self.delivery.connectedGeneration() orelse return error.NoConnection;
+        const control = try self.requireProductControl();
+        const result = control.withdrawQueuedInput(parsed.value.operationId, task_id, run_id, revision) catch |err| {
+            if (err == error.InvalidQueueOperation) return error.InvalidBridgePayload;
+            if (err == error.UnknownTask) return encodeQueuedInputResult(output, control, task_id, rejectedQueueOperation(parsed.value.operationId, .withdraw, .task_unavailable));
+            return err;
+        };
+        self.notifyCommitted();
+        return encodeQueuedInputResult(output, control, task_id, result);
+    }
+
     fn acceptAttachmentGrants(context: ?*anyopaque) void {
         const acceptance: *AttachmentGrantAcceptance = @ptrCast(@alignCast(context.?));
         acceptance.dispatcher.attachment_grants.consume(
@@ -4943,6 +5002,7 @@ fn taskCreateRejection(err: anyerror) ?[]const u8 {
 
 fn taskRunRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.QueuedInputPresent => "queued_input_present",
         error.BindingEpochMismatch => "binding_changed",
         error.ExecutionUnavailable, error.ExecutionGenerationMismatch => "binding_unavailable",
         error.UnknownTask, error.TaskClosing => "task_unavailable",
@@ -4994,6 +5054,7 @@ fn taskModelSelectionRejection(err: anyerror) ?[]const u8 {
 
 fn taskCompactRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.QueuedInputPresent => "queued_input_present",
         error.BindingEpochMismatch => "binding_changed",
         error.ExecutionUnavailable, error.ExecutionGenerationMismatch => "binding_unavailable",
         error.UnknownTask, error.TaskClosing => "task_unavailable",
@@ -5011,6 +5072,7 @@ fn taskCompactRejection(err: anyerror) ?[]const u8 {
 
 fn taskRestoreRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.QueuedInputPresent => "queued_input_present",
         error.BindingEpochMismatch => "binding_changed",
         error.UnknownTask => "task_unavailable",
         error.RecoveryUnavailable => "recovery_unavailable",
@@ -5203,6 +5265,32 @@ fn scheduledTaskDefinition(
         .input = instruction,
         .recurrence = try handlers.parseScheduledTaskRecurrence(recurrence_value),
     };
+}
+
+fn rejectedQueueOperation(operation_id: []const u8, kind: @FieldType(product_control.QueuedInputResult, "kind"), reason: product_control.QueuedInputReason) product_control.QueuedInputResult {
+    var result: product_control.QueuedInputResult = .{ .operation_id = @splat(0), .operation_id_len = @intCast(operation_id.len), .kind = kind, .outcome = .rejected, .reason = reason };
+    @memcpy(result.operation_id[0..operation_id.len], operation_id);
+    return result;
+}
+fn encodeQueuedInputResult(output: []u8, control: *const product_control.Runtime, task_id: u64, result: product_control.QueuedInputResult) ![]const u8 {
+    const success = result.outcome != .rejected;
+    if (task_id == 0 or (success != (result.revision != null and result.reason == null)) or
+        (!success and (result.revision != null or result.reason == null or result.input != null)) or
+        (result.outcome == .queued and (result.kind != .queue or result.input != null)) or
+        (result.outcome == .withdrawn and (result.kind != .withdraw or result.input == null))) return error.InvalidQueuedInputResult;
+    var writer = std.Io.Writer.fixed(output);
+    try writer.writeAll("{\"operationId\":");
+    try std.json.Stringify.value(result.operationId(), .{}, &writer);
+    try writer.print(",\"taskId\":\"{d}\",\"{s}\":{},\"revision\":", .{ task_id, if (result.kind == .queue) "accepted" else "withdrawn", success });
+    if (result.revision) |revision| try writer.print("\"{d}\"", .{revision}) else try writer.writeAll("null");
+    try writer.writeAll(",\"reason\":");
+    if (result.reason) |reason| try std.json.Stringify.value(@tagName(reason), .{}, &writer) else try writer.writeAll("null");
+    if (result.kind == .withdraw) {
+        try writer.writeAll(",\"input\":");
+        try control.writeQueuedInputValue(&writer, result);
+    }
+    try writer.writeByte('}');
+    return writer.buffered();
 }
 
 fn encodeTaskRunResult(
@@ -7350,4 +7438,93 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.invoke(native, source, commands.cancel_attachment_add, "{\"generation\":\"2\",\"batchId\":\"99\"}");
     try capture.expect("\"status\":\"cleaned\"");
     try std.testing.expect(dispatcher.receive_active == null);
+}
+
+test "queued input dispatch preserves receipt after response encoding loss and scopes identity" {
+    const fixture = @import("lifecycle_fixture");
+    const Host = struct {
+        fn wake(_: ?*anyopaque) anyerror!void {}
+        fn emit(_: ?*anyopaque, _: u64, _: []const u8, _: []const u8) anyerror!void {}
+        fn timer(_: ?*anyopaque, _: u64, _: u64, _: bool) anyerror!void {}
+        fn cancel(_: ?*anyopaque, _: u64) anyerror!void {}
+        fn main(_: ?*anyopaque) bool {
+            return true;
+        }
+        fn now(_: ?*anyopaque) u64 {
+            return 1;
+        }
+        fn random(_: ?*anyopaque, out: []u8) bool {
+            @memset(out, 7);
+            return true;
+        }
+        fn dispatch(n: native_sdk.bridge.Dispatcher, source: native_sdk.bridge.Source, output: []u8, command: []const u8, payload: []const u8) []const u8 {
+            var bytes: [2048]u8 = undefined;
+            const request = std.fmt.bufPrint(&bytes, "{{\"id\":\"q\",\"command\":\"{s}\",\"payload\":{s}}}", .{ command, payload }) catch unreachable;
+            return n.dispatch(request, source, output);
+        }
+    };
+    fixture.fake_core.reset();
+    fixture.fake_core.setNextPlan(.ui_wait);
+    const runtime = try fixture.createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        fixture.shutdownTestComposition(runtime) catch unreachable;
+        fixture.deinitTestComposition(runtime);
+    }
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 1, .max_tasks = 1, .max_runs_per_task = 2, .max_tools_per_run = 1 }, fixture.productControlConfiguration());
+    defer control.deinit();
+    try fixture.installProductControlExecution(&control);
+    var input = fixture.productControlTaskInput();
+    input.approval_mode = .manual;
+    const task_id = try control.createTask(input);
+    _ = try control.runTask(task_id, .{ .text = "initial" });
+    try fixture.waitProductControlSnapshot(&control, "\"currentRunPhase\":\"waiting_ui\"");
+    var dispatcher = try Dispatcher.init(std.testing.allocator, &control, undefined, undefined, .{
+        .context = null,
+        .wake_fn = Host.wake,
+        .emit_fn = Host.emit,
+        .start_timer_fn = Host.timer,
+        .cancel_timer_fn = Host.cancel,
+        .random_fn = Host.random,
+        .now_fn = Host.now,
+        .on_main_thread_fn = Host.main,
+        .show_open_dialog_fn = undefined,
+        .canonicalize_directory_fn = undefined,
+        .window_chrome_connect_fn = undefined,
+        .window_chrome_refresh_fn = undefined,
+        .window_chrome_gesture_fn = undefined,
+        .window_chrome_control_fn = undefined,
+        .window_chrome_disconnect_fn = undefined,
+    }, .{}, 3);
+    defer dispatcher.deinit();
+    const native = dispatcher.register(@import("policy.zig").product(.release));
+    const source: native_sdk.bridge.Source = .{ .origin = "zero://app", .window_id = 3 };
+    var output: [16 * 1024]u8 = undefined;
+    var wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("queued_input.fixture"), .{});
+    defer wire.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const queue_payload = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("queuePayload").?, .{});
+    const withdraw_payload = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("withdrawPayload").?, .{});
+    const task = control.task_runtime.find(task_id).?;
+    _ = Host.dispatch(native, source, &output, commands.queue_input, queue_payload);
+    try std.testing.expect(task.queued_input == null); // No connected generation.
+    _ = Host.dispatch(native, source, &output, commands.connect, "{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}");
+    _ = Host.dispatch(native, .{ .origin = "zero://app", .window_id = 4 }, &output, commands.queue_input, queue_payload);
+    try std.testing.expect(task.queued_input == null);
+    var small: [32]u8 = undefined;
+    _ = Host.dispatch(native, source, &small, commands.queue_input, queue_payload);
+    try std.testing.expect(task.queued_input != null);
+    try std.testing.expectEqualStrings("queue-1", task.queued_input_result.?.operationId());
+    var snapshot_buffer: [64 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&snapshot_buffer);
+    const expected_receipt = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("receipt").?, .{});
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, expected_receipt) != null);
+    const stale = Host.dispatch(native, source, &output, commands.withdraw_queued_input, "{\"operationId\":\"stale\",\"taskId\":\"1\",\"runId\":\"2\",\"revision\":\"1\"}");
+    try std.testing.expect(std.mem.indexOf(u8, stale, "queued_input_changed") != null);
+    try std.testing.expect(task.queued_input != null);
+    const withdrawn = Host.dispatch(native, source, &output, commands.withdraw_queued_input, withdraw_payload);
+    const expected = try std.json.Stringify.valueAlloc(arena.allocator(), wire.value.object.get("withdrawn").?, .{});
+    try std.testing.expect(std.mem.indexOf(u8, withdrawn, expected) != null);
+    try std.testing.expect(task.queued_input == null);
+    try std.testing.expectEqualStrings("follow up", task.queued_input_result.?.input.?.text.value);
 }

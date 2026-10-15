@@ -8531,12 +8531,71 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
     transform 120ms ease;
 }
 
-.composer-send-group {
+.composer-send-group,
+.composer-run-actions {
   display: inline-flex;
   min-width: 0;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.composer-run-actions .composer-stop {
+  width: 44px;
+  height: 44px;
+}
+
+.composer-queue {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.queued-input-card {
+  display: grid;
+  min-width: 0;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  gap: 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-surface-panel);
+  color: var(--ui-content-primary);
+  font-size: var(--text-label);
+  overflow-wrap: anywhere;
+}
+
+.queued-input-card p {
+  margin: 0;
+}
+.queued-input-state {
+  font-weight: 600;
+}
+.queued-input-card small {
+  color: var(--ui-content-muted);
+}
+.queued-input-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  white-space: pre-wrap;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.queued-input-actions {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.queued-input-actions button {
+  min-height: 44px;
+  white-space: normal;
+}
+.queued-input-reconciliation {
+  display: grid;
+  gap: 8px;
+}
+.queued-input-error {
+  color: var(--ui-content-warning);
 }
 
 .composer-default-recovery {

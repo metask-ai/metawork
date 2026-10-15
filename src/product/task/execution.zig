@@ -159,6 +159,13 @@ pub const RunJob = struct {
         self.access = null;
     }
 
+    fn finish(self: *RunJob) void {
+        // Notifier lifetime extends through every worker join. No job/Task access follows release.
+        const notifier = self.notifier;
+        self.destroy();
+        if (!notifier.notify_fn(notifier.context)) @panic("required Run cleanup wake failed");
+    }
+
     pub fn destroy(self: *RunJob) void {
         self.releaseSessionAccess();
         if (self.title_execution) |*execution| execution.deinit();
@@ -232,7 +239,7 @@ const AutomaticTitleWatchdog = struct {
 
 pub fn executeRun(context: *anyopaque) void {
     const job: *RunJob = @ptrCast(@alignCast(context));
-    defer job.destroy();
+    defer job.finish();
     const run = job.run;
     const claimed = run.agent_handoff.cmpxchgStrong(.queued, .starting, .acq_rel, .acquire);
     std.debug.assert(claimed == null);
@@ -281,7 +288,7 @@ pub fn executeRun(context: *anyopaque) void {
 
 pub fn cancelRun(context: *anyopaque) void {
     const job: *RunJob = @ptrCast(@alignCast(context));
-    defer job.destroy();
+    defer job.finish();
     const run = job.run;
     _ = run.pending_termination.cmpxchgStrong(.none, .app_shutdown, .acq_rel, .acquire);
     const signal = policy.pendingTerminationSignal(run);

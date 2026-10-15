@@ -682,6 +682,17 @@ pub const Runtime = struct {
         self.replace(candidate);
     }
 
+    /// Prevent a successor from replacing the terminal observed for this occurrence.
+    pub fn hasPendingSubmittedOccurrence(self: *const Runtime, task_id: u64) bool {
+        for (self.store.items) |entry| {
+            const item = entry orelse continue;
+            for (item.occurrences()) |occurrence| {
+                if (occurrence.task_id == task_id and occurrence.result == .submitted and !occurrence.notification_sent) return true;
+            }
+        }
+        return false;
+    }
+
     fn nextCompletionResolution(
         self: *Runtime,
         tasks: TaskEffects,
@@ -1564,4 +1575,27 @@ test "permission-required scheduled occurrence stops without waiting for UI" {
         effects.notification_kind.?,
     );
     try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
+}
+
+test "queued input completion gate includes submitted occurrences skipped after earlier write failure" {
+    var effects: TestEffects = .{};
+    var tasks: TestTasks = .{ .next_task_id = 41 };
+    var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 2, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+    defer runtime.deinit();
+    const redaction = testRedaction(&effects);
+    const first = try runtime.create(testDefinition("first", "first"), testBinding(), redaction);
+    const second = try runtime.create(testDefinition("second", "second"), testBinding(), redaction);
+    _ = try runtime.runNow(first, 1, redaction, tasks.effects());
+    _ = try runtime.runNow(second, 1, redaction, tasks.effects());
+    tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+    effects.fail_commit_at = effects.commits + 1;
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expect(runtime.hasPendingSubmittedOccurrence(41));
+    try std.testing.expect(runtime.hasPendingSubmittedOccurrence(42));
+    try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(43));
+    effects.fail_commit_at = null;
+    try std.testing.expectEqual(PersistenceRecoveryOutcome.recovered, runtime.recoverPersistence(redaction));
+    _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(41));
+    try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(42));
 }

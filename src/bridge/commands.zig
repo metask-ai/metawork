@@ -81,6 +81,8 @@ pub const custom_model_remove = "metawork.models.customModels.remove";
 pub const account_logout = "metawork.account.logout";
 pub const create_task = "metawork.tasks.create";
 pub const run = "metawork.tasks.run";
+pub const queue_input = "metawork.tasks.queueInput";
+pub const withdraw_queued_input = "metawork.tasks.withdrawQueuedInput";
 pub const set_approval_mode = "metawork.tasks.setApprovalMode";
 pub const select_task_model = "metawork.tasks.selectModel";
 pub const restore_task = "metawork.tasks.restore";
@@ -180,6 +182,8 @@ pub const product = [_][]const u8{
     account_logout,
     create_task,
     run,
+    queue_input,
+    withdraw_queued_input,
     set_approval_mode,
     select_task_model,
     restore_task,

@@ -856,7 +856,70 @@ export type TaskApprovalResult = {
   | { outcome: "failed"; reason: ApprovalFailureReason }
 );
 
+export const queuedInputReasons = [
+  "stopped_by_user",
+  "approval_mode_changed",
+  "run_not_completed",
+  "schedule_completion_unconfirmed",
+  "task_idle",
+  "run_changed",
+  "run_stopping",
+  "queue_occupied",
+  "queued_input_changed",
+  "unsupported_input",
+  "binding_changed",
+  "binding_unavailable",
+  "task_unavailable",
+  "task_busy",
+  "shutting_down",
+  "workspace_unavailable",
+  "workspace_changed",
+  "workspace_removing",
+  "catalog_loading",
+  "catalog_unavailable",
+  "stale_catalog",
+  "skill_not_found",
+  "skill_unavailable",
+  "invalid_skill_arguments",
+  "missing_instruction",
+  "capacity_reached",
+  "admission_failed",
+] as const;
+export type QueuedInputReason = (typeof queuedInputReasons)[number];
+export type QueuedInputView =
+  | Extract<RunInputView, { kind: "text" }>
+  | (Extract<RunInputView, { kind: "skill" }> & { selectionRevision: string });
+export type QueuedInput = {
+  revision: string;
+  runId: string;
+  input: QueuedInputView;
+  state: "waiting" | "held";
+  heldReason: QueuedInputReason | null;
+  queuedAtUnixMs: string | null;
+};
+export type QueuedInputResult = {
+  operationId: string;
+  kind: "queue" | "withdraw";
+  outcome: "queued" | "withdrawn" | "rejected";
+  revision: string | null;
+  reason: QueuedInputReason | null;
+  input: QueuedInputView | null;
+};
+export type QueueInputResult = { operationId: string; taskId: string } & (
+  | { accepted: true; revision: string; reason: null }
+  | { accepted: false; revision: null; reason: QueuedInputReason }
+);
+export type WithdrawQueuedInputResult = {
+  operationId: string;
+  taskId: string;
+} & (
+  | { withdrawn: true; revision: string; input: QueuedInputView; reason: null }
+  | { withdrawn: false; revision: null; input: null; reason: QueuedInputReason }
+);
+
 export type TaskView = {
+  queuedInput: QueuedInput | null;
+  queuedInputResult: QueuedInputResult | null;
   approvalMode: ApprovalMode;
   approvalRevision: string;
   availableApprovalModes: ApprovalMode[];
@@ -1419,6 +1482,7 @@ export type NewTaskModelSelectionIntent = {
 };
 
 export type TaskRunReason =
+  | "queued_input_present"
   | "binding_changed"
   | "binding_unavailable"
   | "task_unavailable"
@@ -1502,6 +1566,7 @@ export type TaskModelSelectionResult =
     };
 
 export type TaskCompactReason =
+  | "queued_input_present"
   | "binding_changed"
   | "binding_unavailable"
   | "task_unavailable"
@@ -1525,6 +1590,7 @@ export type TaskCompactResult =
     };
 
 export type TaskRestoreReason =
+  | "queued_input_present"
   | "binding_changed"
   | "task_unavailable"
   | "recovery_unavailable"

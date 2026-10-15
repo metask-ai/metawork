@@ -33,6 +33,10 @@ function useDrafts(
   const draft = activeId
     ? (drafts[activeId] ?? readDraft(activeId))
     : emptyComposerDraft();
+  const getDraft = useCallback(
+    (id: string) => draftsRef.current[id] ?? readDraft(id),
+    [readDraft],
+  );
   const currentDraft = useCallback(
     (expectedId: string | null) => {
       if (!expectedId || expectedId !== activeRef.current) return null;
@@ -120,6 +124,7 @@ function useDrafts(
   }, [publish]);
   return {
     draft,
+    getDraft,
     currentDraft,
     commitDraft,
     updateDraft,

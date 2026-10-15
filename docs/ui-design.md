@@ -514,8 +514,8 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 | waiting_user + permission review = reviewing | Automatic review     | 自动评审中   | 可直接批准、拒绝或停止      |
 | waiting_user + no active permission review   | Needs your attention | 需要你处理   | 回答、批准、拒绝或停止      |
 | run phase = stopping                         | Stopping             | 正在停止     | 等待真实结果                |
-| run phase = running                          | Working              | 正在工作     | 草拟下一条指令或停止        |
-| run phase = queued                           | Queued               | 排队中       | 停止                        |
+| run phase = running                          | Working              | 正在工作     | 草拟、排队下一条或停止      |
+| run phase = queued                           | Queued               | 排队中       | 排队下一条或停止            |
 | no active Run + outcome = completed          | Completed            | 已完成       | 继续输入、打开结果          |
 | no active Run + outcome = cancelled          | Stopped              | 已停止       | 继续输入或重试              |
 | no active Run + outcome = failed             | Failed               | 失败         | 修复问题、重试或继续        |
@@ -721,7 +721,7 @@ Composer 布局与输入规则：
 
 Composer 是唯一 active operation 停止入口：
 
-- `queued / running / waiting_user` 时在 Composer 发送位置显示 `Stop task`，替换发送按钮；
+- `queued / running / waiting_user` 时在 Composer 发送位置显示 `Stop task`；空输入时仅显示停止，有文本或 Skill 草稿时并列主按钮“排队发送”，Enter 执行排队，保留 IME 与 Shift+Enter 换行语义；
 - manual compact 为 `queued / compacting` 时在同一位置显示 `Stop compacting`，替换发送按钮；
 - `stopping` 时保留该位置的禁用停止按钮，阻止重复请求并等待真实结果；
 - 顶部命令栏不重复显示 Task Stop，窗口控制和检查器入口保持全局职责；
@@ -744,21 +744,26 @@ Command 只是现有动作的键盘入口。选择后由 `App` action controller
 
 Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer session storage；既有 raw Text draft 读取后在下一次写入时单向升级为 tagged storage，暂时超过 Run 提交预算的非空 draft 不得删除已有持久值。发送失败、拒绝或 timeout reconciliation 后恢复完整 tagged draft。catalog revision 或 identity 变化时保留 token 与参数，但显示 stale 说明并禁用发送；刷新是显式动作，成功后仍要求用户从新 catalog 重新选择。已有 Task 的 Workspace current catalog 尚不可用时，同一刷新动作先刷新 Workspace；Workspace ready 后再次执行才刷新 Task binding，不隐式监听、重放或跨 revision 替换。current Workspace 的 `loading / unavailable` 只影响 Skill 候选；Automatic Task 的初始准备 loading 另按 §8.3 阻止首个 Run，文字保持可编辑。
 
-| Task state             | Composer behavior                                                                        |
-| ---------------------- | ---------------------------------------------------------------------------------------- |
-| draft / idle           | 文本、附件、发送                                                                         |
-| queued                 | 允许草拟但禁止发送；Composer 发送位置替换为停止入口                                      |
-| running                | 允许草拟下一条指令但禁止发送，显示 `当前任务结束后发送`；Composer 发送位置替换为停止入口 |
-| waiting_user           | 普通输入让位于时间线请求，底部提示 `Respond above to continue` 并保留本地草稿            |
-| stopping               | 禁用输入，显示 `Stopping…`                                                               |
-| compact queued/running | 允许编辑本地草稿但禁止发送；Composer 发送位置替换为停止入口                              |
-| failed / interrupted   | 恢复输入，提供针对性的重试或继续动作                                                     |
+| Task state             | Composer behavior |
+| --- | --- |
+| draft / idle | 文本、附件、普通发送；存在 held 时禁用发送，先编辑或撤回 |
+| queued / running | 可编辑下一条草稿；空输入仅停止，有内容时停止与排队发送并列 |
+| waiting_user | 时间线审批仍是首要处理面，底部保留“请在上方处理请求”；可草拟或排队，不能替代审批回答 |
+| stopping | 保留禁用停止按钮与停止说明，不再入队 |
+| compact queued/running | 可编辑本地草稿，不支持在 compact 后排队；保留压缩停止入口 |
+| failed / interrupted | 恢复输入；排队消息保留并解释原因，不自动继续 |
+
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
 
 输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 发送前作为独立、明确标注的选择出现，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
 
-运行中的输入不会发送给当前 Run，也不使用未验证的 `UiBackend.poll()` 模拟实时 steering。首版 Composer 只保存 Renderer 本地草稿，发送动作保持禁用并显示 `当前任务结束后发送`；当前 Run terminal 后由用户明确发送。不得自动提交、自动启动下一次 Run，或把草稿伪装成已排队状态。`queued` 只表示唯一已提交 Run 正在等待 Host executor，不表示当前 Run 后面还有另一条队列。未来只有在 AgentCore 发布 typed steering capability 后，才设计 `排队补充` 与 `立即打断` 的不同操作。
+运行中的输入不会发送给当前 Run，也不使用 `UiBackend.poll()` 模拟 steering。排队发送的范围与保留规则以[产品需求](requirements.md#53-task)为准；“排队中”标签仍只表示已接纳 Run 等待 executor，不指待发送槽位。附件草稿、已有槽位、停止中或尚未核对的操作禁用排队，并给出具体说明，不静默降级为普通发送。
+
+待发送卡片贴在输入框上方，与时间线和审批面独立。只展示安全内容预览与“当前 Run 完成并收尾后发送”或“未自动发送：原因”，不显示内部 identity、计时重试或虚构进度。提供“编辑”和“撤回”；编辑只在输入框为空时可用，成功撤回后才放回草稿，普通撤回丢弃内容。卡片说明消息仅在本次应用运行期间保留；归档确认和删除/移除目录确认必须说明对应丢弃行为。现有归档没有待发送消息时仍可直接执行。
+
+命令超时后以 [Bridge 对账合同](renderer-bridge-contract.md)为唯一依据：没有匹配证据时显示“消息去向尚未确认”，提供刷新，不自动恢复成可重发消息；再次使用原输入必须明确确认可能重复。成功回执不清除较新草稿，编辑撤回与新输入竞争时保留撤回内容供用户显式放回或舍弃，不覆盖新草稿。正常自动发出的 Run 不抢焦点、不强制滚动或打开右栏；左侧不新增排队槽位图标，既有未读 completion receipt 不改变，Schedule 完成确认及通知先于自动续跑。
+
 
 ### 8.2 文件附件
 
@@ -1298,6 +1303,10 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 - 缺失翻译回退。
 
 ### 19.3 Task 状态
+
+- 运行 Run 中的空/文本/Skill/附件草稿分别呈现正确的停止和排队动作，文本与 Skill 的 Enter 均不破坏 IME、换行和 Slash 选择；审批始终保留独立处理面；
+- waiting、held、响应丢失、无匹配证据与撤回草稿冲突都有可访问的说明和恢复动作；普通停止、审批切换和用户入口竞态不会意外发出；
+- 较新草稿、切换 Task、重载、旧连接迟到响应及自动续跑不丢输入、不重发、不抢焦点；桌面和约 390px、深浅主题、键盘、长内容及减少动效均须验收；
 
 - New task；
 - Queued；

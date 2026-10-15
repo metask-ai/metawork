@@ -47,7 +47,10 @@ const build_options = @import("build_options");
 
 pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 
-pub const Error = task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
+pub const QueuedInputResult = task_runtime.QueuedInputResult;
+pub const QueuedInputReason = task_runtime.QueuedInputReason;
+
+pub const Error = task_runtime.RunError || task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
     RunCapacity,
     CompactCapacity,
@@ -116,6 +119,46 @@ pub const Error = task_runtime.Runtime.ApprovalError || attachment_staging.Error
 
 const default_attachment_file_bytes: usize = 100_000_000;
 const default_attachment_count: usize = 8;
+
+pub fn queuedInputRejection(err: anyerror) task_runtime.QueuedInputReason {
+    return switch (err) {
+        error.TaskIdle => .task_idle,
+        error.RunChanged => .run_changed,
+        error.RunStopping => .run_stopping,
+        error.QueueOccupied => .queue_occupied,
+        error.UnsupportedInput => .unsupported_input,
+        error.BindingEpochMismatch => .binding_changed,
+        error.ExecutionUnavailable, error.ExecutionGenerationMismatch => .binding_unavailable,
+        error.UnknownTask, error.TaskClosing => .task_unavailable,
+        error.TaskBusy => .task_busy,
+        error.UnknownWorkspace, error.WorkspaceUnavailable, error.WorkspaceIdentityUntrusted => .workspace_unavailable,
+        error.WorkspaceEpochMismatch => .workspace_changed,
+        error.WorkspaceRemovalInProgress => .workspace_removing,
+        error.CatalogLoading => .catalog_loading,
+        error.CatalogUnavailable => .catalog_unavailable,
+        error.StaleCatalog => .stale_catalog,
+        error.SkillNotFound => .skill_not_found,
+        error.SkillUnavailable => .skill_unavailable,
+        error.InvalidSkillArguments => .invalid_skill_arguments,
+        error.MissingInstruction => .missing_instruction,
+        error.RunCapacity, error.RunGenerationExhausted, error.QueueFull, error.ProjectionCapacity, error.OutOfMemory => .capacity_reached,
+        error.ExecutorShuttingDown => .shutting_down,
+        else => .admission_failed,
+    };
+}
+
+const QueuedRunAcceptanceContext = struct {
+    runtime: *task_runtime.Runtime,
+    task_id: u64,
+    revision: u64,
+    release: task_runtime.ReleaseEffects,
+};
+fn consumeQueuedInput(context: ?*anyopaque) void {
+    const value: *QueuedRunAcceptanceContext = @ptrCast(@alignCast(context.?));
+    const task = value.runtime.findConst(value.task_id) orelse unreachable;
+    std.debug.assert(task.queued_input.?.revision == value.revision);
+    value.runtime.discardQueuedInput(value.task_id, value.release);
+}
 
 pub const Limits = struct {
     worker_count: usize = 4,
@@ -1117,6 +1160,7 @@ pub const Runtime = struct {
     file_change_executor: ?*executor_impl.Executor,
     file_change_lane: ?*file_change_io.Lane,
     shutting_down: bool = false,
+    dispatching_queued_input: bool = false,
     executor_shutdown: bool = false,
     attachment_executor_shutdown: bool = false,
     preview_executor_shutdown: bool = false,
@@ -3510,7 +3554,8 @@ pub const Runtime = struct {
         workspace_id: u64,
         expected_workspace_epoch: u64,
     ) Error!void {
-        self.syncLifecycle();
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         var preparation = try self.workspace.prepareRemoval(
             workspace_id,
             expected_workspace_epoch,
@@ -3951,6 +3996,7 @@ pub const Runtime = struct {
         expected_binding_epoch: u64,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input) |queued| if (queued.state == .waiting) return error.QueuedInputPresent;
         self.syncLifecycle();
         const facts = try self.task_runtime.recoveryStartFacts(
             task_id,
@@ -4337,10 +4383,11 @@ pub const Runtime = struct {
         input: TaskRunInput,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input != null) return error.QueuedInputPresent;
         self.syncLifecycle();
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
-        return self.runTaskAtBinding(task_id, binding_epoch, input);
+        return self.admitTaskRun(task_id, binding_epoch, input, null);
     }
 
     pub fn taskBindingEpoch(self: *Runtime, task_id: u64) Error!u64 {
@@ -4423,6 +4470,83 @@ pub const Runtime = struct {
         self.bumpRevision();
     }
 
+    pub fn writeQueuedInputValue(self: *const Runtime, writer: *std.Io.Writer, result: QueuedInputResult) Error!void {
+        if (result.input) |input| try product_task.writeInput(writer, self.taskTextProjection(), input, result.selection_revision) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    }
+
+    pub fn queueInput(self: *Runtime, operation_id: []const u8, task_id: u64, binding_epoch: u64, run_id: u64, input: TaskRunInput) Error!task_runtime.QueuedInputResult {
+        if (self.containsKnownCredential(operation_id)) return error.InvalidQueueOperation;
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        const result = try self.task_runtime.beginQueuedInputOperation(task_id, operation_id, .queue, self.taskRuntimeOperationEffects().release);
+        defer self.bumpRevision();
+        self.admitQueuedInput(task_id, binding_epoch, run_id, input) catch |err| {
+            result.reason = queuedInputRejection(err);
+            return result.*;
+        };
+        result.outcome = .queued;
+        result.revision = self.task_runtime.findConst(task_id).?.queued_input.?.revision;
+        return result.*;
+    }
+
+    fn admitQueuedInput(self: *Runtime, task_id: u64, binding_epoch: u64, run_id: u64, input: TaskRunInput) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse return error.UnknownTask;
+        const epoch = self.task_runtime.taskWorkspaceEpoch(task_id) orelse return error.UnknownTask;
+        _ = try self.workspace.taskRunAuthority(workspace_id, epoch);
+        if ((self.task_runtime.catalogProjection(task_id) orelse return error.UnknownTask).availability == .loading) return error.CatalogLoading;
+        const task_input: task_runtime.RunInput = switch (input) {
+            .text => |text| .{ .text = text },
+            .skill => |skill| .{ .skill = .{ .skill_id = skill.skill_id, .catalog_revision = skill.catalog_revision, .selection_revision = skill.selection_revision, .argument_values = skill.argument_values } },
+            .multimodal => return error.UnsupportedInput,
+        };
+        _ = try self.task_runtime.queueInput(task_id, binding_epoch, run_id, task_input, self.taskRuntimeOperationEffects());
+    }
+
+    pub fn withdrawQueuedInput(self: *Runtime, operation_id: []const u8, task_id: u64, run_id: u64, revision: u64) Error!task_runtime.QueuedInputResult {
+        if (self.containsKnownCredential(operation_id)) return error.InvalidQueueOperation;
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        const result = try self.task_runtime.beginQueuedInputOperation(task_id, operation_id, .withdraw, self.taskRuntimeOperationEffects().release);
+        defer self.bumpRevision();
+        if (self.shutting_down) {
+            result.reason = .shutting_down;
+            return result.*;
+        }
+        if (!self.task_runtime.withdrawQueuedInput(task_id, run_id, revision, self.taskRuntimeOperationEffects().release)) result.reason = .queued_input_changed;
+        return result.*;
+    }
+
+    fn dispatchQueuedInputs(self: *Runtime) void {
+        if (self.shutting_down or self.dispatching_queued_input) return;
+        self.dispatching_queued_input = true;
+        defer self.dispatching_queued_input = false;
+        for (self.task_runtime.tasks) |entry| {
+            const task = entry orelse continue;
+            const completed = self.task_runtime.queuedInputCompletion(task.durable.id) orelse continue;
+            const reason: ?task_runtime.QueuedInputReason = if (!completed) .run_not_completed else if (self.schedule.hasPendingSubmittedOccurrence(task.durable.id)) .schedule_completion_unconfirmed else null;
+            if (reason) |held_reason| {
+                if (self.task_runtime.holdQueuedInput(task.durable.id, null, held_reason)) self.bumpRevision();
+                continue;
+            }
+            const queued = task.queued_input.?;
+            const input: TaskRunInput = switch (task_runtime.queuedExecutionInput(&queued)) {
+                .text => |text| .{ .text = text },
+                .skill => |skill| .{ .skill = .{ .skill_id = skill.skill_id, .catalog_revision = skill.catalog_revision, .selection_revision = skill.selection_revision, .argument_values = skill.argument_values } },
+                .multimodal => unreachable,
+            };
+            _ = self.admitTaskRun(task.durable.id, queued.binding_epoch, input, queued.revision) catch |err| {
+                if (self.task_runtime.holdQueuedInput(task.durable.id, null, queuedInputRejection(err))) self.bumpRevision();
+                continue;
+            };
+        }
+    }
+
+    /// Close admission before any Application shutdown drain can reconcile.
+    pub fn beginShutdown(self: *Runtime) void {
+        self.shutting_down = true;
+    }
+
     pub fn runTaskAtBinding(
         self: *Runtime,
         task_id: u64,
@@ -4430,7 +4554,16 @@ pub const Runtime = struct {
         input: TaskRunInput,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input != null) return error.QueuedInputPresent;
         self.syncLifecycle();
+        return self.admitTaskRun(task_id, expected_binding_epoch, input, null);
+    }
+
+    fn admitTaskRun(self: *Runtime, task_id: u64, expected_binding_epoch: u64, input: TaskRunInput, queued_revision: ?u64) Error!u64 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (queued_revision == null) {
+            if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input != null) return error.QueuedInputPresent;
+        }
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
@@ -4521,6 +4654,8 @@ pub const Runtime = struct {
             .preparation = &order_preparation,
         };
         var operation_effects = self.taskRuntimeOperationEffects();
+        var queue_acceptance = QueuedRunAcceptanceContext{ .runtime = &self.task_runtime, .task_id = task_id, .revision = queued_revision orelse 0, .release = operation_effects.release };
+        if (queued_revision != null) operation_effects.run_acceptance = .{ .context = &queue_acceptance, .accept_fn = consumeQueuedInput, .irreversible = true };
         if (attachment_borrow != null) {
             acceptance_context = .{
                 .borrow = &attachment_borrow.?,
@@ -4532,19 +4667,17 @@ pub const Runtime = struct {
                 .irreversible = true,
             };
         }
-        var prepared = try self.task_runtime.startRun(
-            task_id,
-            expected_binding_epoch,
-            task_input,
-            .{
-                .context = &order_context,
-                .manual = workspace.kind == .manual,
-                .recent_order = order_preparation.recentOrder(),
-                .apply_fn = applyTaskWorkspaceOrder,
-                .rollback_fn = rollbackTaskWorkspaceOrder,
-            },
-            operation_effects,
-        );
+        const workspace_effect: task_runtime.WorkspaceOrderEffect = .{
+            .context = &order_context,
+            .manual = workspace.kind == .manual,
+            .recent_order = order_preparation.recentOrder(),
+            .apply_fn = applyTaskWorkspaceOrder,
+            .rollback_fn = rollbackTaskWorkspaceOrder,
+        };
+        var prepared = if (queued_revision) |revision|
+            try self.task_runtime.startQueuedRun(task_id, revision, workspace_effect, operation_effects)
+        else
+            try self.task_runtime.startRun(task_id, expected_binding_epoch, task_input, workspace_effect, operation_effects);
         self.commitTaskStateBestEffort() catch |err| {
             prepared.rollback();
             return err;
@@ -4570,6 +4703,7 @@ pub const Runtime = struct {
         expected_binding_epoch: u64,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input) |queued| if (queued.state == .waiting) return error.QueuedInputPresent;
         self.syncLifecycle();
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
@@ -4642,7 +4776,9 @@ pub const Runtime = struct {
     }
 
     pub fn cancel(self: *Runtime, task_id: u64, run_id: u64) Error!void {
-        self.syncLifecycle();
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        if (self.task_runtime.holdQueuedInput(task_id, run_id, .stopped_by_user)) self.bumpRevision();
         if (try self.task_runtime.cancelRun(
             task_id,
             run_id,
@@ -4819,8 +4955,10 @@ pub const Runtime = struct {
     }
 
     pub fn setTaskArchived(self: *Runtime, task_id: u64, archived: bool) Error!void {
-        self.syncLifecycle();
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         if (try self.task_runtime.setArchived(task_id, archived)) {
+            if (archived) self.task_runtime.discardQueuedInput(task_id, self.taskRuntimeOperationEffects().release);
             self.commitTaskStateNoFail();
             self.bumpRevision();
         }
@@ -4839,8 +4977,10 @@ pub const Runtime = struct {
     }
 
     pub fn deleteTask(self: *Runtime, task_id: u64) Error!void {
-        self.syncLifecycle();
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         const requested = try self.task_runtime.requestDeletion(task_id);
+        self.task_runtime.discardQueuedInput(task_id, self.taskRuntimeOperationEffects().release);
         if (self.task_runtime.taskWorkspaceId(task_id)) |id| {
             if (self.workspace.facts(id)) |workspace| {
                 if (workspace.kind == .automatic)
@@ -5142,6 +5282,7 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         self.syncPermissionReviews();
         if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        self.dispatchQueuedInputs();
     }
 
     /// Lifecycle facts alone never accept or start a reviewer decision. The
@@ -6374,6 +6515,7 @@ pub const Runtime = struct {
     }
 
     pub fn shutdownExecutor(self: *Runtime) void {
+        self.beginShutdown();
         self.shutdownPermissionReviews();
         self.shutdownAttachmentStagingExecutor();
         self.shutdownFilePreviewExecutor();
@@ -7973,6 +8115,7 @@ pub const Runtime = struct {
                 .ready => .ready,
             };
             if (self.workspace.applyRemovalState(workspace.id, state)) {
+                if (state == .ready) self.task_runtime.discardWorkspaceQueuedInputs(workspace.id, self.taskRuntimeReleaseEffects());
                 const updated = self.workspace.facts(workspace.id) orelse unreachable;
                 self.skill.setWorkspaceCatalogAuthorized(updated.id, updated.epoch, workspaceSkillCatalogAuthorized(updated), self.skillProjectionBudget()) catch unreachable;
                 changed = true;

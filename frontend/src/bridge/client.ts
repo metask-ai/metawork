@@ -1,4 +1,8 @@
 import {
+  decodeQueueInputResult,
+  decodeWithdrawQueuedInputResult,
+} from "./decode-contracts.ts";
+import {
   commands,
   events,
   RENDERER_BRIDGE_CONTRACT_ID,
@@ -815,6 +819,43 @@ export class BridgeClient {
     return decodeTaskRunResult(
       await this.invoke(commands.run, { taskId, expectedBindingEpoch, input }),
       taskId,
+    );
+  }
+
+  async queueInput(
+    operationId: string,
+    taskId: string,
+    expectedBindingEpoch: string,
+    runId: string,
+    input: TaskRunInput,
+  ) {
+    return decodeQueueInputResult(
+      await this.invoke(commands.queueInput, {
+        operationId,
+        taskId,
+        expectedBindingEpoch,
+        runId,
+        input,
+      }),
+      taskId,
+      operationId,
+    );
+  }
+  async withdrawQueuedInput(
+    operationId: string,
+    taskId: string,
+    runId: string,
+    revision: string,
+  ) {
+    return decodeWithdrawQueuedInputResult(
+      await this.invoke(commands.withdrawQueuedInput, {
+        operationId,
+        taskId,
+        runId,
+        revision,
+      }),
+      taskId,
+      operationId,
     );
   }
 

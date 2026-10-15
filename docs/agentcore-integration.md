@@ -101,7 +101,7 @@ unknown observation 继续走官方 unknown 分支并被忽略，不由 MetaWork
 | Skill catalog     | 双向借用    | Runtime query 返回 opaque handle；Session create/idle update 同步借用                                                                |
 | Skill policy      | Host → Core | fresh Session create 与 idle update 显式传入完整 replacement；Conversation restore 固定传 null，后续 idle Task 的初始准备或显式 refresh 再绑定 |
 
-`UiEvent` / `UiBackend.poll()` 虽然存在于 Metask AgentCore native 协议中，但当前生产 agent loop 未证明消费。MetaWork 不依赖它完成 stop、生成期 queue message 或 steering。
+MetaWork 不调用 `UiBackend.poll()`，也不借此注入当前 Run 输入。运行中排队由 Product Task 保管，绑定 Run 完成并收尾后才按普通准入创建后续 Run；不是 AgentCore Session 输入队列或 steering capability。停止沿已有 abort 路径处理。
 
 当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token 或 background handle，但包含 checkpoint outcome、durable usage、required checkpoint bytes 与两个 budget stop。unknown status、stop reason、checkpoint outcome、result flag 或不一致组合在 Host validation 层 fail closed；Host 不能制造这些产品状态。
 
@@ -264,7 +264,7 @@ Agent 的 `RunInput.multimodal` 接受有序 `InputPart`：非空 UTF-8 文本�
 
 单次输入的 parts 数、单图 Base64 上限和总 prompt 上限使用 canonical SDK 常量；当前单图对应 3.75 MB raw image 的标准 Base64。Host 的总 prompt 核算包括用户文字、文本附件封装与正文、Base64 和 media type 字节；全部 text part 合计还受既有 `max_prompt_bytes` 限制。Runtime 的 `max_multimodal_input_bytes` 默认 64 MiB，约束 owned parts 数组与文本/Base64 storage 的总分配请求字节，包括尚未完成 admission 的并发准备；它不表示调用方 raw bytes、Core Conversation、allocator overhead 或进程整体内存上限。Runtime 预算耗尽返回 `RunInputBudgetExceeded`，单次输入超限返回 `RunInputTooLarge`；均在 owned allocation 前失败。已开始执行的输入须在 Core 调用、相关 callback 和 abort 调用静止后释放。
 
-`image_input_unsupported` 只在本次 Run 含图片时作为 typed admission 拒绝，并映射为同名 Product cause；Session 保持 reusable。文本附件最终是普通 text part，不借用该 status。文本-only、Text、Skill 或其他 operation 不因认识该 status 而放行。当前锁定的 ABI revision 18 不定义 document part 或文档能力拒绝 status。非 OK result 的可读边界由 ABI 合同规定。附件历史保持由 Core 所有；MetaWork 不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，也不删除输入以换取保存成功。Product 必须显式配置能够容纳满额模型图片预览及附件引用的 checkpoint 单字符串限额；其余 checkpoint 总量、section 和数量预算继续有界，不能在运行时自动扩容。其他超限仍沿既有 typed failure 返回。
+`image_input_unsupported` 只在本次 Run 含图片时作为 typed admission 拒绝，并映射为同名 Product cause；Session 保持 reusable。文本附件最终是普通 text part，不借用该 status。文本-only、Text、Skill 或其他 operation 不因认识该 status 而放行。当前 [ABI 消费合同](agentcore-abi-v1.md)不定义 document part 或文档能力拒绝 status；具体接受的修订由 canonical bundle identity 验证。非 OK result 的可读边界由 ABI 合同规定。附件历史保持由 Core 所有；MetaWork 不解析或重写 opaque checkpoint，不静默扩大 checkpoint 预算，也不删除输入以换取保存成功。Product 必须显式配置能够容纳满额模型图片预览及附件引用的 checkpoint 单字符串限额；其余 checkpoint 总量、section 和数量预算继续有界，不能在运行时自动扩容。其他超限仍沿既有 typed failure 返回。
 
 ### 每 Run 时间上下文
 
@@ -278,10 +278,10 @@ Core Conversation/checkpoint 可以保留旧时间 block。MetaWork 不改写 op
 
 - 至多一个 in-flight operation；Run、manual compact、model/Skill/permission mutation 与 destroy 互斥；
 - Permission rule update 不得改变 Task-owned PermissionProfile；Task 创建后只允许 same-profile Run 与 restore；
-- 第二个 Run 明确排队或拒绝；
+- Session 已有 in-flight operation 时拒绝第二个 Run；Product 的待发送输入不是 Run，不在当前同步调用期间再次调用 `session_run_input`；
 - run ID 单调且与 Session 绑定；
 - fresh/restore Session 可以分别接收 Product 提供的 Run、compact 与 UI request allocation floor；新 Run/compact id 必须严格大于各自 Product operation history 高水位，新 UI request id 必须严格大于 durable UI history 高水位，这些 floor 都不改变 checkpoint restore expectation；
-- queued Run 不接触 AgentCore mutable state；
+- executor queued Run 的有界输入与身份由 Agent 先准备，实际同步 `session_run_input` 在 worker 执行时才进入 Core；不得把 Core BUSY 解释为会话内排队能力；
 - queued Text/Skill input 在复制前按 Host byte limit、catalog identity 和参数数量拒绝，保证 executor 有界时输入内存也有明确上限；
 - multimodal input 在任何 owned allocation 前校验 parts、文本附件名称与正文、全部文本和编码图片上限，并预留 Runtime 共享输入预算；预算覆盖并发 prepare、Queued 与 Running，失败回滚及终止释放均恰好一次；
 - active Run 独占 Session Conversation；
@@ -615,7 +615,7 @@ React stop compact command
 
 Compact abort 同样不进入普通 FIFO；accepted cancellation 最终必须由 `session_compact` 返回 `STATUS_OK + COMPACT_ABORTED` 才能发布 aborted，acknowledgement 本身不构成 terminal product state。`too_late / stale_compact / invalid_argument / invalid_state` 仍等待并独立验证原 compact result；只有 abort `STATUS_OK` 与非 aborted terminal 的组合属于 dependency contract failure。Compact terminal publication 直接成为产品 terminal fact，不复制 Run 的 event-drain barrier。
 
-生成期 `queue_message` 当前只进入 Host 有界 Session 输入队列，在当前 Run 结束后按确定规则形成下一 Run 输入。它不依赖未接通的 `UiBackend.poll()`。
+运行中排队由 Product Task 的独立内存槽位持有文本或 Skill，入队不调用 AgentCore、不分配 Run identity、不占 active-operation 槽。只有绑定 Run 正常完成、事件 drain 与全部 worker lease 收口后，Product Control 才调用与普通发送共用的 Agent preparation/admission；输入在现有 Run acceptance effect 处消费。异常结局或准入失败保留，不自动恢复会话、重试或重放工具。并发、停止、Schedule 与退出规则由 [Product 架构](product-architecture.md)定义，不改变本节 AgentCore Session 串行化合同。
 
 ## 14. Shell 边界
 

@@ -296,6 +296,12 @@ pub const TaskRun = struct {
     expectedBindingEpoch: []const u8,
     input: std.json.Value,
 };
+pub const TaskQueueInput = struct { operationId: []const u8, taskId: []const u8, expectedBindingEpoch: []const u8, runId: []const u8, input: std.json.Value };
+pub const TaskWithdrawQueuedInput = struct { operationId: []const u8, taskId: []const u8, runId: []const u8, revision: []const u8 };
+pub fn validateQueueOperationId(value: []const u8) !void {
+    if (value.len == 0 or value.len > 64) return error.InvalidBridgePayload;
+    for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidBridgePayload;
+}
 pub const TaskApprovalMode = struct {
     taskId: []const u8,
     targetMode: product_control.ApprovalMode,

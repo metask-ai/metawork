@@ -145,6 +145,13 @@ Automatic admission 在完成上述证明后才创建候选目录、临时 Works
 
 每个 Task 在创建时取得 owned ExecutionConfig 和 immutable binding epoch。默认配置变化不热替换已有 Task；显式改变 Task execution 必须在 Task idle、authority 精确且持久化 candidate 可提交时形成新的 binding。Run、manual compact 与 Conversation recovery 共享 Task-owned active-operation 槽；删除和 Session replacement 是独立生命周期用例，必须与该槽互斥并等待已有 operation 收口，不能通过不同入口并发改变同一个 attachment。
 
+Task Runtime 独立持有至多一条文本或 Skill 待发送输入，以及最近一次显式排队/撤回操作的有界结果。待发送输入不占 active-operation 槽，入队不创建 Run；它绑定当时的 Run identity、binding epoch 和单调槽位 revision。原始执行输入与安全投影分别 owned、有界并计入容量；原始输入不得进入 Snapshot、日志、history 或 checkpoint。普通发送在槽位非空时拒绝；waiting 同时阻止手动压缩与恢复，held 允许用户显式恢复但不因此重新激活消息。
+
+自动发送只在完整 lifecycle 同步最后执行：绑定 Run 的 Product terminal 与事件流已收口、所有 worker lease 均释放、没有 active operation、审批切换或 shutdown，且 Schedule 已确认该 Task 的 submitted occurrence。正常完成才通过与普通发送共用的当前准入；其他结局或准入失败转为稳定 held，不自动重试或恢复对话。Schedule 存储失败或前序 occurrence 使本 Task 的完成观察尚未确认时，消息保留为 schedule_completion_unconfirmed，不以全局 Schedule 健康冻结无关 Task。消费直接复用现有 Run acceptance effect；接纳之前失败保留，接纳之后即使执行队列满也由已创建的普通 Run 表达结果，不重新排队。
+
+停止、撤回、归档、删除及移除 Workspace 的入口先做事实收口，再校验并处理用户意图，不能由命令自身的前置同步抢先自动发送。有效普通停止和实际接纳的审批切换先将 waiting 改为 held，再请求取消；相同模式或拒绝的命令无此副作用。归档、Task 删除及 Workspace 移除仅在生效边界丢弃消息，拒绝或移除回滚不能提前丢弃。后台 Run 的正常返回、启动失败与排队取消共用退出清理：捕获独立通知句柄，销毁 job 并释放最后占用，再执行 required wake；通知对象必须存活到全部 worker join。Application 开始退出时关闭 admission，迟到唤醒不得产生新 Run。
+
+
 Product Task 还拥有绑定 Run identity 的 completion receipt。durable `completion_seen_run_id` 只记录 Renderer 已明确观察的当前最新 terminal `completed` Run；Product projection 只在该 Run identity 与 receipt 不同且它仍是最新 terminal outcome 时发布未读 identity。acknowledgement 必须同时携带 Task/Run identity，迟到、重复、其他 outcome、已删除 Task 或已被新 terminal Run 取代的请求无副作用；它不改变 Task `recent_order`。归档在同一 Task mutation 中确认当前 completion。Renderer 只报告中央 Task 工作面是否真正暴露，不从本地缓存、选择状态或时间推断 canonical receipt。
 
 Product Control 拥有全局的新 Task 默认 `ApprovalMode`，在 create admission 时复制；成功提交交互式 Task 时，同一 canonical mutation 记住其模式，并随 Task 历史进行同一次 best-effort projection commit，admission 拒绝、回滚和 noninteractive Scheduled occurrence 均不得改变。历史写入失败不回滚已发布的交互式 Task 或进程内默认值，后续完整 snapshot 按现有恢复规则重试持久化。旧合法历史缺少模式默认值时，从原默认 profile 恢复人工审批或完全访问；不得把新默认值覆盖到已有 Task。
@@ -314,6 +321,8 @@ Agent Session、callback、UI request、event pump、close race、错误映射�
 具体格式演进、迁移、恢复单位和 replace transaction 只由各 aggregate 的既有章节与实现拥有；本节不建立跨 owner 的通用恢复算法。尚未形成一致合同或真实能力的机制登记在[验证规范](validation.md)中，不得从本节推导新的 wire、磁盘布局或用户操作。
 
 ### 4.2 Durable history 与 runtime attachment
+
+待发送输入与最近排队操作结果只存在于当前 Host 的 Task 内存中，不写入 durable history 或 checkpoint。Renderer 重载、断连和导航不撤销已接纳的输入；退出或崩溃后不恢复，不自动重放。最近结果仅用于 operation identity 的响应丢失对账：自动消费槽位不清掉结果，下一次显式排队操作可以替换它；不建立结果历史或跨重启 exactly-once 承诺。
 
 Product history 保存用户可观察且跨重启仍有意义的 Workspace、Task、用户消息、已提交 assistant 输出、Tool 结果、File Changes metadata/artifact reference、UI 决策、Run/compact terminal fact、execution provenance 与 checkpoint reference。完整产品范围以[产品需求](requirements.md)为准。
 

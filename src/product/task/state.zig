@@ -726,6 +726,10 @@ pub const ApprovalResult = struct {
 pub const Task = struct {
     durable: DurableTaskRecord,
     runtime: RuntimeAttachment,
+    /// Process-only input and last explicit queue-operation receipt.
+    queued_input: ?QueuedInput = null,
+    queued_input_result: ?QueuedInputResult = null,
+    next_queued_input_revision: u64 = 1,
     conversation_observation: ConversationObservation = .{},
     /// Runtime-only first catalog binding; never persisted or used for recovery eligibility.
     initial_catalog_preparation: enum { uninitialized, loading, unavailable } = .uninitialized,
@@ -744,6 +748,75 @@ pub const Task = struct {
     pub fn permissionReviewPhase(self: *const Task) task_attachment.PermissionReviewState.Phase {
         if (ApprovalMode.fromFacts(self.durable.permission_profile, self.durable.permission_review_delegated) != .auto_review) return .idle;
         return self.runtime.permission_review.phaseForRequest(self.runtime.active_run_id, self.runtime.pending_ui_request_id);
+    }
+};
+
+pub const QueuedInputReason = enum {
+    stopped_by_user,
+    approval_mode_changed,
+    run_not_completed,
+    schedule_completion_unconfirmed,
+    task_idle,
+    run_changed,
+    run_stopping,
+    queue_occupied,
+    queued_input_changed,
+    unsupported_input,
+    binding_changed,
+    binding_unavailable,
+    task_unavailable,
+    task_busy,
+    shutting_down,
+    workspace_unavailable,
+    workspace_changed,
+    workspace_removing,
+    catalog_loading,
+    catalog_unavailable,
+    stale_catalog,
+    skill_not_found,
+    skill_unavailable,
+    invalid_skill_arguments,
+    missing_instruction,
+    capacity_reached,
+    admission_failed,
+};
+
+pub const QueuedInput = struct {
+    revision: u64,
+    run_id: u64,
+    binding_epoch: u64,
+    queued_at_unix_ms: ?u64,
+    state: enum { waiting, held } = .waiting,
+    held_reason: ?QueuedInputReason = null,
+    /// Raw execution bytes never enter a wire or history projection.
+    bytes: []u8,
+    arguments: [][]const u8,
+    raw: union(enum) {
+        text: []const u8,
+        skill: struct {
+            skill_id: []const u8,
+            catalog_revision: []const u8,
+            selection_revision: u64,
+        },
+    },
+    input: RunInputRecord,
+    input_storage_bytes: usize = 0,
+    selection_revision: ?u64,
+};
+
+pub const QueuedInputResult = struct {
+    operation_id: [64]u8,
+    operation_id_len: u8,
+    kind: enum { queue, withdraw },
+    outcome: enum { queued, withdrawn, rejected },
+    revision: ?u64 = null,
+    reason: ?QueuedInputReason = null,
+    input: ?RunInputRecord = null,
+    input_storage_bytes: usize = 0,
+    selection_revision: ?u64 = null,
+
+    pub fn operationId(self: *const QueuedInputResult) []const u8 {
+        return self.operation_id[0..self.operation_id_len];
     }
 };
 

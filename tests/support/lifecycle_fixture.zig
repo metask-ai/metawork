@@ -73,6 +73,8 @@ pub const Plan = enum {
     wrong_ui_request_run_id,
     wrong_ui_request_session_id,
     resource_limit,
+    max_turns,
+    tool_loop,
     checkpoint_budget_required,
     checkpoint_budget_required_invalid_result,
     checkpoint_budget_exhausted,
@@ -2246,6 +2248,8 @@ pub fn sessionRunInput(
             wire.STOP_ABORTED
         else switch (plan) {
             .unknown_stop_result => 42,
+            .max_turns => wire.STOP_MAX_TURNS,
+            .tool_loop => wire.STOP_TOOL_LOOP,
             .checkpoint_budget_exhausted => wire.STOP_CHECKPOINT_BUDGET_EXHAUSTED,
             .checkpoint_resource_limit => wire.STOP_CHECKPOINT_RESOURCE_LIMIT,
             else => wire.STOP_END_TURN,

@@ -1228,3 +1228,40 @@ test("Task completion dot consumes only the canonical unread receipt", () => {
     /task-notification-dot/,
   );
 });
+
+test("an active Run can show Stop and a separately named Queue primary action", () => {
+  const markup = render({
+    draft: { kind: "text", text: "follow up" },
+    stopAction: "run",
+    runInFlight: true,
+    onQueueInput() {},
+    canQueue: true,
+  });
+  assert.match(markup, /aria-label="Stop task"/);
+  assert.match(markup, /aria-label="Queue message"/);
+  assert.doesNotMatch(markup, /aria-label="Send message"/);
+  const attachments = render({
+    draft: {
+      kind: "multimodal",
+      text: "",
+      attachments: [
+        {
+          token: "file",
+          kind: "file",
+          displayName: "notes.txt",
+          sizeBytes: "1",
+          redacted: false,
+        },
+      ],
+    },
+    stopAction: "run",
+    onQueueInput() {},
+    canQueue: false,
+    queueDisabledReason: "queue.attachments_unsupported",
+  });
+  assert.match(
+    attachments,
+    /<button(?=[^>]*aria-label="Queue message")(?=[^>]*disabled)[^>]*>/,
+  );
+  assert.match(attachments, /Send messages with attachments manually/);
+});
