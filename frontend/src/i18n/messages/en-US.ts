@@ -634,6 +634,73 @@ export const enUS = {
     "The current execution cannot run this conversation. Switch to an account or connection that supports the task model",
   "run.placeholder_history_read_only":
     "This task has content this version can't read. You can view it; use a newer MetaWork to continue",
+  "queue.card_label": "Queued message",
+  "queue.submit": "Queue message",
+  "queue.waiting": "Send after the current Run finishes and settles",
+  "queue.held": "Not sent automatically: {reason}",
+  "queue.memory_only":
+    "Kept for this app session only. Quitting the app discards it.",
+  "queue.edit": "Edit",
+  "queue.withdraw": "Withdraw",
+  "queue.restore": "Move to composer",
+  "queue.pending": "Queuing message…",
+  "queue.withdrawing": "Withdrawing…",
+  "queue.unconfirmed": "Message outcome is unconfirmed",
+  "queue.draft_conflict": "Message withdrawn. The composer has a newer draft.",
+  "queue.rejected": "Action not completed: {reason}",
+  "queue.storage_unavailable":
+    "Could not save reconciliation information. Your input remains in the draft.",
+  "queue.refresh": "Refresh status",
+  "queue.keep_current": "Keep current draft and continue",
+  "queue.use_original": "Use original input",
+  "queue.continue": "Acknowledge and continue",
+  "queue.discard_returned": "Discard withdrawn message",
+  "queue.uncertain_confirm_body":
+    "This action may already have taken effect. The original message may have been sent; sending it again could create a duplicate. A newer draft will be preserved. Original input is restored only when the composer is empty.",
+  "queue.attachments_unsupported":
+    "Send messages with attachments manually after the current task finishes.",
+  "queue.occupied": "A message is already queued.",
+  "queue.resolve_first": "Resolve the queued message status first.",
+  "queue.held_first": "Edit or withdraw the queued message first.",
+  "queue.stopping": "The task is stopping. Send your message afterward.",
+  "queue.draft_hint": "Draft your next message, then choose Queue message.",
+  "queue.discard_on_action":
+    "When this action takes effect, the queued message will be discarded.",
+  "queue.archive_title": "Archive and discard the queued message?",
+  "queue.archive_confirm": "Archive",
+  "queue.reason.stopped_by_user": "You stopped the current Run.",
+  "queue.reason.approval_mode_changed": "The approval mode changed.",
+  "queue.reason.run_not_completed":
+    "The previous Run did not complete normally. Decide whether to continue.",
+  "queue.reason.schedule_completion_unconfirmed":
+    "The scheduled task result is not yet confirmed.",
+  "queue.reason.task_idle": "The current Run ended. Send the message manually.",
+  "queue.reason.run_changed": "The current Run changed.",
+  "queue.reason.run_stopping": "The current Run is stopping.",
+  "queue.reason.queue_occupied": "A message is already queued.",
+  "queue.reason.queued_input_changed":
+    "The queued message changed. Refresh its status.",
+  "queue.reason.unsupported_input": "Attachments cannot be queued.",
+  "queue.reason.binding_changed": "The task binding changed.",
+  "queue.reason.binding_unavailable": "The model binding is unavailable.",
+  "queue.reason.task_unavailable": "The task is unavailable.",
+  "queue.reason.task_busy": "The task is handling another operation.",
+  "queue.reason.shutting_down": "The app is shutting down.",
+  "queue.reason.workspace_unavailable": "The workspace is unavailable.",
+  "queue.reason.workspace_changed": "The workspace binding changed.",
+  "queue.reason.workspace_removing": "The workspace is being removed.",
+  "queue.reason.catalog_loading": "The Skill catalog is loading.",
+  "queue.reason.catalog_unavailable": "The Skill catalog is unavailable.",
+  "queue.reason.stale_catalog":
+    "The Skill selection is stale. Edit and select it again.",
+  "queue.reason.skill_not_found": "The selected Skill no longer exists.",
+  "queue.reason.skill_unavailable": "The selected Skill is unavailable.",
+  "queue.reason.invalid_skill_arguments":
+    "The Skill arguments are invalid. Edit before sending.",
+  "queue.reason.missing_instruction": "The message has no instruction.",
+  "queue.reason.capacity_reached": "Capacity has been reached.",
+  "queue.reason.admission_failed":
+    "The next message could not be accepted. Handle it manually.",
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
   "run.started": "Work started.",

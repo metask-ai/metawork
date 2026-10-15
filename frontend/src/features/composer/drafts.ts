@@ -168,7 +168,7 @@ function decodeSkillDraft(
   return skillDraftPersistable(decoded) ? decoded : null;
 }
 
-function storage(): Storage | null {
+export function composerSessionStorage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {
     return window.sessionStorage;
@@ -177,7 +177,7 @@ function storage(): Storage | null {
   }
 }
 
-function decodeTaggedDraft(value: string | null): ComposerDraft {
+export function decodeTaggedDraft(value: string | null): ComposerDraft {
   if (!value) return emptyComposerDraft();
   if (utf8ByteLength(value) > maxPersistedDraftBytes)
     return emptyComposerDraft();
@@ -248,7 +248,7 @@ function writeDraftValue(
 
 export function readTaskDraft(taskId: string): ComposerDraft {
   try {
-    const target = storage();
+    const target = composerSessionStorage();
     if (!target) return emptyComposerDraft();
     const tagged = target.getItem(`${taskPrefix}${taskId}`);
     return tagged !== null
@@ -259,9 +259,47 @@ export function readTaskDraft(taskId: string): ComposerDraft {
   }
 }
 
-export function writeTaskDraft(taskId: string, value: ComposerDraft): void {
+const versionPrefix = "metawork.task-draft-version.v1.";
+const localVersions = new Map<string, string>();
+export function newComposerOperationId(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+export function taskDraftVersion(taskId: string): string {
+  const cached = localVersions.get(taskId);
+  if (cached) return cached;
+  let version: string | null = null;
   try {
-    const target = storage();
+    version =
+      composerSessionStorage()?.getItem(`${versionPrefix}${taskId}`) ?? null;
+  } catch {
+    /* Local state still works. */
+  }
+  if (!version || !/^[a-zA-Z0-9-]{1,64}$/.test(version))
+    version = newComposerOperationId();
+  localVersions.set(taskId, version);
+  try {
+    composerSessionStorage()?.setItem(`${versionPrefix}${taskId}`, version);
+  } catch {
+    /* Queue journaling validates its own write. */
+  }
+  return version;
+}
+function advanceTaskDraftVersion(taskId: string): void {
+  const version = newComposerOperationId();
+  localVersions.set(taskId, version);
+  try {
+    composerSessionStorage()?.setItem(`${versionPrefix}${taskId}`, version);
+  } catch {
+    /* Keep the current in-memory version. */
+  }
+}
+
+export function writeTaskDraft(taskId: string, value: ComposerDraft): void {
+  advanceTaskDraftVersion(taskId);
+  try {
+    const target = composerSessionStorage();
     if (!target) return;
     writeDraftValue(
       target,
@@ -280,7 +318,7 @@ export function clearTaskDraft(taskId: string): void {
 
 export function readNewTaskDraft(workspaceId: string): ComposerDraft {
   try {
-    const target = storage();
+    const target = composerSessionStorage();
     if (!target) return emptyComposerDraft();
     const tagged = target.getItem(`${newTaskPrefix}${workspaceId}`);
     return tagged !== null
@@ -298,7 +336,7 @@ export function writeNewTaskDraft(
   value: ComposerDraft,
 ): void {
   try {
-    const target = storage();
+    const target = composerSessionStorage();
     if (!target) return;
     writeDraftValue(
       target,
@@ -316,18 +354,24 @@ export function clearNewTaskDraft(workspaceId: string): void {
 }
 
 export function pruneTaskDrafts(validTaskIds: ReadonlySet<string>): void {
+  for (const id of localVersions.keys())
+    if (!validTaskIds.has(id)) localVersions.delete(id);
   try {
-    const target = storage();
+    const target = composerSessionStorage();
     if (!target) return;
     const stale: string[] = [];
     for (let index = 0; index < target.length; index += 1) {
       const key = target.key(index);
       if (!key) continue;
-      const taskId = key.startsWith(taskPrefix)
-        ? key.slice(taskPrefix.length)
-        : key.startsWith(legacyTaskPrefix)
-          ? key.slice(legacyTaskPrefix.length)
-          : null;
+      const taskId = key.startsWith(versionPrefix)
+        ? key.slice(versionPrefix.length)
+        : key.startsWith("metawork.queued-input-operation.v1.")
+          ? key.slice("metawork.queued-input-operation.v1.".length)
+          : key.startsWith(taskPrefix)
+            ? key.slice(taskPrefix.length)
+            : key.startsWith(legacyTaskPrefix)
+              ? key.slice(legacyTaskPrefix.length)
+              : null;
       if (taskId !== null && !validTaskIds.has(taskId)) stale.push(key);
     }
     for (const key of stale) target.removeItem(key);

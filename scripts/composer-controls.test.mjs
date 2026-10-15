@@ -2177,3 +2177,169 @@ test("Models reports an authoritative empty conversation catalog without signing
   assert.ok(screen.getByRole("button", { name: "Sync again" }));
   assert.deepEqual(view.selections.model, []);
 });
+
+test("queued Text Enter preserves IME and Shift newline while Stop remains independent", () => {
+  let queues = 0,
+    stops = 0;
+  const composer = renderComposer({
+    stopAction: "run",
+    stopDisabled: false,
+    runInFlight: true,
+    canSubmit: false,
+    canQueue: true,
+    onQueueInput() {
+      queues++;
+    },
+    onStop() {
+      stops++;
+    },
+  });
+  fireEvent.keyDown(composer.textarea, { key: "Enter", shiftKey: true });
+  fireEvent.keyDown(composer.textarea, { key: "Enter", isComposing: true });
+  assert.equal(queues, 0);
+  fireEvent.keyDown(composer.textarea, { key: "Enter" });
+  assert.equal(queues, 1);
+  assert.equal(composer.submissions(), 0);
+  fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
+  assert.equal(stops, 1);
+  assert.equal(queues, 1);
+});
+
+test("structured Skill Enter uses Queue and confirmed queue cleanup does not steal outside focus", async () => {
+  let queues = 0;
+  const draft = {
+    kind: "skill",
+    skillId: "review",
+    invocationName: "review",
+    displayName: "Review",
+    catalogRevision: "4",
+    selectionRevision: "1",
+    argumentNames: ["File"],
+    argumentValues: ["src/main.zig"],
+    maxValues: 1,
+  };
+  const composer = renderComposer({
+    draft,
+    quietDraftChange: true,
+    stopAction: "run",
+    stopDisabled: false,
+    runInFlight: true,
+    canSubmit: false,
+    canQueue: true,
+    onQueueInput() {
+      queues++;
+    },
+    skillCatalog: {
+      availability: "ready",
+      revision: "4",
+      selectionRevision: "1",
+      skills: [
+        {
+          skillId: "review",
+          invocationName: "review",
+          displayName: "Review",
+          description: "",
+          argumentNames: ["File"],
+          maxValues: 1,
+          enabled: true,
+        },
+      ],
+      issues: [],
+      redacted: false,
+    },
+  });
+  const argument = document.querySelector(".skill-arguments input");
+  assert.ok(argument);
+  fireEvent.keyDown(argument, { key: "Enter" });
+  assert.equal(queues, 1);
+  assert.equal(composer.submissions(), 0);
+  const outside = document.createElement("button");
+  outside.textContent = "outside";
+  document.body.append(outside);
+  outside.focus();
+  act(() => composer.setDraft({ kind: "text", text: "" }));
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(document.activeElement, outside);
+  outside.remove();
+});
+
+test("queued card edits only an empty draft and unconfirmed reuse needs explicit confirmation", async () => {
+  const { QueuedInputCard } = await vite.ssrLoadModule(
+    "/src/features/composer/QueuedInputCard.tsx",
+  );
+  let edits = 0,
+    withdrawals = 0;
+  const resolutions = [],
+    dialogStates = [];
+  const base = {
+    queued: {
+      revision: "1",
+      runId: "7",
+      input: { kind: "text", text: "queued safe preview", redacted: false },
+      state: "waiting",
+      heldReason: null,
+      queuedAtUnixMs: null,
+    },
+    pending: null,
+    busy: false,
+    error: null,
+    draftEmpty: false,
+    preserveCurrent: false,
+    disabled: false,
+    onEdit() {
+      edits++;
+    },
+    onWithdraw() {
+      withdrawals++;
+    },
+    onRefresh() {},
+    onResolve(value) {
+      resolutions.push(value);
+    },
+    onConfirmationOpenChange(value) {
+      dialogStates.push(value);
+    },
+  };
+  const element = (props) =>
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(QueuedInputCard, props),
+    );
+  const view = render(element(base));
+  assert.equal(screen.getByRole("button", { name: "Edit" }).disabled, true);
+  fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
+  assert.equal(withdrawals, 1);
+  assert.equal(edits, 0);
+  assert.match(
+    screen.getByText("queued safe preview").textContent,
+    /queued safe preview/,
+  );
+  view.rerender(element({ ...base, draftEmpty: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  assert.equal(edits, 1);
+  const pending = {
+    operationId: "lost",
+    kind: "queue",
+    intent: "queue",
+    draftVersion: "1",
+    draft: { kind: "text", text: "original" },
+    phase: "unconfirmed",
+  };
+  view.rerender(element({ ...base, queued: null, pending, draftEmpty: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Use original input" }));
+  const dialog = await screen.findByRole("alertdialog");
+  assert.match(dialog.textContent, /could create a duplicate/);
+  assert.deepEqual(resolutions, []);
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Use original input" }),
+  );
+  assert.deepEqual(resolutions, [true]);
+  assert.equal(dialogStates.at(-1), false);
+});

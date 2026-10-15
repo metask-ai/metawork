@@ -21,6 +21,7 @@ import { ModelSelector } from "./ModelSelector.tsx";
 import { SlashMenu } from "./SlashMenu.tsx";
 import {
   composerDraftWithinLimits,
+  composerDraftHasContent,
   emptyComposerDraft,
   isSkillDraftCurrent,
   parseSlashInput,
@@ -128,6 +129,12 @@ export function ComposerFooter({
   onCancelAttachments,
   onRemoveAttachment,
   onSubmit,
+  canQueue = false,
+  onQueueInput,
+  queueDisabledReason,
+  sendDisabledReason,
+  queuedInputCard,
+  quietDraftChange = false,
   onStop,
   onSlashCommand,
   onRefreshSkillCatalog,
@@ -191,6 +198,12 @@ export function ComposerFooter({
   onCancelAttachments?: () => void;
   onRemoveAttachment: (token: string) => void;
   onSubmit: () => void;
+  canQueue?: boolean;
+  onQueueInput?: () => void;
+  queueDisabledReason?: MessageId;
+  sendDisabledReason?: MessageId;
+  queuedInputCard?: ReactNode;
+  quietDraftChange?: boolean;
   onStop: () => void;
   onSlashCommand: (command: SlashCommandName) => void;
   onRefreshSkillCatalog: () => void;
@@ -240,8 +253,18 @@ export function ComposerFooter({
   const skillDraftCurrent =
     draft.kind !== "skill" || isSkillDraftCurrent(draft, skillCatalog);
   const draftWithinLimits = composerDraftWithinLimits(draft);
+  const showQueueAction = Boolean(
+    onQueueInput &&
+    stopAction === "run" &&
+    (composerDraftHasContent(draft) ||
+      (draft.kind === "multimodal" && draft.attachments.length > 0)),
+  );
   const sendEnabled =
-    canSubmit && !attachmentBusy && slashInput === null && draftWithinLimits;
+    (showQueueAction ? canQueue : canSubmit) &&
+    !attachmentBusy &&
+    slashInput === null &&
+    draftWithinLimits;
+  const submitPrimary = () => (showQueueAction ? onQueueInput?.() : onSubmit());
   const candidates = useMemo(
     () =>
       slashInput
@@ -323,7 +346,7 @@ export function ComposerFooter({
   useEffect(() => {
     if (previousDraftFocusIdentity.current === draftFocusIdentity) return;
     previousDraftFocusIdentity.current = draftFocusIdentity;
-    if (pendingAttachmentFocusRef.current) return;
+    if (quietDraftChange || pendingAttachmentFocusRef.current) return;
     const frame = window.requestAnimationFrame(() => {
       const firstArgument = firstSkillArgumentRef.current;
       const sendButton = sendButtonRef.current;
@@ -342,7 +365,7 @@ export function ComposerFooter({
       target?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [draft.kind, draftFocusIdentity, textareaRef]);
+  }, [draft.kind, draftFocusIdentity, textareaRef, quietDraftChange]);
 
   useEffect(() => {
     const pending = pendingAttachmentFocusRef.current;
@@ -422,7 +445,7 @@ export function ComposerFooter({
     }
     if (event.key === "Enter" && !event.shiftKey && sendEnabled) {
       event.preventDefault();
-      onSubmit();
+      submitPrimary();
     }
   }
 
@@ -503,6 +526,7 @@ export function ComposerFooter({
             onRefresh={onRefreshSkillCatalog}
           />
         )}
+        {queuedInputCard}
         <Composer
           state={
             unavailable || archived || closing
@@ -691,7 +715,7 @@ export function ComposerFooter({
                             sendEnabled
                           ) {
                             event.preventDefault();
-                            onSubmit();
+                            submitPrimary();
                           }
                         }}
                       />
@@ -819,23 +843,40 @@ export function ComposerFooter({
               )}
             </div>
             {stopAction ? (
-              <Button
-                type="button"
-                variant="danger"
-                size="icon"
-                ref={stopButtonRef}
-                className="composer-stop"
-                aria-label={t(
-                  stopAction === "compact" ? "compact.stop" : "task.stop",
+              <div className="composer-run-actions">
+                <Button
+                  type="button"
+                  variant="danger"
+                  size="icon"
+                  ref={stopButtonRef}
+                  className="composer-stop"
+                  aria-label={t(
+                    stopAction === "compact" ? "compact.stop" : "task.stop",
+                  )}
+                  title={t(
+                    stopAction === "compact" ? "compact.stop" : "task.stop",
+                  )}
+                  disabled={stopDisabled}
+                  onClick={onStop}
+                >
+                  <Icon name="stop" />
+                </Button>
+                {showQueueAction && (
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    ref={sendButtonRef}
+                    className="composer-queue"
+                    aria-label={t("queue.submit")}
+                    title={t(queueDisabledReason ?? "queue.submit")}
+                    disabled={!sendEnabled}
+                    onClick={onQueueInput}
+                  >
+                    {t("queue.submit")}
+                  </Button>
                 )}
-                title={t(
-                  stopAction === "compact" ? "compact.stop" : "task.stop",
-                )}
-                disabled={stopDisabled}
-                onClick={onStop}
-              >
-                <Icon name="stop" />
-              </Button>
+              </div>
             ) : (
               <div className="composer-send-group">
                 {defaultSelectionMissing && (
@@ -859,7 +900,7 @@ export function ComposerFooter({
                   ref={sendButtonRef}
                   className="composer-send"
                   aria-label={t("run.submit")}
-                  title={t("run.submit")}
+                  title={t(sendDisabledReason ?? "run.submit")}
                   disabled={!sendEnabled}
                   onClick={onSubmit}
                 >
@@ -892,7 +933,18 @@ export function ComposerFooter({
         />
       </div>
       {runInFlight && (
-        <p className="composer-draft-note">{t("run.draft_only")}</p>
+        <p className="composer-draft-note">
+          {t(
+            onQueueInput && stopAction === "run"
+              ? (queueDisabledReason ?? "queue.draft_hint")
+              : "run.draft_only",
+          )}
+        </p>
+      )}
+      {!runInFlight && sendDisabledReason && (
+        <p className="composer-draft-note" role="status">
+          {t(sendDisabledReason)}
+        </p>
       )}
     </footer>
   );
