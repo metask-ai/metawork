@@ -525,6 +525,8 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 
 连接失败必须按可恢复边界呈现：只有 bootstrap `connect` 明确返回 Renderer Bridge identity 或 revision 不匹配时，才显示“组件不匹配”并要求关闭后重建或安装；snapshot、revision notification 或 Host signal 的 malformed/unknown payload 仍然 fail closed、禁止 mutation，但显示对应的视图读取失败、技术来源和显式重新连接入口，不能伪装成已经证实的组件版本问题。
 
+启动时收到的数据格式不符合预期，主提示使用“无法加载 MetaWork”等用户能够理解的描述，不把“工作台视图”作为需要用户理解的技术对象。原因说明只陈述已观察到的数据异常；对象路径和有界字段差异收入可折叠技术详情，不在主提示罗列内部字段，也不推断版本错配。该文案不改变既有拒绝与显式恢复边界。
+
 没有 active Run 且 execution binding 为 `rebind_required` 或 `unavailable` 时，左栏仍保留最近一次 Run 的 outcome；Composer 区域另外显示 `需要确认执行配置` 或 `当前无法继续`。不得用 binding 问题把历史结果改标成 Failed，也不得继续显示可发送输入造成错误暗示。
 
 ### 6.4 跨重启 Conversation 恢复与 execution rebind
