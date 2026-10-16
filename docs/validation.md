@@ -53,6 +53,8 @@ npm test
 
 `npm test` 必须校验 canonical staged AgentCore bundle、执行 Renderer typecheck，并运行自动发现的 Node tests 与正式 Native test graph。Node 和 Native 阶段都必须得到结果；一侧失败不得遮蔽另一侧。bundle 缺失或不匹配时必须明确失败，不能跳过 AgentCore 用例后报告成功。
 
+Renderer `check/test` 必须确定性验证由 Host wire 类型生成的源码没有过期；`dev/build` 在构建 Renderer 前更新生成结果。生成器只消费纯合同，在构建机运行，不加载 Product Runtime 或 AgentCore Session。结构派生的验收同时覆盖实际 Host 编码、实际 Renderer 解码、独立的字段/nullable/enum/整数拒绝用例；不能只验证生成器与自己的输出相符，也不能用同一生成器制造全部 fixture 预期。
+
 candidate probe、真实桌面验收、签名、公证和发布验证不属于 `npm test`，也不得被其结果替代。定向入口只缩短开发反馈；提交前仍运行能覆盖受影响失败模式的完整关联 root。
 
 | 范围                              | 标准入口                                                                                          | 说明                                                                                                                                                                                                                                                                            |

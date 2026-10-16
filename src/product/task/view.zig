@@ -9,6 +9,7 @@ const product_skill = @import("metawork_product_skill");
 const task_state = @import("product_task_state");
 const task_policy = @import("product_task_policy");
 const task_recovery = @import("product_task_recovery");
+const view_contract = @import("product_task_view_contract");
 
 pub const Error = std.mem.Allocator.Error || error{
     SnapshotTooLarge,
@@ -161,9 +162,12 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"approvalResult\":") catch return error.SnapshotTooLarge;
     if (task.approval_result) |result| {
-        writer.print("{{\"revision\":\"{d}\",\"outcome\":\"{s}\",\"reason\":", .{ result.revision, @tagName(result.outcome) }) catch return error.SnapshotTooLarge;
-        if (result.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
+        const wire = view_contract.ApprovalResult{
+            .revision = .{ .value = result.revision },
+            .outcome = result.outcome,
+            .reason = result.reason,
+        };
+        std.json.Stringify.value(wire, .{}, writer) catch return error.SnapshotTooLarge;
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"queuedInput\":") catch return error.SnapshotTooLarge;
     if (task.queued_input) |queued| {
@@ -1177,4 +1181,42 @@ fn jsonValue(writer: *std.Io.Writer, value: anytype) !void {
         .{ .emit_nonportable_numbers_as_strings = true },
         writer,
     );
+}
+
+test "approval result wire keeps nullable reason and exact revision without allocation" {
+    var storage: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try std.json.Stringify.value(view_contract.ApprovalResult{
+        .revision = .{ .value = std.math.maxInt(u64) },
+        .outcome = .completed,
+        .reason = null,
+    }, .{}, &writer);
+    try std.testing.expectEqualStrings("{\"revision\":\"18446744073709551615\",\"outcome\":\"completed\",\"reason\":null}", writer.buffered());
+}
+
+test "interrupted Compact serializer matches the independent Renderer fixture" {
+    var diagnostic: [0]u8 = .{};
+    const compact = task_state.CompactRecord{
+        .id = std.math.maxInt(u64),
+        .coverage = .excluded,
+        .after_run_id = 7,
+        .terminal_publication = .init(.published),
+        .terminal_observed = true,
+        .terminal_diagnostic = &diagnostic,
+        .terminal_payload = .{
+            .exclude_on_product_terminal = false,
+            .phase = .interrupted,
+            .cause = null,
+            .before_context_tokens = 100,
+            .after_context_tokens = 40,
+            .usage = .{ .input_tokens = 5, .output_tokens = 2 },
+            .session_disposition_at_completion = .reusable,
+        },
+    };
+    var storage: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try writeCompact(&writer, &compact);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, @import("task_view_fixture").interrupted_compact, "\r\n"), writer.buffered());
+    writer = std.Io.Writer.fixed(storage[0..8]);
+    try std.testing.expectError(error.SnapshotTooLarge, writeCompact(&writer, &compact));
 }

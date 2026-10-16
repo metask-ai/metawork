@@ -841,11 +841,14 @@ pub const Dispatcher = struct {
             }) == .retry);
             return err;
         };
-        return std.fmt.bufPrint(
-            output,
-            "{{\"snapshotId\":\"{d}\",\"bytes\":{d},\"chunkBytes\":{d}}}",
-            .{ descriptor.id, descriptor.bytes, product_delivery.snapshot_chunk_bytes },
-        );
+        var writer = std.Io.Writer.fixed(output);
+        const wire = @import("snapshot_contract.zig").SnapshotDescriptor{
+            .snapshotId = .{ .value = descriptor.id },
+            .bytes = .{ .value = descriptor.bytes },
+            .chunkBytes = .{ .value = product_delivery.snapshot_chunk_bytes },
+        };
+        try std.json.Stringify.value(wire, .{}, &writer);
+        return writer.buffered();
     }
 
     fn fetchSnapshotChunk(context: *anyopaque, invocation: native_sdk.bridge.Invocation, output: []u8) anyerror![]const u8 {

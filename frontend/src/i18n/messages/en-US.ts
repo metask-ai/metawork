@@ -37,9 +37,9 @@ export const enUS = {
   "connection.failed": "Workbench connection unavailable",
   "connection.failed_help":
     "The content already shown remains available. Retry syncing to continue.",
-  "connection.contract_failed": "MetaWork could not read the Workbench view",
+  "connection.contract_failed": "Could not load MetaWork",
   "connection.contract_failed_help":
-    "Reconnect to load a fresh view. If this continues, close and reopen MetaWork.",
+    "The received data does not match the expected format. Check the technical details. If this continues, close and reopen MetaWork.",
   "connection.component_mismatch": "MetaWork components do not match",
   "connection.component_mismatch_help":
     "Close MetaWork, then rebuild or reinstall the matching application components before reopening it.",

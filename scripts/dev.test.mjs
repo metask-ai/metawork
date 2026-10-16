@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
+  developmentEnvironment,
+  withDevelopmentDirectory,
   buildAppleDevelopmentRequirement,
   buildCanonicalDesignatedRequirement,
   isAppleDevelopmentIdentityName,
@@ -17,12 +29,151 @@ import {
   validateCanonicalDesignatedRequirement,
 } from "./dev.mjs";
 import { xcodeContentsForDeveloperDirectory } from "./setup-macos-local-signing.mjs";
+import { runChild } from "./run-child-process.mjs";
 
 const fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567";
 const secondFingerprint = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
 const certificateSuffix = "6L6UHLW8L7";
 const teamId = "Z4T2BLNJ8X";
 const identityName = `Apple Development: developer@example.com (${certificateSuffix})`;
+
+test("paired development removes server overrides without changing inherited environment", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "metawork-dev-env-"));
+  const resources = path.join(root, "src", "product", "control", "resources");
+  await mkdir(resources, { recursive: true });
+  await writeFile(path.join(resources, "archive.py"), "");
+  const inherited = {
+    NATIVE_SDK_FRONTEND_URL: "http://old-server/",
+    NATIVE_SDK_HMR: "1",
+    NATIVE_SDK_MODE: "dev",
+    KEEP: "preserved",
+  };
+  try {
+    const environment = developmentEnvironment(root, inherited);
+    assert.equal(environment.NATIVE_SDK_FRONTEND_URL, undefined);
+    assert.equal(environment.NATIVE_SDK_HMR, undefined);
+    assert.equal(environment.NATIVE_SDK_MODE, undefined);
+    assert.equal(environment.KEEP, "preserved");
+    assert.equal(environment.METAWORK_DEV_REQUIRE_PRIMARY, "1");
+    assert.equal(inherited.NATIVE_SDK_HMR, "1");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("development directories isolate overlapping sessions and clean only their own output", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "metawork-dev-test-"));
+  try {
+    const preserved = path.join(root, "preserved");
+    await writeFile(preserved, "keep");
+    let outer;
+    let inner;
+    await assert.rejects(
+      withDevelopmentDirectory(root, async (first) => {
+        outer = first;
+        await withDevelopmentDirectory(root, async (second) => {
+          inner = second;
+          assert.notEqual(first, second);
+          await writeFile(path.join(first, "output"), "first");
+        });
+        await assert.rejects(access(inner));
+        await access(path.join(first, "output"));
+        throw new Error("build failed");
+      }),
+      /build failed/,
+    );
+    await assert.rejects(access(outer));
+    await access(preserved);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const detachedDescendant of [false, true])
+  for (const exitCode of [null, 7])
+    test(
+      `${exitCode === null ? "cancelled" : "failed"} development retains output while an owned ${detachedDescendant ? "detached " : ""}descendant is still running`,
+      {
+        skip: process.platform === "win32",
+      },
+      async () => {
+        const root = await mkdtemp(
+          path.join(tmpdir(), "metawork-dev-descendant-"),
+        );
+        const cancellation = new AbortController();
+        let group;
+        let descendant;
+        let output;
+        try {
+          await assert.rejects(
+            withDevelopmentDirectory(root, async (directory) => {
+              output = directory;
+              const ready = path.join(directory, "ready.json");
+              const pending = runChild(
+                process.execPath,
+                [
+                  "-e",
+                  `
+        const { spawn } = require('node:child_process');
+        const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); process.send('ready'); setInterval(() => {}, 1000)"], { detached: ${detachedDescendant}, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+        child.once('message', () => {
+          require('node:fs').writeFileSync(process.argv[1], JSON.stringify({ group: process.pid, descendant: child.pid }));
+          if (${exitCode} !== null) process.exit(${exitCode});
+        });
+        setInterval(() => {}, 1000);
+      `,
+                  ready,
+                ],
+                {
+                  label: "owned process tree",
+                  signal: cancellation.signal,
+                  timeoutMs: null,
+                },
+              ).catch((error) => error);
+              const deadline = Date.now() + 5000;
+              while (group === undefined) {
+                const bytes = await readFile(ready, "utf8").catch((error) => {
+                  if (error.code === "ENOENT") return null;
+                  throw error;
+                });
+                if (bytes) ({ group, descendant } = JSON.parse(bytes));
+                else {
+                  if (Date.now() >= deadline)
+                    throw new Error("descendant did not start");
+                  await new Promise((resolve) => setTimeout(resolve, 10));
+                }
+              }
+              if (exitCode === null) cancellation.abort();
+              const error = await pending;
+              process.kill(descendant, 0);
+              assert.equal(error.childProcessesMayBeRunning, true);
+              throw error;
+            }),
+            exitCode === null
+              ? /owned process tree cancelled/
+              : /owned process tree failed with exit code 7/,
+          );
+          await access(path.join(output, "ready.json"));
+        } finally {
+          cancellation.abort();
+          if (descendant && detachedDescendant) {
+            try {
+              process.kill(-descendant, "SIGKILL");
+            } catch (error) {
+              if (error.code !== "ESRCH") throw error;
+            }
+          }
+          if (group) {
+            try {
+              process.kill(-group, "SIGKILL");
+            } catch (error) {
+              if (error.code !== "ESRCH") throw error;
+            }
+          }
+          await rm(root, { recursive: true, force: true });
+        }
+      },
+    );
 
 test("development signing reads the existing Native product identity", () => {
   assert.deepEqual(localProductIdentity, {

@@ -12,6 +12,7 @@ pub const Disposition = enum { primary, secondary };
 pub const CoordinateError = error{
     ActivationFailed,
     ArgumentsUnavailable,
+    DevelopmentInstanceAlreadyRunning,
 } || protocol.EncodeError || std.mem.Allocator.Error ||
     std.process.CurrentPathError || std.process.Args.Iterator.InitError;
 
@@ -32,13 +33,14 @@ pub const Coordinator = struct {
         artifact_identity: []const u8,
         notifier: protocol.Notifier,
         interactive: bool,
+        require_primary: bool,
     ) CoordinateError!Disposition {
         const identity = protocol.Identity.init(artifact_identity, canonical_data_root);
         var lease = switch (compat.tryAcquireLease(io, canonical_data_root) catch {
             return activationFailure(interactive, .startup_failed);
         }) {
             .acquired => |value| value,
-            .occupied => switch (try forwardOrFail(
+            .occupied => if (require_primary) return error.DevelopmentInstanceAlreadyRunning else switch (try forwardOrFail(
                 io,
                 allocator,
                 args,
@@ -246,6 +248,33 @@ test "single-instance coordinator reacquires a lease after ingress closes" {
         .secondary => return error.UnexpectedSecondary,
     };
     acquired.deinit();
+}
+
+test "single-instance coordinator development startup rejects an existing owner without activation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var held = switch (try compat.tryAcquireLease(std.testing.io, root)) {
+        .acquired => |lease| lease,
+        .occupied => return error.UnexpectedOccupiedLease,
+    };
+    defer held.deinit();
+    var coordinator: Coordinator = undefined;
+    try std.testing.expectError(error.DevelopmentInstanceAlreadyRunning, coordinator.init(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .vector = &.{} },
+        root,
+        "development",
+        .{ .context = null, .notify_fn = struct {
+            fn notify(_: ?*anyopaque) bool {
+                @panic("rejected development startup must not activate existing owner");
+            }
+        }.notify },
+        false,
+        true,
+    ));
 }
 
 test "single-instance coordinator forwards after a cold-start endpoint appears" {

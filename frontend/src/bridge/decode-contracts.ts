@@ -1,3 +1,20 @@
+import { decodeTaskApprovalResultWire } from "./generated-wire.ts";
+import {
+  exactKeys,
+  fail,
+  record,
+  object,
+  stringValue,
+  booleanValue,
+  arrayValue,
+  wireId,
+  positiveWireId,
+  numberValue,
+  positiveNumber,
+  nonNegativeNumber,
+  enumValue,
+} from "./wire-codec.ts";
+import { compactPhases } from "./contracts.ts";
 import {
   queuedInputReasons,
   type QueuedInput,
@@ -11,7 +28,6 @@ import {
   builtinProviderIds,
   permissionProfiles,
   approvalModes,
-  approvalFailureReasons,
   taskApprovalModeReasons,
   type TaskApprovalModeResult,
   type TaskApprovalChange,
@@ -127,16 +143,7 @@ const nonTerminalRunPhases = [
   "waiting_ui",
   "stopping",
 ] as const;
-const compactPhases = [
-  "queued",
-  "compacting",
-  "stopping",
-  "compacted",
-  "no_change",
-  "degraded",
-  "aborted",
-  "failed",
-] as const;
+
 const nonTerminalCompactPhases = ["queued", "compacting", "stopping"] as const;
 const runOutcomes = [
   "completed",
@@ -421,52 +428,9 @@ const catalogRefreshReasons = [
   "shutting_down",
 ] as const;
 
-function fail(path: string, message: string): never {
-  throw new Error(`Invalid Host contract at ${path}: ${message}`);
-}
-
-function record(value: unknown, path: string): JsonObject {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    fail(path, "expected object");
-  return value as JsonObject;
-}
-
-function exactKeys(result: JsonObject, path: string, keys: readonly string[]) {
-  const actual = Object.keys(result).sort();
-  const expected = [...keys].sort();
-  if (
-    actual.length !== expected.length ||
-    actual.some((key, index) => key !== expected[index])
-  )
-    fail(path, `expected keys ${expected.join(", ")}`);
-}
-
-function object(value: unknown, path: string, keys: readonly string[]) {
-  const result = record(value, path);
-  exactKeys(result, path, keys);
-  return result;
-}
-
-function stringValue(value: unknown, path: string) {
-  if (typeof value !== "string") fail(path, "expected string");
-  return value;
-}
-
 function nonEmptyString(value: unknown, path: string) {
   const result = stringValue(value, path);
   if (result.length === 0) fail(path, "expected non-empty string");
-  return result;
-}
-
-function wireId(value: unknown, path: string) {
-  const result = stringValue(value, path);
-  if (!/^(0|[1-9][0-9]*)$/.test(result)) fail(path, "expected wire integer");
-  return result;
-}
-
-function positiveWireId(value: unknown, path: string) {
-  const result = wireId(value, path);
-  if (result === "0") fail(path, "expected positive wire integer");
   return result;
 }
 
@@ -531,42 +495,10 @@ function calendarDayNumber(value: string) {
   return Math.floor(Date.parse(`${value}T00:00:00Z`) / 86_400_000);
 }
 
-function booleanValue(value: unknown, path: string) {
-  if (typeof value !== "boolean") fail(path, "expected boolean");
-  return value;
-}
-
-function numberValue(value: unknown, path: string) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value))
-    fail(path, "expected safe integer");
-  return value;
-}
-
-function positiveNumber(value: unknown, path: string) {
-  const result = numberValue(value, path);
-  if (result <= 0) fail(path, "expected positive safe integer");
-  return result;
-}
-
-function nonNegativeNumber(value: unknown, path: string) {
-  const result = numberValue(value, path);
-  if (result < 0) fail(path, "expected non-negative safe integer");
-  return result;
-}
-
 function nonNegativeFiniteNumber(value: unknown, path: string) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
     fail(path, "expected non-negative finite number");
   return value;
-}
-
-function arrayValue<T>(
-  value: unknown,
-  path: string,
-  decode: (item: unknown, path: string) => T,
-) {
-  if (!Array.isArray(value)) fail(path, "expected array");
-  return value.map((item, index) => decode(item, `${path}[${index}]`));
 }
 
 function nullableObject<T>(
@@ -575,17 +507,6 @@ function nullableObject<T>(
   decode: (item: unknown, path: string) => T,
 ): T | null {
   return value === null ? null : decode(value, path);
-}
-
-function enumValue<const T extends readonly string[]>(
-  value: unknown,
-  path: string,
-  values: T,
-): T[number] {
-  const result = stringValue(value, path);
-  if (!(values as readonly string[]).includes(result))
-    fail(path, `unexpected value ${result}`);
-  return result as T[number];
 }
 
 function nullableEnum<const T extends readonly string[]>(
@@ -2748,7 +2669,7 @@ function decodeRunActivity(value: unknown, path: string): RunActivity | null {
       fail(path, "retry attempt cannot exceed max");
     return { kind, attempt, max, delayMs };
   }
-  return fail(`${path}.kind`, `unexpected Run activity ${kind}`);
+  return fail(`${path}.kind`, "unexpected Run activity");
 }
 
 function decodeConversationContext(value: unknown, path: string) {
@@ -3164,7 +3085,7 @@ function decodePendingUi(value: unknown, path: string): PendingUi | null {
       candidate,
     };
   }
-  return fail(`${path}.kind`, `unexpected request kind ${kind}`);
+  return fail(`${path}.kind`, "unexpected request kind");
 }
 
 function decodeTaskMcpAuthority(
@@ -3210,21 +3131,14 @@ function decodeTaskApprovalResult(
   value: unknown,
   path: string,
 ): TaskApprovalResult {
-  const item = object(value, path, ["revision", "outcome", "reason"]);
-  const revision = positiveWireId(item.revision, `${path}.revision`);
-  const outcome = enumValue(item.outcome, `${path}.outcome`, [
-    "completed",
-    "failed",
-  ] as const);
+  const item = decodeTaskApprovalResultWire(value, path);
+  const { revision, outcome, reason } = item;
   if (outcome === "completed") {
-    if (item.reason !== null) fail(`${path}.reason`, "expected null");
+    if (reason !== null) fail(`${path}.reason`, "expected null");
     return { revision, outcome, reason: null };
   }
-  return {
-    revision,
-    outcome,
-    reason: enumValue(item.reason, `${path}.reason`, approvalFailureReasons),
-  };
+  if (reason === null) fail(`${path}.reason`, "expected failure reason");
+  return { revision, outcome, reason };
 }
 
 function queueOperationId(value: unknown, path: string): string {

@@ -70,7 +70,11 @@ node scripts/setup-macos-local-signing.mjs clear
 npm run dev
 ```
 
-macOS `dev` 会读取 `app.zon` 的现有 identifier，确认本机已选择的 identity 仍然有效，再构建并为 Debug executable 写入 canonical designated requirement；验证阶段必须精确读回该 requirement，并由系统 requirement engine 独立复核 identifier、Apple anchor、Team 与所选 Apple Development certificate，最后启动 Native SDK development shell。
+macOS `dev` 读取 `app.zon` 的现有 identifier，确认本机已选择的 identity 仍然有效；Renderer 静态资源和 Debug Host 从构建输出开始使用本次独立目录，再对最终运行位置的 executable 写入 canonical designated requirement。验证阶段必须精确读回该 requirement，并由系统 requirement engine 独立复核 identifier、Apple anchor、Team 与所选 Apple Development certificate。开发入口直接启动这组成套产物，不启动 Vite，也不继承前端 URL/HMR 覆盖；进程存活期间资源不被后续构建覆盖。默认开发循环是正常退出后重新构建启动。
+
+开发启动要求取得新 primary；已有同身份实例占用时明确失败，不把激活旧窗口算作新构建成功。普通产品重复打开的单实例激活语义保持不变。开发脚本只管理自己的子进程，正常退出后清理本次目录；异常退出不能证明全部后代已停止时保留目录，不能仅凭原进程组消失就删除资源。构建、部署或签名失败不能回退上次产物。Office、archive、Skill 开发配置和 credential namespace 保持原 owner 的既有规则。
+
+取消开发启动时先请求自有子进程退出；宽限期后仍存活时，仅终止其自有进程组并等待关闭，不能无限等待不响应退出信号的进程。该兜底不改变异常输出目录的保留规则，也不能用于停止其他实例。
 
 ## 凭据准备
 

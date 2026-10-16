@@ -685,17 +685,7 @@ pub const DurableTaskRecord = struct {
 
 pub const RuntimeAttachment = task_attachment.State;
 
-pub const ApprovalFailureReason = enum {
-    cancelled,
-    busy,
-    budget_required,
-    mode_update_failed,
-    checkpoint_failed,
-    persistence_failed,
-    outcome_unknown,
-    recovery_failed,
-    dependency_contract,
-};
+pub const ApprovalFailureReason = @import("product_task_view_contract").ApprovalFailureReason;
 
 pub const ApprovalChange = struct {
     revision: u64,
@@ -719,7 +709,7 @@ pub const ApprovalChange = struct {
 
 pub const ApprovalResult = struct {
     revision: u64,
-    outcome: enum { completed, failed },
+    outcome: @import("product_task_view_contract").ApprovalOutcome,
     reason: ?ApprovalFailureReason = null,
 };
 

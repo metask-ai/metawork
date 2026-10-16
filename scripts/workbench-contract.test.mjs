@@ -853,7 +853,7 @@ test("attachment results enforce opaque grants and atomic typed outcomes", () =>
         ...ready,
         attachments: [{ ...ready.attachments[1], kind: "pdf" }],
       }),
-    /unexpected value pdf/,
+    /attachments\[0\].kind: unexpected value for enum/,
   );
   assert.throws(
     () =>
@@ -902,7 +902,7 @@ test("multimodal Run history keeps only ordered safe attachment metadata", () =>
   retiredPdf.tasks[0].runs[0].input.attachments[1].format = "pdf";
   assert.throws(
     () => decodeWorkbenchSnapshot(retiredPdf),
-    /unexpected value pdf/,
+    /attachments\[1\].kind: unexpected value for enum/,
   );
 });
 
@@ -1921,7 +1921,7 @@ test("Conversation recovery projection is one coherent continuation state", () =
   retiredReason.tasks[0].continuationUnavailableReason = "execution_mismatch";
   assert.throws(
     () => decodeWorkbenchSnapshot(retiredReason),
-    /execution_mismatch/,
+    /continuationUnavailableReason: unexpected value for enum/,
   );
 
   const missingOperation = clone(restoring);
@@ -2716,7 +2716,7 @@ test("Workbench decoding rejects extra fields and invalid wire values", () => {
   unsupportedScope.tasks[0].pendingUi.candidate.scope = "workspace";
   assert.throws(
     () => decodeWorkbenchSnapshot(unsupportedScope),
-    /unexpected value workspace/,
+    /candidate.scope: unexpected value for enum/,
   );
 
   const resolvedAndPending = clone(pendingPermission);
@@ -3184,4 +3184,112 @@ test("queued input shared wire fixture preserves receipt and safe editable input
   assert.throws(() =>
     decodeQueueInputResult({ ...wire.queued, accepted: false }, "1", "queue-1"),
   );
+});
+
+test("unavailable Host attachment fixture stays decodable without advertising image formats", () => {
+  const value = clone(fixture);
+  value.capabilities.attachments = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/attachments-unavailable.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(decodeWorkbenchSnapshot(value), value);
+  value.capabilities.attachments.imageFormats = ["png", "jpeg", "webp"];
+  assert.throws(
+    () => decodeWorkbenchSnapshot(value),
+    /attachment formats must match/,
+  );
+});
+
+test("field mismatch locates missing schema fields without exposing input keys or values", () => {
+  const value = clone(fixture);
+  delete value.tasks[0].queuedInput;
+  delete value.tasks[0].queuedInputResult;
+  const privateKey = "private-input-key-".repeat(1000);
+  value.tasks[0][privateKey] = "private-input-value";
+  assert.throws(
+    () => decodeWorkbenchSnapshot(value),
+    (error) => {
+      assert.match(error.message, /\$\.tasks\[0\]/);
+      assert.match(
+        error.message,
+        /missing \(2\): queuedInput, queuedInputResult/,
+      );
+      assert.match(error.message, /unexpected fields: 1/);
+      assert.doesNotMatch(error.message, /private-input/);
+      assert.ok(error.message.length < 512);
+      return true;
+    },
+  );
+  assert.throws(
+    () => decodeWorkbenchSnapshot({}),
+    (error) => {
+      assert.ok(error.message.length < 512);
+      assert.match(error.message, /unexpected fields: 0/);
+      return true;
+    },
+  );
+});
+
+test("unknown enum and tagged values are rejected without echoing their content", () => {
+  const privateValue = "private-input-value-".repeat(1000);
+  for (const [field, mutate] of [
+    [
+      "permissionProfile",
+      (value) => {
+        value.tasks[0].permissionProfile = privateValue;
+      },
+    ],
+    [
+      "activity.kind",
+      (value) => {
+        value.tasks[0].runs[0].activity = { kind: privateValue };
+      },
+    ],
+    [
+      "pendingUi.kind",
+      (value) => {
+        value.tasks[0].pendingUi = { kind: privateValue };
+      },
+    ],
+  ]) {
+    const value = clone(fixture);
+    mutate(value);
+    assert.throws(
+      () => decodeWorkbenchSnapshot(value),
+      (error) => {
+        assert.ok(error.message.includes(field));
+        assert.doesNotMatch(error.message, /private-input/);
+        assert.ok(error.message.length < 512);
+        return true;
+      },
+    );
+  }
+});
+
+test("actual interrupted Compact fixture is accepted by the existing snapshot decoder", () => {
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.runs[0].phase = "completed";
+  task.runs[0].activity = null;
+  task.runs[0].terminal = terminal("completed");
+  value.tasks[0].compacts = [
+    JSON.parse(
+      readFileSync(
+        new URL(
+          "../frontend/src/bridge/__fixtures__/compact-interrupted.fixture",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ),
+  ];
+  assert.deepEqual(decodeWorkbenchSnapshot(value), value);
 });

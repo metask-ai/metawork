@@ -5,6 +5,7 @@ import { runChild } from "./run-child-process.mjs";
 import { verifyFrontendBuild } from "./verify-frontend-build.mjs";
 import { verifyNativeAutomationIsolation } from "./verify-native-automation-isolation.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
+import { generateRendererWire } from "./generate-renderer-wire.mjs";
 
 export const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -29,18 +30,32 @@ export const nativeCli = path.join(
   "native.js",
 );
 
-export async function buildFrontend(root = repositoryRoot) {
-  await runChild(process.execPath, [viteCli, "build"], {
+export async function buildFrontend(
+  root = repositoryRoot,
+  { outDir, signal } = {},
+) {
+  await generateRendererWire({ signal });
+  const args = [viteCli, "build"];
+  if (outDir) args.push("--outDir", outDir);
+  await runChild(process.execPath, args, {
     cwd: path.join(root, "frontend"),
     label: "Renderer build",
     timeoutMs: null,
+    signal,
   });
-  await verifyFrontendBuild(root);
+  await verifyFrontendBuild(root, { outDir });
 }
 
 export async function buildNative(
   root = repositoryRoot,
-  { optimize, target, automation = false } = {},
+  {
+    optimize,
+    target,
+    automation = false,
+    installPrefix,
+    frontendDir,
+    signal,
+  } = {},
 ) {
   if (!target) throw new Error("Native build requires a verified target");
   const args = [
@@ -53,10 +68,13 @@ export async function buildNative(
     `-Dartifact=${automation ? "automation" : "development"}`,
   ];
   if (automation) args.push("-Dautomation=true");
+  if (installPrefix) args.push(`-Dinstall-prefix=${installPrefix}`);
+  if (frontendDir) args.push(`-Dfrontend-dist=${frontendDir}`);
   await runChild(process.execPath, args, {
     cwd: root,
     label: `Native ${optimize}${automation ? " automation" : ""} build`,
     timeoutMs: null,
+    signal,
   });
 }
 

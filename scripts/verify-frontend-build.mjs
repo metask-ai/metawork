@@ -11,8 +11,9 @@ const defaultRepositoryRoot = path.resolve(
 
 export async function verifyFrontendBuild(
   repositoryRoot = defaultRepositoryRoot,
+  { outDir = path.join(repositoryRoot, "frontend", "dist") } = {},
 ) {
-  const indexPath = path.join(repositoryRoot, "frontend", "dist", "index.html");
+  const indexPath = path.join(outDir, "index.html");
   const html = await readFile(indexPath, "utf8");
 
   const requiredCsp = `content="${releaseCsp}"`;
@@ -37,7 +38,7 @@ export async function verifyFrontendBuild(
     }
   }
 
-  const assetsPath = path.join(repositoryRoot, "frontend", "dist", "assets");
+  const assetsPath = path.join(outDir, "assets");
   const assets = await readdir(assetsPath);
   const styleText = (
     await Promise.all(

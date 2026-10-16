@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { nativeCli, repositoryRoot } from "./build.mjs";
 import { runChild } from "./run-child-process.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
+import { generateRendererWire } from "./generate-renderer-wire.mjs";
 
 const typescriptCli = path.join(
   repositoryRoot,
@@ -25,6 +26,7 @@ export async function discoverNodeTests(root = repositoryRoot) {
 }
 
 export async function typecheckRenderer(root = repositoryRoot) {
+  await generateRendererWire({ check: true });
   await runChild(process.execPath, [typescriptCli, "--noEmit"], {
     cwd: path.join(root, "frontend"),
     label: "Renderer typecheck",

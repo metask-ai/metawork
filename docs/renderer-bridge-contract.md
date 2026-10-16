@@ -318,3 +318,7 @@ Models snapshot 中的 `builtinProviderPresets[]` 精确发布 `id + displayName
 `connect` 是 product delivery 的 bootstrap 边界。Host 必须在合同身份与 revision 校验成功后才建立 `ProductDelivery` connection；既有 `requireWindow()` 门禁随后统一保护 Account、Task、event 和 snapshot 产品路径。协商前只允许显式列出的无状态 bootstrap/smoke 命令，不得读取或修改产品状态。合同不匹配返回 typed terminal bootstrap error，Renderer 不把它当作瞬时断线重试。
 
 Zig/TypeScript 的 identity、revision 和完整 command catalog 必须精确一致，`app.zon` allowlist 不得缺项或多项；Host serializer → TypeScript decoder 与 TypeScript bootstrap payload → Host decoder 必须有跨语言 fixture/行为测试。Renderer 内同一 wire enum 的 TypeScript type 与 runtime decoder 必须消费同一值目录，不能维护彼此独立的 union 与 allowlist；Host 新增产品 cause 时，serializer、Renderer 值目录、文案和跨语言 fixture 必须在同一变更中收齐。Renderer 始终 runtime decode Host payload；malformed payload 或 decoder/serializer contract mismatch 一律进入 fail-closed view-sync failure，不能猜测字段或静默降级。
+
+采用结构派生的对象以发布 owner 的纯 Zig wire 类型与显式编码声明为唯一结构定义，实际 Host serializer 必须消费同一定义；Renderer 类型、字段集合、基础 decoder 与共享运输限制从中生成，禁止另行手写维护被接管的表达。Product 的投影类型不得反向依赖 Bridge；Bridge 运输描述符由 Bridge 发布。结构生成不接管脱敏、权限、对象关联或业务状态校验，也不得要求先物化完整 Snapshot 对象图或突破既有流式写入、同步借用与容量预算。不支持的编码必须在构建时明确失败。生成结果随源码提交，其新鲜度及跨语言验证由[验证规范](validation.md#标准入口)负责。
+
+结构诊断只报告发生差异的对象路径、缺少的已知字段及额外字段数量，缺字段名称的条数与总长度必须有界；不得输出任意输入 key、字段值或原始 payload。未知 enum 值不回显原文。结构拒绝不自动证明运行组件版本不同，不触发兼容解码或命令重放。

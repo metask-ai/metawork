@@ -5873,6 +5873,10 @@ for (const outcome of ["committed", "timeout"]) {
     if (sidebar.getAttribute("aria-expanded") === "false")
       fireEvent.click(sidebar);
     fireEvent.click(await findRecentTaskButton(/First task/));
+    // An empty draft exposes Stop; a retained draft exposes Send instead.
+    fireEvent.change(screen.getByRole("combobox", { name: "" }), {
+      target: { value: "" },
+    });
     const { BridgeClient, BridgeCommandTimeoutError } =
       await vite.ssrLoadModule("/src/bridge/client.ts");
     let resolveStop,

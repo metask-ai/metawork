@@ -5949,11 +5949,12 @@ pub const Runtime = struct {
             self.schedule.persistenceHealth() == .ready;
         const task_persistence_ready = self.task_persistence_health.operational();
         const background_schedule_wake = self.schedule.backgroundAvailable();
+        const attachments_available = self.attachments.file_store != null and self.attachments.images.prepare_fn != null;
         const mcp_capabilities = if (self.mcp) |*runtime|
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":[\"png\",\"jpeg\",\"webp\"],\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":{s},\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -5977,7 +5978,8 @@ pub const Runtime = struct {
             mcp_capabilities.host.secret_capture,
             mcp_capabilities.secret_max_bytes,
             mcp_capabilities.host.oauth,
-            self.attachments.file_store != null and self.attachments.images.prepare_fn != null,
+            attachments_available,
+            if (attachments_available) "[\"png\",\"jpeg\",\"webp\"]" else "[]",
             self.limits.max_attachments_per_draft,
             self.limits.max_attachment_file_bytes,
             self.limits.max_staged_attachment_bytes,
@@ -19168,4 +19170,20 @@ test "complete model metadata Host projection matches the Renderer fixture" {
     var writer = std.Io.Writer.fixed(&storage);
     try Runtime.writeModelMetadata(&writer, metadata);
     try std.testing.expectEqualStrings(std.mem.trimEnd(u8, contract_fixture.model_metadata, "\r\n"), writer.buffered());
+}
+
+test "Product Control snapshot serializer omits image formats when attachments are unavailable" {
+    var limits = testLimits();
+    limits.max_attachments_per_draft = 2;
+    limits.max_attachment_file_bytes = 1024;
+    limits.max_staged_attachment_bytes = 2048;
+    var control = try testRuntimeWithLimits(limits, .{});
+    defer control.deinit();
+    var storage: [8192]u8 = undefined;
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try control.writeSnapshot(&storage), .{});
+    defer parsed.deinit();
+    const capability = parsed.value.object.get("capabilities").?.object.get("attachments").?;
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, capability, .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.attachments_unavailable, "\r\n"), encoded);
 }

@@ -1,5 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { buildFrontend, buildNative } from "./build.mjs";
+import { runChild } from "./run-child-process.mjs";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
@@ -23,21 +26,6 @@ export const localProductIdentity = packageManifest.identity;
 export const localSigningConfigPath = path.join(
   repositoryRoot,
   ".metawork-local-signing.json",
-);
-
-const executablePath = path.join(
-  repositoryRoot,
-  "zig-out",
-  "bin",
-  localProductIdentity.executableName,
-);
-const nativeDispatcher = path.join(
-  repositoryRoot,
-  "node_modules",
-  "@native-sdk",
-  "cli",
-  "bin",
-  "native.js",
 );
 
 export function localSigningKeychainPath() {
@@ -369,36 +357,91 @@ export function signWithStableRequirement(targetPath, identity, options = {}) {
   });
 }
 
-function runNative(args) {
-  requireTarget(nativeDispatcher);
-  run(process.execPath, [nativeDispatcher, ...args]);
+export function developmentEnvironment(root, inherited = process.env) {
+  const environment = localArchiveEnvironment(
+    root,
+    localOfficeEnvironment(root, inherited),
+  );
+  delete environment.NATIVE_SDK_FRONTEND_URL;
+  delete environment.NATIVE_SDK_HMR;
+  delete environment.NATIVE_SDK_MODE;
+  environment.METAWORK_DEV_REQUIRE_PRIMARY = "1";
+  environment.METAWORK_LOCAL_SKILL_ROOT = path.join(
+    root,
+    "src",
+    "product",
+    "skill",
+    "assets",
+  );
+  return environment;
 }
 
-async function verifiedAgentCoreTarget() {
-  const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
-  console.log(
-    `verified staged AgentCore ${bundle.manifest.version} ABI ${bundle.manifest.contract.binary_abi_version} revision ${bundle.manifest.contract.binary_abi_revision}`,
-  );
-  const target = bundle.target;
-  if (typeof target !== "string" || target.length === 0) {
-    throw new Error("verified AgentCore bundle has no Zig target");
+export async function withDevelopmentDirectory(root, useDirectory) {
+  const parent = path.join(root, ".zig-cache", "development");
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(path.join(parent, "run-"));
+  let safeToRemove = true;
+  try {
+    return await useDirectory(directory);
+  } catch (error) {
+    if (error.childProcessesMayBeRunning) {
+      safeToRemove = false;
+      console.warn(
+        `Development processes may still be using ${directory}; output retained.`,
+      );
+    }
+    throw error;
+  } finally {
+    if (safeToRemove) await rm(directory, { recursive: true, force: true });
   }
-  return target;
 }
 
 export async function runDevelopment() {
-  const target = await verifiedAgentCoreTarget();
-  if (process.platform !== "darwin") {
-    runNative(["dev", ".", "--yes", `-Dtarget=${target}`]);
-    return;
+  const bundle = await verifyStagedAgentCoreBundle(repositoryRoot);
+  const identity = process.platform === "darwin" ? resolveIdentity() : null;
+  const cancellation = new AbortController();
+  const cancel = () => cancellation.abort();
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  for (const signal of signals) process.on(signal, cancel);
+  try {
+    await withDevelopmentDirectory(repositoryRoot, async (directory) => {
+      const frontendDir = path.join(directory, "renderer");
+      const installPrefix = path.join(directory, "app");
+      const signal = cancellation.signal;
+      await buildFrontend(repositoryRoot, { outDir: frontendDir, signal });
+      await buildNative(repositoryRoot, {
+        target: bundle.target,
+        optimize: "Debug",
+        installPrefix,
+        frontendDir,
+        signal,
+      });
+      const executable = path.join(
+        installPrefix,
+        "bin",
+        localProductIdentity.executableName +
+          (process.platform === "win32" ? ".exe" : ""),
+      );
+      if (signal.aborted) throw new Error("Development startup cancelled");
+      if (identity) {
+        const signature = signWithStableRequirement(executable, identity);
+        console.log(
+          `verified local development signature ${identity.fingerprint} (${signature.requirement})`,
+        );
+      }
+      console.log(`starting paired development artifact: ${executable}`);
+      await runChild(executable, [], {
+        cwd: repositoryRoot,
+        label:
+          "MetaWork development instance (close any existing instance before starting)",
+        env: developmentEnvironment(repositoryRoot),
+        signal,
+        timeoutMs: null,
+      });
+    });
+  } finally {
+    for (const signal of signals) process.removeListener(signal, cancel);
   }
-  const identity = resolveIdentity();
-  runNative(["build", ".", "--yes", `-Dtarget=${target}`, "-Doptimize=Debug"]);
-  const signature = signWithStableRequirement(executablePath, identity);
-  console.log(
-    `verified local development signature ${identity.fingerprint} (${signature.requirement})`,
-  );
-  runNative(["dev", "--manifest", "app.zon", "--binary", executablePath]);
 }
 
 const invokedPath = process.argv[1]
