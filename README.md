@@ -12,7 +12,7 @@ MetaWork 是一款面向本地工作区的桌面 Agent Workbench。用户可以�
 
 需要 Node.js 24+、Zig 0.16.0，以及与仓库 lock 精确匹配的 target-specific AgentCore bundle。
 
-桌面框架使用 [zogien/native](https://github.com/zogien/native) 发布的 [`@zogien/native`](https://www.npmjs.com/package/@zogien/native)，由依赖清单和 lockfile 固定版本。`npm ci` 同时安装 SDK，并通过其安装脚本下载、校验 SDK 固定的 ScriptC 工具链，无需另行全局安装 ScriptC；首次准备工具链需要访问 npm registry 和 GitHub Releases。依赖来源与接受规则见[高层架构](docs/architecture.md#35-native-sdk)。
+桌面框架使用 [zogien/native](https://github.com/zogien/native) 发布的 [`@zogien/native-sdk`](https://www.npmjs.com/package/@zogien/native-sdk)，由依赖清单和 lockfile 固定版本。`npm ci` 同时安装 SDK，并通过其安装脚本下载、校验 SDK 固定的 ScriptC 工具链，无需另行全局安装 ScriptC；首次准备工具链需要访问 npm registry 和 GitHub Releases。依赖来源与接受规则见[高层架构](docs/architecture.md#35-native-sdk)。
 
 ### macOS
 

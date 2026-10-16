@@ -95,7 +95,7 @@ AgentCore 拥有 provider 调用、agent loop、Conversation、Session、CoreEve
 
 Native SDK 是 MetaWork 消费的外部桌面依赖。Application 通过其 Runtime API 执行生命周期、窗口、System WebView、菜单、托盘、快捷键、dialog、notification、timer、credential 和其他系统 effect，并把 Product 所需能力收窄成 MetaWork-owned capability；Renderer 可以消费 manifest 已开放、SDK 明确面向 WebView 的 presentation/input API。Product owner 不依赖 Native SDK Runtime 类型，Renderer 使用这些 UI/input API 也不因此取得原生 effect 或 Product authority。
 
-Native SDK 对 MetaWork 是外部依赖，唯一 canonical 输入是 [zogien/native](https://github.com/zogien/native) 维护并以 `@zogien/native` 发布的固定版本 npm artifact 及其 public API。该 fork 承担 SDK 发布、构建和依赖消费修复；SDK 源码修改、平台 binary 构建与发布属于该仓库的职责，源码 revision 与发布 artifact 必须可追溯，主包与平台包必须来自同一发布版本。MetaWork 的依赖清单与 lockfile 固定所消费版本、registry artifact 与 integrity；更换版本或发布来源时必须核对公开 API 合同，并完成受影响的构建、测试与平台验收；凭据操作的返回语义以 [Account 架构](account-architecture.md)为准。
+Native SDK 对 MetaWork 是外部依赖，唯一 canonical 输入是 [zogien/native](https://github.com/zogien/native) 维护并以 `@zogien/native-sdk` 发布的固定版本 npm artifact 及其 public API。该 fork 承担 SDK 发布、构建和依赖消费修复；SDK 源码修改、平台 binary 构建与发布属于该仓库的职责，源码 revision 与发布 artifact 必须可追溯，主包与平台包必须来自同一发布版本。MetaWork 的依赖清单与 lockfile 固定所消费版本、registry artifact 与 integrity；更换版本或发布来源时必须核对公开 API 合同，并完成受影响的构建、测试与平台验收；凭据操作的返回语义以 [Account 架构](account-architecture.md)为准。
 
 MetaWork 不在本仓库 vendor、patch 或直接修改已安装 SDK，不从本地源码树、未发布临时包或可变 tag 消费替代实现，也不静默回退到其他发布来源。SDK public API 未覆盖的能力保持 unsupported 或已登记 capability gap；fork 的演进不自动开放产品能力，新发布版仍须重新审计和验收。
 
@@ -130,7 +130,7 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 
 当前登记的 compatibility capability 为：
 
-当前消费的 Native SDK 已公开 Windows drag-region mirror，但 `set_window_drag_regions` 只接受 GPU surface，启动 System WebView 不在其覆盖范围；因此登记缺口是“System WebView 缺少等价 public API”，不是“SDK 完全没有 drag-region 能力”。
+Native SDK 的 `set_window_drag_regions` 只接受 GPU surface；声明式 `window_drag_regions` 已提供 System WebView 入口，但仍须通过下述目标平台等价验收才能替换现有 compatibility seam。SDK API 的存在本身不关闭已登记的能力缺口。
 
 | Capability | 层级 | 允许边界 | 删除条件 |
 | --- | --- | --- | --- |
