@@ -647,6 +647,7 @@ export const zhCN: Record<MessageId, string> = {
     "无法确认文件清理结果，正在恢复连接；未发送的附件需要重新选择。",
   "attachment.cancelling": "正在取消添加…",
   "attachment.error.input_busy": "文件仍在处理中，请稍后再添加。",
+  "attachment.error.input_unavailable": "当前无法添加文件。",
   "attachment.error.cleanup_failed":
     "部分未发送文件未能清理；可稍后重新添加，已有草稿仍保留。",
   "attachment.cancel": "取消添加",

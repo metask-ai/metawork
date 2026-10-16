@@ -1887,6 +1887,105 @@ test("text file size rejection remains actionable", () => {
   assert.match(screen.getByRole("alert").textContent, /100 MB/);
 });
 
+function pasteItems(target, items) {
+  const event = new window.Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: {
+      items,
+      get files() {
+        throw new Error("Do not extract the same clipboard files twice");
+      },
+      getData: () => "companion clipboard text",
+    },
+  });
+  fireEvent(target, event);
+  return event;
+}
+
+function imageItem(file) {
+  return { kind: "file", type: file.type, getAsFile: () => file };
+}
+
+test("image paste appends one ordered batch and leaves existing text and selection intact", () => {
+  const received = [];
+  const composer = renderComposer({
+    attachmentsEnabled: true,
+    onPasteImages: (files) => received.push(files),
+  });
+  composer.textarea.focus();
+  composer.textarea.setSelectionRange(1, 3);
+  const before = composer.textarea.value;
+  const png = new File(["png bytes"], "screenshot.png", { type: "image/png" });
+  const jpeg = new File(["jpeg bytes"], "capture.jpg", { type: "image/jpeg" });
+  let reads = 0;
+  const event = pasteItems(composer.textarea, [
+    { kind: "string", type: "text/html" },
+    {
+      kind: "file",
+      type: "application/pdf",
+      getAsFile: () => assert.fail("Only image candidates are read"),
+    },
+    {
+      kind: "file",
+      type: png.type,
+      getAsFile: () => {
+        reads++;
+        return png;
+      },
+    },
+    imageItem(jpeg),
+  ]);
+  assert.equal(event.defaultPrevented, true);
+  assert.deepEqual(received, [[png, jpeg]]);
+  assert.equal(reads, 1);
+  assert.equal(composer.textarea.value, before);
+  assert.equal(composer.textarea.selectionStart, 1);
+  assert.equal(composer.textarea.selectionEnd, 3);
+  assert.equal(composer.submissions(), 0);
+});
+
+test("image paste preserves File bytes and MIME and supplies only a missing display name", async () => {
+  const received = [];
+  const composer = renderComposer({
+    onPasteImages: (files) => received.push(files),
+  });
+  const file = new File([new Uint8Array([0, 255, 11])], "", {
+    type: "image/webp",
+    lastModified: 42,
+  });
+  pasteItems(composer.textarea, [imageItem(file)]);
+  assert.equal(received.length, 1);
+  const pasted = received[0][0];
+  assert.ok(pasted.name.length > 0);
+  assert.equal(pasted.type, file.type);
+  assert.equal(pasted.lastModified, file.lastModified);
+  assert.deepEqual(await pasted.arrayBuffer(), await file.arrayBuffer());
+});
+
+test("ordinary text paste, other fields and a disabled Composer are not intercepted", () => {
+  const composer = renderComposer({
+    onPasteImages: () => assert.fail("No image admission"),
+  });
+  const text = pasteItems(composer.textarea, [
+    { kind: "string", type: "text/plain" },
+  ]);
+  assert.equal(text.defaultPrevented, false);
+  const outside = document.createElement("textarea");
+  document.body.append(outside);
+  const file = new File(["png"], "a.png", { type: "image/png" });
+  assert.equal(pasteItems(outside, [imageItem(file)]).defaultPrevented, false);
+  outside.remove();
+  cleanup();
+  const disabled = renderComposer({
+    composeDisabled: true,
+    onPasteImages: () => assert.fail("Disabled Composer"),
+  });
+  assert.equal(
+    pasteItems(disabled.textarea, [imageItem(file)]).defaultPrevented,
+    false,
+  );
+});
+
 test("file drag highlights the active Composer and hands the drop files to its input owner", () => {
   const received = [];
   renderComposer({
@@ -2416,7 +2515,7 @@ test("new Task approval menu explains each mode only when opened and changes the
 // Exercise the actual App so state, draft handoff and DOM focus are verified together.
 async function renderSubmissionApp(
   ctx,
-  { newTask = false, draft = null } = {},
+  { newTask = false, draft = null, attachmentsEnabled } = {},
 ) {
   window.sessionStorage.clear();
   window.matchMedia = (query) => ({
@@ -2436,6 +2535,8 @@ async function renderSubmissionApp(
     ),
   );
   snapshot.capabilities.automaticWorkspaces = true;
+  if (attachmentsEnabled !== undefined)
+    snapshot.capabilities.attachments.enabled = attachmentsEnabled;
   const task = structuredClone(snapshot.tasks[0]);
   Object.assign(task, {
     title: "Submission task",
@@ -2527,6 +2628,241 @@ async function renderSubmissionApp(
       act(async () => resolveRun(result)),
   };
 }
+
+test("App image paste shares staging, rejects overlapping paste and sends the latest draft with existing images", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  fixture.snapshot.capabilities.attachments.enabled = true;
+  await fixture.publish();
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const { AttachmentAddOperation } = await vite.ssrLoadModule(
+    "/src/bridge/attachment-receive.ts",
+  );
+  const file = new File(["image bytes"], "capture.png", { type: "image/png" });
+  const descriptor = (token, name) => ({
+    token: token.repeat(48),
+    kind: "image",
+    format: "png",
+    displayName: name,
+    sizeBytes: String(file.size),
+  });
+  const operations = [];
+  const sources = [];
+  const chunks = [];
+  let finishSecond;
+  const second = new Promise((resolve) => {
+    finishSecond = resolve;
+  });
+  ctx.mock.method(BridgeClient.prototype, "createAttachmentAdd", () => {
+    const index = operations.length;
+    const op = new AttachmentAddOperation(
+      {
+        begin: async (source) => {
+          sources.push(source);
+          return { status: "accepted" };
+        },
+        append: async (...chunk) => {
+          chunks.push(chunk);
+          return { status: "accepted" };
+        },
+        finish: async () =>
+          index === 0
+            ? { status: "ready", attachments: [descriptor("a", "first.png")] }
+            : second,
+        cancel: async () => ({ status: "cleaned", released: true }),
+        recover: async () => assert.fail("No recovery expected"),
+      },
+      3,
+    );
+    operations.push(op);
+    return op;
+  });
+  fireEvent.change(fixture.textarea, { target: { value: "old instruction" } });
+  pasteItems(fixture.textarea, [imageItem(file)]);
+  await screen.findByText("first.png");
+  pasteItems(fixture.textarea, [imageItem(file)]);
+  await waitFor(() => assert.equal(sources.length, 2));
+  fireEvent.change(fixture.textarea, {
+    target: { value: "new instruction while adding" },
+  });
+  pasteItems(fixture.textarea, [imageItem(file)]);
+  assert.match(screen.getByRole("alert").textContent, /still being processed/);
+  assert.equal(operations.length, 2);
+  await act(async () =>
+    finishSecond({
+      status: "ready",
+      attachments: [descriptor("b", "second.png")],
+    }),
+  );
+  await screen.findByText("second.png");
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.equal(fixture.textarea.value, "new instruction while adding");
+  assert.ok(screen.getByText("first.png"));
+  assert.ok(sources.every((source) => source.kind === "file_bytes"));
+  assert.equal(chunks.length, 2 * Math.ceil(file.size / 3));
+  assert.equal(
+    screen.getByRole("button", { name: "Send", exact: true }).disabled,
+    false,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true }));
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.deepEqual(fixture.inputs[0][2], {
+    kind: "multimodal",
+    text: "new instruction while adding",
+    attachmentTokens: ["a".repeat(48), "b".repeat(48)],
+  });
+  await fixture.settle();
+});
+
+async function renderPendingPasteApp(ctx) {
+  const fixture = await renderSubmissionApp(ctx);
+  fixture.snapshot.capabilities.attachments.enabled = true;
+  await fixture.publish();
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const { AttachmentAddOperation } = await vite.ssrLoadModule(
+    "/src/bridge/attachment-receive.ts",
+  );
+  let resolveFinish,
+    finishing = false,
+    cancellations = 0,
+    additions = 0;
+  const finished = new Promise((resolve) => {
+    resolveFinish = resolve;
+  });
+  ctx.mock.method(BridgeClient.prototype, "createAttachmentAdd", () => {
+    additions++;
+    return new AttachmentAddOperation(
+      {
+        begin: async () => ({ status: "accepted" }),
+        append: async () => ({ status: "accepted" }),
+        finish: () => {
+          finishing = true;
+          return finished;
+        },
+        cancel: async () => {
+          cancellations++;
+          return { status: "cleaned", released: true };
+        },
+        recover: async () => assert.fail("No connection recovery expected"),
+      },
+      3,
+    );
+  });
+  const file = new File(["image"], "pending.png", { type: "image/png" });
+  const attachment = {
+    token: "c".repeat(48),
+    kind: "image",
+    format: "png",
+    displayName: file.name,
+    sizeBytes: String(file.size),
+  };
+  return {
+    ...fixture,
+    begin: async () => {
+      pasteItems(fixture.textarea, [imageItem(file)]);
+      await waitFor(() => assert.ok(finishing));
+    },
+    finish: async () =>
+      act(async () =>
+        resolveFinish({ status: "ready", attachments: [attachment] }),
+      ),
+    cancellations: () => cancellations,
+    additions: () => additions,
+    attachment,
+  };
+}
+
+test("App image paste reports unavailable attachments without starting a writer", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { attachmentsEnabled: false });
+  assert.ok(screen.queryByRole("button", { name: "Add files" }) === null);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  ctx.mock.method(BridgeClient.prototype, "createAttachmentAdd", () =>
+    assert.fail("Unavailable attachments must not reserve resources"),
+  );
+  const file = new File(["png"], "a.png", { type: "image/png" });
+  const event = pasteItems(fixture.textarea, [imageItem(file)]);
+  assert.equal(event.defaultPrevented, true);
+  assert.match(screen.getByRole("alert").textContent, /cannot be added/);
+  assert.equal(BridgeClient.prototype.createAttachmentAdd.mock.callCount(), 0);
+  assert.equal(fixture.inputs.length, 0);
+});
+
+test("App cancelled image paste preserves edits and ignores a late ready result", async (ctx) => {
+  const f = await renderPendingPasteApp(ctx);
+  fireEvent.change(f.textarea, { target: { value: "keep original draft" } });
+  await f.begin();
+  fireEvent.change(f.textarea, { target: { value: "edited during staging" } });
+  fireEvent.click(screen.getByRole("button", { name: "Cancel adding files" }));
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Add files" }).disabled,
+      false,
+    ),
+  );
+  await f.finish();
+  assert.equal(f.cancellations(), 1);
+  assert.equal(f.textarea.value, "edited during staging");
+  assert.equal(screen.queryByText("pending.png"), null);
+  assert.equal(f.inputs.length, 0);
+});
+
+test("App image paste cannot hand off to a Task after leaving and returning", async (ctx) => {
+  const f = await renderPendingPasteApp(ctx);
+  const other = structuredClone(f.task);
+  other.id = String(BigInt(f.task.id) + 1n);
+  other.title = "Other paste task";
+  f.snapshot.tasks.push(other);
+  await f.publish();
+  fireEvent.change(f.textarea, { target: { value: "source Task draft" } });
+  await f.begin();
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Other paste task/ }))[0],
+  );
+  await waitFor(() =>
+    assert.equal(document.querySelector(".composer-bar textarea").value, ""),
+  );
+  fireEvent.change(document.querySelector(".composer-bar textarea"), {
+    target: { value: "other Task draft" },
+  });
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Submission task/ }))[0],
+  );
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".composer-bar textarea").value,
+      "source Task draft",
+    ),
+  );
+  await f.finish();
+  assert.equal(f.cancellations(), 1);
+  assert.equal(screen.queryByText("pending.png"), null);
+  assert.equal(f.inputs.length, 0);
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Other paste task/ }))[0],
+  );
+  assert.equal(
+    document.querySelector(".composer-bar textarea").value,
+    "other Task draft",
+  );
+  assert.equal(screen.queryByText("pending.png"), null);
+});
+
+test("App image-only paste sends through the existing multimodal Run input", async (ctx) => {
+  const f = await renderPendingPasteApp(ctx);
+  assert.equal(f.textarea.value, "");
+  await f.begin();
+  await f.finish();
+  await screen.findByText("pending.png");
+  const send = screen.getByRole("button", { name: "Send", exact: true });
+  assert.equal(send.disabled, false);
+  fireEvent.click(send);
+  await waitFor(() => assert.equal(f.inputs.length, 1));
+  assert.deepEqual(f.inputs[0][2], {
+    kind: "multimodal",
+    text: "",
+    attachmentTokens: [f.attachment.token],
+  });
+  await f.settle();
+});
 
 for (const method of ["Enter", "click"]) {
   test(`App ${method} send keeps the editor focused and preserves edits before acknowledgement`, async (ctx) => {

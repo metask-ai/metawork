@@ -718,6 +718,7 @@ export const enUS = {
   "attachment.cancelling": "Cancelling file addition…",
   "attachment.error.input_busy":
     "Files are still being processed. Try adding again shortly.",
+  "attachment.error.input_unavailable": "Files cannot be added here right now.",
   "attachment.error.cleanup_failed":
     "Some unsent files could not be cleaned up. Try adding again later; your existing draft is retained.",
   "attachment.cancel": "Cancel adding files",

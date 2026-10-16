@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent,
   type KeyboardEvent,
   type RefObject,
   type ReactNode,
@@ -77,6 +78,7 @@ function attachmentErrorMessage(reason: string): MessageId {
     invalid_transfer: "attachment.error.invalid_transfer",
     stale_transfer: "attachment.error.stale_transfer",
     input_busy: "attachment.error.input_busy",
+    input_unavailable: "attachment.error.input_unavailable",
     cleanup_failed: "attachment.error.cleanup_failed",
     release_unconfirmed: "attachment.error.release_unconfirmed",
   };
@@ -127,6 +129,7 @@ export function ComposerFooter({
   onDraftChange,
   onChooseAttachments,
   onDropFiles,
+  onPasteImages,
   onCancelAttachments,
   onRemoveAttachment,
   onSubmit,
@@ -197,6 +200,7 @@ export function ComposerFooter({
   onDraftChange: (value: ComposerDraft) => void;
   onChooseAttachments: () => void;
   onDropFiles?: (files: File[]) => void;
+  onPasteImages?: (files: File[]) => void;
   onCancelAttachments?: () => void;
   onRemoveAttachment: (token: string) => void;
   onSubmit: () => void;
@@ -481,6 +485,27 @@ export function ComposerFooter({
     });
   }
 
+  function pasteImages(event: ClipboardEvent<HTMLTextAreaElement>) {
+    if (composeDisabled || !onPasteImages) return;
+    const files: File[] = [];
+    for (const item of Array.from(event.clipboardData.items)) {
+      if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+      files.push(
+        file.name
+          ? file
+          : new File([file], "pasted-image", {
+              type: file.type,
+              lastModified: file.lastModified,
+            }),
+      );
+    }
+    if (!files.length) return;
+    event.preventDefault();
+    onPasteImages(files);
+  }
+
   function removeAttachment(attachment: ComposerAttachment, index: number) {
     const adjacent =
       draft.kind === "multimodal"
@@ -676,6 +701,7 @@ export function ComposerFooter({
                   updateText(event.target.value);
                 }}
                 onKeyDown={handleTextKeyDown}
+                onPaste={pasteImages}
               />
               {!draftWithinLimits && (
                 <p className="composer-attachment-error" role="status">
