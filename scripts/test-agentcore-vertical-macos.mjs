@@ -602,6 +602,11 @@ desktopVertical: try {
     assert.equal(restoredWorkspace.canonicalRoot, canonicalWorkspace);
     await finishApprovalRestart();
     await probeWindowsWebViewFocus();
+    const refreshedCatalog = await invokeBridge(
+      "metawork.workspaces.refreshSkillCatalog",
+      { workspaceId, expectedWorkspaceEpoch },
+    );
+    assert.equal(refreshedCatalog.accepted, true);
     catalogSnapshot = await readCatalog();
   }
   const verifyQueuedRestart = await runQueuedInputVertical({
@@ -2766,7 +2771,7 @@ async function selectRenderedMode(taskId, targetMode) {
     const labels = {
       manual: ["人工审批", "Manual approval"],
       auto_review: ["自动评审", "Automatic review"],
-      full_access: ["完全访问", "Full access"],
+      full_access: ["直接执行", "Direct execution"],
     }[targetMode];
     const choice = await poll(
       async () =>
