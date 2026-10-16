@@ -46,5 +46,16 @@
   },
   "cleanupFailed": {
     "status": "cleanup_failed"
+  },
+  "nativePathsConnect": {
+    "accepted": true,
+    "contractId": "metawork.renderer-bridge",
+    "contractRevision": 1,
+    "generation": "1",
+    "error": null,
+    "attachmentInput": {
+      "mode": "native_paths",
+      "maxChunkBytes": "131072"
+    }
   }
 }

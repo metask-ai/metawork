@@ -871,7 +871,10 @@ export class BridgeClient {
     return new AttachmentAddOperation(
       {
         begin: async (source) => {
-          if (source.kind !== "picker" && source.kind !== connection.mode)
+          if (
+            source.kind === "native_paths" &&
+            connection.mode !== "native_paths"
+          )
             throw new Error("Attachment source does not match the connection");
           return decodeAttachmentAddBegin(
             await this.bridge().invoke(commands.beginAttachmentAdd, {

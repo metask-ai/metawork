@@ -1887,6 +1887,105 @@ test("text file size rejection remains actionable", () => {
   assert.match(screen.getByRole("alert").textContent, /100 MB/);
 });
 
+function pasteItems(target, items) {
+  const event = new window.Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: {
+      items,
+      get files() {
+        throw new Error("Do not extract the same clipboard files twice");
+      },
+      getData: () => "companion clipboard text",
+    },
+  });
+  fireEvent(target, event);
+  return event;
+}
+
+function imageItem(file) {
+  return { kind: "file", type: file.type, getAsFile: () => file };
+}
+
+test("image paste appends one ordered batch and leaves existing text and selection intact", () => {
+  const received = [];
+  const composer = renderComposer({
+    attachmentsEnabled: true,
+    onPasteImages: (files) => received.push(files),
+  });
+  composer.textarea.focus();
+  composer.textarea.setSelectionRange(1, 3);
+  const before = composer.textarea.value;
+  const png = new File(["png bytes"], "screenshot.png", { type: "image/png" });
+  const jpeg = new File(["jpeg bytes"], "capture.jpg", { type: "image/jpeg" });
+  let reads = 0;
+  const event = pasteItems(composer.textarea, [
+    { kind: "string", type: "text/html" },
+    {
+      kind: "file",
+      type: "application/pdf",
+      getAsFile: () => assert.fail("Only image candidates are read"),
+    },
+    {
+      kind: "file",
+      type: png.type,
+      getAsFile: () => {
+        reads++;
+        return png;
+      },
+    },
+    imageItem(jpeg),
+  ]);
+  assert.equal(event.defaultPrevented, true);
+  assert.deepEqual(received, [[png, jpeg]]);
+  assert.equal(reads, 1);
+  assert.equal(composer.textarea.value, before);
+  assert.equal(composer.textarea.selectionStart, 1);
+  assert.equal(composer.textarea.selectionEnd, 3);
+  assert.equal(composer.submissions(), 0);
+});
+
+test("image paste preserves File bytes and MIME and supplies only a missing display name", async () => {
+  const received = [];
+  const composer = renderComposer({
+    onPasteImages: (files) => received.push(files),
+  });
+  const file = new File([new Uint8Array([0, 255, 11])], "", {
+    type: "image/webp",
+    lastModified: 42,
+  });
+  pasteItems(composer.textarea, [imageItem(file)]);
+  assert.equal(received.length, 1);
+  const pasted = received[0][0];
+  assert.ok(pasted.name.length > 0);
+  assert.equal(pasted.type, file.type);
+  assert.equal(pasted.lastModified, file.lastModified);
+  assert.deepEqual(await pasted.arrayBuffer(), await file.arrayBuffer());
+});
+
+test("ordinary text paste, other fields and a disabled Composer are not intercepted", () => {
+  const composer = renderComposer({
+    onPasteImages: () => assert.fail("No image admission"),
+  });
+  const text = pasteItems(composer.textarea, [
+    { kind: "string", type: "text/plain" },
+  ]);
+  assert.equal(text.defaultPrevented, false);
+  const outside = document.createElement("textarea");
+  document.body.append(outside);
+  const file = new File(["png"], "a.png", { type: "image/png" });
+  assert.equal(pasteItems(outside, [imageItem(file)]).defaultPrevented, false);
+  outside.remove();
+  cleanup();
+  const disabled = renderComposer({
+    composeDisabled: true,
+    onPasteImages: () => assert.fail("Disabled Composer"),
+  });
+  assert.equal(
+    pasteItems(disabled.textarea, [imageItem(file)]).defaultPrevented,
+    false,
+  );
+});
+
 test("file drag highlights the active Composer and hands the drop files to its input owner", () => {
   const received = [];
   renderComposer({
@@ -2527,6 +2626,90 @@ async function renderSubmissionApp(
       act(async () => resolveRun(result)),
   };
 }
+
+test("App image paste shares staging, rejects overlapping paste and sends the latest draft with existing images", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  fixture.snapshot.capabilities.attachments.enabled = true;
+  await fixture.publish();
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const { AttachmentAddOperation } = await vite.ssrLoadModule(
+    "/src/bridge/attachment-receive.ts",
+  );
+  const file = new File(["image bytes"], "capture.png", { type: "image/png" });
+  const descriptor = (token, name) => ({
+    token: token.repeat(48),
+    kind: "image",
+    format: "png",
+    displayName: name,
+    sizeBytes: String(file.size),
+  });
+  const operations = [];
+  const sources = [];
+  const chunks = [];
+  let finishSecond;
+  const second = new Promise((resolve) => {
+    finishSecond = resolve;
+  });
+  ctx.mock.method(BridgeClient.prototype, "createAttachmentAdd", () => {
+    const index = operations.length;
+    const op = new AttachmentAddOperation(
+      {
+        begin: async (source) => {
+          sources.push(source);
+          return { status: "accepted" };
+        },
+        append: async (...chunk) => {
+          chunks.push(chunk);
+          return { status: "accepted" };
+        },
+        finish: async () =>
+          index === 0
+            ? { status: "ready", attachments: [descriptor("a", "first.png")] }
+            : second,
+        cancel: async () => ({ status: "cleaned", released: true }),
+        recover: async () => assert.fail("No recovery expected"),
+      },
+      3,
+    );
+    operations.push(op);
+    return op;
+  });
+  fireEvent.change(fixture.textarea, { target: { value: "old instruction" } });
+  pasteItems(fixture.textarea, [imageItem(file)]);
+  await screen.findByText("first.png");
+  pasteItems(fixture.textarea, [imageItem(file)]);
+  await waitFor(() => assert.equal(sources.length, 2));
+  fireEvent.change(fixture.textarea, {
+    target: { value: "new instruction while adding" },
+  });
+  pasteItems(fixture.textarea, [imageItem(file)]);
+  assert.match(screen.getByRole("alert").textContent, /still being processed/);
+  assert.equal(operations.length, 2);
+  await act(async () =>
+    finishSecond({
+      status: "ready",
+      attachments: [descriptor("b", "second.png")],
+    }),
+  );
+  await screen.findByText("second.png");
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.equal(fixture.textarea.value, "new instruction while adding");
+  assert.ok(screen.getByText("first.png"));
+  assert.ok(sources.every((source) => source.kind === "file_bytes"));
+  assert.equal(chunks.length, 2 * Math.ceil(file.size / 3));
+  assert.equal(
+    screen.getByRole("button", { name: "Send", exact: true }).disabled,
+    false,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true }));
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.deepEqual(fixture.inputs[0][2], {
+    kind: "multimodal",
+    text: "new instruction while adding",
+    attachmentTokens: ["a".repeat(48), "b".repeat(48)],
+  });
+  await fixture.settle();
+});
 
 for (const method of ["Enter", "click"]) {
   test(`App ${method} send keeps the editor focused and preserves edits before acknowledgement`, async (ctx) => {

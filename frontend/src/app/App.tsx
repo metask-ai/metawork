@@ -2126,16 +2126,21 @@ export default function App() {
   async function addAttachments(
     input?: { paths: string[] } | { files: File[] },
   ) {
+    if (attachmentBusyRef.current || attachmentRemoval.current.busy) {
+      setAttachmentError("input_busy");
+      return;
+    }
     if (
-      attachmentBusyRef.current ||
-      attachmentRemoval.current.busy ||
       bridgeUnavailable ||
       !snapshot.capabilities.attachments.enabled ||
       !taskCanCompose ||
       taskMutationDisabled ||
+      pendingTaskSelection.current !== null ||
       composerDraftRef.current.kind === "skill"
-    )
+    ) {
+      setAttachmentError("input_unavailable");
       return;
+    }
     const requestedScope = composerDraftScopeRef.current;
     const requestedGeneration = bridgeGenerationRef.current;
     const target = newTaskDraftActive ? newTaskDrafts : taskDrafts;
@@ -2224,6 +2229,9 @@ export default function App() {
         attachmentOperation.current = null;
         attachmentBusyRef.current = false;
         setAttachmentView(null);
+        setAttachmentError((reason) =>
+          reason === "input_busy" ? null : reason,
+        );
       }
     }
   }
@@ -3288,6 +3296,10 @@ export default function App() {
             !settingsOpen &&
             !searchOpen
           )
+            void addAttachments({ files });
+        }}
+        onPasteImages={(files) => {
+          if (route === "workbench" && !settingsOpen && !searchOpen)
             void addAttachments({ files });
         }}
         onCancelAttachments={

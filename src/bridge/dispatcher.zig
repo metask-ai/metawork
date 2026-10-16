@@ -1273,7 +1273,7 @@ pub const Dispatcher = struct {
         switch (source.kind) {
             .picker => if (source.paths != null or source.files != null) return error.InvalidBridgePayload,
             .native_paths => if (self.platform.attachment_input != .native_paths or source.paths == null or source.files != null) return error.InvalidBridgePayload,
-            .file_bytes => if (self.platform.attachment_input != .file_bytes or source.files == null or source.paths != null) return error.InvalidBridgePayload,
+            .file_bytes => if (source.files == null or source.paths != null) return error.InvalidBridgePayload,
         }
         if (key.batch_id <= self.receive_high_water) {
             respondAddError(responder, invocation.request.id, error.StaleTransfer);
@@ -7177,7 +7177,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
     var store = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
     defer store.deinit();
-    var wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("attachment_receive.fixture"), .{});
+    var wire = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("attachment_add.fixture"), .{});
     defer wire.deinit();
     var fixture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer fixture_arena.deinit();
@@ -7210,7 +7210,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     configuration.attachment_store = &store;
     var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .max_tasks = 1, .max_runs_per_task = 1, .max_tools_per_run = 1 }, configuration);
     var dispatcher = try Dispatcher.init(std.testing.allocator, &workbench, undefined, undefined, .{
-        .attachment_input = .file_bytes,
+        .attachment_input = .native_paths,
         .context = null,
         .wake_fn = Host.wake,
         .emit_fn = Host.emit,
@@ -7239,7 +7239,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     var output: [16 * 1024]u8 = undefined;
     const connect_request = "{\"id\":\"c\",\"command\":\"metawork.events.connect\",\"payload\":{\"contractId\":\"metawork.renderer-bridge\",\"contractRevision\":1}}";
     const connected = native.dispatch(connect_request, source, &output);
-    const expected_connect = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("connect").?, .{});
+    const expected_connect = try std.json.Stringify.valueAlloc(fixture_arena.allocator(), wire.value.object.get("nativePathsConnect").?, .{});
     try std.testing.expect(std.mem.indexOf(u8, connected, expected_connect) != null);
     const Capture = struct {
         response: ?[]u8 = null,
@@ -7294,8 +7294,10 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.invoke(native, source, commands.begin_attachment_add, add_begin);
     try capture.wait(&workbench, &dispatcher, 5);
     try capture.expect("accepted");
+    dispatcher.platform.attachment_input = .file_bytes;
     const legacy = native.dispatch("{\"id\":\"r\",\"command\":\"metawork.attachments.finishReceive\",\"payload\":{\"generation\":\"1\",\"batchId\":\"3\"}}", source, &output);
     try std.testing.expect(std.mem.indexOf(u8, legacy, "invalid_transfer") != null);
+    dispatcher.platform.attachment_input = .native_paths;
     try capture.invoke(native, source, commands.append_attachment_add, "{\"generation\":\"1\",\"batchId\":\"3\",\"fileIndex\":0,\"offset\":\"0\",\"dataBase64\":\"/wBi\"}");
     try capture.wait(&workbench, &dispatcher, 6);
     try capture.expect("accepted");
@@ -7306,6 +7308,7 @@ test "unified add async jobs join cancellation and freeze their protocol produce
     try capture.invoke(native, source, commands.cancel_attachment_add, key3);
     try capture.expect("\"released\":true");
     try std.testing.expectEqual(@as(usize, 0), workbench.attachments.used_bytes);
+    dispatcher.platform.attachment_input = .file_bytes;
     try capture.invoke(native, .{ .origin = "zero://app", .window_id = 4 }, commands.cancel_attachment_add, key3);
     try capture.expect("EventWindowMismatch");
     try capture.invoke(native, source, commands.begin_attachment_add, "{\"generation\":\"1\",\"batchId\":\"4\",\"source\":{\"kind\":\"native_paths\",\"paths\":[\"C:/tmp/a.txt\"]}}");
