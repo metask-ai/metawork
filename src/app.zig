@@ -507,6 +507,8 @@ pub fn run(init: std.process.Init) !void {
             .notify_fn = app_platform.Adapter.notifyMainLoop,
         },
         product_identity.artifact_kind != .automation,
+        product_identity.artifact_kind == .development and
+            std.mem.eql(u8, init.environ_map.get("METAWORK_DEV_REQUIRE_PRIMARY") orelse "", "1"),
     );
     if (disposition == .secondary) return;
     app.single_instance = &single_instance_state;

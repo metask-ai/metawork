@@ -20,6 +20,8 @@ const ArtifactOption = enum {
 
 pub fn build(b: *std.Build) void {
     addRendererWireGenerator(b);
+    if (b.option([]const u8, "install-prefix", "Independent output directory for this artifact")) |prefix|
+        b.resolveInstallPrefix(prefix, .{});
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
     const artifact = selectedArtifact(b);
     // Include the ICO in the generated resource path's cache identity.
@@ -29,8 +31,9 @@ pub fn build(b: *std.Build) void {
         .file = windows_resources.addCopyFile(b.path("packaging/windows/metawork.rc"), "metawork.rc"),
         .include_paths = &.{b.path("assets/icons")},
     });
+    const frontend_dist = b.option([]const u8, "frontend-dist", "Built Renderer assets for this artifact");
     const frontend_assets = b.addInstallDirectory(.{
-        .source_dir = b.path("frontend/dist"),
+        .source_dir = if (frontend_dist) |path| .{ .cwd_relative = path } else b.path("frontend/dist"),
         .install_dir = .bin,
         .install_subdir = "frontend/dist",
     });
