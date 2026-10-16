@@ -77,6 +77,30 @@ function useDrafts(
     },
     [publish, clearStoredDraft],
   );
+  const acknowledgeDraft = useCallback(
+    (id: string, submitted: ComposerDraft) => {
+      const current = getDraft(id);
+      if (current === submitted) {
+        clearDraft(id);
+      } else if (
+        current.kind === "multimodal" &&
+        submitted.kind === "multimodal"
+      ) {
+        const sent = new Set(submitted.attachments.map(({ token }) => token));
+        const attachments = current.attachments.filter(
+          ({ token }) => !sent.has(token),
+        );
+        if (attachments.length !== current.attachments.length)
+          setDraft(
+            id,
+            attachments.length
+              ? { ...current, attachments }
+              : { kind: "text", text: current.text },
+          );
+      }
+    },
+    [getDraft, clearDraft, setDraft],
+  );
   const moveDraft = useCallback(
     (from: string, to: string) => {
       if (from === to) return "same" as const;
@@ -130,6 +154,7 @@ function useDrafts(
     updateDraft,
     setDraft,
     clearDraft,
+    acknowledgeDraft,
     moveDraft,
     pruneDraftCache,
     invalidateAttachments,

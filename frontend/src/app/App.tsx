@@ -91,7 +91,7 @@ import {
 import { TaskList, type TaskMenuAction } from "../features/tasks/TaskList.tsx";
 import {
   NewTaskApprovalModeMenu,
-  NewTaskView,
+  TaskWorkspace,
 } from "../features/tasks/NewTaskView.tsx";
 import { TaskContent } from "../features/tasks/TaskContent.tsx";
 import {
@@ -351,6 +351,11 @@ export default function App() {
   const client = useMemo(() => new BridgeClient(), []);
   const connection = useRef<WorkbenchConnection | null>(null);
   const pendingTaskSelection = useRef<string | null>(null);
+  const pendingTaskDraftSource = useRef<{
+    taskId: string;
+    draftId: string;
+    generation: string;
+  } | null>(null);
   const pendingTaskDraftRetention = useRef(new Set<string>());
   const taskPendingScopes = useRef(new PendingScopes());
   const cancelPendingTasks = useRef(new PendingScopes());
@@ -946,6 +951,7 @@ export default function App() {
     activeTask && queuedInput.blocked(activeTask.id),
   );
   const canSubmit =
+    !pendingTaskSelection.current &&
     taskCanCompose &&
     (!newTaskDraftActive || snapshot.newTaskAdmission.available) &&
     (!newTaskDraftActive || newTaskWorkspaceReady) &&
@@ -1102,6 +1108,15 @@ export default function App() {
             pendingTaskId &&
             next.tasks.some((task) => task.id === pendingTaskId)
           ) {
+            const source = pendingTaskDraftSource.current;
+            if (source?.taskId === pendingTaskId) {
+              const draft = newTaskDrafts.currentDraft(source.draftId);
+              if (draft && source.generation === bridgeGenerationRef.current) {
+                taskDrafts.setDraft(pendingTaskId, draft);
+                newTaskDrafts.clearDraft(source.draftId);
+              }
+              pendingTaskDraftSource.current = null;
+            }
             pendingTaskSelection.current = null;
             dispatchWorkbench({
               type: "task.selected",
@@ -1939,11 +1954,14 @@ export default function App() {
           }
         : { kind: "automatic" as const };
     const submittedDraftId = newTaskDraftId;
+    const submittedScope = composerDraftScope;
+    const submittedGeneration = bridgeGenerationRef.current;
     let pendingScope = currentTaskScope;
     if (!beginTaskPendingOperation(pendingScope, "run")) return;
-    if (newTaskDraftActive && submittedDraftId)
-      newTaskDrafts.clearDraft(submittedDraftId);
-    else updateComposerDraft(emptyComposerDraft());
+    // Cache the exact submitted object. Only this version may be cleared by
+    // the acknowledgement; edits made while awaiting it belong to the user.
+    if (submittedDraftId) newTaskDrafts.setDraft(submittedDraftId, submitted);
+    else if (existingTaskId) taskDrafts.setDraft(existingTaskId, submitted);
     try {
       const result = await submitTaskInstruction({
         client,
@@ -1968,18 +1986,42 @@ export default function App() {
         onTaskCreated: (taskId) => {
           setNewTaskApprovalOverride(null);
           setNewTaskRequestedModel(null);
-          pendingTaskSelection.current = taskId;
           pendingTaskDraftRetention.current.add(taskId);
-          taskDrafts.setDraft(taskId, submitted);
-          dispatchWorkbench({ type: "task.draft.closed" });
+          taskDrafts.setDraft(
+            taskId,
+            submittedDraftId
+              ? newTaskDrafts.getDraft(submittedDraftId)
+              : submitted,
+          );
+          if (
+            composerDraftScopeRef.current === submittedScope &&
+            bridgeGenerationRef.current === submittedGeneration
+          ) {
+            pendingTaskSelection.current = taskId;
+            if (submittedDraftId)
+              pendingTaskDraftSource.current = {
+                taskId,
+                draftId: submittedDraftId,
+                generation: submittedGeneration,
+              };
+          }
           const taskScope = `task:${taskId}`;
           if (moveTaskPendingOperation(pendingScope, taskScope))
             pendingScope = taskScope;
         },
       });
+      // Creation can precede the first Snapshot containing the Task. Until
+      // selection, keep the visible New task draft as the editing authority.
+      const source = pendingTaskDraftSource.current;
+      if (
+        "taskId" in result &&
+        source?.taskId === result.taskId &&
+        source.generation === bridgeGenerationRef.current
+      ) {
+        const latest = newTaskDrafts.currentDraft(source.draftId);
+        if (latest) taskDrafts.setDraft(result.taskId, latest);
+      }
       if (result.kind === "create_failed") {
-        if (submittedDraftId)
-          newTaskDrafts.setDraft(submittedDraftId, submitted);
         if (
           await reconcileCommandTimeout(result.error, "operation.task_create", {
             scope: "workspace",
@@ -2000,8 +2042,6 @@ export default function App() {
         return;
       }
       if (result.kind === "create_rejected") {
-        if (submittedDraftId)
-          newTaskDrafts.setDraft(submittedDraftId, submitted);
         await refreshSnapshot().catch(() => undefined);
         setStatus(
           attentionStatus(mutationReasonMessageId(result.reason), {
@@ -2012,7 +2052,6 @@ export default function App() {
         return;
       }
       if (result.kind === "continuation_rejected") {
-        taskDrafts.setDraft(result.taskId, submitted);
         await refreshSnapshot().catch(() => undefined);
         setStatus(
           attentionStatus(mutationReasonMessageId(result.reason), {
@@ -2023,7 +2062,6 @@ export default function App() {
         return;
       }
       if (result.kind === "continuation_failed") {
-        taskDrafts.setDraft(result.taskId, submitted);
         if (
           await reconcileCommandTimeout(result.error, "operation.restore", {
             scope: "task",
@@ -2042,7 +2080,6 @@ export default function App() {
         return;
       }
       if (result.kind === "run_failed") {
-        taskDrafts.setDraft(result.taskId, submitted);
         if (
           await reconcileCommandTimeout(result.error, "operation.run_submit", {
             scope: "task",
@@ -2063,7 +2100,6 @@ export default function App() {
         return;
       }
       if (result.kind === "run_rejected") {
-        taskDrafts.setDraft(result.taskId, submitted);
         await refreshSnapshot().catch(() => undefined);
         setStatus(
           attentionStatus(mutationReasonMessageId(result.reason), {
@@ -2073,7 +2109,11 @@ export default function App() {
         );
         return;
       }
-      taskDrafts.clearDraft(result.taskId);
+      if (bridgeGenerationRef.current === submittedGeneration) {
+        taskDrafts.acknowledgeDraft(result.taskId, submitted);
+        if (submittedDraftId)
+          newTaskDrafts.acknowledgeDraft(submittedDraftId, submitted);
+      }
       await refreshAfterCommit("run.started", "operation.run_submit", {
         scope: "task",
         taskId: result.taskId,
@@ -3114,7 +3154,13 @@ export default function App() {
         attachmentModelWarning={attachmentModelWarning}
         skillCatalog={skillCatalog}
         slashCommands={slashCommands}
-        composeDisabled={!taskCanCompose || taskMutationDisabled}
+        composeDisabled={
+          !taskCanCompose ||
+          (taskMutationDisabled && taskPending[currentTaskScope] !== "run")
+        }
+        attachmentActionsDisabled={
+          taskMutationDisabled || pendingTaskSelection.current !== null
+        }
         canSubmit={canSubmit}
         runInFlight={Boolean(taskCanCompose && taskOperationInFlight)}
         accessRequired={Boolean(
@@ -4059,13 +4105,11 @@ export default function App() {
             </AlertDialog.Root>
           )}
 
-          {newTaskDraftActive ? (
-            <NewTaskView
-              hasWorkspace={Boolean(composerWorkspace)}
-              composer={composerFooter}
-            />
-          ) : (
-            <>
+          <TaskWorkspace
+            newTask={newTaskDraftActive}
+            hasWorkspace={Boolean(composerWorkspace)}
+            composer={composerFooter}
+            taskContent={
               <TaskContent
                 task={activeTask}
                 webLink={markdownWebLink}
@@ -4097,9 +4141,8 @@ export default function App() {
                   );
                 }}
               />
-              {composerFooter}
-            </>
-          )}
+            }
+          />
         </div>
       )}
       <GlobalSearch

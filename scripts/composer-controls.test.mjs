@@ -2412,3 +2412,345 @@ test("new Task approval menu explains each mode only when opened and changes the
   await user.click(screen.getByRole("option", { name: /^Manual approval/ }));
   assert.deepEqual(choices, ["manual"]);
 });
+
+// Exercise the actual App so state, draft handoff and DOM focus are verified together.
+async function renderSubmissionApp(
+  ctx,
+  { newTask = false, draft = null } = {},
+) {
+  window.sessionStorage.clear();
+  window.matchMedia = (query) => ({
+    matches: false,
+    media: query,
+    addEventListener() {},
+    removeEventListener() {},
+  });
+  globalThis.CSS ??= { escape: (value) => value.replace(/["\\]/g, "\\$&") };
+  const { readFile } = await import("node:fs/promises");
+  const { default: App } = await vite.ssrLoadModule("/src/app/App.tsx");
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const snapshot = JSON.parse(
+    await readFile(
+      "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+      "utf8",
+    ),
+  );
+  snapshot.capabilities.automaticWorkspaces = true;
+  const task = structuredClone(snapshot.tasks[0]);
+  Object.assign(task, {
+    title: "Submission task",
+    activeOperation: null,
+    currentRunId: null,
+    currentRunPhase: null,
+    runs: [],
+  });
+  task.skillCatalog.availability = "unavailable";
+  snapshot.tasks = newTask ? [] : [task];
+  let revision;
+  let resolveCreate, resolveRun;
+  const creating = new Promise((resolve) => {
+    resolveCreate = resolve;
+  });
+  const running = new Promise((resolve) => {
+    resolveRun = resolve;
+  });
+  const inputs = [];
+  let creations = 0;
+  for (const [name, fn] of Object.entries({
+    available: () => true,
+    onShortcut: () => () => {},
+    onHostSignal: () => () => {},
+    onWorkbenchRevision: (callback) => {
+      revision = callback;
+      return () => {};
+    },
+    connect: async () => "1",
+    disconnect: async () => {},
+    ping: async () => {},
+    fetchSnapshot: async () => structuredClone(snapshot),
+    createTask: () => {
+      creations += 1;
+      return creating;
+    },
+    run: (...args) => {
+      inputs.push(args);
+      return running;
+    },
+  }))
+    ctx.mock.method(BridgeClient.prototype, name, fn);
+  render(
+    createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale() {},
+          t: (id, values) => translate("en-US", id, values),
+        },
+      },
+      createElement(App),
+    ),
+  );
+  await waitFor(() => assert.ok(revision));
+  await waitFor(() =>
+    assert.ok(
+      document.querySelector(".composer-bar textarea") &&
+        !document.querySelector(".composer-bar textarea").disabled,
+    ),
+  );
+  if (!newTask) {
+    const button = (
+      await screen.findAllByRole("button", { name: /Submission task/ })
+    )[0];
+    fireEvent.click(button);
+  }
+  const textarea = document.querySelector(".composer-bar textarea");
+  return {
+    textarea,
+    snapshot,
+    task,
+    inputs,
+    creations: () => creations,
+    publish: async () => {
+      snapshot.revision = String(BigInt(snapshot.revision) + 1n);
+      await act(async () => revision(snapshot.revision));
+    },
+    created: async () =>
+      act(async () =>
+        resolveCreate({
+          accepted: true,
+          taskId: task.id,
+          bindingEpoch: task.binding.epoch,
+        }),
+      ),
+    settle: async (result = { accepted: true }) =>
+      act(async () => resolveRun(result)),
+  };
+}
+
+for (const method of ["Enter", "click"]) {
+  test(`App ${method} send keeps the editor focused and preserves edits before acknowledgement`, async (ctx) => {
+    const fixture = await renderSubmissionApp(ctx);
+    const user = userEvent.setup({ document });
+    await user.type(fixture.textarea, "first instruction");
+    if (method === "Enter") await user.keyboard("{Enter}");
+    else
+      await user.click(
+        screen.getByRole("button", { name: "Send", exact: true }),
+      );
+    assert.equal(fixture.inputs.length, 1);
+    assert.equal(fixture.textarea.disabled, false);
+    assert.equal(document.activeElement, fixture.textarea);
+    await user.clear(fixture.textarea);
+    await user.type(fixture.textarea, "next instruction{Enter}");
+    assert.equal(fixture.inputs.length, 1, "pending send must not be repeated");
+    await fixture.settle();
+    await waitFor(() =>
+      assert.equal(
+        screen.getByRole("button", { name: "Send", exact: true }).disabled,
+        false,
+      ),
+    );
+    assert.equal(fixture.textarea.value, "next instruction\n");
+    assert.equal(document.activeElement, fixture.textarea);
+  });
+}
+
+test("App first send preserves the textarea, caret and IME composition across Task creation", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "first instruction{Enter}");
+  assert.equal(fixture.creations(), 1);
+  assert.equal(fixture.textarea.disabled, false);
+  await user.clear(fixture.textarea);
+  await user.type(fixture.textarea, "next draft");
+  await fixture.created();
+  await user.keyboard("{Enter}");
+  assert.equal(fixture.creations(), 1);
+  fireEvent.compositionStart(fixture.textarea);
+  fixture.textarea.setSelectionRange(3, 3);
+  fixture.snapshot.tasks = [fixture.task];
+  await fixture.publish();
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".workbench-view").dataset.view,
+      "task",
+    ),
+  );
+  assert.equal(
+    document.querySelector(".composer-bar textarea"),
+    fixture.textarea,
+  );
+  assert.equal(fixture.textarea.value, "next draft\n");
+  assert.equal(fixture.textarea.selectionStart, 3);
+  assert.equal(document.activeElement, fixture.textarea);
+  await fixture.settle();
+  assert.equal(fixture.textarea.value, "next draft\n");
+  // Retaining the Composer instance also retains its in-progress IME latch.
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  assert.equal(fixture.inputs.length, 1);
+  fireEvent.compositionEnd(fixture.textarea);
+});
+
+test("App acknowledgement clears only the submitted draft and never steals outside focus", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "first instruction{Enter}");
+  const outside = screen.getByRole("button", { name: "New task", exact: true });
+  outside.focus();
+  await fixture.settle();
+  await waitFor(() => assert.equal(fixture.textarea.value, ""));
+  assert.equal(document.activeElement, outside);
+});
+
+test("App rejected send preserves the latest edit and allows a deliberate retry", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "first instruction{Enter}");
+  await user.clear(fixture.textarea);
+  await user.type(fixture.textarea, "revised instruction");
+  await fixture.settle({ accepted: false, reason: "catalog_loading" });
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Send", exact: true }).disabled,
+      false,
+    ),
+  );
+  assert.equal(fixture.textarea.value, "revised instruction");
+  assert.equal(document.activeElement, fixture.textarea);
+});
+
+test("App first accepted send clears its original version after Task handoff without losing focus", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "first instruction{Enter}");
+  await fixture.created();
+  fixture.snapshot.tasks = [fixture.task];
+  await fixture.publish();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  await fixture.settle();
+  await waitFor(() => assert.equal(fixture.textarea.value, ""));
+  assert.equal(
+    document.querySelector(".composer-bar textarea"),
+    fixture.textarea,
+  );
+  assert.equal(document.activeElement, fixture.textarea);
+  assert.equal(fixture.textarea.disabled, false);
+  await user.type(fixture.textarea, "follow-up");
+  assert.equal(fixture.textarea.value, "follow-up");
+});
+
+test("App late send result preserves another Task's draft and focus", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx);
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "first instruction{Enter}");
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  const next = document.querySelector(".composer-bar textarea");
+  await user.type(next, "different task draft");
+  await fixture.settle();
+  assert.equal(next.value, "different task draft");
+  assert.equal(document.activeElement, next);
+});
+
+test("Composer draft kind changes do not reclaim focus from another control", async () => {
+  const composer = renderComposer();
+  const outside = document.createElement("button");
+  document.body.append(outside);
+  outside.focus();
+  try {
+    act(() =>
+      composer.setDraft({
+        kind: "skill",
+        skillId: "review",
+        invocationName: "review",
+        displayName: "Review",
+        catalogRevision: "4",
+        selectionRevision: "1",
+        argumentNames: ["path"],
+        argumentValues: ["src"],
+        maxValues: 1,
+      }),
+    );
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    assert.equal(document.activeElement, outside);
+  } finally {
+    outside.remove();
+  }
+});
+
+test("send acknowledgement preserves newer text and unsubmitted attachments", () => {
+  let drafts;
+  function Harness() {
+    drafts = useNewTaskDrafts("send-acknowledgement");
+    return null;
+  }
+  render(createElement(Harness));
+  const sent = {
+    token: "a".repeat(48),
+    kind: "file",
+    displayName: "sent.txt",
+    sizeBytes: "3",
+  };
+  const unsent = { ...sent, token: "b".repeat(48), displayName: "unsent.txt" };
+  const submitted = {
+    kind: "multimodal",
+    text: "read notes",
+    attachments: [sent],
+  };
+  act(() => {
+    drafts.setDraft("send-acknowledgement", submitted);
+    drafts.updateDraft({
+      ...submitted,
+      text: "new text",
+      attachments: [sent, unsent],
+    });
+    drafts.acknowledgeDraft("send-acknowledgement", submitted);
+  });
+  assert.deepEqual(drafts.draft, {
+    kind: "multimodal",
+    text: "new text",
+    attachments: [unsent],
+  });
+  act(() => {
+    drafts.updateDraft({ ...submitted, text: "newer text" });
+    drafts.acknowledgeDraft("send-acknowledgement", submitted);
+  });
+  assert.deepEqual(drafts.draft, { kind: "text", text: "newer text" });
+});
+
+test("App leaving Task creation preserves drafts and current input when preparation cancels", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const user = userEvent.setup({ document });
+  await user.type(fixture.textarea, "first instruction{Enter}");
+  await fixture.created();
+  const other = {
+    ...structuredClone(fixture.task),
+    id: "4",
+    title: "Other task",
+  };
+  fixture.snapshot.tasks = [other];
+  await fixture.publish();
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Other task/ }))[0],
+  );
+  await user.type(
+    document.querySelector(".composer-bar textarea"),
+    "other task draft",
+  );
+  fixture.snapshot.tasks.push(fixture.task);
+  await fixture.publish();
+  assert.equal(fixture.inputs.length, 0);
+  assert.equal(
+    document.querySelector(".composer-bar textarea").value,
+    "other task draft",
+  );
+  const { readNewTaskDraft, unscopedNewTaskDraftId } = await vite.ssrLoadModule(
+    "/src/features/composer/drafts.ts",
+  );
+  assert.equal(
+    readNewTaskDraft(unscopedNewTaskDraftId).text,
+    "first instruction",
+  );
+});

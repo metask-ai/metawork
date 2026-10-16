@@ -23,7 +23,7 @@ const { AppShell, resolveWorkbenchColumns } = await vite.ssrLoadModule(
 const { TaskContent } = await vite.ssrLoadModule(
   "/src/features/tasks/TaskContent.tsx",
 );
-const { NewTaskView, NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
+const { TaskWorkspace, NewTaskApprovalModeMenu } = await vite.ssrLoadModule(
   "/src/features/tasks/NewTaskView.tsx",
 );
 const { TaskList } = await vite.ssrLoadModule(
@@ -313,7 +313,8 @@ function renderNewTaskView(composer = null, overrides = {}) {
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(NewTaskView, {
+      createElement(TaskWorkspace, {
+        newTask: true,
         hasWorkspace: true,
         composer:
           composer ??

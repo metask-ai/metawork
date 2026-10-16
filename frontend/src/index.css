@@ -7746,7 +7746,11 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   background: var(--workbench-content-surface);
 }
 
-.workbench-view[data-view="task"] > .composer-bar {
+.task-workspace {
+  display: contents;
+}
+
+.workbench-view[data-view="task"] .task-workspace > .composer-bar {
   animation: composer-dock-in 180ms ease-out;
 }
 

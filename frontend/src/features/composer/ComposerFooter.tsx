@@ -95,6 +95,7 @@ export function ComposerFooter({
   attachmentsEnabled,
   attachmentMaxFileBytes,
   attachmentBusy,
+  attachmentActionsDisabled = false,
   attachmentCancelling = false,
   attachmentRemoving = false,
   attachmentError,
@@ -154,6 +155,7 @@ export function ComposerFooter({
   attachmentsEnabled: boolean;
   attachmentMaxFileBytes: string;
   attachmentBusy: boolean;
+  attachmentActionsDisabled?: boolean;
   attachmentCancelling?: boolean;
   attachmentRemoving?: boolean;
   attachmentError: string | null;
@@ -219,6 +221,7 @@ export function ComposerFooter({
   );
   const [composing, setComposing] = useState(false);
   const [fileDragActive, setFileDragActive] = useState(false);
+  const footerRef = useRef<HTMLElement>(null);
   const firstSkillArgumentRef = useRef<HTMLInputElement>(null);
   const skillRemoveButtonRef = useRef<HTMLButtonElement>(null);
   const sendButtonRef = useRef<HTMLButtonElement>(null);
@@ -248,6 +251,7 @@ export function ComposerFooter({
     attachmentsEnabled &&
     draft.kind !== "skill" &&
     !composeDisabled &&
+    !attachmentActionsDisabled &&
     !attachmentBusy;
   const menuOpen = Boolean(slashInput && !menuDismissed && !composing);
   const skillDraftCurrent =
@@ -265,7 +269,15 @@ export function ComposerFooter({
     !attachmentBusy &&
     slashInput === null &&
     draftWithinLimits;
-  const submitPrimary = () => (showQueueAction ? onQueueInput?.() : onSubmit());
+  const submitPrimary = () => {
+    const input =
+      draft.kind === "skill"
+        ? firstSkillArgumentRef.current
+        : textareaRef.current;
+    if (input && !input.disabled) input.focus({ preventScroll: true });
+    if (showQueueAction) onQueueInput?.();
+    else onSubmit();
+  };
   const candidates = useMemo(
     () =>
       slashInput
@@ -363,7 +375,11 @@ export function ComposerFooter({
                 ? sendButton
                 : skillRemoveButtonRef.current
           : textareaRef.current;
-      target?.focus();
+      if (
+        document.activeElement === document.body ||
+        footerRef.current?.contains(document.activeElement)
+      )
+        target?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [draft.kind, draftFocusIdentity, textareaRef, quietDraftChange]);
@@ -507,7 +523,7 @@ export function ComposerFooter({
   }
 
   return (
-    <footer className="composer-bar">
+    <footer ref={footerRef} className="composer-bar">
       <div className="composer-shell" data-file-drag-active={fileDragActive}>
         {fileDragActive && (
           <div className="composer-file-drop" aria-hidden="true">
@@ -589,7 +605,11 @@ export function ComposerFooter({
                         aria-label={t("attachment.remove", {
                           name: attachment.displayName,
                         })}
-                        disabled={composeDisabled || attachmentBusy}
+                        disabled={
+                          composeDisabled ||
+                          attachmentActionsDisabled ||
+                          attachmentBusy
+                        }
                         onClick={() => removeAttachment(attachment, index)}
                       >
                         <Icon name="close" />
@@ -808,6 +828,7 @@ export function ComposerFooter({
                   )}
                   disabled={
                     composeDisabled ||
+                    attachmentActionsDisabled ||
                     attachmentCancelling ||
                     (attachmentBusy && !onCancelAttachments)
                   }
@@ -855,7 +876,7 @@ export function ComposerFooter({
                     aria-label={t("run.submit")}
                     title={t(queueDisabledReason ?? "run.submit")}
                     disabled={!sendEnabled}
-                    onClick={onQueueInput}
+                    onClick={submitPrimary}
                   >
                     <Icon name="send" />
                   </Button>
@@ -904,7 +925,7 @@ export function ComposerFooter({
                   aria-label={t("run.submit")}
                   title={t(sendDisabledReason ?? "run.submit")}
                   disabled={!sendEnabled}
-                  onClick={onSubmit}
+                  onClick={submitPrimary}
                 >
                   <Icon name="send" />
                 </Button>
