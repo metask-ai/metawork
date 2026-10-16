@@ -1,3 +1,4 @@
+import { compactPhases } from "./contracts.ts";
 import {
   queuedInputReasons,
   type QueuedInput,
@@ -127,16 +128,7 @@ const nonTerminalRunPhases = [
   "waiting_ui",
   "stopping",
 ] as const;
-const compactPhases = [
-  "queued",
-  "compacting",
-  "stopping",
-  "compacted",
-  "no_change",
-  "degraded",
-  "aborted",
-  "failed",
-] as const;
+
 const nonTerminalCompactPhases = ["queued", "compacting", "stopping"] as const;
 const runOutcomes = [
   "completed",

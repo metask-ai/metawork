@@ -3185,3 +3185,45 @@ test("queued input shared wire fixture preserves receipt and safe editable input
     decodeQueueInputResult({ ...wire.queued, accepted: false }, "1", "queue-1"),
   );
 });
+
+test("unavailable Host attachment fixture stays decodable without advertising image formats", () => {
+  const value = clone(fixture);
+  value.capabilities.attachments = JSON.parse(
+    readFileSync(
+      new URL(
+        "../frontend/src/bridge/__fixtures__/attachments-unavailable.fixture",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(decodeWorkbenchSnapshot(value), value);
+  value.capabilities.attachments.imageFormats = ["png", "jpeg", "webp"];
+  assert.throws(
+    () => decodeWorkbenchSnapshot(value),
+    /attachment formats must match/,
+  );
+});
+
+test("actual interrupted Compact fixture is accepted by the existing snapshot decoder", () => {
+  const value = clone(fixture);
+  const task = value.tasks[0];
+  task.activeOperation = null;
+  task.currentRunId = "0";
+  task.currentRunPhase = null;
+  task.runs[0].phase = "completed";
+  task.runs[0].activity = null;
+  task.runs[0].terminal = terminal("completed");
+  value.tasks[0].compacts = [
+    JSON.parse(
+      readFileSync(
+        new URL(
+          "../frontend/src/bridge/__fixtures__/compact-interrupted.fixture",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ),
+  ];
+  assert.deepEqual(decodeWorkbenchSnapshot(value), value);
+});

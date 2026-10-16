@@ -1598,6 +1598,9 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    const task_view_fixture = b.addOptions();
+    task_view_fixture.addOption([]const u8, "interrupted_compact", @embedFile("frontend/src/bridge/__fixtures__/compact-interrupted.fixture"));
+    task_view.addOptions("task_view_fixture", task_view_fixture);
     task_view.addImport("metawork_agent", agent);
     task_view.addImport("metawork_product_skill", product_skill);
     task_view.addImport("product_task_state", task_state);
@@ -1781,6 +1784,7 @@ fn wireAgentCore(
         ),
     );
     const product_control_contract_fixture = b.addOptions();
+    product_control_contract_fixture.addOption([]const u8, "attachments_unavailable", @embedFile("frontend/src/bridge/__fixtures__/attachments-unavailable.fixture"));
     product_control_contract_fixture.addOption([]const u8, "model_metadata", @embedFile("frontend/src/bridge/__fixtures__/model-metadata.fixture"));
     product_control_contract_fixture.addOption(
         []const u8,

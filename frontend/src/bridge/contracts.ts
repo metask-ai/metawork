@@ -708,16 +708,18 @@ export type ConversationContext = {
   } | null;
 };
 
-export type CompactPhase =
-  | "queued"
-  | "compacting"
-  | "stopping"
-  | "compacted"
-  | "no_change"
-  | "degraded"
-  | "aborted"
-  | "interrupted"
-  | "failed";
+export const compactPhases = [
+  "queued",
+  "compacting",
+  "stopping",
+  "compacted",
+  "no_change",
+  "degraded",
+  "aborted",
+  "interrupted",
+  "failed",
+] as const;
+export type CompactPhase = (typeof compactPhases)[number];
 
 export const compactCauses = [
   "user_cancel",

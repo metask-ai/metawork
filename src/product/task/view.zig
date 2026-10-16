@@ -1178,3 +1178,30 @@ fn jsonValue(writer: *std.Io.Writer, value: anytype) !void {
         writer,
     );
 }
+
+test "interrupted Compact serializer matches the independent Renderer fixture" {
+    var diagnostic: [0]u8 = .{};
+    const compact = task_state.CompactRecord{
+        .id = std.math.maxInt(u64),
+        .coverage = .excluded,
+        .after_run_id = 7,
+        .terminal_publication = .init(.published),
+        .terminal_observed = true,
+        .terminal_diagnostic = &diagnostic,
+        .terminal_payload = .{
+            .exclude_on_product_terminal = false,
+            .phase = .interrupted,
+            .cause = null,
+            .before_context_tokens = 100,
+            .after_context_tokens = 40,
+            .usage = .{ .input_tokens = 5, .output_tokens = 2 },
+            .session_disposition_at_completion = .reusable,
+        },
+    };
+    var storage: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    try writeCompact(&writer, &compact);
+    try std.testing.expectEqualStrings(std.mem.trim(u8, @import("task_view_fixture").interrupted_compact, "\r\n"), writer.buffered());
+    writer = std.Io.Writer.fixed(storage[0..8]);
+    try std.testing.expectError(error.SnapshotTooLarge, writeCompact(&writer, &compact));
+}
