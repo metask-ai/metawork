@@ -2515,7 +2515,7 @@ test("new Task approval menu explains each mode only when opened and changes the
 // Exercise the actual App so state, draft handoff and DOM focus are verified together.
 async function renderSubmissionApp(
   ctx,
-  { newTask = false, draft = null } = {},
+  { newTask = false, draft = null, attachmentsEnabled } = {},
 ) {
   window.sessionStorage.clear();
   window.matchMedia = (query) => ({
@@ -2535,6 +2535,8 @@ async function renderSubmissionApp(
     ),
   );
   snapshot.capabilities.automaticWorkspaces = true;
+  if (attachmentsEnabled !== undefined)
+    snapshot.capabilities.attachments.enabled = attachmentsEnabled;
   const task = structuredClone(snapshot.tasks[0]);
   Object.assign(task, {
     title: "Submission task",
@@ -2709,6 +2711,157 @@ test("App image paste shares staging, rejects overlapping paste and sends the la
     attachmentTokens: ["a".repeat(48), "b".repeat(48)],
   });
   await fixture.settle();
+});
+
+async function renderPendingPasteApp(ctx) {
+  const fixture = await renderSubmissionApp(ctx);
+  fixture.snapshot.capabilities.attachments.enabled = true;
+  await fixture.publish();
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  const { AttachmentAddOperation } = await vite.ssrLoadModule(
+    "/src/bridge/attachment-receive.ts",
+  );
+  let resolveFinish,
+    finishing = false,
+    cancellations = 0,
+    additions = 0;
+  const finished = new Promise((resolve) => {
+    resolveFinish = resolve;
+  });
+  ctx.mock.method(BridgeClient.prototype, "createAttachmentAdd", () => {
+    additions++;
+    return new AttachmentAddOperation(
+      {
+        begin: async () => ({ status: "accepted" }),
+        append: async () => ({ status: "accepted" }),
+        finish: () => {
+          finishing = true;
+          return finished;
+        },
+        cancel: async () => {
+          cancellations++;
+          return { status: "cleaned", released: true };
+        },
+        recover: async () => assert.fail("No connection recovery expected"),
+      },
+      3,
+    );
+  });
+  const file = new File(["image"], "pending.png", { type: "image/png" });
+  const attachment = {
+    token: "c".repeat(48),
+    kind: "image",
+    format: "png",
+    displayName: file.name,
+    sizeBytes: String(file.size),
+  };
+  return {
+    ...fixture,
+    begin: async () => {
+      pasteItems(fixture.textarea, [imageItem(file)]);
+      await waitFor(() => assert.ok(finishing));
+    },
+    finish: async () =>
+      act(async () =>
+        resolveFinish({ status: "ready", attachments: [attachment] }),
+      ),
+    cancellations: () => cancellations,
+    additions: () => additions,
+    attachment,
+  };
+}
+
+test("App image paste reports unavailable attachments without starting a writer", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { attachmentsEnabled: false });
+  assert.ok(screen.queryByRole("button", { name: "Add files" }) === null);
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  ctx.mock.method(BridgeClient.prototype, "createAttachmentAdd", () =>
+    assert.fail("Unavailable attachments must not reserve resources"),
+  );
+  const file = new File(["png"], "a.png", { type: "image/png" });
+  const event = pasteItems(fixture.textarea, [imageItem(file)]);
+  assert.equal(event.defaultPrevented, true);
+  assert.match(screen.getByRole("alert").textContent, /cannot be added/);
+  assert.equal(BridgeClient.prototype.createAttachmentAdd.mock.callCount(), 0);
+  assert.equal(fixture.inputs.length, 0);
+});
+
+test("App cancelled image paste preserves edits and ignores a late ready result", async (ctx) => {
+  const f = await renderPendingPasteApp(ctx);
+  fireEvent.change(f.textarea, { target: { value: "keep original draft" } });
+  await f.begin();
+  fireEvent.change(f.textarea, { target: { value: "edited during staging" } });
+  fireEvent.click(screen.getByRole("button", { name: "Cancel adding files" }));
+  await waitFor(() =>
+    assert.equal(
+      screen.getByRole("button", { name: "Add files" }).disabled,
+      false,
+    ),
+  );
+  await f.finish();
+  assert.equal(f.cancellations(), 1);
+  assert.equal(f.textarea.value, "edited during staging");
+  assert.equal(screen.queryByText("pending.png"), null);
+  assert.equal(f.inputs.length, 0);
+});
+
+test("App image paste cannot hand off to a Task after leaving and returning", async (ctx) => {
+  const f = await renderPendingPasteApp(ctx);
+  const other = structuredClone(f.task);
+  other.id = String(BigInt(f.task.id) + 1n);
+  other.title = "Other paste task";
+  f.snapshot.tasks.push(other);
+  await f.publish();
+  fireEvent.change(f.textarea, { target: { value: "source Task draft" } });
+  await f.begin();
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Other paste task/ }))[0],
+  );
+  await waitFor(() =>
+    assert.equal(document.querySelector(".composer-bar textarea").value, ""),
+  );
+  fireEvent.change(document.querySelector(".composer-bar textarea"), {
+    target: { value: "other Task draft" },
+  });
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Submission task/ }))[0],
+  );
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".composer-bar textarea").value,
+      "source Task draft",
+    ),
+  );
+  await f.finish();
+  assert.equal(f.cancellations(), 1);
+  assert.equal(screen.queryByText("pending.png"), null);
+  assert.equal(f.inputs.length, 0);
+  fireEvent.click(
+    (await screen.findAllByRole("button", { name: /Other paste task/ }))[0],
+  );
+  assert.equal(
+    document.querySelector(".composer-bar textarea").value,
+    "other Task draft",
+  );
+  assert.equal(screen.queryByText("pending.png"), null);
+});
+
+test("App image-only paste sends through the existing multimodal Run input", async (ctx) => {
+  const f = await renderPendingPasteApp(ctx);
+  assert.equal(f.textarea.value, "");
+  await f.begin();
+  await f.finish();
+  await screen.findByText("pending.png");
+  const send = screen.getByRole("button", { name: "Send", exact: true });
+  assert.equal(send.disabled, false);
+  fireEvent.click(send);
+  await waitFor(() => assert.equal(f.inputs.length, 1));
+  assert.deepEqual(f.inputs[0][2], {
+    kind: "multimodal",
+    text: "",
+    attachmentTokens: [f.attachment.token],
+  });
+  await f.settle();
 });
 
 for (const method of ["Enter", "click"]) {
