@@ -95,7 +95,9 @@ AgentCore 拥有 provider 调用、agent loop、Conversation、Session、CoreEve
 
 Native SDK 是 MetaWork 消费的外部桌面依赖。Application 通过其 Runtime API 执行生命周期、窗口、System WebView、菜单、托盘、快捷键、dialog、notification、timer、credential 和其他系统 effect，并把 Product 所需能力收窄成 MetaWork-owned capability；Renderer 可以消费 manifest 已开放、SDK 明确面向 WebView 的 presentation/input API。Product owner 不依赖 Native SDK Runtime 类型，Renderer 使用这些 UI/input API 也不因此取得原生 effect 或 Product authority。
 
-Native SDK 虽然开源，对 MetaWork 仍是 upstream-only 外部依赖。唯一 canonical 输入是官方发布的固定版本 artifact 及其 public API；除非用户明确改变该政策，MetaWork 不 patch、fork、vendor 或直接修改 Native SDK，不维护私有 SDK 分支，也不把向 Native SDK 提交 PR 或等待 PR 合入作为产品交付路径。官方 public API 未覆盖的能力保持 unsupported 或已登记 capability gap，只在新的官方发布版出现后重新审计和验收。这项约束同样适用于方案和建议：不得把“修改 Native SDK”或“给 Native SDK 提 PR”当作解决 MetaWork 当前需求的默认建议。
+Native SDK 对 MetaWork 是外部依赖，唯一 canonical 输入是 [zogien/native](https://github.com/zogien/native) 维护并以 `@zogien/native` 发布的固定版本 npm artifact 及其 public API。该 fork 承担 SDK 发布、构建和依赖消费修复；SDK 源码修改、平台 binary 构建与发布属于该仓库的职责，源码 revision 与发布 artifact 必须可追溯，主包与平台包必须来自同一发布版本。MetaWork 的依赖清单与 lockfile 固定所消费版本、registry artifact 与 integrity；更换版本或发布来源时必须核对公开 API 合同，并完成受影响的构建、测试与平台验收；凭据操作的返回语义以 [Account 架构](account-architecture.md)为准。
+
+MetaWork 不在本仓库 vendor、patch 或直接修改已安装 SDK，不从本地源码树、未发布临时包或可变 tag 消费替代实现，也不静默回退到其他发布来源。SDK public API 未覆盖的能力保持 unsupported 或已登记 capability gap；fork 的演进不自动开放产品能力，新发布版仍须重新审计和验收。
 
 Native SDK Bridge API 是独立的正式 transport surface，不属于系统 effect 入口。Bridge 和 Application 只能消费完成 transport authority 所需的公开 contract、data-only DTO 与 opaque identifier；这些值不授予任意系统执行权，也不得传播到 Product owner。
 
@@ -128,11 +130,11 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 
 当前登记的 compatibility capability 为：
 
-当前固定 Native SDK 0.10.1 已公开 Windows drag-region mirror，但 `set_window_drag_regions` 只接受 GPU surface，启动 System WebView 不在其覆盖范围；因此登记缺口是“System WebView 缺少等价 public API”，不是“SDK 完全没有 drag-region 能力”。
+当前消费的 Native SDK 已公开 Windows drag-region mirror，但 `set_window_drag_regions` 只接受 GPU surface，启动 System WebView 不在其覆盖范围；因此登记缺口是“System WebView 缺少等价 public API”，不是“SDK 完全没有 drag-region 能力”。
 
 | Capability | 层级 | 允许边界 | 删除条件 |
 | --- | --- | --- | --- |
-| `system_webview_drag_region` | macOS 一级；Windows 二级 | Renderer 仅绑定真实标题栏并排除交互路径；Windows 按浏览器计数选择 drag/toggle，Host 不保存首击历史，对两种意图都复核当前 OS 指针与原生 top-band；macOS 校验范围后交给 SDK/AppKit；最大化复用 window-controls owner | 官方发布版提供适用于 System WebView 的等价 public API 并通过平台验收；包括 `ICoreWebView2Settings9::IsNonClientRegionSupportEnabled` / CSS `app-region` 的正式等价入口，而非仅 GPU surface 区域 |
+| `system_webview_drag_region` | macOS 一级；Windows 二级 | Renderer 仅绑定真实标题栏并排除交互路径；Windows 按浏览器计数选择 drag/toggle，Host 不保存首击历史，对两种意图都复核当前 OS 指针与原生 top-band；macOS 校验范围后交给 SDK/AppKit；最大化复用 window-controls owner | 所消费的 SDK 发布版提供适用于 System WebView 的等价 public API 并通过平台验收；包括 `ICoreWebView2Settings9::IsNonClientRegionSupportEnabled` / CSS `app-region` 的正式等价入口，而非仅 GPU surface 区域 |
 | `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize；不观察或维护标题栏点击历史 | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |

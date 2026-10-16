@@ -174,7 +174,7 @@ child-process 非正常退出证明进程终止后的 WAL 恢复，不是机器�
 
 以下不是可长期豁免的 capability：Application adapter 中仍存在 Runtime 已覆盖能力的直接低层调用，main-loop `wake` 也尚未完成 SDK 缺口确认与独立 seam 登记。它们在架构收口、结构 guard 和对应线程、行为、shutdown 证据全部完成前，仓库级兼容 Gate 保持打开。单项兼容能力通过不能证明全仓低层能力路径合规。
 
-Account credential outcome-certainty 由 `scripts/native-sdk-credential-contract.test.mjs` 持续验证。基线绑定 `@native-sdk/cli` 0.10.1 的精确 package integrity，并验证 Windows 与 macOS credential mutation 从系统同步返回值到 `PlatformServices` 错误之间没有“系统已报告成功、随后又失败”的步骤。系统合同分别以 Microsoft 的 [Credential Manager 写入](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew)与[删除](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-creddeletew)、Apple 的 [Keychain 更新与删除](https://developer.apple.com/documentation/security/updating-and-deleting-keychain-items)和[新增](https://developer.apple.com/documentation/security/adding-a-password-to-the-keychain)为准。由此，当前 SDK 返回的 mutation error 是 definite non-commit，Account 不需要 `outcome_unknown`；该结论只覆盖正常返回的调用，不把进程终止或没有返回结果伪装成 definite failure。package 或实现变化会使机器 Gate 失败，升级必须重新审计；若新实现出现 post-commit failure window，必须先增加 readback/restart reconciliation，不能通过改松 Gate 继续沿用现有状态机。
+Account 凭据操作的返回与恢复语义由 [Account 架构](account-architecture.md)定义。SDK 维护方负责其公开凭据 API 的合同与行为验证；MetaWork 通过 Account credential store 与 Runtime 的故障注入回归，验证写入失败保留已提交凭据、删除失败保留身份、轮换保存失败阻断后续刷新，以及重启后的收敛。平台安全存储的真实行为由对应平台验收负责，故障注入不替代 SDK 或系统安全存储的行为验证。
 
 ## 平台与 artifact 状态
 

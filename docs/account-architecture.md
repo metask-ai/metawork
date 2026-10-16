@@ -129,7 +129,7 @@ refresh timer 的 wall-clock 读取、首次 arm 和失败后的 retry arm 都�
 
 logout 先删除 Account-owned refresh credential，再删除刷新阻断记录并提交 `signed_out`；它不读取 Models 或 consumer 状态。删除明确失败时保留原 committed identity并发布 Account error；成功后 Runtime 清除 access/refresh token和 authorization generation，随后由 Application 通知 Models 授权不可用。
 
-把 credential mutation 错误解释为“未提交”的前提，是当前锁定 Native SDK 的 outcome-certainty Gate 持续通过：精确 package version 与 integrity、受支持平台实现、公开 wrapper 和系统安全存储同步返回合同必须同时匹配。依赖升级或实现漂移必须先重新审计并更新 Gate；若任一受支持平台不能证明错误即未提交，Account 不得把结果压成现有 definite failure，而必须先引入 `outcome_unknown`、readback 或 restart reconciliation，再允许后续状态迁移。当前 Gate 通过，因此不预防性增加未知状态。
+Account credential port 的返回合同要求：正常返回成功表示该次保存或删除已提交，正常返回错误表示该次变更未提交。SDK 维护方负责公开凭据 API 的返回合同与行为验证，Application binding 负责保持该语义并映射为 Account port 的结果，不在成功提交后追加可能失败的步骤。进程终止或调用没有返回结果不视为明确失败；若接入的 SDK 不能提供该合同，必须先增加 `outcome_unknown`、readback 或 restart reconciliation，再允许后续状态迁移。
 
 ## 7. Persistence 与恢复
 
