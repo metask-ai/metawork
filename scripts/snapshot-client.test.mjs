@@ -113,10 +113,18 @@ test("a valid snapshot larger than 8 MiB is assembled within the Host budget", a
 
 test("snapshot descriptor accepts the Host limit and rejects larger budgets before reading", async () => {
   const host = readFileSync(
+    new URL("../src/bridge/snapshot_contract.zig", import.meta.url),
+    "utf8",
+  );
+  assert.match(host, /pub const max_snapshot_bytes = 64 \* 1024 \* 1024;/);
+  const delivery = readFileSync(
     new URL("../src/bridge/snapshot_delivery.zig", import.meta.url),
     "utf8",
   );
-  assert.match(host, /pub const max_bytes: usize = 64 \* 1024 \* 1024;/);
+  assert.match(
+    delivery,
+    /max_bytes: usize = @import\("snapshot_contract.zig"\).max_snapshot_bytes/,
+  );
   const limit = 64 * 1024 * 1024;
   const firstChunk = new Error("descriptor accepted");
   let reads = 0;

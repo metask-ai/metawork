@@ -1,3 +1,8 @@
+import {
+  decodeSnapshotDescriptor,
+  maxSnapshotBytes,
+  maxSnapshotChunkBytes,
+} from "../generated-wire.ts";
 import { commands } from "../commands.ts";
 import { RendererBridgeContractError } from "../contract-error.ts";
 import type { WorkbenchSnapshot } from "../contracts.ts";
@@ -16,21 +21,12 @@ export type SnapshotInvoke = (
   payload: SnapshotJson,
 ) => Promise<unknown>;
 
-type SnapshotDescriptor = {
-  snapshotId: string;
-  bytes: number;
-  chunkBytes: number;
-};
-
 type SnapshotChunk = {
   snapshotId: string;
   offset: number;
   bytes: number;
   data: string;
 };
-
-const maxSnapshotBytes = 64 * 1024 * 1024;
-const maxSnapshotChunkBytes = 256 * 1024;
 
 function invalidSnapshot(diagnostic: string): never {
   throw new RendererBridgeContractError("invalid_response", diagnostic);
@@ -48,25 +44,14 @@ function nonNegativeInteger(value: unknown, name: string) {
   return value;
 }
 
-function descriptor(value: unknown): SnapshotDescriptor {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    invalidSnapshot("Invalid Workbench snapshot descriptor");
-  const item = value as Record<string, unknown>;
-  if (
-    Object.keys(item).sort().join(",") !==
-    ["bytes", "chunkBytes", "snapshotId"].sort().join(",")
-  )
-    invalidSnapshot("Invalid Workbench snapshot descriptor fields");
-  if (
-    typeof item.snapshotId !== "string" ||
-    !/^[1-9][0-9]*$/.test(item.snapshotId)
-  )
-    invalidSnapshot("Invalid Workbench snapshot identity");
-  return {
-    snapshotId: item.snapshotId,
-    bytes: positiveInteger(item.bytes, "size"),
-    chunkBytes: positiveInteger(item.chunkBytes, "chunk size"),
-  };
+function descriptor(value: unknown) {
+  try {
+    return decodeSnapshotDescriptor(value, "$snapshotDescriptor");
+  } catch (error) {
+    invalidSnapshot(
+      error instanceof Error ? error.message : "Invalid snapshot descriptor",
+    );
+  }
 }
 
 function chunk(value: unknown): SnapshotChunk {

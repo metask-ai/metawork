@@ -5,6 +5,7 @@ import { runChild } from "./run-child-process.mjs";
 import { verifyFrontendBuild } from "./verify-frontend-build.mjs";
 import { verifyNativeAutomationIsolation } from "./verify-native-automation-isolation.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
+import { generateRendererWire } from "./generate-renderer-wire.mjs";
 
 export const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -30,6 +31,7 @@ export const nativeCli = path.join(
 );
 
 export async function buildFrontend(root = repositoryRoot) {
+  await generateRendererWire();
   await runChild(process.execPath, [viteCli, "build"], {
     cwd: path.join(root, "frontend"),
     label: "Renderer build",

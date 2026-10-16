@@ -1,3 +1,9 @@
+import {
+  approvalFailureReasons,
+  type TaskApprovalResultWire,
+} from "./generated-wire.ts";
+export { approvalFailureReasons };
+
 export type AccountState =
   "checking" | "signed_out" | "authorizing" | "authenticated";
 
@@ -834,29 +840,17 @@ export type TaskModelSelectionAvailability =
   | "unsupported_source"
   | "authority_changed";
 
-export const approvalFailureReasons = [
-  "cancelled",
-  "busy",
-  "budget_required",
-  "mode_update_failed",
-  "checkpoint_failed",
-  "persistence_failed",
-  "outcome_unknown",
-  "recovery_failed",
-  "dependency_contract",
-] as const;
 export type ApprovalFailureReason = (typeof approvalFailureReasons)[number];
 export type TaskApprovalChange = {
   revision: string;
   targetMode: ApprovalMode;
   state: "pending" | "recovering" | "outcome_unknown";
 };
-export type TaskApprovalResult = {
-  revision: string;
-} & (
-  | { outcome: "completed"; reason: null }
-  | { outcome: "failed"; reason: ApprovalFailureReason }
-);
+export type TaskApprovalResult = TaskApprovalResultWire &
+  (
+    | { outcome: "completed"; reason: null }
+    | { outcome: "failed"; reason: ApprovalFailureReason }
+  );
 
 export const queuedInputReasons = [
   "stopped_by_user",

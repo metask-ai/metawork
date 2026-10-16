@@ -19,6 +19,7 @@ const ArtifactOption = enum {
 };
 
 pub fn build(b: *std.Build) void {
+    addRendererWireGenerator(b);
     const artifacts = native_sdk.addAppArtifacts(b, b.dependency("native_sdk", .{}), .{ .name = "metawork" });
     const artifact = selectedArtifact(b);
     // Include the ICO in the generated resource path's cache identity.
@@ -352,6 +353,19 @@ pub fn build(b: *std.Build) void {
         "test-single-instance",
         "Run Application single-instance lifecycle race tests",
     ).dependOn(&b.addRunArtifact(single_instance_tests).step);
+}
+
+fn addRendererWireGenerator(b: *std.Build) void {
+    const encoding = b.createModule(.{ .root_source_file = b.path("src/product/control/view_encoding.zig"), .target = b.graph.host });
+    const snapshot = b.createModule(.{ .root_source_file = b.path("src/bridge/snapshot_contract.zig"), .target = b.graph.host });
+    snapshot.addImport("product_view_encoding", encoding);
+    const task_view = b.createModule(.{ .root_source_file = b.path("src/product/task/view_contract.zig"), .target = b.graph.host });
+    task_view.addImport("product_view_encoding", encoding);
+    const module = b.createModule(.{ .root_source_file = b.path("build_support/renderer_wire_generator.zig"), .target = b.graph.host });
+    module.addImport("snapshot_contract", snapshot);
+    module.addImport("task_view_contract", task_view);
+    const generator = b.addExecutable(.{ .name = "metawork-renderer-wire-generator", .root_module = module });
+    b.step("generate-renderer-wire", "Generate Renderer structures from actual Host wire types").dependOn(&b.addRunArtifact(generator).step);
 }
 
 fn agentCoreTargetId(target: std.Target) []const u8 {
@@ -1510,11 +1524,15 @@ fn wireAgentCore(
         product_agent_protocol_adapter,
     );
     task_attachment.addImport("product_task_recovery_job", task_recovery_job);
+    const view_encoding = b.createModule(.{ .root_source_file = b.path("src/product/control/view_encoding.zig"), .target = target, .optimize = root_module.optimize });
+    const task_view_contract = b.createModule(.{ .root_source_file = b.path("src/product/task/view_contract.zig"), .target = target, .optimize = root_module.optimize });
+    task_view_contract.addImport("product_view_encoding", view_encoding);
     const task_state = b.createModule(.{
         .root_source_file = b.path("src/product/task/state.zig"),
         .target = target,
         .optimize = root_module.optimize,
     });
+    task_state.addImport("product_task_view_contract", task_view_contract);
     task_state.addImport("metawork_agent", agent);
     task_state.addImport("metawork_product_models_contract", models_contract);
     task_state.addImport("product_task_checkpoint_record", checkpoint_record);
@@ -1598,6 +1616,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    task_view.addImport("product_task_view_contract", task_view_contract);
     const task_view_fixture = b.addOptions();
     task_view_fixture.addOption([]const u8, "interrupted_compact", @embedFile("frontend/src/bridge/__fixtures__/compact-interrupted.fixture"));
     task_view.addOptions("task_view_fixture", task_view_fixture);
@@ -1825,6 +1844,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    bridge.addImport("product_view_encoding", view_encoding);
     bridge.addImport("native_sdk", existingImport(root_module, "native_sdk"));
     bridge.addImport("metawork_account_contract", account_contract);
     bridge.addImport("metawork_product_models_contract", models_contract);

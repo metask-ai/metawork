@@ -1,3 +1,4 @@
+import { decodeTaskApprovalResultWire } from "./generated-wire.ts";
 import {
   exactKeys,
   fail,
@@ -27,7 +28,6 @@ import {
   builtinProviderIds,
   permissionProfiles,
   approvalModes,
-  approvalFailureReasons,
   taskApprovalModeReasons,
   type TaskApprovalModeResult,
   type TaskApprovalChange,
@@ -3131,21 +3131,14 @@ function decodeTaskApprovalResult(
   value: unknown,
   path: string,
 ): TaskApprovalResult {
-  const item = object(value, path, ["revision", "outcome", "reason"]);
-  const revision = positiveWireId(item.revision, `${path}.revision`);
-  const outcome = enumValue(item.outcome, `${path}.outcome`, [
-    "completed",
-    "failed",
-  ] as const);
+  const item = decodeTaskApprovalResultWire(value, path);
+  const { revision, outcome, reason } = item;
   if (outcome === "completed") {
-    if (item.reason !== null) fail(`${path}.reason`, "expected null");
+    if (reason !== null) fail(`${path}.reason`, "expected null");
     return { revision, outcome, reason: null };
   }
-  return {
-    revision,
-    outcome,
-    reason: enumValue(item.reason, `${path}.reason`, approvalFailureReasons),
-  };
+  if (reason === null) fail(`${path}.reason`, "expected failure reason");
+  return { revision, outcome, reason };
 }
 
 function queueOperationId(value: unknown, path: string): string {
