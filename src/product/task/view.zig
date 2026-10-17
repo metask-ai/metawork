@@ -198,6 +198,14 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
     else
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"modelIntent\":") catch return error.SnapshotTooLarge;
+    if (task.durable.model_intent) |intent| {
+        writer.writeAll("{\"modelRef\":{\"sourceId\":") catch return error.SnapshotTooLarge;
+        try input.text.writeJson(writer, intent.source_id);
+        writer.writeAll(",\"modelId\":") catch return error.SnapshotTooLarge;
+        try input.text.writeJson(writer, intent.model_id);
+        writer.print("}},\"selectionRevision\":\"{d}\"}}", .{intent.revision}) catch return error.SnapshotTooLarge;
+    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"modelSelectionAvailability\":\"{s}\"", .{
         @tagName(input.model_selection_availability),
     }) catch return error.SnapshotTooLarge;

@@ -3286,6 +3286,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "approvalResult",
     "permissionReviewState",
     "binding",
+    "modelIntent",
     "modelSelectionAvailability",
     "mcpAuthority",
     "skillCatalog",
@@ -3344,6 +3345,35 @@ function decodeTask(value: unknown, path: string): TaskView {
     ),
     unavailableReason,
   };
+  const modelIntent =
+    item.modelIntent === null
+      ? null
+      : (() => {
+          const intent = object(item.modelIntent, `${path}.modelIntent`, [
+            "modelRef",
+            "selectionRevision",
+          ]);
+          const selectionRevision = positiveWireId(
+            intent.selectionRevision,
+            `${path}.modelIntent.selectionRevision`,
+          );
+          if (
+            selectionRevision.length > 20 ||
+            (selectionRevision.length === 20 &&
+              selectionRevision > "18446744073709551615")
+          )
+            fail(
+              `${path}.modelIntent.selectionRevision`,
+              "expected positive u64 revision",
+            );
+          return {
+            modelRef: decodeRequiredModelRef(
+              intent.modelRef,
+              `${path}.modelIntent.modelRef`,
+            ),
+            selectionRevision,
+          };
+        })();
   const modelSelectionAvailability = enumValue(
     item.modelSelectionAvailability,
     `${path}.modelSelectionAvailability`,
@@ -3717,6 +3747,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     approvalResult,
     permissionReviewState,
     binding,
+    modelIntent,
     modelSelectionAvailability,
     mcpAuthority,
     skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),

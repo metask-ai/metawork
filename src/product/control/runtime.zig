@@ -11143,6 +11143,32 @@ test "Product Control snapshot serializer matches the Renderer contract fixture"
     );
 }
 
+test "Product Control snapshot serializer keeps model intent independent of installed execution" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const task = control.task_runtime.find(3).?;
+    task.durable.model_intent = try task_test_state.ModelIntent.init(std.testing.allocator, .{
+        .source_id = "another-provider",
+        .model_id = "next-model",
+    }, 9);
+    var storage: [16 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&storage);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer parsed.deinit();
+    const projected = parsed.value.object.get("tasks").?.array.items[0].object;
+    const intent = projected.get("modelIntent").?.object;
+    const model = intent.get("modelRef").?.object;
+    try std.testing.expectEqualStrings("another-provider", model.get("sourceId").?.string);
+    try std.testing.expectEqualStrings("next-model", model.get("modelId").?.string);
+    try std.testing.expectEqualStrings("9", intent.get("selectionRevision").?.string);
+    const binding = projected.get("binding").?.object;
+    try std.testing.expectEqualStrings("fixture-model", binding.get("model").?.string);
+    try std.testing.expectEqualStrings("1", binding.get("executionGeneration").?.string);
+    const run = projected.get("runs").?.array.items[0].object.get("execution").?.object;
+    try std.testing.expectEqualStrings("fixture-model", run.get("model").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "SECRET-KEY") == null);
+}
+
 test "Product Control snapshot serializer preserves complete Account summary history" {
     var control = try testRuntime();
     defer control.deinit();

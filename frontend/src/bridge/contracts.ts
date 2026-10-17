@@ -935,6 +935,10 @@ export type TaskView = {
     executionGeneration: string;
     unavailableReason: "runtime_detached" | null;
   };
+  modelIntent: {
+    modelRef: ModelRef;
+    selectionRevision: string;
+  } | null;
   modelSelectionAvailability: TaskModelSelectionAvailability;
   mcpAuthority: TaskMcpAuthority;
   skillCatalog: SkillCatalogView;
