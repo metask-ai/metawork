@@ -86,7 +86,9 @@ export const Select = {
   ),
   Value: BaseSelect.Value,
   Icon: BaseSelect.Icon,
-  Portal: BaseSelect.Portal,
+  Portal: (props: ComponentProps<typeof BaseSelect.Portal>) => (
+    <BaseSelect.Portal {...props} data-native-window-drag-exclude="" />
+  ),
   Positioner: ({
     className,
     ...props

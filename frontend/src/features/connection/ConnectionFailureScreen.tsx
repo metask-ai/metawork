@@ -37,7 +37,10 @@ export function ConnectionFailureScreen({
           </span>
           <span>{t("app.name")}</span>
         </div>
-        <div className="connection-failure-toolbar-actions">
+        <div
+          className="connection-failure-toolbar-actions"
+          data-native-window-drag-exclude=""
+        >
           <label className="locale-control">
             <span className="sr-only">{t("app.language")}</span>
             <SelectionMenu

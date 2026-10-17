@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const control_ports = @import("metawork_product_control_ports");
-const drag_region = @import("../native_sdk_compat/system_webview_drag_region.zig");
 const startup_window = @import("../native_sdk_compat/system_webview_startup_window.zig");
 const window_controls = @import("../native_sdk_compat/system_webview_window_controls.zig");
 const resize = @import("../native_sdk_compat/system_webview_resize.zig");
@@ -26,7 +25,6 @@ const tray_icon_path = switch (builtin.os.tag) {
 
 pub const State = struct {
     startup_window_capture: startup_window.Capture = .{},
-    drag_region_capability: drag_region.Capability = drag_region.Capability.init(main_window_id),
     window_controls_capability: window_controls.Capability = window_controls.Capability.init(main_window_id),
     resize_capability: resize.Capability = .{},
     tray_installed: bool = false,
@@ -38,21 +36,18 @@ pub const State = struct {
 
     pub fn captureStartupWindow(self: *State) !void {
         const startup_binding = try self.startup_window_capture.take(main_window_id);
-        try self.drag_region_capability.captureStartupWindow(startup_binding);
         try self.window_controls_capability.captureStartupWindow(startup_binding);
         try self.resize_capability.attach(startup_binding);
     }
 
-    pub fn bind(self: *State, services: native_sdk.platform.PlatformServices) !void {
-        try self.drag_region_capability.requirePlatform(services);
-        self.drag_region_capability.bindRoot();
+    pub fn bind(_: *State, services: native_sdk.platform.PlatformServices) !void {
+        if (services.window_chrome_fn == null) return error.SystemWebViewChromeUnavailable;
     }
 
     pub fn deinit(self: *State) void {
         self.resize_capability.deinit();
         self.startup_window_capture.deinit();
         self.window_controls_capability.deinit();
-        self.drag_region_capability.deinit();
     }
 
     pub fn installTray(
@@ -130,7 +125,7 @@ pub const State = struct {
     ) !bridge_api.WindowChromePlatformEnvironment {
         _ = try requireLiveMainWindow(runtime, window_id);
         const controls = try self.window_controls_capability.windowsState();
-        return environment(try self.drag_region_capability.connect(services), controls);
+        return environment(services.windowChrome(window_id), controls);
     }
 
     pub fn refreshWindows(
@@ -141,30 +136,9 @@ pub const State = struct {
     ) !bridge_api.WindowChromePlatformEnvironment {
         _ = try requireLiveMainWindow(runtime, window_id);
         return environment(
-            self.drag_region_capability.current(services),
+            services.windowChrome(window_id),
             try self.window_controls_capability.windowsState(),
         );
-    }
-
-    pub fn handleWindowsGesture(
-        self: *State,
-        runtime: ?*native_sdk.Runtime,
-        services: ?native_sdk.platform.PlatformServices,
-        window_id: native_sdk.platform.WindowId,
-        gesture: bridge_api.WindowChromeGesture,
-    ) !void {
-        try requireMainWindow(window_id);
-        const runtime_value = runtime orelse return error.RuntimeUnavailable;
-        try requireUnhiddenMainWindow(runtime_value, window_id);
-        _ = try self.window_controls_capability.isMaximized();
-        const outcome = try self.drag_region_capability.handleGesture(
-            services orelse return error.RuntimeUnavailable,
-            gestureAction(gesture),
-            gesture.x,
-            gesture.y,
-        );
-        if (outcome == .toggle_maximize)
-            try self.toggleMainWindowMaximized(runtime_value, window_id);
     }
 
     fn toggleMainWindowMaximized(
@@ -185,7 +159,7 @@ pub const State = struct {
     ) !bridge_api.WindowChromePlatformEnvironment {
         try requireMainWindow(window_id);
         return environment(
-            try self.drag_region_capability.connect(services),
+            services.windowChrome(window_id),
             self.window_controls_capability.state(),
         );
     }
@@ -196,22 +170,7 @@ pub const State = struct {
         window_id: native_sdk.platform.WindowId,
     ) !bridge_api.WindowChromePlatformEnvironment {
         try requireMainWindow(window_id);
-        return environment(self.drag_region_capability.current(services), self.window_controls_capability.state());
-    }
-
-    pub fn handleGesture(
-        self: *State,
-        services: native_sdk.platform.PlatformServices,
-        window_id: native_sdk.platform.WindowId,
-        gesture: bridge_api.WindowChromeGesture,
-    ) !void {
-        try requireMainWindow(window_id);
-        _ = try self.drag_region_capability.handleGesture(services, gestureAction(gesture), gesture.x, gesture.y);
-    }
-
-    pub fn disconnect(self: *State, window_id: native_sdk.platform.WindowId) !void {
-        try requireMainWindow(window_id);
-        self.drag_region_capability.disconnect();
+        return environment(services.windowChrome(window_id), self.window_controls_capability.state());
     }
 
     pub fn control(
@@ -294,38 +253,25 @@ fn requireUnhiddenMainWindow(
         return error.WindowHidden;
 }
 
-fn gestureAction(gesture: bridge_api.WindowChromeGesture) drag_region.GestureAction {
-    return switch (gesture.action) {
-        .start_drag => .start_drag,
-        .toggle_maximize => .toggle_maximize,
-    };
-}
-
 fn environment(
-    value: drag_region.Environment,
+    value: native_sdk.platform.WindowChrome,
     controls: window_controls.State,
 ) bridge_api.WindowChromePlatformEnvironment {
     return .{
-        .top = value.top,
-        .left = value.left,
-        .bottom = value.bottom,
-        .right = value.right,
-        .buttons_x = value.buttons_x,
-        .buttons_y = value.buttons_y,
-        .buttons_width = value.buttons_width,
-        .buttons_height = value.buttons_height,
-        .gesture_mode = switch (value.gesture_mode) {
-            .browser_mouse => .browser_mouse,
-            .native_press => .native_press,
-            .disabled => .disabled,
-        },
+        .top = if (builtin.os.tag == .windows) 40 else value.insets.top,
+        .left = value.insets.left,
+        .bottom = value.insets.bottom,
+        .right = value.insets.right,
+        .buttons_x = value.buttons.x,
+        .buttons_y = value.buttons.y,
+        .buttons_width = value.buttons.width,
+        .buttons_height = value.buttons.height,
         .renderer_controls = controls.renderer_controls,
         .maximized = controls.maximized,
     };
 }
 
 test {
-    _ = drag_region;
     _ = startup_window;
     _ = window_controls;
     _ = resize;
@@ -417,20 +363,16 @@ test "Windows window actions reject missing closed and hidden SDK windows before
         try std.testing.expectError(error.WindowUnavailable, window.control(&harness.runtime, 1, action));
 }
 
-test "Windows window query failure precedes attachment and preserves refresh session" {
+test "Windows window queries fail explicitly without a native controls binding" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
     _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html("") });
     var window: State = .{};
     defer window.deinit();
-    window.drag_region_capability.platform_ready = true;
     const services = harness.runtime.options.platform.services;
     try std.testing.expectError(error.WindowUnavailable, window.connectWindows(&harness.runtime, services, 1));
-    try std.testing.expect(!window.drag_region_capability.document_attached);
-    window.drag_region_capability.document_attached = true;
     try harness.runtime.hideWindow(1);
     // Hidden is allowed to query; an absent binding still fails explicitly.
     try std.testing.expectError(error.WindowUnavailable, window.refreshWindows(&harness.runtime, services, 1));
-    try std.testing.expect(window.drag_region_capability.document_attached);
 }

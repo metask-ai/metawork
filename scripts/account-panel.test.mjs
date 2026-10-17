@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { JSDOM } from "jsdom";
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -681,5 +682,30 @@ test("refresh errors retain identity and expose sign-in without claiming expiry 
       translate(locale, "account.error.refresh"),
       /expired|revoked|removed|过期|失效|撤销|移除/i,
     );
+  }
+});
+
+test("connection failure titlebar explicitly excludes language and window controls", () => {
+  const dom = new JSDOM(renderConnectionFailure());
+  try {
+    const header = dom.window.document.querySelector(
+      "header[data-native-window-drag]",
+    );
+    assert.ok(header);
+    for (const element of header.querySelectorAll(
+      "button,input,select,textarea,label,[tabindex]",
+    ))
+      assert.ok(
+        element.closest("[data-native-window-drag-exclude]"),
+        element.outerHTML,
+      );
+    assert.equal(
+      header
+        .querySelector(".connection-failure-brand")
+        .closest("[data-native-window-drag-exclude]"),
+      null,
+    );
+  } finally {
+    dom.window.close();
   }
 });

@@ -27,7 +27,9 @@ export const Drawer = {
   }: ComponentProps<typeof BaseDialog.Trigger>) => (
     <BaseDialog.Trigger className={cn(focusRing, className)} {...props} />
   ),
-  Portal: BaseDialog.Portal,
+  Portal: (props: ComponentProps<typeof BaseDialog.Portal>) => (
+    <BaseDialog.Portal {...props} data-native-window-drag-exclude="" />
+  ),
   Backdrop: ({
     className,
     ...props

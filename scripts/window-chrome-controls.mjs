@@ -157,8 +157,6 @@ export async function probeWindowChromeControls({
         "control",
         { action },
       ]),
-      ["gesture", { action: "start_drag", x: 300, y: 20 }],
-      ["gesture", { action: "toggle_maximize", x: 300, y: 20 }],
     ]) {
       const result = await invoke(command, payload);
       assert.equal(result.ok, false, `Hidden ${command} must be rejected`);

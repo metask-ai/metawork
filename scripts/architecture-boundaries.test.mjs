@@ -2609,12 +2609,11 @@ test("Renderer Bridge catalogs and contract identity are exact mirrors", () => {
 test("Native compatibility seams have exact owners and symbol allowlists", () => {
   const compatFiles = zigFiles("src/native_sdk_compat/");
   const compatSource = compatFiles.map(read).join("\n");
+  assert.doesNotMatch(
+    compatSource + read("src/app/window.zig"),
+    /system_webview_drag_region|startWindowDrag/,
+  );
   const window = read("src/app/window.zig");
-  const dragPath = "src/native_sdk_compat/system_webview_drag_region.zig";
-  const dragWindowsPath =
-    "src/native_sdk_compat/system_webview_drag_region/windows.zig";
-  const dragMacosPath =
-    "src/native_sdk_compat/system_webview_drag_region/macos.zig";
   const controlsPath =
     "src/native_sdk_compat/system_webview_window_controls.zig";
   const controlsWindowsPath =
@@ -2630,7 +2629,7 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   const instanceMacosPath =
     "src/native_sdk_compat/app_single_instance/macos.zig";
 
-  for (const seamPath of [dragPath, controlsPath, resizePath]) {
+  for (const seamPath of [controlsPath, resizePath]) {
     assert.deepEqual(
       zigFiles("src/").filter((file) =>
         read(file).includes(`native_sdk_compat/${seamPath.split("/").at(-1)}`),
@@ -2662,7 +2661,7 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
         read(file).includes("native_sdk.platform.PlatformServices"),
       )
       .sort(),
-    [dragPath, dragMacosPath, dragWindowsPath].sort(),
+    [],
   );
 
   assert.deepEqual(
@@ -2700,31 +2699,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   assert.doesNotMatch(
     read(resizeWindowsPath),
     /EnumChildWindows|SetWindowsHookEx|GetForegroundWindow|FindWindow|SetParent/,
-  );
-  assert.deepEqual(
-    externSymbols(read(dragWindowsPath), [
-      "user32",
-      "kernel32",
-      "comctl32",
-      "gdi32",
-    ]),
-    [
-      "GetAncestor",
-      "GetAsyncKeyState",
-      "GetCursorPos",
-      "GetDpiForWindow",
-      "GetSystemMetrics",
-      "IsWindow",
-      "PostMessageW",
-      "ReleaseCapture",
-      "ScreenToClient",
-      "SendMessageW",
-      "WindowFromPoint",
-    ].sort(),
-  );
-  assert.deepEqual(
-    externSymbols(read(dragWindowsPath), ["gdi32", "kernel32", "comctl32"]),
-    [],
   );
   assert.doesNotMatch(
     read("build.zig"),

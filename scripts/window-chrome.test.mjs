@@ -54,7 +54,7 @@ async function settle() {
 
 function setup(t, options = {}) {
   const dom = new JSDOM(
-    '<!doctype html><html><body><header data-metawork-window-drag><span id="title">title</span><button data-metawork-window-control="toggle_maximize"><svg><path/></svg></button><button id="disabled" disabled>disabled</button></header><main>content</main><aside id="overlay">overlay</aside></body></html>',
+    '<!doctype html><html><body><header data-native-window-drag><span id="title">title</span><button data-metawork-window-control="toggle_maximize"><svg><path/></svg></button><button id="disabled" disabled>disabled</button></header><main>content</main><aside id="overlay">overlay</aside></body></html>',
     { pretendToBeVisual: true },
   );
   const previous = Object.fromEntries(
@@ -89,8 +89,6 @@ function setup(t, options = {}) {
         return Promise.resolve().then(() => refreshReply());
       if (command === commands.windowChromeControl)
         return options.control?.promise ?? Promise.resolve(ack);
-      if (command === commands.windowChromeGesture)
-        return options.gesture?.promise ?? Promise.resolve(ack);
       if (command === commands.windowChromeDisconnect)
         return Promise.resolve({
           generation: payload.generation,
@@ -119,31 +117,6 @@ function setup(t, options = {}) {
   };
   const unbind =
     options.mount === false ? () => {} : bindWindowTitlebar(header);
-  const pointer = (target, extra = {}, type = "mousedown") => {
-    const path = [];
-    for (let node = target; node; node = node.parentNode ?? node.host)
-      path.push(node);
-    const event = {
-      isTrusted: true,
-      isPrimary: true,
-      button: 0,
-      detail: 1,
-      clientX: 200,
-      clientY: 20,
-      composedPath: () => path,
-      cancelled: false,
-      stopped: false,
-      preventDefault() {
-        this.cancelled = true;
-      },
-      stopImmediatePropagation() {
-        this.stopped = true;
-      },
-      ...extra,
-    };
-    if (path.includes(header)) handlers.get(type)?.(event);
-    return event;
-  };
   const count = (command) =>
     calls.filter((call) => call.command === command).length;
   t.after(async () => {
@@ -163,7 +136,6 @@ function setup(t, options = {}) {
     dispose,
     unbind,
     query,
-    pointer,
     count,
     refreshReply(value) {
       refreshReply = value;
@@ -183,7 +155,7 @@ test("shared Host wire fixture decodes strictly and action ack contains no state
     { ...environment, generation: "0" },
     { ...environment, insets: { ...environment.insets, top: -1 } },
     { ...environment, maximized: "false" },
-    { ...environment, gestureMode: "unknown" },
+    { ...environment, gestureMode: "browser_mouse" },
     { ...environment, livePointerDrag: true },
   ])
     assert.throws(() => decodeWindowChromeEnvironment(malformed));
@@ -194,111 +166,6 @@ test("shared Host wire fixture decodes strictly and action ack contains no state
     { ...ack, maximized: true },
   ])
     assert.throws(() => assertWindowChromeHandled(malformed, "7"));
-});
-
-test("Tauri Windows branch uses only exact detail 1/2, with no interruption history", async (t) => {
-  const h = setup(t);
-  await settle();
-  const title = h.query("#title");
-  for (const detail of [0, 1, 2, 3, 4]) {
-    const event = h.pointer(title, { detail });
-    assert.equal(event.cancelled, detail === 1 || detail === 2);
-    assert.equal(event.stopped, event.cancelled);
-  }
-  h.pointer(title, { detail: 1 });
-  h.pointer(h.query("#disabled"), { detail: 1 });
-  h.pointer(title, { detail: 2 });
-  h.pointer(title, { detail: 1 });
-  h.dom.window.dispatchEvent(new h.dom.window.Event("blur"));
-  h.pointer(title, { detail: 2 });
-  h.pointer(title, { detail: 1 });
-  h.pointer(h.query("#disabled"), { detail: 2 });
-  h.pointer(title, { detail: 3 });
-  assert.deepEqual(
-    h.calls
-      .filter((c) => c.command === commands.windowChromeGesture)
-      .map((c) => c.payload.action),
-    [
-      "start_drag",
-      "toggle_maximize",
-      "start_drag",
-      "toggle_maximize",
-      "start_drag",
-      "toggle_maximize",
-      "start_drag",
-    ],
-  );
-});
-
-test("native press mode calls only SDK drag, with primary gating and unchanged defaults", async (t) => {
-  const h = setup(t, {
-    environment: { gestureMode: "native_press", rendererControls: false },
-  });
-  await settle();
-  const title = h.query("#title");
-  h.pointer(title, { detail: 2 });
-  for (const detail of [0, 2]) {
-    const event = h.pointer(title, { detail }, "pointerdown");
-    assert.equal(event.cancelled, false);
-  }
-  h.pointer(title, { isPrimary: false }, "pointerdown");
-  h.pointer(h.query("#disabled"), {}, "pointerdown");
-  assert.deepEqual(
-    h.calls
-      .filter((c) => c.command === commands.windowChromeGesture)
-      .map((c) => c.payload.action),
-    ["start_drag", "start_drag"],
-  );
-});
-
-test("pending connect, disabled mode, late mount and cleanup never replay input", async (t) => {
-  const connect = deferred();
-  const h = setup(t, { connect, mount: false });
-  const title = h.query("#title"),
-    header = h.query("header");
-  const firstCleanup = bindWindowTitlebar(header);
-  assert.equal(h.pointer(title).cancelled, false);
-  connect.resolve({ ...environment, gestureMode: "disabled" });
-  h.refreshReply(() => ({ ...environment, gestureMode: "disabled" }));
-  await settle();
-  assert.equal(h.pointer(title).cancelled, false);
-  h.refreshReply(() => environment);
-  h.listeners.get("resize")({});
-  await settle();
-  const secondCleanup = bindWindowTitlebar(header);
-  firstCleanup(); // A stale ref cleanup must not unbind its replacement.
-  firstCleanup();
-  h.pointer(title);
-  assert.equal(h.count(commands.windowChromeGesture), 1);
-  secondCleanup();
-  h.pointer(title);
-  assert.equal(h.count(commands.windowChromeGesture), 1);
-  bindWindowTitlebar(header);
-  h.dispose();
-  h.pointer(title);
-  assert.equal(h.handlers.size, 0);
-  assert.equal(h.count(commands.windowChromeGesture), 1);
-});
-
-test("native local listener is absent from business events and respects stopped DOM propagation", async (t) => {
-  const h = setup(t);
-  await settle();
-  let visits = 0;
-  // Count delivery at the real header; no synthetic trusted-event override here.
-  h.query("header").addEventListener("mousedown", () => visits++);
-  h.query("main").dispatchEvent(
-    new h.dom.window.MouseEvent("mousedown", { bubbles: true }),
-  );
-  h.query("#overlay").dispatchEvent(
-    new h.dom.window.MouseEvent("mousedown", { bubbles: true }),
-  );
-  const title = h.query("#title");
-  title.addEventListener("mousedown", (e) => e.stopPropagation());
-  title.dispatchEvent(
-    new h.dom.window.MouseEvent("mousedown", { bubbles: true }),
-  );
-  assert.equal(visits, 0);
-  assert.equal(h.count(commands.windowChromeGesture), 0);
 });
 
 test("real WindowTitlebar ref survives StrictMode, view switches and portals, then unbinds on unmount", async (t) => {
@@ -353,28 +220,17 @@ test("real WindowTitlebar ref survives StrictMode, view switches and portals, th
       );
       const header = h.query("main header"),
         title = header.querySelector("span");
-      assert.equal(bound.get(header).size, 3);
+      assert.deepEqual([...bound.get(header).keys()], ["click"]);
+      assert.ok(header.hasAttribute("data-native-window-drag"));
       for (const [oldHeader, listeners] of bound)
         if (oldHeader !== header) assert.equal(listeners.size, 0);
-      bound.get(header).get("mousedown")({
-        isTrusted: true,
-        button: 0,
-        detail: 1,
-        clientX: 200,
-        clientY: 20,
-        composedPath: () => [
-          title,
-          header,
-          h.query("main"),
-          h.dom.window.document.body,
-        ],
-        preventDefault() {},
-        stopImmediatePropagation() {},
-      });
       h.query("#overlay button").click(); // React ancestry is not native DOM ancestry.
       assert.equal(h.count(commands.windowChromeControl), 0);
     }
-    assert.equal(h.count(commands.windowChromeGesture), 3);
+    assert.equal(
+      h.calls.some((c) => c.command.endsWith(".gesture")),
+      false,
+    );
     await act(async () => root.unmount());
     for (const listeners of bound.values()) assert.equal(listeners.size, 0);
   } finally {
@@ -383,67 +239,6 @@ test("real WindowTitlebar ref survives StrictMode, view switches and portals, th
     if (previousAct === undefined) delete globalThis.IS_REACT_ACT_ENVIRONMENT;
     else globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
   }
-});
-
-test("local input excludes controls, SVG, portals, inert and interactive ancestors without cancelling them", async (t) => {
-  const h = setup(t);
-  await settle();
-  h.pointer(h.query("#title"));
-  for (const selector of ["path", "#disabled", "main", "#overlay"])
-    assert.equal(h.pointer(h.query(selector)).cancelled, false);
-  const title = h.query("#title");
-  for (const attrs of [
-    { contenteditable: "" },
-    { role: "button" },
-    { tabindex: "-1" },
-    { "data-metawork-window-drag-exclude": "" },
-  ]) {
-    for (const [key, value] of Object.entries(attrs))
-      title.setAttribute(key, value);
-    h.pointer(title);
-    for (const key of Object.keys(attrs)) title.removeAttribute(key);
-  }
-  h.query("header").setAttribute("inert", "");
-  h.pointer(title);
-  h.query("header").removeAttribute("inert");
-  // A shadow descendant still excludes its button through the composed path.
-  const host = h.dom.window.document.createElement("span");
-  h.query("header").append(host);
-  const shadow = host.attachShadow({ mode: "open" });
-  shadow.innerHTML = "<button><span>shadow control</span></button>";
-  h.pointer(shadow.querySelector("span"));
-  h.pointer(title, { isTrusted: false });
-  h.pointer(title, { button: 2 });
-  await settle();
-  const pointers = h.calls.filter(
-    (c) => c.command === commands.windowChromeGesture,
-  );
-  assert.deepEqual(pointers[0].payload, {
-    generation: "7",
-    action: "start_drag",
-    x: 200,
-    y: 20,
-  });
-  assert.equal(pointers.length, 1);
-});
-
-test("DOM changes and pointer classification do not scan or measure the document", async (t) => {
-  const h = setup(t);
-  await settle();
-  const before = h.calls.length;
-  h.query("main").append(h.dom.window.document.createElement("button"));
-  await settle();
-  assert.equal(h.calls.length, before);
-  h.dom.window.document.querySelectorAll = () => {
-    throw new Error("document scan");
-  };
-  const title = h.query("#title");
-  title.getBoundingClientRect = () => {
-    throw new Error("layout read");
-  };
-  h.pointer(title);
-  await settle();
-  assert.equal(h.count(commands.windowChromeGesture), 1);
 });
 
 test("SDK resize coalesces in-flight refresh and rejects stale state without reconnecting", async (t) => {
@@ -504,21 +299,10 @@ test("refresh failure preserves controls and focus can refresh without reconnect
   await settle();
   assert.equal(h.maximized, "true");
   assert.equal(h.count(commands.windowChromeConnect), 1);
-  assert.equal(h.count(commands.windowChromeGesture), 0);
-});
-
-test("pending gesture ack does not queue a second gesture or replay failed input", async (t) => {
-  const pending = deferred();
-  const h = setup(t, { gesture: pending });
-  await settle();
-  h.pointer(h.query("#title"));
-  h.pointer(h.query("main"));
-  h.pointer(h.query("#title"), { detail: 2 });
-  assert.equal(h.count(commands.windowChromeGesture), 2);
-  pending.reject(new Error("rejected"));
-  await settle();
-  assert.equal(h.count(commands.windowChromeGesture), 2);
-  assert.equal(h.count(commands.windowChromeConnect), 1);
+  assert.equal(
+    h.calls.some((c) => c.command.endsWith(".gesture")),
+    false,
+  );
 });
 
 test("late connect after dispose only revokes its generation and cannot revive UI", async (t) => {

@@ -11,7 +11,9 @@ export const Menu = {
   }: ComponentProps<typeof BaseMenu.Trigger>) => (
     <BaseMenu.Trigger className={cn(focusRing, className)} {...props} />
   ),
-  Portal: BaseMenu.Portal,
+  Portal: (props: ComponentProps<typeof BaseMenu.Portal>) => (
+    <BaseMenu.Portal {...props} data-native-window-drag-exclude="" />
+  ),
   Positioner: ({
     className,
     ...props

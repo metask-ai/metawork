@@ -12,7 +12,9 @@ export const Tooltip = {
   }: ComponentProps<typeof BaseTooltip.Trigger>) => (
     <BaseTooltip.Trigger className={cn(focusRing, className)} {...props} />
   ),
-  Portal: BaseTooltip.Portal,
+  Portal: (props: ComponentProps<typeof BaseTooltip.Portal>) => (
+    <BaseTooltip.Portal {...props} data-native-window-drag-exclude="" />
+  ),
   Positioner: ({
     className,
     ...props

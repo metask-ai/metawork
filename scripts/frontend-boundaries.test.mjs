@@ -331,7 +331,7 @@ test("Settings is a full content overlay that preserves the Workbench mount", as
     assert.match(
       shell,
       new RegExp(
-        `className="${group}"[^>]*data-metawork-window-drag-exclude=\\{overlay \\? "" : undefined\\}[\\s\\S]*?className="commandbar-inert-content"[\\s\\S]*?inert=\\{overlay \\? true : undefined\\}`,
+        `className="${group}"[^>]*data-native-window-drag-exclude[\\s\\S]*?className="commandbar-inert-content"[\\s\\S]*?inert=\\{overlay \\? true : undefined\\}`,
       ),
     );
   }
@@ -483,7 +483,7 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
   assert.match(shell, /WindowTitlebar/);
   assert.match(rootFailure, /connection-failure-toolbar/);
   assert.match(rootFailure, /WindowTitlebar/);
-  assert.match(titlebar, /data-metawork-window-drag="deep"/);
+  assert.match(titlebar, /data-native-window-drag=""/);
   assert.match(titlebar, /ref=\{ref\}/);
   assert.match(shell, /<WindowTitlebar ref=\{bindWindowTitlebar\}/);
   assert.match(rootFailure, /<WindowTitlebar\s+ref=\{bindWindowTitlebar\}/);
@@ -494,6 +494,12 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
     /onPointerMove|setPointerCapture/,
   );
   assert.match(manifest, /\.titlebar = "hidden_inset_tall"/);
+  assert.match(manifest, /\.window_drag_regions = true/);
+  assert.match(controls, /data-native-window-drag-exclude=""/);
+  assert.match(
+    rootFailure,
+    /className="connection-failure-toolbar-actions"[\s\S]*?data-native-window-drag-exclude=""/,
+  );
   assert.doesNotMatch(css, /-webkit-app-region:/);
   assert.match(`${shell}\n${rootFailure}`, /WindowControls/);
   assert.doesNotMatch(`${shell}\n${rootFailure}`, /windowPlatform/);
@@ -519,21 +525,16 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
     /\.app-window\[data-resizing-left="true"\] \.workspace-resize-handle::after/,
     "captured pointer resizing must preserve the continuous divider feedback",
   );
-  assert.match(
-    chromeBridge,
-    /element\.addEventListener\("mousedown", onMouseDown\)/,
-  );
-  assert.match(
-    chromeBridge,
-    /element\.addEventListener\("pointerdown", onPointerDown\)/,
-  );
   assert.doesNotMatch(
     chromeBridge,
     /(?:document|window)\.addEventListener\("(?:pointerdown|mousedown|click|blur)"/,
   );
   assert.match(chromeBridge, /commands\.windowChromeConnect/);
   assert.match(chromeBridge, /commands\.windowChromeRefresh/);
-  assert.match(chromeBridge, /commands\.windowChromeGesture/);
+  assert.doesNotMatch(
+    chromeBridge,
+    /windowChromeGesture|mousedown|pointerdown/,
+  );
   assert.match(chromeBridge, /commands\.windowChromeControl/);
   assert.match(chromeBridge, /commands\.windowChromeDisconnect/);
   assert.match(chromeBridge, /decodeWindowChromeEnvironment/);
@@ -547,13 +548,6 @@ test("Renderer draws declarative titlebar controls while Bridge and Host own nat
     /window\.addEventListener\("focus", scheduleRefresh\)/,
   );
   assert.match(chromeBridge, /event\.composedPath\(\)/);
-  assert.match(chromeBridge, /entry\.matches\(exclusionSelector\)/);
-  assert.match(
-    chromeBridge,
-    /event\.isTrusted[\s\S]*event\.button !== 0[\s\S]*event\.isPrimary/,
-  );
-  assert.match(chromeBridge, /event\.detail !== 1 && event\.detail !== 2/);
-  assert.doesNotMatch(chromeBridge, /phase:|submitPointer|first_press/);
   assert.match(chromeBridge, /refreshInFlight/);
   assert.match(chromeBridge, /stateEpoch === requestEpoch/);
   assert.match(chromeBridge, /value\.generation === requestGeneration/);

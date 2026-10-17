@@ -11,7 +11,9 @@ export const AlertDialog = {
   }: ComponentProps<typeof BaseAlertDialog.Trigger>) => (
     <BaseAlertDialog.Trigger className={cn(focusRing, className)} {...props} />
   ),
-  Portal: BaseAlertDialog.Portal,
+  Portal: (props: ComponentProps<typeof BaseAlertDialog.Portal>) => (
+    <BaseAlertDialog.Portal {...props} data-native-window-drag-exclude="" />
+  ),
   Backdrop: ({
     className,
     ...props

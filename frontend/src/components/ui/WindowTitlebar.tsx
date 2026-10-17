@@ -10,7 +10,7 @@ export function WindowTitlebar({
   ref: Ref<HTMLElement>;
 }) {
   return (
-    <header ref={ref} className={className} data-metawork-window-drag="deep">
+    <header ref={ref} className={className} data-native-window-drag="">
       {children}
     </header>
   );

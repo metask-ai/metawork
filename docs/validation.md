@@ -188,9 +188,9 @@ Account 凭据操作的返回与恢复语义由 [Account 架构](account-archite
 | Windows arm64 GNU  | revision 15 bundle 与交叉链接已验证（`E-AGENTCORE-R15-20260907`）                        | ARM64 真机运行与安装                           |
 | Linux              | 尚未实现                                                                                 | 构建、运行、分发和平台验收均未开始             |
 
-System WebView window chrome 输入变更须覆盖真实控件、可编辑内容、弹层/portal、inert/no-drag 排除及两种 gesture 的 Host top-band/实时指针拒绝。Bridge 测试覆盖严格新 wire、旧命令拒绝、generation、刷新与动作 ACK fixture；Renderer 覆盖首次挂载、节点替换、StrictMode/重复清理、迟到 connect/refresh/卸载响应。Windows 按 [UI 合同](ui-design.md#43-一体化窗口栏) 的浏览器计数验收，不再要求任意插入事件中断或保留旧 Host 配对。真实 WebView2 OS 鼠标须覆盖首击 caption move loop 后第二击、默认/非默认双击时间、正负距离边界、三/四击、内容/相邻 normal/disabled/停止传播/取消 pointerdown 控件、失焦及原生边缘无尺寸变化的插入；记录实际 detail、局部命中、意图和执行结果，按当前合同判断。业务事件自身零手势 IPC、无取消及两种动作原生授权仍是硬要求。还须验证普通/最大化拖动恢复、真实 AccountGate/Workbench/动态 actions/弹层/窄窗/缩放。未解释的机制差异停止合入，不临时补状态或改断言。合成 DOM/上游源码不代替平台证据；新证据绑定 revision/diff/artifact、OS、SDK 和 WebView2，历史仅证明当时 artifact。
+System WebView window chrome 输入变更须覆盖真实控件、disabled/SVG、可编辑与可聚焦内容、弹层/portal、动态动作、改名表单、语言菜单及 inert 的可命中外层。Renderer 回归固定真实标题栏的 SDK 声明与显式排除，普通文字仍可拖动；Bridge 固定删除的 gesture command/旧环境 shape 拒绝、现有按钮权限与 generation，以及刷新/动作 ACK 的跨语言 fixture、StrictMode/节点替换与迟到响应清理。
 
-Windows 当前时间/距离边界由目标 WebView 浏览器计数决定，不复制旧 Host 闭区间，也不要求与隔离 native-child 原型逐像素等价。真实输入覆盖 x/y 正负方向的内点、边界、外点，记录系统指标与实际计数。系统 caption 对照可用于诊断，不能替代实际 System WebView 产品路径验收；历史原型与旧 Host 证据保持原意。
+Windows 原生路径必须以真实 OS 鼠标验收普通拖动、最大化拖动恢复、双击及系统非默认时间、超时与距离外点、控件不误拖及业务事件零 gesture IPC；输入可由 SDK 非客户区消费，不要求 WebView 分发浏览器按下或特定 detail 序列。SDK/OS 拥有原生时间、距离、序列与命中语义，不再按旧应用 JS 计数推导原生结果。真实 AccountGate/Workbench、弹层、窄窗、浏览器缩放、reload、hide/reopen、按钮真实状态、上沿 resize/绘制与 clean shutdown 分别验收。macOS 必须独立验收 SDK/AppKit 拖动、系统双击偏好、缩放、交互排除和生命周期。合成 DOM/源码检查不能代替平台证据；新证据绑定 revision/diff/artifact、OS、SDK 和 WebView，历史仅证明当时 artifact。未验证平台和环境明确保留，不以代码路径存在宣称通过。
 
 Windows 窗口控制生命周期变更须覆盖 SDK 公共窗口事实更新、执行前拒绝、错误与清理顺序、connect 失败和 refresh 恢复；真实桌面矩阵覆盖普通/最大化关闭与 Alt+F4、最大化后最小化并从任务栏恢复、隐藏后既有 Bridge 请求、托盘重开、关闭与 toggle 交错及 reload。真实键鼠、直接 Bridge 请求与 SDK 托盘 automation 分别记录，不互相冒充；恢复后的按钮可操作性与实际图标须一并验证。以有界状态条件观察结果，不把固定等待或关闭 ACK 当作隐藏完成屏障；探针只能被动取得当前 generation，不额外 connect 改变待测会话。测试脏工作树时须绑定 diff 与 artifact，提交后的相同证据须核对源码一致性。
 

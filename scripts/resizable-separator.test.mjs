@@ -80,7 +80,7 @@ test("Task stage exposure excludes every full-covering surface", () => {
   );
 });
 
-function renderTaskPanelShell(viewportWidth) {
+function renderTaskPanelShell(viewportWidth, overrides = {}) {
   Object.defineProperty(dom.window, "innerWidth", {
     configurable: true,
     value: viewportWidth,
@@ -106,6 +106,7 @@ function renderTaskPanelShell(viewportWidth) {
           rightPanel: createElement("p", null, "Task details"),
           rightPanelOpen: open,
           onDismissRightPanel() {},
+          ...overrides,
         },
         createElement("p", null, "Task stage"),
       ),
@@ -459,4 +460,44 @@ test("a closed Task Panel preserves its target placement for exit motion", () =>
   resizeViewport(1039);
   assert.equal(root?.getAttribute("data-right-panel-docked"), "false");
   assert.equal(root?.style.getPropertyValue("--right-panel-width"), "400px");
+});
+
+test("native titlebar declarations exclude controls and the hittable inert outer groups", () => {
+  const audit = () => {
+    const header = document.querySelector("header[data-native-window-drag]");
+    assert.ok(header);
+    for (const element of header.querySelectorAll(
+      'button,input,select,textarea,label,details,summary,a,[tabindex],[contenteditable],[inert],[role="button"]',
+    ))
+      assert.ok(
+        element.closest("[data-native-window-drag-exclude]"),
+        element.outerHTML,
+      );
+    return header;
+  };
+  renderTaskPanelShell(1200, {
+    headerActions: createElement("button", null, "Dynamic task action"),
+    attentionNotice: "Connection failed",
+  });
+  const header = audit();
+  assert.equal(
+    header
+      .querySelector(".commandbar-task")
+      .closest("[data-native-window-drag-exclude]"),
+    null,
+    "ordinary title text must remain draggable",
+  );
+  cleanup();
+  renderTaskPanelShell(390, {
+    overlayOpen: true,
+    attentionNotice: "Connection failed",
+  });
+  audit();
+  for (const element of document.querySelectorAll("header [inert]")) {
+    const outer = element.parentElement;
+    assert.ok(
+      !outer.inert && outer.hasAttribute("data-native-window-drag-exclude"),
+      "inert hit-test retargeting must land on an excluded outer element",
+    );
+  }
 });
