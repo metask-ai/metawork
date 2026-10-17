@@ -1399,6 +1399,12 @@ export const enUS = {
     "This conversation can no longer be restored from the current saved state.",
   "mutation.reason.queued_input_present":
     "Edit or withdraw the queued message first.",
+  "mutation.reason.persistence_unavailable":
+    "Model selection cannot be saved. Recover task history first.",
+  "mutation.reason.persistence_failed":
+    "Model selection was not saved. The previous selection is unchanged.",
+  "mutation.reason.persistence_outcome_unknown":
+    "The model selection save is unconfirmed. Recover task history before sending.",
   "mutation.reason.task_busy": "This task is already working.",
   "mutation.reason.no_history": "Run this task once before compacting context.",
   "mutation.reason.catalog_loading":

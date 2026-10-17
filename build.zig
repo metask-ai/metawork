@@ -232,6 +232,15 @@ pub fn build(b: *std.Build) void {
         .root_module = test_modules.bridge,
         .filters = &.{"complete model metadata"},
     })).step);
+    const task_model_step = b.step("test-task-model-selection", "Run Task model intent, selection and strict Bridge tests");
+    task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = test_modules.product_control_runtime,
+        .filters = &.{ "Task model", "default replacement preserves", "same-source default model", "snapshot serializer" },
+    })).step);
+    task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = test_modules.bridge,
+        .filters = &.{ "Task model", "Dispatcher validates authority", "mutation response encoders" },
+    })).step);
     const permission_review_tests = b.addTest(.{
         .name = "metawork-product-permission-review-focused",
         .root_module = test_modules.product_permission_review,

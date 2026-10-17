@@ -256,7 +256,7 @@ test("Task model selection carries source-qualified authority", async () => {
       return {
         accepted: true,
         taskId: "11",
-        model: "model-2",
+        selectionRevision: "18",
         reason: null,
       };
     }),
@@ -265,21 +265,19 @@ test("Task model selection carries source-qualified authority", async () => {
   assert.deepEqual(
     await client.selectTaskModel(
       "11",
-      "model-1",
       "17",
       { sourceId: "metask", modelId: "model-2" },
       "19",
       "23",
     ),
-    { accepted: true, taskId: "11", model: "model-2", reason: null },
+    { accepted: true, taskId: "11", selectionRevision: "18", reason: null },
   );
   assert.deepEqual(calls, [
     {
       command: "metawork.tasks.selectModel",
       payload: {
         taskId: "11",
-        expectedModel: "model-1",
-        expectedExecutionGeneration: "17",
+        expectedSelectionRevision: "17",
         targetModelRef: {
           sourceId: "metask",
           modelId: "model-2",

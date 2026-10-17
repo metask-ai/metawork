@@ -1548,14 +1548,12 @@ fn installTwoModelCatalog(workbench: *product_control.Runtime) void {
 
 fn taskModelSelectionInput(
     workbench: *product_control.Runtime,
-    expected_model: []const u8,
-    expected_execution_generation: u64,
+    expected_revision: u64,
     target_model: []const u8,
 ) product_control.TaskModelSelectionInput {
     const models = workbench.modelsView();
     return .{
-        .expected_model = expected_model,
-        .expected_execution_generation = expected_execution_generation,
+        .expected_selection_revision = expected_revision,
         .target = .{
             .source_id = models.metask_selection.?.source_id,
             .model_id = target_model,
@@ -4784,7 +4782,78 @@ test "Manual Task persistence failure keeps Product Task usable in memory" {
     ) != null);
 }
 
-test "Idle Task model persistence failure keeps the selected model and Session usable" {
+test "Task model selection during a Run persists intent and queued admission uses the latest model" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 3,
+        .max_tools_per_run = 1,
+    }, productControlConfiguration());
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    installTwoModelCatalog(&workbench);
+    const id = try workbench.createTask(productControlTaskInput());
+    const task = workbench.task_runtime.find(id).?;
+    const epoch = task.durable.binding_epoch;
+    const profile = task.durable.permission_profile;
+    fake_core.setSessionPlan(.controlled);
+    var released = false;
+    defer if (!released) fake_core.releaseControlled();
+    const first = try workbench.runTask(id, .{ .text = "first frozen model" });
+    try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+    try std.testing.expectEqual(@as(u64, 2), try workbench.selectTaskModel(id, taskModelSelectionInput(&workbench, 1, "fixture-model-2")));
+    try std.testing.expectError(error.TaskModelMismatch, workbench.selectTaskModel(id, taskModelSelectionInput(&workbench, 1, "fixture-model")));
+    try expectFakeSessionModel(0, "fixture-model");
+    try std.testing.expectEqualStrings("fixture-model", task.durable.runs[0].?.execution_model);
+    const queued = try workbench.queueInput("next-model-run", id, epoch, first, .{ .text = "queued latest intent" });
+    try std.testing.expect(queued.outcome == .queued);
+    fake_core.releaseControlled();
+    released = true;
+    var completed = false;
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        workbench.syncLifecycle();
+        if (task.durable.runs[1]) |*run| if (task_state.terminalPayload(run) != null) {
+            completed = true;
+            break;
+        };
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(completed);
+    try std.testing.expect(task.queued_input == null);
+    try std.testing.expectEqualStrings("fixture-model", task.durable.runs[0].?.execution_model);
+    try std.testing.expectEqualStrings("fixture-model-2", task.durable.runs[1].?.execution_model);
+    try std.testing.expectEqualStrings("fixture-model-2", (try workbench.task_runtime.testExecutionInput(id)).target.model);
+    try expectFakeSessionModel(0, "fixture-model-2");
+    try std.testing.expectEqual(epoch, task.durable.binding_epoch);
+    try std.testing.expectEqual(profile, task.durable.permission_profile);
+    _ = try product_control.TestSupport.retryTaskSessionClose(&workbench, id);
+    var detached = false;
+    for (0..10_000) |_| {
+        try workbench.drainAgentEvents();
+        workbench.syncLifecycle();
+        if (task.runtime.attachment == .detached) {
+            detached = true;
+            break;
+        }
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(detached);
+    try std.testing.expectEqual(@as(u64, 3), try workbench.selectTaskModel(id, taskModelSelectionInput(&workbench, 2, "fixture-model")));
+    try std.testing.expectEqualStrings("fixture-model-2", task.durable.execution_model);
+    try std.testing.expectEqualStrings("fixture-model", task.durable.model_intent.?.model_id);
+    try std.testing.expect(task.runtime.attachment == .detached);
+}
+
+test "Task model selection save failure preserves installed execution and unknown blocks new admission" {
     fake_core.reset();
     const runtime = try createTestComposition(.{
         .worker_count = 1,
@@ -4822,22 +4891,17 @@ test "Idle Task model persistence failure keeps the selected model and Session u
         try installControlExecution(&workbench);
         installTwoModelCatalog(&workbench);
         const task_id = try workbench.createTask(productControlTaskInput());
-        const before = try workbench.taskExecutionIdentity(task_id);
         const projection_before = workbench.projectionBytesForTest();
         try expectFakeSessionModel(0, "fixture-model");
         persistence.result = .failed;
-        try workbench.selectTaskModel(
+        try std.testing.expectError(error.TaskPersistenceFailed, workbench.selectTaskModel(
             task_id,
-            taskModelSelectionInput(
-                &workbench,
-                before.model,
-                before.generation,
-                "fixture-model-2",
-            ),
-        );
+            taskModelSelectionInput(&workbench, 1, "fixture-model-2"),
+        ));
         const after = try workbench.taskExecutionIdentity(task_id);
-        try std.testing.expectEqualStrings("fixture-model-2", after.model);
-        try expectFakeSessionModel(0, "fixture-model-2");
+        try std.testing.expectEqualStrings("fixture-model", after.model);
+        try expectFakeSessionModel(0, "fixture-model");
+        try std.testing.expectEqualStrings("fixture-model", workbench.task_runtime.findConst(task_id).?.durable.model_intent.?.model_id);
         try std.testing.expect(workbench.projectionBytesForTest() >= projection_before);
     }
 
@@ -4863,22 +4927,18 @@ test "Idle Task model persistence failure keeps the selected model and Session u
         try installControlExecution(&workbench);
         installTwoModelCatalog(&workbench);
         const task_id = try workbench.createTask(productControlTaskInput());
-        const before = try workbench.taskExecutionIdentity(task_id);
         const projection_before = workbench.projectionBytesForTest();
         persistence.result = .outcome_unknown;
-        try workbench.selectTaskModel(
+        try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, workbench.selectTaskModel(
             task_id,
-            taskModelSelectionInput(
-                &workbench,
-                before.model,
-                before.generation,
-                "fixture-model-2",
-            ),
-        );
+            taskModelSelectionInput(&workbench, 1, "fixture-model-2"),
+        ));
         const after = try workbench.taskExecutionIdentity(task_id);
-        try std.testing.expectEqualStrings("fixture-model-2", after.model);
-        try expectFakeSessionModel(0, "fixture-model-2");
+        try std.testing.expectEqualStrings("fixture-model", after.model);
+        try expectFakeSessionModel(0, "fixture-model");
+        try std.testing.expectEqualStrings("fixture-model-2", workbench.task_runtime.findConst(task_id).?.durable.model_intent.?.model_id);
         try std.testing.expect(workbench.projectionBytesForTest() >= projection_before);
+        try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, workbench.runTask(task_id, .{ .text = "must wait for canonical history" }));
     }
 }
 

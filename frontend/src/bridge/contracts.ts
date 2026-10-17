@@ -938,6 +938,7 @@ export type TaskView = {
   modelIntent: {
     modelRef: ModelRef;
     selectionRevision: string;
+    state: "committed" | "outcome_unknown";
   } | null;
   modelSelectionAvailability: TaskModelSelectionAvailability;
   mcpAuthority: TaskMcpAuthority;
@@ -1544,6 +1545,9 @@ export type TaskApprovalModeResult =
     };
 
 export type TaskModelSelectionReason =
+  | "persistence_unavailable"
+  | "persistence_failed"
+  | "persistence_outcome_unknown"
   | "model_changed"
   | "stale_catalog"
   | "task_unavailable"
@@ -1555,13 +1559,13 @@ export type TaskModelSelectionResult =
   | {
       accepted: true;
       taskId: string;
-      model: string;
+      selectionRevision: string;
       reason: null;
     }
   | {
       accepted: false;
       taskId: string;
-      model: null;
+      selectionRevision: null;
       reason: TaskModelSelectionReason;
     };
 

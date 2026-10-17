@@ -1137,6 +1137,7 @@ test("Task model intent is a source-qualified durable fact independent of instal
   snapshot.tasks[0].modelIntent = {
     modelRef: { sourceId: "another-provider", modelId: "next-model" },
     selectionRevision: "9",
+    state: "committed",
   };
   assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
   assert.notEqual(
@@ -1152,6 +1153,7 @@ test("Task model intent rejects missing or extended wire shapes and invalid revi
   const valid = {
     modelRef: { sourceId: "provider", modelId: "model" },
     selectionRevision: "1",
+    state: "committed",
   };
   const missing = clone(fixture);
   delete missing.tasks[0].modelIntent;

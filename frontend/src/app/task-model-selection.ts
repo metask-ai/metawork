@@ -9,6 +9,8 @@ export type TaskModelSelectionPolicy = {
 export function taskModelSelectionPolicy(
   task: TaskView | null,
 ): TaskModelSelectionPolicy {
+  if (task?.modelIntent?.state === "outcome_unknown")
+    return { showsSelector: true, selectable: false, pending: true };
   switch (task?.modelSelectionAvailability) {
     case "available":
       return { showsSelector: true, selectable: true, pending: false };

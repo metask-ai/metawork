@@ -287,8 +287,7 @@ pub const TaskRunInput = union(enum) {
 };
 
 pub const TaskModelSelectionInput = struct {
-    expected_model: []const u8,
-    expected_execution_generation: u64,
+    expected_selection_revision: u64,
     target: models_contract.ModelRef,
     expected_source_generation: u64,
     expected_catalog_generation: u64,
@@ -1141,6 +1140,7 @@ pub const Runtime = struct {
     // exact candidate until an explicit readback decides the canonical record.
     approval_history_dirty: bool = false,
     approval_history_unknown: ?[]u8 = null,
+    pending_model_intent: ?task_runtime.PreparedModelIntent = null,
     /// Bounded diagnostic count of canonical Agent events that arrived after
     /// their Run's terminal drain was finalized. Runtime-only evidence for
     /// the Stop-barrier investigation; never persisted or published.
@@ -3836,6 +3836,7 @@ pub const Runtime = struct {
             .protocol = execution_input.target.protocol,
             .model = execution_input.target.model,
             .model_ref = if (model_selection) |selection| selection.target else self.execution_state.activeModelRef(),
+            .source_generation = if (model_selection) |selection| selection.expected_source_generation else self.execution_state.activeSourceGeneration(),
             .permission_profile = permission_profile,
             .permission_review_delegated = switch (permission) {
                 .interactive => |mode| (mode orelse self.default_approval_mode) == .auto_review,
@@ -3959,6 +3960,10 @@ pub const Runtime = struct {
         );
         const binding_epoch = self.task_runtime.taskBindingEpoch(task.id()) orelse
             unreachable;
+        var model_target = try self.resolveTaskRunModel(task.id());
+        defer if (model_target) |*target| target.deinit();
+        var run_effects = self.taskRuntimeOperationEffects();
+        run_effects.model_target = if (model_target) |*target| target.input() else null;
         var run = try self.task_runtime.startRun(
             task.id(),
             binding_epoch,
@@ -3970,7 +3975,7 @@ pub const Runtime = struct {
                 .apply_fn = ignoreTaskWorkspaceOrder,
                 .rollback_fn = ignoreTaskWorkspaceOrder,
             },
-            self.taskRuntimeOperationEffects(),
+            run_effects,
         );
         errdefer run.rollback();
         task_live = false;
@@ -3992,6 +3997,7 @@ pub const Runtime = struct {
         expected_binding_epoch: u64,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
         if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input) |queued| if (queued.state == .waiting) return error.QueuedInputPresent;
         self.syncLifecycle();
         const facts = try self.task_runtime.recoveryStartFacts(
@@ -4018,6 +4024,7 @@ pub const Runtime = struct {
                 .automatic => .automatic,
             },
             .execution = execution,
+            .source_generation = self.execution_state.activeSourceGeneration(),
             .agent_runtime = self.agent_runtime,
             .checkpoint_store = self.checkpoint_store,
             .checkpoint_limits = checkpoint_export_limits,
@@ -4155,6 +4162,10 @@ pub const Runtime = struct {
                         .history => |result| switch (result) {
                             .committed, .failed => {
                                 if (resolve_only) {
+                                    if (self.pending_model_intent) |*intent| {
+                                        if (result == .committed) intent.complete() else intent.rollback();
+                                        self.pending_model_intent = null;
+                                    }
                                     self.allocator.free(self.approval_history_unknown.?);
                                     self.approval_history_unknown = null;
                                     self.approval_history_dirty = true;
@@ -4412,58 +4423,66 @@ pub const Runtime = struct {
         return self.task_runtime.testLateTerminalEventCount();
     }
 
-    /// Selects the model for one Task. Credentials and their execution
-    /// generation remain pinned; only the Task model binding changes. A
-    /// request received during a Run is kept in runtime-only pending state
-    /// and applied before the next Run.
+    /// Commits only the next-Run intent. Installed execution and the active
+    /// Run retain their own authority until a later execution admission.
     pub fn selectTaskModel(
         self: *Runtime,
         task_id: u64,
         input: TaskModelSelectionInput,
-    ) Error!void {
+    ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         self.syncLifecycle();
-        const identity = self.task_runtime.taskExecutionIdentity(task_id) orelse
-            return error.UnknownTask;
-        if (input.expected_model.len == 0 or input.target.source_id.len == 0 or
+        if (input.target.source_id.len == 0 or
             input.target.model_id.len == 0 or
-            input.expected_model.len > models_contract.Limits.model_id_bytes or
             input.target.source_id.len > models_contract.Limits.provider_id_bytes or
             input.target.model_id.len > models_contract.Limits.model_id_bytes or
-            input.expected_execution_generation == 0 or
             input.expected_source_generation == 0 or
             input.expected_catalog_generation == 0 or
-            !std.unicode.utf8ValidateSlice(input.expected_model) or
             !std.unicode.utf8ValidateSlice(input.target.source_id) or
-            !std.unicode.utf8ValidateSlice(input.target.model_id))
+            !std.unicode.utf8ValidateSlice(input.target.model_id) or
+            self.containsKnownCredential(input.target.source_id) or
+            self.containsKnownCredential(input.target.model_id))
             return error.InvalidTaskModel;
-        if (!std.mem.eql(u8, input.expected_model, identity.model) or
-            input.expected_execution_generation != identity.generation)
-            return error.TaskModelMismatch;
-        if (!self.taskModelSelectionAuthorized(
-            .{ .generation = identity.generation, .protocol = identity.protocol },
-            input.target,
-            input.expected_source_generation,
-            input.expected_catalog_generation,
-        ))
+        if (!self.newTaskModelSelectionAuthorized(.{
+            .target = input.target,
+            .expected_source_generation = input.expected_source_generation,
+            .expected_catalog_generation = input.expected_catalog_generation,
+        }))
             return error.StaleCatalog;
-        _ = self.task_runtime.selectModel(
-            task_id,
-            input.expected_model,
-            input.target.model_id,
-            &self.checkpoint_store_health,
-            self.taskRuntimeTextProjection(),
-            models_contract.Limits.model_id_bytes,
-        ) catch |err| {
-            if (err == error.TaskClosing)
-                _ = self.task_runtime.beginDetach(
-                    task_id,
-                    self.taskRuntimeOperationEffects(),
-                ) catch {};
-            return err;
-        };
-        self.commitTaskStateNoFail();
+        if (self.approvalHistoryBlocked() or self.task_runtime.approvalHistoryWorkerActive()) return error.TaskBusy;
+        for (self.task_runtime.tasks) |entry| if (entry) |task| if (task.approval_change != null) return error.TaskBusy;
+        var prepared = try self.task_runtime.prepareModelIntent(task_id, input.expected_selection_revision, input.target);
+        defer if (prepared.active) prepared.rollback();
+        const revision = prepared.task.durable.model_intent.?.revision;
+        if (self.task_persistence.enabled or self.task_persistence.restore_failed) {
+            switch (self.task_persistence_health) {
+                .ready, .degraded, .write_failed => {},
+                else => return error.TaskPersistenceUnavailable,
+            }
+            const bytes = try self.encodeTaskHistoryCandidate(null);
+            var bytes_owned = true;
+            defer if (bytes_owned) self.allocator.free(bytes);
+            switch (self.task_persistence.commitConfirmed(bytes)) {
+                .committed => self.task_persistence_health = .ready,
+                .failed => {
+                    self.markTaskPersistenceWriteFailed();
+                    return error.TaskPersistenceFailed;
+                },
+                .outcome_unknown => {
+                    self.approval_history_unknown = bytes;
+                    bytes_owned = false;
+                    self.pending_model_intent = prepared;
+                    prepared.active = false;
+                    self.approval_history_dirty = true;
+                    self.task_persistence_health = .outcome_unknown;
+                    self.bumpRevision();
+                    return error.TaskPersistenceOutcomeUnknown;
+                },
+            }
+        }
+        prepared.complete();
         self.bumpRevision();
+        return revision;
     }
 
     pub fn writeQueuedInputValue(self: *const Runtime, writer: *std.Io.Writer, result: QueuedInputResult) Error!void {
@@ -4519,6 +4538,7 @@ pub const Runtime = struct {
         defer self.dispatching_queued_input = false;
         for (self.task_runtime.tasks) |entry| {
             const task = entry orelse continue;
+            if (task.model_intent_prepared) continue;
             const completed = self.task_runtime.queuedInputCompletion(task.durable.id) orelse continue;
             const reason: ?task_runtime.QueuedInputReason = if (!completed) .run_not_completed else if (self.schedule.hasPendingSubmittedOccurrence(task.durable.id)) .schedule_completion_unconfirmed else null;
             if (reason) |held_reason| {
@@ -4650,6 +4670,9 @@ pub const Runtime = struct {
             .preparation = &order_preparation,
         };
         var operation_effects = self.taskRuntimeOperationEffects();
+        var model_target = try self.resolveTaskRunModel(task_id);
+        defer if (model_target) |*target| target.deinit();
+        operation_effects.model_target = if (model_target) |*target| target.input() else null;
         var queue_acceptance = QueuedRunAcceptanceContext{ .runtime = &self.task_runtime, .task_id = task_id, .revision = queued_revision orelse 0, .release = operation_effects.release };
         if (queued_revision != null) operation_effects.run_acceptance = .{ .context = &queue_acceptance, .accept_fn = consumeQueuedInput, .irreversible = true };
         if (attachment_borrow != null) {
@@ -6446,6 +6469,8 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.shutdownExecutor();
+        if (self.pending_model_intent) |*intent| intent.rollback();
+        self.pending_model_intent = null;
         self.task_runtime.deinitTasks(self.taskRuntimeReleaseEffects());
         self.task_runtime.deinitStorage();
         if (self.approval_history_unknown) |bytes| self.allocator.free(bytes);
@@ -6756,37 +6781,50 @@ pub const Runtime = struct {
         };
     }
 
-    fn taskModelSelectionAvailability(
-        self: *Runtime,
-        query: task_runtime.ProjectionAuthorityQuery,
-    ) product_task.ModelSelectionAvailability {
-        if (!query.runtime_attached) return .runtime_detached;
+    fn taskModelSelectionAvailability(self: *Runtime, _: task_runtime.ProjectionAuthorityQuery) product_task.ModelSelectionAvailability {
         if (self.shutting_down) return .authority_changed;
-        if (self.execution_state.replacementPending()) return .execution_replacing;
-        if (!self.execution_state.ready() or
-            query.execution_generation != self.execution_state.generation() or
-            self.execution_state.protocol() == null or
-            query.execution_protocol != self.execution_state.protocol().?)
-            return .authority_changed;
-        if (self.execution_state.activeSource() != .metask)
-            return if (self.execution_state.activeSource() == .custom_provider)
-                .unsupported_source
-            else
-                .authority_changed;
-        if (!self.metaskBindingCurrent()) return .authority_changed;
-
         const models = self.modelsView();
-        const provider = for (models.providers) |candidate| {
-            if (std.mem.eql(u8, candidate.id, "metask")) break candidate;
-        } else return .catalog_unavailable;
-        return switch (provider.catalog_state) {
-            .loading, .choosing => .catalog_loading,
-            .ready => if (provider.catalog_generation != 0 and provider.models.len != 0)
-                .available
-            else
-                .catalog_unavailable,
-            .needs_authentication, .failed, .unavailable => .catalog_unavailable,
+        if (models.availability != .ready) return .catalog_unavailable;
+        for (models.custom_providers) |provider| {
+            if (provider.enabled and provider.credential_status == .ready)
+                for (provider.models) |model| {
+                    if (model.ready) return .available;
+                };
+        }
+        var loading = false;
+        for (models.providers) |provider| switch (provider.catalog_state) {
+            .ready => {
+                if (provider.models.len != 0) return .available;
+            },
+            .loading, .choosing => loading = true,
+            else => {},
         };
+        return if (loading) .catalog_loading else .catalog_unavailable;
+    }
+
+    fn resolveTaskRunModel(self: *Runtime, task_id: u64) Error!?models_contract.OwnedSourceCandidate {
+        const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
+        if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
+        const intent = task.durable.model_intent orelse return null;
+        if (task.runtime.executionConst()) |installed|
+            if (installed.model_intent_revision == intent.revision) return null;
+        const models = self.modelsView();
+        var source_generation: u64 = 0;
+        var catalog_generation: u64 = 0;
+        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id)) {
+            source_generation = provider.source_generation;
+            catalog_generation = provider.catalog_generation;
+            break;
+        };
+        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id)) {
+            source_generation = provider.source_generation;
+            catalog_generation = provider.catalog_generation;
+            break;
+        };
+        return (self.custom_providers.resolveModel(intent.modelRef(), source_generation, catalog_generation) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.ExecutionUnavailable,
+        }) orelse return error.ExecutionUnavailable;
     }
 
     fn writeTaskCatalogProjection(
@@ -6953,24 +6991,6 @@ pub const Runtime = struct {
     fn metaskBindingCurrent(self: *const Runtime) bool {
         return self.execution_state.activeSource() == .metask and
             self.modelsDefaultCurrent();
-    }
-
-    fn taskModelSelectionAuthorized(
-        self: *const Runtime,
-        identity: execution_state.ExecutionIdentity,
-        target: models_contract.ModelRef,
-        expected_source_generation: u64,
-        expected_catalog_generation: u64,
-    ) bool {
-        return self.execution_state.taskModelSelectionBaseAuthorized(identity) and
-            self.metaskBindingCurrent() and
-            self.execution_state.metaskSourceGeneration() == expected_source_generation and
-            self.custom_providers.metaskSourceModelAvailable(
-                target,
-                expected_source_generation,
-                expected_catalog_generation,
-                identity.protocol,
-            );
     }
 
     fn scheduleExecutionBinding(self: *const Runtime) product_schedule.ExecutionBinding {
@@ -10155,14 +10175,12 @@ test "non-Skill executor completion wakes queued source recovery without a Skill
 
 fn testTaskModelSelectionInput(
     control: *Runtime,
-    expected_model: []const u8,
-    expected_execution_generation: u64,
+    expected_revision: u64,
     target_model: []const u8,
 ) TaskModelSelectionInput {
     const models = control.modelsView();
     return .{
-        .expected_model = expected_model,
-        .expected_execution_generation = expected_execution_generation,
+        .expected_selection_revision = expected_revision,
         .target = .{
             .source_id = models.metask_selection.?.source_id,
             .model_id = target_model,
@@ -14105,20 +14123,9 @@ test "default replacement preserves Task generation and installs the next admiss
     try std.testing.expectEqual(@as(u64, 2), control.execution_state.generation());
     try std.testing.expectEqualStrings("fixture-model-2", control.execution_state.model());
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expectError(
-        error.StaleCatalog,
-        control.selectTaskModel(
-            task.durable.id,
-            testTaskModelSelectionInput(
-                &control,
-                "fixture-model",
-                task.durable.execution_generation,
-                "fixture-model-2",
-            ),
-        ),
-    );
+    _ = try control.selectTaskModel(task.durable.id, testTaskModelSelectionInput(&control, 0, "fixture-model-2"));
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expect(task.runtime.pending_model == null);
+    try std.testing.expect(task.durable.model_intent != null);
     try std.testing.expect(std.mem.indexOf(u8, task.durable.title, "metawork") == null);
     var scrubbed_snapshot_storage: [96 * 1024]u8 = undefined;
     const scrubbed_snapshot = try control.writeSnapshot(&scrubbed_snapshot_storage);
@@ -14166,7 +14173,7 @@ test "default replacement preserves Task generation and installs the next admiss
     task.durable.execution_generation = 1;
 }
 
-test "busy Task model selection keeps only the last runtime pending model" {
+test "busy Task model selection commits the last intent without changing installed execution" {
     var control = try testRuntime();
     defer control.deinit();
 
@@ -14180,8 +14187,7 @@ test "busy Task model selection keeps only the last runtime pending model" {
     const binding_epoch = task.durable.binding_epoch;
     var cross_source = testTaskModelSelectionInput(
         &control,
-        "fixture-model",
-        task.durable.execution_generation,
+        0,
         "fixture-model-2",
     );
     cross_source.target.source_id = "provider-1";
@@ -14189,30 +14195,28 @@ test "busy Task model selection keeps only the last runtime pending model" {
         error.StaleCatalog,
         control.selectTaskModel(task.durable.id, cross_source),
     );
-    try control.selectTaskModel(
+    _ = try control.selectTaskModel(
         task.durable.id,
         testTaskModelSelectionInput(
             &control,
-            "fixture-model",
-            task.durable.execution_generation,
+            0,
             "fixture-model-2",
         ),
     );
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expectEqualStrings("fixture-model-2", task.runtime.pending_model.?);
+    try std.testing.expectEqualStrings("fixture-model-2", task.durable.model_intent.?.model_id);
     try std.testing.expectEqual(binding_epoch, task.durable.binding_epoch);
     try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
 
-    try control.selectTaskModel(
+    _ = try control.selectTaskModel(
         task.durable.id,
         testTaskModelSelectionInput(
             &control,
-            "fixture-model",
-            task.durable.execution_generation,
+            1,
             "fixture-model-3",
         ),
     );
-    try std.testing.expectEqualStrings("fixture-model-3", task.runtime.pending_model.?);
+    try std.testing.expectEqualStrings("fixture-model-3", task.durable.model_intent.?.model_id);
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
     try std.testing.expectError(
         error.TaskModelMismatch,
@@ -14220,8 +14224,7 @@ test "busy Task model selection keeps only the last runtime pending model" {
             task.durable.id,
             testTaskModelSelectionInput(
                 &control,
-                "fixture-model-2",
-                task.durable.execution_generation,
+                0,
                 "fixture-model",
             ),
         ),
@@ -14283,18 +14286,11 @@ test "same-source default model change preserves execution generation and advanc
     );
     const task = &control.task_runtime.tasks[0].?;
     try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
-    try std.testing.expect(control.taskModelSelectionAuthorized(
-        .{
-            .generation = task.durable.execution_generation,
-            .protocol = task.durable.execution_protocol,
-        },
-        .{
-            .source_id = after.active_model_ref.?.source_id,
-            .model_id = "fixture-model-2",
-        },
-        provider.source_generation,
-        provider.catalog_generation,
-    ));
+    try std.testing.expect(control.newTaskModelSelectionAuthorized(.{
+        .target = .{ .source_id = after.active_model_ref.?.source_id, .model_id = "fixture-model-2" },
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    }));
 
     try models_aggregate.TestSupport.installMetaskDefault(
         &control.custom_providers,
@@ -14355,22 +14351,24 @@ test "Product Control publishes Task model selection availability from cross-own
         control.taskModelSelectionAvailability(query),
     );
 
+    const ready_models = [_]models_contract.ModelView{.{ .id = "fixture-model", .display_name = "Fixture model" }};
+    try TestSupport.replaceMetaskCatalog(&control, &ready_models, "fixture-model");
     try control.beginDefaultExecutionReplacement();
     try std.testing.expectEqual(
-        product_task.ModelSelectionAvailability.execution_replacing,
+        product_task.ModelSelectionAvailability.available,
         control.taskModelSelectionAvailability(query),
     );
     control.endExecutionReplacementNoFail();
 
     query.runtime_attached = false;
     try std.testing.expectEqual(
-        product_task.ModelSelectionAvailability.runtime_detached,
+        product_task.ModelSelectionAvailability.available,
         control.taskModelSelectionAvailability(query),
     );
     query.runtime_attached = true;
     query.execution_generation += 1;
     try std.testing.expectEqual(
-        product_task.ModelSelectionAvailability.authority_changed,
+        product_task.ModelSelectionAvailability.available,
         control.taskModelSelectionAvailability(query),
     );
     query.execution_generation -= 1;
@@ -14385,45 +14383,93 @@ test "Product Control publishes Task model selection availability from cross-own
         &binding,
     );
     try std.testing.expectEqual(
-        product_task.ModelSelectionAvailability.unsupported_source,
+        product_task.ModelSelectionAvailability.available,
         control.taskModelSelectionAvailability(query),
     );
 }
 
-test "user Custom Provider cannot consume the current Metask catalog" {
+test "Task model selection unknown commit resolves the original candidate before admitting another intent" {
+    for ([_]TaskPersistenceCommit{ .committed, .failed }) |resolution| {
+        const storage = try std.testing.allocator.alloc(u8, task_persistence.max_store_bytes);
+        defer std.testing.allocator.free(storage);
+        var history = TestTaskPersistence{ .storage = storage };
+        var control = try testRuntimeWith(.{ .task_persistence = history.capability(null) });
+        defer control.deinit();
+        const models = [_]models_contract.ModelView{
+            .{ .id = "fixture-model", .display_name = "Fixture model" },
+            .{ .id = "fixture-model-2", .display_name = "Fixture model 2" },
+        };
+        try TestSupport.replaceMetaskCatalog(&control, &models, "fixture-model");
+        const task = control.task_runtime.find(3).?;
+        history.result = .outcome_unknown;
+        try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model-2")));
+        try std.testing.expect(task.model_intent_prepared);
+        try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+        const witness = control.approval_history_unknown.?;
+        const digest = std.crypto.hash.sha2.Sha256.hash;
+        var original_digest: [32]u8 = undefined;
+        digest(witness, &original_digest, .{});
+        try std.testing.expectError(error.TaskBusy, control.selectTaskModel(3, testTaskModelSelectionInput(&control, 1, "fixture-model")));
+        try std.testing.expectError(error.TaskPersistenceOutcomeUnknown, control.runTask(3, .{ .text = "must not use an unconfirmed selection" }));
+        try control.renameTask(3, "later title");
+        try std.testing.expectEqual(witness.ptr, control.approval_history_unknown.?.ptr);
+        var retained_digest: [32]u8 = undefined;
+        digest(control.approval_history_unknown.?, &retained_digest, .{});
+        try std.testing.expectEqualSlices(u8, &original_digest, &retained_digest);
+        var snapshot_bytes: [16 * 1024]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, try control.writeSnapshot(&snapshot_bytes), "\"state\":\"outcome_unknown\"") != null);
+        history.result = .committed;
+        history.resolution_result = resolution;
+        try std.testing.expectEqual(PersistenceRecoveryOutcome.outcome_unknown, control.recoverTaskHistory(control.currentRevision()));
+        var settled = false;
+        for (0..100_000) |_| {
+            control.syncLifecycle();
+            if (control.pending_model_intent == null) {
+                settled = true;
+                break;
+            }
+            std.Thread.yield() catch {};
+        }
+        try std.testing.expect(settled);
+        try std.testing.expect(history.resolutions > 0);
+        try std.testing.expect(!task.model_intent_prepared);
+        try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+        if (resolution == .committed) {
+            try std.testing.expectEqualStrings("fixture-model-2", task.durable.model_intent.?.model_id);
+            try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
+        } else try std.testing.expect(task.durable.model_intent == null);
+    }
+}
+
+test "Task model installed intent does not borrow a catalog refresh as new execution authority" {
     var control = try testRuntime();
     defer control.deinit();
+    const task = control.task_runtime.find(3).?;
+    _ = try control.selectTaskModel(3, testTaskModelSelectionInput(&control, 0, "fixture-model"));
+    task.runtime.execution().?.model_intent_revision = task.durable.model_intent.?.revision;
+    const refresh = control.prepareMetaskCatalogRefresh("account-1", 17);
+    const preparation = switch (refresh) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    control.failMetaskCatalogRefresh(preparation.attempt_id, preparation.authorization_generation, .catalog_unavailable, "unavailable catalog");
+    try std.testing.expect((try control.resolveTaskRunModel(3)) == null);
+    try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+    // An uninstalled/newly selected revision still needs exact current source
+    // authority; a matching model name alone cannot establish that proof.
+    task.runtime.execution().?.model_intent_revision = 0;
+    try std.testing.expectError(error.ExecutionUnavailable, control.resolveTaskRunModel(3));
+}
 
-    var binding = try PreparedCustomProviderBinding.init(
-        std.testing.allocator,
-        "provider-1",
-        "fixture-model",
-    );
-    execution_state.testing.installCustomProviderBinding(
-        &control.execution_state,
-        &binding,
-    );
-
+test "Task model selection does not depend on the global Custom Provider binding" {
+    var control = try testRuntime();
+    defer control.deinit();
+    var binding = try PreparedCustomProviderBinding.init(std.testing.allocator, "provider-1", "fixture-model");
+    execution_state.testing.installCustomProviderBinding(&control.execution_state, &binding);
     const task = &control.task_runtime.tasks[0].?;
-    try std.testing.expect(!control.taskModelSelectionAuthorized(.{
-        .generation = task.durable.execution_generation,
-        .protocol = task.durable.execution_protocol,
-    }, .{
-        .source_id = control.modelsView().metask_selection.?.source_id,
-        .model_id = task.durable.execution_model,
-    }, control.modelsView().providers[0].source_generation, control.modelsView().providers[0].catalog_generation));
-    try std.testing.expectError(
-        error.StaleCatalog,
-        control.selectTaskModel(
-            task.durable.id,
-            testTaskModelSelectionInput(
-                &control,
-                task.durable.execution_model,
-                task.durable.execution_generation,
-                task.durable.execution_model,
-            ),
-        ),
-    );
+    _ = try control.selectTaskModel(task.durable.id, testTaskModelSelectionInput(&control, 0, "fixture-model"));
+    try std.testing.expectEqualStrings("metask", task.durable.model_intent.?.source_id);
+    try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
 }
 
 test "clearing the admission default preserves active Task execution" {

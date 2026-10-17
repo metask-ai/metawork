@@ -204,7 +204,7 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         try input.text.writeJson(writer, intent.source_id);
         writer.writeAll(",\"modelId\":") catch return error.SnapshotTooLarge;
         try input.text.writeJson(writer, intent.model_id);
-        writer.print("}},\"selectionRevision\":\"{d}\"}}", .{intent.revision}) catch return error.SnapshotTooLarge;
+        writer.print("}},\"selectionRevision\":\"{d}\",\"state\":\"{s}\"}}", .{ intent.revision, if (task.model_intent_prepared) "outcome_unknown" else "committed" }) catch return error.SnapshotTooLarge;
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"modelSelectionAvailability\":\"{s}\"", .{
         @tagName(input.model_selection_availability),

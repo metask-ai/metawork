@@ -9,6 +9,7 @@ import {
   arrayValue,
   wireId,
   positiveWireId,
+  positiveU64WireId,
   numberValue,
   positiveNumber,
   nonNegativeNumber,
@@ -390,6 +391,9 @@ const taskRunReasons = [
   "shutting_down",
 ] as const;
 const taskModelSelectionReasons = [
+  "persistence_unavailable",
+  "persistence_failed",
+  "persistence_outcome_unknown",
   "model_changed",
   "stale_catalog",
   "task_unavailable",
@@ -3352,26 +3356,22 @@ function decodeTask(value: unknown, path: string): TaskView {
           const intent = object(item.modelIntent, `${path}.modelIntent`, [
             "modelRef",
             "selectionRevision",
+            "state",
           ]);
-          const selectionRevision = positiveWireId(
+          const selectionRevision = positiveU64WireId(
             intent.selectionRevision,
             `${path}.modelIntent.selectionRevision`,
           );
-          if (
-            selectionRevision.length > 20 ||
-            (selectionRevision.length === 20 &&
-              selectionRevision > "18446744073709551615")
-          )
-            fail(
-              `${path}.modelIntent.selectionRevision`,
-              "expected positive u64 revision",
-            );
           return {
             modelRef: decodeRequiredModelRef(
               intent.modelRef,
               `${path}.modelIntent.modelRef`,
             ),
             selectionRevision,
+            state: enumValue(intent.state, `${path}.modelIntent.state`, [
+              "committed",
+              "outcome_unknown",
+            ] as const),
           };
         })();
   const modelSelectionAvailability = enumValue(
@@ -5785,7 +5785,12 @@ export function decodeTaskModelSelectionResult(
   value: unknown,
   expectedTaskId: string,
 ): TaskModelSelectionResult {
-  const item = object(value, "$", ["accepted", "taskId", "model", "reason"]);
+  const item = object(value, "$", [
+    "accepted",
+    "taskId",
+    "selectionRevision",
+    "reason",
+  ]);
   const accepted = booleanValue(item.accepted, "$.accepted");
   const taskId = positiveWireId(item.taskId, "$.taskId");
   if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
@@ -5794,15 +5799,19 @@ export function decodeTaskModelSelectionResult(
     return {
       accepted: true,
       taskId,
-      model: stringValue(item.model, "$.model"),
+      selectionRevision: positiveU64WireId(
+        item.selectionRevision,
+        "$.selectionRevision",
+      ),
       reason: null,
     };
   }
-  if (item.model !== null) fail("$.model", "expected null");
+  if (item.selectionRevision !== null)
+    fail("$.selectionRevision", "expected null");
   return {
     accepted: false,
     taskId,
-    model: null,
+    selectionRevision: null,
     reason: enumValue(item.reason, "$.reason", taskModelSelectionReasons),
   };
 }

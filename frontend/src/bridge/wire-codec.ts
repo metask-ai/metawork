@@ -70,6 +70,16 @@ export function positiveWireId(value: unknown, path: string) {
   return result;
 }
 
+export function positiveU64WireId(value: unknown, path: string) {
+  const result = positiveWireId(value, path);
+  if (
+    result.length > 20 ||
+    (result.length === 20 && result > "18446744073709551615")
+  )
+    fail(path, "expected positive u64 wire integer");
+  return result;
+}
+
 export function numberValue(value: unknown, path: string) {
   if (typeof value !== "number" || !Number.isSafeInteger(value))
     fail(path, "expected safe integer");

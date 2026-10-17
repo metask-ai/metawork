@@ -10,6 +10,9 @@ pub const OwnedTaskExecution = struct {
     model: []u8,
     base_url: []u8,
     execution_generation: u64,
+    source_generation: u64 = 0,
+    /// Process-local proof that this attachment installed the committed intent.
+    model_intent_revision: u64 = 0,
     secret: []u8,
     owned: bool = true,
 

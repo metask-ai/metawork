@@ -169,6 +169,10 @@ import { chooseWorkspaceAndMigrateDraft } from "../features/workspaces/chooseWor
 import { initialWorkbenchState, workbenchReducer } from "../workbench/store.ts";
 import { navigableTasks } from "../workbench/task-visibility.ts";
 import { PendingScopes } from "../workbench/pendingScopes.ts";
+import {
+  readyModelOptions,
+  modelOptionId,
+} from "./new-task-model-selection.ts";
 import { taskModelSelectionPolicy } from "./task-model-selection.ts";
 import { SkillPreparationCoordinator } from "./skill-preparation.ts";
 import { ConversationRecoveryCoordinator } from "./conversation-recovery.ts";
@@ -322,9 +326,6 @@ export default function App() {
     () => undefined,
   );
   const [taskPending, setTaskPending] = useState<Record<string, string>>({});
-  const [pendingTaskModels, setPendingTaskModels] = useState<
-    Record<string, string>
-  >({});
   const approvalRequestsRef = useRef(new TaskApprovalRequests());
   const [approvalRequests, setApprovalRequests] = useState(
     approvalRequestsRef.current.view(),
@@ -383,22 +384,6 @@ export default function App() {
   const newTaskApprovalMode =
     newTaskApprovalOverride ?? snapshot.permissions.defaultMode;
   const activeTask = useMemo(() => selectActiveTask(workbench), [workbench]);
-  useEffect(() => {
-    setPendingTaskModels((current) => {
-      let changed = false;
-      const next = { ...current };
-      for (const [taskId, model] of Object.entries(current)) {
-        const task = snapshot.tasks.find(
-          (candidate) => candidate.id === taskId,
-        );
-        if (!task || task.binding.model === model) {
-          delete next[taskId];
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [snapshot.tasks]);
   const activeTaskIdRef = useRef<string | null>(null);
   activeTaskIdRef.current = activeTask?.id ?? null;
 
@@ -952,6 +937,7 @@ export default function App() {
   );
   const canSubmit =
     !pendingTaskSelection.current &&
+    activeTask?.modelIntent?.state !== "outcome_unknown" &&
     taskCanCompose &&
     (!newTaskDraftActive ||
       snapshot.newTaskAdmission.available ||
@@ -997,21 +983,17 @@ export default function App() {
   const metaskProvider = snapshot.models.providers.find(
     (provider) => provider.id === "metask",
   );
-  const metaskModelOptions = (metaskProvider?.models ?? []).map((model) => ({
-    selectionId: model.id,
-    displayName: model.displayName,
-    metadata: model.metadata,
-  }));
-  const activeCustomProvider = snapshot.models.customProviders.find(
-    (connection) =>
-      connection.id === snapshot.newTaskAdmission.activeModelRef?.sourceId,
+  const taskModelOptions = readyModelOptions(snapshot.models);
+  const taskIntent = activeTask?.modelIntent;
+  const displayedTaskModelId = taskIntent
+    ? modelOptionId(taskIntent.modelRef)
+    : "";
+  const taskModelOption = taskModelOptions.find(
+    (option) => option.selectionId === displayedTaskModelId,
   );
-  const customCustomProviderSelected = activeCustomProvider !== undefined;
   const composerModelMetadata = newTaskDraftActive
     ? newTaskModelState.selectedMetadata
-    : (metaskProvider?.models.find(
-        (model) => model.id === activeTask?.binding.model,
-      )?.metadata ?? null);
+    : (taskModelOption?.metadata ?? null);
   const imageDeclaredUnsupported =
     composerDraft.kind === "multimodal" &&
     composerModelMetadata?.capabilities.imageInput === false &&
@@ -1032,22 +1014,15 @@ export default function App() {
       (model) => model.id === snapshot.models.metaskSelection?.modelId,
     ),
   );
-  const taskModelId = activeTask?.binding.model ?? "";
-  const pendingTaskModelId = activeTask
-    ? (pendingTaskModels[activeTask.id] ?? null)
-    : null;
-  const pendingTaskModel = pendingTaskModelId
-    ? metaskProvider?.models.find((model) => model.id === pendingTaskModelId)
-    : null;
-  const taskModelLabel = pendingTaskModelId
-    ? t("task.model_pending", {
-        model:
-          pendingTaskModel?.displayName ||
-          pendingTaskModel?.id ||
-          pendingTaskModelId,
-      })
-    : (activeTask?.binding.model ?? selectedModelLabel);
-  const displayedTaskModelId = pendingTaskModelId ?? taskModelId;
+  const taskIntentLabel =
+    taskModelOption?.displayName ??
+    taskIntent?.modelRef.modelId ??
+    activeTask?.binding.model ??
+    selectedModelLabel;
+  const taskModelLabel =
+    taskIntent && activeTask?.activeOperation !== null
+      ? t("task.model_pending", { model: taskIntentLabel })
+      : taskIntentLabel;
   const taskModelPolicy = taskModelSelectionPolicy(activeTask);
 
   // The Host result is already committed. A failed follow-up refresh is
@@ -1604,21 +1579,19 @@ export default function App() {
 
   async function selectModelForTask(selectionId: string) {
     const task = activeTask;
-    if (!task || bridgeUnavailable) return;
-    const wasBusy = task.activeOperation !== null;
+    const option = taskModelOptions.find(
+      (option) => option.selectionId === selectionId,
+    );
+    if (!task || !option || bridgeUnavailable) return;
     const scope = `task:${task.id}`;
     if (!beginTaskPendingOperation(scope, "model")) return;
     try {
       const result = await client.selectTaskModel(
         task.id,
-        task.binding.model,
-        task.binding.executionGeneration,
-        {
-          sourceId: snapshot.models.metaskSelection?.sourceId ?? "",
-          modelId: selectionId,
-        },
-        metaskProvider?.sourceGeneration ?? "0",
-        metaskProvider?.catalogGeneration ?? "0",
+        task.modelIntent?.selectionRevision ?? "0",
+        option.modelRef,
+        option.sourceGeneration,
+        option.catalogGeneration,
       );
       if (!result.accepted) {
         await refreshSnapshot().catch(() => undefined);
@@ -1630,12 +1603,6 @@ export default function App() {
         );
         return;
       }
-      setPendingTaskModels((current) => {
-        const next = { ...current };
-        if (wasBusy) next[task.id] = result.model;
-        else delete next[task.id];
-        return next;
-      });
       await refreshAfterCommit("task.model.updated", "operation.account", {
         scope: "task",
         taskId: task.id,
@@ -3221,7 +3188,7 @@ export default function App() {
           newTaskDraftActive
             ? newTaskModelState.options
             : taskModelPolicy.showsSelector
-              ? metaskModelOptions
+              ? taskModelOptions
               : []
         }
         selectedModelId={
@@ -3238,28 +3205,28 @@ export default function App() {
           bridgeUnavailable ||
           (newTaskDraftActive
             ? newTaskModelState.options.length === 0
-            : (customCustomProviderSelected ? executionBusy : accountBusy) ||
-              !taskModelPolicy.selectable)
+            : taskModelOptions.length === 0 || !taskModelPolicy.selectable)
         }
         modelSelectionPending={
           newTaskDraftActive
             ? newTaskModelState.options.length === 0 &&
               snapshot.models.operation === "refreshing_catalog"
-            : (customCustomProviderSelected ? executionBusy : accountBusy) ||
-              taskModelPolicy.pending
+            : taskModelPolicy.pending
         }
         modelContextTitle={
           newTaskDraftActive &&
           newTaskRequestedModel !== null &&
           !newTaskModelState.valid
             ? t("settings.new_task_model_invalid")
-            : newTaskDraftActive
-              ? t("settings.new_task_model_help")
-              : t(
-                  taskModelSelectionMessageId(
-                    activeTask?.modelSelectionAvailability,
-                  ),
-                )
+            : activeTask?.modelIntent?.state === "outcome_unknown"
+              ? t("mutation.reason.persistence_outcome_unknown")
+              : newTaskDraftActive
+                ? t("settings.new_task_model_help")
+                : t(
+                    taskModelSelectionMessageId(
+                      activeTask?.modelSelectionAvailability,
+                    ),
+                  )
         }
         defaultSelectionMissing={
           metaskDefaultRecoveryAvailable && newTaskModelState.intent === null

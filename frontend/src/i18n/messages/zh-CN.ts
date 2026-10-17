@@ -1252,6 +1252,11 @@ export const zhCN: Record<MessageId, string> = {
   "task.model_pending": "下一轮使用：{model}",
   "mutation.reason.recovery_unavailable": "当前保存状态已无法恢复此会话。",
   "mutation.reason.queued_input_present": "请先编辑或撤回待发送消息。",
+  "mutation.reason.persistence_unavailable":
+    "模型选择无法保存，请先恢复任务历史存储。",
+  "mutation.reason.persistence_failed": "模型选择保存失败，原选择保持不变。",
+  "mutation.reason.persistence_outcome_unknown":
+    "模型选择的保存结果尚未确认，请恢复任务历史后再发送。",
   "mutation.reason.task_busy": "该任务正在执行中。",
   "mutation.reason.no_history": "请先运行一次任务，再压缩上下文。",
   "mutation.reason.catalog_loading": "相关能力目录正在刷新，请稍后重试。",

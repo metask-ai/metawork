@@ -64,3 +64,22 @@ test("detached, unsupported, and changed authority remain read-only", () => {
     pending: false,
   });
 });
+
+test("busy Tasks can select the next model but an unknown save waits for Host recovery", () => {
+  const value = {
+    modelSelectionAvailability: "available",
+    activeOperation: { kind: "run", id: "7" },
+    modelIntent: {
+      modelRef: { sourceId: "provider-b", modelId: "model" },
+      selectionRevision: "2",
+      state: "committed",
+    },
+  };
+  assert.equal(taskModelSelectionPolicy(value).selectable, true);
+  value.modelIntent.state = "outcome_unknown";
+  assert.deepEqual(taskModelSelectionPolicy(value), {
+    showsSelector: true,
+    selectable: false,
+    pending: true,
+  });
+});

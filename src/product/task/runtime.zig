@@ -369,6 +369,8 @@ pub const RunClock = struct {
 };
 
 pub const OperationEffects = struct {
+    /// Borrowed only during prepareRun; never retained by PreparedRun or a worker.
+    model_target: ?models_contract.SourceCandidateInput = null,
     text: TextProjection,
     release: ReleaseEffects,
     executor: ExecutorPort,
@@ -435,16 +437,6 @@ pub const ControlError = agent.Error || std.mem.Allocator.Error || error{
     TaskPersistenceOutcomeUnknown,
 };
 
-pub const ModelError = agent.Error || std.mem.Allocator.Error || error{
-    ProjectionCapacity,
-    UnknownTask,
-    TaskBusy,
-    TaskClosing,
-    TaskModelMismatch,
-    TaskPersistenceFailed,
-    TaskPersistenceOutcomeUnknown,
-};
-
 pub const ModelIntentError = std.mem.Allocator.Error || error{
     UnknownTask,
     TaskClosing,
@@ -478,6 +470,7 @@ pub const RecoveryStartInput = struct {
     workspace_trust: RecoveryWorkspaceTrust,
     workspace_kind: recovery_job.WorkspaceKind,
     execution: models_contract.ConfigInput,
+    source_generation: u64 = 0,
     agent_runtime: *agent.Runtime,
     checkpoint_store: ?*checkpoint_store.FileStore,
     checkpoint_limits: agent.CheckpointLimits,
@@ -508,6 +501,7 @@ pub const MutationError = std.mem.Allocator.Error || error{
 };
 
 pub const DeletionError = error{
+    TaskBusy,
     UnknownTask,
     TaskNotArchived,
     TaskReadOnly,
@@ -550,6 +544,7 @@ pub const CreateTaskInput = struct {
     protocol: task_state.Protocol,
     model: []const u8,
     model_ref: ?models_contract.ModelRef = null,
+    source_generation: u64 = 0,
     permission_profile: task_state.PermissionProfile,
     permission_review_delegated: bool = false,
     permission_interaction: task_state.PermissionInteraction,
@@ -1604,6 +1599,11 @@ pub const Runtime = struct {
             self.allocator,
             input.execution,
         );
+        execution.source_generation = input.source_generation;
+        execution.model_intent_revision = if (input.source_generation != 0)
+            if (model_intent) |intent| intent.revision else 0
+        else
+            0;
         errdefer execution.deinit();
         var epoch_storage: [32]u8 = undefined;
         const epoch_token = std.fmt.bufPrint(
@@ -1942,14 +1942,15 @@ pub const Runtime = struct {
         if (task.queued_input) |queued| {
             if (queued_revision == null or queued_revision.? != queued.revision) return error.QueuedInputPresent;
         } else if (queued_revision != null) return error.RunChanged;
-        const execution = try taskExecutionInput(task);
+        _ = try taskExecutionInput(task);
         if (task_policy.hasActiveOperation(task) or
             checkpointMutationPending(task, effects.worker.checkpoint.store_health))
             return error.TaskBusy;
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
         var access_live = true;
         errdefer if (access_live) access.deinit();
-        try applyPendingModel(self, task, &access, effects);
+        try applyModelIntent(self, task, &access, effects);
+        const execution = try taskExecutionInput(task);
         var input_parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
         const agent_input = try validateRunInput(task, input, effects.limits, &input_parts);
         const run_id = try access.prepareRun(agent_input);
@@ -2033,7 +2034,7 @@ pub const Runtime = struct {
             .run_id = run_id,
             .job = job,
             .workspace = workspace,
-            .effects = effects,
+            .effects = cleanRunEffects(effects),
             .previous_active_run_id = previous_active_run_id,
             .previous_active_operation = previous_active_operation,
             .previous_recent_order = previous_recent_order,
@@ -2485,49 +2486,6 @@ pub const Runtime = struct {
         return prepared;
     }
 
-    pub fn selectModel(
-        self: *Runtime,
-        task_id: u64,
-        expected_model: []const u8,
-        model: []const u8,
-        checkpoint_health: *const std.atomic.Value(checkpoint_store.Health),
-        text: TextProjection,
-        max_model_id_bytes: usize,
-    ) ModelError!bool {
-        const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.read_only_history != null) return error.TaskClosing;
-        if (task.approval_change != null) return error.TaskBusy;
-        if (!std.mem.eql(u8, expected_model, task.durable.execution_model))
-            return error.TaskModelMismatch;
-        if (task_policy.hasActiveOperation(task)) {
-            const replacement = try self.allocator.dupe(u8, model);
-            if (task.runtime.pending_model) |old| self.allocator.free(old);
-            task.runtime.pending_model = replacement;
-            return true;
-        }
-        if (checkpointMutationPending(task, checkpoint_health))
-            return error.TaskBusy;
-        var access = task.runtime.acquireAccess() catch return error.TaskClosing;
-        defer access.deinit();
-        try access.setModel(model);
-        const previous = task.durable.execution_model;
-        const projected = text.project(
-            model,
-            max_model_id_bytes,
-            &.{},
-            previous.len,
-        ) catch |err| {
-            access.setModel(expected_model) catch {
-                poisonAttachment(task);
-                return error.TaskClosing;
-            };
-            return err;
-        };
-        task.durable.execution_model = projected.value;
-        text.discardPrevious(previous);
-        return true;
-    }
-
     pub fn beginDetach(
         self: *Runtime,
         task_id: u64,
@@ -2835,7 +2793,7 @@ pub const Runtime = struct {
     ) MutationError!bool {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.read_only_history != null) return error.TaskReadOnly;
-        if (task.deletion == .deleting or
+        if (task.model_intent_prepared or task.deletion == .deleting or
             task_policy.taskLifecycle(task) == .closing or
             task_policy.hasActiveOperation(task))
             return error.TaskBusy;
@@ -2893,6 +2851,7 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.read_only_history != null) return error.TaskReadOnly;
         if (!task.durable.archived) return error.TaskNotArchived;
+        if (task.model_intent_prepared) return error.TaskBusy;
         if (task.deletion == .deleting) return false;
         task.runtime.permission_review.invalidate();
         task.deletion = .deleting;
@@ -4155,10 +4114,13 @@ pub const Runtime = struct {
         );
         var workspace_live = true;
         errdefer if (workspace_live) workspace.deinit();
+        var restored_execution = input.execution;
+        restored_execution.target.model = task.durable.execution_model;
         var execution = try owned_task_execution.OwnedTaskExecution.clone(
             self.allocator,
-            input.execution,
+            restored_execution,
         );
+        execution.source_generation = input.source_generation;
         errdefer execution.deinit();
         const model = try self.allocator.dupe(u8, task.durable.execution_model);
         var model_live = true;
@@ -6424,32 +6386,49 @@ fn applyProvisionalTitle(
     return true;
 }
 
-fn applyPendingModel(
+fn cleanRunEffects(effects: OperationEffects) OperationEffects {
+    var clean = effects;
+    clean.model_target = null;
+    return clean;
+}
+
+fn applyModelIntent(
     self: *Runtime,
     task: *task_state.Task,
     access: *task_agent_session.Access,
     effects: OperationEffects,
 ) RunError!void {
-    const pending = task.runtime.pending_model orelse return;
+    if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
+    const intent = task.durable.model_intent orelse return;
+    const installed = task.runtime.execution().?;
+    if (installed.model_intent_revision == intent.revision) return;
+    const target = effects.model_target orelse return error.ExecutionUnavailable;
+    if (!std.mem.eql(u8, intent.model_id, target.target.model)) return error.ExecutionGenerationMismatch;
+    if (installed.source_generation == 0 or installed.source_generation != target.source_generation or
+        installed.protocol != target.target.protocol or
+        !std.mem.eql(u8, installed.provider_id, target.target.provider_id) or
+        !std.mem.eql(u8, installed.base_url, target.target.base_url) or
+        !std.mem.eql(u8, installed.secret, target.api_key))
+        return error.ExecutionGenerationMismatch;
+    if (std.mem.eql(u8, intent.model_id, task.durable.execution_model)) {
+        installed.model_intent_revision = intent.revision;
+        return;
+    }
+    const owned_model = try self.allocator.dupe(u8, intent.model_id);
+    errdefer self.allocator.free(owned_model);
     const previous = task.durable.execution_model;
-    try access.setModel(pending);
-    const replacement = effects.text.project(
-        pending,
-        effects.limits.max_model_id_bytes,
-        &.{},
-        previous.len,
-    ) catch |err| {
-        access.setModel(previous) catch {
-            if (task.runtime.attached()) |attached|
-                attached.health = .session_poisoned;
-            return error.TaskClosing;
-        };
-        return err;
-    };
+    const replacement = try effects.text.project(intent.model_id, effects.limits.max_model_id_bytes, installed.secret, previous.len);
+    errdefer {
+        effects.text.discardCandidate(replacement.value);
+        effects.text.restorePrevious(previous.len);
+    }
+    // Every fallible Host allocation precedes the Session mutation.
+    try access.setModel(intent.model_id);
     task.durable.execution_model = replacement.value;
-    task.runtime.pending_model = null;
     effects.text.discardPrevious(previous);
-    self.allocator.free(pending);
+    self.allocator.free(installed.model);
+    installed.model = owned_model;
+    installed.model_intent_revision = intent.revision;
 }
 
 fn cancelTaskAutomaticTitles(task: *task_state.Task) void {
@@ -6978,10 +6957,6 @@ fn releaseAttachmentNoFail(
     cause: task_attachment.DetachmentCause,
 ) void {
     task.conversation_observation = .{};
-    if (task.runtime.pending_model) |model| {
-        self.allocator.free(model);
-        task.runtime.pending_model = null;
-    }
     if (task.runtime.live() == null) {
         task.runtime.attachment = .{ .detached = cause };
         return;
@@ -7053,7 +7028,6 @@ fn deinitTask(
         if (change.candidate) |*candidate| candidate.deinit(self.allocator);
         if (change.unknown_history) |history| self.allocator.free(history.bytes);
     }
-    if (task.runtime.pending_model) |model| self.allocator.free(model);
     if (task.read_only_history) |history| self.allocator.free(history.payload);
     task.* = undefined;
 }
