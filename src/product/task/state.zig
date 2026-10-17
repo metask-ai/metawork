@@ -774,6 +774,8 @@ pub const ApprovalResult = struct {
 pub const Task = struct {
     durable: DurableTaskRecord,
     runtime: RuntimeAttachment,
+    /// One synchronous model-intent history overlay may own this Task at a time.
+    model_intent_prepared: bool = false,
     /// Process-only input and last explicit queue-operation receipt.
     queued_input: ?QueuedInput = null,
     queued_input_result: ?QueuedInputResult = null,

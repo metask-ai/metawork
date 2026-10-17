@@ -445,6 +445,14 @@ pub const ModelError = agent.Error || std.mem.Allocator.Error || error{
     TaskPersistenceOutcomeUnknown,
 };
 
+pub const ModelIntentError = std.mem.Allocator.Error || error{
+    UnknownTask,
+    TaskClosing,
+    TaskBusy,
+    TaskModelMismatch,
+    InvalidTaskModel,
+};
+
 pub const CloseError = ControlError || std.Thread.SpawnError || error{
     CloseInProgress,
     TaskBusy,
@@ -594,6 +602,31 @@ pub const ReleaseEffects = struct {
 
     fn releaseProjectionBytes(self: ReleaseEffects, bytes: usize) void {
         self.release_projection_bytes_fn(self.context, bytes);
+    }
+};
+
+/// Synchronous history overlay. Control must complete the durable write before
+/// completing this transaction, or roll it back before publishing a snapshot.
+/// Neither path changes the installed Session, Run, or permission authority.
+pub const PreparedModelIntent = struct {
+    allocator: std.mem.Allocator,
+    task: *task_state.Task,
+    previous: ?task_state.ModelIntent,
+    active: bool = true,
+
+    pub fn complete(self: *PreparedModelIntent) void {
+        std.debug.assert(self.active);
+        if (self.previous) |*intent| intent.deinit(self.allocator);
+        self.task.model_intent_prepared = false;
+        self.active = false;
+    }
+
+    pub fn rollback(self: *PreparedModelIntent) void {
+        std.debug.assert(self.active);
+        self.task.durable.model_intent.?.deinit(self.allocator);
+        self.task.durable.model_intent = self.previous;
+        self.task.model_intent_prepared = false;
+        self.active = false;
     }
 };
 
@@ -2422,6 +2455,34 @@ pub const Runtime = struct {
             return err;
         };
         return true;
+    }
+
+    pub fn prepareModelIntent(
+        self: *Runtime,
+        task_id: u64,
+        expected_revision: u64,
+        target: models_contract.ModelRef,
+    ) ModelIntentError!PreparedModelIntent {
+        const task = self.find(task_id) orelse return error.UnknownTask;
+        if (task.read_only_history != null or task.durable.archived or
+            task.deletion != .idle or task.runtime.close_requested)
+            return error.TaskClosing;
+        if (task.approval_change != null or task.model_intent_prepared) return error.TaskBusy;
+        const revision = if (task.durable.model_intent) |intent| intent.revision else 0;
+        if (expected_revision != revision) return error.TaskModelMismatch;
+        const next_revision = std.math.add(u64, revision, 1) catch return error.InvalidTaskModel;
+        const replacement = task_state.ModelIntent.init(self.allocator, target, next_revision) catch |err| switch (err) {
+            error.InvalidModelIntent => return error.InvalidTaskModel,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const prepared = PreparedModelIntent{
+            .allocator = self.allocator,
+            .task = task,
+            .previous = task.durable.model_intent,
+        };
+        task.durable.model_intent = replacement;
+        task.model_intent_prepared = true;
+        return prepared;
     }
 
     pub fn selectModel(
@@ -7024,6 +7085,112 @@ test "Task execution owns the service reference and protocol across clone and tr
     try std.testing.expectEqualStrings("custom_provider:service-a", resolved.target.provider_id);
     try std.testing.expectEqual(models_contract.Protocol.openai_chat_completions, resolved.target.protocol);
     try std.testing.expectEqual(@as(u64, 7), resolved.execution_generation);
+}
+
+fn testModelIntentTask() task_state.Task {
+    return .{
+        .durable = .{
+            .id = 1,
+            .recent_order = 1,
+            .execution_generation = 7,
+            .execution_protocol = .openai_responses,
+            .execution_model = @constCast("installed-model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 1,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &.{},
+            .compacts = &.{},
+            .ui_history = &.{},
+        },
+        .runtime = .{},
+    };
+}
+
+test "Task model intent transaction uses its own revision and rolls back without Session effects" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    runtime.tasks[0] = testModelIntentTask();
+    const task = runtime.find(1).?;
+    defer {
+        if (task.durable.model_intent) |*intent| intent.deinit(runtime.allocator);
+        runtime.tasks[0] = null;
+    }
+    const target = models_contract.ModelRef{ .source_id = "provider-b", .model_id = "same-model" };
+    try std.testing.expectError(error.UnknownTask, runtime.prepareModelIntent(2, 0, target));
+    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntent(1, 1, target));
+    try std.testing.expect(task.durable.model_intent == null);
+    var first = try runtime.prepareModelIntent(1, 0, target);
+    try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
+    try std.testing.expectError(error.TaskBusy, runtime.prepareModelIntent(1, 1, target));
+    first.rollback();
+    try std.testing.expect(task.durable.model_intent == null);
+    try std.testing.expect(!task.model_intent_prepared);
+
+    first = try runtime.prepareModelIntent(1, 0, target);
+    first.complete();
+    try std.testing.expect(!task.model_intent_prepared);
+    const original_source = task.durable.model_intent.?.source_id.ptr;
+    var second = try runtime.prepareModelIntent(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
+    try std.testing.expectEqual(@as(u64, 2), task.durable.model_intent.?.revision);
+    second.rollback();
+    try std.testing.expectEqual(original_source, task.durable.model_intent.?.source_id.ptr);
+    try std.testing.expectEqualStrings("provider-b", task.durable.model_intent.?.source_id);
+    try std.testing.expectEqual(@as(u64, 1), task.durable.model_intent.?.revision);
+    try std.testing.expectError(error.TaskModelMismatch, runtime.prepareModelIntent(1, 0, target));
+    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntent(1, 1, .{ .source_id = "bad\nsource", .model_id = "model" }));
+
+    // The same transaction is legal while a Run is active. It neither obtains
+    // Session access nor changes the Run/permission/installed binding facts.
+    task.runtime.active_operation = .{ .run = 12 };
+    task.runtime.active_run_id = 12;
+    task.runtime.pending_ui_request_id = 33;
+    second = try runtime.prepareModelIntent(1, 1, .{ .source_id = "provider-c", .model_id = "same-model" });
+    second.complete();
+    try std.testing.expectEqualStrings("provider-c", task.durable.model_intent.?.source_id);
+    try std.testing.expectEqual(@as(u64, 2), task.durable.model_intent.?.revision);
+    try std.testing.expectEqual(@as(u64, 12), task.runtime.active_operation.run);
+    try std.testing.expectEqual(@as(u64, 12), task.runtime.active_run_id);
+    try std.testing.expectEqual(@as(u64, 33), task.runtime.pending_ui_request_id);
+    try std.testing.expectEqual(task_state.PermissionProfile.approval_required, task.durable.permission_profile);
+    try std.testing.expectEqualStrings("installed-model", task.durable.execution_model);
+    try std.testing.expectEqual(@as(u64, 7), task.durable.execution_generation);
+    try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
+    try std.testing.expect(task.runtime.attachment == .detached);
+
+    task.durable.archived = true;
+    try std.testing.expectError(error.TaskClosing, runtime.prepareModelIntent(1, 2, target));
+    task.durable.archived = false;
+    task.durable.model_intent.?.revision = std.math.maxInt(u64);
+    try std.testing.expectError(error.InvalidTaskModel, runtime.prepareModelIntent(1, std.math.maxInt(u64), target));
+    try std.testing.expectEqualStrings("provider-c", task.durable.model_intent.?.source_id);
+}
+
+test "Task model intent allocation failure preserves the exact committed identity" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var runtime = try Runtime.init(allocator, 1);
+            defer runtime.deinitStorage();
+            runtime.tasks[0] = testModelIntentTask();
+            const task = runtime.find(1).?;
+            defer {
+                if (task.durable.model_intent) |*intent| intent.deinit(allocator);
+                runtime.tasks[0] = null;
+            }
+            task.durable.model_intent = try task_state.ModelIntent.init(allocator, .{ .source_id = "source", .model_id = "model" }, 5);
+            const previous = task.durable.model_intent.?;
+            var prepared = runtime.prepareModelIntent(1, 5, .{ .source_id = "new-source", .model_id = "new-model" }) catch |err| {
+                try std.testing.expectEqual(previous.source_id.ptr, task.durable.model_intent.?.source_id.ptr);
+                try std.testing.expectEqual(previous.model_id.ptr, task.durable.model_intent.?.model_id.ptr);
+                try std.testing.expectEqual(@as(u64, 5), task.durable.model_intent.?.revision);
+                return err;
+            };
+            prepared.rollback();
+            try std.testing.expectEqual(previous.source_id.ptr, task.durable.model_intent.?.source_id.ptr);
+            try std.testing.expectEqual(previous.model_id.ptr, task.durable.model_intent.?.model_id.ptr);
+        }
+    }.run, .{});
 }
 
 test "Runtime owns bounded Task collection and monotonic process facts" {
