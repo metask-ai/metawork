@@ -322,6 +322,7 @@ pub const FakeCore = struct {
     runtime_destroy_failures: usize = 0,
     session_create_failures: usize = 0,
     forced_skill_update_status: ?u32 = null,
+    forced_set_model_status: ?u32 = null,
     forced_mcp_update_status: ?u32 = null,
     forced_mcp_refresh_status: ?u32 = null,
     forced_mcp_apply_status: ?u32 = null,
@@ -1193,6 +1194,14 @@ pub fn sessionSetModel(
     out_error: ?*wire.OwnedBytesV1,
 ) callconv(.c) u32 {
     if (out_error) |out| out.* = .{ .ptr = null, .len = 0 };
+    fake_core.lock();
+    const forced_status = fake_core.forced_set_model_status;
+    fake_core.forced_set_model_status = null;
+    fake_core.unlock();
+    if (forced_status) |status| {
+        diagnostic(out_error);
+        return status;
+    }
     const session: *FakeSession = @ptrCast(@alignCast(handle orelse {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;

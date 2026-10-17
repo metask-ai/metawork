@@ -8116,8 +8116,10 @@ test "recovery binding confirmation retains candidates and never writes on the m
             return true;
         }
     };
-    const cases = [_]struct { result: Commit, resolved: Commit = .committed, stale: bool = false, shutdown: bool = false, hold_close: bool = false, close_failure: bool = false, cancel_binding: bool = false }{
+    const cases = [_]struct { result: Commit, resolved: Commit = .committed, stale: bool = false, shutdown: bool = false, hold_close: bool = false, close_failure: bool = false, cancel_binding: bool = false, reject_model: bool = false, cancel_candidate: bool = false }{
         .{ .result = .committed },
+        .{ .result = .committed, .reject_model = true },
+        .{ .result = .committed, .cancel_candidate = true },
         .{ .result = .committed, .cancel_binding = true },
         .{ .result = .committed, .stale = true, .hold_close = true },
         .{ .result = .committed, .stale = true, .hold_close = true, .close_failure = true },
@@ -8182,11 +8184,66 @@ test "recovery binding confirmation retains candidates and never writes on the m
         const main_commits = history.main_commits;
         fake_core.lock();
         fake_core.session_destroy_probe = .{ .context = &history, .observe_fn = Harness.observeClose };
+        if (case.reject_model) fake_core.forced_set_model_status = wire.STATUS_CORE_ERROR;
         fake_core.unlock();
+        if (case.reject_model or case.cancel_candidate) fake_core.failNextSessionDestroy();
         const attempt_id = if (case.close_failure) approval: {
             _ = try control.setApprovalMode(task_id, .auto_review, 1, 1);
             break :approval task.runtime.restore_job.?.attempt.attempt_id;
         } else try control.restoreTaskConversation(task_id, 1);
+        if (case.reject_model or case.cancel_candidate) {
+            const restore = task.runtime.restore_job.?;
+            for (0..2000) |_| {
+                if (restore.completionReady()) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(restore.completionReady());
+            if (case.reject_model) {
+                try std.testing.expectEqual(.restore_rejected, restore.outcome.candidate.rejection.?);
+            } else {
+                try std.testing.expect(restore.outcome.candidate.rejection == null);
+                // Cancellation after worker completion still forbids publication.
+                restore.requestCancellation();
+            }
+            try std.testing.expectEqual(.owned, restore.outcome.candidate.binding.state());
+            // The restore worker returns its owner without attempting destroy.
+            try std.testing.expectEqual(@as(usize, 0), history.close_calls.load(.acquire));
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (task.runtime.close_failed) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expect(task.runtime.restore_job == null);
+            try std.testing.expect(task.runtime.close_failed);
+            try std.testing.expect(task.runtime.discarding_restore);
+            try std.testing.expectEqual(.session_poisoned, task.runtime.liveConst().?.health);
+            try std.testing.expectEqual(@as(usize, 0), task.runtime.executionConst().?.secret.len);
+            try std.testing.expectEqual(.candidate_cleanup_failed, task.runtime.last_restore_failure.?);
+            try std.testing.expectEqual(@as(u64, 1), task.durable.binding_epoch);
+            try std.testing.expectEqual(@as(u64, 1), task.durable.execution_generation);
+            try std.testing.expect(!task.runtime.worker_leases.hasLive());
+            try std.testing.expectError(error.TaskClosing, control.runTask(task_id, .{ .text = "rejected model cannot run" }));
+            for (0..10) |_| control.syncLifecycle();
+            try std.testing.expectEqual(@as(usize, 1), history.close_calls.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 0), history.main_closes.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 0), history.worker_commits);
+            try std.testing.expectEqual(main_commits, history.main_commits);
+            try std.testing.expect(try product_control.TestSupport.retryTaskSessionClose(&control, task_id));
+            for (0..2000) |_| {
+                control.syncLifecycle();
+                if (task.runtime.attachment == .detached and task.runtime.close_thread == null) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            try std.testing.expectEqual(.detached, std.meta.activeTag(task.runtime.attachment));
+            try std.testing.expectEqual(@as(usize, 2), history.close_calls.load(.acquire));
+            fake_core.lock();
+            const runs = fake_core.run_calls;
+            const destroyed = fake_core.session_destroyed;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, 0), runs);
+            try std.testing.expectEqual(@as(usize, 2), destroyed); // seed plus rejected candidate
+            continue;
+        }
         if (case.cancel_binding) {
             const restore = task.runtime.restore_job.?;
             for (0..2000) |_| {

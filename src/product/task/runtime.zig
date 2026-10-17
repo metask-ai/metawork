@@ -4585,6 +4585,8 @@ pub const Runtime = struct {
                 .none, .run, .compact => null,
             };
             if (job.outcome == .candidate) {
+                const rejection: ?recovery_job.Failure = if (job.cancellation.load(.acquire)) .cancelled else job.outcome.candidate.rejection;
+                if (rejection) |reason| task.runtime.last_restore_failure = reason;
                 const checkpoint_matches = if (job.attempt.checkpoint) |expected|
                     if (task.durable.checkpoint) |record|
                         checkpointIdentityEqual(record.blob, expected.blob) and task_policy.checkpointMatchesCurrentHistory(task, record)
@@ -4595,7 +4597,7 @@ pub const Runtime = struct {
                         task_policy.runHistoryHighWater(task) == job.attempt.run_id_floor and
                         task_policy.compactHistoryHighWater(task) == job.attempt.compact_id_floor and
                         task_policy.uiRequestHistoryHighWater(task) == job.attempt.ui_request_id_floor;
-                const allowed = recovery_job.commitAllowed(
+                const allowed = rejection == null and recovery_job.commitAllowed(
                     &job.attempt,
                     .{
                         .task_id = task.durable.id,

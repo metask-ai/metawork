@@ -266,6 +266,9 @@ pub const Candidate = struct {
     binding: agent_session.Binding,
     report: ?agent.CheckpointRestoreReport,
     execution: owned_execution.OwnedTaskExecution,
+    /// A created Session always returns to the Task's ordinary close owner,
+    /// including a cancellation or mutation failure before publication.
+    rejection: ?Failure = null,
 
     pub fn takeExecution(self: *Candidate) owned_execution.OwnedTaskExecution {
         return self.execution.take();
@@ -440,19 +443,13 @@ pub const Job = struct {
             report = restored.report;
             break :restored restored.takeBinding();
         } else agent_session.Binding.open(self.runtime, options) catch |err| return .{ .failure = mapRestoreError(err) };
-        if (self.cancellation.load(.acquire)) return .{ .failure = if (discardBinding(&binding)) .cancelled else .candidate_cleanup_failed };
+        if (self.cancellation.load(.acquire)) return self.rejectCandidate(&binding, report, .cancelled);
         var access = binding.acquireAccess() catch {
-            return .{ .failure = if (discardBinding(&binding))
-                .restore_rejected
-            else
-                .candidate_cleanup_failed };
+            return self.rejectCandidate(&binding, report, .restore_rejected);
         };
         access.setModel(self.attempt.task_model) catch {
             access.deinit();
-            return .{ .failure = if (discardBinding(&binding))
-                .restore_rejected
-            else
-                .candidate_cleanup_failed };
+            return self.rejectCandidate(&binding, report, .restore_rejected);
         };
         access.deinit();
 
@@ -460,6 +457,15 @@ pub const Job = struct {
             .binding = binding.take(),
             .report = report,
             .execution = self.attempt.execution.take(),
+        } };
+    }
+
+    fn rejectCandidate(self: *Job, binding: *agent_session.Binding, report: ?agent.CheckpointRestoreReport, reason: Failure) Outcome {
+        return .{ .candidate = .{
+            .binding = binding.take(),
+            .report = report,
+            .execution = self.attempt.execution.take(),
+            .rejection = reason,
         } };
     }
 };
@@ -488,15 +494,6 @@ fn mapRestoreError(err: anyerror) Failure {
         error.SessionCapacity => .session_capacity,
         else => .restore_rejected,
     };
-}
-
-fn discardBinding(binding: *agent_session.Binding) bool {
-    switch (binding.closeOutcome(.session_close)) {
-        .closed => {},
-        .failure => return false,
-    }
-    binding.releaseClosed() catch return false;
-    return true;
 }
 
 test "restore Runtime serialization failures remain retryable job outcomes" {
