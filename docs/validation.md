@@ -85,6 +85,8 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 
 恢复时的 Product 能力上限使用 `zig build test-product-skill-policy test-product-skill-runtime` 定向验证：原 pinned Skill ID、来源开关、稳定 policy key、Manual/Automatic Workspace 隔离与未知授权拒绝。MCP 当前授权由 `test-product-mcp-runtime` 和 `test-mcp-interop` 共同观察，后者须经 Product MCP 恢复入口验证连接批准或工具授权撤销后不再提供工具，模型尝试旧工具名也不能产生新 MCP 请求。上述定向入口沿用正式 module graph，不替代跨连接 Task 事务与桌面验收。
 
+detached Task 模型恢复由 `test-lifecycle` 覆盖跨重启的持久意图：全局默认为空时仍按原 Task 的精确来源恢复或 fresh attach，跨 protocol 保留历史 Run，新 checkpoint 与实际模型一致；目标移除时保留意图和旧 binding，明确失败且不得接纳替代模型。
+
 ## 变更验证 Gate
 
 Models 默认选择与新 Task admission 的回归必须覆盖：同一 source identity/source generation/protocol 内默认模型 A→B→A 只推进 selection revision 并保持 Product execution generation；旧 `generation + selection revision` pair 被拒绝，新 pair 被接受；credential、endpoint、protocol 或 source authority 变化仍建立新 generation。New task 模型 override 还必须覆盖默认 null、不修改 global default、同源非默认模型被写入新 Task 与 owned ExecutionConfig、source/catalog generation 漂移或 membership 失效时拒绝且不回退；Renderer、Bridge 和 Product Control 必须各自固定这条 payload/authority 链路。

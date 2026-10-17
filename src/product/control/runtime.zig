@@ -4037,10 +4037,11 @@ pub const Runtime = struct {
         const job = task.runtime.restore_job orelse return false;
         const rebind = if (job.rebind) |*value| value else return false;
         if (task.durable.approval_revision != rebind.approval_revision) return false;
-        const current = self.prepareTaskRestoreFilters(task_id, &rebind.capabilities.original) catch return false;
+        const capabilities = if (rebind.capabilities) |*value| value else return true;
+        const current = self.prepareTaskRestoreFilters(task_id, &capabilities.original) catch return false;
         defer if (current.skill) |value| value.deinit() catch {};
         defer if (current.mcp) |value| value.deinit();
-        return sameRestoreFilters(&rebind.capabilities, current);
+        return sameRestoreFilters(capabilities, current);
     }
 
     fn refreshModelRestoreCapabilities(context: *anyopaque, task_id: u64) bool {
@@ -4048,25 +4049,28 @@ pub const Runtime = struct {
         const task = self.task_runtime.find(task_id) orelse return false;
         const job = task.runtime.restore_job orelse return false;
         const rebind = if (job.rebind) |*value| value else return false;
-        const current = self.prepareTaskRestoreFilters(task_id, &rebind.capabilities.original) catch return false;
-        if (rebind.capabilities.skill) |value| value.deinit() catch {
-            rebind.capabilities.skill = null;
+        const capabilities = if (rebind.capabilities) |*value| value else return true;
+        const current = self.prepareTaskRestoreFilters(task_id, &capabilities.original) catch return false;
+        if (capabilities.skill) |value| value.deinit() catch {
+            capabilities.skill = null;
             if (current.skill) |replacement| replacement.deinit() catch {};
             if (current.mcp) |replacement| replacement.deinit();
             return false;
         };
-        if (rebind.capabilities.mcp) |value| value.deinit();
-        rebind.capabilities.skill = current.skill;
-        rebind.capabilities.mcp = current.mcp;
-        rebind.capabilities.mcp_catalog_generation = current.mcp_catalog_generation;
+        if (capabilities.mcp) |value| value.deinit();
+        capabilities.skill = current.skill;
+        capabilities.mcp = current.mcp;
+        capabilities.mcp_catalog_generation = current.mcp_catalog_generation;
         return true;
     }
 
     fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate) Error!u64 {
         const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
         if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
-        if (!task.runtime.hasAttachedSession() or task.durable.archived or task.read_only_history != null) return error.RecoveryUnavailable;
-        if (!self.task_persistence_health.operational() or self.checkpoint_store == null or self.checkpoint_store_health.load(.acquire) != .ready)
+        const attached = task.runtime.hasAttachedSession();
+        if (task.durable.archived or task.read_only_history != null) return error.RecoveryUnavailable;
+        if (!attached) _ = try self.task_runtime.recoveryStartFacts(task_id, expected_binding_epoch, self.taskRuntimeRecoveryAdmissionEffects());
+        if (attached and (!self.task_persistence_health.operational() or self.checkpoint_store == null or self.checkpoint_store_health.load(.acquire) != .ready))
             return error.RecoveryUnavailable;
         const workspace = try self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch);
         const binding = self.workspace.recoveryBinding(workspace.id) orelse return error.RecoveryUnavailable;
@@ -4074,22 +4078,27 @@ pub const Runtime = struct {
         const intent = task.durable.model_intent orelse return error.RecoveryUnavailable;
         const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
         self.redactAllProductProjectionsNoFail(target.input().api_key);
-        var access = try task.runtime.acquireAccess();
-        defer access.deinit();
-        var original = try access.captureRestoreInputs();
-        var original_owned = true;
-        defer if (original_owned) original.deinit() catch {};
-        const filters = try self.prepareTaskRestoreFilters(task_id, &original);
-        var capabilities: ?task_runtime.RestoreCapabilities = .{
-            .original = original,
-            .skill = filters.skill,
-            .mcp = filters.mcp,
-            .mcp_catalog_generation = filters.mcp_catalog_generation,
-        };
-        original_owned = false;
+        var capabilities: ?task_runtime.RestoreCapabilities = null;
         defer if (capabilities) |*value| value.deinit() catch {};
-        const generation = self.nextExecutionGeneration(@max(self.executionGeneration(), task.durable.execution_generation)) catch return error.ExecutionUnavailable;
+        if (attached) {
+            var access = try task.runtime.acquireAccess();
+            defer access.deinit();
+            var original = try access.captureRestoreInputs();
+            var original_owned = true;
+            defer if (original_owned) original.deinit() catch {};
+            const filters = try self.prepareTaskRestoreFilters(task_id, &original);
+            capabilities = .{ .original = original, .skill = filters.skill, .mcp = filters.mcp, .mcp_catalog_generation = filters.mcp_catalog_generation };
+            original_owned = false;
+        }
         const execution = target.input();
+        // A cold restore may reuse an already resolved immutable connection.
+        // Only exact full authority permits reuse; an absent or unrelated
+        // global default still resolves independently and gets a new identity.
+        const active = self.execution_state.executionInput();
+        const same_connection = !attached and active != null and self.execution_state.activeSourceGeneration() == execution.source_generation and
+            active.?.target.protocol == execution.target.protocol and std.mem.eql(u8, active.?.target.provider_id, execution.target.provider_id) and
+            std.mem.eql(u8, active.?.target.base_url, execution.target.base_url) and std.mem.eql(u8, active.?.api_key, execution.api_key);
+        const generation = if (same_connection) active.?.execution_generation else self.nextExecutionGeneration(@max(self.executionGeneration(), task.durable.execution_generation)) catch return error.ExecutionUnavailable;
         const config: models_contract.ConfigInput = .{ .execution_generation = generation, .target = execution.target, .api_key = execution.api_key };
         const attempt = try self.task_runtime.startRecovery(task_id, .{
             .expected_binding_epoch = expected_binding_epoch,
@@ -4113,7 +4122,7 @@ pub const Runtime = struct {
             .checkpoint_limits = checkpoint_export_limits,
             .notifier = .{ .context = self.change_notifier.context, .notify_fn = self.change_notifier.wake },
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
-            .rebind = .{ .source_id = intent.source_id, .selection_revision = intent.revision, .catalog_generation = authority.catalog_generation, .capabilities = &capabilities, .text = self.taskRuntimeTextProjection() },
+            .rebind = .{ .source_id = intent.source_id, .selection_revision = intent.revision, .catalog_generation = authority.catalog_generation, .capabilities = if (attached) &capabilities else null, .text = self.taskRuntimeTextProjection() },
         });
         self.bumpRevision();
         return attempt;
@@ -4129,12 +4138,15 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
-        if (self.task_runtime.findConst(task_id)) |task| if (task.runtime.hasAttachedSession()) {
+        self.syncLifecycle();
+        if (self.task_runtime.findConst(task_id)) |task| {
+            if (task.runtime.active_operation != .none) return error.RecoveryUnavailable;
             var target = try self.resolveTaskRunModel(task_id);
             defer if (target) |*value| value.deinit();
-            if (target) |*value| if (!task.runtime.executionConst().?.matchesSource(value.input()))
+            if (target) |*value| if (task.runtime.attachment == .detached or
+                (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
                 return self.beginTaskModelRebind(task_id, expected_binding_epoch, value);
-        };
+        }
         if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input) |queued| if (queued.state == .waiting) return error.QueuedInputPresent;
         self.syncLifecycle();
         const facts = try self.task_runtime.recoveryStartFacts(
@@ -6906,7 +6918,11 @@ pub const Runtime = struct {
             query.workspace_root,
             query.task_id,
         );
-        const execution_available = self.modelsDefaultCurrent() and
+        const task = self.task_runtime.findConst(query.task_id);
+        const execution_available = if (task != null and task.?.durable.model_intent != null) intent: {
+            const authority = self.taskModelIntentAuthority(query.task_id) orelse break :intent false;
+            break :intent self.custom_providers.sourceModelProtocol(task.?.durable.model_intent.?.modelRef(), authority.source_generation, authority.catalog_generation) != null;
+        } else self.modelsDefaultCurrent() and
             self.execution_state.supportsTaskExecution(
                 query.execution_protocol,
                 query.execution_model,
@@ -6976,6 +6992,9 @@ pub const Runtime = struct {
     fn taskModelIntentAuthority(self: *Runtime, task_id: u64) ?task_runtime.ModelIntentAuthority {
         const task = self.task_runtime.findConst(task_id) orelse return null;
         const intent = task.durable.model_intent orelse return null;
+        // Account identity replacement revokes new Metask credential use.
+        // Independent Custom Providers do not inherit that Account gate.
+        if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id) and self.execution_state.identityReplacementPending()) return null;
         const models = self.modelsView();
         for (models.providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id))
             return .{ .source_id = intent.source_id, .selection_revision = intent.revision, .source_generation = provider.source_generation, .catalog_generation = provider.catalog_generation };
@@ -7992,8 +8011,10 @@ pub const Runtime = struct {
         const model_intent_exact = if (query.model_intent) |authority| exact: {
             const task = self.task_runtime.findConst(query.task_id) orelse break :exact false;
             const intent = task.durable.model_intent orelse break :exact false;
+            const current = self.taskModelIntentAuthority(query.task_id) orelse break :exact false;
             if (task.model_intent_prepared or intent.revision != authority.selection_revision or !std.mem.eql(u8, intent.source_id, authority.source_id) or
-                !std.mem.eql(u8, intent.model_id, query.task_model)) break :exact false;
+                !std.mem.eql(u8, intent.model_id, query.task_model) or current.source_generation != authority.source_generation or
+                current.catalog_generation != authority.catalog_generation) break :exact false;
             break :exact self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == query.protocol and
                 self.modelRestoreCapabilitiesExact(query.task_id);
         } else if (query.original_restore) self.modelRestoreCapabilitiesExact(query.task_id) else false;

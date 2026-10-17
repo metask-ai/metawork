@@ -339,14 +339,14 @@ pub const Rebind = struct {
     approval_revision: u64,
     last_run_id: u64,
     last_compact_id: u64,
-    original_execution: owned_execution.OwnedTaskExecution,
+    original_execution: ?owned_execution.OwnedTaskExecution,
     original_credential: []const u8,
     original_model: ?[]u8,
-    capabilities: RestoreCapabilities,
+    capabilities: ?RestoreCapabilities,
     projected_model: ?[]u8,
     baseline: ?checkpoint_record.Record = null,
     baseline_access: ?agent_session.Access,
-    store_health: *std.atomic.Value(checkpoint_store.Health),
+    store_health: ?*std.atomic.Value(checkpoint_store.Health),
     failure: ?Failure = null,
     export_poisoned: bool = false,
 
@@ -455,11 +455,11 @@ pub const Job = struct {
             std.debug.assert(rebind.projected_model == null);
             if (rebind.baseline_access) |*access| access.deinit();
             if (rebind.baseline) |*baseline| baseline.deinit(self.allocator);
-            rebind.capabilities.deinit() catch {
+            if (rebind.capabilities) |*capabilities| capabilities.deinit() catch {
                 cleanup_ok = false;
             };
             if (rebind.original_model) |model| self.allocator.free(model);
-            rebind.original_execution.deinit();
+            if (rebind.original_execution) |*execution| execution.deinit();
             self.allocator.free(rebind.source_id);
         }
         if (self.unknown_history) |bytes| self.allocator.free(bytes);
@@ -482,7 +482,7 @@ pub const Job = struct {
             var access = rebind.baseline_access.?.take();
             rebind.baseline_access = null;
             defer access.deinit();
-            const result = self.export_checkpoint_fn.?(self, &access, rebind.original_execution.model);
+            const result = self.export_checkpoint_fn.?(self, &access, rebind.original_execution.?.model);
             return switch (result) {
                 .checkpoint => |record| .{ .baseline = record },
                 .failure => |failure_value| failed: {
@@ -493,6 +493,7 @@ pub const Job = struct {
         };
 
         const execution = self.attempt.execution.input();
+        const capabilities = if (self.rebind) |rebind| rebind.capabilities else null;
         const options: agent.SessionOpenOptions = .{
             .model_binding = .{
                 .target = .{
@@ -515,9 +516,9 @@ pub const Job = struct {
             },
             .canonical_user_home = self.attempt.workspace.canonical_user_home,
             .workspace_epoch = self.attempt.workspace.epoch_token,
-            .skill_catalog = if (self.rebind) |rebind| if (rebind.capabilities.skill) |inputs| inputs.borrow().catalog else null else null,
-            .skill_policy = if (self.rebind) |rebind| if (rebind.capabilities.skill) |inputs| inputs.borrow().policy else null else null,
-            .mcp_selection = if (self.rebind) |rebind| rebind.capabilities.mcp else null,
+            .skill_catalog = if (capabilities) |value| if (value.skill) |inputs| inputs.borrow().catalog else null else null,
+            .skill_policy = if (capabilities) |value| if (value.skill) |inputs| inputs.borrow().policy else null else null,
+            .mcp_selection = if (capabilities) |value| value.mcp else null,
             .operation_id_floor = .{
                 .last_run_id = self.attempt.run_id_floor,
                 .last_compact_id = self.attempt.compact_id_floor,
@@ -559,7 +560,9 @@ pub const Job = struct {
         access.deinit();
 
         var target_checkpoint: ?checkpoint_record.Record = null;
-        if (self.rebind != null) {
+        const export_target = if (self.rebind) |rebind| rebind.capabilities != null or
+            (self.attempt.checkpoint != null and !std.mem.eql(u8, self.attempt.checkpoint.?.session.model, self.attempt.task_model)) else false;
+        if (export_target and self.store != null) {
             var export_access = binding.acquireAccess() catch return self.rejectCandidate(&binding, report, .restore_rejected);
             defer export_access.deinit();
             switch (self.export_checkpoint_fn.?(self, &export_access, self.attempt.task_model)) {

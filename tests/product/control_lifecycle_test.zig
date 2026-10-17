@@ -1822,6 +1822,37 @@ test "new Task model selection uses the full custom connection with or without a
     }
 }
 
+fn configureTaskRebindTarget(workbench: *product_control.Runtime) !models_contract.CustomModelTestCommand {
+    if (workbench.modelsView().custom_providers.len == 0) {
+        try std.testing.expect(workbench.createCustomProviderWithCredential("other-secret", .{
+            .display_name = "Other",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://other.example.com/v1/responses",
+        }).accepted);
+        const created = workbench.modelsView().custom_providers[0];
+        try std.testing.expect(workbench.submitCustomProviderCommand(.{ .add_custom_model = .{
+            .source_id = TaskModelsVault.slot,
+            .expected_provider_revision = created.provider_revision,
+            .expected_catalog_generation = created.catalog_generation,
+            .model = .{ .id = "other-model" },
+        } }).accepted);
+    }
+    const configured = workbench.modelsView().custom_providers[0];
+    const probe: models_contract.CustomModelTestCommand = .{
+        .model = .{ .source_id = TaskModelsVault.slot, .model_id = "other-model" },
+        .expected_provider_revision = configured.provider_revision,
+        .expected_source_generation = configured.source_generation,
+        .expected_catalog_generation = configured.catalog_generation,
+    };
+    var preparation = switch (workbench.beginCustomProviderProbe(probe)) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    preparation.deinit();
+    try std.testing.expect(workbench.completeCustomModelTest(probe, true).accepted);
+    return probe;
+}
+
 test "Task model rebind confirms a full target connection and restores the original once on failure" {
     const cases = [_]struct { reject_target: bool, queued: bool }{
         .{ .reject_target = false, .queued = false }, .{ .reject_target = true, .queued = false },
@@ -1865,31 +1896,7 @@ test "Task model rebind confirms a full target connection and restores the origi
         defer workbench.stopCustomProviders();
         try installControlExecution(&workbench);
         installTwoModelCatalog(&workbench);
-        try std.testing.expect(workbench.createCustomProviderWithCredential("other-secret", .{
-            .display_name = "Other",
-            .protocol = .openai_responses,
-            .normalized_base_url = "https://other.example.com/v1/responses",
-        }).accepted);
-        const created = workbench.modelsView().custom_providers[0];
-        try std.testing.expect(workbench.submitCustomProviderCommand(.{ .add_custom_model = .{
-            .source_id = TaskModelsVault.slot,
-            .expected_provider_revision = created.provider_revision,
-            .expected_catalog_generation = created.catalog_generation,
-            .model = .{ .id = "other-model" },
-        } }).accepted);
-        const configured = workbench.modelsView().custom_providers[0];
-        const probe: models_contract.CustomModelTestCommand = .{
-            .model = .{ .source_id = TaskModelsVault.slot, .model_id = "other-model" },
-            .expected_provider_revision = configured.provider_revision,
-            .expected_source_generation = configured.source_generation,
-            .expected_catalog_generation = configured.catalog_generation,
-        };
-        var preparation = switch (workbench.beginCustomProviderProbe(probe)) {
-            .ready => |value| value,
-            .rejected => return error.TestUnexpectedResult,
-        };
-        preparation.deinit();
-        try std.testing.expect(workbench.completeCustomModelTest(probe, true).accepted);
+        const probe = try configureTaskRebindTarget(&workbench);
         const ready = workbench.modelsView().custom_providers[0];
         var input = productControlTaskInput();
         input.workspace_root = home;
@@ -2008,6 +2015,124 @@ test "Task model rebind confirms a full target connection and restores the origi
             try std.testing.expectEqualStrings("other-model", task.durable.runs[1].?.execution_model);
         }
     }
+}
+
+test "detached Task restores its committed target across restart without a global default" {
+    for ([_]bool{ false, true }) |has_history| for ([_]bool{ false, true }) |target_available| {
+        fake_core.reset();
+        fake_core.setCheckpointGeneration(1);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer store.deinit();
+        const storage = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+        defer std.testing.allocator.free(storage);
+        var persistence = TaskPersistenceProbe{ .storage = storage };
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = persistence.capability();
+        configuration.checkpoint_store = .{ .file_store = &store };
+        const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 3, .max_tools_per_run = 1 };
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var vault: TaskModelsVault = .{};
+        defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
+        var first = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        var first_live = true;
+        defer if (first_live) {
+            first.stopCustomProviders();
+            first.deinit();
+        };
+        try first.startCustomProviders(home, vault.port());
+        try installControlExecution(&first);
+        installTwoModelCatalog(&first);
+        const probe = try configureTaskRebindTarget(&first);
+        const ready = first.modelsView().custom_providers[0];
+        var input = productControlTaskInput();
+        input.workspace_root = home;
+        input.trust = .explicitly_trusted;
+        input.approval_mode = .manual;
+        const id = try first.createTask(input);
+        if (has_history) {
+            _ = try first.runTask(id, .{ .text = "original context survives a different protocol" });
+            try waitCheckpointRecord(&first, &persistence);
+        }
+        const task = first.task_runtime.findConst(id).?;
+        const old_epoch = task.durable.binding_epoch;
+        const workspace_id = task.durable.workspace_id;
+        const selected_revision = try first.selectTaskModel(id, .{
+            .target = probe.model,
+            .expected_selection_revision = task.durable.model_intent.?.revision,
+            .expected_source_generation = ready.source_generation,
+            .expected_catalog_generation = ready.catalog_generation,
+        });
+        if (has_history) {
+            fake_core.setRestoredLogicalId(task.durable.checkpoint.?.session.logical_session_id);
+            fake_core.lock();
+            fake_core.restore_last_run_id = 1;
+            fake_core.unlock();
+        }
+        const history = try std.testing.allocator.dupe(u8, storage[0..persistence.len]);
+        defer std.testing.allocator.free(history);
+        first.shutdownExecutor();
+        first.stopCustomProviders();
+        first.deinit();
+        first_live = false;
+        configuration.task_persistence = persistence.capabilityRestored(history);
+        var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+        defer restored.deinit();
+        try restored.startCustomProviders(home, vault.port());
+        defer restored.stopCustomProviders();
+        _ = try configureTaskRebindTarget(&restored);
+        try std.testing.expect(restored.clearCustomProviderDefault().accepted);
+        try std.testing.expect(restored.modelsView().default_selection == null);
+        try std.testing.expect(!restored.newTaskAdmissionView().available);
+        try std.testing.expectEqual(workspace_id, try restored.openWorkspace(input));
+        const recovered = restored.task_runtime.findConst(id).?;
+        try std.testing.expectEqual(selected_revision, recovered.durable.model_intent.?.revision);
+        try std.testing.expectEqual(.detached, std.meta.activeTag(recovered.runtime.attachment));
+        if (!target_available) {
+            const current = restored.modelsView().custom_providers[0];
+            try std.testing.expect(restored.submitCustomProviderCommand(.{ .remove_custom_model = .{
+                .selection = probe.model,
+                .expected_provider_revision = current.provider_revision,
+                .expected_catalog_generation = current.catalog_generation,
+            } }).accepted);
+            try std.testing.expectError(error.ExecutionUnavailable, restored.restoreTaskConversation(id, old_epoch));
+            try std.testing.expectEqual(old_epoch, recovered.durable.binding_epoch);
+            try std.testing.expectEqual(.detached, std.meta.activeTag(recovered.runtime.attachment));
+            try std.testing.expectEqualStrings("other-model", recovered.durable.model_intent.?.model_id);
+            continue;
+        }
+        _ = try restored.restoreTaskConversation(id, old_epoch);
+        for (0..5000) |_| {
+            try restored.drainAgentEvents();
+            restored.syncLifecycle();
+            if (recovered.runtime.restore_job == null and !recovered.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        if (recovered.runtime.last_restore_failure) |failure| std.debug.print("detached target failed: {s}\n", .{@tagName(failure)});
+        try std.testing.expect(recovered.runtime.hasAttachedSession());
+        try std.testing.expectEqual(old_epoch + 1, recovered.durable.binding_epoch);
+        try std.testing.expectEqualStrings("other-model", recovered.durable.execution_model);
+        if (has_history) {
+            try std.testing.expectEqualStrings("other-model", recovered.durable.checkpoint.?.session.model);
+        } else try std.testing.expect(recovered.durable.checkpoint == null);
+        const execution = recovered.runtime.executionConst().?;
+        try std.testing.expectEqual(selected_revision, execution.model_intent_revision);
+        try std.testing.expectEqualStrings("other-secret", execution.secret);
+        try std.testing.expectEqualStrings("https://other.example.com/v1/responses", execution.base_url);
+        try std.testing.expectEqual(models_contract.Protocol.openai_responses, execution.protocol);
+        if (has_history) try std.testing.expectEqual(models_contract.Protocol.anthropic_messages, recovered.durable.runs[0].?.execution_protocol);
+        const run_id = try restored.runTask(id, .{ .text = "continue using my selected target" });
+        try std.testing.expectEqual(@as(u64, if (has_history) 2 else 1), run_id);
+        try std.testing.expect(restored.modelsView().default_selection == null);
+    };
 }
 
 fn waitCatalogReady(

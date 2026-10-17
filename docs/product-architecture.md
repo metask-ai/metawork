@@ -406,7 +406,7 @@ Conversation recovery 是 detached Task 的 attachment 重建事务，不是 tra
 
 - source Task、binding、checkpoint 与 terminal anchor 未变化；
 - Workspace identity、kind、epoch、root、authorization 与 Automatic owner 精确；
-- target ExecutionConfig protocol 相同、能够承载 Task model，且其 generation 在 start 到 commit 期间保持不变；
+- target ExecutionConfig 能够承载所选模型，且其 generation 在 start 到 commit 期间保持不变；已有显式模型意图时按精确来源解析完整配置，允许更换 protocol，不依赖全局默认；旧记录没有来源意图时仍按现有恢复资格匹配原模型与 protocol，不推断历史来源；
 - persistence、checkpoint store 与 Agent Runtime 可用；
 - Task 未归档、删除、运行其他 operation、replacement 或 shutdown；
 - 当前 recovery attempt 和 poison 状态允许进入。
@@ -416,6 +416,8 @@ checkpoint 必须与 covered 前沿精确相等，并且不能存在 pending ope
 唯一无 checkpoint 恢复例外是：Task 没有 checkpoint record、covered 前沿均为零且没有 pending operation。此时 Product 可以在原 Task 上 fresh attach 空 Conversation，以完整 Product operation history 和 durable UI history 高水位初始化各自 allocator；全部 excluded 历史继续可见，不进入新上下文，也不自动重放。只要存在 covered 历史，checkpoint 缺失、损坏或 store 不可用都必须 fail closed。
 
 历史 execution generation 只证明历史 Run 使用过哪个 execution，不是恢复当前 credential 的句柄，也不要求等于 target generation。Skill、MCP、Permission 和 projection continuity 是恢复后的可选能力状态，不是 Conversation 恢复资格；AgentCore 合法返回 degraded Session 时，Product 接受已恢复 Conversation，并让不可重建 authority 保持安全失效。
+
+detached Task 的显式模型意图沿同一恢复事务提交：冻结该来源的当前 authority，先按旧 checkpoint 的模型 expectation 恢复，模型改变时设置目标模型并导出对应 checkpoint，确认实际 model/protocol/binding 后才能安装。原模型未变时可沿用原 checkpoint，不能为冷恢复额外制造新的覆盖事实。没有原 live attachment 时，不构造原连接 credential 或进程前的 Skill/MCP 恢复输入，也不执行原配置回退；失败保持原 Task、意图和历史，等待明确重试。目标来源或模型已失效时不得借用全局默认。无 covered 历史且没有 checkpoint 的 Task 仍可走既有 fresh attach 例外，并使用所选完整配置。
 
 用户显式发起恢复后，Product 冻结完整 source/target authority 并提交 bounded recovery job。checkpoint restore 与上述空 Conversation fresh attach 使用同一恢复执行与提交边界；job 不保存 Task/Workspace 指针，不查询 Product Skill，不构造 MCP Selection，也不取得 durable permission rule，只按不可变输入验证 checkpoint source 并调用 Agent restore，或创建符合无 checkpoint 例外的空 Session。I/O、Agent Runtime、capacity、cancellation 与 typed AgentCore refusal 必须作为 attempt 结果返回；排队取消或一次失败结束本次 attempt，不得隐式重试或重放历史。
 
