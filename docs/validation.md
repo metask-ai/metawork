@@ -231,7 +231,15 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 
 首轮 `.zig-cache/sdk-native-drag/` 的未标记 portal 覆盖标题栏仍可误拖，暴露 SDK 原生区域不会自动按 DOM 遮挡排除的问题；产品共享 portal 根已显式 no-drag，并增加实际菜单/dialog portal 回归。第二轮 `.zig-cache/sdk-native-drag-final/` 原生输入矩阵通过，但 UI 探针仍错误要求原生拖动分发浏览器 pointerdown；记录已证明窗口实际移动。最终驱动仅对 SDK caption drag 使用原生位移断言，业务控件仍要求真实浏览器输入，不降低不误拖或零 gesture IPC 断言。
 
-同次正式 Native graph 单并发通过；默认并发停在 composition shutdown，长时间无进展后由执行者中止，同一二进制独立运行通过。串行通过不宣称解决并发停滞。不证明 macOS 实机、Windows 11、混合 DPI、浏览器缩放、真实任务改名/全部动态 action、touch/pen、系统菜单、snap 或安装包；旧 compatibility 的平台证据不自动转移到本次 SDK 路径。
+同次正式 Native graph 单并发通过；默认并发停在 composition shutdown，长时间无进展后由执行者中止，同一二进制独立运行通过。串行通过不宣称解决并发停滞。该次 composition 用例竞态的后续根因与修复见 [E-WIN-COMPOSITION-SHUTDOWN-20261017](#e-win-composition-shutdown-20261017)。不证明 macOS 实机、Windows 11、混合 DPI、浏览器缩放、真实任务改名/全部动态 action、touch/pen、系统菜单、snap 或安装包；旧 compatibility 的平台证据不自动转移到本次 SDK 路径。
+
+### E-WIN-COMPOSITION-SHUTDOWN-20261017
+
+2026-10-17，Windows x64 `10.0.19045`，canonical AgentCore ABI revision 19。未修改的 composition lifecycle 二进制在 8 实例并发的 160 次执行中出现 2 次 10 秒超时，均停在关闭 active/queued/idle Sessions 的用例。只添加 fake Core 观测日志的定向版本在 240 次执行中出现 13 次 8 秒超时，每次都记录到 requested Run `1`、Core 已接纳 Run `0`：Host `running` 已发布，但同步 ABI 尚未完成 Core admission，测试就开始 shutdown；abort 返回 `too_late` 后，随后进入 Core 的 controlled Run 没有退出信号，shutdown 等待其完成。
+
+修复将该“关闭已进入 Core 的 Run”用例的前置屏障改为 fake Core 的实际 Run-entry condition，保留 executor、queued/idle Sessions 和原 shutdown 路径；终态额外断言 ABI/abort 均为 OK、stop reason 为 aborted、interruption 为 app_shutdown。既有 pre-Core shutdown 回归继续验证关闭发生在执行前采样期间时不进入 Core。临时诊断日志已移除；未调整产品代码、测试并发、deadline 或超时，也未增加重试或跳过用例。
+
+修复绑定 revision `87610d223c1eef369f407b1a36c788d2571a3a60` 加测试源码 diff SHA-256 `67a8ec2abbdf988b63c98e2e5e27ce32f7ebdbc7e489621a6f833ea9d0ca6000`；修复后二进制 SHA-256 `044fa438694ed65a1dce9c7dd4acb244d9fd18317aab505babddd07583b80f28`。同样 8 实例并发运行完整 composition root 1000 次，全部通过；默认并发 `zig build test-lifecycle -Dtarget=x86_64-windows` 通过，正式 `native test . --yes -Dtarget=x86_64-windows` 连续两轮默认并发通过，未使用 `-j1`。本地 `.zig-cache/shutdown-race-evidence/identity.json` 与 `source.patch` 绑定 artifact、源码和各轮日志，逐次结果保存在 `shutdown-stress-baseline`、`shutdown-stress-diagnostic` 和 `shutdown-stress-fixed` 目录。本证据关闭该用例的前置条件竞态，不将其他历史 Native 停滞或平台异常一并归因或关闭。
 
 ### E-WIN-CHROME-GESTURES-20260919
 

@@ -54,11 +54,22 @@ test "composition shutdown closes active queued and idle Sessions before Runtime
     const active = try openSession(runtime);
     const queued = try openSession(runtime);
     _ = try openSession(runtime);
-    _ = try submitSession(active, "active");
-    try active.waitForState(.running);
+    const active_run = try submitSession(active, "active");
+    // Host Running precedes Core admission. This case needs an entered Core
+    // Run; otherwise shutdown can win the ABI handoff and abort an idle Core.
+    fake_core.waitRunEntered();
     _ = try submitSession(queued, "queued");
 
     try shutdownTestComposition(runtime);
+    var terminal = takeTestTerminal(active, active_run);
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_status_code);
+    try std.testing.expectEqual(@as(?u32, wire.STATUS_OK), terminal.raw_abort_status_code);
+    try std.testing.expectEqual(@as(?lifecycle.StopReason, .aborted), terminal.stop_reason);
+    try std.testing.expectEqual(
+        lifecycle.TerminationSignal{ .interrupted = .app_shutdown },
+        terminal.termination_signal.?,
+    );
     fake_core.lock();
     const session_destroyed = fake_core.session_destroyed;
     const runtime_destroyed = fake_core.runtime_destroyed;
