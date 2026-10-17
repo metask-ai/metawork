@@ -219,6 +219,10 @@ pub fn build(b: *std.Build) void {
         spec.root_module.link_libc = bundle.link_libc;
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_skill_runtime)
+            b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_skill_policy)
+            b.step("test-product-skill-policy", "Run Product Skill authority policy tests").dependOn(&b.addRunArtifact(tests).step);
     }
     const model_metadata_step = b.step("test-model-metadata", "Run Models declarations, resolution and Host/Renderer contract tests");
     for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers, test_modules.models_runtime }) |module| {

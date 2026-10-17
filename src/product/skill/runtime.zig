@@ -1189,6 +1189,26 @@ pub const Runtime = struct {
         };
     }
 
+    /// The caller owns the returned array; its ID bytes borrow the original
+    /// pinned projection until Agent's synchronous narrow call copies them.
+    pub fn restoreCeiling(self: *const Runtime, id: u64, epoch: u64, pinned: catalog.CatalogProjection) Error![][]const u8 {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const workspace = self.findWorkspaceConst(id) orelse return error.UnknownWorkspace;
+        if (workspace.epoch != epoch) return error.WorkspaceEpochMismatch;
+        const settings = self.state.source_settings orelse return error.CatalogUnavailable;
+        if (!workspace.authorized or !self.enablementTrusted() or pinned.redacted or
+            (pinned.availability != .ready and pinned.availability != .degraded)) return error.CatalogUnavailable;
+        const scope: management.Scope = if (workspace.personal_only) .personal else .{ .project = .{ .workspace_id = id, .workspace_epoch = epoch } };
+        var ids: std.ArrayList([]const u8) = .empty;
+        errdefer ids.deinit(self.allocator);
+        for (pinned.skills) |skill| {
+            if (skill.enabled and self.isSkillEnabled(scope, skill.skill_policy_key) and
+                policy.restoreSourceAllowed(skill, settings.selection, workspace.personal_only))
+                try ids.append(self.allocator, skill.skill_id);
+        }
+        return ids.toOwnedSlice(self.allocator);
+    }
+
     pub fn enablementRevision(
         self: *const Runtime,
         scope: management.Scope,
@@ -1976,6 +1996,97 @@ fn testRuntime(harness: *TestHarness) !Runtime {
             .max_policy_key_bytes = 64,
         },
     );
+}
+
+test "Skill restore ceiling retains pinned IDs under current source and Workspace grants" {
+    const Check = struct {
+        fn ids(runtime: *const Runtime, workspace_id: u64, pinned: catalog.CatalogProjection, expected: []const []const u8) !void {
+            const actual = try runtime.restoreCeiling(workspace_id, 1, pinned);
+            defer runtime.allocator.free(actual);
+            try std.testing.expectEqual(expected.len, actual.len);
+            for (actual, expected) |got, wanted| try std.testing.expectEqualStrings(wanted, got);
+        }
+    };
+    var harness: TestHarness = .{};
+    var runtime = try testRuntime(&harness);
+    defer runtime.deinit();
+    runtime.state.enablement_health = .ready;
+    runtime.state.source_settings.?.selection.values[@intFromEnum(sources.Id.codex_user)] = true;
+    runtime.registerWorkspaceOwned(.{
+        .id = 9,
+        .epoch = 1,
+        .catalog_authorized = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/manual"),
+    }, harness.budget());
+    runtime.registerWorkspaceOwned(.{
+        .id = 10,
+        .epoch = 1,
+        .catalog_authorized = true,
+        .personal_only = true,
+        .canonical_root = try std.testing.allocator.dupe(u8, "/automatic"),
+    }, harness.budget());
+    const template: catalog.SkillProjection = .{
+        .skill_id = "pinned-review",
+        .skill_policy_key = "review",
+        .invocation_name = "review",
+        .provider_id = "agents.directory",
+        .source_scope = .user,
+        .source_instance_id = "agents.user.default",
+        .contribution_id = "original-contribution",
+        .content_revision = "original-content",
+        .display_name = "Review",
+        .description = "",
+        .argument_names = &.{},
+        .max_values = 1,
+    };
+    var skills = [_]catalog.SkillProjection{template} ** 7;
+    skills[1].skill_id = "pinned-project";
+    skills[1].skill_policy_key = "project";
+    skills[1].source_instance_id = "agents.workspace.default";
+    skills[1].source_scope = .workspace;
+    skills[2].skill_id = "pinned-codex";
+    skills[2].skill_policy_key = "codex";
+    skills[2].source_instance_id = sources.definition(.codex_user).source_instance_id;
+    skills[3].enabled = false;
+    skills[4].source_instance_id = "unknown-source";
+    skills[5].provider_id = "unknown-provider";
+    skills[6].source_instance_id = sources.definition(.codex_user).source_instance_id;
+    skills[6].source_scope = .workspace;
+    var pinned: catalog.CatalogProjection = .{ .availability = .ready, .revision = "original-catalog", .skills = &skills };
+    // No latest catalog is needed: the original query lease owns the content.
+    try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project", "pinned-codex" });
+    try Check.ids(&runtime, 10, pinned, &.{ "pinned-review", "pinned-codex" });
+    try std.testing.expectEqual(@as(usize, 0), harness.query_count);
+    _ = try runtime.state.enablement_store.applyUser(.{ .skill_policy_key = "review", .enabled = false, .expected_revision = runtime.state.enablement_store.userRevision() });
+    try Check.ids(&runtime, 9, pinned, &.{ "pinned-project", "pinned-codex" });
+    _ = try runtime.state.enablement_store.applyWorkspace(.{ .identity = .{ .workspace_id = 9, .workspace_epoch = 1 }, .skill_policy_key = "review", .state = .enabled, .expected_revision = runtime.state.enablement_store.revision(.{ .workspace_id = 9, .workspace_epoch = 1 }) });
+    try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project", "pinned-codex" });
+    // Automatic Tasks ignore another Workspace's overrides and local sources.
+    try Check.ids(&runtime, 10, pinned, &.{"pinned-codex"});
+    runtime.state.source_settings.?.selection.values[@intFromEnum(sources.Id.codex_user)] = false;
+    try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project" });
+    try Check.ids(&runtime, 10, pinned, &.{});
+    try std.testing.expectEqualStrings("pinned-review", skills[0].skill_id);
+    try std.testing.expect(skills[0].enabled);
+    try std.testing.expectEqualStrings("original-content", skills[0].content_revision);
+    try std.testing.expectError(error.UnknownWorkspace, runtime.restoreCeiling(11, 1, pinned));
+    try std.testing.expectError(error.WorkspaceEpochMismatch, runtime.restoreCeiling(9, 2, pinned));
+    pinned.redacted = true;
+    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(9, 1, pinned));
+    pinned.redacted = false;
+    for ([_]state.EnablementHealth{ .unavailable, .read_failed, .corrupt, .outcome_unknown }) |health| {
+        runtime.state.enablement_health = health;
+        try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(9, 1, pinned));
+    }
+    runtime.state.enablement_health = .write_failed;
+    try Check.ids(&runtime, 9, pinned, &.{ "pinned-review", "pinned-project" });
+    runtime.findWorkspace(9).?.authorized = false;
+    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(9, 1, pinned));
+    runtime.findWorkspace(9).?.authorized = true;
+    runtime.state.source_settings = null;
+    try std.testing.expectError(error.CatalogUnavailable, runtime.restoreCeiling(9, 1, pinned));
+    runtime.shutting_down = true;
+    try std.testing.expectError(error.ExecutorShuttingDown, runtime.restoreCeiling(9, 1, pinned));
 }
 
 fn exerciseManagementCommitFailure(
