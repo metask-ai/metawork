@@ -1982,12 +1982,11 @@ test "Task source settings stay pinned until an explicit same-model selection in
 }
 
 test "Task model rebind confirms a full target connection and restores the original once on failure" {
-    const cases = [_]struct { reject_target: bool, queued: bool }{
-        .{ .reject_target = false, .queued = false }, .{ .reject_target = true, .queued = false },
-        .{ .reject_target = false, .queued = true },  .{ .reject_target = true, .queued = true },
-    };
-    for (cases) |case| {
-        const reject_target = case.reject_target;
+    const Failure = enum { none, restore, set_model, target_export, stale_intent, baseline_export, baseline_history, original_close, candidate_close, rollback, baseline_unknown_old, baseline_unknown_new, baseline_unknown_shutdown, shutdown };
+    for ([_]bool{ false, true }) |queued_input| for (std.enums.values(Failure)) |failure| {
+        const unknown = failure == .baseline_unknown_old or failure == .baseline_unknown_new or failure == .baseline_unknown_shutdown;
+        if (queued_input and (unknown or failure == .baseline_export or failure == .baseline_history or failure == .original_close)) continue;
+        const reject_target = failure != .none and failure != .baseline_unknown_new;
         fake_core.reset();
         fake_core.setCheckpointGeneration(1);
         var tmp = std.testing.tmpDir(.{});
@@ -2002,6 +2001,13 @@ test "Task model rebind confirms a full target connection and restores the origi
         var configuration = productControlConfiguration();
         configuration.directories.canonical_user_home = home;
         configuration.task_persistence = persistence.capability();
+        if (unknown) configuration.task_persistence.resolve_commit_fn = struct {
+            fn resolve(context: ?*anyopaque, candidate: []const u8) product_task.history.Commit {
+                const probe: *TaskPersistenceProbe = @ptrCast(@alignCast(context.?));
+                if (probe.result == .outcome_unknown) return .outcome_unknown;
+                return if (std.mem.eql(u8, candidate, probe.storage.?[0..probe.len])) .committed else .failed;
+            }
+        }.resolve;
         configuration.checkpoint_store = .{ .file_store = &checkpoint_store };
         const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
         defer {
@@ -2018,6 +2024,7 @@ test "Task model rebind confirms a full target connection and restores the origi
         }, configuration);
         defer workbench.deinit();
         defer fake_core.releaseControlled();
+        defer fake_core.releaseControlledRestore();
         var vault: TaskModelsVault = .{};
         defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
         try workbench.startCustomProviders(home, vault.port());
@@ -2030,14 +2037,14 @@ test "Task model rebind confirms a full target connection and restores the origi
         input.workspace_root = home;
         input.trust = .explicitly_trusted;
         input.approval_mode = .manual;
-        if (case.queued) fake_core.setNextPlan(.controlled);
+        if (queued_input) fake_core.setNextPlan(.controlled);
         const id = try workbench.createTask(input);
         const task = workbench.task_runtime.find(id).?;
         const old_epoch = task.durable.binding_epoch;
         const old_generation = task.durable.execution_generation;
         const first_run = try workbench.runTask(id, .{ .text = "keep this original context" });
         var revision: u64 = undefined;
-        if (case.queued) {
+        if (queued_input) {
             try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
             fake_core.setRestoredLogicalId(fake_core.sessions[0].session_id[0..fake_core.sessions[0].session_id_len]);
             fake_core.lock();
@@ -2051,16 +2058,47 @@ test "Task model rebind confirms a full target connection and restores the origi
             });
             const queued = try workbench.queueInput("model-rebind-queued", id, old_epoch, first_run, .{ .text = "queued through the connection change" });
             try std.testing.expectEqual(.queued, queued.outcome);
-            if (reject_target) fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT);
+            switch (failure) {
+                .none => {},
+                .restore => fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT),
+                .set_model => {
+                    fake_core.lock();
+                    fake_core.forced_set_model_status = wire.STATUS_CORE_ERROR;
+                    fake_core.unlock();
+                },
+                .target_export, .stale_intent => fake_core.armControlledRestore(),
+                .shutdown => fake_core.armControlledRestoreAfterCreate(),
+                .baseline_export => fake_core.forceNextCheckpointExportStatus(wire.STATUS_RESOURCE_LIMIT),
+                .baseline_history => persistence.result = .failed,
+                .baseline_unknown_old, .baseline_unknown_new, .baseline_unknown_shutdown => {
+                    fake_core.setCheckpointGeneration(2);
+                    fake_core.lock();
+                    fake_core.checkpoint_payload = "distinct-baseline-witness";
+                    fake_core.unlock();
+                    persistence.store_on_outcome_unknown = failure != .baseline_unknown_old;
+                    persistence.result = .outcome_unknown;
+                },
+                .original_close => fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR),
+                .candidate_close => {
+                    fake_core.lock();
+                    fake_core.forced_set_model_status = wire.STATUS_CORE_ERROR;
+                    fake_core.unlock();
+                    fake_core.armControlledRestore();
+                },
+                .rollback => {
+                    fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT);
+                    fake_core.armControlledRestore();
+                },
+            }
             fake_core.releaseControlled();
         }
         try waitCheckpointRecord(&workbench, &persistence);
-        if (!case.queued) for (0..2000) |_| {
+        if (!queued_input) for (0..2000) |_| {
             workbench.syncLifecycle();
             if (!task.runtime.worker_leases.hasLive() and task.runtime.active_operation == .none) break;
             try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
         };
-        if (!case.queued) {
+        if (!queued_input) {
             try std.testing.expect(!task.runtime.worker_leases.hasLive());
             fake_core.setRestoredLogicalId(task.durable.checkpoint.?.session.logical_session_id);
             fake_core.lock();
@@ -2072,16 +2110,145 @@ test "Task model rebind confirms a full target connection and restores the origi
                 .expected_source_generation = ready.source_generation,
                 .expected_catalog_generation = ready.catalog_generation,
             });
-            if (reject_target) fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT);
+            switch (failure) {
+                .none => {},
+                .restore => fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT),
+                .set_model => {
+                    fake_core.lock();
+                    fake_core.forced_set_model_status = wire.STATUS_CORE_ERROR;
+                    fake_core.unlock();
+                },
+                .target_export, .stale_intent => fake_core.armControlledRestore(),
+                .shutdown => fake_core.armControlledRestoreAfterCreate(),
+                .baseline_export => fake_core.forceNextCheckpointExportStatus(wire.STATUS_RESOURCE_LIMIT),
+                .baseline_history => persistence.result = .failed,
+                .baseline_unknown_old, .baseline_unknown_new, .baseline_unknown_shutdown => {
+                    fake_core.setCheckpointGeneration(2);
+                    fake_core.lock();
+                    fake_core.checkpoint_payload = "distinct-baseline-witness";
+                    fake_core.unlock();
+                    persistence.store_on_outcome_unknown = failure != .baseline_unknown_old;
+                    persistence.result = .outcome_unknown;
+                },
+                .original_close => fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR),
+                .candidate_close => {
+                    fake_core.lock();
+                    fake_core.forced_set_model_status = wire.STATUS_CORE_ERROR;
+                    fake_core.unlock();
+                    fake_core.armControlledRestore();
+                },
+                .rollback => {
+                    fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CHECKPOINT_CORRUPT);
+                    fake_core.armControlledRestore();
+                },
+            }
             const attempt = try workbench.restoreTaskConversation(id, old_epoch);
             try std.testing.expect(attempt != 0);
             try std.testing.expectEqual(.restore, std.meta.activeTag(task.runtime.active_operation));
+        }
+        var rejected_unknown_blob: ?product_task.checkpoint_store.Identity = null;
+        if (unknown) {
+            const original_blob = task.durable.checkpoint.?.blob;
+            for (0..5000) |_| {
+                workbench.syncLifecycle();
+                if (task.runtime.restore_job.?.binding_commit == .outcome_unknown) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.TestUnexpectedResult;
+            const baseline_blob = task.runtime.restore_job.?.rebind.?.baseline.?.blob;
+            if (failure == .baseline_unknown_old) rejected_unknown_blob = baseline_blob;
+            try std.testing.expect(!std.meta.eql(original_blob, baseline_blob));
+            for (0..10) |_| workbench.syncLifecycle();
+            try checkpoint_store.verify(original_blob);
+            try checkpoint_store.verify(baseline_blob);
+            try std.testing.expectEqual(old_epoch, task.durable.binding_epoch);
+            try std.testing.expect(task.runtime.hasAttachedSession());
+            fake_core.lock();
+            const before_readback_restores = fake_core.checkpoint_restores;
+            const before_readback_destroyed = fake_core.session_destroyed;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, 0), before_readback_restores);
+            try std.testing.expectEqual(@as(usize, 0), before_readback_destroyed);
+            if (failure == .baseline_unknown_shutdown) {
+                workbench.shutdownExecutor();
+                try std.testing.expect(task.runtime.restore_job == null);
+                try std.testing.expect(!task.runtime.worker_leases.hasLive());
+                try std.testing.expectEqual(old_epoch, task.durable.binding_epoch);
+                try std.testing.expectEqual(.outcome_unknown, workbench.task_persistence_health);
+                try checkpoint_store.verify(original_blob);
+                try checkpoint_store.verify(baseline_blob);
+                continue;
+            }
+            // Only a readback of the exact candidate may settle the result.
+            persistence.result = .committed;
+            try std.testing.expectEqual(.outcome_unknown, workbench.recoverTaskHistory(workbench.currentRevision()));
+        }
+        if (failure == .target_export or failure == .stale_intent or failure == .candidate_close or failure == .rollback or failure == .shutdown) {
+            for (0..5000) |_| {
+                try workbench.drainAgentEvents();
+                workbench.syncLifecycle();
+                fake_core.lock();
+                const entered = fake_core.restore_entered;
+                fake_core.unlock();
+                if (entered) break;
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.TestUnexpectedResult;
+            // Baseline export is already confirmed and the original route
+            // released. Refuse only the target's new checkpoint export.
+            if (failure == .shutdown) {
+                const Release = struct {
+                    cancellation: *const std.atomic.Value(bool),
+                    observed: bool = false,
+                    fn run(self: *@This()) void {
+                        for (0..5000) |_| {
+                            if (self.cancellation.load(.acquire)) {
+                                self.observed = true;
+                                break;
+                            }
+                            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+                        }
+                        fake_core.releaseControlledRestore();
+                    }
+                };
+                var context = Release{ .cancellation = &task.runtime.restore_job.?.cancellation };
+                const thread = try std.Thread.spawn(.{}, Release.run, .{&context});
+                // Composition and Models stay on Main. The helper only releases
+                // the synthetic Core barrier after observing cancellation.
+                workbench.shutdownExecutor();
+                thread.join();
+                try std.testing.expect(context.observed);
+                try std.testing.expect(task.runtime.restore_job == null);
+                try std.testing.expect(!task.runtime.worker_leases.hasLive());
+                try std.testing.expectEqual(old_epoch, task.durable.binding_epoch);
+                try std.testing.expectEqual(old_generation, task.durable.execution_generation);
+                try std.testing.expect(task.durable.runs[1] == null);
+                try checkpoint_store.verify(task.durable.checkpoint.?.blob);
+                fake_core.lock();
+                const shutdown_restores = fake_core.checkpoint_restores;
+                const shutdown_runs = fake_core.run_calls;
+                fake_core.unlock();
+                try std.testing.expectEqual(@as(usize, 1), shutdown_restores);
+                try std.testing.expectEqual(@as(usize, 1), shutdown_runs);
+                continue;
+            }
+            switch (failure) {
+                .target_export => fake_core.forceNextCheckpointExportStatus(wire.STATUS_RESOURCE_LIMIT),
+                .stale_intent => revision = try workbench.selectTaskModel(id, .{
+                    .expected_selection_revision = revision,
+                    .target = probe.model,
+                    .expected_source_generation = ready.source_generation,
+                    .expected_catalog_generation = ready.catalog_generation,
+                }),
+                .candidate_close => fake_core.forceNextSessionDestroyStatus(wire.STATUS_CORE_ERROR),
+                .rollback => fake_core.forceNextCheckpointRestoreStatus(wire.STATUS_CORE_ERROR),
+                else => unreachable,
+            }
+            fake_core.releaseControlledRestore();
         }
         for (0..5000) |_| {
             try workbench.drainAgentEvents();
             workbench.syncLifecycle();
             if (task.runtime.restore_job == null) {
-                if (!case.queued) break;
+                if (!queued_input) break;
                 if (reject_target) {
                     if (task.queued_input) |queued| if (queued.state == .held) break;
                 } else if (task.durable.runs[1]) |*run| if (task_state.productTerminalFacts(run) != null and run.event_stream_finalized and !task.runtime.worker_leases.hasLive()) break;
@@ -2090,6 +2257,47 @@ test "Task model rebind confirms a full target connection and restores the origi
         }
         if (task.runtime.restore_job) |job| std.debug.print("rebind phase={s} state={s} commit={s} outcome={s}\n", .{ @tagName(job.rebind.?.phase), @tagName(job.state.load(.acquire)), @tagName(job.binding_commit), @tagName(job.outcome) });
         try std.testing.expect(task.runtime.restore_job == null);
+        if (rejected_unknown_blob) |blob| {
+            for (0..5000) |_| {
+                workbench.syncLifecycle();
+                checkpoint_store.verify(blob) catch |err| {
+                    try std.testing.expectEqual(error.BlobMissing, err);
+                    break;
+                };
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            } else return error.TestUnexpectedResult;
+        }
+        if (failure == .baseline_export or failure == .baseline_history or failure == .baseline_unknown_old or failure == .original_close or failure == .candidate_close or failure == .rollback) {
+            try std.testing.expectEqual(old_epoch, task.durable.binding_epoch);
+            try std.testing.expectEqual(old_generation, task.durable.execution_generation);
+            try std.testing.expectEqualStrings("fixture-model", task.durable.execution_model);
+            try std.testing.expect(task.durable.runs[1] == null);
+            try std.testing.expect(task.runtime.last_restore_failure != null);
+            try std.testing.expect(!task.runtime.worker_leases.hasLive());
+            try checkpoint_store.verify(task.durable.checkpoint.?.blob);
+            fake_core.lock();
+            const restores = fake_core.checkpoint_restores;
+            const runs = fake_core.run_calls;
+            fake_core.unlock();
+            try std.testing.expectEqual(@as(usize, if (failure == .rollback) 2 else if (failure == .candidate_close) 1 else 0), restores);
+            try std.testing.expectEqual(@as(usize, 1), runs);
+            if (failure == .original_close or failure == .candidate_close) {
+                try std.testing.expect(task.runtime.close_failed);
+            } else if (failure == .rollback) {
+                try std.testing.expect(!task.runtime.hasAttachedSession());
+            } else {
+                try std.testing.expect(task.runtime.hasAttachedSession());
+                try std.testing.expectEqualStrings("fixture-secret", task.runtime.executionConst().?.secret);
+            }
+            // Settling again cannot restart a failed switch or replay input.
+            for (0..10) |_| workbench.syncLifecycle();
+            fake_core.lock();
+            const settled_restores = fake_core.checkpoint_restores;
+            fake_core.unlock();
+            try std.testing.expectEqual(restores, settled_restores);
+            persistence.result = .committed;
+            continue;
+        }
         try std.testing.expect(task.runtime.hasAttachedSession());
         try std.testing.expect(!task.runtime.worker_leases.hasLive());
         try std.testing.expectEqualStrings("fixture-model", task.durable.runs[0].?.execution_model);
@@ -2098,7 +2306,7 @@ test "Task model rebind confirms a full target connection and restores the origi
         try std.testing.expectEqualStrings("metask", workbench.modelsView().default_selection.?.source_id);
         const execution = task.runtime.executionConst().?;
         if (!reject_target and task.durable.binding_epoch == old_epoch) std.debug.print("unexpected rollback: failure={s} model={s} exports={d} restores={d}\n", .{
-            if (task.runtime.last_restore_failure) |failure| @tagName(failure) else "none", task.durable.execution_model, fake_core.checkpoint_exports, fake_core.checkpoint_restores,
+            if (task.runtime.last_restore_failure) |reason| @tagName(reason) else "none", task.durable.execution_model, fake_core.checkpoint_exports, fake_core.checkpoint_restores,
         });
         try std.testing.expectEqual(old_epoch + @as(u64, if (reject_target) 0 else 1), task.durable.binding_epoch);
         try std.testing.expectEqual(task.durable.binding_epoch, task.durable.checkpoint.?.anchor.binding_epoch);
@@ -2112,14 +2320,14 @@ test "Task model rebind confirms a full target connection and restores the origi
         const restore_calls = fake_core.checkpoint_restores;
         const destroyed = fake_core.session_destroyed;
         fake_core.unlock();
-        try std.testing.expectEqual(@as(usize, if (case.queued and !reject_target) 2 else 1), run_calls);
+        try std.testing.expectEqual(@as(usize, if (queued_input and !reject_target) 2 else 1), run_calls);
         try std.testing.expectEqual(@as(usize, if (reject_target) 2 else 1), restore_calls);
-        try std.testing.expectEqual(@as(usize, 1), destroyed);
+        try std.testing.expectEqual(@as(usize, if (failure == .set_model or failure == .target_export or failure == .stale_intent) 2 else 1), destroyed);
         if (reject_target) {
             try std.testing.expectEqual(old_generation, task.durable.execution_generation);
             try std.testing.expect(execution.model_intent_revision != revision);
             try std.testing.expect(task.runtime.last_restore_failure != null);
-            if (case.queued) {
+            if (queued_input) {
                 try std.testing.expectEqual(.held, task.queued_input.?.state);
                 try std.testing.expectEqualStrings("queued through the connection change", task.queued_input.?.input.text.value);
                 try std.testing.expectEqual(old_epoch, task.queued_input.?.binding_epoch);
@@ -2130,7 +2338,7 @@ test "Task model rebind confirms a full target connection and restores the origi
             try std.testing.expectEqual(revision, execution.model_intent_revision);
             try std.testing.expect(task.runtime.last_restore_failure == null);
             try std.testing.expectEqualStrings("custom_provider:" ++ TaskModelsVault.slot, execution.provider_id);
-            if (!case.queued) {
+            if (!queued_input) {
                 const next_run = try workbench.runTask(id, .{ .text = "continue on the selected connection" });
                 try std.testing.expectEqual(@as(u64, 2), next_run);
             } else try std.testing.expect(task.queued_input == null);
@@ -2142,7 +2350,7 @@ test "Task model rebind confirms a full target connection and restores the origi
             }
             try std.testing.expectEqualStrings("other-model", task.durable.runs[1].?.execution_model);
         }
-    }
+    };
 }
 
 test "detached Task restores its committed target across restart without a global default" {

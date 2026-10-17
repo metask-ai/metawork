@@ -1718,6 +1718,17 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     try std.testing.expectEqual(target_protocol, task.runtime.executionConst().?.protocol);
     try std.testing.expectEqual(target_protocol, task.durable.execution_protocol);
     try std.testing.expectEqualStrings(logical_id, task.durable.checkpoint.?.session.logical_session_id);
+    // A confirmed replacement retires the superseded blob through the
+    // existing cleanup worker, while its new canonical witness stays usable.
+    for (0..5000) |_| {
+        control.syncLifecycle();
+        checkpoints.verify(before.blob) catch |err| {
+            try std.testing.expectEqual(error.BlobMissing, err);
+            break;
+        };
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    } else return error.TestUnexpectedResult;
+    try checkpoints.verify(task.durable.checkpoint.?.blob);
     const after_switch_file = try tmp.dir.statFile(std.testing.io, "permission-boundary.txt", .{});
     try std.testing.expectEqual(original_file.mtime, after_switch_file.mtime);
     try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Continue on the new connection." }, .allow_session));

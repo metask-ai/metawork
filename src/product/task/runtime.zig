@@ -1007,6 +1007,7 @@ pub const RecoveryEffects = struct {
     queue_binding_fn: *const fn (*anyopaque, u64) anyerror!?DurableCommit,
     executor: ?ExecutorPort = null,
     refresh_capabilities_fn: ?*const fn (*anyopaque, u64) bool = null,
+    retire_checkpoint_fn: ?*const fn (*anyopaque, checkpoint_store.Identity) void = null,
 
     fn authority(
         self: RecoveryEffects,
@@ -4671,8 +4672,20 @@ pub const Runtime = struct {
         return changed;
     }
 
-    fn finishRecovery(self: *Runtime, task: *task_state.Task, job: *recovery_job.Job, release: ReleaseEffects) void {
+    fn retireUnusedRecoveryCheckpoint(task: *const task_state.Task, record: checkpoint_record.Record, effects: RecoveryEffects) void {
+        if (task.durable.checkpoint) |current| if (checkpointIdentityEqual(current.blob, record.blob)) return;
+        if (effects.retire_checkpoint_fn) |retire| retire(effects.context, record.blob);
+    }
+
+    fn finishRecovery(self: *Runtime, task: *task_state.Task, job: *recovery_job.Job, effects: RecoveryEffects, release: ReleaseEffects) void {
+        // Pending/unknown history owns every possible witness. Main must
+        // resolve it, or transfer the barrier to Control during shutdown;
+        // Control declines all retirement while shutting down.
+        std.debug.assert(job.binding_commit != .pending and job.binding_commit != .outcome_unknown);
+        if (job.attempt.checkpoint) |record| retireUnusedRecoveryCheckpoint(task, record, effects);
+        if (job.outcome == .baseline) retireUnusedRecoveryCheckpoint(task, job.outcome.baseline, effects);
         if (job.rebind) |*rebind| {
+            if (rebind.baseline) |record| retireUnusedRecoveryCheckpoint(task, record, effects);
             if (rebind.projected_model) |value| {
                 release.releaseProjectionBytes(value.len);
                 self.allocator.free(value);
@@ -4725,12 +4738,12 @@ pub const Runtime = struct {
         if (rebind.original_execution == null or !rebind.original_execution.?.owned or effects.refresh_capabilities_fn == null or
             !effects.refresh_capabilities_fn.?(effects.context, task.durable.id))
         {
-            self.finishRecovery(task, job, release);
+            self.finishRecovery(task, job, effects, release);
             return;
         }
         const authority = rebindAuthority(task, job, effects);
         if (authority.shutting_down or !authority.workspace_authority_exact or !authority.automatic_owner_exact) {
-            self.finishRecovery(task, job, release);
+            self.finishRecovery(task, job, effects, release);
             return;
         }
         job.credential = &.{};
@@ -4760,7 +4773,7 @@ pub const Runtime = struct {
                 if (job.outcome == .baseline) {
                     var duplicate = job.outcome.baseline.clone(self.allocator) catch {
                         task.runtime.last_restore_failure = .checkpoint_io;
-                        self.finishRecovery(task, job, release);
+                        self.finishRecovery(task, job, effects, release);
                         return .changed;
                     };
                     if (job.attempt.checkpoint) |*previous| previous.deinit(self.allocator);
@@ -4775,7 +4788,7 @@ pub const Runtime = struct {
                 if (rebind.export_poisoned) if (task.runtime.attached()) |attached| {
                     attached.health = .session_poisoned;
                 };
-                self.finishRecovery(task, job, release);
+                self.finishRecovery(task, job, effects, release);
                 return .changed;
             },
             .confirming_baseline => {
@@ -4784,13 +4797,13 @@ pub const Runtime = struct {
                     .not_started => {
                         if (job.cancellation.load(.acquire)) {
                             task.runtime.last_restore_failure = .cancelled;
-                            self.finishRecovery(task, job, release);
+                            self.finishRecovery(task, job, effects, release);
                             return .changed;
                         }
                         const candidate: task_state.CheckpointCandidate = .{ .record = rebind.baseline.?, .metrics = .{ .chunk_count = 0, .export_duration_ns = 0 } };
                         const overlay = beginCheckpointCoverageOverlay(task, &candidate) orelse {
                             task.runtime.last_restore_failure = .checkpoint_mismatch;
-                            self.finishRecovery(task, job, release);
+                            self.finishRecovery(task, job, effects, release);
                             return .changed;
                         };
                         const previous = task.durable.checkpoint;
@@ -4812,13 +4825,17 @@ pub const Runtime = struct {
                     },
                     .failed => {
                         task.runtime.last_restore_failure = task.runtime.last_restore_failure orelse .binding_persistence_failed;
-                        self.finishRecovery(task, job, release);
+                        self.finishRecovery(task, job, effects, release);
                         return .changed;
                     },
                     .committed => {
                         const candidate: task_state.CheckpointCandidate = .{ .record = rebind.baseline.?, .metrics = .{ .chunk_count = 0, .export_duration_ns = 0 } };
                         _ = beginCheckpointCoverageOverlay(task, &candidate) orelse unreachable;
-                        if (task.durable.checkpoint) |*old| old.deinit(self.allocator);
+                        if (task.durable.checkpoint) |*old| {
+                            if (!checkpointIdentityEqual(old.blob, rebind.baseline.?.blob))
+                                if (effects.retire_checkpoint_fn) |retire| retire(effects.context, old.blob);
+                            old.deinit(self.allocator);
+                        }
                         task.durable.checkpoint = rebind.baseline;
                         task.durable.checkpoint_anchor = .available;
                         task.durable.checkpoint_attempt = .none;
@@ -4829,7 +4846,7 @@ pub const Runtime = struct {
                             !authority.automatic_owner_exact or !authority.target_execution_authority_exact)
                         {
                             task.runtime.last_restore_failure = if (job.cancellation.load(.acquire)) .cancelled else .restore_rejected;
-                            self.finishRecovery(task, job, release);
+                            self.finishRecovery(task, job, effects, release);
                             return .changed;
                         }
                         std.debug.assert(task.runtime.worker_leases.liveCount() == 1);
@@ -4841,7 +4858,7 @@ pub const Runtime = struct {
                             task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
                             task.runtime.restore_catalog = null;
                             task.runtime.last_restore_failure = .runtime_busy;
-                            self.finishRecovery(task, job, release);
+                            self.finishRecovery(task, job, effects, release);
                         };
                         return .changed;
                     },
@@ -4855,14 +4872,14 @@ pub const Runtime = struct {
                         task.runtime.restore_catalog = null;
                     };
                     task.runtime.last_restore_failure = .candidate_cleanup_failed;
-                    self.finishRecovery(task, job, release);
+                    self.finishRecovery(task, job, effects, release);
                     return .changed;
                 }
                 if (task.runtime.attachment != .detached) return .waiting;
                 const authority = rebindAuthority(task, job, effects);
                 if (authority.shutting_down) {
                     task.runtime.last_restore_failure = .cancelled;
-                    self.finishRecovery(task, job, release);
+                    self.finishRecovery(task, job, effects, release);
                     return .changed;
                 }
                 if (rebind.phase == .closing_candidate or job.cancellation.load(.acquire) or
@@ -4882,7 +4899,7 @@ pub const Runtime = struct {
                 if (rebind.phase == .restoring_target) {
                     rebind.failure = task.runtime.last_restore_failure;
                     self.beginOriginalRestore(task, job, effects, release);
-                } else self.finishRecovery(task, job, release);
+                } else self.finishRecovery(task, job, effects, release);
                 return .changed;
             },
         }
@@ -5023,7 +5040,15 @@ pub const Runtime = struct {
                                 if (job.outcome.candidate.checkpoint) |value| {
                                     var record = value;
                                     if (advances_binding) record.adoptBindingEpoch(previous_epoch, next_epoch) catch unreachable;
-                                    if (task.durable.checkpoint) |*old| old.deinit(self.allocator);
+                                    if (task.durable.checkpoint) |*old| {
+                                        // The original baseline is still needed
+                                        // for a possible rollback. A superseded
+                                        // committed target is no longer needed.
+                                        const baseline_owned = if (job.attempt.checkpoint) |baseline| checkpointIdentityEqual(old.blob, baseline.blob) else false;
+                                        if (!baseline_owned and !checkpointIdentityEqual(old.blob, record.blob))
+                                            if (effects.retire_checkpoint_fn) |retire| retire(effects.context, old.blob);
+                                        old.deinit(self.allocator);
+                                    }
                                     task.durable.checkpoint = record;
                                 } else if (advances_binding) if (task.durable.checkpoint) |*record| record.adoptBindingEpoch(previous_epoch, next_epoch) catch unreachable;
                                 job.outcome.candidate.checkpoint = null;
@@ -5048,7 +5073,10 @@ pub const Runtime = struct {
                     }
                 }
                 var candidate = job.takeCandidate().?;
-                if (candidate.checkpoint) |*record| record.deinit(self.allocator);
+                if (candidate.checkpoint) |*record| {
+                    retireUnusedRecoveryCheckpoint(task, record.*, effects);
+                    record.deinit(self.allocator);
+                }
                 if (install_candidate) {
                     task.runtime.last_restore_report = candidate.report;
                     task.runtime.last_restore_permission = if (candidate.report) |report| .{
@@ -5137,7 +5165,7 @@ pub const Runtime = struct {
                     else => {},
                 }
             }
-            self.finishRecovery(task, job, release);
+            self.finishRecovery(task, job, effects, release);
             result.changed = true;
         }
         return result;

@@ -8072,7 +8072,15 @@ pub const Runtime = struct {
             .queue_binding_fn = queueTaskRuntimeBinding,
             .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
             .refresh_capabilities_fn = refreshModelRestoreCapabilities,
+            .retire_checkpoint_fn = retireRecoveryCheckpoint,
         };
+    }
+
+    fn retireRecoveryCheckpoint(context: *anyopaque, identity: checkpoint_store.Identity) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.shutting_down) return;
+        if (self.checkpoint_store) |store|
+            self.task_runtime.queueApprovalRetirement(store, identity, self.approvalExecutor(), self.approvalNotifier()) catch {};
     }
 
     fn commitTaskStateIfConfigured(self: *Runtime) Error!void {
