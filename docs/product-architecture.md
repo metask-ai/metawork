@@ -40,6 +40,8 @@ Account authenticated authorization
 → Agent Session consumption
 ```
 
+Models 可以独立于全局默认值，按精确 `ModelRef` 与预期 source/catalog generation 解析完整 owned execution candidate。protocol 与 endpoint 只取目标来源的声明，Custom Provider 还必须有当前 source generation 的 readiness proof；来源、目录、模型或 credential 不可用时明确失败，不回退到默认值。解析不修改 Provider-local/global selection，已交付 candidate 不受后续目录或 credential 状态变更改写。Task 等消费者的操作资格与安装事务仍由 Product Control 所有。
+
 Custom Provider execution 的数据流为：
 
 ```text

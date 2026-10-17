@@ -220,8 +220,8 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
     }
-    const model_metadata_step = b.step("test-model-metadata", "Run Models declarations and their Host/Renderer contract tests");
-    for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers }) |module| {
+    const model_metadata_step = b.step("test-model-metadata", "Run Models declarations, resolution and Host/Renderer contract tests");
+    for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers, test_modules.models_runtime }) |module| {
         model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
     }
     model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{
