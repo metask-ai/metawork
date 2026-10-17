@@ -1853,6 +1853,134 @@ fn configureTaskRebindTarget(workbench: *product_control.Runtime) !models_contra
     return probe;
 }
 
+test "Task source settings stay pinned until an explicit same-model selection installs new authority" {
+    for ([_]bool{ false, true }) |replace_credential| {
+        fake_core.reset();
+        fake_core.setCheckpointGeneration(1);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+        defer checkpoints.deinit();
+        const bytes = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+        defer std.testing.allocator.free(bytes);
+        var history = TaskPersistenceProbe{ .storage = bytes };
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        configuration.checkpoint_store = .{ .file_store = &checkpoints };
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+            .worker_count = 1,
+            .queue_capacity = 2,
+            .max_workspaces = 1,
+            .max_tasks = 1,
+            .max_runs_per_task = 3,
+            .max_tools_per_run = 1,
+        }, configuration);
+        defer workbench.deinit();
+        defer fake_core.releaseControlled();
+        var vault: TaskModelsVault = .{};
+        defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
+        try workbench.startCustomProviders(home, vault.port());
+        defer workbench.stopCustomProviders();
+        try installControlExecution(&workbench);
+        installTwoModelCatalog(&workbench);
+        const initial = try configureTaskRebindTarget(&workbench);
+        var workspace_input = productControlTaskInput();
+        workspace_input.workspace_root = home;
+        workspace_input.trust = .explicitly_trusted;
+        const workspace = try workbench.openWorkspace(workspace_input);
+        fake_core.setNextPlan(.controlled);
+        const task_id = try workbench.createTaskInWorkspace(workspace, try workbench.workspaceEpoch(workspace), workbench.newTaskAdmissionView().active_generation, workbench.newTaskAdmissionView().active_selection_revision, .{
+            .target = initial.model,
+            .expected_source_generation = initial.expected_source_generation,
+            .expected_catalog_generation = initial.expected_catalog_generation,
+        }, null, null, .{ .interactive = .manual });
+        const task = workbench.task_runtime.find(task_id).?;
+        const installed_source_generation = task.runtime.executionConst().?.source_generation;
+        const old_execution_generation = task.durable.execution_generation;
+        const old_revision = task.durable.model_intent.?.revision;
+        const old_epoch = task.durable.binding_epoch;
+        const first_run = try workbench.runTask(task_id, .{ .text = "stay on the already installed source" });
+        try waitControlSnapshot(&workbench, "\"currentRunPhase\":\"running\"");
+        const current = workbench.modelsView().custom_providers[0];
+        if (replace_credential) {
+            try std.testing.expect(workbench.replaceCustomProviderCredential("replacement-secret", .{ .source_id = TaskModelsVault.slot, .expected_provider_revision = current.provider_revision }).accepted);
+        } else {
+            try std.testing.expect(workbench.submitCustomProviderCommand(.{ .update = .{
+                .selection = .{ .source_id = TaskModelsVault.slot, .expected_provider_revision = current.provider_revision },
+                .spec = .{ .display_name = "Updated connection", .protocol = .gemini_native, .normalized_base_url = "https://updated.example.com" },
+            } }).accepted);
+        }
+        const changed = workbench.modelsView().custom_providers[0];
+        try std.testing.expect(changed.source_generation != installed_source_generation);
+        try std.testing.expectError(error.StaleCatalog, workbench.selectTaskModel(task_id, .{
+            .expected_selection_revision = old_revision,
+            .target = initial.model,
+            .expected_source_generation = changed.source_generation,
+            .expected_catalog_generation = changed.catalog_generation,
+        }));
+        try std.testing.expectEqual(old_revision, task.durable.model_intent.?.revision);
+        try std.testing.expectEqual(old_execution_generation, task.durable.execution_generation);
+        try std.testing.expectEqualStrings("other-secret", task.runtime.executionConst().?.secret);
+        try std.testing.expectEqualStrings("https://other.example.com/v1/responses", task.runtime.executionConst().?.base_url);
+        try std.testing.expectEqual(models_contract.Protocol.openai_responses, task.runtime.executionConst().?.protocol);
+        // Resolving the same public model under the new source authority and
+        // explicitly selecting it is a new Task intent, even during a Run.
+        const validated = try configureTaskRebindTarget(&workbench);
+        const revision = try workbench.selectTaskModel(task_id, .{
+            .expected_selection_revision = old_revision,
+            .target = validated.model,
+            .expected_source_generation = validated.expected_source_generation,
+            .expected_catalog_generation = validated.expected_catalog_generation,
+        });
+        try std.testing.expectEqual(old_revision + 1, revision);
+        try std.testing.expectEqual(first_run, task.runtime.active_operation.run);
+        try std.testing.expectEqual(old_execution_generation, task.durable.runs[0].?.execution_generation);
+        try std.testing.expectEqual(models_contract.Protocol.openai_responses, task.durable.runs[0].?.execution_protocol);
+        try std.testing.expectEqual(installed_source_generation, task.runtime.executionConst().?.source_generation);
+        fake_core.releaseControlled();
+        try waitCheckpointRecord(&workbench, &history);
+        for (0..2000) |_| {
+            workbench.syncLifecycle();
+            if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        fake_core.setRestoredLogicalId(task.durable.checkpoint.?.session.logical_session_id);
+        fake_core.setRestoredModel("other-model");
+        fake_core.lock();
+        fake_core.restore_last_run_id = first_run;
+        fake_core.unlock();
+        try std.testing.expectError(error.RestoreBusy, workbench.runTask(task_id, .{ .text = "apply the explicitly selected new authority" }));
+        try std.testing.expect(task.durable.runs[1] == null);
+        for (0..5000) |_| {
+            try workbench.drainAgentEvents();
+            workbench.syncLifecycle();
+            if (task.runtime.restore_job == null and !task.runtime.worker_leases.hasLive()) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        if (task.runtime.last_restore_failure) |failure| std.debug.print("source reselect failed: {s}\n", .{@tagName(failure)});
+        try std.testing.expect(task.runtime.last_restore_failure == null);
+        const execution = task.runtime.executionConst().?;
+        try std.testing.expectEqual(validated.expected_source_generation, execution.source_generation);
+        try std.testing.expectEqual(revision, execution.model_intent_revision);
+        try std.testing.expectEqualStrings(if (replace_credential) "replacement-secret" else "other-secret", execution.secret);
+        try std.testing.expectEqualStrings(if (replace_credential) "https://other.example.com/v1/responses" else "https://updated.example.com", execution.base_url);
+        try std.testing.expectEqual(if (replace_credential) models_contract.Protocol.openai_responses else models_contract.Protocol.gemini_native, execution.protocol);
+        try std.testing.expectEqual(old_epoch + 1, task.durable.binding_epoch);
+        try std.testing.expectEqualStrings("other-model", task.durable.execution_model);
+        try std.testing.expectEqualStrings("metask", workbench.modelsView().default_selection.?.source_id);
+        try std.testing.expectEqual(@as(u64, 2), try workbench.runTask(task_id, .{ .text = "apply the explicitly selected new authority" }));
+        try std.testing.expectEqual(execution.protocol, task.durable.runs[1].?.execution_protocol);
+    }
+}
+
 test "Task model rebind confirms a full target connection and restores the original once on failure" {
     const cases = [_]struct { reject_target: bool, queued: bool }{
         .{ .reject_target = false, .queued = false }, .{ .reject_target = true, .queued = false },

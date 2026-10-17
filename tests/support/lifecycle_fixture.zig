@@ -357,6 +357,8 @@ pub const FakeCore = struct {
     restore_last_compact_id: u64 = 0,
     restore_session_id: [wire.MAX_SESSION_ID_BYTES_V1]u8 = @splat(0),
     restore_session_id_len: usize = 0,
+    restore_model: [256]u8 = @splat(0),
+    restore_model_len: usize = 0,
     restore_controlled: bool = false,
     restore_after_create: bool = false,
     restore_entered: bool = false,
@@ -535,6 +537,14 @@ pub const FakeCore = struct {
         defer self.unlock();
         @memcpy(self.restore_session_id[0..id.len], id);
         self.restore_session_id_len = id.len;
+    }
+
+    pub fn setRestoredModel(self: *FakeCore, model: []const u8) void {
+        std.debug.assert(model.len != 0 and model.len <= self.restore_model.len);
+        self.lock();
+        defer self.unlock();
+        @memcpy(self.restore_model[0..model.len], model);
+        self.restore_model_len = model.len;
     }
 
     pub fn forceNextMcpRefreshStatus(self: *FakeCore, status: u32) void {
@@ -1501,6 +1511,8 @@ pub fn sessionRestore(
             .run_id = last_run_id,
             .compact_id = last_compact_id,
         };
+        @memcpy(session.model[0..fake_core.restore_model_len], fake_core.restore_model[0..fake_core.restore_model_len]);
+        session.model_len = fake_core.restore_model_len;
         const encoded = (if (restore_degraded)
             std.fmt.bufPrint(
                 &session.description_buffer,
