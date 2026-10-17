@@ -7907,7 +7907,7 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
     defer runtime.tasks[0] = null;
 
     const task = runtime.find(1).?;
-    var authority = ProjectionAuthority{ .shutting_down = false, .task_persistence_ready = true, .checkpoint_store_ready = true, .execution_admission = .available, .workspace_identity_exact = true, .automatic_owner_exact = true, .runtime_admission = .available, .authority_stable = true, .model_selection_availability = .runtime_detached };
+    var authority = ProjectionAuthority{ .shutting_down = false, .task_persistence_ready = true, .checkpoint_store_ready = true, .execution_admission = .available, .workspace_identity_exact = true, .automatic_owner_exact = true, .runtime_admission = .available, .authority_stable = true, .model_selection_availability = .available };
     const effects = RecoveryAdmissionEffects{ .context = &authority, .authority_fn = Harness.authority };
     const generation = task.runtime.permission_review.generation;
     var mode_buffer: [3]task_state.ApprovalMode = undefined;

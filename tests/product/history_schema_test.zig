@@ -27,6 +27,51 @@ fn temporaryPath(allocator: std.mem.Allocator, dir: std.Io.Dir) ![]const u8 {
     return std.fs.path.join(allocator, &.{ bytes[0..len], "history.db" });
 }
 
+test "history schema preserves optional source-qualified Task model intent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const state = try history.fixture(allocator);
+    for ([_]?history.wire.ModelIntentWire{
+        null,
+        .{ .source_id = "metask", .model_id = "next-model", .revision = 7 },
+        .{ .source_id = "custom-provider-00000000000000000000000000000001", .model_id = "模型-世", .revision = std.math.maxInt(u64) },
+    }) |intent| {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+        defer database.destroy() catch unreachable;
+        state.tasks[0].model_intent = intent;
+        _ = try save(allocator, database.capability(), state);
+        try expectSame(allocator, database.capability(), state);
+    }
+}
+
+test "Task model intent migration preserves old Task rows with no intent" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const path = try temporaryPath(arena.allocator(), temporary.dir);
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..4]);
+        defer database.destroy() catch unreachable;
+        const workspace = "INSERT INTO workspaces(ordinal,id,epoch,kind,canonical_root,display_name,visible,recent_order) VALUES(0,X'0000000000000001',X'0000000000000001','manual',X'2f746d70',X'77',1,X'0000000000000001')";
+        const task =
+            \\INSERT INTO tasks(ordinal,id,recent_order,workspace_id,workspace_epoch,workspace_root,title,title_redacted,archived,
+            \\permission_profile,permission_interaction,binding_epoch,execution_generation,protocol,model,next_run_generation,
+            \\checkpoint_anchor,checkpoint_attempt,ui_history_json,compacts_json)
+            \\VALUES(0,X'0000000000000001',X'0000000000000001',X'0000000000000001',X'0000000000000001',X'2f746d70',X'6f6c64',0,0,
+            \\'approval_required','interactive',X'0000000000000001',X'0000000000000001','anthropic_messages',X'6d',X'0000000000000001',
+            \\'none','none','[]','[]')
+        ;
+        try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{ .{ .statement = .{ .sql = workspace } }, .{ .statement = .{ .sql = task } } }));
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer database.destroy() catch unreachable;
+    var count: Count = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT COUNT(*) FROM tasks WHERE title=X'6f6c64' AND model_intent_json IS NULL", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(?i64, 1), count.value);
+}
+
 test "history schema preserves null empty and nonterminal history variants" {
     for (0..4) |variant| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -467,7 +512,7 @@ test "history schema upgrades v3 without changing existing checkpoint constraint
     for (0..2) |_| {
         const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
         defer database.destroy() catch unreachable;
-        try std.testing.expectEqual(@as(u32, 4), database.schemaVersion());
+        try std.testing.expectEqual(@as(u32, schema.migrations.len), database.schemaVersion());
         var count: Count = .{};
         try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query(
             "SELECT COUNT(*) FROM tasks WHERE approval_revision=X'0000000000000001' AND checkpoint_approval_revision IS NULL AND checkpoint_approval_json IS NULL AND checkpoint_generation=X'FFFFFFFFFFFFFFFF' AND checkpoint_digest=zeroblob(32) AND checkpoint_terminal_kind='run' AND checkpoint_terminal_id=X'0000000000000001' AND checkpoint_model=X'61' AND title=X'61'",
