@@ -427,6 +427,8 @@ detached Task 的显式模型意图沿同一恢复事务提交：冻结该来源
 
 同进程显式模型意图要求更换连接或 protocol 时，沿本节同一 operation、恢复 worker、history writer 与关闭 owner 执行重绑定。原 attachment 必须 idle 且事件、worker 和权限 mutation 静止；先冻结完整目标配置、原配置和实际能力输入，导出并确认基线 checkpoint，才能关闭并释放原 Session。此时目标 protocol 不必等于原 protocol，但 checkpoint 的模型与操作前沿 expectation 仍使用原始精确事实；恢复后调用官方 `setModel`，再导出与目标实际模型一致的 checkpoint。不得同时保留两个相同逻辑 Session identity 的 live handle，或发送中间模型请求。
 
+重绑定容量投影可以计入随后释放的当前 Task owned route；Runtime 必须核验该 route 仍由自身持有，并保持 shutdown、Core availability 与 MCP refresh 屏障。该观察不预留槽位，也不替代释放旧 Session 后的实际 restore admission；并发消费者占用槽位时仍明确失败。detached 恢复没有可释放的 owned route，继续要求空闲容量；poisoned 或 closing attachment 不能因此投影成可重绑定。
+
 Skill 的原 pinned 投影留在 Task attachment，由主线程管理；worker 只接收 Agent-owned 恢复输入。原 Skill grant、MCP selector/来源与实际 permission mode、shell policy、interaction 是恢复上限，还须与 Product 当前 Workspace、来源开关和工具授权求交，发布前再次核验。选择 revision、Models source/catalog authority、审批 revision、Workspace 或生命周期变化使目标 candidate 失去安装资格；不能采用更新的全局能力列表来补齐或扩大原 Task。
 
 目标确认前失败时，保留原模型意图和待发送输入。原 Session 已释放的，候选必须先经普通关闭 owner 清理，才允许使用原配置、同一基线和当前授权上限执行至多一次恢复；失败后保持真实 detached/closing 状态。回退不接纳 Run、不回放审批或用户输入，也不将原模型伪装成已安装的目标。确认目标 binding 后，合法排队输入的 anchor 在同一 Task 事务内随 epoch 推进；失败且未确认 binding 时不推进 anchor。若 authority 在 durable commit 期间变化，仍须先接受已确认的 canonical binding，再清理候选并独立提交必要的原配置恢复，不能倒退已确认的 epoch。

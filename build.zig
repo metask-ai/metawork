@@ -239,6 +239,10 @@ pub fn build(b: *std.Build) void {
     const task_model_step = b.step("test-task-model-selection", "Run Task model intent, selection and strict Bridge tests");
     task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_task_persistence })).step);
     task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = test_modules.product_task_runtime,
+        .filters = &.{ "Task model", "pending model rebind" },
+    })).step);
+    task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{
         .root_module = test_modules.product_control_runtime,
         .filters = &.{ "Task model", "default replacement preserves", "same-source default model", "snapshot serializer" },
     })).step);

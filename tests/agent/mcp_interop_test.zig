@@ -1693,6 +1693,16 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     try control.refreshMcpCatalog();
     try waitForMcpSnapshot(&control, "\"operation\":\"idle\",\"configurationApply\":\"idle\"");
     _ = try control.selectTaskModel(task_id, .{ .expected_selection_revision = task.durable.model_intent.?.revision, .target = selected.target, .expected_source_generation = selected.expected_source_generation, .expected_catalog_generation = selected.expected_catalog_generation });
+    // The full one-slot Runtime can offer rebind through the same Snapshot
+    // consumed by Renderer, because this Task owns the slot it will release.
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
+    var snapshot_bytes: [128 * 1024]u8 = undefined;
+    const snapshot = try control.writeSnapshot(&snapshot_bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+    defer parsed.deinit();
+    const projected = parsed.value.object.get("tasks").?.array.items[0].object;
+    try std.testing.expect(projected.get("continuationRecoveryAvailable").?.bool);
+    try std.testing.expectEqualStrings("session_recovery_required", projected.get("continuationUnavailableReason").?.string);
     _ = try control.restoreTaskConversation(task_id, old_epoch);
     for (0..5000) |_| {
         try control.drainAgentEvents();

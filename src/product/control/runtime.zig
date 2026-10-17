@@ -6919,6 +6919,12 @@ pub const Runtime = struct {
             query.task_id,
         );
         const task = self.task_runtime.findConst(query.task_id);
+        const model_rebind_required = self.taskModelNeedsRebind(query.task_id);
+        const releasing_route_id: ?u64 = if (task != null and model_rebind_required and task.?.runtime.attachedConst() != null and
+            task.?.runtime.attachedConst().?.health == .available)
+            task.?.runtime.attachedConst().?.binding.routeId()
+        else
+            null;
         const execution_available = if (task != null and task.?.durable.model_intent != null) intent: {
             const authority = self.taskModelIntentAuthority(query.task_id) orelse break :intent false;
             break :intent self.custom_providers.sourceModelProtocol(task.?.durable.model_intent.?.modelRef(), authority.source_generation, authority.catalog_generation) != null;
@@ -6943,14 +6949,14 @@ pub const Runtime = struct {
             .automatic_owner_exact = workspace.automatic_owner_exact,
             .runtime_admission = if (self.shutting_down)
                 .shutting_down
-            else if (self.agent_runtime.restoreAdmissionAvailable())
+            else if (self.agent_runtime.restoreAdmissionAvailable(releasing_route_id))
                 .available
             else
                 .unavailable,
             .authority_stable = !self.shutting_down and
                 self.canonical_user_home != null and workspace.exists,
             .model_selection_availability = self.taskModelSelectionAvailability(query),
-            .model_rebind_required = self.taskModelNeedsRebind(query.task_id),
+            .model_rebind_required = model_rebind_required,
         };
     }
 

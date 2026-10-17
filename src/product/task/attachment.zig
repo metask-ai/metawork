@@ -169,9 +169,6 @@ pub const State = struct {
     /// Session owner. Even a reusable close failure cannot install it.
     discarding_restore: bool = false,
     cancel_requested: bool = false,
-    /// Runtime-only model selection requested while the Session is busy.
-    /// It is deliberately not part of task persistence and is dropped on
-    /// restart/detach.
     pub fn attached(self: *State) ?*LiveAttachment {
         return switch (self.attachment) {
             .attached => |*value| value,

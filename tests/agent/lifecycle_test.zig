@@ -28,6 +28,38 @@ const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
 
+test "recovery capacity observation counts only an owned route scheduled for release" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.restoreAdmissionAvailable(null));
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(0));
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(std.math.maxInt(u64)));
+    const session = try openSession(runtime);
+    const route = session.id;
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
+    try std.testing.expect(runtime.restoreAdmissionAvailable(route));
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(route + 1));
+    // Projection cannot bypass the existing Runtime refresh fence.
+    runtime.mcp_refresh_running = true;
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
+    runtime.mcp_refresh_running = false;
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
+    try std.testing.expect(runtime.restoreAdmissionAvailable(null));
+    const next = try openSession(runtime);
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
+    try std.testing.expect(runtime.restoreAdmissionAvailable(next.id));
+    const next_route = next.id;
+    try runtime.shutdown();
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(next_route));
+}
+
 const TestRunClock = struct {
     snapshot: lifecycle.RunTimeSnapshot = .{},
     samples: usize = 0,

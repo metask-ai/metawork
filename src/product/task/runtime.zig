@@ -4333,7 +4333,9 @@ pub const Runtime = struct {
         task: *const task_state.Task,
         external: ProjectionAuthority,
     ) task_recovery.Projection {
-        if (task.runtime.active_operation == .none and task.runtime.hasAttachedSession() and external.model_rebind_required) {
+        if (task.runtime.active_operation == .none and task.runtime.attachedConst() != null and
+            task.runtime.attachedConst().?.health == .available and external.model_rebind_required)
+        {
             return .{
                 .continuation = .{ .unavailable = if (task.runtime.last_restore_failure != null) .session_recovery_failed else .session_recovery_required },
                 .recovery_available = !external.shutting_down and !task.durable.archived and task.read_only_history == null and
@@ -7791,6 +7793,56 @@ test "permission review intent includes only bounded explicit Skill and multimod
     defer decoded.deinit();
     try std.testing.expect(decoded.value.object.get("text").? == .null);
     try std.testing.expectEqualStrings("instructions.txt", decoded.value.object.get("attachments").?.array.items[0].object.get("display_name").?.string);
+}
+
+test "pending model rebind never hides poisoned or closing attachment truth" {
+    var runtime = try Runtime.init(std.testing.allocator, 1);
+    defer runtime.deinitStorage();
+    var task: task_state.Task = .{
+        .durable = .{
+            .id = 1,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .openai_responses,
+            .execution_model = @constCast("m"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .workspace_id = 1,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &.{},
+            .compacts = &.{},
+            .ui_history = &.{},
+        },
+        .runtime = .{ .attachment = .{ .attached = .{
+            .binding = task_agent_session.Binding.testFixture(1),
+            .execution = undefined,
+            .pinned_catalog = null,
+        } } },
+    };
+    const authority: ProjectionAuthority = .{
+        .shutting_down = false,
+        .task_persistence_ready = true,
+        .checkpoint_store_ready = true,
+        .execution_admission = .available,
+        .workspace_identity_exact = true,
+        .automatic_owner_exact = true,
+        .runtime_admission = .available,
+        .authority_stable = true,
+        .model_selection_availability = .available,
+        .model_rebind_required = true,
+    };
+    const healthy = runtime.recoveryProjectionWithAuthority(&task, authority);
+    try std.testing.expect(healthy.recovery_available);
+    try std.testing.expectEqual(.session_recovery_required, healthy.continuation.unavailable);
+    task.runtime.attached().?.health = .session_poisoned;
+    const poisoned = runtime.recoveryProjectionWithAuthority(&task, authority);
+    try std.testing.expect(!poisoned.recovery_available);
+    try std.testing.expectEqual(.session_poisoned, poisoned.continuation.unavailable);
+    try std.testing.expect(task.runtime.beginClosing());
+    const closing = runtime.recoveryProjectionWithAuthority(&task, authority);
+    try std.testing.expect(!closing.recovery_available);
+    try std.testing.expectEqual(.closing, closing.continuation.unavailable);
 }
 
 test "approval intent CAS, no-op, delegation commit and history authority stay distinct" {

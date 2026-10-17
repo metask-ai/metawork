@@ -733,16 +733,22 @@ pub const Runtime = struct {
         return (try self.createSessionRoute(options)).session;
     }
 
-    /// Lightweight observation used only to project recovery eligibility.
-    /// restoreSessionRoute revalidates under the same mutex and remains the
-    /// admission linearization point.
-    pub fn restoreAdmissionAvailable(self: *Runtime) bool {
+    /// Lightweight recovery observation, not a reservation. A rebind may
+    /// release its own still-owned route before restoring. Actual restore
+    /// revalidates capacity under this mutex after that release.
+    pub fn restoreAdmissionAvailable(self: *Runtime, releasing_route_id: ?u64) bool {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire) or
             self.runtime == null or
             self.mcp_refresh_running)
             return false;
+        if (releasing_route_id) |route_id| {
+            if (route_id == 0) return false;
+            for (self.sessions) |entry| if (entry) |session|
+                if (session.id == route_id) return true;
+            return false;
+        }
         for (self.sessions, self.session_reservations) |entry, reserved|
             if (entry == null and !reserved) return true;
         return false;
