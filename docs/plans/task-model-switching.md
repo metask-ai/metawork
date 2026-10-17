@@ -2,7 +2,7 @@
 
 用户可以在同一 Task 中选择下一轮使用的模型，包括其他连接和协议提供的模型。全局默认模型只决定新任务的初始选择；Task 模型意图、当前内部 Session 和已经接纳的 Run 分别拥有自己的状态。切换保留上下文，在原授权仍然有效时保留能力，既不因为全局配置变化锁死选择器，也不借切换取得新能力。
 
-本文是待实施计划，不是 decision record，也不替代规范。核心产品整改与正式 Product/Core 回归已实施；最终合同清理与真实桌面交互验收尚未收口。实施使用当前 canonical Metask AgentCore，沿用现有 Models、Task、Agent、Bridge 和 checkpoint，不以升级 Core 为前提。
+本文记录本轮整改范围和验收要求，不是 decision record，也不替代规范。实施使用当前 canonical Metask AgentCore，沿用现有 Models、Task、Agent、Bridge 和 checkpoint，不以升级 Core 为前提。验证结果由正式测试和任务验收证据记录。
 
 ## 1 验证依据
 
@@ -20,11 +20,11 @@
 
 本地原始证据分别位于 [.zig-cache/execution-switch-probe-20261017/evidence.json](../../.zig-cache/execution-switch-probe-20261017/evidence.json) 与 [.zig-cache/execution-authority-probe-20261017/evidence.json](../../.zig-cache/execution-authority-probe-20261017/evidence.json)，包含依赖身份、探测输入 hash、请求、结果和文件副作用。这些路径是本机临时材料；正式回归必须进入标准测试入口，不能依赖缓存目录存在。
 
-## 2 当前问题与整改边界
+## 2 整改前的问题与整改边界
 
-当前 Task 模型选择虽然已使用 source-qualified `ModelRef`，接纳条件仍依赖全局 installed execution 与 Task pinned execution 的一致性，并限制 source 和 protocol。已有 Custom Provider Task 不能切换；全局连接 authority 变化还会使旧任务只读。运行中的 pending model 只保存模型字符串且只存在于进程内，不能表达完整的下一轮连接意图。
+整改前，Task 模型选择虽然已使用 source-qualified `ModelRef`，接纳条件仍依赖全局 installed execution 与 Task pinned execution 的一致性，并限制 source 和 protocol。已有 Custom Provider Task 不能切换；全局连接 authority 变化还会使旧任务只读。运行中的 pending model 只保存模型字符串且只存在于进程内，不能表达完整的下一轮连接意图。
 
-跨连接恢复另有独立接线缺口：[recovery_job.zig](../../src/product/task/recovery_job.zig) 的冷恢复输入将 Skill catalog、policy 和 MCP selection 设为 null；[attachment.zig](../../src/product/task/attachment.zig) 也未保留足够的原始 MCP 恢复输入。直接复用这一冷恢复策略会丢失能力。Agent 的 MCP selection 还绑定 Runtime 与 catalog generation，不能修改旧 generation 或拿最新全局 selection 直接代替。
+整改前的跨连接恢复另有独立接线缺口：[recovery_job.zig](../../src/product/task/recovery_job.zig) 的冷恢复输入将 Skill catalog、policy 和 MCP selection 设为 null；[attachment.zig](../../src/product/task/attachment.zig) 也未保留足够的原始 MCP 恢复输入。直接复用这一冷恢复策略会丢失能力。Agent 的 MCP selection 还绑定 Runtime 与 catalog generation，不能修改旧 generation 或拿最新全局 selection 直接代替。
 
 本轮收口模型选择、执行重绑定、能力连续性、对应 UI/Bridge 与持久化。沿用现有生命周期、事务和资源 owner，不新增路由平台、第二套权限引擎、Provider codec、checkpoint 格式或后台调度服务。普通历史恢复、Skill 显式刷新、MCP 全局配置管理和 Schedule 凭据政策继续由各自合同负责。
 
