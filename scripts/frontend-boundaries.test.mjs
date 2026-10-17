@@ -197,8 +197,9 @@ test("Account states never replace or reinterpret the Workbench", async () => {
   assert.doesNotMatch(app, /workbenchEntered|setWorkbenchEntered/);
   assert.match(
     app,
-    /\(!newTaskDraftActive \|\| snapshot\.newTaskAdmission\.available\)/,
+    /\(!newTaskDraftActive\s*\|\|\s*snapshot\.newTaskAdmission\.available\s*\|\|\s*newTaskModelState\.intent !== null\)/,
   );
+  assert.match(app, /\(!newTaskDraftActive \|\| newTaskModelState\.valid\)/);
   assert.doesNotMatch(app, /setStatus\(\s*\{/);
   assert.doesNotMatch(app, /AccountPrerequisite|prerequisite=\{/);
   assert.doesNotMatch(

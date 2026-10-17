@@ -706,8 +706,8 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 
 模型选择规则：
 
-- New task 默认显示当前 active Provider 与模型；当 Host snapshot 能证明 active source 的 current catalog 可用时，Composer 菜单可以为本次 Task 选择该 source 中的另一个 ready 模型。该 runtime-only 选择不修改 global default，不开放跨 credential 或跨 Provider 候选；重新打开 New task 时恢复 active default；
-- 模型不可用或尚未设置 global default 时，Composer 提供进入 `Models` 设置的导航；不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
+- New task 默认显示当前 active Provider 与模型；Composer 菜单列出 Host Models snapshot 中各可用来源的 ready 模型，以来源和模型共同区分候选。选择只用于本次 Task，不修改 global default；明确选择与默认相同时也保留该选择。重新打开 New task 时恢复初始默认意图；
+- 没有可用 global default 时仍允许选择当前可用的其他模型并发送；没有可用候选时提供进入 `Models` 设置的导航。不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
 - Models默认来源、Metask API/protocol/credential authority或 ready Custom Provider模型变化先更新 Models desired selection及对应 revision/source generation，再由 Product Control独立 reconcile active binding generation。两类变化都不热替换已有 live Task；detached历史 Task可在 §6.4的 Conversation restore中采用同 protocol、可承载其 pinned model的当前 credential authority，并通过窄 binding adoption提交新 generation，任意 protocol/model变化仍只能走未来显式 rebind；
 - 已有 Task 的 Composer 显示当前 binding epoch 的模型事实，历史按 epoch 保留原模型；`available` 时菜单列出当前 Metask catalog 候选，即使 pinned model 已离开目录也允许切换到有效候选；`catalog_loading`、`catalog_unavailable` 与 `execution_replacing` 保留菜单但禁用并显示对应原因；`runtime_detached`、`unsupported_source` 与 `authority_changed` 只显示 pinned model 和原因，不展示必然被 Host 拒绝的菜单。以上状态只消费 Host 发布的 `modelSelectionAvailability`；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；

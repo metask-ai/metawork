@@ -953,7 +953,9 @@ export default function App() {
   const canSubmit =
     !pendingTaskSelection.current &&
     taskCanCompose &&
-    (!newTaskDraftActive || snapshot.newTaskAdmission.available) &&
+    (!newTaskDraftActive ||
+      snapshot.newTaskAdmission.available ||
+      newTaskModelState.intent !== null) &&
     (!newTaskDraftActive || newTaskWorkspaceReady) &&
     (!newTaskDraftActive || newTaskModelState.valid) &&
     !taskOperationInFlight &&
@@ -1017,11 +1019,6 @@ export default function App() {
   const attachmentModelWarning = imageDeclaredUnsupported
     ? ("image" as const)
     : null;
-  const customCustomProviderContext = activeCustomProvider
-    ? `${activeCustomProvider.displayName} · ${t(
-        `settings.custom_provider_protocol.${activeCustomProvider.protocol}`,
-      )}`
-    : "";
   const selectedModelLabel =
     newTaskModelState.selectedModelLabel || t("account.choose_model");
   const metaskDefaultRecoveryAvailable = Boolean(
@@ -3239,34 +3236,34 @@ export default function App() {
         }
         modelSelectionDisabled={
           bridgeUnavailable ||
-          (customCustomProviderSelected ? executionBusy : accountBusy) ||
           (newTaskDraftActive
-            ? newTaskModelState.options.length === 0 ||
-              (!customCustomProviderSelected &&
-                snapshot.models.operation === "refreshing_catalog")
-            : !taskModelPolicy.selectable)
+            ? newTaskModelState.options.length === 0
+            : (customCustomProviderSelected ? executionBusy : accountBusy) ||
+              !taskModelPolicy.selectable)
         }
         modelSelectionPending={
-          (customCustomProviderSelected ? executionBusy : accountBusy) ||
-          (newTaskDraftActive
-            ? !customCustomProviderSelected &&
+          newTaskDraftActive
+            ? newTaskModelState.options.length === 0 &&
               snapshot.models.operation === "refreshing_catalog"
-            : taskModelPolicy.pending)
+            : (customCustomProviderSelected ? executionBusy : accountBusy) ||
+              taskModelPolicy.pending
         }
         modelContextTitle={
-          newTaskDraftActive && !newTaskModelState.valid
+          newTaskDraftActive &&
+          newTaskRequestedModel !== null &&
+          !newTaskModelState.valid
             ? t("settings.new_task_model_invalid")
-            : newTaskDraftActive && customCustomProviderSelected
-              ? customCustomProviderContext
-              : newTaskDraftActive
-                ? t("settings.new_task_model_help")
-                : t(
-                    taskModelSelectionMessageId(
-                      activeTask?.modelSelectionAvailability,
-                    ),
-                  )
+            : newTaskDraftActive
+              ? t("settings.new_task_model_help")
+              : t(
+                  taskModelSelectionMessageId(
+                    activeTask?.modelSelectionAvailability,
+                  ),
+                )
         }
-        defaultSelectionMissing={metaskDefaultRecoveryAvailable}
+        defaultSelectionMissing={
+          metaskDefaultRecoveryAvailable && newTaskModelState.intent === null
+        }
         defaultRecoveryDisabled={bridgeUnavailable || executionBusy}
         actionDisabled={workbenchMutationDisabled || workspaceBusy}
         stopAction={
@@ -3325,13 +3322,10 @@ export default function App() {
         onSelectWorkspace={(workspaceId) => setDraftWorkspaceById(workspaceId)}
         onSelectModel={(id) => {
           if (newTaskDraftActive) {
-            const activeModel = snapshot.newTaskAdmission.activeModelRef;
-            if (activeModel)
-              setNewTaskRequestedModel(
-                id === activeModel.modelId
-                  ? null
-                  : { sourceId: activeModel.sourceId, modelId: id },
-              );
+            const option = newTaskModelState.options.find(
+              (candidate) => candidate.selectionId === id,
+            );
+            if (option) setNewTaskRequestedModel(option.modelRef);
             return;
           }
           void selectModelForTask(id);

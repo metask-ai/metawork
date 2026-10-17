@@ -561,6 +561,7 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_product_task", modules.product_task);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("metawork_product_models_contract", modules.models_contract);
+    fixture.addImport("product_models_ports", modules.models_ports);
     fixture.addImport("event_pump", modules.event_pump);
     fixture.addImport("metask_agentcore", modules.sdk);
     fixture.addImport("product_control_executor", modules.product_control_executor);

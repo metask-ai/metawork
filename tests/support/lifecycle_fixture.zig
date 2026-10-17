@@ -5,6 +5,7 @@ pub const product_skill = @import("metawork_product_skill");
 pub const product_task = @import("metawork_product_task");
 pub const account_contract = @import("metawork_account_contract");
 pub const models_contract = @import("metawork_product_models_contract");
+pub const models_ports = @import("product_models_ports");
 pub const event_pump = @import("event_pump");
 pub const product_control_executor = @import("product_control_executor");
 pub const sdk = @import("metask_agentcore");

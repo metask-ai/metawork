@@ -1667,6 +1667,10 @@ test "new Task model selection binds only the created Task and rejects stale aut
     );
     const identity = try workbench.taskExecutionIdentity(task_id);
     try std.testing.expectEqualStrings("fixture-model-2", identity.model);
+    const intent = workbench.task_runtime.findConst(task_id).?.durable.model_intent.?;
+    try std.testing.expectEqualStrings("metask", intent.source_id);
+    try std.testing.expectEqualStrings("fixture-model-2", intent.model_id);
+    try std.testing.expectEqual(@as(u64, 1), intent.revision);
     try expectFakeSessionModel(0, "fixture-model-2");
     try std.testing.expectEqualStrings(
         "fixture-model",
@@ -1676,6 +1680,146 @@ test "new Task model selection binds only the created Task and rejects stale aut
         "fixture-model",
         workbench.newTaskAdmissionView().active_model_ref.?.model_id,
     );
+}
+
+test "new Task model selection is independent of default execution admission" {
+    fake_core.reset();
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_workspaces = 1,
+        .max_tasks = 1,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, productControlConfiguration());
+    defer workbench.deinit();
+    try installControlExecution(&workbench);
+    installTwoModelCatalog(&workbench);
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    const epoch = try workbench.workspaceEpoch(workspace_id);
+    const selection = newTaskModelSelectionInput(&workbench, "fixture-model-2");
+    try workbench.beginDefaultExecutionReplacement();
+    defer workbench.endExecutionReplacementNoFail();
+    try std.testing.expect(!workbench.newTaskAdmissionView().available);
+    const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, 0, 0, selection, null, null, .{ .interactive = null });
+    const identity = try workbench.taskExecutionIdentity(task_id);
+    try std.testing.expectEqualStrings("fixture-model-2", identity.model);
+    try std.testing.expect(identity.generation != 0);
+    try expectFakeSessionModel(0, "fixture-model-2");
+    try std.testing.expectEqualStrings("fixture-model", workbench.modelsView().default_selection.?.model_id);
+    const execution = workbench.task_runtime.findConst(task_id).?.runtime.executionConst().?;
+    try std.testing.expectEqual(models_contract.Protocol.anthropic_messages, execution.protocol);
+    try std.testing.expectEqualStrings(models_contract.metask_anthropic_messages_url, execution.base_url);
+    const intent = workbench.task_runtime.findConst(task_id).?.durable.model_intent.?;
+    try std.testing.expectEqualStrings("metask", intent.source_id);
+    try std.testing.expectEqualStrings("fixture-model-2", intent.model_id);
+}
+
+test "new Task model selection uses the full custom connection with or without a default" {
+    fake_core.reset();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Vault = struct {
+        const slot = "custom-provider-" ++ "0" ** 32;
+        secret: [models_contract.Limits.credential_bytes]u8 = undefined,
+        len: usize = 0,
+        fn generate(_: *anyopaque, output: *[fixture.models_ports.credential_slot_bytes]u8) anyerror!void {
+            @memcpy(output, slot);
+        }
+        fn store(ctx: *anyopaque, _: []const u8, value: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            @memcpy(self.secret[0..value.len], value);
+            self.len = value.len;
+        }
+        fn get(ctx: *anyopaque, _: []const u8, output: []u8) anyerror!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.len == 0) return null;
+            @memcpy(output[0..self.len], self.secret[0..self.len]);
+            return output[0..self.len];
+        }
+        fn delete(ctx: *anyopaque, _: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            std.crypto.secureZero(u8, self.secret[0..self.len]);
+            self.len = 0;
+        }
+        fn port(self: *@This()) fixture.models_ports.CredentialVault {
+            return .{ .context = self, .generate_slot_fn = generate, .store_fn = store, .get_fn = get, .delete_fn = delete };
+        }
+    };
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 2 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var workbench = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 1,
+        .max_workspaces = 1,
+        .max_tasks = 2,
+        .max_runs_per_task = 1,
+        .max_tools_per_run = 1,
+    }, productControlConfiguration());
+    defer workbench.deinit();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &path);
+    var vault: Vault = .{};
+    defer Vault.delete(&vault, Vault.slot) catch unreachable;
+    try workbench.startCustomProviders(path[0..length], vault.port());
+    defer workbench.stopCustomProviders();
+    try installControlExecution(&workbench);
+    try std.testing.expect(workbench.createCustomProviderWithCredential("other-secret", .{
+        .display_name = "Other",
+        .protocol = .openai_responses,
+        .normalized_base_url = "https://other.example.com/v1/responses",
+    }).accepted);
+    const created = workbench.modelsView().custom_providers[0];
+    try std.testing.expect(workbench.submitCustomProviderCommand(.{ .add_custom_model = .{
+        .source_id = Vault.slot,
+        .expected_provider_revision = created.provider_revision,
+        .expected_catalog_generation = created.catalog_generation,
+        .model = .{ .id = "other-model" },
+    } }).accepted);
+    const configured = workbench.modelsView().custom_providers[0];
+    const probe_command: models_contract.CustomModelTestCommand = .{
+        .model = .{ .source_id = Vault.slot, .model_id = "other-model" },
+        .expected_provider_revision = configured.provider_revision,
+        .expected_source_generation = configured.source_generation,
+        .expected_catalog_generation = configured.catalog_generation,
+    };
+    var probe = switch (workbench.beginCustomProviderProbe(probe_command)) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    probe.deinit();
+    try std.testing.expect(workbench.completeCustomModelTest(probe_command, true).accepted);
+    const ready = workbench.modelsView().custom_providers[0];
+    const selection: product_control.NewTaskModelSelectionInput = .{ .target = probe_command.model, .expected_source_generation = ready.source_generation, .expected_catalog_generation = ready.catalog_generation };
+    const workspace_id = try workbench.openWorkspace(productControlTaskInput());
+    const epoch = try workbench.workspaceEpoch(workspace_id);
+    for ([_]bool{ true, false }) |has_default| {
+        if (!has_default) {
+            try std.testing.expect(workbench.clearCustomProviderDefault().accepted);
+            try std.testing.expect(workbench.modelsView().default_selection == null);
+            try std.testing.expect(!workbench.newTaskAdmissionView().available);
+        }
+        const task_id = try workbench.createTaskInWorkspace(workspace_id, epoch, 0, 0, selection, null, null, .{ .interactive = null });
+        const task = workbench.task_runtime.findConst(task_id).?;
+        const execution = task.runtime.executionConst().?;
+        try std.testing.expectEqualStrings("custom_provider:" ++ Vault.slot, execution.provider_id);
+        try std.testing.expectEqual(models_contract.Protocol.openai_responses, execution.protocol);
+        try std.testing.expectEqualStrings("https://other.example.com/v1/responses", execution.base_url);
+        try std.testing.expectEqualStrings("other-secret", execution.input().api_key);
+        try std.testing.expectEqualStrings(Vault.slot, task.durable.model_intent.?.source_id);
+        try std.testing.expectEqualStrings("other-model", task.durable.execution_model);
+        try std.testing.expectEqual(@as(?u32, wire.PROVIDER_OPENAI), fake_core.last_created_provider_kind_code);
+        try std.testing.expectEqual(@as(?u32, wire.OPENAI_PROTOCOL_RESPONSES), fake_core.last_created_protocol_kind_code);
+        if (has_default) try std.testing.expectEqualStrings("metask", workbench.modelsView().default_selection.?.source_id);
+    }
 }
 
 fn waitCatalogReady(

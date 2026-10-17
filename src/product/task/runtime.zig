@@ -517,6 +517,7 @@ pub const CreateCandidate = struct {
     execution_generation: u64,
     execution_protocol: task_state.Protocol,
     execution_model: []u8,
+    model_intent: ?task_state.ModelIntent = null,
     permission_profile: task_state.PermissionProfile,
     permission_review_delegated: bool = false,
     permission_interaction: task_state.PermissionInteraction,
@@ -540,6 +541,7 @@ pub const CreateTaskInput = struct {
     execution: models_contract.ConfigInput,
     protocol: task_state.Protocol,
     model: []const u8,
+    model_ref: ?models_contract.ModelRef = null,
     permission_profile: task_state.PermissionProfile,
     permission_review_delegated: bool = false,
     permission_interaction: task_state.PermissionInteraction,
@@ -569,6 +571,7 @@ pub const CreateTaskError = CreateError || agent.Error || error{
 };
 
 pub const CreateError = std.mem.Allocator.Error || error{
+    InvalidTaskModel,
     TaskCapacity,
     TaskIdentityExhausted,
     TaskPersistenceFailed,
@@ -1530,6 +1533,15 @@ pub const Runtime = struct {
         self: *Runtime,
         input: CreateTaskInput,
     ) CreateTaskError!PreparedCreate {
+        var model_intent = if (input.model_ref) |model|
+            task_state.ModelIntent.init(self.allocator, model, 1) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidModelIntent => return error.InvalidTaskModel,
+            }
+        else
+            null;
+        var intent_live = true;
+        errdefer if (intent_live) if (model_intent) |*intent| intent.deinit(self.allocator);
         const execution_model = (try input.text.project(
             input.model,
             input.max_model_id_bytes,
@@ -1607,6 +1619,7 @@ pub const Runtime = struct {
             .execution_generation = input.execution.execution_generation,
             .execution_protocol = input.protocol,
             .execution_model = execution_model,
+            .model_intent = model_intent,
             .permission_profile = input.permission_profile,
             .permission_review_delegated = input.permission_review_delegated,
             .permission_interaction = input.permission_interaction,
@@ -1620,6 +1633,7 @@ pub const Runtime = struct {
             .mcp_authority = input.mcp_authority,
         };
         model_live = false;
+        intent_live = false;
         workspace_live = false;
         title_live = false;
         pinned = null;
@@ -1675,6 +1689,7 @@ pub const Runtime = struct {
                 .execution_generation = owned.execution_generation,
                 .execution_protocol = owned.execution_protocol,
                 .execution_model = owned.execution_model,
+                .model_intent = owned.model_intent,
                 .permission_profile = owned.permission_profile,
                 .permission_review_delegated = owned.permission_review_delegated,
                 .permission_interaction = owned.permission_interaction,
@@ -5806,6 +5821,7 @@ fn deinitCreateCandidate(
     const credential = candidate.execution.input().api_key;
     effects.redactAll(credential);
     candidate.execution.deinit();
+    if (candidate.model_intent) |*intent| intent.deinit(self.allocator);
     if (candidate.pinned_catalog) |*catalog| {
         effects.releaseProjectionBytes(catalog.projected_bytes);
         catalog.deinit();

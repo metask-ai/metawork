@@ -2865,7 +2865,12 @@ pub const Runtime = struct {
     }
 
     pub fn clearCustomProviderDefault(self: *Runtime) models_contract.CommandResult {
-        return self.custom_providers.clearDefault();
+        const result = self.custom_providers.clearDefault();
+        if (result.accepted) {
+            self.reconcileModelsDefaultNoFail(false, false);
+            self.finishExecutionCommitNoFail();
+        }
+        return result;
     }
 
     pub fn nextExecutionGeneration(self: *Runtime, current: u64) !u64 {
@@ -3734,18 +3739,7 @@ pub const Runtime = struct {
         allow_unowned_automatic: bool,
     ) Error!PreparedTaskCreate {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.executionReplacementPending())
-            return error.ExecutionInUse;
-        if (!self.canCreateTask())
-            return error.ExecutionUnavailable;
-        if (!self.validNewTaskAdmission(
-            expected_execution_generation,
-            expected_selection_revision,
-        ))
-            return error.ExecutionGenerationMismatch;
-        if (model_selection) |selection|
-            if (!self.newTaskModelSelectionAuthorized(selection))
-                return error.ModelSelectionChanged;
+        try self.validateNewTaskModelAdmission(expected_execution_generation, expected_selection_revision, model_selection);
         const workspace_view = try self.workspace.taskCreateAuthority(
             workspace_id,
             expected_workspace_epoch,
@@ -3795,9 +3789,18 @@ pub const Runtime = struct {
                 self.allocator,
                 skill.skill_id,
             );
-        var execution_input = self.execution_state.executionInput().?;
-        if (model_selection) |selection|
-            execution_input.target.model = selection.target.model_id;
+        var explicit_execution: ?models_contract.OwnedConfig = null;
+        defer if (explicit_execution) |*execution| execution.deinit();
+        const execution_input = if (model_selection) |selection| selected: {
+            var source = (self.custom_providers.resolveModel(selection.target, selection.expected_source_generation, selection.expected_catalog_generation) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.ExecutionUnavailable,
+            }) orelse return error.ModelSelectionChanged;
+            defer source.deinit();
+            const generation = self.nextExecutionGeneration(self.executionGeneration()) catch return error.ExecutionUnavailable;
+            explicit_execution = source.intoConfig(generation) catch return error.ExecutionUnavailable;
+            break :selected explicit_execution.?.input();
+        } else self.execution_state.executionInput().?;
         const permission_profile: PermissionProfile = switch (permission) {
             .interactive => |mode| (mode orelse self.default_approval_mode).profile(),
             .noninteractive => |profile| profile,
@@ -3832,6 +3835,7 @@ pub const Runtime = struct {
             .execution = execution_input,
             .protocol = execution_input.target.protocol,
             .model = execution_input.target.model,
+            .model_ref = if (model_selection) |selection| selection.target else self.execution_state.activeModelRef(),
             .permission_profile = permission_profile,
             .permission_review_delegated = switch (permission) {
                 .interactive => |mode| (mode orelse self.default_approval_mode) == .auto_review,
@@ -3895,15 +3899,7 @@ pub const Runtime = struct {
         permission: TaskPermissionRequest,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.executionReplacementPending())
-            return error.ExecutionInUse;
-        if (!self.canCreateTask())
-            return error.ExecutionUnavailable;
-        if (!self.validNewTaskAdmission(
-            expected_execution_generation,
-            expected_selection_revision,
-        ))
-            return error.ExecutionGenerationMismatch;
+        try self.validateNewTaskModelAdmission(expected_execution_generation, expected_selection_revision, model_selection);
         if (expected_skill_catalog_revision != null or
             expected_skill_selection_revision != null)
             return error.CatalogUnavailable;
@@ -6925,16 +6921,22 @@ pub const Runtime = struct {
             !std.unicode.utf8ValidateSlice(selection.target.source_id) or
             !std.unicode.utf8ValidateSlice(selection.target.model_id))
             return false;
-        const active = self.execution_state.activeModelRef() orelse return false;
-        const protocol = self.execution_state.protocol() orelse return false;
-        return std.mem.eql(u8, selection.target.source_id, active.source_id) and
-            selection.expected_source_generation == self.execution_state.activeSourceGeneration() and
-            self.custom_providers.sourceModelAvailable(
-                selection.target,
-                selection.expected_source_generation,
-                selection.expected_catalog_generation,
-                protocol,
-            );
+        return self.custom_providers.sourceModelProtocol(
+            selection.target,
+            selection.expected_source_generation,
+            selection.expected_catalog_generation,
+        ) != null;
+    }
+
+    fn validateNewTaskModelAdmission(self: *Runtime, expected_execution_generation: u64, expected_selection_revision: u64, selection: ?NewTaskModelSelectionInput) Error!void {
+        if (selection) |explicit| {
+            if (!self.newTaskModelSelectionAuthorized(explicit)) return error.ModelSelectionChanged;
+        } else {
+            if (self.executionReplacementPending()) return error.ExecutionInUse;
+            if (!self.canCreateTask()) return error.ExecutionUnavailable;
+            if (!self.validNewTaskAdmission(expected_execution_generation, expected_selection_revision))
+                return error.ExecutionGenerationMismatch;
+        }
     }
 
     fn modelsDefaultCurrent(self: *const Runtime) bool {
