@@ -95,6 +95,8 @@ Models 默认选择与新 Task admission 的回归必须覆盖：同一 source i
 
 已有 Task 模型选择投影的回归必须覆盖 Host 对 `available | catalog_loading | catalog_unavailable | task_unavailable` 的跨 owner 判定、serializer 与严格 Renderer decoder；Renderer 只消费该枚举，目录更新保留 disabled selector，生命周期不可编辑时显示只读值，缺失、已退休或未知枚举 fail closed。detached、Custom Provider 来源、全局默认执行替换与无关目录刷新不得单独撤销选择。活跃 Run 冻结原执行配置，Task 持久模型意图独立提交，尚未接纳的输入使用最新已提交意图。跨来源或协议变更须通过真实 Product/当前 canonical Core 的 checkpoint 事务回归，覆盖原 Skill/MCP/权限上限、媒体与工具上下文、一次回退、无 effect 重放、closing owner、未知提交的多 witness 保留和确认后的 blob 退休；本地协议 fixture 不替代外部供应商和真实桌面交互验收。
 
+Windows 桌面模型切换由 `node scripts/run-agentcore-vertical-windows.mjs` 消费实际 automation 构建，沿真实 WebView、Bridge、Product 与 canonical Core 验证。设置 `METAWORK_MODEL_SWITCH_ONLY=1` 可单独执行该段，复用原有进程内 fixture vault，不读取或清除系统账户凭据。该段须观察运行中下一轮选择、完整连接与协议变更、上下文和历史 Run、独立默认值、键盘菜单、桌面与 390px 深浅主题及减少动效，生成页面截图和结构化证据。WebView 定向输入的成功不替代全量 desktop vertical 或原生窗口前台与系统按键检查；全量 Windows 入口仍执行原有检查后运行同一模型切换段。
+
 选择能观察真实失败模式的最小充分验证层；文件位置不能反向决定 owner，也不因脚本名、lock 路径或构建文件变化机械扩大平台矩阵。
 
 Automatic Workspace root 设置的最小充分证据必须覆盖：schema 1 strict codec、缺失初始化、read/corrupt/write/outcome-unknown 分类、exact quarantine 与显式 recovery；choose/reset/retry 的 generation CAS、picker cancel、路径长度与 Manual/Automatic registry 冲突；A→B 后旧 Task 保持 A、新 Task 使用 B，restart/reset/retry 和 Scheduled occurrence 使用当前 root；旧 Automatic exact root 始终不能转为 Manual；`workbench-history.store`、checkpoint 与 file-change store schema/bytes 不因设置交易改写。Bridge 要证明 Renderer 无自由 path payload、Snapshot 严格解码且 `automaticWorkspaces` 不替代配置 health；Renderer 要覆盖常规设置行、原生 picker 等待、局部错误、重试和焦点恢复。当前完成 Gate 包含 macOS 原生 picker smoke；Windows 只在当前平台运行 table-driven 的大小写不敏感纯路径语义测试，真实 Windows picker、权限和文件系统运行证据是后续平台验证，不是本次完成标准，也不得用 macOS 结果声称 Windows 已验收。

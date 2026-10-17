@@ -34,6 +34,7 @@ import { probeWindowChromeUi } from "./window-chrome-ui.mjs";
 import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
 import { runQueuedInputVertical } from "./agentcore-queued-input-vertical.mjs";
+import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -399,6 +400,11 @@ startApplication();
 
 desktopVertical: try {
   await waitForBridge();
+  if (process.env.METAWORK_MODEL_SWITCH_ONLY === "1") {
+    await verifyModelSwitch();
+    await stopApplication("model switch verification complete");
+    break desktopVertical;
+  }
   if (!queuedInputOnly) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
@@ -1651,6 +1657,7 @@ desktopVertical: try {
         ...options,
       });
   }
+  if (process.platform === "win32") await verifyModelSwitch();
   await stopApplication("app stop");
 
   process.stdout.write(
@@ -3105,6 +3112,26 @@ async function captureVisual(
     args,
     { timeout: commandTimeoutMs, maxBuffer: 1024 * 1024 },
   );
+}
+
+async function verifyModelSwitch() {
+  if (chromeProbePort === null)
+    throw new Error("Model switch WebView verification requires Windows");
+  const webview = await connectTestWebView(chromeProbePort);
+  try {
+    await runModelSwitchVertical({
+      invoke: invokeBridge,
+      snapshot,
+      poll,
+      provider,
+      textSse,
+      webview,
+      evidenceDir:
+        visualCaptureDir ?? path.join(root, ".zig-cache", "model-switch-ui"),
+    });
+  } finally {
+    webview.close();
+  }
 }
 
 async function probeWindowsWebViewFocus() {
