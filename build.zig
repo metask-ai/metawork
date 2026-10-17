@@ -864,6 +864,9 @@ fn addMcpInteropTests(
     cases.addImport("metawork_mcp_platform", modules.mcp_platform);
     cases.addImport("metawork_product_control", modules.product_control);
     cases.addImport("metawork_product_mcp", modules.product_mcp);
+    cases.addImport("metawork_product_task", modules.product_task);
+    cases.addImport("metawork_product_skill", modules.product_skill);
+    cases.addImport("product_models_ports", modules.models_ports);
     cases.addOptions("mcp_interop_options", fixture_options);
     const tests = b.addTest(.{
         .name = "metawork-mcp-interop",

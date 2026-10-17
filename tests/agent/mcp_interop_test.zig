@@ -5,6 +5,9 @@ const agent = @import("metawork_agent");
 const mcp_platform = @import("metawork_mcp_platform");
 const options = @import("mcp_interop_options");
 const product_control = @import("metawork_product_control");
+const product_task = @import("metawork_product_task");
+const product_skill = @import("metawork_product_skill");
+const models_ports = @import("product_models_ports");
 const mcp_configuration = @import("metawork_product_mcp").contract;
 const mcp_types = @import("metawork_product_mcp");
 
@@ -1385,4 +1388,434 @@ test "stdio real-server timeout and cancellation terminate the child" {
         },
     }
     transport.close_fn(cancellation_connection);
+}
+
+const TaskSwitchHistory = struct {
+    fn commit(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+        const store: *product_task.history.FileStore = @ptrCast(@alignCast(context.?));
+        store.commit(bytes) catch |err| return if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .failed;
+        return .committed;
+    }
+    fn confirmed(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+        const store: *product_task.history.FileStore = @ptrCast(@alignCast(context.?));
+        return store.commitConfirmed(std.testing.allocator, bytes);
+    }
+    fn resolve(context: ?*anyopaque, bytes: []const u8) product_task.history.Commit {
+        const store: *product_task.history.FileStore = @ptrCast(@alignCast(context.?));
+        return store.resolveCommit(std.testing.allocator, bytes);
+    }
+    fn capability(store: *product_task.history.FileStore) product_task.history.Capability {
+        return .{ .context = store, .enabled = true, .commit_fn = commit, .confirmed_commit_fn = confirmed, .resolve_commit_fn = resolve };
+    }
+};
+
+const TaskSwitchVault = struct {
+    next: u8 = 0,
+    keys: [2][128]u8 = undefined,
+    lengths: [2]usize = .{ 0, 0 },
+    fn generate(context: *anyopaque, output: *[models_ports.credential_slot_bytes]u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.next == 2) return error.CapacityReached;
+        self.next += 1;
+        @memcpy(output, models_ports.credential_slot_prefix ++ "0" ** 31 ++ "0");
+        output[output.len - 1] = '0' + self.next;
+    }
+    fn index(slot: []const u8) usize {
+        return slot[slot.len - 1] - '1';
+    }
+    fn store(context: *anyopaque, slot: []const u8, key: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const i = index(slot);
+        if (key.len > self.keys[i].len) return error.CapacityReached;
+        @memcpy(self.keys[i][0..key.len], key);
+        self.lengths[i] = key.len;
+    }
+    fn get(context: *anyopaque, slot: []const u8, output: []u8) anyerror!?[]const u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const i = index(slot);
+        if (self.lengths[i] == 0) return null;
+        @memcpy(output[0..self.lengths[i]], self.keys[i][0..self.lengths[i]]);
+        return output[0..self.lengths[i]];
+    }
+    fn delete(context: *anyopaque, slot: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const i = index(slot);
+        std.crypto.secureZero(u8, self.keys[i][0..self.lengths[i]]);
+        self.lengths[i] = 0;
+    }
+    fn port(self: *@This()) models_ports.CredentialVault {
+        return .{ .context = self, .generate_slot_fn = generate, .store_fn = store, .get_fn = get, .delete_fn = delete };
+    }
+};
+
+fn configureTaskSwitchProvider(control: *product_control.Runtime, endpoint: []const u8, name: []const u8, protocol: models_contract.Protocol) !product_control.NewTaskModelSelectionInput {
+    const model = if (std.mem.eql(u8, name, "source-model")) "gpt-4o" else "gpt-4o-mini";
+    const root = endpoint[0 .. endpoint.len - "/v1/messages".len];
+    const address = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}", .{ root, switch (protocol) {
+        .anthropic_messages => "/v1/messages",
+        .openai_chat_completions => "/v1/chat/completions",
+        .openai_responses => "/v1/responses",
+        .gemini_native => "",
+    } });
+    defer std.testing.allocator.free(address);
+    const key = try std.fmt.allocPrint(std.testing.allocator, "synthetic-key-for-{s}", .{model});
+    defer std.testing.allocator.free(key);
+    try std.testing.expect(control.createCustomProviderWithCredential(key, .{
+        .display_name = name,
+        .protocol = protocol,
+        .normalized_base_url = address,
+    }).accepted);
+    const view = control.modelsView();
+    const created = view.custom_providers[view.custom_providers.len - 1];
+    const id = try std.testing.allocator.dupe(u8, created.id);
+    defer std.testing.allocator.free(id);
+    try std.testing.expect(control.submitCustomProviderCommand(.{ .add_custom_model = .{
+        .source_id = id,
+        .expected_provider_revision = created.provider_revision,
+        .expected_catalog_generation = created.catalog_generation,
+        .model = .{ .id = model, .metadata = .{ .capabilities = .{ .image_input = true } } },
+    } }).accepted);
+    const configured = control.modelsView().custom_providers[view.custom_providers.len - 1];
+    const probe: models_contract.CustomModelTestCommand = .{
+        .model = .{ .source_id = id, .model_id = model },
+        .expected_provider_revision = configured.provider_revision,
+        .expected_source_generation = configured.source_generation,
+        .expected_catalog_generation = configured.catalog_generation,
+    };
+    var prepared = switch (control.beginCustomProviderProbe(probe)) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    prepared.deinit();
+    try std.testing.expect(control.completeCustomModelTest(probe, true).accepted);
+    const ready = control.modelsView().custom_providers[view.custom_providers.len - 1];
+    return .{ .target = .{ .source_id = ready.id, .model_id = model }, .expected_source_generation = ready.source_generation, .expected_catalog_generation = ready.catalog_generation };
+}
+
+fn waitTaskSwitchCatalog(control: *product_control.Runtime, workspace: u64, skill_count: usize) !product_control.CatalogProjection {
+    for (0..2000) |_| {
+        const catalog = try control.workspaceCatalog(workspace);
+        if ((catalog.availability == .ready or catalog.availability == .degraded) and catalog.skills.len == skill_count) return catalog;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn executeTaskSwitchRun(control: *product_control.Runtime, task_id: u64, input: product_control.TaskRunInput, choice: product_task.PermissionChoice) !usize {
+    const run_id = try control.runTask(task_id, input);
+    const task = control.task_runtime.find(task_id).?;
+    var previous: ?u64 = null;
+    var answers: usize = 0;
+    for (0..10000) |_| {
+        try control.drainAgentEvents();
+        control.syncLifecycle();
+        if (task.runtime.hasAttachedSession()) {
+            var access = try task.runtime.acquireAccess();
+            defer access.deinit();
+            if (access.pendingUiObservation()) |request| if (previous == null or previous.? != request.request_id) {
+                try control.respondUi(task_id, run_id, request.request_id, .{ .permission = choice });
+                previous = request.request_id;
+                answers += 1;
+            };
+        }
+        if (task.runtime.active_operation == .none and !task.runtime.worker_leases.hasLive()) {
+            const run = product_task.testing.state_module.findRun(task.durable.runs, run_id) orelse return error.TestUnexpectedResult;
+            const terminal = product_task.testing.state_module.productTerminalFacts(run) orelse return error.TestUnexpectedResult;
+            if (terminal.outcome != .completed) std.debug.print("real Product Run failed outcome={s} cause={any}\n", .{ @tagName(terminal.outcome), terminal.cause });
+            try std.testing.expectEqual(.completed, terminal.outcome);
+            if (task.durable.checkpoint == null) std.debug.print("real Product Run checkpoint unavailable: {any}\n", .{task.durable.checkpoint_attempt});
+            try std.testing.expect(task.durable.checkpoint != null);
+            try std.testing.expect(task.runtime.last_restore_failure == null);
+            return answers;
+        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestUnexpectedResult;
+}
+
+const task_switch_png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3V8AAAAASUVORK5CYII=";
+
+// The platform preview port receives one already encoded canonical PNG. Core,
+// Product staging, owned originals, checkpoints and all protocol codecs are real;
+// OS image decoding and preview generation belong to desktop acceptance.
+fn prepareTaskSwitchPng(_: ?*anyopaque, allocator: std.mem.Allocator, bytes: []const u8) anyerror![]u8 {
+    var expected: [128]u8 = undefined;
+    const size = try std.base64.standard.Decoder.calcSizeForSlice(task_switch_png_base64);
+    try std.base64.standard.Decoder.decode(expected[0..size], task_switch_png_base64);
+    try std.testing.expectEqualSlices(u8, expected[0..size], bytes);
+    return allocator.dupe(u8, bytes);
+}
+
+const task_switch_protocols = [_]models_contract.Protocol{ .anthropic_messages, .openai_chat_completions, .openai_responses, .gemini_native };
+
+test "real Core Product rebind from Anthropic retains Skill MCP permissions and context" {
+    for (task_switch_protocols) |target| try expectProductTaskSwitch(.anthropic_messages, target, .narrow, .manual);
+}
+test "real Core Product rebind from Chat retains Skill MCP permissions and context" {
+    for (task_switch_protocols) |target| try expectProductTaskSwitch(.openai_chat_completions, target, .narrow, .manual);
+}
+test "real Core Product rebind from Responses retains Skill MCP permissions and context" {
+    for (task_switch_protocols) |target| try expectProductTaskSwitch(.openai_responses, target, .narrow, .manual);
+}
+test "real Core Product rebind from Gemini retains Skill MCP permissions and context" {
+    for (task_switch_protocols) |target| try expectProductTaskSwitch(.gemini_native, target, .narrow, .manual);
+}
+
+test "real Core Product rejects a different MCP origin before closing the original Session" {
+    try expectProductTaskSwitch(.anthropic_messages, .openai_responses, .replace_connection, .manual);
+}
+
+test "real Core Product rebind preserves full access without adding Skill or MCP authority" {
+    try expectProductTaskSwitch(.gemini_native, .openai_responses, .narrow, .full_access);
+}
+
+const TaskSwitchAuthority = enum { narrow, replace_connection };
+
+fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_protocol: models_contract.Protocol, authority_case: TaskSwitchAuthority, approval_mode: product_control.ApprovalMode) !void {
+    const manual = approval_mode == .manual;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    try tmp.dir.createDirPath(std.testing.io, "workspace");
+    const workspace_root = try tmp.dir.realPathFileAlloc(std.testing.io, "workspace", std.testing.allocator);
+    defer std.testing.allocator.free(workspace_root);
+    try tmp.dir.createDirPath(std.testing.io, ".agents/skills/retained");
+    try tmp.dir.createDirPath(std.testing.io, ".agents/skills/blocked");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/retained/SKILL.md", .data = "---\nname: retained\ndescription: Original retained Skill\n---\nPINNED_PRODUCT_SKILL: report the retained original skill.\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/blocked/SKILL.md", .data = "---\nname: blocked\ndescription: Original ungranted Skill\n---\nThis skill must remain ungranted.\n" });
+    const trace_a = try std.fmt.allocPrint(std.testing.allocator, "{s}/source-trace.jsonl", .{home});
+    defer std.testing.allocator.free(trace_a);
+    const trace_b = try std.fmt.allocPrint(std.testing.allocator, "{s}/target-trace.jsonl", .{home});
+    defer std.testing.allocator.free(trace_b);
+    var source = try HttpFixture.start("2026-07-28", "json", trace_a);
+    defer source.deinit();
+    var target = try HttpFixture.start("2026-07-28", "json", trace_b);
+    defer target.deinit();
+    var preparation = try prepareHttpFixture(source.endpoint, "2026-07-28");
+    var preparation_owned = true;
+    defer if (preparation_owned) preparation.deinit();
+    const fingerprint = mcp_configuration.connectionFingerprint(preparation.registry.?.value.servers[0]);
+    preparation.registry.?.value.servers[0].connection_approval = .{ .fingerprint = try preparation.registry.?.arena.allocator().dupe(u8, &fingerprint) };
+    var manifest = (try mcp_configuration.RuntimeManifest.candidate(std.testing.allocator, &preparation)).?;
+    var manifest_owned = true;
+    defer if (manifest_owned) manifest.deinit();
+    const registry_bytes = try std.testing.allocator.alloc(u8, mcp_configuration.max_store_bytes);
+    defer std.testing.allocator.free(registry_bytes);
+    var registry = DurableRegistry{ .storage = registry_bytes };
+    var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
+    defer runtime_build.deinit();
+    const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .run_time_source = agent.RunTimeSource.unavailable, .max_sessions = 1, .mcp_input = &runtime_build.input.? });
+    var runtime_owned = true;
+    defer if (runtime_owned) {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    };
+    const activation = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var activation_owned = true;
+    defer if (activation_owned) activation.deinit();
+    var checkpoints = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer checkpoints.deinit();
+    var history = try product_task.history.FileStore.init(std.testing.io, home);
+    defer history.deinit();
+    var enablement = try product_skill.enablement.FileStore.init(std.testing.io, home);
+    defer enablement.deinit();
+    var originals = try product_control.AttachmentFileStore.init(std.testing.io, std.testing.allocator, home);
+    defer originals.deinit();
+    var vault = TaskSwitchVault{};
+    defer for (0..2) |i| std.crypto.secureZero(u8, vault.keys[i][0..vault.lengths[i]]);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{ .worker_count = 1, .queue_capacity = 4, .max_tasks = 1, .max_workspaces = 1 }, .{
+        .directories = .{ .canonical_user_home = home },
+        .task_persistence = TaskSwitchHistory.capability(&history),
+        .checkpoint_store = .{ .file_store = &checkpoints },
+        .skill_enablement = .{ .file_store = &enablement },
+        .skill_sources = .{ .restored = .{ .loaded = .{ .ready = .{} } } },
+        .attachment_store = &originals,
+        .attachment_images = .{ .prepare_fn = prepareTaskSwitchPng },
+        .mcp = .{ .preparation = &preparation, .activation = activation, .management = managementConfiguration(&registry, &manifest), .host_capabilities = .{ .connection_approval = true } },
+    });
+    preparation_owned = false;
+    manifest_owned = false;
+    activation_owned = false;
+    runtime_owned = false;
+    defer shutdownProduct(&control, runtime);
+    try control.startCustomProviders(home, vault.port());
+    defer control.stopCustomProviders();
+    const initial_borrowed = try configureTaskSwitchProvider(&control, source.provider_endpoint, "source-model", source_protocol);
+    const source_id = try std.testing.allocator.dupe(u8, initial_borrowed.target.source_id);
+    defer std.testing.allocator.free(source_id);
+    var initial = initial_borrowed;
+    initial.target.source_id = source_id;
+    var selected = try configureTaskSwitchProvider(&control, target.provider_endpoint, "target-model", target_protocol);
+    const target_id = try std.testing.allocator.dupe(u8, selected.target.source_id);
+    defer std.testing.allocator.free(target_id);
+    selected.target.source_id = target_id;
+    try std.testing.expect(control.clearCustomProviderDefault().accepted);
+    const workspace = try control.openWorkspace(.{ .workspace_root = workspace_root, .trust = .explicitly_trusted });
+    var catalog = try waitTaskSwitchCatalog(&control, workspace, 2);
+    try std.testing.expectEqual(@as(usize, 2), catalog.skills.len);
+    _ = try control.setSkillEnabled(.{ .scope = .{ .project = .{ .workspace_id = workspace, .expected_workspace_epoch = try control.workspaceEpoch(workspace) } }, .skill_policy_key = "blocked", .state = .disabled, .expected_catalog_revision = catalog.revision, .expected_selection_revision = catalog.selection_revision.? });
+    catalog = try control.workspaceCatalog(workspace);
+    const task_id = try control.createTaskInWorkspace(workspace, try control.workspaceEpoch(workspace), control.newTaskAdmissionView().active_generation, control.newTaskAdmissionView().active_selection_revision, initial, catalog.revision, catalog.selection_revision, .{ .interactive = approval_mode });
+    const task = control.task_runtime.find(task_id).?;
+    const pinned = try control.taskCatalog(task_id);
+    try std.testing.expectEqual(source_protocol, task.runtime.executionConst().?.protocol);
+    const retained = for (pinned.skills) |skill| {
+        if (std.mem.eql(u8, skill.invocation_name, "retained")) break skill;
+    } else return error.TestUnexpectedResult;
+    const blocked = for (pinned.skills) |skill| {
+        if (std.mem.eql(u8, skill.invocation_name, "blocked")) break skill;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(retained.enabled);
+    try std.testing.expect(!blocked.enabled);
+    const old_epoch = task.durable.binding_epoch;
+    var png: [128]u8 = undefined;
+    const png_len = try std.base64.standard.Decoder.calcSizeForSlice(task_switch_png_base64);
+    try std.base64.standard.Decoder.decode(png[0..png_len], task_switch_png_base64);
+    var staged: [1]product_control.AttachmentDescriptor = undefined;
+    const attachments = try control.stageAttachments(&.{.{ .display_name = "original.png", .bytes = png[0..png_len] }}, &staged);
+    try std.testing.expectEqual(.image, attachments[0].kind);
+    try std.testing.expectEqual(@as(usize, if (manual) 1 else 0), try executeTaskSwitchRun(&control, task_id, .{ .multimodal = .{ .text = "Call the selected echo tool. ORIGINAL_TASK_CONTEXT", .attachment_ids = &.{attachments[0].id} } }, .allow_session));
+    try std.testing.expectEqual(@as(usize, if (manual) 1 else 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Deny this echo tool." }, .deny_session));
+    try std.testing.expectEqual(@as(usize, if (manual) 1 else 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Write the permission boundary file." }, .allow_once));
+    const original_file = try tmp.dir.statFile(std.testing.io, "permission-boundary.txt", .{});
+    const before = task.durable.checkpoint.?;
+    const logical_id = try std.testing.allocator.dupe(u8, before.session.logical_session_id);
+    defer std.testing.allocator.free(logical_id);
+    try tmp.dir.createDirPath(std.testing.io, ".agents/skills/extra");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".agents/skills/extra/SKILL.md", .data = "---\nname: extra\ndescription: Newly available ungranted Skill\n---\nThis new global capability must not enter the original Task.\n" });
+    try control.refreshWorkspaceCatalog(workspace, try control.workspaceEpoch(workspace));
+    const wider = try waitTaskSwitchCatalog(&control, workspace, 3);
+    try std.testing.expectEqual(@as(usize, 3), wider.skills.len);
+    try control.refreshMcpCatalog();
+    try waitForMcpSnapshot(&control, "\"operation\":\"idle\",\"configurationApply\":\"idle\"");
+    _ = try control.selectTaskModel(task_id, .{ .expected_selection_revision = task.durable.model_intent.?.revision, .target = selected.target, .expected_source_generation = selected.expected_source_generation, .expected_catalog_generation = selected.expected_catalog_generation });
+    _ = try control.restoreTaskConversation(task_id, old_epoch);
+    for (0..5000) |_| {
+        try control.drainAgentEvents();
+        control.syncLifecycle();
+        if (task.runtime.restore_job == null and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    if (task.runtime.last_restore_failure) |failure| std.debug.print("real Product rebind failed: {s}\n", .{@tagName(failure)});
+    try std.testing.expect(task.runtime.hasAttachedSession());
+    try std.testing.expect(task.runtime.last_restore_failure == null);
+    try std.testing.expectEqual(old_epoch + 1, task.durable.binding_epoch);
+    try std.testing.expectEqualStrings("gpt-4o-mini", task.durable.execution_model);
+    try std.testing.expectEqual(target_protocol, task.runtime.executionConst().?.protocol);
+    try std.testing.expectEqual(target_protocol, task.durable.execution_protocol);
+    try std.testing.expectEqualStrings(logical_id, task.durable.checkpoint.?.session.logical_session_id);
+    const after_switch_file = try tmp.dir.statFile(std.testing.io, "permission-boundary.txt", .{});
+    try std.testing.expectEqual(original_file.mtime, after_switch_file.mtime);
+    try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Continue on the new connection." }, .allow_session));
+    try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Deny this echo tool." }, .allow_session));
+    // A one-shot Write decision must not become a restored Session grant.
+    try std.testing.expectEqual(@as(usize, if (manual) 1 else 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Write the permission boundary file." }, .allow_once));
+    const restored_catalog = try control.taskCatalog(task_id);
+    try std.testing.expectEqualStrings(pinned.revision, restored_catalog.revision);
+    try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .skill = .{ .skill_id = retained.skill_id, .catalog_revision = pinned.revision, .selection_revision = restored_catalog.selection_revision.?, .argument_values = &.{} } }, .allow_session));
+    var access = try task.runtime.acquireAccess();
+    var access_owned = true;
+    defer if (access_owned) access.deinit();
+    var restored_inputs = try access.captureRestoreInputs();
+    defer restored_inputs.deinit() catch unreachable;
+    try std.testing.expectError(error.SkillUnavailable, control.runTask(task_id, .{ .skill = .{ .skill_id = blocked.skill_id, .catalog_revision = restored_catalog.revision, .selection_revision = restored_catalog.selection_revision.?, .argument_values = &.{} } }));
+    try std.testing.expectEqual(if (manual) agent.PermissionMode.accept_edits else agent.PermissionMode.full_access, restored_inputs.permission_mode);
+    if (manual) try std.testing.expect(task.runtime.last_restore_report.?.restored_permission_rules >= 2);
+    try std.testing.expectEqual(agent.ShellPolicy.unrestricted, restored_inputs.shell_policy);
+    try std.testing.expectEqual(agent.PermissionInteraction.interactive, restored_inputs.permission_interaction);
+    const ids = restored_inputs.skill.?.borrow().policy.granted_skill_ids;
+    try std.testing.expectEqual(@as(usize, 1), ids.len);
+    try std.testing.expectEqualStrings(retained.skill_id, ids[0]);
+    var mcp_authority = try control.mcp.?.restoreAuthority(restored_inputs.mcp);
+    defer mcp_authority.deinit();
+    try std.testing.expectEqual(@as(usize, 1), mcp_authority.selection.?.selectedTools().len);
+    if (authority_case == .replace_connection) {
+        const route = task.runtime.attached().?.binding.routeId();
+        const epoch = task.durable.binding_epoch;
+        access.deinit();
+        access_owned = false;
+        try std.testing.expectEqual(mcp_configuration.ManagementOutcome.saved, try control.updateMcpHttpConnection(1, .{
+            .server_id = "deterministic-http",
+            .display_name = "Different origin, same echo schema",
+            .negotiation = "modern_only",
+            .timeout_ms = 2000,
+            .url = target.endpoint,
+            .auth_mode = .none,
+        }));
+        try waitForMcpSnapshot(&control, "\"operation\":\"idle\",\"configurationApply\":\"idle\"");
+        // This one-slot Runtime still owns the live Task. Observe the MCP
+        // owner directly so a capacity rejection cannot masquerade as origin
+        // validation after the management transaction has settled.
+        try std.testing.expect(!control.mcp.?.newTaskAuthorityReady());
+        if (control.mcp.?.restoreAuthority(restored_inputs.mcp)) |value| {
+            var unexpected = value;
+            unexpected.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.RecoveryUnavailable, err);
+        _ = try control.selectTaskModel(task_id, .{ .expected_selection_revision = task.durable.model_intent.?.revision, .target = initial.target, .expected_source_generation = initial.expected_source_generation, .expected_catalog_generation = initial.expected_catalog_generation });
+        try std.testing.expectError(error.RecoveryUnavailable, control.restoreTaskConversation(task_id, epoch));
+        try std.testing.expect(task.runtime.restore_job == null);
+        try std.testing.expect(task.runtime.hasAttachedSession());
+        try std.testing.expectEqual(route, task.runtime.attached().?.binding.routeId());
+        try std.testing.expectEqual(epoch, task.durable.binding_epoch);
+        return;
+    }
+    // Revoke current Product authority through the public mutation paths.
+    _ = try control.setSkillEnabled(.{ .scope = .{ .project = .{ .workspace_id = workspace, .expected_workspace_epoch = try control.workspaceEpoch(workspace) } }, .skill_policy_key = "retained", .state = .disabled, .expected_catalog_revision = wider.revision, .expected_selection_revision = wider.selection_revision.? });
+    try std.testing.expectEqual(mcp_configuration.ManagementOutcome.saved, try control.setMcpAllowedTools(1, .{ .server_id = "deterministic-http", .tools = &.{} }));
+    // Capture inputs above has its own Access. Release it before taking the
+    // next operation slot; opaque captured owners intentionally remain alive.
+    access.deinit();
+    access_owned = false;
+    _ = try control.selectTaskModel(task_id, .{ .expected_selection_revision = task.durable.model_intent.?.revision, .target = initial.target, .expected_source_generation = initial.expected_source_generation, .expected_catalog_generation = initial.expected_catalog_generation });
+    _ = try control.restoreTaskConversation(task_id, task.durable.binding_epoch);
+    for (0..5000) |_| {
+        try control.drainAgentEvents();
+        control.syncLifecycle();
+        if (task.runtime.restore_job == null and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    if (task.runtime.last_restore_failure) |failure| std.debug.print("reduced Product rebind failed: {s}\n", .{@tagName(failure)});
+    try std.testing.expect(task.runtime.last_restore_failure == null);
+    try std.testing.expectEqual(agent.CheckpointRestoreHealth.degraded, task.runtime.last_restore_report.?.health);
+    try std.testing.expect(task.runtime.last_restore_report.?.invalidated_mcp_bindings > 0);
+    try std.testing.expectEqual(source_protocol, task.runtime.executionConst().?.protocol);
+    try std.testing.expectEqualStrings("gpt-4o", task.durable.execution_model);
+    try std.testing.expectEqualStrings(logical_id, task.durable.checkpoint.?.session.logical_session_id);
+    const narrowed = try control.taskCatalog(task_id);
+    for (narrowed.skills) |skill| try std.testing.expect(!skill.enabled);
+    try std.testing.expectError(error.SkillUnavailable, control.runTask(task_id, .{ .skill = .{ .skill_id = retained.skill_id, .catalog_revision = narrowed.revision, .selection_revision = narrowed.selection_revision.?, .argument_values = &.{} } }));
+    try std.testing.expectEqual(@as(usize, 0), try executeTaskSwitchRun(&control, task_id, .{ .text = "Call the revoked echo tool." }, .allow_session));
+    // A checkpoint's cached image cannot substitute for retaining the user's
+    // original file in the Product Task namespace.
+    var task_directory_name: [32]u8 = undefined;
+    const task_directory = try std.fmt.bufPrint(&task_directory_name, "{d}", .{task_id});
+    var original_directory = try originals.root.openDir(std.testing.io, task_directory, .{ .iterate = true });
+    defer original_directory.close(std.testing.io);
+    var iterator = original_directory.iterate();
+    var original_count: usize = 0;
+    while (try iterator.next(std.testing.io)) |entry| if (std.mem.endsWith(u8, entry.name, ".png")) {
+        const original_bytes = try original_directory.readFileAlloc(std.testing.io, entry.name, std.testing.allocator, .limited(128));
+        defer std.testing.allocator.free(original_bytes);
+        try std.testing.expectEqualSlices(u8, png[0..png_len], original_bytes);
+        original_count += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), original_count);
+    const durable_bytes = (try history.loadAlloc(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(durable_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, durable_bytes, "synthetic-key-for-gpt-4o") == null);
+    const trace_source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, trace_a, std.testing.allocator, .limited(4 * 1024 * 1024));
+    defer std.testing.allocator.free(trace_source);
+    const trace_target = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, trace_b, std.testing.allocator, .limited(4 * 1024 * 1024));
+    defer std.testing.allocator.free(trace_target);
+    try std.testing.expect(std.mem.indexOf(u8, trace_target, "ORIGINAL_TASK_CONTEXT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace_target, task_switch_png_base64) != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace_target, "\"credentialMatched\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace_target, "PINNED_PRODUCT_SKILL") != null);
+    try std.testing.expectEqual(@as(usize, if (manual) 2 else 4), std.mem.count(u8, trace_source, "\"method\":\"tools/call\""));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, trace_target, "\"method\":\"tools/call\""));
 }

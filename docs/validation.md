@@ -55,6 +55,8 @@ Task 模型意图与选择的定向入口为 `zig build test-task-model-selectio
 
 同进程能力输入由 `test-mcp-catalog` 验证 MCP 原来源指纹、跨 generation 交集、收缩/不扩大及分配失败；`test-lifecycle` 验证 Skill query/Session/捕获 owner 的精确释放与 Runtime shutdown fence、capture 分配失败不改 authority、成功权限 mutation 后捕获，以及替换失败。`test-mcp-interop` 使用当前 canonical Core、真实临时 Skill 和本地 HTTP MCP：export 后释放原 Session/query owner，额外查询更宽目录，使用原输入恢复并实际执行原 Skill/MCP；未授权 Skill 仍被拒绝，缩小 ceiling 返回 degraded 并撤销旧 Skill。Core session allow/deny 在恢复前各由一次真实 UI 回应建立，恢复后同参数允许/拒绝均不再询问，MCP trace 精确检查实际调用且无历史重放。模型端为本地协议 fixture，不将该证据扩大为远端供应商兼容性承诺。
 
+同一 `test-mcp-interop` 还必须经过真实 Product Control 的模型选择、恢复、Run 和权限响应入口，覆盖四种协议间的完整组合：单 Session 容量下释放旧 attachment 后恢复同一逻辑 Conversation，保留图片和工具历史、原 pinned Skill、MCP selector 及 session allow/deny，目录刷新和新增全局 Skill 不扩大原 Task。以实际 binding protocol、请求凭据匹配、Provider 请求中的原图片字节、Task namespace 中的原件及真实 MCP RPC 观察结果；使用真实 history/checkpoint store。Workspace 外 Write 的一次性批准在切换后仍需再次询问，切换本身不得改写其文件；full access 保持原 mode/shell/interaction，也不能取得未选择的 Skill/MCP。通过 Product 授权命令撤销 Skill 或工具后必须安全 degraded，模型再尝试原工具名不得产生额外 RPC；更换 MCP 连接来源即使 schema 相同，也须在关闭旧 Session 前拒绝沿用原 authority。PNG 预览 port 仅接受固定的已编码 PNG，不替代桌面的系统图片解码、预览与原生输入验收。
+
 `npm test` 必须校验 canonical staged AgentCore bundle、执行 Renderer typecheck，并运行自动发现的 Node tests 与正式 Native test graph。Node 和 Native 阶段都必须得到结果；一侧失败不得遮蔽另一侧。bundle 缺失或不匹配时必须明确失败，不能跳过 AgentCore 用例后报告成功。
 
 Renderer `check/test` 必须确定性验证由 Host wire 类型生成的源码没有过期；`dev/build` 在构建 Renderer 前更新生成结果。生成器只消费纯合同，在构建机运行，不加载 Product Runtime 或 AgentCore Session。结构派生的验收同时覆盖实际 Host 编码、实际 Renderer 解码、独立的字段/nullable/enum/整数拒绝用例；不能只验证生成器与自己的输出相符，也不能用同一生成器制造全部 fixture 预期。

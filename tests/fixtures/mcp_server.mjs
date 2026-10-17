@@ -1,6 +1,8 @@
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
 import { appendFileSync } from "node:fs";
+import path from "node:path";
+import { protocolTextSse, protocolToolSse } from "./provider_protocol.mjs";
 
 const options = parseOptions(process.argv.slice(2));
 const imageData =
@@ -30,6 +32,7 @@ function startStdio() {
 function startHttp() {
   let providerCalls = 0;
   let selectedMcpToolName;
+  let reducedMcpAuthority = false;
   const server = createServer((request, response) => {
     const chunks = [];
     let bytes = 0;
@@ -42,9 +45,114 @@ function startHttp() {
         if (bytes > 1024 * 1024) throw new Error("request too large");
         if (request.method !== "POST") throw new Error("unexpected method");
         const body = Buffer.concat(chunks).toString("utf8");
+        const protocol =
+          request.url === "/v1/chat/completions"
+            ? "chat"
+            : request.url === "/v1/responses"
+              ? "responses"
+              : request.url.startsWith("/v1beta/models/")
+                ? "gemini"
+                : null;
+        if (protocol) {
+          const payload = JSON.parse(body);
+          const model =
+            payload.model ??
+            /^\/v1beta\/models\/([^:]+):/.exec(request.url)?.[1];
+          const key = `synthetic-key-for-${model}`;
+          const credentialMatched =
+            protocol === "gemini"
+              ? request.headers["x-goog-api-key"] === key
+              : request.headers.authorization === `Bearer ${key}`;
+          if (!credentialMatched)
+            throw new Error("wrong connection credential");
+          trace({
+            transport: "provider",
+            direction: "request",
+            protocol,
+            credentialMatched,
+            message: payload,
+          });
+          const declarations =
+            protocol === "gemini"
+              ? (payload.tools?.flatMap(
+                  (tool) =>
+                    tool.functionDeclarations ??
+                    tool.function_declarations ??
+                    [],
+                ) ?? [])
+              : (payload.tools?.map((tool) => tool.function ?? tool) ?? []);
+          const mcpTools = declarations.filter((tool) =>
+            tool.name.startsWith("mcp__"),
+          );
+          if (providerCalls === 0) selectedMcpToolName = mcpTools[0]?.name;
+
+          const messages =
+            payload.input ?? payload.messages ?? payload.contents;
+          const latest = messages?.at(-1);
+          const content = latest?.content ?? latest?.parts;
+          const text =
+            typeof content === "string"
+              ? content
+              : (content
+                  ?.filter((part) => typeof part.text === "string")
+                  .map((part) => part.text)
+                  .join("\n") ?? "");
+          const revoked =
+            latest?.role === "user" &&
+            text.includes("Call the revoked echo tool.");
+          if (revoked) reducedMcpAuthority = true;
+          if (mcpTools.length !== (reducedMcpAuthority ? 0 : 1))
+            throw new Error("MCP authority missing or expanded");
+          const denied =
+            latest?.role === "user" && text.includes("Deny this echo tool.");
+          const writeCall =
+            latest?.role === "user" &&
+            text.includes("Write the permission boundary file.");
+          const needsTool =
+            providerCalls === 0 || denied || revoked || writeCall;
+          const providerBody = needsTool
+            ? protocolToolSse(
+                protocol,
+                providerCalls + 1,
+                writeCall ? "Write" : selectedMcpToolName,
+                writeCall
+                  ? {
+                      file_path: path.join(
+                        path.dirname(options.tracePath),
+                        "permission-boundary.txt",
+                      ),
+                      content: "permission-boundary",
+                    }
+                  : {
+                      text: revoked
+                        ? "revoked-from-agentcore"
+                        : denied
+                          ? "deny-from-agentcore"
+                          : "echo-from-agentcore",
+                    },
+              )
+            : protocolTextSse(protocol, "MCP execution complete");
+          providerCalls += 1;
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+            connection: "close",
+          });
+          response.end(providerBody);
+          return;
+        }
         if (request.url === "/v1/messages") {
           const payload = JSON.parse(body);
+          const taskSwitchModel = ["gpt-4o", "gpt-4o-mini"].includes(
+            payload.model,
+          );
+          const credentialMatched = taskSwitchModel
+            ? request.headers.authorization ===
+              `Bearer synthetic-key-for-${payload.model}`
+            : undefined;
+          if (taskSwitchModel && !credentialMatched)
+            throw new Error("wrong connection credential");
           trace({
+            credentialMatched,
             transport: "provider",
             direction: "request",
             message: payload,
@@ -128,19 +236,42 @@ function startHttp() {
             throw new Error(
               "restored context or original MCP authority was lost",
             );
+          const writeCall = payload.messages
+            ?.at(-1)
+            ?.content?.some(
+              (part) =>
+                part.type === "text" &&
+                part.text?.includes("Write the permission boundary file."),
+            );
           const providerBody =
-            providerCalls === 0 || restoredCall || deniedCall || revokedCall
+            providerCalls === 0 ||
+            restoredCall ||
+            deniedCall ||
+            revokedCall ||
+            writeCall
               ? providerToolSse(
                   `mcp-message-${providerCalls + 1}`,
                   `mcp-call-${providerCalls + 1}`,
-                  revokedCall ? selectedMcpToolName : mcpTool.name,
-                  {
-                    text: revokedCall
-                      ? "revoked-from-agentcore"
-                      : deniedCall
-                        ? "deny-from-agentcore"
-                        : "echo-from-agentcore",
-                  },
+                  writeCall
+                    ? "Write"
+                    : revokedCall
+                      ? selectedMcpToolName
+                      : mcpTool.name,
+                  writeCall
+                    ? {
+                        file_path: path.join(
+                          path.dirname(options.tracePath),
+                          "permission-boundary.txt",
+                        ),
+                        content: "permission-boundary",
+                      }
+                    : {
+                        text: revokedCall
+                          ? "revoked-from-agentcore"
+                          : deniedCall
+                            ? "deny-from-agentcore"
+                            : "echo-from-agentcore",
+                      },
                 )
               : providerTextSse(
                   `mcp-message-${providerCalls + 1}`,
