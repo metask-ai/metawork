@@ -53,6 +53,8 @@ npm test
 
 Task 模型意图与选择的定向入口为 `zig build test-task-model-selection`，覆盖 revision CAS、默认配置独立性、confirmed history 写入及未知结果读回、Host 投影与严格 Bridge payload。真实 Task/Run/queued input 和 Session setModel 行为归 `test-lifecycle`；Renderer 运行 typecheck 与 `task-model-selection`、`new-task-model-selection`、`bridge-client`、`workbench-contract` suites。模型选择不得改变已有 Run 的执行及权限事实；跨连接 rebind 仍须完整生命周期验收。
 
+MCP 同进程恢复输入由 `test-mcp-catalog` 验证来源指纹、跨 generation 选择交集、授权不扩大、收缩及分配失败原子性；`test-lifecycle` 覆盖 Session 复制、替换失败及清空责任。`test-mcp-interop` 使用当前 canonical Core 和真实本地 HTTP MCP，以文本和图片工具结果验证 export、释放原 Session、重新验证选择、restore 与实际续跑调用；模型端为本地协议 fixture，不将此证据扩大为远端供应商兼容性承诺。
+
 `npm test` 必须校验 canonical staged AgentCore bundle、执行 Renderer typecheck，并运行自动发现的 Node tests 与正式 Native test graph。Node 和 Native 阶段都必须得到结果；一侧失败不得遮蔽另一侧。bundle 缺失或不匹配时必须明确失败，不能跳过 AgentCore 用例后报告成功。
 
 Renderer `check/test` 必须确定性验证由 Host wire 类型生成的源码没有过期；`dev/build` 在构建 Renderer 前更新生成结果。生成器只消费纯合同，在构建机运行，不加载 Product Runtime 或 AgentCore Session。结构派生的验收同时覆盖实际 Host 编码、实际 Renderer 解码、独立的字段/nullable/enum/整数拒绝用例；不能只验证生成器与自己的输出相符，也不能用同一生成器制造全部 fixture 预期。

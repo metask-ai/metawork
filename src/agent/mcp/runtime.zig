@@ -37,6 +37,7 @@ pub const ExpectedServer = struct {
     binding_identity: [32]u8,
     namespace: []const u8,
     allowed_tools: []const []const u8,
+    configuration_fingerprint: [32]u8 = [_]u8{0} ** 32,
 };
 
 pub const Error = error{InvalidConfig};
@@ -83,6 +84,7 @@ pub const Servers = struct {
                 .binding_identity = bindingIdentity(id),
                 .namespace = namespace,
                 .allowed_tools = allowed_tools,
+                .configuration_fingerprint = config.configuration_fingerprint,
             };
             self.descriptors[index] = .{
                 .struct_size = @sizeOf(wire.McpServerV1),

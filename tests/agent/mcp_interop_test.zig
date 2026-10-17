@@ -558,6 +558,26 @@ test "canonical AgentCore preserves MCP image payload as opaque tool-result text
     try expectSelectedHttpToolResult("image");
 }
 
+const RestoreBytes = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    offset: usize = 0,
+
+    fn write(context: ?*anyopaque, value: []const u8) agent.CheckpointSinkWriteResult {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.bytes.appendSlice(std.testing.allocator, value) catch return .io_failed;
+        return .ok;
+    }
+
+    fn read(context: ?*anyopaque, output: []u8) agent.CheckpointSourceReadResult {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        const count = @min(output.len, self.bytes.items.len - self.offset);
+        if (count == 0) return .eof;
+        @memcpy(output[0..count], self.bytes.items[self.offset..][0..count]);
+        self.offset += count;
+        return .{ .bytes = count };
+    }
+};
+
 fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -603,7 +623,7 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
         std.testing.allocator,
     );
     defer std.testing.allocator.free(workspace_root);
-    const session = try runtime.createSession(.{
+    const open_options: agent.SessionOpenOptions = .{
         .model_binding = .{
             .target = .{
                 .provider_id = "fixture-provider",
@@ -620,7 +640,8 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
             .trust = .explicitly_trusted,
         },
         .mcp_selection = selection,
-    });
+    };
+    const session = try runtime.createSession(open_options);
     const run_id = try session.prepareRun(.{ .text = "Call the selected echo tool." });
     var run = try session.beginRun(run_id);
     var terminal = run.execute();
@@ -629,6 +650,64 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     try std.testing.expectEqual(@as(?agent.TerminalFailure, null), terminal.failure);
     try std.testing.expectEqual(@as(?agent.Status, .ok), terminal.abi_status);
     try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), terminal.stop_reason);
+    while (runtime.takeEvent()) |event_value| {
+        var event = event_value;
+        event.deinit();
+    }
+    const saved = (try session.captureMcpRestoreSelection()).?;
+    defer saved.deinit();
+    const limits: agent.CheckpointLimits = .{
+        .hard_bytes = 16 * 1024 * 1024,
+        .max_section_bytes = 16 * 1024 * 1024,
+        .max_string_bytes = 8 * 1024 * 1024,
+        .max_messages = 1024,
+        .max_blocks_per_message = 128,
+        .chunk_bytes = 64 * 1024,
+    };
+    var bytes = RestoreBytes{};
+    defer bytes.bytes.deinit(std.testing.allocator);
+    var exported = try session.exportCheckpoint(limits, .{ .context = &bytes, .write_fn = RestoreBytes.write }, run_id, 0, open_options.model_binding.target.model);
+    defer exported.deinit();
+    const checkpoint = switch (exported) {
+        .success => |value| value,
+        .failure => return error.TestUnexpectedResult,
+    };
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+    const current = switch (try runtime.activateMcp()) {
+        .activated => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer current.deinit();
+    const prepared = try runtime.prepareMcpRestoreSelection(saved, current);
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 1), prepared.selectedTools().len);
+    try std.testing.expectEqualStrings("echo", prepared.selectedTools()[0].name);
+    var restore_options = open_options;
+    restore_options.mcp_selection = prepared;
+    restore_options.operation_id_floor.last_run_id = run_id;
+    const restored = try runtime.restoreSessionRoute(.{
+        .session = restore_options,
+        .checkpoint_limits = limits,
+        .source = .{ .context = &bytes, .read_fn = RestoreBytes.read },
+        .expectation = .{
+            .logical_session_id = checkpoint.description.session_id,
+            .checkpoint_generation = checkpoint.checkpoint.generation,
+            .last_run_id = run_id,
+            .last_compact_id = 0,
+            .model = open_options.model_binding.target.model,
+        },
+    });
+    try std.testing.expectEqual(agent.CheckpointRestoreHealth.complete, restored.report.health);
+    const next = try restored.session.prepareRun(.{ .text = "Call the restored echo tool." });
+    try std.testing.expect(next > run_id);
+    var continuation = try restored.session.beginRun(next);
+    var continued = continuation.execute();
+    continuation.deinit();
+    defer continued.deinit();
+    if (continued.failure != null) std.debug.print("restored MCP run status={any} stop={any} signal={any} diagnostic={s}\n", .{ continued.abi_status, continued.stop_reason, continued.termination_signal, continued.diagnostic() });
+    try std.testing.expectEqual(@as(?agent.TerminalFailure, null), continued.failure);
+    try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), continued.stop_reason);
     const trace = try tmp.dir.readFileAlloc(
         std.testing.io,
         "execution-trace.jsonl",
@@ -640,6 +719,7 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
         std.debug.print("MCP execution trace:\n{s}\n", .{trace});
     try std.testing.expect(std.mem.indexOf(u8, trace, "\"method\":\"tools/call\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "echo-from-agentcore") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
 }
 
 test "expired MCP authority is typed and the same model succeeds after refresh" {

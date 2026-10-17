@@ -96,12 +96,34 @@ function startHttp() {
                 "MCP image payload serialization changed; review visual-input support",
               );
           }
+          const restoredCall = payload.messages
+            ?.at(-1)
+            ?.content?.some(
+              (part) =>
+                part.type === "text" &&
+                part.text?.includes("Call the restored echo tool."),
+            );
+          if (
+            restoredCall &&
+            (!toolResult || !mcpTool || mcpTools.length !== 1)
+          )
+            throw new Error(
+              "restored context or original MCP authority was lost",
+            );
           const providerBody =
-            providerCalls === 0
-              ? providerToolSse("mcp-message-1", "mcp-call-1", mcpTool.name, {
-                  text: "echo-from-agentcore",
-                })
-              : providerTextSse("mcp-message-2", "MCP execution complete");
+            providerCalls === 0 || restoredCall
+              ? providerToolSse(
+                  `mcp-message-${providerCalls + 1}`,
+                  `mcp-call-${providerCalls + 1}`,
+                  mcpTool.name,
+                  {
+                    text: "echo-from-agentcore",
+                  },
+                )
+              : providerTextSse(
+                  `mcp-message-${providerCalls + 1}`,
+                  "MCP execution complete",
+                );
           providerCalls += 1;
           response.writeHead(200, {
             "content-type": "text/event-stream",

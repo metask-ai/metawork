@@ -60,6 +60,7 @@ pub const McpCatalogServer = mcp_catalog.Server;
 pub const McpCatalogTool = mcp_catalog.Tool;
 pub const McpCatalogIssue = mcp_catalog.Issue;
 pub const McpSelection = mcp_catalog.Selection;
+pub const McpRestoreSelection = mcp_catalog.RestoreSelection;
 pub const McpSelector = mcp_catalog.Selector;
 pub const McpServerAllowlist = mcp_catalog.ServerAllowlist;
 pub const McpActivation = mcp_catalog.Activation;
@@ -448,6 +449,7 @@ pub const Error = error{
     McpCatalogBindingMismatch,
     InvalidMcpSelection,
     StaleMcpSelection,
+    McpRestoreSourceChanged,
     McpRefreshInProgress,
     McpConfigurationApplyFailed,
     McpConfigurationApplyLimit,
@@ -547,6 +549,7 @@ pub const Session = struct {
     file_changes_lost: std.atomic.Value(bool) = .init(false),
     permission_interaction: PermissionInteraction = .interactive,
     permission_stop_requested: bool = false,
+    mcp_restore_selection: ?*McpRestoreSelection = null,
     core_session_identity: CoreSessionIdentity = .unbound,
     cancel_requested: bool = false,
     active_refs: usize = 0,
@@ -1085,8 +1088,23 @@ pub const Session = struct {
     pub fn updateMcpSelection(
         self: *Session,
         selection: ?*const McpSelection,
-    ) Error!void {
+    ) (Error || std.mem.Allocator.Error)!void {
         return self.agent_runtime.updateSessionMcpSelection(self, selection);
+    }
+
+    /// Owns the Session's original selectors and connection provenance after
+    /// close/release. It contains no SDK handle or permission grants.
+    pub fn captureMcpRestoreSelection(self: *Session) (Error || std.mem.Allocator.Error)!?*McpRestoreSelection {
+        self.lock();
+        defer self.unlock();
+        if (self.agent_runtime.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
+        switch (self.state) {
+            .idle => {},
+            .poisoned => return error.SessionPoisoned,
+            .closing, .closed => return error.SessionClosing,
+            else => return error.SessionNotIdle,
+        }
+        return if (self.mcp_restore_selection) |selection| try selection.clone(self.agent_runtime.allocator) else null;
     }
 
     pub fn failMcpUpdateContractLocked(self: *Session) Error {
@@ -2012,6 +2030,7 @@ pub const Session = struct {
         self.agent_runtime.allocator.free(self.workspace_root);
         self.agent_runtime.allocator.free(self.workspace_home);
         self.agent_runtime.allocator.free(self.workspace_epoch);
+        if (self.mcp_restore_selection) |selection| selection.deinit();
     }
 
     pub fn onEvent(

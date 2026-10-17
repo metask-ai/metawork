@@ -626,7 +626,7 @@ pub const Runtime = struct {
         self: *Runtime,
         session: *Session,
         selection: ?*const McpSelection,
-    ) Error!void {
+    ) (Error || std.mem.Allocator.Error)!void {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire))
@@ -647,6 +647,8 @@ pub const Runtime = struct {
                 return error.StaleMcpSelection;
         }
 
+        const restore_selection = try self.captureMcpRestoreSelectionLocked(selection);
+        errdefer if (restore_selection) |saved| saved.deinit();
         session.lock();
         defer session.unlock();
         switch (session.state) {
@@ -678,13 +680,36 @@ pub const Runtime = struct {
             return error.SessionPoisoned;
         }
         return switch (status) {
-            .ok => {},
+            .ok => {
+                if (session.mcp_restore_selection) |saved| saved.deinit();
+                session.mcp_restore_selection = restore_selection;
+            },
             .busy => error.SessionNotIdle,
             .mcp_not_refreshed => error.McpNotRefreshed,
             .invalid_mcp_selection => error.InvalidMcpSelection,
             .checkpoint_budget_required => error.McpCheckpointBudgetRequired,
             .out_of_memory, .core_error, .resource_limit => error.McpSelectionUpdateFailed,
             else => unreachable,
+        };
+    }
+
+    /// The caller holds sessions_mutex and has validated this live selection.
+    fn captureMcpRestoreSelectionLocked(self: *Runtime, selection: ?*const McpSelection) (Error || std.mem.Allocator.Error)!?*root.McpRestoreSelection {
+        return if (selection) |value| mcp_catalog.captureRestoreSelection(self.allocator, self.mcp_owner_id, value, self.mcp_servers.expectedServers()) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return mapMcpCatalogError(err);
+        } else null;
+    }
+
+    pub fn prepareMcpRestoreSelection(self: *Runtime, original: *const root.McpRestoreSelection, activation: *const McpActivation) (Error || std.mem.Allocator.Error)!*McpSelection {
+        self.sessions_mutex.lockUncancelable(self.io);
+        defer self.sessions_mutex.unlock(self.io);
+        if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
+        if (self.mcp_refresh_running) return error.McpRefreshInProgress;
+        if (self.mcp_catalog_generation == null or self.mcp_catalog_generation.? != activation.catalogGeneration()) return error.StaleMcpSelection;
+        return mcp_catalog.restoreSelectionForActivation(self.allocator, self.mcp_owner_id, original, activation, self.mcp_servers.expectedServers()) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return mapMcpCatalogError(err);
         };
     }
 
@@ -781,6 +806,8 @@ pub const Runtime = struct {
                 mcp_catalog.selectionGeneration(selection) != self.mcp_catalog_generation.?)
                 return error.StaleMcpSelection;
         }
+        const mcp_restore_selection = try self.captureMcpRestoreSelectionLocked(options.mcp_selection);
+        errdefer if (mcp_restore_selection) |saved| saved.deinit();
         var slot: ?usize = null;
         for (self.sessions, self.session_reservations, 0..) |entry, reserved, index| {
             if (entry == null and !reserved) {
@@ -820,6 +847,7 @@ pub const Runtime = struct {
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
             .permission_interaction = options.permission_interaction,
+            .mcp_restore_selection = mcp_restore_selection,
             .control_block = control_block,
             .next_run_id = options.operation_id_floor.last_run_id,
             .next_compact_id = options.operation_id_floor.last_compact_id,
@@ -1028,6 +1056,11 @@ pub const Runtime = struct {
                 return error.StaleMcpSelection;
             }
         }
+        const mcp_restore_selection = self.captureMcpRestoreSelectionLocked(session_options.mcp_selection) catch |err| {
+            self.sessions_mutex.unlock(self.io);
+            return err;
+        };
+        defer if (!session_installed) if (mcp_restore_selection) |saved| saved.deinit();
         var slot: ?usize = null;
         for (self.sessions, self.session_reservations, 0..) |entry, reserved, index| {
             if (entry == null and !reserved) {
@@ -1066,6 +1099,7 @@ pub const Runtime = struct {
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
             .permission_interaction = session_options.permission_interaction,
+            .mcp_restore_selection = mcp_restore_selection,
             .control_block = control_block,
             .next_run_id = session_options.operation_id_floor.last_run_id,
             .next_compact_id = session_options.operation_id_floor.last_compact_id,
@@ -1475,6 +1509,7 @@ fn mapMcpCatalogError(err: anyerror) Error {
         error.DuplicateCatalogIdentity => error.InvalidMcpCatalogDescriptor,
         error.InvalidSelection => error.InvalidMcpSelection,
         error.StaleSelection => error.StaleMcpSelection,
+        error.RestoreSourceChanged => error.McpRestoreSourceChanged,
         else => error.McpRefreshFailed,
     };
 }

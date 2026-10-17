@@ -631,7 +631,10 @@ test "MCP catalog refresh binds explicit Session selection and idle replacement"
         },
         .mcp_selection = selection,
     });
+    const saved = (try session.captureMcpRestoreSelection()).?;
+    defer saved.deinit();
     try session.updateMcpSelection(null);
+    try std.testing.expect((try session.captureMcpRestoreSelection()) == null);
     fake_core.lock();
     const updates_after_clear = fake_core.mcp_updates;
     const selectors_after_clear = fake_core.last_mcp_update_selector_count;
@@ -645,6 +648,8 @@ test "MCP catalog refresh binds explicit Session selection and idle replacement"
         session.updateMcpSelection(null),
     );
     try session.cancelPreparedRun(queued_run);
+    const retained = (try session.captureMcpRestoreSelection()).?;
+    retained.deinit();
     fake_core.lock();
     const refreshes = fake_core.mcp_refreshes;
     const descriptions = fake_core.mcp_descriptions;
@@ -680,6 +685,8 @@ test "MCP selection mutation preserves reusable and poison status contracts" {
     });
     fake_core.forceNextMcpUpdateStatus(wire.STATUS_BUSY);
     try std.testing.expectError(error.SessionNotIdle, session.updateMcpSelection(null));
+    const after_busy = (try session.captureMcpRestoreSelection()).?;
+    after_busy.deinit();
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
     fake_core.forceNextMcpUpdateStatus(wire.STATUS_CHECKPOINT_BUDGET_REQUIRED);
     try std.testing.expectError(
@@ -688,6 +695,7 @@ test "MCP selection mutation preserves reusable and poison status contracts" {
     );
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
     try session.updateMcpSelection(null);
+    try std.testing.expect((try session.captureMcpRestoreSelection()) == null);
     fake_core.forceNextMcpUpdateStatus(wire.STATUS_STALE_CATALOG);
     try std.testing.expectError(
         error.McpSelectionUpdateFailed,
