@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-17
+
+### Added
+
+- Run 进行期间可以排队一条文本或 Skill 输入；绑定 Run 正常完成并收尾后自动按普通准入启动下一次 Run，支持查看、编辑和撤回；非正常结局或准入失败时保留为待处理，应用重启后不恢复。
+- Composer 支持直接粘贴剪贴板图片，并复用现有附件接收、校验、取消与草稿生命周期；不主动读取系统剪贴板，不插入同次粘贴的 HTML 或文字表示，也不自动发送。
+
+### Changed
+
+- New task 可以直接选择已有且仍获授权的 Manual Workspace；系统选择器只用于新增或重新授权目录，Automatic Workspace 统一显示为“默认”。
+- 审批模式界面文案调整为“自动审批 / 直接执行”并压缩选择器说明；权限、额外用量与存疑转人工语义不变。
+- Agent 时间上下文只传递本轮日历日期与时区信息，不再包含具体钟点。
+- Renderer Bridge 的两类共享 wire 结构改由 Host 类型生成；开发启动与构建改用隔离、成对产物，避免跨语言合同漂移和旧产物混用。
+- Native SDK 切换至维护版 `@zogien/native-sdk 0.11.0-fork.2`；System WebView 标题栏拖动改用 SDK 原生声明区域，移除应用自有手势与拖动兼容路径。
+- Windows 与 macOS 的 x86_64/ARM64 AgentCore bundles 统一刷新至 `0.6.0-dev+4e826cef9799` / ABI revision 19。
+
+### Fixed
+
+- 修复提交输入时可能丢失 Composer 焦点或草稿的问题。
+- 修复已保存 Manual Workspace 恢复后仍重复要求目录选择，以及 Renderer/Host Snapshot 对 Compact 阶段、附件可用性和合同差异的处理不一致。
+
 ## [0.2.3] - 2026-10-14
 
 ### Added
@@ -364,7 +385,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.3...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/metask-ai/metawork/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/metask-ai/metawork/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/metask-ai/metawork/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/metask-ai/metawork/compare/v0.2.0...v0.2.1
