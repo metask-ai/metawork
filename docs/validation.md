@@ -165,7 +165,7 @@ child-process 非正常退出证明进程终止后的 WAL 恢复，不是机器�
 
 | capability                                                           | Windows 状态                                                                                            | macOS 状态                                                                                                           | 证据定位                                                   | 未闭合验证                                                  |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------- |
-| `system_webview_drag_region` | 已验证：局部标题栏、浏览器计数、原生授权、真实 AccountGate/Workbench 与窗口生命周期；未覆盖范围见新证据 | 继续使用 SDK/AppKit，无新增原生兼容；本次局部入口/wire 接线未实机回归 | `E-WIN-CHROME-GESTURES-20260919`；旧 Host 配对证据仅作历史 | macOS 接线回归、混合 DPI、其他 Windows/WebView 版本；SDK 正式能力需独立验收 |
+| SDK System WebView 原生拖拽（原 `system_webview_drag_region` 已移除） | 已验证：SDK 原生拖动/双击、控件与 portal 排除、真实 Workbench、390px 窄窗及窗口生命周期 | SDK/AppKit 声明式接线；实机验收待完成 | `E-WIN-SDK-DRAG-20261017`；旧 compatibility 证据仅作历史 | macOS 原生运行、真实任务改名/动态 action、浏览器缩放、混合 DPI 与其他 Windows/WebView 版本 |
 | `system_webview_resize`                                              | 已验证：上沿与两上角真实鼠标缩放、光标、原生边缘双击、绘制、重载及隐藏重开；不再承担标题栏序列重置 | 不适用于已登记兼容 seam | `E-WIN-TOP-RESIZE-20260916`（历史）、`E-WIN-CHROME-GESTURES-20260919` | 混合 DPI 跨屏、负坐标实屏、高对比模式及其他 Windows 版本；SDK 正式能力需等价验收 |
 | `system_webview_maximize_restore` / `maximized_state` / `user_close` | 已验证：窗口生命周期受理、按钮与双击、任务栏恢复、关闭交错、hide/reopen、reload 与 clean shutdown | 不适用于已登记兼容 seam | `E-WIN-CONTROLS-20260917` | Native SDK 正式能力在 Windows 通过等价验收 |
 | `app_single_instance`                                                | 已验证：多进程仲裁、activation 转交、restart 与 crash 后 lease 恢复；人工验收待完成：交互失败与安装升级 | 已验证（历史）：交叉语义编译；人工验收待完成：socket 权限、peer identity、并发转交、提示、shutdown 和 crash recovery | `E-WIN-SINGLE-20260828`、`E-MACOS-SINGLE-COMPILE-20260828` | 两平台分别取得完整实例仲裁与 activation 验收                |
@@ -222,6 +222,16 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 `E-ATTACHMENT-MACOS-20260902` 的 arm64 真实交互证据为：系统 picker 选择 `0b0a714cdf0e9cfb99830d2fd58afd78eedf655080c0ff09fbcb3dd3d5576e26`、逐项移除 `cb012ce2f8541d6b49921e74e403755b387235deeb98571322da9359bba49cb9`、取消 `ef8b8c08c528c997cc08115c72122511aedec78290fd5c47e90b898dc2474c17`、最终焦点 `f1b7121669516a2bc33a3e58cd934d3ae09a8edd4d6779b4d2981f553e00a695`、窄窗 `961c0eb23d274100bfcfa17967b113a4732982c9bcaccb2be8d7dffb030f0776`（均为截图 SHA-256）。窄窗附件由 automation 经正式 choose/staging 后续链路注入；其他四项使用真实 `NSOpenPanel` 和 Renderer 交互。
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
+
+### E-WIN-SDK-DRAG-20261017
+
+2026-10-17，Windows 10 x64 `10.0.19045`、双屏 96 DPI、Native SDK `0.11.0-fork.2`、WebView2 `Edg/155.0.4283.45`。`node scripts/test-window-chrome-windows.mjs` 完整入口 exit 0，绑定 revision `307323b8cc31495693d1e9f9003ef36c4cbf0a22` 加源码 diff SHA-256 `9e878b59c2119739291f14d74cf6c2b52db888d6025e466867adca5e6ff39c61`，automation Debug exe SHA-256 `ad01f97e67a586f5ab496c7650f79c8a626a2d38652964c8fd36f9179fab59f7`。本地 `.zig-cache/sdk-native-drag-verified/` 保存 identity、源码 diff、原生输入/UI/controls JSON 与截图；收尾仅删除旧阶段方案并补充验收文档，未修改受测实现。 已逐文件核对提交 `c5ba5c0ce299032ed046c147932af422745e02a1` 中的实现与探针源码，与该受测源码一致。
+
+真实鼠标验证 SDK 原生普通/最大化拖动恢复，默认及 900ms 系统双击、超时和距离外点，按钮/SVG、disabled、inert 外层、可聚焦/可编辑/input、portal 和未标记正文不误拖；全程无应用 gesture/pointer IPC。真实 Workbench 的侧栏、Task Panel、账户菜单、Settings inert 标题栏与窄窗操作通过；390px 外窗的 WebView 内容宽与 scrollWidth 同为 374px，截图已检查。上沿/两上角、双屏、五色静止/遮挡恢复、reload、按钮与 Alt+F4 关闭隐藏、隐藏请求拒绝、任务栏恢复、close/toggle 交错、托盘重开及 clean shutdown 通过。
+
+首轮 `.zig-cache/sdk-native-drag/` 的未标记 portal 覆盖标题栏仍可误拖，暴露 SDK 原生区域不会自动按 DOM 遮挡排除的问题；产品共享 portal 根已显式 no-drag，并增加实际菜单/dialog portal 回归。第二轮 `.zig-cache/sdk-native-drag-final/` 原生输入矩阵通过，但 UI 探针仍错误要求原生拖动分发浏览器 pointerdown；记录已证明窗口实际移动。最终驱动仅对 SDK caption drag 使用原生位移断言，业务控件仍要求真实浏览器输入，不降低不误拖或零 gesture IPC 断言。
+
+同次正式 Native graph 单并发通过；默认并发停在 composition shutdown，长时间无进展后由执行者中止，同一二进制独立运行通过。串行通过不宣称解决并发停滞。不证明 macOS 实机、Windows 11、混合 DPI、浏览器缩放、真实任务改名/全部动态 action、touch/pen、系统菜单、snap 或安装包；旧 compatibility 的平台证据不自动转移到本次 SDK 路径。
 
 ### E-WIN-CHROME-GESTURES-20260919
 
