@@ -2621,10 +2621,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     /system_webview_drag_region|startWindowDrag/,
   );
   const window = read("src/app/window.zig");
-  const controlsPath =
-    "src/native_sdk_compat/system_webview_window_controls.zig";
-  const controlsWindowsPath =
-    "src/native_sdk_compat/system_webview_window_controls/windows.zig";
   const resizePath = "src/native_sdk_compat/system_webview_resize.zig";
   const resizeWindowsPath =
     "src/native_sdk_compat/system_webview_resize/windows.zig";
@@ -2636,7 +2632,29 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   const instanceMacosPath =
     "src/native_sdk_compat/app_single_instance/macos.zig";
 
-  for (const seamPath of [controlsPath, resizePath]) {
+  assert.doesNotMatch(compatSource + window, /system_webview_window_controls/);
+  assert.ok(
+    !existsSync(
+      new URL("src/native_sdk_compat/system_webview_window_controls.zig", root),
+    ),
+  );
+  assert.ok(
+    !existsSync(
+      new URL(
+        "src/native_sdk_compat/system_webview_window_controls/windows.zig",
+        root,
+      ),
+    ),
+  );
+  assert.doesNotMatch(window, /\b(?:ShowWindow|IsZoomed|PostMessageW)\b/);
+  for (const method of [
+    "maximizeWindow",
+    "unmaximizeWindow",
+    "requestCloseWindow",
+  ]) {
+    assert.match(window, new RegExp(`runtime\\.${method}\\(window_id\\)`));
+  }
+  for (const seamPath of [resizePath]) {
     assert.deepEqual(
       zigFiles("src/").filter((file) =>
         read(file).includes(`native_sdk_compat/${seamPath.split("/").at(-1)}`),
@@ -2712,14 +2730,6 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
     /window-chrome-probe|window_chrome_probe/,
   );
   assert.doesNotMatch(read("src/app.zig"), /runWindowChromeProbe/);
-  assert.deepEqual(
-    externSymbols(read(controlsWindowsPath), [
-      "user32",
-      "kernel32",
-      "comctl32",
-    ]),
-    ["IsZoomed", "PostMessageW", "ShowWindow"].sort(),
-  );
   assert.deepEqual(
     externSymbols(read(startupWindowsPath), ["user32", "kernel32", "comctl32"]),
     [

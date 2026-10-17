@@ -4,7 +4,6 @@ const native_sdk = @import("native_sdk");
 const bridge_api = @import("metawork_bridge");
 const control_ports = @import("metawork_product_control_ports");
 const startup_window = @import("../native_sdk_compat/system_webview_startup_window.zig");
-const window_controls = @import("../native_sdk_compat/system_webview_window_controls.zig");
 const resize = @import("../native_sdk_compat/system_webview_resize.zig");
 
 pub const main_window_id: native_sdk.platform.WindowId = 1;
@@ -25,18 +24,15 @@ const tray_icon_path = switch (builtin.os.tag) {
 
 pub const State = struct {
     startup_window_capture: startup_window.Capture = .{},
-    window_controls_capability: window_controls.Capability = window_controls.Capability.init(main_window_id),
     resize_capability: resize.Capability = .{},
     tray_installed: bool = false,
 
     pub fn prepareStartup(self: *State) !void {
-        try self.window_controls_capability.prepareStartup();
         try self.startup_window_capture.prepare();
     }
 
     pub fn captureStartupWindow(self: *State) !void {
         const startup_binding = try self.startup_window_capture.take(main_window_id);
-        try self.window_controls_capability.captureStartupWindow(startup_binding);
         try self.resize_capability.attach(startup_binding);
     }
 
@@ -47,7 +43,6 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         self.resize_capability.deinit();
         self.startup_window_capture.deinit();
-        self.window_controls_capability.deinit();
     }
 
     pub fn installTray(
@@ -118,14 +113,13 @@ pub const State = struct {
     }
 
     pub fn connectWindows(
-        self: *State,
+        _: *State,
         runtime: *native_sdk.Runtime,
         services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
     ) !bridge_api.WindowChromePlatformEnvironment {
-        _ = try requireLiveMainWindow(runtime, window_id);
-        const controls = try self.window_controls_capability.windowsState();
-        return environment(services.windowChrome(window_id), controls);
+        const window = try requireLiveMainWindow(runtime, window_id);
+        return environment(services.windowChrome(window_id), window.maximized);
     }
 
     pub fn refreshWindows(
@@ -134,34 +128,17 @@ pub const State = struct {
         services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
     ) !bridge_api.WindowChromePlatformEnvironment {
-        _ = try requireLiveMainWindow(runtime, window_id);
-        return environment(
-            services.windowChrome(window_id),
-            try self.window_controls_capability.windowsState(),
-        );
-    }
-
-    fn toggleMainWindowMaximized(
-        self: *State,
-        runtime: *native_sdk.Runtime,
-        window_id: native_sdk.platform.WindowId,
-    ) !void {
-        try requireUnhiddenMainWindow(runtime, window_id);
-        const maximized = try self.window_controls_capability.isMaximized();
-        try self.window_controls_capability.setMaximized(!maximized);
+        return self.connectWindows(runtime, services, window_id);
     }
 
     // Existing SDK/disabled-controls path for non-Windows platforms.
     pub fn connect(
-        self: *State,
+        _: *State,
         services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
     ) !bridge_api.WindowChromePlatformEnvironment {
         try requireMainWindow(window_id);
-        return environment(
-            services.windowChrome(window_id),
-            self.window_controls_capability.state(),
-        );
+        return environment(services.windowChrome(window_id), false);
     }
 
     pub fn refresh(
@@ -169,35 +146,32 @@ pub const State = struct {
         services: native_sdk.platform.PlatformServices,
         window_id: native_sdk.platform.WindowId,
     ) !bridge_api.WindowChromePlatformEnvironment {
-        try requireMainWindow(window_id);
-        return environment(services.windowChrome(window_id), self.window_controls_capability.state());
+        return self.connect(services, window_id);
     }
 
     pub fn control(
-        self: *State,
+        _: *State,
         runtime: *native_sdk.Runtime,
         window_id: native_sdk.platform.WindowId,
         action: bridge_api.WindowChromeControlAction,
     ) !void {
         try requireMainWindow(window_id);
         if (comptime builtin.os.tag == .windows) {
+            try requireUnhiddenMainWindow(runtime, window_id);
             switch (action) {
-                .minimize => {
-                    try requireUnhiddenMainWindow(runtime, window_id);
-                    try runtime.minimizeWindow(window_id);
-                },
-                .toggle_maximize => try self.toggleMainWindowMaximized(runtime, window_id),
-                .close => {
-                    try requireUnhiddenMainWindow(runtime, window_id);
-                    try self.window_controls_capability.requestUserClose();
-                },
+                .minimize => try runtime.minimizeWindow(window_id),
+                .toggle_maximize => if ((try requireLiveMainWindow(runtime, window_id)).maximized)
+                    try runtime.unmaximizeWindow(window_id)
+                else
+                    try runtime.maximizeWindow(window_id),
+                .close => try runtime.requestCloseWindow(window_id),
             }
             return;
         }
         switch (action) {
             .minimize => try runtime.minimizeWindow(main_window_id),
-            .toggle_maximize => try self.window_controls_capability.toggleMaximize(),
-            .close => try self.window_controls_capability.userClose(),
+            .toggle_maximize => return error.UnsupportedSystemWebViewMaximize,
+            .close => return error.UnsupportedSystemWebViewUserClose,
         }
     }
 };
@@ -255,7 +229,7 @@ fn requireUnhiddenMainWindow(
 
 fn environment(
     value: native_sdk.platform.WindowChrome,
-    controls: window_controls.State,
+    maximized: bool,
 ) bridge_api.WindowChromePlatformEnvironment {
     return .{
         .top = if (builtin.os.tag == .windows) 40 else value.insets.top,
@@ -266,14 +240,13 @@ fn environment(
         .buttons_y = value.buttons.y,
         .buttons_width = value.buttons.width,
         .buttons_height = value.buttons.height,
-        .renderer_controls = controls.renderer_controls,
-        .maximized = controls.maximized,
+        .renderer_controls = builtin.os.tag == .windows,
+        .maximized = maximized,
     };
 }
 
 test {
     _ = startup_window;
-    _ = window_controls;
     _ = resize;
 }
 
@@ -355,15 +328,16 @@ test "Windows window actions reject missing closed and hidden SDK windows before
     try window.control(&harness.runtime, 1, .minimize);
     try std.testing.expectEqual(@as(u32, 1), harness.null_platform.minimizeCountForWindow(1));
     try requireUnhiddenMainWindow(&harness.runtime, 1);
-    try std.testing.expectError(error.WindowUnavailable, window.control(&harness.runtime, 1, .toggle_maximize));
-    try std.testing.expectError(error.WindowUnavailable, window.control(&harness.runtime, 1, .close));
+    try window.control(&harness.runtime, 1, .toggle_maximize);
+    try std.testing.expect(harness.null_platform.windows[0].maximized);
+    try std.testing.expect(harness.null_platform.takeQueuedCloseRequest() == null);
 
     try window.requestExplicitQuit(&harness.runtime);
     for (actions) |action|
         try std.testing.expectError(error.WindowUnavailable, window.control(&harness.runtime, 1, action));
 }
 
-test "Windows window queries fail explicitly without a native controls binding" {
+test "Windows window controls follow SDK frame state without a native controls binding" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
@@ -371,8 +345,55 @@ test "Windows window queries fail explicitly without a native controls binding" 
     var window: State = .{};
     defer window.deinit();
     const services = harness.runtime.options.platform.services;
-    try std.testing.expectError(error.WindowUnavailable, window.connectWindows(&harness.runtime, services, 1));
+    const initial = try window.connectWindows(&harness.runtime, services, 1);
+    try std.testing.expect(initial.renderer_controls);
+    try std.testing.expect(!initial.maximized);
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "window-controls-test" };
+
+    try window.control(&harness.runtime, 1, .toggle_maximize);
+    // Only the host frame event commits maximized state to the SDK Runtime.
+    try std.testing.expect(!(try window.refreshWindows(&harness.runtime, services, 1)).maximized);
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.windowFrameEvent(1).?);
+    try std.testing.expect((try window.refreshWindows(&harness.runtime, services, 1)).maximized);
+    try window.control(&harness.runtime, 1, .toggle_maximize);
+    try std.testing.expect(!harness.null_platform.windows[0].maximized);
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.windowFrameEvent(1).?);
+    try std.testing.expect(!(try window.refreshWindows(&harness.runtime, services, 1)).maximized);
+
+    // A native double-click or system command uses that same observed state.
+    var state = harness.null_platform.windowFrameEvent(1).?.window_frame_changed;
+    state.maximized = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .window_frame_changed = state });
+    try std.testing.expect((try window.refreshWindows(&harness.runtime, services, 1)).maximized);
     try harness.runtime.hideWindow(1);
-    // Hidden is allowed to query; an absent binding still fails explicitly.
+    _ = try window.refreshWindows(&harness.runtime, services, 1);
+    try std.testing.expectError(error.WindowIdentityMismatch, window.connectWindows(&harness.runtime, services, 2));
+    try window.requestExplicitQuit(&harness.runtime);
     try std.testing.expectError(error.WindowUnavailable, window.refreshWindows(&harness.runtime, services, 1));
+}
+
+test "Windows user close preserves SDK hide policy while explicit quit closes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    _ = try harness.runtime.createWindow(.{ .id = 1, .label = "main", .source = .html(""), .close_policy = .hide });
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "window-controls-test" };
+    var window: State = .{};
+    defer window.deinit();
+
+    try std.testing.expectError(error.WindowIdentityMismatch, window.control(&harness.runtime, 2, .close));
+    try std.testing.expect(harness.null_platform.takeQueuedCloseRequest() == null);
+    try window.control(&harness.runtime, 1, .close);
+    try requireUnhiddenMainWindow(&harness.runtime, 1);
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.takeQueuedCloseRequest().?);
+    try std.testing.expect((try requireLiveMainWindow(&harness.runtime, 1)).hidden);
+    try std.testing.expectError(error.WindowHidden, window.control(&harness.runtime, 1, .close));
+    try std.testing.expect(harness.null_platform.takeQueuedCloseRequest() == null);
+
+    window.showMainWindow(&harness.runtime);
+    try requireUnhiddenMainWindow(&harness.runtime, 1);
+    try window.requestExplicitQuit(&harness.runtime);
+    try std.testing.expectError(error.WindowUnavailable, requireLiveMainWindow(&harness.runtime, 1));
 }

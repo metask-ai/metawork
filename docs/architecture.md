@@ -130,12 +130,13 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 
 System WebView 标题栏拖拽使用 SDK 正式的 `window_drag_regions` 声明和 `data-native-window-drag` / `data-native-window-drag-exclude`。SDK 独占真实原生输入、命中与系统拖动/双击；Application 和 Bridge 不建立手势命令、点击计数、坐标授权或拖动实现。区域与交互排除的产品合同见 [UI 设计规范](ui-design.md#43-一体化窗口栏)，目标平台证据见 [验证规范](validation.md#native-sdk-兼容能力证据)。
 
+Windows System WebView 的最大化、还原和用户关闭通过 SDK Runtime API 执行，最大化状态只读取 SDK 随宿主 frame event 更新的窗口事实。Application 在执行按钮操作前仍校验当前主窗口 identity、open 与 hidden；用户关闭遵守窗口 `close_policy`，显式退出使用独立的无条件关闭语义，不以用户关闭代替退出。
+
 当前登记的 compatibility capability 为：
 
 | Capability | 层级 | 允许边界 | 删除条件 |
 | --- | --- | --- | --- |
 | `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize；不观察或维护标题栏点击历史 | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
-| `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |
 | `external_link_handoff` | 一级 | Renderer 只提交用户显式点击的有界 `http`、`https` 或 `mailto` URL；Bridge 校验 connection/window、协议、绝对地址、无 credential 与控制字符后，Application 通过公开 `PlatformServices.openExternalUrl` 交给系统 handler。URL 不进入 Product、Snapshot、日志或持久化，失败只返回闭合结果 | SDK Runtime API 提供不要求全局放宽 WebView navigation policy、可逐次接收同等严格目标的 external-open 能力并通过 macOS/Windows 验收 |
 | `attachment_image_preview` | 一级 | Application 在 Native loop thread 通过公开 `PlatformServices.decodeImage` 生成按像素有界的 RGBA，并通过公开 `canvas.app_icon.encodePng` 编码有界 PNG；Product 独占原件、类型、配额和生命周期，Renderer 不参与图片转换。不调用 SDK 私有 codec，不注册额外 host tool | Native SDK Runtime 提供等价有界附件图片转换 API 并通过 macOS/Windows 验收后原位替换此 primitive seam |
