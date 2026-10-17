@@ -653,6 +653,63 @@ pub const UiRecord = struct {
     }
 };
 
+/// Owned, secret-free intent for the next Run; independent of the installed
+/// execution and every historical Run. Absence preserves an unknown legacy
+/// source instead of inventing a binding from today's global default.
+pub const ModelIntent = struct {
+    source_id: []u8,
+    model_id: []u8,
+    revision: u64,
+
+    pub fn valid(model: models_contract.ModelRef, revision: u64) bool {
+        if (revision == 0 or model.source_id.len == 0 or model.model_id.len == 0 or
+            model.source_id.len > models_contract.Limits.provider_id_bytes or
+            model.model_id.len > models_contract.Limits.model_id_bytes)
+            return false;
+        for ([_][]const u8{ model.source_id, model.model_id }) |value| {
+            if (!std.unicode.utf8ValidateSlice(value)) return false;
+            for (value) |byte| if (std.ascii.isControl(byte)) return false;
+        }
+        return true;
+    }
+
+    pub fn init(allocator: std.mem.Allocator, model: models_contract.ModelRef, revision: u64) (std.mem.Allocator.Error || error{InvalidModelIntent})!ModelIntent {
+        if (!valid(model, revision)) return error.InvalidModelIntent;
+        const source_id = try allocator.dupe(u8, model.source_id);
+        errdefer allocator.free(source_id);
+        return .{ .source_id = source_id, .model_id = try allocator.dupe(u8, model.model_id), .revision = revision };
+    }
+
+    pub fn modelRef(self: *const ModelIntent) models_contract.ModelRef {
+        return .{ .source_id = self.source_id, .model_id = self.model_id };
+    }
+
+    pub fn deinit(self: *ModelIntent, allocator: std.mem.Allocator) void {
+        allocator.free(self.source_id);
+        allocator.free(self.model_id);
+        self.* = undefined;
+    }
+};
+
+test "Task model intent owns independent bounded identity and revision" {
+    var source = "source-one".*;
+    var model = "model-one".*;
+    var intent = try ModelIntent.init(std.testing.allocator, .{ .source_id = &source, .model_id = &model }, 3);
+    defer intent.deinit(std.testing.allocator);
+    source[0] = 'X';
+    model[0] = 'X';
+    try std.testing.expectEqualStrings("source-one", intent.modelRef().source_id);
+    try std.testing.expectEqualStrings("model-one", intent.modelRef().model_id);
+    try std.testing.expectEqual(@as(u64, 3), intent.revision);
+    const Checks = struct {
+        fn create(allocator: std.mem.Allocator) !void {
+            var owned = try ModelIntent.init(allocator, .{ .source_id = "source", .model_id = "model" }, 1);
+            defer owned.deinit(allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Checks.create, .{});
+}
+
 pub const DurableTaskRecord = struct {
     id: u64,
     recent_order: u64,
@@ -660,6 +717,7 @@ pub const DurableTaskRecord = struct {
     execution_generation: u64,
     execution_protocol: Protocol,
     execution_model: []u8,
+    model_intent: ?ModelIntent = null,
     permission_profile: PermissionProfile,
     permission_interaction: PermissionInteraction,
     binding_epoch: u64 = 1,

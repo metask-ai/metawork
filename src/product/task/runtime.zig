@@ -6966,6 +6966,7 @@ fn deinitTask(
         deinitCompact(self, effects, compact);
     self.allocator.free(task.durable.compacts);
     self.allocator.free(task.durable.ui_history);
+    if (task.durable.model_intent) |*intent| intent.deinit(self.allocator);
     releaseProjectedSlice(self, effects, task.durable.execution_model);
     releaseProjectedSlice(self, effects, task.durable.workspace_root);
     releaseProjectedSlice(self, effects, task.durable.title);
