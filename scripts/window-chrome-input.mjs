@@ -13,17 +13,17 @@ export async function probeWindowChromeInput({ port, runProbe, evidenceDir }) {
   };
   try {
     await webview.evaluate(`(() => {
-      const titlebar = document.querySelector('header[data-metawork-window-drag]');
+      const titlebar = document.querySelector('header[data-native-window-drag]');
       if (!titlebar) throw new Error('Production titlebar is not mounted');
       const fixture = document.createElement('div');
       fixture.id = 'chrome-input-fixture';
       fixture.style.cssText = 'position:fixed;inset:0 0 auto;height:40px;z-index:2147483647;background:white';
-      fixture.innerHTML = '<button id="chrome-button" style="position:absolute;left:380px;top:8px;width:40px;height:24px"><svg width="30" height="20"><rect width="30" height="20"/></svg></button>'
-        + '<button disabled style="position:absolute;left:430px;top:8px;width:40px;height:24px">off</button>'
-        + '<div data-metawork-window-drag-exclude style="position:absolute;left:480px;top:8px;width:40px;height:24px"><div class="commandbar-inert-content" inert><button style="width:40px;height:24px">inert</button></div></div>'
-        + '<span tabindex="0" style="position:absolute;left:580px;top:8px;width:40px;height:24px">focus</span>'
-        + '<span contenteditable="" style="position:absolute;left:630px;top:8px;width:40px;height:24px">edit</span>'
-        + '<input style="position:absolute;left:680px;top:8px;width:40px;height:24px">';
+      fixture.innerHTML = '<button data-native-window-drag-exclude id="chrome-button" style="position:absolute;left:380px;top:8px;width:40px;height:24px"><svg width="30" height="20"><rect width="30" height="20"/></svg></button>'
+        + '<button data-native-window-drag-exclude disabled style="position:absolute;left:430px;top:8px;width:40px;height:24px">off</button>'
+        + '<div data-native-window-drag-exclude style="position:absolute;left:480px;top:8px;width:40px;height:24px"><div class="commandbar-inert-content" inert><button style="width:40px;height:24px">inert</button></div></div>'
+        + '<span data-native-window-drag-exclude tabindex="0" style="position:absolute;left:580px;top:8px;width:40px;height:24px">focus</span>'
+        + '<span data-native-window-drag-exclude contenteditable="" style="position:absolute;left:630px;top:8px;width:40px;height:24px">edit</span>'
+        + '<input data-native-window-drag-exclude style="position:absolute;left:680px;top:8px;width:40px;height:24px">';
       // Production CSP rejects HTML inline styles; use CSSOM just like the paint probe.
       for (const element of fixture.querySelectorAll("[style]")) {
         const css = element.getAttribute("style");
@@ -32,32 +32,21 @@ export async function probeWindowChromeInput({ port, runProbe, evidenceDir }) {
       }
       const portal = document.createElement('div');
       portal.id = 'chrome-input-portal';
+      portal.setAttribute('data-native-window-drag-exclude', '');
       portal.style.cssText = 'position:fixed;left:530px;top:8px;width:40px;height:24px;z-index:2147483647;background:gray';
       const outside = document.createElement('div');
       outside.id = 'chrome-input-outside';
-      outside.setAttribute('data-metawork-window-drag', '');
       outside.style.cssText = 'position:fixed;left:730px;top:80px;width:40px;height:40px;z-index:2147483647;background:white';
-      // Exercise the existing production ref binding, never install a test handler.
-      titlebar.append(fixture, outside);
+      // Declarations use the production SDK input path, never a test drag handler.
+      titlebar.append(fixture);
+      document.body.append(outside);
       document.body.append(portal);
-      const adjacent = document.createElement('button');
-      adjacent.id = 'chrome-adjacent';
-      adjacent.style.cssText = 'position:absolute;left:301px;top:8px;width:1px;height:24px;padding:0;border:0';
-      adjacent.hidden = true;
-      fixture.append(adjacent);
-      adjacent.addEventListener('pointerdown', event => {
-        if (adjacent.dataset.mode === 'cancel') event.preventDefault();
-        if (adjacent.dataset.mode === 'stop') event.stopPropagation();
-      });
-      adjacent.addEventListener('mousedown', event => {
-        if (adjacent.dataset.mode === 'stop') event.stopPropagation();
-      });
       window.__chromeInput = { events: [], calls: [] };
       const listener = event => window.__chromeInput.events.push({
         type:event.type, detail:event.detail, trusted:event.isTrusted,
         x:event.clientX, y:event.clientY, target:event.target.tagName, path:event.composedPath().filter(e => e.tagName).map(e => e.tagName + (e.id ? "#" + e.id : "")), windowBlur:event.type === "blur" && event.target === window,
         titlebar:event.composedPath().includes(titlebar),
-        excluded:event.composedPath().some(e => e.matches?.('button,input,select,textarea,label,details,summary,a,[tabindex],[contenteditable],[inert],[data-metawork-window-drag-exclude]')),
+        excluded:event.composedPath().some(e => e.matches?.('button,input,select,textarea,label,details,summary,a,[tabindex],[contenteditable],[inert],[data-native-window-drag-exclude]')),
         time:performance.now(),
       });
       for (const name of ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick', 'blur'])
@@ -79,20 +68,10 @@ export async function probeWindowChromeInput({ port, runProbe, evidenceDir }) {
       };
     })()`);
     const cases = [
-      ["default-pair", "pair"],
-      ["slow-system-pair", "pair", 300, 20, 900],
-      ["slow-system-timeout", "timeout", 300, 20, 900],
-      ["distance-inside", "distance-inside"],
-      ["distance-outside", "distance-outside"],
-      ["triple-and-quad", "quad"],
-      ["content-interruption", "content-reset"],
-      ["control-interruption", "control-reset"],
-      ["focus-interruption", "blur-reset"],
-      ["native-edge-interruption", "browser-edge"],
-      ...["normal", "disabled", "stop", "cancel"].map((mode) => [
-        `adjacent-${mode}`,
-        "browser-adjacent",
-      ]),
+      ["default-pair", "pair", 300, 20, 0, true],
+      ["slow-system-pair", "pair", 300, 20, 900, true],
+      ["slow-system-timeout", "timeout", 300, 20, 900, false],
+      ["distance-outside", "distance-outside", 300, 20, 0, false],
       ["ordinary-drag", "drag"],
       ["button-svg", "no-drag", 400],
       ["disabled-button", "no-drag", 450],
@@ -101,7 +80,7 @@ export async function probeWindowChromeInput({ port, runProbe, evidenceDir }) {
       ["focusable", "no-drag", 600],
       ["editable", "no-drag", 650],
       ["input", "no-drag", 700],
-      ["marker-outside-native-band", "no-drag", 750, 100],
+      ["unmarked-content", "no-drag", 750, 100],
     ];
     for (const [
       name,
@@ -109,17 +88,10 @@ export async function probeWindowChromeInput({ port, runProbe, evidenceDir }) {
       x = 300,
       y = 20,
       time = 0,
-      dx = 0,
-      dy = 0,
+      maximized,
     ] of cases) {
       await webview.evaluate(
-        `(() => {
-          window.__chromeInput.events = []; window.__chromeInput.calls = [];
-          const adjacent = document.querySelector('#chrome-adjacent');
-          adjacent.hidden = !${JSON.stringify(name.startsWith("adjacent-"))};
-          adjacent.disabled = ${JSON.stringify(name === "adjacent-disabled")};
-          adjacent.dataset.mode = ${JSON.stringify(name.replace("adjacent-", ""))};
-        })()`,
+        "window.__chromeInput.events = []; window.__chromeInput.calls = [];",
       );
       let native;
       try {
@@ -134,10 +106,6 @@ export async function probeWindowChromeInput({ port, runProbe, evidenceDir }) {
               String(y),
               "-DoubleClickMilliseconds",
               String(time),
-              "-OffsetX",
-              String(dx),
-              "-OffsetY",
-              String(dy),
               "-KeepTopmost",
             ])
           ).trim(),
@@ -155,134 +123,29 @@ export async function probeWindowChromeInput({ port, runProbe, evidenceDir }) {
       }
       const observed = await webview.evaluate("window.__chromeInput");
       evidence.cases.push({ name, native, ...observed });
-      assert.ok(
-        observed.events.some((e) => e.type === "pointerdown" && e.trusted),
-      );
-      assert.ok(
-        observed.events
-          .filter((e) => e.type === "pointerdown")
-          .every((e) => e.detail === 0),
-      );
-      const gestures = observed.calls.filter((c) =>
-        c.command.endsWith(".gesture"),
-      );
-      const eligible = observed.events.filter(
-        (e) =>
-          e.type === "mousedown" &&
-          e.titlebar &&
-          !e.excluded &&
-          (e.detail === 1 || e.detail === 2),
-      );
-      assert.deepEqual(
-        gestures.map((c) => c.payload.action),
-        eligible.map((e) =>
-          e.detail === 2 ? "toggle_maximize" : "start_drag",
-        ),
-        `${name}: intent differs from browser count`,
-      );
-      assert.ok(
-        observed.calls.every((c) => !c.command.endsWith(".pointer")),
-        "retired protocol must not be emitted",
-      );
-      const toggleCount = gestures.filter(
-        (c) => c.payload.action === "toggle_maximize" && c.payload.y < 40,
-      ).length;
+      // Native caption input need not dispatch browser pointer events.
+      // Excluded controls must still receive genuine input and never move the window.
       assert.equal(
-        native.maximized,
-        toggleCount % 2 === 1,
-        `${name}: native state differs from authorized intent`,
+        observed.calls.some((c) => /\.(gesture|pointer)$/.test(c.command)),
+        false,
+        "SDK drag must not use the application gesture Bridge",
       );
-      if (name === "default-pair" || name === "slow-system-pair") {
-        assert.deepEqual(
-          eligible.map((e) => e.detail),
-          [1, 2],
+      if (maximized !== undefined)
+        assert.equal(
+          native.maximized,
+          maximized,
+          `${name}: native double-click result`,
         );
-        assert.equal(native.maximized, true);
-      }
-      if (name.startsWith("adjacent-")) {
-        const presses = observed.events.filter((e) => e.type === "pointerdown");
-        assert.equal(presses.length, 3, "three real adjacent presses required");
+      if (inputCase === "no-drag") {
         assert.ok(
-          presses[1].path.some((p) => p.includes("#chrome-adjacent")),
-          "middle press must hit adjacent control",
+          observed.events.some((e) => e.type === "pointerdown" && e.trusted),
+          `${name}: excluded content must receive real input`,
         );
-        assert.ok(
-          (Math.abs(presses[1].x - presses[0].x) * native.dpi) / 96 <=
-            native.distanceWidth / 2,
-        );
-        assert.ok(presses[2].time - presses[0].time < native.timeMs);
-        // WebView2 suppresses mousedown on a disabled button, but the browser
-        // counter still advances: the two delivered title events are 1 and 3.
-        if (name === "adjacent-disabled")
-          assert.deepEqual(
-            observed.events
-              .filter((e) => e.type === "mousedown")
-              .map((e) => e.detail),
-            [1, 3],
-          );
-        else if (name !== "adjacent-cancel")
-          assert.deepEqual(
-            observed.events
-              .filter((e) => e.type === "mousedown")
-              .map((e) => e.detail),
-            [1, 2, 3],
-          );
-      }
-      if (inputCase === "blur-reset") {
-        const downs = observed.events.filter((e) => e.type === "mousedown");
-        assert.equal(downs.length, 2);
-        assert.ok(
-          observed.events.some(
-            (e) =>
-              e.windowBlur && e.time > downs[0].time && e.time < downs[1].time,
-          ),
-        );
-        assert.ok(
-          downs[1].time - downs[0].time < native.timeMs,
-          "Blur probe must interrupt within the OS interval",
-        );
-        evidence.browserBlurSequence = {
-          counts: downs.map((e) => e.detail),
-          intervalMs: downs[1].time - downs[0].time,
-          finalAction: downs[1].detail === 2 ? "toggle_maximize" : "start_drag",
-        };
-      }
-      if (name === "marker-outside-native-band")
-        assert.equal(gestures[0].payload.action, "start_drag");
-      if (inputCase === "no-drag" && y < 40) {
-        assert.ok(
-          gestures.length === 0,
-          `${name}: excluded input was forwarded as drag`,
-        );
+        assert.equal(native.maximized, false);
+        assert.equal(native.after.Left, native.before.Left);
+        assert.equal(native.after.Top, native.before.Top);
       }
       evidence.cases.at(-1).passed = true;
-      // Use observed OS metrics, testing both axes/directions without assuming
-      // the old Host's closed rectangle or the child prototype's pixel boundary.
-      if (name === "default-pair") {
-        for (const [axis, size] of [
-          ["x", native.distanceWidth],
-          ["y", native.distanceHeight],
-        ]) {
-          const half = Math.floor(size / 2);
-          for (const delta of new Set([
-            -half - 1,
-            -half,
-            -Math.max(half - 1, 0),
-            Math.max(half - 1, 0),
-            half,
-            half + 1,
-          ]))
-            cases.push([
-              `distance-${axis}-${delta}`,
-              "offset-pair",
-              300,
-              20,
-              0,
-              axis === "x" ? delta : 0,
-              axis === "y" ? delta : 0,
-            ]);
-        }
-      }
       process.stdout.write(
         `${name}: mousedown.detail=${JSON.stringify(observed.events.filter((e) => e.type === "mousedown").map((e) => e.detail))}\n`,
       );

@@ -7,12 +7,10 @@ import {
 } from "./decode-contracts.ts";
 
 const controlSelector = "[data-metawork-window-control]";
-const exclusionSelector =
-  "button, input, select, textarea, label, details, summary, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='link'], [role='textbox'], [tabindex], [inert], [data-metawork-window-drag-exclude]";
 const controlActions = new Set(["minimize", "toggle_maximize", "close"]);
 let bindTitlebar: ((element: HTMLElement) => () => void) | null = null;
 
-// React registers only its actual DOM node; this module owns input and transport.
+// React registers its titlebar for button commands; SDK owns drag input.
 export function bindWindowTitlebar(element: HTMLElement) {
   return bindTitlebar?.(element) ?? (() => undefined);
 }
@@ -118,86 +116,17 @@ export function installWindowChromeBridge() {
       // A replacement document may already have revoked this exact generation.
     }
   }
-  function isDragTarget(event: Event, titlebar: HTMLElement) {
-    const path = event.composedPath();
-    if (!path.includes(titlebar)) return false;
-    for (const entry of path) {
-      if (!(entry instanceof Element)) continue;
-      if (entry.matches(exclusionSelector)) return false;
-    }
-    return true;
-  }
-  async function submitGesture(
-    action: "start_drag" | "toggle_maximize",
-    event: MouseEvent,
-  ) {
-    if (disposed || !generation) return;
-    const requestGeneration = generation;
-    stateEpoch++;
-    try {
-      assertWindowChromeHandled(
-        await bridge.invoke(commands.windowChromeGesture, {
-          generation: requestGeneration,
-          action,
-          x: event.clientX,
-          y: event.clientY,
-        }),
-        requestGeneration,
-      );
-    } catch {
-      // Never replay a gesture or reconnect on a rejected action.
-    } finally {
-      if (!disposed && generation === requestGeneration) scheduleRefresh();
-    }
-  }
   function bind(element: HTMLElement) {
     titlebars.get(element)?.();
     if (disposed) return () => undefined;
-    function onMouseDown(event: MouseEvent) {
-      if (
-        disposed ||
-        !generation ||
-        environment?.gestureMode !== "browser_mouse" ||
-        !event.isTrusted ||
-        event.button !== 0 ||
-        !isDragTarget(event, element) ||
-        (event.detail !== 1 && event.detail !== 2)
-      )
-        return;
-      // Tauri 2.11.5 drag.js Windows branch: only clicks 1 and 2 select actions.
-      // Binding is local and the entire noninteractive titlebar is draggable.
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      void submitGesture(
-        event.detail === 2 ? "toggle_maximize" : "start_drag",
-        event,
-      );
-    }
-    function onPointerDown(event: PointerEvent) {
-      if (
-        disposed ||
-        !generation ||
-        environment?.gestureMode !== "native_press" ||
-        !event.isTrusted ||
-        event.button !== 0 ||
-        !event.isPrimary ||
-        !isDragTarget(event, element)
-      )
-        return;
-      void submitGesture("start_drag", event);
-    }
     function onClick(event: MouseEvent) {
       if (event.composedPath().includes(element)) void onControlClick(event);
     }
-    element.addEventListener("mousedown", onMouseDown);
-    element.addEventListener("pointerdown", onPointerDown);
     element.addEventListener("click", onClick);
     let unbound = false;
     function unbind() {
       if (unbound) return;
       unbound = true;
-      element.removeEventListener("mousedown", onMouseDown);
-      element.removeEventListener("pointerdown", onPointerDown);
       element.removeEventListener("click", onClick);
       if (titlebars.get(element) === unbind) titlebars.delete(element);
       for (const button of disabledControls) {

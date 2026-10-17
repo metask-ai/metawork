@@ -11,7 +11,9 @@ export const Popover = {
   }: ComponentProps<typeof BasePopover.Trigger>) => (
     <BasePopover.Trigger className={cn(focusRing, className)} {...props} />
   ),
-  Portal: BasePopover.Portal,
+  Portal: (props: ComponentProps<typeof BasePopover.Portal>) => (
+    <BasePopover.Portal {...props} data-native-window-drag-exclude="" />
+  ),
   Positioner: ({
     className,
     ...props

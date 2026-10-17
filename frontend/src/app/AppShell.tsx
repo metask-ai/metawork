@@ -360,7 +360,7 @@ export function AppShell({
       <WindowTitlebar ref={bindWindowTitlebar} className="workbench-commandbar">
         <div
           className="commandbar-leading-actions"
-          data-metawork-window-drag-exclude={overlay ? "" : undefined}
+          data-native-window-drag-exclude=""
         >
           <div
             className="commandbar-inert-content"
@@ -391,7 +391,7 @@ export function AppShell({
         <div
           className="commandbar-context"
           data-visible={contextVisible}
-          data-metawork-window-drag-exclude={overlay ? "" : undefined}
+          data-native-window-drag-exclude={overlay ? "" : undefined}
         >
           <div
             className="commandbar-inert-content"
@@ -405,7 +405,7 @@ export function AppShell({
         </div>
         <div
           className="commandbar-alert-slot"
-          data-metawork-window-drag-exclude={overlay ? "" : undefined}
+          data-native-window-drag-exclude=""
         >
           <div
             className="commandbar-inert-content"

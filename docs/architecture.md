@@ -128,13 +128,12 @@ Runtime API 已可用时，绕过它调用低层函数属于架构违规。Compa
 - 只调用 SDK 公开原语或公开 OS API，不访问私有 context、私有实现类型或未登记 system handle；
 - 在 Native SDK 等价正式能力经目标平台验收后原位替换，并删除 seam、allowlist 和专用验证。
 
-当前登记的 compatibility capability 为：
+System WebView 标题栏拖拽使用 SDK 正式的 `window_drag_regions` 声明和 `data-native-window-drag` / `data-native-window-drag-exclude`。SDK 独占真实原生输入、命中与系统拖动/双击；Application 和 Bridge 不建立手势命令、点击计数、坐标授权或拖动实现。区域与交互排除的产品合同见 [UI 设计规范](ui-design.md#43-一体化窗口栏)，目标平台证据见 [验证规范](validation.md#native-sdk-兼容能力证据)。
 
-Native SDK 的 `set_window_drag_regions` 只接受 GPU surface；声明式 `window_drag_regions` 已提供 System WebView 入口，但仍须通过下述目标平台等价验收才能替换现有 compatibility seam。SDK API 的存在本身不关闭已登记的能力缺口。
+当前登记的 compatibility capability 为：
 
 | Capability | 层级 | 允许边界 | 删除条件 |
 | --- | --- | --- | --- |
-| `system_webview_drag_region` | macOS 一级；Windows 二级 | Renderer 仅绑定真实标题栏并排除交互路径；Windows 按浏览器计数选择 drag/toggle，Host 不保存首击历史，对两种意图都复核当前 OS 指针与原生 top-band；macOS 校验范围后交给 SDK/AppKit；最大化复用 window-controls owner | 所消费的 SDK 发布版提供适用于 System WebView 的等价 public API 并通过平台验收；包括 `ICoreWebView2Settings9::IsNonClientRegionSupportEnabled` / CSS `app-region` 的正式等价入口，而非仅 GPU surface 区域 |
 | `system_webview_resize` | Windows 二级 | 补齐 System WebView 上沿及两个上角的原生输入路径；复用 startup binding，按 OS 边框指标在窄上沿判定 resize hit 并交给宿主的系统 resize；不观察或维护标题栏点击历史 | SDK 正式 System WebView 上沿缩放通过真实鼠标、绘制与生命周期等价验收 |
 | `system_webview_maximize_restore`、`maximized_state`、`user_close` | 二级 | 各自保持封闭语义，可共享同一 startup window identity，但不得形成任意窗口 facade | SDK 等价窗口能力通过目标平台验收 |
 | `app_single_instance` | 二级 | 应用实例仲裁与 second-launch activation transport | SDK 提供等价 data-root authority、同用户转交、bounded activation 与 shutdown |

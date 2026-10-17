@@ -39,7 +39,13 @@ export async function probeWindowChromeUi({
       return element.contains(document.elementFromPoint(x,y)) ? {x,y} : null;
     })()`);
   }
-  async function check(name, action, expectedGestures, verify = () => {}) {
+  async function check(
+    name,
+    action,
+    expectedGestures,
+    verify = () => {},
+    { browserInput = true } = {},
+  ) {
     await webview.evaluate(
       "window.__chromeUi.events = []; window.__chromeUi.calls = [];",
     );
@@ -49,9 +55,11 @@ export async function probeWindowChromeUi({
       await action();
       Object.assign(record, await webview.evaluate("window.__chromeUi"));
       record.after = await nativeState();
-      assert.ok(
-        record.events.some((e) => e.type === "pointerdown" && e.trusted),
-      );
+      // Native caption input can be consumed before WebView dispatch.
+      if (browserInput)
+        assert.ok(
+          record.events.some((e) => e.type === "pointerdown" && e.trusted),
+        );
       assert.deepEqual(
         record.calls
           .filter((c) => c.command.endsWith(".gesture"))
@@ -105,6 +113,14 @@ export async function probeWindowChromeUi({
   try {
     await until(
       "document.querySelector('.workbench-commandbar') && document.documentElement.dataset.metaworkWindowChrome === 'ready'",
+    );
+    const missingExclusions = await webview.evaluate(
+      `Array.from(document.querySelectorAll('header[data-native-window-drag] :is(button,input,select,textarea,label,details,summary,a,[contenteditable]:not([contenteditable="false"]),[tabindex],[inert],[role="button"],[role="link"],[role="textbox"])')).filter(e => !e.closest('[data-native-window-drag-exclude]')).map(e => e.outerHTML)`,
+    );
+    assert.deepEqual(
+      missingExclusions,
+      [],
+      "all titlebar controls need explicit SDK exclusions",
     );
     await webview.evaluate(`(() => {
       window.__chromeUi = {events:[],calls:[]};
@@ -213,7 +229,7 @@ export async function probeWindowChromeUi({
       const free = await webview.evaluate(`(() => {
         for (let x=160;x<600;x+=10) {
           const e = document.elementFromPoint(x,20);
-          if(e?.closest('.workbench-commandbar') && !e.closest('button,input,[tabindex],[data-metawork-window-drag-exclude]')) return {x,y:20};
+          if(e?.closest('.workbench-commandbar') && !e.closest('button,input,[tabindex],[data-native-window-drag-exclude]')) return {x,y:20};
         }
         throw new Error('No real noninteractive titlebar point');
       })()`);
@@ -228,8 +244,9 @@ export async function probeWindowChromeUi({
             "-PointY",
             "20",
           ]),
-        ["start_drag"],
+        [],
         (record) => assert.notEqual(record.after.rect.Left, 100),
+        { browserInput: false },
       );
       const panel = ".commandbar-task-panel-toggle";
       const expanded = await webview.evaluate(
@@ -278,6 +295,25 @@ export async function probeWindowChromeUi({
         panel,
         `document.querySelector('${panel}').getAttribute('aria-expanded') === ${JSON.stringify(expanded)}`,
       );
+      await runProbe("control-layout", ["-ProbeWidth", "390"]);
+      await until("innerWidth <= 390");
+      evidence.mobileWidth =
+        await webview.evaluate(`({width:innerWidth, scrollWidth:document.documentElement.scrollWidth,
+        missingExclusions:Array.from(document.querySelectorAll('header[data-native-window-drag] button')).filter(e => !e.closest('[data-native-window-drag-exclude]')).map(e => e.outerHTML)})`);
+      assert.ok(
+        evidence.mobileWidth.scrollWidth <= evidence.mobileWidth.width,
+        "390px window must not overflow horizontally",
+      );
+      assert.deepEqual(evidence.mobileWidth.missingExclusions, []);
+      if (evidenceDir) {
+        const shot = await webview.send("Page.captureScreenshot", {
+          format: "png",
+        });
+        await writeFile(
+          path.join(evidenceDir, "window-chrome-390.png"),
+          Buffer.from(shot.data, "base64"),
+        );
+      }
       await runProbe("control-layout");
     }
     evidence.surface =

@@ -339,3 +339,23 @@ test("healthy account and refresh scheduling failure do not offer reauthorizatio
     cleanup();
   }
 });
+
+test("native drag exclusions cover mounted menu/dialog portals and their backdrops", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  renderIdentity({});
+  await user.click(
+    screen.getByRole("button", { name: "Account and application menu" }),
+  );
+  const menu = await screen.findByRole("menu");
+  assert.ok(
+    menu.closest("[data-base-ui-portal][data-native-window-drag-exclude]"),
+  );
+  await user.click(await screen.findByRole("menuitem", { name: "About" }));
+  const dialog = await screen.findByRole("dialog", { name: "MetaWork" });
+  const portal = dialog.closest("[data-base-ui-portal]");
+  assert.ok(portal.hasAttribute("data-native-window-drag-exclude"));
+  assert.ok(
+    portal.querySelector('[class*="fixed inset-0"]'),
+    "dialog backdrop must share the excluded portal",
+  );
+});

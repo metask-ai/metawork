@@ -3408,6 +3408,7 @@ export default function App() {
         !settingsOpen && route === "workbench" && activeTask && editingTitle ? (
           <form
             className="commandbar-task-editor"
+            data-native-window-drag-exclude=""
             onSubmit={(event) => {
               event.preventDefault();
               void renameTask();

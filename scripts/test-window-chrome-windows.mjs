@@ -226,7 +226,7 @@ try {
           ? "Windows real input matrix and clean shutdown passed.\n"
           : resizeSessionOnly
             ? "Windows top-edge resize/cursors, native edge double click, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
-            : "Windows top-edge resize/cursors, native edge double click, paint/reload, browser-count titlebar gestures, controls, hide/reopen, and clean shutdown passed.\n",
+            : "Windows top-edge resize/cursors, native edge double click, paint/reload, SDK native titlebar dragging/double-click, controls, hide/reopen, and clean shutdown passed.\n",
   );
 } catch (error) {
   process.stderr.write(output);

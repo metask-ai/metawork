@@ -165,7 +165,7 @@ child-process 非正常退出证明进程终止后的 WAL 恢复，不是机器�
 
 | capability                                                           | Windows 状态                                                                                            | macOS 状态                                                                                                           | 证据定位                                                   | 未闭合验证                                                  |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------- |
-| `system_webview_drag_region` | 已验证：局部标题栏、浏览器计数、原生授权、真实 AccountGate/Workbench 与窗口生命周期；未覆盖范围见新证据 | 继续使用 SDK/AppKit，无新增原生兼容；本次局部入口/wire 接线未实机回归 | `E-WIN-CHROME-GESTURES-20260919`；旧 Host 配对证据仅作历史 | macOS 接线回归、混合 DPI、其他 Windows/WebView 版本；SDK 正式能力需独立验收 |
+| SDK System WebView 原生拖拽（原 `system_webview_drag_region` 已移除） | 已验证：SDK 原生拖动/双击、控件与 portal 排除、真实 Workbench、390px 窄窗及窗口生命周期 | SDK/AppKit 声明式接线；实机验收待完成 | `E-WIN-SDK-DRAG-20261017`；旧 compatibility 证据仅作历史 | macOS 原生运行、真实任务改名/动态 action、浏览器缩放、混合 DPI 与其他 Windows/WebView 版本 |
 | `system_webview_resize`                                              | 已验证：上沿与两上角真实鼠标缩放、光标、原生边缘双击、绘制、重载及隐藏重开；不再承担标题栏序列重置 | 不适用于已登记兼容 seam | `E-WIN-TOP-RESIZE-20260916`（历史）、`E-WIN-CHROME-GESTURES-20260919` | 混合 DPI 跨屏、负坐标实屏、高对比模式及其他 Windows 版本；SDK 正式能力需等价验收 |
 | `system_webview_maximize_restore` / `maximized_state` / `user_close` | 已验证：窗口生命周期受理、按钮与双击、任务栏恢复、关闭交错、hide/reopen、reload 与 clean shutdown | 不适用于已登记兼容 seam | `E-WIN-CONTROLS-20260917` | Native SDK 正式能力在 Windows 通过等价验收 |
 | `app_single_instance`                                                | 已验证：多进程仲裁、activation 转交、restart 与 crash 后 lease 恢复；人工验收待完成：交互失败与安装升级 | 已验证（历史）：交叉语义编译；人工验收待完成：socket 权限、peer identity、并发转交、提示、shutdown 和 crash recovery | `E-WIN-SINGLE-20260828`、`E-MACOS-SINGLE-COMPILE-20260828` | 两平台分别取得完整实例仲裁与 activation 验收                |
@@ -188,9 +188,9 @@ Account 凭据操作的返回与恢复语义由 [Account 架构](account-archite
 | Windows arm64 GNU  | revision 15 bundle 与交叉链接已验证（`E-AGENTCORE-R15-20260907`）                        | ARM64 真机运行与安装                           |
 | Linux              | 尚未实现                                                                                 | 构建、运行、分发和平台验收均未开始             |
 
-System WebView window chrome 输入变更须覆盖真实控件、可编辑内容、弹层/portal、inert/no-drag 排除及两种 gesture 的 Host top-band/实时指针拒绝。Bridge 测试覆盖严格新 wire、旧命令拒绝、generation、刷新与动作 ACK fixture；Renderer 覆盖首次挂载、节点替换、StrictMode/重复清理、迟到 connect/refresh/卸载响应。Windows 按 [UI 合同](ui-design.md#43-一体化窗口栏) 的浏览器计数验收，不再要求任意插入事件中断或保留旧 Host 配对。真实 WebView2 OS 鼠标须覆盖首击 caption move loop 后第二击、默认/非默认双击时间、正负距离边界、三/四击、内容/相邻 normal/disabled/停止传播/取消 pointerdown 控件、失焦及原生边缘无尺寸变化的插入；记录实际 detail、局部命中、意图和执行结果，按当前合同判断。业务事件自身零手势 IPC、无取消及两种动作原生授权仍是硬要求。还须验证普通/最大化拖动恢复、真实 AccountGate/Workbench/动态 actions/弹层/窄窗/缩放。未解释的机制差异停止合入，不临时补状态或改断言。合成 DOM/上游源码不代替平台证据；新证据绑定 revision/diff/artifact、OS、SDK 和 WebView2，历史仅证明当时 artifact。
+System WebView window chrome 输入变更须覆盖真实控件、disabled/SVG、可编辑与可聚焦内容、弹层/portal、动态动作、改名表单、语言菜单及 inert 的可命中外层。Renderer 回归固定真实标题栏的 SDK 声明与显式排除，普通文字仍可拖动；Bridge 固定删除的 gesture command/旧环境 shape 拒绝、现有按钮权限与 generation，以及刷新/动作 ACK 的跨语言 fixture、StrictMode/节点替换与迟到响应清理。
 
-Windows 当前时间/距离边界由目标 WebView 浏览器计数决定，不复制旧 Host 闭区间，也不要求与隔离 native-child 原型逐像素等价。真实输入覆盖 x/y 正负方向的内点、边界、外点，记录系统指标与实际计数。系统 caption 对照可用于诊断，不能替代实际 System WebView 产品路径验收；历史原型与旧 Host 证据保持原意。
+Windows 原生路径必须以真实 OS 鼠标验收普通拖动、最大化拖动恢复、双击及系统非默认时间、超时与距离外点、控件不误拖及业务事件零 gesture IPC；输入可由 SDK 非客户区消费，不要求 WebView 分发浏览器按下或特定 detail 序列。SDK/OS 拥有原生时间、距离、序列与命中语义，不再按旧应用 JS 计数推导原生结果。真实 AccountGate/Workbench、弹层、窄窗、浏览器缩放、reload、hide/reopen、按钮真实状态、上沿 resize/绘制与 clean shutdown 分别验收。macOS 必须独立验收 SDK/AppKit 拖动、系统双击偏好、缩放、交互排除和生命周期。合成 DOM/源码检查不能代替平台证据；新证据绑定 revision/diff/artifact、OS、SDK 和 WebView，历史仅证明当时 artifact。未验证平台和环境明确保留，不以代码路径存在宣称通过。
 
 Windows 窗口控制生命周期变更须覆盖 SDK 公共窗口事实更新、执行前拒绝、错误与清理顺序、connect 失败和 refresh 恢复；真实桌面矩阵覆盖普通/最大化关闭与 Alt+F4、最大化后最小化并从任务栏恢复、隐藏后既有 Bridge 请求、托盘重开、关闭与 toggle 交错及 reload。真实键鼠、直接 Bridge 请求与 SDK 托盘 automation 分别记录，不互相冒充；恢复后的按钮可操作性与实际图标须一并验证。以有界状态条件观察结果，不把固定等待或关闭 ACK 当作隐藏完成屏障；探针只能被动取得当前 generation，不额外 connect 改变待测会话。测试脏工作树时须绑定 diff 与 artifact，提交后的相同证据须核对源码一致性。
 
@@ -222,6 +222,24 @@ macOS 的 AgentCore artifact、Native vertical、Keychain、window chrome、WebV
 `E-ATTACHMENT-MACOS-20260902` 的 arm64 真实交互证据为：系统 picker 选择 `0b0a714cdf0e9cfb99830d2fd58afd78eedf655080c0ff09fbcb3dd3d5576e26`、逐项移除 `cb012ce2f8541d6b49921e74e403755b387235deeb98571322da9359bba49cb9`、取消 `ef8b8c08c528c997cc08115c72122511aedec78290fd5c47e90b898dc2474c17`、最终焦点 `f1b7121669516a2bc33a3e58cd934d3ae09a8edd4d6779b4d2981f553e00a695`、窄窗 `961c0eb23d274100bfcfa17967b113a4732982c9bcaccb2be8d7dffb030f0776`（均为截图 SHA-256）。窄窗附件由 automation 经正式 choose/staging 后续链路注入；其他四项使用真实 `NSOpenPanel` 和 Renderer 交互。
 
 `E-MACOS-CLIPBOARD-20260914` 在 2026-09-15 对 MetaWork revision `f40ff75a` 复验：`zero://app/index.html` 的真实原生 UI 点击以延迟 150 ms 生成的 HTML `Promise<Blob>`，证明 `write()` 仍在点击调用栈内启动，并在系统剪贴板产生 `public.html` 与 `public.utf8-plain-text`；plain 字节精确，HTML 语义标记完整。WebKit 会规范化 HTML 序列化，因此合同不要求 HTML 字节恒等。此前同一证据项已证明 70 KiB 与 256 KiB Markdown 精确完整，以及扩张至 1,179,687 B 的 HTML 标记完整。
+
+### E-WIN-SDK-DRAG-20261017
+
+2026-10-17，Windows 10 x64 `10.0.19045`、双屏 96 DPI、Native SDK `0.11.0-fork.2`、WebView2 `Edg/155.0.4283.45`。`node scripts/test-window-chrome-windows.mjs` 完整入口 exit 0，绑定 revision `307323b8cc31495693d1e9f9003ef36c4cbf0a22` 加源码 diff SHA-256 `9e878b59c2119739291f14d74cf6c2b52db888d6025e466867adca5e6ff39c61`，automation Debug exe SHA-256 `ad01f97e67a586f5ab496c7650f79c8a626a2d38652964c8fd36f9179fab59f7`。本地 `.zig-cache/sdk-native-drag-verified/` 保存 identity、源码 diff、原生输入/UI/controls JSON 与截图；收尾仅删除旧阶段方案并补充验收文档，未修改受测实现。 已逐文件核对提交 `c5ba5c0ce299032ed046c147932af422745e02a1` 中的实现与探针源码，与该受测源码一致。
+
+真实鼠标验证 SDK 原生普通/最大化拖动恢复，默认及 900ms 系统双击、超时和距离外点，按钮/SVG、disabled、inert 外层、可聚焦/可编辑/input、portal 和未标记正文不误拖；全程无应用 gesture/pointer IPC。真实 Workbench 的侧栏、Task Panel、账户菜单、Settings inert 标题栏与窄窗操作通过；390px 外窗的 WebView 内容宽与 scrollWidth 同为 374px，截图已检查。上沿/两上角、双屏、五色静止/遮挡恢复、reload、按钮与 Alt+F4 关闭隐藏、隐藏请求拒绝、任务栏恢复、close/toggle 交错、托盘重开及 clean shutdown 通过。
+
+首轮 `.zig-cache/sdk-native-drag/` 的未标记 portal 覆盖标题栏仍可误拖，暴露 SDK 原生区域不会自动按 DOM 遮挡排除的问题；产品共享 portal 根已显式 no-drag，并增加实际菜单/dialog portal 回归。第二轮 `.zig-cache/sdk-native-drag-final/` 原生输入矩阵通过，但 UI 探针仍错误要求原生拖动分发浏览器 pointerdown；记录已证明窗口实际移动。最终驱动仅对 SDK caption drag 使用原生位移断言，业务控件仍要求真实浏览器输入，不降低不误拖或零 gesture IPC 断言。
+
+同次正式 Native graph 单并发通过；默认并发停在 composition shutdown，长时间无进展后由执行者中止，同一二进制独立运行通过。串行通过不宣称解决并发停滞。该次 composition 用例竞态的后续根因与修复见 [E-WIN-COMPOSITION-SHUTDOWN-20261017](#e-win-composition-shutdown-20261017)。不证明 macOS 实机、Windows 11、混合 DPI、浏览器缩放、真实任务改名/全部动态 action、touch/pen、系统菜单、snap 或安装包；旧 compatibility 的平台证据不自动转移到本次 SDK 路径。
+
+### E-WIN-COMPOSITION-SHUTDOWN-20261017
+
+2026-10-17，Windows x64 `10.0.19045`，canonical AgentCore ABI revision 19。未修改的 composition lifecycle 二进制在 8 实例并发的 160 次执行中出现 2 次 10 秒超时，均停在关闭 active/queued/idle Sessions 的用例。只添加 fake Core 观测日志的定向版本在 240 次执行中出现 13 次 8 秒超时，每次都记录到 requested Run `1`、Core 已接纳 Run `0`：Host `running` 已发布，但同步 ABI 尚未完成 Core admission，测试就开始 shutdown；abort 返回 `too_late` 后，随后进入 Core 的 controlled Run 没有退出信号，shutdown 等待其完成。
+
+修复将该“关闭已进入 Core 的 Run”用例的前置屏障改为 fake Core 的实际 Run-entry condition，保留 executor、queued/idle Sessions 和原 shutdown 路径；终态额外断言 ABI/abort 均为 OK、stop reason 为 aborted、interruption 为 app_shutdown。既有 pre-Core shutdown 回归继续验证关闭发生在执行前采样期间时不进入 Core。临时诊断日志已移除；未调整产品代码、测试并发、deadline 或超时，也未增加重试或跳过用例。
+
+修复绑定 revision `87610d223c1eef369f407b1a36c788d2571a3a60` 加测试源码 diff SHA-256 `67a8ec2abbdf988b63c98e2e5e27ce32f7ebdbc7e489621a6f833ea9d0ca6000`；修复后二进制 SHA-256 `044fa438694ed65a1dce9c7dd4acb244d9fd18317aab505babddd07583b80f28`。同样 8 实例并发运行完整 composition root 1000 次，全部通过；默认并发 `zig build test-lifecycle -Dtarget=x86_64-windows` 通过，正式 `native test . --yes -Dtarget=x86_64-windows` 连续两轮默认并发通过，未使用 `-j1`。本地 `.zig-cache/shutdown-race-evidence/identity.json` 与 `source.patch` 绑定 artifact、源码和各轮日志，逐次结果保存在 `shutdown-stress-baseline`、`shutdown-stress-diagnostic` 和 `shutdown-stress-fixed` 目录。本证据关闭该用例的前置条件竞态，不将其他历史 Native 停滞或平台异常一并归因或关闭。
 
 ### E-WIN-CHROME-GESTURES-20260919
 

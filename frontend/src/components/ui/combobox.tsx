@@ -75,7 +75,9 @@ export const Combobox = {
       {children ?? "×"}
     </BaseCombobox.Clear>
   ),
-  Portal: BaseCombobox.Portal,
+  Portal: (props: ComponentProps<typeof BaseCombobox.Portal>) => (
+    <BaseCombobox.Portal {...props} data-native-window-drag-exclude="" />
+  ),
   Positioner: ({
     className,
     ...props

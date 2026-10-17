@@ -14,7 +14,12 @@ export function WindowControls({
   };
 }) {
   return (
-    <div className="window-controls" role="group" aria-label={labels.controls}>
+    <div
+      className="window-controls"
+      role="group"
+      aria-label={labels.controls}
+      data-native-window-drag-exclude=""
+    >
       <button
         type="button"
         aria-label={labels.minimize}
