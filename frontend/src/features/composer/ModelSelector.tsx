@@ -42,9 +42,10 @@ export function ModelSelector({
         value: model.selectionId,
         label:
           model.displayName || model.selectionId || t("account.model_fallback"),
-        triggerLabel: model.triggerLabel,
+        triggerLabel:
+          model.selectionId === selectedId ? label : model.triggerLabel,
       }))}
-      placeholder={t("account.choose_model")}
+      placeholder={label || t("account.choose_model")}
       ariaLabel={t("settings.default_model")}
       title={contextTitle}
       helper={contextTitle}

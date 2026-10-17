@@ -1403,6 +1403,32 @@ function renderComposer(overrides = {}) {
   };
 }
 
+test("Task model trigger keeps the Host label for unavailable and next-run selections", () => {
+  for (const options of [
+    [],
+    [
+      {
+        selectionId: "selected",
+        displayName: "Catalog label",
+        triggerLabel: "Catalog trigger",
+      },
+    ],
+  ]) {
+    renderComposer({
+      modelEditable: true,
+      modelLabel: "Next run: retained Task model",
+      selectedModelId: "selected",
+      modelOptions: options,
+    });
+    assert.equal(
+      document.querySelector(".composer-model-trigger .selection-trigger-value")
+        .textContent,
+      "Next run: retained Task model",
+    );
+    cleanup();
+  }
+});
+
 test("detached Conversation uses the ordinary send action", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   const composer = renderComposer({

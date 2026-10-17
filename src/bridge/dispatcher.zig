@@ -3076,10 +3076,7 @@ pub const Dispatcher = struct {
             invocation.request.payload,
         );
         defer parsed.deinit();
-        if (parsed.value.expectedModel.len == 0 or
-            parsed.value.expectedModel.len > models_contract.Limits.model_id_bytes or
-            !std.unicode.utf8ValidateSlice(parsed.value.expectedModel) or
-            parsed.value.targetModelRef.sourceId.len == 0 or
+        if (parsed.value.targetModelRef.sourceId.len == 0 or
             parsed.value.targetModelRef.sourceId.len > models_contract.Limits.provider_id_bytes or
             !std.unicode.utf8ValidateSlice(parsed.value.targetModelRef.sourceId) or
             parsed.value.targetModelRef.modelId.len == 0 or
@@ -3087,8 +3084,8 @@ pub const Dispatcher = struct {
             !std.unicode.utf8ValidateSlice(parsed.value.targetModelRef.modelId))
             return error.InvalidBridgePayload;
         const task_id = try handlers.parseWireId(parsed.value.taskId);
-        const execution_generation = try handlers.parseWireId(
-            parsed.value.expectedExecutionGeneration,
+        const selection_revision = try handlers.parseWireId(
+            parsed.value.expectedSelectionRevision,
         );
         const source_generation = try handlers.parseWireId(
             parsed.value.expectedSourceGeneration,
@@ -3096,15 +3093,13 @@ pub const Dispatcher = struct {
         const catalog_generation = try handlers.parseWireId(
             parsed.value.expectedCatalogGeneration,
         );
-        if (execution_generation == 0 or
-            source_generation == 0 or
+        if (task_id == 0 or source_generation == 0 or
             catalog_generation == 0)
             return error.InvalidBridgePayload;
-        (try self.requireProductControl()).selectTaskModel(
+        const revision = (try self.requireProductControl()).selectTaskModel(
             task_id,
             .{
-                .expected_model = parsed.value.expectedModel,
-                .expected_execution_generation = execution_generation,
+                .expected_selection_revision = selection_revision,
                 .target = .{
                     .source_id = parsed.value.targetModelRef.sourceId,
                     .model_id = parsed.value.targetModelRef.modelId,
@@ -3113,7 +3108,8 @@ pub const Dispatcher = struct {
                 .expected_catalog_generation = catalog_generation,
             },
         ) catch |err| {
-            if (taskModelSelectionRejection(err)) |reason|
+            if (taskModelSelectionRejection(err)) |reason| {
+                self.notifyCommitted();
                 return encodeTaskModelSelectionResult(
                     output,
                     false,
@@ -3121,6 +3117,7 @@ pub const Dispatcher = struct {
                     null,
                     reason,
                 );
+            }
             return err;
         };
         self.notifyCommitted();
@@ -3128,7 +3125,7 @@ pub const Dispatcher = struct {
             output,
             true,
             task_id,
-            parsed.value.targetModelRef.modelId,
+            revision,
             null,
         );
     }
@@ -4992,6 +4989,10 @@ fn taskApprovalModeRejection(err: anyerror) ?[]const u8 {
 
 fn taskModelSelectionRejection(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.TaskPersistenceUnavailable => "persistence_unavailable",
+        error.TaskPersistenceFailed => "persistence_failed",
+        error.TaskPersistenceOutcomeUnknown => "persistence_outcome_unknown",
+        error.InvalidTaskModel => "stale_catalog",
         error.TaskModelMismatch => "model_changed",
         error.StaleCatalog => "stale_catalog",
         error.UnknownTask, error.TaskClosing => "task_unavailable",
@@ -5290,21 +5291,21 @@ fn encodeTaskModelSelectionResult(
     output: []u8,
     accepted: bool,
     task_id: u64,
-    model: ?[]const u8,
+    revision: ?u64,
     reason: ?[]const u8,
 ) ![]const u8 {
-    const valid = if (accepted)
-        model != null and model.?.len != 0 and reason == null
+    const valid = task_id != 0 and if (accepted)
+        revision != null and revision.? != 0 and reason == null
     else
-        model == null and reason != null;
+        revision == null and reason != null;
     if (!valid) return error.InvalidTaskModelSelectionResult;
     var writer = std.Io.Writer.fixed(output);
-    writer.print("{{\"accepted\":{},\"taskId\":\"{d}\",\"model\":", .{
+    writer.print("{{\"accepted\":{},\"taskId\":\"{d}\",\"selectionRevision\":", .{
         accepted,
         task_id,
     }) catch return error.NoSpaceLeft;
-    if (model) |value|
-        std.json.Stringify.value(value, .{}, &writer) catch return error.NoSpaceLeft
+    if (revision) |value|
+        writer.print("\"{d}\"", .{value}) catch return error.NoSpaceLeft
     else
         writer.writeAll("null") catch return error.NoSpaceLeft;
     writer.writeAll(",\"reason\":") catch return error.NoSpaceLeft;
@@ -5832,6 +5833,21 @@ test "Execution command responses preserve the existing Bridge error vocabulary"
         );
         try std.testing.expect(parsed.value.object.get("attemptId").? == .null);
     }
+}
+
+test "Task model selection result acknowledges intent revision and preserves typed save failures" {
+    var output: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "{\"accepted\":true,\"taskId\":\"3\",\"selectionRevision\":\"7\",\"reason\":null}",
+        try encodeTaskModelSelectionResult(&output, true, 3, 7, null),
+    );
+    try std.testing.expectEqualStrings(
+        "{\"accepted\":false,\"taskId\":\"3\",\"selectionRevision\":null,\"reason\":\"persistence_outcome_unknown\"}",
+        try encodeTaskModelSelectionResult(&output, false, 3, null, taskModelSelectionRejection(error.TaskPersistenceOutcomeUnknown)),
+    );
+    try std.testing.expectError(error.InvalidTaskModelSelectionResult, encodeTaskModelSelectionResult(&output, true, 0, 7, null));
+    try std.testing.expectError(error.InvalidTaskModelSelectionResult, encodeTaskModelSelectionResult(&output, true, 3, 0, null));
+    try std.testing.expectError(error.InvalidTaskModelSelectionResult, encodeTaskModelSelectionResult(&output, false, 3, 7, "persistence_failed"));
 }
 
 test "mutation response encoders reject every inconsistent success and rejection shape" {

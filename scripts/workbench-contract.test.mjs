@@ -1132,19 +1132,73 @@ test("typed Agent failures cross the Host to Renderer contract", () => {
   }
 });
 
+test("Task model intent is a source-qualified durable fact independent of installed and default models", () => {
+  const snapshot = clone(fixture);
+  snapshot.tasks[0].modelIntent = {
+    modelRef: { sourceId: "another-provider", modelId: "next-model" },
+    selectionRevision: "9",
+    state: "committed",
+  };
+  assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+  assert.notEqual(
+    snapshot.tasks[0].modelIntent.modelRef.modelId,
+    snapshot.tasks[0].binding.model,
+  );
+  // A legacy record must not inherit a source from today's global catalog.
+  snapshot.tasks[0].modelIntent = null;
+  assert.equal(decodeWorkbenchSnapshot(snapshot).tasks[0].modelIntent, null);
+});
+
+test("Task model intent rejects missing or extended wire shapes and invalid revisions", () => {
+  const valid = {
+    modelRef: { sourceId: "provider", modelId: "model" },
+    selectionRevision: "1",
+    state: "committed",
+  };
+  const missing = clone(fixture);
+  delete missing.tasks[0].modelIntent;
+  assert.throws(() => decodeWorkbenchSnapshot(missing), /modelIntent/);
+  for (const invalid of [
+    {},
+    { ...valid, modelRef: null },
+    { ...valid, modelRef: { sourceId: "provider" } },
+    { ...valid, modelRef: { sourceId: "", modelId: "model" } },
+    { ...valid, modelRef: { ...valid.modelRef, apiKey: "forbidden" } },
+    { ...valid, credential: "forbidden" },
+    ...["0", "01", "-1", "18446744073709551616", 1, null].map(
+      (selectionRevision) => ({ ...valid, selectionRevision }),
+    ),
+  ]) {
+    const bad = clone(fixture);
+    bad.tasks[0].modelIntent = invalid;
+    assert.throws(() => decodeWorkbenchSnapshot(bad), /modelIntent/);
+  }
+});
+
 test("Task model selection availability is a strict Host-owned projection", () => {
   for (const availability of [
     "available",
     "catalog_loading",
     "catalog_unavailable",
+    "task_unavailable",
+  ]) {
+    const snapshot = clone(fixture);
+    snapshot.tasks[0].modelSelectionAvailability = availability;
+    assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+  }
+
+  for (const retired of [
     "execution_replacing",
     "runtime_detached",
     "unsupported_source",
     "authority_changed",
   ]) {
     const snapshot = clone(fixture);
-    snapshot.tasks[0].modelSelectionAvailability = availability;
-    assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+    snapshot.tasks[0].modelSelectionAvailability = retired;
+    assert.throws(
+      () => decodeWorkbenchSnapshot(snapshot),
+      /modelSelectionAvailability/,
+    );
   }
 
   const missing = clone(fixture);

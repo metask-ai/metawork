@@ -832,13 +832,7 @@ export type TaskMcpAuthority =
   | { kind: "unavailable"; selection: null };
 
 export type TaskModelSelectionAvailability =
-  | "available"
-  | "catalog_loading"
-  | "catalog_unavailable"
-  | "execution_replacing"
-  | "runtime_detached"
-  | "unsupported_source"
-  | "authority_changed";
+  "available" | "catalog_loading" | "catalog_unavailable" | "task_unavailable";
 
 export type ApprovalFailureReason = (typeof approvalFailureReasons)[number];
 export type TaskApprovalChange = {
@@ -935,6 +929,11 @@ export type TaskView = {
     executionGeneration: string;
     unavailableReason: "runtime_detached" | null;
   };
+  modelIntent: {
+    modelRef: ModelRef;
+    selectionRevision: string;
+    state: "committed" | "outcome_unknown";
+  } | null;
   modelSelectionAvailability: TaskModelSelectionAvailability;
   mcpAuthority: TaskMcpAuthority;
   skillCatalog: SkillCatalogView;
@@ -1540,6 +1539,9 @@ export type TaskApprovalModeResult =
     };
 
 export type TaskModelSelectionReason =
+  | "persistence_unavailable"
+  | "persistence_failed"
+  | "persistence_outcome_unknown"
   | "model_changed"
   | "stale_catalog"
   | "task_unavailable"
@@ -1551,13 +1553,13 @@ export type TaskModelSelectionResult =
   | {
       accepted: true;
       taskId: string;
-      model: string;
+      selectionRevision: string;
       reason: null;
     }
   | {
       accepted: false;
       taskId: string;
-      model: null;
+      selectionRevision: null;
       reason: TaskModelSelectionReason;
     };
 

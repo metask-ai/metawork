@@ -304,8 +304,7 @@ pub const TaskApprovalMode = struct {
 };
 pub const TaskModelSelection = struct {
     taskId: []const u8,
-    expectedModel: []const u8,
-    expectedExecutionGeneration: []const u8,
+    expectedSelectionRevision: []const u8,
     targetModelRef: struct {
         sourceId: []const u8,
         modelId: []const u8,
@@ -1009,6 +1008,26 @@ test "Task approval mode payload is typed and requires both exact CAS identities
     };
     for (invalid) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(TaskApprovalMode, payload));
     try std.testing.expectError(error.InvalidBridgeId, parseWireId("01"));
+}
+
+test "Task model selection payload uses independent intent revision and exact source-qualified target" {
+    var parsed = try parsePayload(TaskModelSelection,
+        \\{"taskId":"3","expectedSelectionRevision":"0","targetModelRef":{"sourceId":"provider-b","modelId":"model"},"expectedSourceGeneration":"7","expectedCatalogGeneration":"9"}
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u64, 0), try parseWireId(parsed.value.expectedSelectionRevision));
+    try std.testing.expectEqualStrings("provider-b", parsed.value.targetModelRef.sourceId);
+    const invalid = [_][]const u8{
+        \\{"taskId":"3","expectedModel":"model","expectedExecutionGeneration":"1","targetModelRef":{"sourceId":"metask","modelId":"model"},"expectedSourceGeneration":"7","expectedCatalogGeneration":"9"}
+        ,
+        \\{"taskId":"3","expectedSelectionRevision":"0","targetModelRef":{"modelId":"model"},"expectedSourceGeneration":"7","expectedCatalogGeneration":"9"}
+        ,
+        \\{"taskId":"3","expectedSelectionRevision":"0","targetModelRef":{"sourceId":"provider-b","modelId":"model","apiKey":"forbidden"},"expectedSourceGeneration":"7","expectedCatalogGeneration":"9"}
+        ,
+    };
+    for (invalid) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(TaskModelSelection, payload));
+    try std.testing.expectError(error.InvalidBridgeId, parseWireId("01"));
+    try std.testing.expectError(error.InvalidBridgeId, parseWireId("18446744073709551616"));
 }
 
 test "complete model metadata incoming declarations retain capabilities and token fields" {

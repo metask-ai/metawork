@@ -10,6 +10,9 @@ pub const OwnedTaskExecution = struct {
     model: []u8,
     base_url: []u8,
     execution_generation: u64,
+    source_generation: u64 = 0,
+    /// Process-local proof that this attachment installed the committed intent.
+    model_intent_revision: u64 = 0,
     secret: []u8,
     owned: bool = true,
 
@@ -71,6 +74,12 @@ pub const OwnedTaskExecution = struct {
             .api_key = self.secret,
             .execution_generation = self.execution_generation,
         };
+    }
+
+    pub fn matchesSource(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {
+        return self.owned and self.source_generation != 0 and self.source_generation == target.source_generation and
+            self.protocol == target.target.protocol and std.mem.eql(u8, self.provider_id, target.target.provider_id) and
+            std.mem.eql(u8, self.base_url, target.target.base_url) and std.mem.eql(u8, self.secret, target.api_key);
     }
 
     /// A rejected restore retains only the metadata needed to close its

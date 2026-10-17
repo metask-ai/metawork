@@ -18,6 +18,10 @@ pub const migrations: []const sql.Migration = &.{ .{
     .version = 4,
     .name = "task_approval_revision",
     .sql = @embedFile("migrations/0004_task_approval_revision.sql"),
+}, .{
+    .version = 5,
+    .name = "task_model_intent",
+    .sql = @embedFile("migrations/0005_task_model_intent.sql"),
 } };
 
 comptime {

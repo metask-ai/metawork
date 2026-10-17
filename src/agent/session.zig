@@ -60,6 +60,7 @@ pub const McpCatalogServer = mcp_catalog.Server;
 pub const McpCatalogTool = mcp_catalog.Tool;
 pub const McpCatalogIssue = mcp_catalog.Issue;
 pub const McpSelection = mcp_catalog.Selection;
+pub const McpRestoreSelection = mcp_catalog.RestoreSelection;
 pub const McpSelector = mcp_catalog.Selector;
 pub const McpServerAllowlist = mcp_catalog.ServerAllowlist;
 pub const McpActivation = mcp_catalog.Activation;
@@ -363,6 +364,84 @@ pub const SkillPolicyInput = struct {
     granted_skill_ids: []const []const u8 = &.{},
 };
 
+/// The handle and exact default-deny grant set remain in the Agent owner.
+/// A captured copy shares the original immutable catalog lease, not a query
+/// of today's global catalog. Each copy must be consumed by deinit.
+pub const SkillRestoreInputs = opaque {
+    pub fn init(runtime: *Runtime, lease: *CatalogLease, policy: SkillPolicyInput) (Error || std.mem.Allocator.Error)!*SkillRestoreInputs {
+        if (!catalog.belongsTo(lease, runtime)) return error.CatalogBindingMismatch;
+        const storage = try runtime.allocator.create(SkillRestoreStorage);
+        errdefer runtime.allocator.destroy(storage);
+        storage.* = .{ .runtime = runtime, .lease = lease, .arena = std.heap.ArenaAllocator.init(runtime.allocator), .ids = &.{} };
+        errdefer storage.arena.deinit();
+        const allocator = storage.arena.allocator();
+        const ids = try allocator.alloc([]const u8, policy.granted_skill_ids.len);
+        for (policy.granted_skill_ids, ids) |id, *target| target.* = try allocator.dupe(u8, id);
+        storage.ids = ids;
+        try catalog.retain(lease);
+        return @ptrCast(storage);
+    }
+
+    pub fn borrow(self: *const SkillRestoreInputs) struct { catalog: *CatalogLease, policy: SkillPolicyInput } {
+        const storage: *const SkillRestoreStorage = @ptrCast(@alignCast(self));
+        return .{ .catalog = storage.lease, .policy = .{ .granted_skill_ids = storage.ids } };
+    }
+
+    pub fn clone(self: *const SkillRestoreInputs) (Error || std.mem.Allocator.Error)!*SkillRestoreInputs {
+        const storage: *const SkillRestoreStorage = @ptrCast(@alignCast(self));
+        return init(storage.runtime, storage.lease, .{ .granted_skill_ids = storage.ids });
+    }
+
+    /// A current Host policy may revoke original grants, never add a grant or
+    /// replace the original catalog with a broader one.
+    pub fn narrow(self: *const SkillRestoreInputs, ceiling: SkillPolicyInput) (Error || std.mem.Allocator.Error)!*SkillRestoreInputs {
+        const storage: *const SkillRestoreStorage = @ptrCast(@alignCast(self));
+        const ids = try storage.runtime.allocator.alloc([]const u8, storage.ids.len);
+        defer storage.runtime.allocator.free(ids);
+        var count: usize = 0;
+        for (storage.ids) |id| {
+            const allowed = for (ceiling.granted_skill_ids) |candidate| {
+                if (std.mem.eql(u8, id, candidate)) break true;
+            } else false;
+            if (allowed) {
+                ids[count] = id;
+                count += 1;
+            }
+        }
+        return init(storage.runtime, storage.lease, .{ .granted_skill_ids = ids[0..count] });
+    }
+
+    /// Consumes this copy even if the final Core catalog release fails.
+    pub fn deinit(self: *SkillRestoreInputs) Error!void {
+        const storage: *SkillRestoreStorage = @ptrCast(@alignCast(self));
+        const allocator = storage.runtime.allocator;
+        defer allocator.destroy(storage);
+        defer storage.arena.deinit();
+        try storage.runtime.releaseSkillCatalog(storage.lease);
+    }
+};
+
+const SkillRestoreStorage = struct {
+    runtime: *Runtime,
+    lease: *CatalogLease,
+    arena: std.heap.ArenaAllocator,
+    ids: []const []const u8,
+};
+
+pub const SessionRestoreInputs = struct {
+    skill: ?*SkillRestoreInputs,
+    mcp: ?*McpRestoreSelection,
+    permission_mode: PermissionMode,
+    shell_policy: ShellPolicy,
+    permission_interaction: PermissionInteraction,
+
+    pub fn deinit(self: *SessionRestoreInputs) Error!void {
+        defer self.* = undefined;
+        if (self.mcp) |selection| selection.deinit();
+        if (self.skill) |inputs| try inputs.deinit();
+    }
+};
+
 pub const SessionRestoreOptions = struct {
     session: SessionOpenOptions,
     checkpoint_limits: CheckpointLimits,
@@ -448,6 +527,7 @@ pub const Error = error{
     McpCatalogBindingMismatch,
     InvalidMcpSelection,
     StaleMcpSelection,
+    McpRestoreSourceChanged,
     McpRefreshInProgress,
     McpConfigurationApplyFailed,
     McpConfigurationApplyLimit,
@@ -546,7 +626,10 @@ pub const Session = struct {
     dependency_contract_failure: bool = false,
     file_changes_lost: std.atomic.Value(bool) = .init(false),
     permission_interaction: PermissionInteraction = .interactive,
+    shell_policy: ShellPolicy = .disabled,
     permission_stop_requested: bool = false,
+    skill_restore_inputs: ?*SkillRestoreInputs = null,
+    mcp_restore_selection: ?*McpRestoreSelection = null,
     core_session_identity: CoreSessionIdentity = .unbound,
     cancel_requested: bool = false,
     active_refs: usize = 0,
@@ -911,8 +994,12 @@ pub const Session = struct {
             skill_policy.granted_skill_ids,
             policy_views,
         ) catch return error.InvalidSkillPolicy;
+        const replacement = try SkillRestoreInputs.init(self.agent_runtime, lease, skill_policy);
+        var replacement_owned = true;
+        defer if (replacement_owned) replacement.deinit() catch unreachable;
         self.lock();
-        defer self.unlock();
+        var locked = true;
+        defer if (locked) self.unlock();
         if (self.agent_runtime.shutting_down.load(.acquire))
             return error.RuntimeShuttingDown;
         switch (self.state) {
@@ -938,7 +1025,20 @@ pub const Session = struct {
             return error.SessionPoisoned;
         }
         return switch (status) {
-            .ok => {},
+            .ok => {
+                const previous = self.skill_restore_inputs;
+                self.skill_restore_inputs = replacement;
+                replacement_owned = false;
+                self.unlock();
+                locked = false;
+                if (previous) |inputs| inputs.deinit() catch {
+                    self.lock();
+                    self.dependency_contract_failure = true;
+                    self.state = .poisoned;
+                    self.unlock();
+                    return error.SessionPoisoned;
+                };
+            },
             .busy => error.SessionNotIdle,
             else => error.CatalogRefreshFailed,
         };
@@ -1085,8 +1185,33 @@ pub const Session = struct {
     pub fn updateMcpSelection(
         self: *Session,
         selection: ?*const McpSelection,
-    ) Error!void {
+    ) (Error || std.mem.Allocator.Error)!void {
         return self.agent_runtime.updateSessionMcpSelection(self, selection);
+    }
+
+    /// Owns the Session's original selectors and connection provenance after
+    /// close/release. It contains no SDK handle or permission grants.
+    pub fn captureRestoreInputs(self: *Session) (Error || std.mem.Allocator.Error)!SessionRestoreInputs {
+        self.lock();
+        defer self.unlock();
+        if (self.agent_runtime.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
+        switch (self.state) {
+            .idle => {},
+            .poisoned => return error.SessionPoisoned,
+            .closing, .closed => return error.SessionClosing,
+            else => return error.SessionNotIdle,
+        }
+        const permission = try self.permissionObservationLocked();
+        const skill = if (self.skill_restore_inputs) |inputs| try inputs.clone() else null;
+        // This clone cannot own the last lease while the Session is locked.
+        errdefer if (skill) |inputs| inputs.deinit() catch unreachable;
+        return .{
+            .skill = skill,
+            .mcp = if (self.mcp_restore_selection) |selection| try selection.clone(self.agent_runtime.allocator) else null,
+            .permission_mode = permission.mode,
+            .shell_policy = self.shell_policy,
+            .permission_interaction = self.permission_interaction,
+        };
     }
 
     pub fn failMcpUpdateContractLocked(self: *Session) Error {
@@ -1586,6 +1711,18 @@ pub const Session = struct {
     }
 
     fn destroyRawSession(self: *Session) Error!void {
+        self.lock();
+        const skill = self.skill_restore_inputs;
+        self.skill_restore_inputs = null;
+        self.unlock();
+        if (skill) |inputs| inputs.deinit() catch |err| {
+            self.lock();
+            self.close_finished = true;
+            self.close_failed = true;
+            self.broadcast();
+            self.unlock();
+            return err;
+        };
         var diagnostic = emptyOwnedBytes();
         const status = self.agent_runtime.api.session().destroy()(self.raw, &diagnostic);
         releaseOwned(self.agent_runtime.api, &diagnostic);
@@ -1999,6 +2136,7 @@ pub const Session = struct {
         std.debug.assert(self.active_refs == 0);
         std.debug.assert(self.active_callback_refs == 0);
         std.debug.assert(self.compact_done);
+        std.debug.assert(self.skill_restore_inputs == null);
         self.control_block.deinit();
         self.agent_runtime.allocator.destroy(self.control_block);
         if (self.run_input) |*input|
@@ -2012,6 +2150,7 @@ pub const Session = struct {
         self.agent_runtime.allocator.free(self.workspace_root);
         self.agent_runtime.allocator.free(self.workspace_home);
         self.agent_runtime.allocator.free(self.workspace_epoch);
+        if (self.mcp_restore_selection) |selection| selection.deinit();
     }
 
     pub fn onEvent(

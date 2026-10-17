@@ -9,6 +9,7 @@ import {
   arrayValue,
   wireId,
   positiveWireId,
+  positiveU64WireId,
   numberValue,
   positiveNumber,
   nonNegativeNumber,
@@ -390,6 +391,9 @@ const taskRunReasons = [
   "shutting_down",
 ] as const;
 const taskModelSelectionReasons = [
+  "persistence_unavailable",
+  "persistence_failed",
+  "persistence_outcome_unknown",
   "model_changed",
   "stale_catalog",
   "task_unavailable",
@@ -3286,6 +3290,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     "approvalResult",
     "permissionReviewState",
     "binding",
+    "modelIntent",
     "modelSelectionAvailability",
     "mcpAuthority",
     "skillCatalog",
@@ -3344,6 +3349,31 @@ function decodeTask(value: unknown, path: string): TaskView {
     ),
     unavailableReason,
   };
+  const modelIntent =
+    item.modelIntent === null
+      ? null
+      : (() => {
+          const intent = object(item.modelIntent, `${path}.modelIntent`, [
+            "modelRef",
+            "selectionRevision",
+            "state",
+          ]);
+          const selectionRevision = positiveU64WireId(
+            intent.selectionRevision,
+            `${path}.modelIntent.selectionRevision`,
+          );
+          return {
+            modelRef: decodeRequiredModelRef(
+              intent.modelRef,
+              `${path}.modelIntent.modelRef`,
+            ),
+            selectionRevision,
+            state: enumValue(intent.state, `${path}.modelIntent.state`, [
+              "committed",
+              "outcome_unknown",
+            ] as const),
+          };
+        })();
   const modelSelectionAvailability = enumValue(
     item.modelSelectionAvailability,
     `${path}.modelSelectionAvailability`,
@@ -3351,10 +3381,7 @@ function decodeTask(value: unknown, path: string): TaskView {
       "available",
       "catalog_loading",
       "catalog_unavailable",
-      "execution_replacing",
-      "runtime_detached",
-      "unsupported_source",
-      "authority_changed",
+      "task_unavailable",
     ] as const,
   );
   const mcpAuthority = decodeTaskMcpAuthority(
@@ -3717,6 +3744,7 @@ function decodeTask(value: unknown, path: string): TaskView {
     approvalResult,
     permissionReviewState,
     binding,
+    modelIntent,
     modelSelectionAvailability,
     mcpAuthority,
     skillCatalog: decodeSkillCatalog(item.skillCatalog, `${path}.skillCatalog`),
@@ -5754,7 +5782,12 @@ export function decodeTaskModelSelectionResult(
   value: unknown,
   expectedTaskId: string,
 ): TaskModelSelectionResult {
-  const item = object(value, "$", ["accepted", "taskId", "model", "reason"]);
+  const item = object(value, "$", [
+    "accepted",
+    "taskId",
+    "selectionRevision",
+    "reason",
+  ]);
   const accepted = booleanValue(item.accepted, "$.accepted");
   const taskId = positiveWireId(item.taskId, "$.taskId");
   if (taskId !== expectedTaskId) fail("$.taskId", "response identity mismatch");
@@ -5763,15 +5796,19 @@ export function decodeTaskModelSelectionResult(
     return {
       accepted: true,
       taskId,
-      model: stringValue(item.model, "$.model"),
+      selectionRevision: positiveU64WireId(
+        item.selectionRevision,
+        "$.selectionRevision",
+      ),
       reason: null,
     };
   }
-  if (item.model !== null) fail("$.model", "expected null");
+  if (item.selectionRevision !== null)
+    fail("$.selectionRevision", "expected null");
   return {
     accepted: false,
     taskId,
-    model: null,
+    selectionRevision: null,
     reason: enumValue(item.reason, "$.reason", taskModelSelectionReasons),
   };
 }

@@ -28,6 +28,38 @@ const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
 
+test "recovery capacity observation counts only an owned route scheduled for release" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    try std.testing.expect(runtime.restoreAdmissionAvailable(null));
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(0));
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(std.math.maxInt(u64)));
+    const session = try openSession(runtime);
+    const route = session.id;
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
+    try std.testing.expect(runtime.restoreAdmissionAvailable(route));
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(route + 1));
+    // Projection cannot bypass the existing Runtime refresh fence.
+    runtime.mcp_refresh_running = true;
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
+    runtime.mcp_refresh_running = false;
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
+    try std.testing.expect(runtime.restoreAdmissionAvailable(null));
+    const next = try openSession(runtime);
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(route));
+    try std.testing.expect(runtime.restoreAdmissionAvailable(next.id));
+    const next_route = next.id;
+    try runtime.shutdown();
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(null));
+    try std.testing.expect(!runtime.restoreAdmissionAvailable(next_route));
+}
+
 const TestRunClock = struct {
     snapshot: lifecycle.RunTimeSnapshot = .{},
     samples: usize = 0,
@@ -631,7 +663,13 @@ test "MCP catalog refresh binds explicit Session selection and idle replacement"
         },
         .mcp_selection = selection,
     });
+    var saved = try session.captureRestoreInputs();
+    defer saved.deinit() catch unreachable;
+    try std.testing.expect(saved.mcp != null);
     try session.updateMcpSelection(null);
+    var empty = try session.captureRestoreInputs();
+    defer empty.deinit() catch unreachable;
+    try std.testing.expect(empty.mcp == null);
     fake_core.lock();
     const updates_after_clear = fake_core.mcp_updates;
     const selectors_after_clear = fake_core.last_mcp_update_selector_count;
@@ -645,6 +683,9 @@ test "MCP catalog refresh binds explicit Session selection and idle replacement"
         session.updateMcpSelection(null),
     );
     try session.cancelPreparedRun(queued_run);
+    var retained = try session.captureRestoreInputs();
+    try std.testing.expect(retained.mcp != null);
+    try retained.deinit();
     fake_core.lock();
     const refreshes = fake_core.mcp_refreshes;
     const descriptions = fake_core.mcp_descriptions;
@@ -680,6 +721,9 @@ test "MCP selection mutation preserves reusable and poison status contracts" {
     });
     fake_core.forceNextMcpUpdateStatus(wire.STATUS_BUSY);
     try std.testing.expectError(error.SessionNotIdle, session.updateMcpSelection(null));
+    var after_busy = try session.captureRestoreInputs();
+    try std.testing.expect(after_busy.mcp != null);
+    try after_busy.deinit();
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
     fake_core.forceNextMcpUpdateStatus(wire.STATUS_CHECKPOINT_BUDGET_REQUIRED);
     try std.testing.expectError(
@@ -688,6 +732,9 @@ test "MCP selection mutation preserves reusable and poison status contracts" {
     );
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
     try session.updateMcpSelection(null);
+    var empty = try session.captureRestoreInputs();
+    defer empty.deinit() catch unreachable;
+    try std.testing.expect(empty.mcp == null);
     fake_core.forceNextMcpUpdateStatus(wire.STATUS_STALE_CATALOG);
     try std.testing.expectError(
         error.McpSelectionUpdateFailed,
@@ -1090,6 +1137,130 @@ test "canonical AgentCore resolves additional Skill sources conflicts and Worksp
     defer session.close(.session_close) catch unreachable;
     try session.refreshSkillCatalog(winner.lease, .{ .granted_skill_ids = &.{winner.projection.skills[0].skill_id} });
     try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+}
+
+test "captured Skill restore inputs retain the exact lease policy and Runtime shutdown fence" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var acquisition = try runtime.querySkillCatalog(.{
+        .canonical_user_home = root,
+        .target = .{ .workspace = .{ .canonical_root = root, .epoch = "restore-inputs" } },
+    });
+    const expected = try std.testing.allocator.dupe(u8, acquisition.projection.skills[0].skill_id);
+    defer std.testing.allocator.free(expected);
+    const session = try runtime.createSession(.{
+        .model_binding = fixtureModelBinding(.anthropic_messages),
+        .permission_mode = .default,
+        .shell_policy = .unrestricted,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = root,
+        .workspace_epoch = "restore-inputs",
+        .skill_catalog = acquisition.lease,
+        .skill_policy = .{ .granted_skill_ids = &.{acquisition.projection.skills[0].skill_id} },
+    });
+    var captured = try session.captureRestoreInputs();
+    try std.testing.expectEqual(lifecycle.PermissionMode.default, captured.permission_mode);
+    try std.testing.expectEqual(lifecycle.ShellPolicy.unrestricted, captured.shell_policy);
+    try std.testing.expectEqual(lifecycle.PermissionInteraction.interactive, captured.permission_interaction);
+    try runtime.releaseSkillCatalog(acquisition.lease);
+    acquisition.projection.deinit();
+    try std.testing.expectEqual(@as(usize, 0), fake_core.catalog_releases);
+    try session.close(.session_close);
+    try runtime.releaseClosedSession(session);
+    const restored = captured.skill.?.borrow();
+    try std.testing.expectEqual(@as(usize, 1), restored.policy.granted_skill_ids.len);
+    try std.testing.expectEqualStrings(expected, restored.policy.granted_skill_ids[0]);
+    try std.testing.expectError(error.CatalogLeasesOutstanding, runtime.shutdown());
+    try captured.deinit();
+    try std.testing.expectEqual(@as(usize, 1), fake_core.catalog_releases);
+    try runtime.shutdown();
+}
+
+test "final Skill restore reference release failure retains the closing Session for retry" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var acquisition = try runtime.querySkillCatalog(.{ .canonical_user_home = root, .target = .{ .workspace = .{ .canonical_root = root, .epoch = "release-failure" } } });
+    defer acquisition.projection.deinit();
+    const session = try runtime.createSession(.{
+        .model_binding = fixtureModelBinding(.anthropic_messages),
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = root,
+        .workspace_epoch = "release-failure",
+        .skill_catalog = acquisition.lease,
+        .skill_policy = .{},
+    });
+    try runtime.releaseSkillCatalog(acquisition.lease);
+    fake_core.catalog_release_failures = 1;
+    const destroyed = fake_core.session_destroyed;
+    try std.testing.expectError(error.CatalogReleaseFailed, session.close(.session_close));
+    try std.testing.expectEqual(lifecycle.SessionState.closing, session.snapshot().state);
+    try std.testing.expectEqual(destroyed, fake_core.session_destroyed);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.catalog_releases);
+    try session.close(.session_close);
+    try std.testing.expectEqual(destroyed + 1, fake_core.session_destroyed);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.catalog_releases);
+    try runtime.releaseClosedSession(session);
+}
+
+test "Skill restore capture allocation failures preserve Session authority and lease ownership" {
+    fake_core.reset();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const runtime = try lifecycle.Runtime.initWithApi(std.testing.io, failing.allocator(), &fake_api, .{
+        .run_time_source = lifecycle.RunTimeSource.unavailable,
+        .max_sessions = 1,
+    });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const root = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var acquisition = try runtime.querySkillCatalog(.{ .canonical_user_home = root, .target = .{ .workspace = .{ .canonical_root = root, .epoch = "capture-allocation" } } });
+    defer acquisition.projection.deinit();
+    defer runtime.releaseSkillCatalog(acquisition.lease) catch unreachable;
+    const session = try runtime.createSession(.{
+        .model_binding = fixtureModelBinding(.anthropic_messages),
+        .permission_mode = .default,
+        .shell_policy = .disabled,
+        .workspace = .{ .canonical_root = root, .trust = .explicitly_trusted },
+        .canonical_user_home = root,
+        .workspace_epoch = "capture-allocation",
+        .skill_catalog = acquisition.lease,
+        .skill_policy = .{ .granted_skill_ids = &.{acquisition.projection.skills[0].skill_id} },
+    });
+    defer session.close(.session_close) catch unreachable;
+    for (0..256) |offset| {
+        failing.fail_index = failing.alloc_index + offset;
+        failing.has_induced_failure = false;
+        var captured = session.captureRestoreInputs() catch |err| {
+            failing.fail_index = std.math.maxInt(usize);
+            try std.testing.expect(err == error.OutOfMemory or err == error.PermissionModeUpdateFailed);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+            try std.testing.expectEqual(@as(usize, 0), fake_core.catalog_releases);
+            continue;
+        };
+        failing.fail_index = std.math.maxInt(usize);
+        try std.testing.expect(offset != 0);
+        try std.testing.expectEqualStrings(acquisition.projection.skills[0].skill_id, captured.skill.?.borrow().policy.granted_skill_ids[0]);
+        try captured.deinit();
+        return;
+    }
+    return error.TestUnexpectedResult;
 }
 
 test "Catalog additional sources are encoded exactly and borrowed only for the query" {
@@ -4026,6 +4197,9 @@ test "idle permission mode mutation validates authority and preserves same-mode 
     const changed = try session.updatePermissionMode(.default, .full_access);
     try std.testing.expect(changed.changed);
     try std.testing.expectEqual(@as(u64, 2), changed.policy_generation);
+    var captured = try session.captureRestoreInputs();
+    defer captured.deinit() catch unreachable;
+    try std.testing.expectEqual(lifecycle.PermissionMode.full_access, captured.permission_mode);
     const restored = try session.updatePermissionMode(.full_access, .accept_edits);
     try std.testing.expectEqual(@as(u64, 3), restored.policy_generation);
 }

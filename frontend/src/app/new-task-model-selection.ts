@@ -8,6 +8,9 @@ import type {
 
 export type NewTaskModelOption = {
   selectionId: string;
+  modelRef: ModelRef;
+  sourceGeneration: string;
+  catalogGeneration: string;
   displayName: string;
   metadata: ModelMetadata | null;
 };
@@ -28,41 +31,70 @@ export function newTaskModelSelectionState(
   requested: ModelRef | null,
 ): NewTaskModelSelectionState {
   const active = admission.activeModelRef;
-  const authority = active ? resolveAuthority(models, active.sourceId) : null;
-  const options = authority?.options ?? [];
+  const options = readyModelOptions(models);
+  const selected = requested ?? active;
   const requestedOption = requested
     ? options.find(
         (option) =>
-          authority?.sourceId === requested.sourceId &&
-          option.selectionId === requested.modelId,
+          option.modelRef.sourceId === requested.sourceId &&
+          option.modelRef.modelId === requested.modelId,
       )
     : null;
-  const valid = requested === null || requestedOption != null;
-  const selected = requested ?? active;
   const selectedOption =
     requestedOption ??
-    options.find((option) => option.selectionId === selected?.modelId);
+    (requested === null
+      ? options.find(
+          (option) =>
+            option.modelRef.sourceId === selected?.sourceId &&
+            option.modelRef.modelId === selected?.modelId,
+        )
+      : undefined);
+  const valid = requested
+    ? requestedOption != null
+    : admission.available && selectedOption != null;
   const intent =
-    requestedOption &&
-    active &&
-    requested &&
-    requested.modelId !== active.modelId &&
-    authority
+    requestedOption && requested
       ? {
           targetModelRef: requested,
-          expectedSourceGeneration: authority.sourceGeneration,
-          expectedCatalogGeneration: authority.catalogGeneration,
+          expectedSourceGeneration: requestedOption.sourceGeneration,
+          expectedCatalogGeneration: requestedOption.catalogGeneration,
         }
       : null;
   return {
-    editable: admission.available && authority !== null && options.length !== 0,
+    editable: options.length !== 0,
     valid,
     options,
-    selectedModelId: selected?.modelId ?? "",
+    selectedModelId: selected ? modelOptionId(selected) : "",
     selectedModelLabel: selectedOption?.displayName || selected?.modelId || "",
     selectedMetadata: selectedOption?.metadata ?? null,
     intent,
   };
+}
+
+export function modelOptionId(model: ModelRef): string {
+  return JSON.stringify([model.sourceId, model.modelId]);
+}
+
+export function readyModelOptions(models: ModelsView): NewTaskModelOption[] {
+  if (models.availability !== "ready") return [];
+  return [
+    "metask",
+    ...models.customProviders.map((provider) => provider.id),
+  ].flatMap((sourceId) => {
+    const authority = resolveAuthority(models, sourceId);
+    if (!authority) return [];
+    return authority.options.map((option) => {
+      const modelRef = { sourceId, modelId: option.selectionId };
+      return {
+        ...option,
+        modelRef,
+        selectionId: modelOptionId(modelRef),
+        sourceGeneration: authority.sourceGeneration,
+        catalogGeneration: authority.catalogGeneration,
+        displayName: `${authority.displayName} · ${option.displayName}`,
+      };
+    });
+  });
 }
 
 function resolveAuthority(models: ModelsView, sourceId: string) {
@@ -72,7 +104,6 @@ function resolveAuthority(models: ModelsView, sourceId: string) {
     );
     if (
       !provider ||
-      models.metaskSelection?.sourceId !== sourceId ||
       provider.catalogState !== "ready" ||
       provider.sourceGeneration === "0" ||
       provider.catalogGeneration === "0"
@@ -80,6 +111,7 @@ function resolveAuthority(models: ModelsView, sourceId: string) {
       return null;
     return {
       sourceId,
+      displayName: provider.displayName || "Metask",
       sourceGeneration: provider.sourceGeneration,
       catalogGeneration: provider.catalogGeneration,
       options: provider.models.map((model) => ({
@@ -104,6 +136,7 @@ function resolveAuthority(models: ModelsView, sourceId: string) {
     return null;
   return {
     sourceId,
+    displayName: provider.displayName || provider.id,
     sourceGeneration: provider.sourceGeneration,
     catalogGeneration: provider.catalogGeneration,
     options: provider.models

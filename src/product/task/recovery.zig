@@ -89,6 +89,7 @@ pub fn evaluateRecoveryAdmission(facts: RecoveryAdmissionFacts) AdmissionDecisio
 }
 
 pub fn project(facts: RecoveryAdmissionFacts) Projection {
+    if (facts.operation == .restore) return unavailable(.session_recovery_in_progress);
     return switch (facts.attachment) {
         .closing => unavailable(.closing),
         .attached_available => .{ .continuation = .available },

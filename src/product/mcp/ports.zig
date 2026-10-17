@@ -35,6 +35,12 @@ pub const Catalog = struct {
         *const agent.McpActivation,
         []const agent.McpServerAllowlist,
     ) CatalogError!?*agent.McpSelection,
+    prepare_restore_selection_fn: *const fn (
+        *anyopaque,
+        *const agent.McpRestoreSelection,
+        *const agent.McpActivation,
+        []const agent.McpActivationTool,
+    ) CatalogError!*agent.McpSelection,
 
     pub fn activate(self: Catalog) CatalogError!agent.McpActivationOutcome {
         return self.activate_fn(self.context);
@@ -50,6 +56,10 @@ pub const Catalog = struct {
             activation,
             allowlists,
         );
+    }
+
+    pub fn prepareRestoreSelection(self: Catalog, original: *const agent.McpRestoreSelection, activation: *const agent.McpActivation, ceiling: []const agent.McpActivationTool) CatalogError!*agent.McpSelection {
+        return self.prepare_restore_selection_fn(self.context, original, activation, ceiling);
     }
 };
 

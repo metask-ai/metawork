@@ -143,6 +143,9 @@ pub const PermissionReviewState = struct {
 pub const State = struct {
     attachment: Attachment = .{ .detached = .cold_start },
     mcp_authority_at_creation: McpAuthorityAtCreation = .unavailable,
+    /// Main-thread projection retained across the old Session's close and a
+    /// possible original restore. Workers receive only Agent-owned inputs.
+    restore_catalog: ?catalog_snapshot.Snapshot = null,
     worker_leases: worker_lease.WorkerLeaseSet = .{},
     pending_ui_request_id: u64 = 0,
     pending_ui_order: u64 = 0,
@@ -166,11 +169,6 @@ pub const State = struct {
     /// Session owner. Even a reusable close failure cannot install it.
     discarding_restore: bool = false,
     cancel_requested: bool = false,
-    /// Runtime-only model selection requested while the Session is busy.
-    /// It is deliberately not part of task persistence and is dropped on
-    /// restart/detach.
-    pending_model: ?[]u8 = null,
-
     pub fn attached(self: *State) ?*LiveAttachment {
         return switch (self.attachment) {
             .attached => |*value| value,

@@ -214,6 +214,10 @@ pub const Access = struct {
         return self.get().setModel(model);
     }
 
+    pub fn captureRestoreInputs(self: *Access) !agent.SessionRestoreInputs {
+        return self.get().captureRestoreInputs();
+    }
+
     pub fn sessionState(self: *Access) agent.SessionState {
         return self.get().snapshot().state;
     }

@@ -475,7 +475,7 @@ Workbench 左栏底部固定显示紧凑的 Metask identity：已登录时只显
 ### 6.1 核心规则
 
 - 每个 Task 同时最多一个 active operation；当前 operation 可以是 Run、manual compact 或 Conversation restore，三者不能并发；
-- 每个 Task 创建时建立第一个 execution binding epoch，固化不含 secret 的 protocol 与 opaque execution generation，并让对应 Agent Session 持有 owned ExecutionConfig；模型是独立的 Task binding，Product Control 以 `modelSelectionAvailability` 发布跨 owner 可用原因，Renderer 不比较 Models/New task/Task 字段重建 authority。切换不修改 `binding.epoch`；默认连接/API/credential authority 变化不静默改写已有 Task，并使其模型控件只读；
+- 每个 Task 创建时建立 execution binding epoch，并持有 owned ExecutionConfig。下一轮模型意图与实际 binding、历史 Run 分别呈现；保存意图和同连接 setModel 不推进 epoch。默认配置变化不改写既有 Task，也不禁用其模型选择；实际连接重绑定遵守 Task 执行事务和 epoch 合同；
 - 多个 Task 可以后台运行，超过 Host executor 能力时明确排队；
 - 切换 Task 不停止执行；
 - `Stop task` 只停止当前执行，不删除历史、输入或已有文件；
@@ -706,10 +706,10 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 
 模型选择规则：
 
-- New task 默认显示当前 active Provider 与模型；当 Host snapshot 能证明 active source 的 current catalog 可用时，Composer 菜单可以为本次 Task 选择该 source 中的另一个 ready 模型。该 runtime-only 选择不修改 global default，不开放跨 credential 或跨 Provider 候选；重新打开 New task 时恢复 active default；
-- 模型不可用或尚未设置 global default 时，Composer 提供进入 `Models` 设置的导航；不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
+- New task 默认显示当前 active Provider 与模型；Composer 菜单列出 Host Models snapshot 中各可用来源的 ready 模型，以来源和模型共同区分候选。选择只用于本次 Task，不修改 global default；明确选择与默认相同时也保留该选择。重新打开 New task 时恢复初始默认意图；
+- 没有可用 global default 时仍允许选择当前可用的其他模型并发送；没有可用候选时提供进入 `Models` 设置的导航。不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
 - Models默认来源、Metask API/protocol/credential authority或 ready Custom Provider模型变化先更新 Models desired selection及对应 revision/source generation，再由 Product Control独立 reconcile active binding generation。两类变化都不热替换已有 live Task；detached历史 Task可在 §6.4的 Conversation restore中采用同 protocol、可承载其 pinned model的当前 credential authority，并通过窄 binding adoption提交新 generation，任意 protocol/model变化仍只能走未来显式 rebind；
-- 已有 Task 的 Composer 显示当前 binding epoch 的模型事实，历史按 epoch 保留原模型；`available` 时菜单列出当前 Metask catalog 候选，即使 pinned model 已离开目录也允许切换到有效候选；`catalog_loading`、`catalog_unavailable` 与 `execution_replacing` 保留菜单但禁用并显示对应原因；`runtime_detached`、`unsupported_source` 与 `authority_changed` 只显示 pinned model 和原因，不展示必然被 Host 拒绝的菜单。以上状态只消费 Host 发布的 `modelSelectionAvailability`；
+- 已有 Task 的 Composer 从 Host modelIntent 显示下一轮选择；当前 Run 保留原执行模型，运行时选择显示“下一轮使用”。菜单列出所有 ready Metask/Custom Provider，使用完整来源与模型区分同名项，不受 global default 的忙碌状态约束。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用发送及再次选择，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
 

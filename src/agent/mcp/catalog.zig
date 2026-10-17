@@ -86,6 +86,25 @@ pub const Selection = opaque {
     }
 };
 
+/// Process-only original selection and connection provenance. It is not a
+/// live Selection and cannot be passed to Core or have its generation edited.
+pub const RestoreSelection = opaque {
+    pub fn deinit(self: *RestoreSelection) void {
+        const storage = restoreStorage(self);
+        const allocator = storage.allocator;
+        storage.arena.deinit();
+        allocator.destroy(storage);
+    }
+
+    pub fn clone(self: *const RestoreSelection, allocator: std.mem.Allocator) std.mem.Allocator.Error!*RestoreSelection {
+        const source = restoreStorageConst(self);
+        const storage = try newRestoreStorage(allocator, source.owner_id, source.tools.len);
+        errdefer @as(*RestoreSelection, @ptrCast(storage)).deinit();
+        for (source.tools, storage.tools) |tool, *target| target.* = try copyRestoreTool(storage.arena.allocator(), tool);
+        return @ptrCast(storage);
+    }
+};
+
 pub const ActivationState = enum {
     ready,
     degraded,
@@ -180,6 +199,7 @@ pub const Error = error{
     DuplicateCatalogIdentity,
     InvalidSelection,
     StaleSelection,
+    RestoreSourceChanged,
 };
 
 const ProjectionStorage = struct {
@@ -203,6 +223,102 @@ const SelectionStorage = struct {
     raw_selectors: []wire.McpSelectorV1,
     published_tools: []const ActivationTool,
 };
+
+const RestoreTool = struct {
+    binding_identity: [32]u8,
+    configuration_fingerprint: [32]u8,
+    server_id: []const u8,
+    namespace: []const u8,
+    name: []const u8,
+};
+
+const RestoreStorage = struct {
+    allocator: std.mem.Allocator,
+    owner_id: u64,
+    arena: std.heap.ArenaAllocator,
+    tools: []RestoreTool,
+};
+
+fn restoreStorage(value: *RestoreSelection) *RestoreStorage {
+    return @ptrCast(@alignCast(value));
+}
+
+fn restoreStorageConst(value: *const RestoreSelection) *const RestoreStorage {
+    return @ptrCast(@alignCast(value));
+}
+
+fn newRestoreStorage(allocator: std.mem.Allocator, owner_id: u64, count: usize) std.mem.Allocator.Error!*RestoreStorage {
+    const storage = try allocator.create(RestoreStorage);
+    errdefer allocator.destroy(storage);
+    storage.* = .{ .allocator = allocator, .owner_id = owner_id, .arena = std.heap.ArenaAllocator.init(allocator), .tools = &.{} };
+    errdefer storage.arena.deinit();
+    storage.tools = try storage.arena.allocator().alloc(RestoreTool, count);
+    return storage;
+}
+
+fn copyRestoreTool(allocator: std.mem.Allocator, tool: RestoreTool) std.mem.Allocator.Error!RestoreTool {
+    return .{
+        .binding_identity = tool.binding_identity,
+        .configuration_fingerprint = tool.configuration_fingerprint,
+        .server_id = try allocator.dupe(u8, tool.server_id),
+        .namespace = try allocator.dupe(u8, tool.namespace),
+        .name = try allocator.dupe(u8, tool.name),
+    };
+}
+
+pub fn captureRestoreSelection(allocator: std.mem.Allocator, owner_id: u64, selection: *const Selection, servers: []const ExpectedServer) (Error || std.mem.Allocator.Error)!*RestoreSelection {
+    const original = selectionStorageConst(selection);
+    if (original.owner_id != owner_id) return error.CatalogBindingMismatch;
+    const storage = try newRestoreStorage(allocator, owner_id, original.raw_selectors.len);
+    errdefer @as(*RestoreSelection, @ptrCast(storage)).deinit();
+    for (original.raw_selectors, storage.tools) |selector, *target| {
+        const server = expectedServer(servers, selector.server_binding_identity) orelse return error.RestoreSourceChanged;
+        if (std.mem.allEqual(u8, &server.configuration_fingerprint, 0)) return error.RestoreSourceChanged;
+        target.* = try copyRestoreTool(storage.arena.allocator(), .{
+            .binding_identity = selector.server_binding_identity,
+            .configuration_fingerprint = server.configuration_fingerprint,
+            .server_id = server.id,
+            .namespace = server.namespace,
+            .name = sdk.borrowedBytes(selector.tool_name) catch return error.InvalidSelection,
+        });
+    }
+    return @ptrCast(storage);
+}
+
+/// Revalidates the original sources, then intersects their exact selectors
+/// with today's validated catalog and allowlists. Core owns schema/permission
+/// compatibility against the checkpoint; this never adds a newly allowed tool.
+pub fn restoreSelectionForActivation(allocator: std.mem.Allocator, owner_id: u64, original: *const RestoreSelection, activation: *const Activation, servers: []const ExpectedServer, ceiling: []const ActivationTool) (Error || std.mem.Allocator.Error)!*Selection {
+    const saved = restoreStorageConst(original);
+    const current = activationStorageConst(activation);
+    if (saved.owner_id != owner_id or !projectionBelongsTo(current.projection, owner_id)) return error.CatalogBindingMismatch;
+    const projection = projectionStorageConst(current.projection);
+    var selectors: std.ArrayList(Selector) = .empty;
+    defer selectors.deinit(allocator);
+    var published: std.ArrayList(ActivationTool) = .empty;
+    defer published.deinit(allocator);
+    for (saved.tools) |tool| {
+        const server = expectedServer(servers, tool.binding_identity) orelse return error.RestoreSourceChanged;
+        if (!std.mem.eql(u8, server.id, tool.server_id) or !std.mem.eql(u8, server.namespace, tool.namespace) or
+            !std.mem.eql(u8, &server.configuration_fingerprint, &tool.configuration_fingerprint)) return error.RestoreSourceChanged;
+        const observed = projectionServer(projection.servers, tool.binding_identity) orelse continue;
+        if (!observed.fresh or !projectionContainsTool(projection.tools, tool.binding_identity, tool.name)) continue;
+        const allowed = for (server.allowed_tools) |name| {
+            if (std.mem.eql(u8, name, tool.name)) break true;
+        } else false;
+        if (!allowed) continue;
+        const admitted = for (ceiling) |current_tool| {
+            if (std.mem.eql(u8, current_tool.server_id, tool.server_id) and std.mem.eql(u8, current_tool.name, tool.name)) break true;
+        } else false;
+        if (!admitted) continue;
+        try selectors.append(allocator, .{ .binding_identity = tool.binding_identity, .tool_name = tool.name });
+        try published.append(allocator, .{ .server_id = tool.server_id, .name = tool.name });
+    }
+    const selection = try createSelection(allocator, owner_id, current.projection, selectors.items);
+    errdefer selection.deinit();
+    try publishSelectionTools(selection, published.items);
+    return selection;
+}
 
 const ActivationStorage = struct {
     allocator: std.mem.Allocator,
@@ -550,6 +666,103 @@ fn publishSelectionTools(
         .name = try arena.dupe(u8, source.name),
     };
     storage.published_tools = published;
+}
+
+fn testRestoreActivation(allocator: std.mem.Allocator, owner_id: u64, generation: u64, names: []const []const u8, servers: []const ExpectedServer) !*Activation {
+    var temporary = std.heap.ArenaAllocator.init(allocator);
+    defer temporary.deinit();
+    var identity_text: [64]u8 = undefined;
+    const identity = encodeIdentity(servers[0].binding_identity, &identity_text);
+    const tools = try temporary.allocator().alloc(sdk.protocol.McpCatalogTool, names.len);
+    for (names, tools) |name, *tool| tool.* = .{
+        .server_binding_identity = identity,
+        .canonical_name = name,
+        .schema_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .permission_binding = "fixture-binding",
+    };
+    const projection = try copyProjection(allocator, owner_id, .{
+        .schema = "agentcore.mcp-catalog/v1",
+        .catalog_generation = generation,
+        .catalog_fingerprint = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        .servers = &.{.{
+            .server_binding_identity = identity,
+            .namespace = servers[0].namespace,
+            .negotiated_protocol = "2026-07-28",
+            .server_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            .cache_scope = "private",
+            .fresh = true,
+            .ttl_remaining_ms = 1000,
+            .tool_offset = 0,
+            .tool_count = @intCast(names.len),
+        }},
+        .tools = tools,
+        .issues = &.{},
+    }, servers);
+    errdefer projection.deinit();
+    return createActivation(allocator, 1, owner_id, projection, servers);
+}
+
+test "MCP restore revalidates original sources and intersects selectors across catalog generations" {
+    const servers = [_]ExpectedServer{.{ .id = "files", .binding_identity = @splat(1), .namespace = "files", .allowed_tools = &.{ "read", "write", "new" }, .configuration_fingerprint = @splat(7) }};
+    const old = try testRestoreActivation(std.testing.allocator, 11, 2, &.{ "read", "write" }, &servers);
+    defer old.deinit();
+    const selected = try createSelection(std.testing.allocator, 11, activationStorageConst(old).projection, &.{.{ .binding_identity = @splat(1), .tool_name = "read" }});
+    const saved = try captureRestoreSelection(std.testing.allocator, 11, selected, &servers);
+    defer saved.deinit();
+    selected.deinit();
+    const clone = try saved.clone(std.testing.allocator);
+    defer clone.deinit();
+    const current = try testRestoreActivation(std.testing.allocator, 11, 9, &.{ "read", "write", "new" }, &servers);
+    defer current.deinit();
+    const restored = try restoreSelectionForActivation(std.testing.allocator, 11, clone, current, &servers, current.selectedTools());
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(u64, 9), selectionGeneration(restored));
+    try std.testing.expectEqual(@as(usize, 1), restored.selectedTools().len);
+    try std.testing.expectEqualStrings("read", restored.selectedTools()[0].name);
+    try std.testing.expectEqual(@as(u64, 2), projectionGeneration(activationStorageConst(old).projection));
+    try std.testing.expectError(error.CatalogBindingMismatch, restoreSelectionForActivation(std.testing.allocator, 12, saved, current, &servers, current.selectedTools()));
+    var changed = servers;
+    changed[0].configuration_fingerprint = @splat(8);
+    try std.testing.expectError(error.RestoreSourceChanged, restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &changed, current.selectedTools()));
+    // Revoking every grant must not hide an incompatible original source.
+    try std.testing.expectError(error.RestoreSourceChanged, restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &changed, &.{}));
+    try std.testing.expectError(error.RestoreSourceChanged, restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &.{}, current.selectedTools()));
+    changed = servers;
+    changed[0].allowed_tools = &.{"write"};
+    const narrowed = try restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &changed, current.selectedTools());
+    defer narrowed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), narrowed.selectedTools().len);
+    const missing = try testRestoreActivation(std.testing.allocator, 11, 10, &.{"write"}, &servers);
+    defer missing.deinit();
+    const degraded = try restoreSelectionForActivation(std.testing.allocator, 11, saved, missing, &servers, missing.selectedTools());
+    defer degraded.deinit();
+    try std.testing.expectEqual(@as(usize, 0), degraded.selectedTools().len);
+    const revoked = try restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &servers, &.{});
+    defer revoked.deinit();
+    try std.testing.expectEqual(@as(usize, 0), revoked.selectedTools().len);
+    // A grant with the same tool name on another server is unrelated authority.
+    const different = try restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &servers, &.{.{ .server_id = "other", .name = "read" }});
+    defer different.deinit();
+    try std.testing.expectEqual(@as(usize, 0), different.selectedTools().len);
+}
+
+test "MCP restore capture clone and revalidation are allocation failure atomic" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const servers = [_]ExpectedServer{.{ .id = "files", .binding_identity = @splat(1), .namespace = "files", .allowed_tools = &.{"read"}, .configuration_fingerprint = @splat(7) }};
+            const activation = try testRestoreActivation(allocator, 11, 2, &.{"read"}, &servers);
+            defer activation.deinit();
+            const selected = activation.takeSelection().?;
+            defer selected.deinit();
+            const saved = try captureRestoreSelection(allocator, 11, selected, &servers);
+            defer saved.deinit();
+            const clone = try saved.clone(allocator);
+            defer clone.deinit();
+            const restored = try restoreSelectionForActivation(allocator, 11, clone, activation, &servers, activation.selectedTools());
+            defer restored.deinit();
+            try std.testing.expectEqual(@as(usize, 1), restored.selectedTools().len);
+        }
+    }.run, .{});
 }
 
 pub fn belongsTo(selection: *const Selection, owner_id: u64) bool {

@@ -51,6 +51,12 @@ npm test
 
 模型元数据的定向 Native 入口为 `zig build test-model-metadata`，使用同一 canonical bundle 与正式 module graph，覆盖 Models parser/合同/持久化和受影响的 Host serializer、Bridge 入站 fixture。Renderer 侧运行 typecheck 与 `scripts/workbench-contract.test.mjs`、`scripts/new-task-model-selection.test.mjs`。纯模型字段解析修正可用此入口观察完整字段、ownership、严格 wire 与刷新行为，避免重复无关生命周期测试。
 
+Task 模型意图与选择的定向入口为 `zig build test-task-model-selection`，覆盖 revision CAS、默认配置独立性、confirmed history 写入及未知结果读回、Host 投影、严格 Bridge payload 与逐 generation 的不可变 Run protocol 历史。真实 Task/Run/queued input 和 Session setModel 行为归 `test-lifecycle`；其中跨连接事务必须观察完整目标配置、基线确认、旧 Session 释放、目标 checkpoint adoption、失败后一次原配置恢复，以及排队输入成功续跑或失败 held。Renderer 运行 typecheck 与 `task-model-selection`、`new-task-model-selection`、`bridge-client`、`workbench-contract` suites。模型选择不得改变已有 Run 的执行及权限事实；fixture 不替代真实 Core、能力连续性和桌面验收。
+
+同进程能力输入由 `test-mcp-catalog` 验证 MCP 原来源指纹、跨 generation 交集、收缩/不扩大及分配失败；`test-lifecycle` 验证 Skill query/Session/捕获 owner 的精确释放与 Runtime shutdown fence、capture 分配失败不改 authority、成功权限 mutation 后捕获，以及替换失败。`test-mcp-interop` 使用当前 canonical Core、真实临时 Skill 和本地 HTTP MCP：export 后释放原 Session/query owner，额外查询更宽目录，使用原输入恢复并实际执行原 Skill/MCP；未授权 Skill 仍被拒绝，缩小 ceiling 返回 degraded 并撤销旧 Skill。Core session allow/deny 在恢复前各由一次真实 UI 回应建立，恢复后同参数允许/拒绝均不再询问，MCP trace 精确检查实际调用且无历史重放。模型端为本地协议 fixture，不将该证据扩大为远端供应商兼容性承诺。
+
+同一 `test-mcp-interop` 还必须经过真实 Product Control 的模型选择、恢复、Run 和权限响应入口，覆盖四种协议间的完整组合：单 Session 容量下释放旧 attachment 后恢复同一逻辑 Conversation，保留图片和工具历史、原 pinned Skill、MCP selector 及 session allow/deny，目录刷新和新增全局 Skill 不扩大原 Task。以实际 binding protocol、请求凭据匹配、Provider 请求中的原图片字节、Task namespace 中的原件及真实 MCP RPC 观察结果；使用真实 history/checkpoint store。Workspace 外 Write 的一次性批准在切换后仍需再次询问，切换本身不得改写其文件；full access 保持原 mode/shell/interaction，也不能取得未选择的 Skill/MCP。通过 Product 授权命令撤销 Skill 或工具后必须安全 degraded，模型再尝试原工具名不得产生额外 RPC；更换 MCP 连接来源即使 schema 相同，也须在关闭旧 Session 前拒绝沿用原 authority。PNG 预览 port 仅接受固定的已编码 PNG，不替代桌面的系统图片解码、预览与原生输入验收。
+
 `npm test` 必须校验 canonical staged AgentCore bundle、执行 Renderer typecheck，并运行自动发现的 Node tests 与正式 Native test graph。Node 和 Native 阶段都必须得到结果；一侧失败不得遮蔽另一侧。bundle 缺失或不匹配时必须明确失败，不能跳过 AgentCore 用例后报告成功。
 
 Renderer `check/test` 必须确定性验证由 Host wire 类型生成的源码没有过期；`dev/build` 在构建 Renderer 前更新生成结果。生成器只消费纯合同，在构建机运行，不加载 Product Runtime 或 AgentCore Session。结构派生的验收同时覆盖实际 Host 编码、实际 Renderer 解码、独立的字段/nullable/enum/整数拒绝用例；不能只验证生成器与自己的输出相符，也不能用同一生成器制造全部 fixture 预期。
@@ -79,11 +85,17 @@ candidate probe、真实桌面验收、签名、公证和发布验证不属于 `
 | macOS 分发                        | `npm run package:macos`                                                                           | 具体签名、公证和 artifact Gate 见 [macOS 分发](macos-distribution.md)                                                                                                                                                                                                           |
 | Windows 分发                      | `npm run package:windows`                                                                         | 具体安装器、签名和 artifact Gate 见 [Windows 分发](windows-distribution.md)                                                                                                                                                                                                     |
 
+恢复时的 Product 能力上限使用 `zig build test-product-skill-policy test-product-skill-runtime` 定向验证：原 pinned Skill ID、来源开关、稳定 policy key、Manual/Automatic Workspace 隔离与未知授权拒绝。MCP 当前授权由 `test-product-mcp-runtime` 和 `test-mcp-interop` 共同观察，后者须经 Product MCP 恢复入口验证连接批准或工具授权撤销后不再提供工具，模型尝试旧工具名也不能产生新 MCP 请求。上述定向入口沿用正式 module graph，不替代跨连接 Task 事务与桌面验收。
+
+detached Task 模型恢复由 `test-lifecycle` 覆盖跨重启的持久意图：全局默认为空时仍按原 Task 的精确来源恢复或 fresh attach，跨 protocol 保留历史 Run，新 checkpoint 与实际模型一致；目标移除时保留意图和旧 binding，明确失败且不得接纳替代模型。
+
 ## 变更验证 Gate
 
 Models 默认选择与新 Task admission 的回归必须覆盖：同一 source identity/source generation/protocol 内默认模型 A→B→A 只推进 selection revision 并保持 Product execution generation；旧 `generation + selection revision` pair 被拒绝，新 pair 被接受；credential、endpoint、protocol 或 source authority 变化仍建立新 generation。New task 模型 override 还必须覆盖默认 null、不修改 global default、同源非默认模型被写入新 Task 与 owned ExecutionConfig、source/catalog generation 漂移或 membership 失效时拒绝且不回退；Renderer、Bridge 和 Product Control 必须各自固定这条 payload/authority 链路。
 
-已有 Task 模型选择投影的回归必须覆盖 Host 对 `available | catalog_loading | catalog_unavailable | execution_replacing | runtime_detached | unsupported_source | authority_changed` 的跨 owner 判定、serializer 与严格 Renderer decoder；Renderer 行为测试必须证明它只消费该枚举，暂态保留 disabled selector，detached/unsupported/changed 显示带原因只读值，缺失或未知枚举 fail closed。provider 的非 authority 失败不得单独撤销选择，活跃 Run 仍沿用 pending model 语义。
+已有 Task 模型选择投影的回归必须覆盖 Host 对 `available | catalog_loading | catalog_unavailable | task_unavailable` 的跨 owner 判定、serializer 与严格 Renderer decoder；Renderer 只消费该枚举，目录更新保留 disabled selector，生命周期不可编辑时显示只读值，缺失、已退休或未知枚举 fail closed。detached、Custom Provider 来源、全局默认执行替换与无关目录刷新不得单独撤销选择。活跃 Run 冻结原执行配置，Task 持久模型意图独立提交，尚未接纳的输入使用最新已提交意图。跨来源或协议变更须通过真实 Product/当前 canonical Core 的 checkpoint 事务回归，覆盖原 Skill/MCP/权限上限、媒体与工具上下文、一次回退、无 effect 重放、closing owner、未知提交的多 witness 保留和确认后的 blob 退休；本地协议 fixture 不替代外部供应商和真实桌面交互验收。
+
+Windows 桌面模型切换由 `node scripts/run-agentcore-vertical-windows.mjs` 消费实际 automation 构建，沿真实 WebView、Bridge、Product 与 canonical Core 验证。设置 `METAWORK_MODEL_SWITCH_ONLY=1` 可单独执行该段，复用原有进程内 fixture vault，不读取或清除系统账户凭据。该段须观察运行中下一轮选择、完整连接与协议变更、上下文和历史 Run、独立默认值、键盘菜单、桌面与 390px 深浅主题及减少动效，生成页面截图和结构化证据。WebView 定向输入的成功不替代全量 desktop vertical 或原生窗口前台与系统按键检查；全量 Windows 入口仍执行原有检查后运行同一模型切换段。
 
 选择能观察真实失败模式的最小充分验证层；文件位置不能反向决定 owner，也不因脚本名、lock 路径或构建文件变化机械扩大平台矩阵。
 

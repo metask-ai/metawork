@@ -219,9 +219,15 @@ pub fn build(b: *std.Build) void {
         spec.root_module.link_libc = bundle.link_libc;
         const tests = b.addTest(.{ .name = spec.name, .root_module = spec.root_module });
         artifacts.tests.step.dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_skill_runtime)
+            b.step("test-product-skill-runtime", "Run Product Skill runtime tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_skill_policy)
+            b.step("test-product-skill-policy", "Run Product Skill authority policy tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.product_task_runtime)
+            b.step("test-product-task-runtime", "Run Product Task runtime kernel tests").dependOn(&b.addRunArtifact(tests).step);
     }
-    const model_metadata_step = b.step("test-model-metadata", "Run Models declarations and their Host/Renderer contract tests");
-    for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers }) |module| {
+    const model_metadata_step = b.step("test-model-metadata", "Run Models declarations, resolution and Host/Renderer contract tests");
+    for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers, test_modules.models_runtime }) |module| {
         model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
     }
     model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{
@@ -231,6 +237,20 @@ pub fn build(b: *std.Build) void {
     model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{
         .root_module = test_modules.bridge,
         .filters = &.{"complete model metadata"},
+    })).step);
+    const task_model_step = b.step("test-task-model-selection", "Run Task model intent, selection and strict Bridge tests");
+    task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_task_persistence })).step);
+    task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = test_modules.product_task_runtime,
+        .filters = &.{ "Task model", "pending model rebind" },
+    })).step);
+    task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = test_modules.product_control_runtime,
+        .filters = &.{ "Task model", "default replacement preserves", "same-source default model", "snapshot serializer" },
+    })).step);
+    task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{
+        .root_module = test_modules.bridge,
+        .filters = &.{ "Task model", "Dispatcher validates authority", "mutation response encoders" },
     })).step);
     const permission_review_tests = b.addTest(.{
         .name = "metawork-product-permission-review-focused",
@@ -561,6 +581,7 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_product_task", modules.product_task);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("metawork_product_models_contract", modules.models_contract);
+    fixture.addImport("product_models_ports", modules.models_ports);
     fixture.addImport("event_pump", modules.event_pump);
     fixture.addImport("metask_agentcore", modules.sdk);
     fixture.addImport("product_control_executor", modules.product_control_executor);
@@ -849,6 +870,9 @@ fn addMcpInteropTests(
     cases.addImport("metawork_mcp_platform", modules.mcp_platform);
     cases.addImport("metawork_product_control", modules.product_control);
     cases.addImport("metawork_product_mcp", modules.product_mcp);
+    cases.addImport("metawork_product_task", modules.product_task);
+    cases.addImport("metawork_product_skill", modules.product_skill);
+    cases.addImport("product_models_ports", modules.models_ports);
     cases.addOptions("mcp_interop_options", fixture_options);
     const tests = b.addTest(.{
         .name = "metawork-mcp-interop",

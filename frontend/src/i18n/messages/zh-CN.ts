@@ -1198,14 +1198,8 @@ export const zhCN: Record<MessageId, string> = {
   "settings.task_model_catalog_loading": "模型目录正在更新，完成后可继续选择。",
   "settings.task_model_catalog_unavailable":
     "当前模型目录不可用；任务仍保留原模型，目录恢复后可再次选择。",
-  "settings.task_model_execution_replacing":
-    "默认执行配置正在切换，完成后可继续选择。",
-  "settings.task_model_runtime_detached":
-    "此任务的运行时已分离；恢复会话后才能修改模型。",
-  "settings.task_model_unsupported_source":
-    "此任务使用自定义 Provider，当前不支持在会话中切换模型。",
-  "settings.task_model_authority_changed":
-    "此任务保留原执行配置；Provider、凭据或协议已变化，无法安全切换模型。",
+  "settings.task_model_task_unavailable":
+    "此任务当前不可编辑，暂时无法修改模型。",
   "outcome.completed": "已完成",
   "outcome.stopped": "已停止",
   "outcome.cancelled": "已停止",
@@ -1252,6 +1246,11 @@ export const zhCN: Record<MessageId, string> = {
   "task.model_pending": "下一轮使用：{model}",
   "mutation.reason.recovery_unavailable": "当前保存状态已无法恢复此会话。",
   "mutation.reason.queued_input_present": "请先编辑或撤回待发送消息。",
+  "mutation.reason.persistence_unavailable":
+    "模型选择无法保存，请先恢复任务历史存储。",
+  "mutation.reason.persistence_failed": "模型选择保存失败，原选择保持不变。",
+  "mutation.reason.persistence_outcome_unknown":
+    "模型选择的保存结果尚未确认，请恢复任务历史后再发送。",
   "mutation.reason.task_busy": "该任务正在执行中。",
   "mutation.reason.no_history": "请先运行一次任务，再压缩上下文。",
   "mutation.reason.catalog_loading": "相关能力目录正在刷新，请稍后重试。",

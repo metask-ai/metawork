@@ -389,14 +389,22 @@ test "catalog compilation applies user and Workspace enablement policy" {
 /// when the resolved winner came from workspace data.
 pub fn restrictToPersonalSources(snapshot: *catalog.Snapshot) void {
     for (snapshot.skills) |*skill| {
-        const known_personal = if (sources.findId(skill.source_instance_id)) |id|
-            sources.definition(id).scope == .user
-        else
-            std.mem.eql(u8, skill.source_instance_id, "agents.user.default") or
-                std.mem.eql(u8, skill.source_instance_id, sources.builtin_source_instance_id);
-        skill.enabled = skill.enabled and skill.source_scope == .user and
-            std.mem.eql(u8, skill.provider_id, "agents.directory") and known_personal;
+        skill.enabled = skill.enabled and restoreSourceAllowed(skill.*, .{ .values = @splat(true) }, true);
     }
+}
+
+/// A pinned winner keeps its original concrete ID and content. Current source
+/// switches can withdraw that authority; a newly resolved winner cannot add it.
+pub fn restoreSourceAllowed(skill: catalog.SkillProjection, selection: sources.Selection, personal_only: bool) bool {
+    if (!std.mem.eql(u8, skill.provider_id, "agents.directory")) return false;
+    if (personal_only and skill.source_scope != .user) return false;
+    if (sources.findId(skill.source_instance_id)) |id| {
+        const definition = sources.definition(id);
+        return definition.scope == skill.source_scope and selection.enabled(id);
+    }
+    if (std.mem.eql(u8, skill.source_instance_id, "agents.user.default") or
+        std.mem.eql(u8, skill.source_instance_id, sources.builtin_source_instance_id)) return skill.source_scope == .user;
+    return std.mem.eql(u8, skill.source_instance_id, "agents.workspace.default") and skill.source_scope == .workspace;
 }
 
 test "Automatic policy grants only eligible resolved personal winners" {

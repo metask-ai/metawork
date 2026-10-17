@@ -277,6 +277,19 @@ pub const Runtime = struct {
         };
     }
 
+    /// Rebind the original Task's exact selectors under today's Product grants.
+    /// Null original authority stays null even while unrelated MCP state moves.
+    pub fn restoreAuthority(self: *Runtime, original: ?*const agent.McpRestoreSelection) Error!state_module.RecoveryMcpAuthority {
+        const saved = original orelse return .{ .selection = null, .catalog_generation = null };
+        var current = try self.recoveryAuthority();
+        defer current.deinit();
+        const activation = self.state.activation orelse return error.RecoveryUnavailable;
+        return .{
+            .selection = try self.ports.catalog.prepareRestoreSelection(saved, activation, if (current.selection) |selection| selection.selectedTools() else &.{}),
+            .catalog_generation = current.catalog_generation,
+        };
+    }
+
     pub fn inspectDesiredConfiguration(
         self: *const Runtime,
     ) ?configuration.ManagementInspection {
@@ -1647,6 +1660,10 @@ const TestHarness = struct {
         return null;
     }
 
+    fn prepareRestoreSelection(_: *anyopaque, _: *const agent.McpRestoreSelection, _: *const agent.McpActivation, _: []const agent.McpActivationTool) ports_module.CatalogError!*agent.McpSelection {
+        return error.InvalidMcpSelection;
+    }
+
     fn now(_: ?*anyopaque) ?u64 {
         return 100;
     }
@@ -1679,6 +1696,7 @@ const TestHarness = struct {
                 .context = self,
                 .activate_fn = activate,
                 .create_admission_selection_fn = createAdmissionSelection,
+                .prepare_restore_selection_fn = prepareRestoreSelection,
             },
             .timer = .{
                 .enabled = true,

@@ -595,6 +595,7 @@ pub const TaskWire = struct {
     permission_review_delegated: bool = false,
     approval_revision: u64 = 1,
     binding: BindingWire,
+    model_intent: ?ModelIntentWire = null,
     next_run_generation: u64,
     active_operation: ?OperationWire,
     runs: []RunWire,
@@ -648,6 +649,12 @@ test "checkpoint wire contains only blob, session binding, and commit anchor" {
         .{ "logical_session_id", "last_run_id", "last_compact_id", "model" },
     ) |field, expected| try std.testing.expectEqualStrings(expected, field.name);
 }
+
+pub const ModelIntentWire = struct {
+    source_id: []const u8,
+    model_id: []const u8,
+    revision: u64,
+};
 
 pub const BindingWire = struct {
     epoch: u64,
@@ -995,6 +1002,11 @@ pub fn projectTask(
         .permission_interaction = @tagName(task.durable.permission_interaction),
         .permission_review_delegated = task.durable.permission_review_delegated,
         .approval_revision = task.durable.approval_revision,
+        .model_intent = if (task.durable.model_intent) |intent| .{
+            .source_id = intent.source_id,
+            .model_id = intent.model_id,
+            .revision = intent.revision,
+        } else null,
         .binding = .{
             .epoch = task.durable.binding_epoch,
             .execution_generation = task.durable.execution_generation,
@@ -1389,6 +1401,14 @@ pub fn restoreTask(
         projection.limits.max_execution_model_bytes,
     );
     errdefer projection.free(execution_model);
+    var model_intent = if (wire.model_intent) |intent|
+        task_state.ModelIntent.init(projection.allocator, .{ .source_id = intent.source_id, .model_id = intent.model_id }, intent.revision) catch |err| switch (err) {
+            error.InvalidModelIntent => return error.TaskStoreCorrupt,
+            error.OutOfMemory => return error.OutOfMemory,
+        }
+    else
+        null;
+    errdefer if (model_intent) |*intent| intent.deinit(projection.allocator);
     const workspace_root = try projection.copy(
         wire.workspace_root,
         projection.limits.max_workspace_bytes,
@@ -1451,6 +1471,7 @@ pub fn restoreTask(
             .permission_interaction = permission_interaction,
             .permission_review_delegated = wire.permission_review_delegated,
             .approval_revision = wire.approval_revision,
+            .model_intent = model_intent,
             .binding_epoch = wire.binding.epoch,
             .workspace_id = wire.workspace_id,
             .workspace_epoch = wire.workspace_epoch,
@@ -2898,6 +2919,10 @@ fn validate(state: *const StateWire, limits: Limits) !void {
 
 fn validateTask(task: TaskWire, limits: Limits) !void {
     if (task.approval_revision == 0) return error.Invalid;
+    if (task.model_intent) |intent| {
+        if (!task_state.ModelIntent.valid(.{ .source_id = intent.source_id, .model_id = intent.model_id }, intent.revision))
+            return error.Invalid;
+    }
     if (task.permission_review_delegated and
         (!std.mem.eql(u8, task.permission_profile, "approval_required") or
             !std.mem.eql(u8, task.permission_interaction, "interactive")))
@@ -2914,7 +2939,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !validPermissionProfile(run.permission_profile) or
             !validPermissionInteraction(run.permission_interaction) or
             !std.mem.eql(u8, run.permission_interaction, task.permission_interaction) or
-            !std.mem.eql(u8, run.execution_protocol, task.binding.protocol) or
+            ((!terminalRunPhase(run.phase) or run.execution_generation == task.binding.execution_generation) and !std.mem.eql(u8, run.execution_protocol, task.binding.protocol)) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or
             run.tools.len > limits.max_tools_per_run or run.next_activity_order == 0)
@@ -2951,7 +2976,8 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             if (!oneOf(failure, &.{ "consumer_rejected", "dependency_contract_failure" }))
                 return error.Invalid;
         for (task.runs[0..index]) |previous|
-            if (previous.id == run.id or previous.generation == run.generation)
+            if (previous.id == run.id or previous.generation == run.generation or
+                (previous.execution_generation == run.execution_generation and !std.mem.eql(u8, previous.execution_protocol, run.execution_protocol)))
                 return error.Invalid;
         try validateRunInput(run.input, limits);
         for (run.tools, 0..) |tool, tool_index| {
@@ -3968,7 +3994,7 @@ test "corrupt Task identity cannot manufacture a global failure" {
     try std.testing.expectEqual(@as(usize, 0), recovered.value.failures.len);
 }
 
-test "task store round-trips per-run execution generations across binding adoption" {
+test "task store round-trips immutable per-run execution generations and protocols across binding adoption" {
     var workspaces = [_]WorkspaceWire{.{
         .id = 1,
         .epoch = 1,
@@ -3984,7 +4010,7 @@ test "task store round-trips per-run execution generations across binding adopti
         .coverage = "covered",
         .generation = 1,
         .execution_generation = 13,
-        .execution_protocol = "openai_chat_completions",
+        .execution_protocol = "anthropic_messages",
         .execution_model = "model",
         .permission_profile = "approval_required",
         .permission_interaction = "interactive",
@@ -4027,6 +4053,7 @@ test "task store round-trips per-run execution generations across binding adopti
     runs[1].coverage = "excluded";
     runs[1].generation = 2;
     runs[1].execution_generation = 17;
+    runs[1].execution_protocol = "openai_chat_completions";
     runs[1].input.text = "after adoption";
     runs[1].elapsed_ms = null;
     runs[1].submitted_at_unix_ms = null;
@@ -4121,6 +4148,8 @@ test "task store round-trips per-run execution generations across binding adopti
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].binding.execution_generation);
     try std.testing.expectEqual(@as(u64, 13), decoded.value.tasks[0].runs[0].execution_generation);
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].runs[1].execution_generation);
+    try std.testing.expectEqualStrings("anthropic_messages", decoded.value.tasks[0].runs[0].execution_protocol);
+    try std.testing.expectEqualStrings("openai_chat_completions", decoded.value.tasks[0].runs[1].execution_protocol);
     try std.testing.expectEqualStrings("covered", decoded.value.tasks[0].runs[0].coverage);
     try std.testing.expectEqualStrings("excluded", decoded.value.tasks[0].runs[1].coverage);
     try std.testing.expectEqualStrings(
@@ -4157,6 +4186,26 @@ test "task store round-trips per-run execution generations across binding adopti
         "dependency_contract_failure",
         decoded.value.tasks[0].runs[1].event_projection_failure.?,
     );
+    // Different protocols require different execution identities. Neither a
+    // current nor a historical generation may describe two protocols.
+    const state: StateWire = .{
+        .default_permission_profile = "full_access",
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    };
+    runs[1].execution_protocol = "gemini_native";
+    try std.testing.expectError(error.TaskStoreEncodeFailed, encode(&output, state, testLimits()));
+    runs[1].execution_protocol = "openai_chat_completions";
+    runs[0].execution_generation = 17;
+    try std.testing.expectError(error.TaskStoreEncodeFailed, encode(&output, state, testLimits()));
+    runs[0].execution_generation = 13;
+    runs[1].execution_generation = 13;
+    tasks[0].binding.execution_generation = 19;
+    try std.testing.expectError(error.TaskStoreEncodeFailed, encode(&output, state, testLimits()));
 }
 
 test "task store rejects states that would violate the product contract" {
@@ -4715,6 +4764,54 @@ fn testLimits() Limits {
         .max_execution_model_bytes = 512,
         .max_terminal_diagnostic_bytes = 512,
     };
+}
+
+test "Task model intent survives framed history independently of installed binding" {
+    var tasks = [_]TaskWire{reviewTestTask()};
+    tasks[0].model_intent = .{ .source_id = "other-connection", .model_id = "next-model", .revision = 7 };
+    var workspaces = [_]WorkspaceWire{.{ .id = 1, .epoch = 1, .kind = "manual", .canonical_root = "/tmp/repo", .display_name = "repo", .visible = true, .recent_order = 1 }};
+    var output: [64 * 1024]u8 = undefined;
+    const bytes = try encode(&output, .{ .next_workspace_id = 2, .next_workspace_recent_order = 2, .next_task_id = 2, .next_task_recent_order = 2, .workspaces = &workspaces, .tasks = &tasks }, testLimits());
+    var parsed = try decode(std.testing.allocator, bytes, testLimits());
+    defer parsed.deinit();
+    const restored = parsed.value.tasks[0];
+    try std.testing.expectEqualStrings("other-connection", restored.model_intent.?.source_id);
+    try std.testing.expectEqualStrings("next-model", restored.model_intent.?.model_id);
+    try std.testing.expectEqual(@as(u64, 7), restored.model_intent.?.revision);
+    try std.testing.expectEqualStrings("m", restored.binding.model);
+    try std.testing.expectEqual(@as(u64, 1), restored.binding.epoch);
+}
+
+test "legacy Task missing model intent preserves unknown source" {
+    const allocator = std.testing.allocator;
+    const bytes = try std.json.Stringify.valueAlloc(allocator, reviewTestTask(), .{});
+    defer allocator.free(bytes);
+    const legacy = try std.mem.replaceOwned(u8, allocator, bytes, "\"model_intent\":null,", "");
+    defer allocator.free(legacy);
+    try std.testing.expect(legacy.len < bytes.len);
+    var parsed = try std.json.parseFromSlice(TaskWire, allocator, legacy, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.model_intent == null);
+    try validateTask(parsed.value, testLimits());
+    try std.testing.expectEqualStrings("m", parsed.value.binding.model);
+}
+
+test "Task model intent rejects malformed identity and zero revision" {
+    const invalid = [_]ModelIntentWire{
+        .{ .source_id = "", .model_id = "model", .revision = 1 },
+        .{ .source_id = "source", .model_id = "", .revision = 1 },
+        .{ .source_id = "source", .model_id = "model", .revision = 0 },
+        .{ .source_id = "source", .model_id = "bad\nmodel", .revision = 1 },
+        .{ .source_id = "source", .model_id = "\xff", .revision = 1 },
+        .{ .source_id = "source", .model_id = "m" ** 257, .revision = 1 },
+    };
+    var task = reviewTestTask();
+    for (invalid) |intent| {
+        task.model_intent = intent;
+        try std.testing.expectError(error.Invalid, validateTask(task, testLimits()));
+    }
+    const extra = "{\"source_id\":\"source\",\"model_id\":\"model\",\"revision\":1,\"credential\":\"forbidden\"}";
+    try std.testing.expectError(error.UnknownField, std.json.parseFromSlice(ModelIntentWire, std.testing.allocator, extra, .{}));
 }
 
 test "mixed permission history survives current Task mode changes and audit follows the owning Run" {
