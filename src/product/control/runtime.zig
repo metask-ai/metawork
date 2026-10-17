@@ -6141,7 +6141,7 @@ pub const Runtime = struct {
             runtime.capabilities()
         else
             mcp_runtime.Capabilities{ .management = false, .host = .{} };
-        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":false,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":{s},\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
+        writer.print("{{\"revision\":\"{d}\",\"capabilities\":{{\"taskHistoryPersistence\":{},\"taskHistoryPersistenceHealth\":\"{s}\",\"taskHistoryRecoveryAvailable\":{},\"retainedTaskHistoryCount\":\"{d}\",\"conversationRecovery\":true,\"executionRebind\":true,\"structuredPlan\":false,\"typedOutputs\":false,\"typedFileChanges\":true,\"persistentWorkspacePermissions\":false,\"permissionProfiles\":{},\"automaticWorkspaces\":{},\"scheduledTasks\":{},\"scheduledTaskPersistence\":{},\"scheduledTaskPersistenceHealth\":\"{s}\",\"scheduledTaskRecoveryAvailable\":{},\"backgroundScheduleWake\":{},\"localSkillManagement\":{},\"skillManagementHealth\":\"{s}\",\"customProviderManagement\":{},\"customProviderSecretCapture\":{},\"customModelTest\":{},\"mcpManagement\":{},\"mcpConnectionApproval\":{},\"mcpSecretCapture\":{},\"mcpSecretMaxBytes\":{d},\"mcpOAuth\":{},\"attachments\":{{\"enabled\":{},\"imageFormats\":{s},\"maxFiles\":\"{d}\",\"maxFileBytes\":\"{d}\",\"maxStagedBytes\":\"{d}\"}}}},\"permissions\":{{\"availableProfiles\":", .{
             self.revision,
             task_persistence_ready,
             @tagName(self.task_persistence_health),
@@ -6960,8 +6960,11 @@ pub const Runtime = struct {
         };
     }
 
-    fn taskModelSelectionAvailability(self: *Runtime, _: task_runtime.ProjectionAuthorityQuery) product_task.ModelSelectionAvailability {
-        if (self.shutting_down) return .authority_changed;
+    fn taskModelSelectionAvailability(self: *Runtime, query: task_runtime.ProjectionAuthorityQuery) product_task.ModelSelectionAvailability {
+        if (self.shutting_down) return .task_unavailable;
+        const task = self.task_runtime.findConst(query.task_id) orelse return .task_unavailable;
+        if (task.read_only_history != null or task.durable.archived or task.deletion != .idle or task.runtime.close_requested)
+            return .task_unavailable;
         const models = self.modelsView();
         if (models.availability != .ready) return .catalog_unavailable;
         for (models.custom_providers) |provider| {
@@ -14601,6 +14604,15 @@ test "Product Control publishes Task model selection availability from cross-own
         product_task.ModelSelectionAvailability.available,
         control.taskModelSelectionAvailability(query),
     );
+    task.durable.archived = true;
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.task_unavailable, control.taskModelSelectionAvailability(query));
+    task.durable.archived = false;
+    task.runtime.close_requested = true;
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.task_unavailable, control.taskModelSelectionAvailability(query));
+    task.runtime.close_requested = false;
+    control.shutting_down = true;
+    try std.testing.expectEqual(product_task.ModelSelectionAvailability.task_unavailable, control.taskModelSelectionAvailability(query));
+    control.shutting_down = false;
 }
 
 test "Task model selection unknown commit resolves the original candidate before admitting another intent" {

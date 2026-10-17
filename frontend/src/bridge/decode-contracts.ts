@@ -3381,10 +3381,7 @@ function decodeTask(value: unknown, path: string): TaskView {
       "available",
       "catalog_loading",
       "catalog_unavailable",
-      "execution_replacing",
-      "runtime_detached",
-      "unsupported_source",
-      "authority_changed",
+      "task_unavailable",
     ] as const,
   );
   const mcpAuthority = decodeTaskMcpAuthority(

@@ -2,7 +2,7 @@
 
 用户可以在同一 Task 中选择下一轮使用的模型，包括其他连接和协议提供的模型。全局默认模型只决定新任务的初始选择；Task 模型意图、当前内部 Session 和已经接纳的 Run 分别拥有自己的状态。切换保留上下文，在原授权仍然有效时保留能力，既不因为全局配置变化锁死选择器，也不借切换取得新能力。
 
-本文是待实施计划，不是 decision record，也不替代规范。当前仅完成依赖能力验证，尚未实施产品整改。实施使用当前 canonical Metask AgentCore，沿用现有 Models、Task、Agent、Bridge 和 checkpoint，不以升级 Core 为前提。
+本文是待实施计划，不是 decision record，也不替代规范。核心产品整改与正式 Product/Core 回归已实施；最终合同清理与真实桌面交互验收尚未收口。实施使用当前 canonical Metask AgentCore，沿用现有 Models、Task、Agent、Bridge 和 checkpoint，不以升级 Core 为前提。
 
 ## 1 验证依据
 
@@ -60,7 +60,7 @@
 
 复用 Models 已有 ModelRef 和解析能力，去掉仅为同一 active default execution 服务的 Task 选择条件；不另建模型目录或 resolver。目录 generation 校验负责目标是否仍可解析，Task selection revision 负责用户意图是否被并发覆盖，两者不互相代替。
 
-Task 意图提交不推进执行 binding epoch。连接或协议的实际重绑定只有在候选成功发布时推进既有 binding epoch，后续 Run 关联新 binding；仅模型变化沿用既有模型历史责任。历史 Run 保留当时事实，不能用新模型覆盖。失败或取消不推进成功 binding。
+Task 意图提交不推进执行 binding epoch。连接或协议的实际重绑定只有在候选成功发布时推进既有 binding epoch，后续 Run 关联新 binding；仅模型变化沿用既有模型历史责任。历史 Run 保留当时事实，不能用新模型覆盖。未提交的失败或取消不推进成功 binding；已确认的 durable binding 必须先采用，后续回退按新的单调 epoch 提交，不能撤回已确认历史。
 
 排队输入的旧 binding anchor 需在 Task 控制事务中与成功重绑定协调，不得通过跳过 epoch 校验执行，也不得把合法模型切换误判为用户输入过期。Run、compact、restore/rebind 共用既有 active operation 槽；模型意图写入不直接触碰忙碌的 Session。
 

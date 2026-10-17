@@ -832,13 +832,7 @@ export type TaskMcpAuthority =
   | { kind: "unavailable"; selection: null };
 
 export type TaskModelSelectionAvailability =
-  | "available"
-  | "catalog_loading"
-  | "catalog_unavailable"
-  | "execution_replacing"
-  | "runtime_detached"
-  | "unsupported_source"
-  | "authority_changed";
+  "available" | "catalog_loading" | "catalog_unavailable" | "task_unavailable";
 
 export type ApprovalFailureReason = (typeof approvalFailureReasons)[number];
 export type TaskApprovalChange = {

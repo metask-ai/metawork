@@ -192,15 +192,9 @@ function taskModelSelectionMessageId(
       return "settings.task_model_catalog_loading";
     case "catalog_unavailable":
       return "settings.task_model_catalog_unavailable";
-    case "execution_replacing":
-      return "settings.task_model_execution_replacing";
-    case "runtime_detached":
-      return "settings.task_model_runtime_detached";
-    case "unsupported_source":
-      return "settings.task_model_unsupported_source";
-    case "authority_changed":
+    case "task_unavailable":
     default:
-      return "settings.task_model_authority_changed";
+      return "settings.task_model_task_unavailable";
   }
 }
 

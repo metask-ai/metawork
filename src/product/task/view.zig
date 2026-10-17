@@ -20,10 +20,7 @@ pub const ModelSelectionAvailability = enum {
     available,
     catalog_loading,
     catalog_unavailable,
-    execution_replacing,
-    runtime_detached,
-    unsupported_source,
-    authority_changed,
+    task_unavailable,
 };
 
 /// Callback-scoped access to Workbench's global sensitive-text projection.

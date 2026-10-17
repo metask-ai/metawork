@@ -1198,14 +1198,8 @@ export const zhCN: Record<MessageId, string> = {
   "settings.task_model_catalog_loading": "模型目录正在更新，完成后可继续选择。",
   "settings.task_model_catalog_unavailable":
     "当前模型目录不可用；任务仍保留原模型，目录恢复后可再次选择。",
-  "settings.task_model_execution_replacing":
-    "默认执行配置正在切换，完成后可继续选择。",
-  "settings.task_model_runtime_detached":
-    "此任务的运行时已分离；恢复会话后才能修改模型。",
-  "settings.task_model_unsupported_source":
-    "此任务使用自定义 Provider，当前不支持在会话中切换模型。",
-  "settings.task_model_authority_changed":
-    "此任务保留原执行配置；Provider、凭据或协议已变化，无法安全切换模型。",
+  "settings.task_model_task_unavailable":
+    "此任务当前不可编辑，暂时无法修改模型。",
   "outcome.completed": "已完成",
   "outcome.stopped": "已停止",
   "outcome.cancelled": "已停止",

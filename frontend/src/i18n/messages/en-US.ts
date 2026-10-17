@@ -1331,14 +1331,8 @@ export const enUS = {
     "The model catalog is updating. You can choose a model when it finishes.",
   "settings.task_model_catalog_unavailable":
     "The model catalog is unavailable. This task keeps its model until the catalog recovers.",
-  "settings.task_model_execution_replacing":
-    "The default execution is changing. You can choose a model when it finishes.",
-  "settings.task_model_runtime_detached":
-    "This task's runtime is detached. Restore the conversation before changing models.",
-  "settings.task_model_unsupported_source":
-    "This task uses a custom provider, which does not support in-conversation model switching.",
-  "settings.task_model_authority_changed":
-    "This task keeps its pinned execution because its provider, credential, or protocol changed.",
+  "settings.task_model_task_unavailable":
+    "This task cannot be edited right now, so its model cannot be changed.",
   "outcome.completed": "Completed",
   "outcome.stopped": "Stopped",
   "outcome.cancelled": "Stopped",

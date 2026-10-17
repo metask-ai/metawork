@@ -1180,14 +1180,25 @@ test("Task model selection availability is a strict Host-owned projection", () =
     "available",
     "catalog_loading",
     "catalog_unavailable",
+    "task_unavailable",
+  ]) {
+    const snapshot = clone(fixture);
+    snapshot.tasks[0].modelSelectionAvailability = availability;
+    assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+  }
+
+  for (const retired of [
     "execution_replacing",
     "runtime_detached",
     "unsupported_source",
     "authority_changed",
   ]) {
     const snapshot = clone(fixture);
-    snapshot.tasks[0].modelSelectionAvailability = availability;
-    assert.deepEqual(decodeWorkbenchSnapshot(snapshot), snapshot);
+    snapshot.tasks[0].modelSelectionAvailability = retired;
+    assert.throws(
+      () => decodeWorkbenchSnapshot(snapshot),
+      /modelSelectionAvailability/,
+    );
   }
 
   const missing = clone(fixture);

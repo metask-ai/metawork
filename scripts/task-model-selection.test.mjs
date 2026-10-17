@@ -34,11 +34,6 @@ test("Host availability is the only Renderer model-selection authority", () => {
     selectable: false,
     pending: true,
   });
-  assert.deepEqual(taskModelSelectionPolicy(task("execution_replacing")), {
-    showsSelector: true,
-    selectable: false,
-    pending: true,
-  });
   assert.deepEqual(taskModelSelectionPolicy(task("catalog_unavailable")), {
     showsSelector: true,
     selectable: false,
@@ -46,18 +41,12 @@ test("Host availability is the only Renderer model-selection authority", () => {
   });
 });
 
-test("detached, unsupported, and changed authority remain read-only", () => {
-  for (const availability of [
-    "runtime_detached",
-    "unsupported_source",
-    "authority_changed",
-  ]) {
-    assert.deepEqual(taskModelSelectionPolicy(task(availability)), {
-      showsSelector: false,
-      selectable: false,
-      pending: false,
-    });
-  }
+test("Host lifecycle restrictions keep unavailable Tasks read-only", () => {
+  assert.deepEqual(taskModelSelectionPolicy(task("task_unavailable")), {
+    showsSelector: false,
+    selectable: false,
+    pending: false,
+  });
   assert.deepEqual(taskModelSelectionPolicy(null), {
     showsSelector: false,
     selectable: false,
