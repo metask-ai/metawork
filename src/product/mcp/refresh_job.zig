@@ -123,6 +123,10 @@ const TestHarness = struct {
         return null;
     }
 
+    fn prepareRestoreSelection(_: *anyopaque, _: *const agent.McpRestoreSelection, _: *const agent.McpActivation, _: []const agent.McpActivationTool) ports.CatalogError!*agent.McpSelection {
+        return error.InvalidMcpSelection;
+    }
+
     fn notify(context: ?*anyopaque) bool {
         const self: *TestHarness = @ptrCast(@alignCast(context.?));
         self.notifications += 1;
@@ -138,6 +142,7 @@ const TestHarness = struct {
                 .context = self,
                 .activate_fn = activate,
                 .create_admission_selection_fn = createAdmissionSelection,
+                .prepare_restore_selection_fn = prepareRestoreSelection,
             },
             .notifier = .{ .context = self, .notify_fn = notify },
             .request_generation = 1,

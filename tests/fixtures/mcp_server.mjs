@@ -29,6 +29,7 @@ function startStdio() {
 
 function startHttp() {
   let providerCalls = 0;
+  let selectedMcpToolName;
   const server = createServer((request, response) => {
     const chunks = [];
     let bytes = 0;
@@ -52,6 +53,7 @@ function startHttp() {
             payload.tools?.filter((tool) => tool.name.startsWith("mcp__")) ??
             [];
           const mcpTool = mcpTools[0];
+          if (providerCalls === 0) selectedMcpToolName = mcpTool?.name;
           if (providerCalls === 0 && !mcpTool)
             throw new Error(
               "selected MCP tool was not offered to the provider",
@@ -110,6 +112,15 @@ function startHttp() {
                 part.type === "text" &&
                 part.text?.includes("Deny this echo tool."),
             );
+          const revokedCall = payload.messages
+            ?.at(-1)
+            ?.content?.some(
+              (part) =>
+                part.type === "text" &&
+                part.text?.includes("Call the revoked echo tool."),
+            );
+          if (revokedCall && (mcpTools.length !== 0 || !selectedMcpToolName))
+            throw new Error("revoked MCP authority was still offered");
           if (
             restoredCall &&
             (!toolResult || !mcpTool || mcpTools.length !== 1)
@@ -118,15 +129,17 @@ function startHttp() {
               "restored context or original MCP authority was lost",
             );
           const providerBody =
-            providerCalls === 0 || restoredCall || deniedCall
+            providerCalls === 0 || restoredCall || deniedCall || revokedCall
               ? providerToolSse(
                   `mcp-message-${providerCalls + 1}`,
                   `mcp-call-${providerCalls + 1}`,
-                  mcpTool.name,
+                  revokedCall ? selectedMcpToolName : mcpTool.name,
                   {
-                    text: deniedCall
-                      ? "deny-from-agentcore"
-                      : "echo-from-agentcore",
+                    text: revokedCall
+                      ? "revoked-from-agentcore"
+                      : deniedCall
+                        ? "deny-from-agentcore"
+                        : "echo-from-agentcore",
                   },
                 )
               : providerTextSse(

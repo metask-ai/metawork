@@ -288,7 +288,7 @@ pub fn captureRestoreSelection(allocator: std.mem.Allocator, owner_id: u64, sele
 /// Revalidates the original sources, then intersects their exact selectors
 /// with today's validated catalog and allowlists. Core owns schema/permission
 /// compatibility against the checkpoint; this never adds a newly allowed tool.
-pub fn restoreSelectionForActivation(allocator: std.mem.Allocator, owner_id: u64, original: *const RestoreSelection, activation: *const Activation, servers: []const ExpectedServer) (Error || std.mem.Allocator.Error)!*Selection {
+pub fn restoreSelectionForActivation(allocator: std.mem.Allocator, owner_id: u64, original: *const RestoreSelection, activation: *const Activation, servers: []const ExpectedServer, ceiling: []const ActivationTool) (Error || std.mem.Allocator.Error)!*Selection {
     const saved = restoreStorageConst(original);
     const current = activationStorageConst(activation);
     if (saved.owner_id != owner_id or !projectionBelongsTo(current.projection, owner_id)) return error.CatalogBindingMismatch;
@@ -307,6 +307,10 @@ pub fn restoreSelectionForActivation(allocator: std.mem.Allocator, owner_id: u64
             if (std.mem.eql(u8, name, tool.name)) break true;
         } else false;
         if (!allowed) continue;
+        const admitted = for (ceiling) |current_tool| {
+            if (std.mem.eql(u8, current_tool.server_id, tool.server_id) and std.mem.eql(u8, current_tool.name, tool.name)) break true;
+        } else false;
+        if (!admitted) continue;
         try selectors.append(allocator, .{ .binding_identity = tool.binding_identity, .tool_name = tool.name });
         try published.append(allocator, .{ .server_id = tool.server_id, .name = tool.name });
     }
@@ -710,27 +714,36 @@ test "MCP restore revalidates original sources and intersects selectors across c
     defer clone.deinit();
     const current = try testRestoreActivation(std.testing.allocator, 11, 9, &.{ "read", "write", "new" }, &servers);
     defer current.deinit();
-    const restored = try restoreSelectionForActivation(std.testing.allocator, 11, clone, current, &servers);
+    const restored = try restoreSelectionForActivation(std.testing.allocator, 11, clone, current, &servers, current.selectedTools());
     defer restored.deinit();
     try std.testing.expectEqual(@as(u64, 9), selectionGeneration(restored));
     try std.testing.expectEqual(@as(usize, 1), restored.selectedTools().len);
     try std.testing.expectEqualStrings("read", restored.selectedTools()[0].name);
     try std.testing.expectEqual(@as(u64, 2), projectionGeneration(activationStorageConst(old).projection));
-    try std.testing.expectError(error.CatalogBindingMismatch, restoreSelectionForActivation(std.testing.allocator, 12, saved, current, &servers));
+    try std.testing.expectError(error.CatalogBindingMismatch, restoreSelectionForActivation(std.testing.allocator, 12, saved, current, &servers, current.selectedTools()));
     var changed = servers;
     changed[0].configuration_fingerprint = @splat(8);
-    try std.testing.expectError(error.RestoreSourceChanged, restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &changed));
-    try std.testing.expectError(error.RestoreSourceChanged, restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &.{}));
+    try std.testing.expectError(error.RestoreSourceChanged, restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &changed, current.selectedTools()));
+    // Revoking every grant must not hide an incompatible original source.
+    try std.testing.expectError(error.RestoreSourceChanged, restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &changed, &.{}));
+    try std.testing.expectError(error.RestoreSourceChanged, restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &.{}, current.selectedTools()));
     changed = servers;
     changed[0].allowed_tools = &.{"write"};
-    const narrowed = try restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &changed);
+    const narrowed = try restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &changed, current.selectedTools());
     defer narrowed.deinit();
     try std.testing.expectEqual(@as(usize, 0), narrowed.selectedTools().len);
     const missing = try testRestoreActivation(std.testing.allocator, 11, 10, &.{"write"}, &servers);
     defer missing.deinit();
-    const degraded = try restoreSelectionForActivation(std.testing.allocator, 11, saved, missing, &servers);
+    const degraded = try restoreSelectionForActivation(std.testing.allocator, 11, saved, missing, &servers, missing.selectedTools());
     defer degraded.deinit();
     try std.testing.expectEqual(@as(usize, 0), degraded.selectedTools().len);
+    const revoked = try restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &servers, &.{});
+    defer revoked.deinit();
+    try std.testing.expectEqual(@as(usize, 0), revoked.selectedTools().len);
+    // A grant with the same tool name on another server is unrelated authority.
+    const different = try restoreSelectionForActivation(std.testing.allocator, 11, saved, current, &servers, &.{.{ .server_id = "other", .name = "read" }});
+    defer different.deinit();
+    try std.testing.expectEqual(@as(usize, 0), different.selectedTools().len);
 }
 
 test "MCP restore capture clone and revalidation are allocation failure atomic" {
@@ -745,7 +758,7 @@ test "MCP restore capture clone and revalidation are allocation failure atomic" 
             defer saved.deinit();
             const clone = try saved.clone(allocator);
             defer clone.deinit();
-            const restored = try restoreSelectionForActivation(allocator, 11, clone, activation, &servers);
+            const restored = try restoreSelectionForActivation(allocator, 11, clone, activation, &servers, activation.selectedTools());
             defer restored.deinit();
             try std.testing.expectEqual(@as(usize, 1), restored.selectedTools().len);
         }

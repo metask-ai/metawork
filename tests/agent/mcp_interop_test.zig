@@ -783,11 +783,59 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
         .activated => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    defer current.deinit();
-    const prepared = try runtime.prepareMcpRestoreSelection(saved.mcp.?, current);
-    defer prepared.deinit();
+    var current_owned = true;
+    defer if (current_owned) current.deinit();
+    var current_preparation = try prepareHttpFixture(fixture.endpoint, "2026-07-28");
+    var preparation_owned = true;
+    defer if (preparation_owned) current_preparation.deinit();
+    const current_registry = &current_preparation.registry.?;
+    const fingerprint = mcp_configuration.connectionFingerprint(current_registry.value.servers[0]);
+    current_registry.value.servers[0].connection_approval.?.fingerprint = try current_registry.arena.allocator().dupe(u8, &fingerprint);
+    var control = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, .{
+        .worker_count = 1,
+        .queue_capacity = 2,
+        .max_tasks = 1,
+        .max_workspaces = 1,
+    }, .{ .mcp = .{ .preparation = &current_preparation, .activation = current } });
+    current_owned = false;
+    preparation_owned = false;
+    defer control.deinit();
+    const product_mcp = &control.mcp.?;
+    var prepared_authority = try product_mcp.restoreAuthority(saved.mcp.?);
+    defer prepared_authority.deinit();
+    const prepared = prepared_authority.selection.?;
     try std.testing.expectEqual(@as(usize, 1), prepared.selectedTools().len);
     try std.testing.expectEqualStrings("echo", prepared.selectedTools()[0].name);
+    // A current catalog can keep advertising the same schema while Product
+    // has withdrawn its connection grant. It must not restore old authority.
+    const current_state = mcp_types.testing.state(product_mcp);
+    const server = &current_state.preparation.registry.?.value.servers[0];
+    {
+        const approval = server.connection_approval;
+        server.connection_approval = null;
+        defer server.connection_approval = approval;
+        var withdrawn = try product_mcp.restoreAuthority(saved.mcp.?);
+        defer withdrawn.deinit();
+        try std.testing.expectEqual(@as(usize, 0), withdrawn.selection.?.selectedTools().len);
+    }
+    var revoked_authority = revoked: {
+        const tools = server.tools;
+        server.tools = &.{};
+        defer server.tools = tools;
+        break :revoked try product_mcp.restoreAuthority(saved.mcp.?);
+    };
+    defer revoked_authority.deinit();
+    try std.testing.expectEqual(@as(usize, 0), revoked_authority.selection.?.selectedTools().len);
+    // A blocked refresh cannot turn a Task that originally had no MCP into
+    // an MCP consumer, or make it depend on unrelated global readiness.
+    {
+        current_state.refresh_pending = true;
+        defer current_state.refresh_pending = false;
+        try std.testing.expectError(error.RecoveryUnavailable, product_mcp.restoreAuthority(saved.mcp.?));
+        var absent = try product_mcp.restoreAuthority(null);
+        defer absent.deinit();
+        try std.testing.expect(absent.selection == null);
+    }
     var restore_options = open_options;
     restore_options.mcp_selection = prepared;
     restore_options.permission_mode = saved.permission_mode;
@@ -857,6 +905,7 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     try std.testing.expectEqual(@as(usize, 0), narrower.borrow().policy.granted_skill_ids.len);
     restore_options.skill_catalog = narrower.borrow().catalog;
     restore_options.skill_policy = narrower.borrow().policy;
+    restore_options.mcp_selection = revoked_authority.selection;
     restore_options.operation_id_floor.last_run_id = denied_id;
     bytes.offset = 0;
     const degraded = try runtime.restoreSessionRoute(.{
@@ -873,12 +922,19 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     });
     try std.testing.expectEqual(agent.CheckpointRestoreHealth.degraded, degraded.report.health);
     try std.testing.expect(degraded.report.invalidated_skill_authority > 0);
+    try std.testing.expect(degraded.report.invalidated_mcp_bindings > 0);
     const revoked_id = try degraded.session.prepareRun(.{ .skill = .{ .skill_id = allowed.skill_id, .catalog_revision = skills.projection.revision, .argument_values = &.{} } });
     var revoked_run = try degraded.session.beginRun(revoked_id);
     var revoked = revoked_run.execute();
     revoked_run.deinit();
     defer revoked.deinit();
     try std.testing.expectEqual(@as(?agent.Status, .skill_policy_violation), revoked.abi_status);
+    const revoked_mcp_id = try degraded.session.prepareRun(.{ .text = "Call the revoked echo tool." });
+    const revoked_mcp = try runWithPermission(runtime, degraded.session, revoked_mcp_id, .deny_session);
+    var revoked_mcp_terminal = revoked_mcp.terminal;
+    defer revoked_mcp_terminal.deinit();
+    try std.testing.expectEqual(@as(usize, 0), revoked_mcp.answers);
+    try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), revoked_mcp_terminal.stop_reason);
     const trace = try tmp.dir.readFileAlloc(
         std.testing.io,
         "execution-trace.jsonl",
@@ -891,6 +947,7 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     try std.testing.expect(std.mem.indexOf(u8, trace, "\"method\":\"tools/call\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "echo-from-agentcore") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "PINNED_RESTORE_SKILL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "revoked-from-agentcore") != null);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
 }
 

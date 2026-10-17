@@ -702,13 +702,15 @@ pub const Runtime = struct {
         } else null;
     }
 
-    pub fn prepareMcpRestoreSelection(self: *Runtime, original: *const root.McpRestoreSelection, activation: *const McpActivation) (Error || std.mem.Allocator.Error)!*McpSelection {
+    /// The Host supplies its current admission ceiling. A ready Core
+    /// catalog alone does not prove that a connection or tool is still granted.
+    pub fn prepareMcpRestoreSelection(self: *Runtime, original: *const root.McpRestoreSelection, activation: *const McpActivation, ceiling: []const root.McpActivationTool) (Error || std.mem.Allocator.Error)!*McpSelection {
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
         if (self.shutting_down.load(.acquire)) return error.RuntimeShuttingDown;
         if (self.mcp_refresh_running) return error.McpRefreshInProgress;
         if (self.mcp_catalog_generation == null or self.mcp_catalog_generation.? != activation.catalogGeneration()) return error.StaleMcpSelection;
-        return mcp_catalog.restoreSelectionForActivation(self.allocator, self.mcp_owner_id, original, activation, self.mcp_servers.expectedServers()) catch |err| {
+        return mcp_catalog.restoreSelectionForActivation(self.allocator, self.mcp_owner_id, original, activation, self.mcp_servers.expectedServers(), ceiling) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return mapMcpCatalogError(err);
         };

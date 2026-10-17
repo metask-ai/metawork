@@ -814,6 +814,11 @@ fn createMcpAdmissionSelection(
     return runtime.createMcpAdmissionSelection(activation, allowlists);
 }
 
+fn prepareMcpRestoreSelection(context: *anyopaque, original: *const lifecycle.McpRestoreSelection, activation: *const lifecycle.McpActivation, ceiling: []const lifecycle.McpActivationTool) mcp_ports.CatalogError!*lifecycle.McpSelection {
+    const runtime: *lifecycle.Runtime = @ptrCast(@alignCast(context));
+    return runtime.prepareMcpRestoreSelection(original, activation, ceiling);
+}
+
 fn mcpExecutorPort(executor: *executor_impl.Executor) mcp_ports.Executor {
     return .{
         .context = executor,
@@ -827,6 +832,7 @@ fn mcpCatalogPort(runtime: *lifecycle.Runtime) mcp_ports.Catalog {
         .context = runtime,
         .activate_fn = activateMcpCatalog,
         .create_admission_selection_fn = createMcpAdmissionSelection,
+        .prepare_restore_selection_fn = prepareMcpRestoreSelection,
     };
 }
 
