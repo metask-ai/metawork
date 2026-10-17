@@ -53,11 +53,11 @@ test("Windows distributions derive exact target and artifact identities", () => 
   const artifactStem = `${manifest.identity.executableName}-${manifest.metadata.version}`;
   const x64 = windowsDistributionForArchitecture("x64");
   const arm64 = windowsDistributionForArchitecture("arm64");
-  assert.equal(x64.targetId, "x86_64-windows-gnu");
+  assert.equal(x64.targetId, "x86_64-windows-msvc");
   assert.equal(x64.peMachine, 0x8664);
   assert.equal(x64.innoArchitecture, "x64compatible");
   assert.equal(x64.installerArtifactName, `${artifactStem}-windows-x64.exe`);
-  assert.equal(arm64.targetId, "aarch64-windows-gnu");
+  assert.equal(arm64.targetId, "aarch64-windows-msvc");
   assert.equal(arm64.peMachine, 0xaa64);
   assert.equal(arm64.innoArchitecture, "arm64");
   assert.equal(

@@ -392,7 +392,7 @@ Metask C1 OAuth/login 的 authority、client、scope 与动态 loopback callback
 
 ### 7.4 Windows baseline
 
-Windows x86_64 GNU 已进入当前开发 baseline；Windows arm64 GNU 已接入 Native Release 与 Windows 安装包构建，真实 AgentCore vertical、安装启动和平台行为仍待对应环境验收。exact artifact identity 以对应 target repository lock 为准；target availability、Native Debug/Release、真实 AgentCore vertical、干净退出与分发证据以[验证规范](validation.md)为准。精确 bundle、Renderer 与 MetaWork 平台无关测试通过不能替代这些平台证据。
+Windows 支持 x86_64 与 arm64，统一使用 [AgentCore ABI 合同](agentcore-abi-v1.md)定义的 MSVC 消费目标。exact artifact identity 以对应 target repository lock 为准；target availability、Native Debug/Release、真实 AgentCore vertical、干净退出与分发证据以[验证规范](validation.md)为准。精确 bundle、Renderer 与 MetaWork 平台无关测试通过不能替代这些平台证据。
 
 ### 7.5 后续产品能力
 

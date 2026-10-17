@@ -7,8 +7,8 @@
         .native_sdk = .{ .path = "node_modules/@native-sdk/cli" },
         .agentcore_macos_arm64 = .{ .path = ".agentcore/bundles/aarch64-macos/bindings/zig" },
         .agentcore_macos_x64 = .{ .path = ".agentcore/bundles/x86_64-macos/bindings/zig" },
-        .agentcore_windows_arm64 = .{ .path = ".agentcore/bundles/aarch64-windows-gnu/bindings/zig" },
-        .agentcore_windows_x64 = .{ .path = ".agentcore/bundles/x86_64-windows-gnu/bindings/zig" },
+        .agentcore_windows_arm64 = .{ .path = ".agentcore/bundles/aarch64-windows-msvc/bindings/zig" },
+        .agentcore_windows_x64 = .{ .path = ".agentcore/bundles/x86_64-windows-msvc/bindings/zig" },
         .sqlite = .{
             .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
             .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",

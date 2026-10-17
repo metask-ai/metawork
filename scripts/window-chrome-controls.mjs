@@ -11,12 +11,14 @@ export async function probeWindowChromeControls({
   openTray,
   reloadPage,
   evidenceDir,
+  reloadOnly = false,
 }) {
   const webview = await connectTestWebView(port);
   const evidence = {
     runtime: await webview.send("Browser.getVersion"),
     cases: [],
     documents: [],
+    clicks: [],
   };
   let handle;
   async function nativeState() {
@@ -70,11 +72,13 @@ export async function probeWindowChromeControls({
       const b = [...document.querySelectorAll('[data-metawork-window-control]')]
         .find(b => b.dataset.metaworkWindowControl === ${JSON.stringify(action)} && !b.disabled && b.getClientRects().length > 0);
       if (!b) return null;
-      const r = b.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2)};
+      const r = b.getBoundingClientRect(); return {x:Math.round(r.x+r.width/2), y:Math.round(r.y+r.height/2),
+        width:innerWidth, height:innerHeight, maximized:document.documentElement.dataset.metaworkWindowMaximized};
     })()`),
       (value) => value !== null,
       `Clickable ${action}`,
     );
+    evidence.clicks.push({ action, ...point });
     await runProbe("control-click", [
       "-WindowHandle",
       handle,
@@ -96,7 +100,18 @@ export async function probeWindowChromeControls({
     await webview.evaluate(`(() => {
       const transport = window.chrome.webview;
       const post = transport.postMessage;
-      window.__controlsProbe = {calls:[], generation:null};
+      window.__controlsProbe = {calls:[], inputs:[], generation:null};
+      const inputTypes = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick'];
+      const observeInput = event => {
+        const button = event.target.closest?.('[data-metawork-window-control]');
+        if (window.__controlsProbe.inputs.length < 128) window.__controlsProbe.inputs.push({
+          type:event.type, x:event.clientX, y:event.clientY, detail:event.detail,
+          action:button?.dataset.metaworkWindowControl ?? null, disabled:button?.disabled ?? null,
+          target:event.target.tagName, maximized:document.documentElement.dataset.metaworkWindowMaximized,
+          width:innerWidth, height:innerHeight
+        });
+      };
+      for (const type of inputTypes) document.addEventListener(type, observeInput, true);
       const observe = function(message) {
         const envelope = JSON.parse(message);
         if (envelope.command?.startsWith('metawork.host.windowChrome.')) {
@@ -107,7 +122,10 @@ export async function probeWindowChromeControls({
       };
       transport.postMessage = observe;
       if (transport.postMessage !== observe) throw new Error('Cannot observe controls transport');
-      window.__controlsProbeCleanup = () => { transport.postMessage = post; delete window.__controlsProbe; };
+      window.__controlsProbeCleanup = () => {
+        for (const type of inputTypes) document.removeEventListener(type, observeInput, true);
+        transport.postMessage = post; delete window.__controlsProbe;
+      };
     })()`);
   }
   async function archiveDocument() {
@@ -196,61 +214,62 @@ export async function probeWindowChromeControls({
       (value) => !!value,
       "Observed generation",
     );
-    for (const maximized of [false, true]) {
-      await setMaximized(maximized);
-      await click("close");
-      await hiddenAdmission(
-        `button-close-${maximized ? "maximized" : "normal"}`,
-        maximized,
+    if (!reloadOnly) {
+      for (const maximized of [false, true]) {
+        await setMaximized(maximized);
+        await click("close");
+        await hiddenAdmission(
+          `button-close-${maximized ? "maximized" : "normal"}`,
+          maximized,
+        );
+        await setMaximized(maximized);
+        await runProbe("control-alt-f4", [
+          "-WindowHandle",
+          handle,
+          "-KeepTopmost",
+        ]);
+        await hiddenAdmission(
+          `alt-f4-${maximized ? "maximized" : "normal"}`,
+          maximized,
+        );
+      }
+
+      await setMaximized(true);
+      await click("minimize");
+      const minimized = await until(
+        nativeState,
+        (value) => value.minimized,
+        "Renderer minimize",
       );
-      await setMaximized(maximized);
-      await runProbe("control-alt-f4", [
+      const taskbarInput = await runProbe("control-taskbar-restore", [
         "-WindowHandle",
         handle,
-        "-KeepTopmost",
       ]);
-      await hiddenAdmission(
-        `alt-f4-${maximized ? "maximized" : "normal"}`,
-        maximized,
+      evidence.taskbarInput = taskbarInput;
+      const restored = await until(
+        nativeState,
+        (value) => value.visible && !value.minimized,
+        "Real taskbar restore",
       );
-    }
+      assert.equal(
+        restored.maximized,
+        true,
+        "Taskbar restore must preserve maximization",
+      );
+      await ready(true);
+      evidence.cases.push({
+        name: "maximized-minimize-taskbar-restore",
+        minimized,
+        restored,
+        passed: true,
+      });
 
-    await setMaximized(true);
-    await click("minimize");
-    const minimized = await until(
-      nativeState,
-      (value) => value.minimized,
-      "Renderer minimize",
-    );
-    const taskbarInput = await runProbe("control-taskbar-restore", [
-      "-WindowHandle",
-      handle,
-    ]);
-    evidence.taskbarInput = taskbarInput;
-    const restored = await until(
-      nativeState,
-      (value) => value.visible && !value.minimized,
-      "Real taskbar restore",
-    );
-    assert.equal(
-      restored.maximized,
-      true,
-      "Taskbar restore must preserve maximization",
-    );
-    await ready(true);
-    evidence.cases.push({
-      name: "maximized-minimize-taskbar-restore",
-      minimized,
-      restored,
-      passed: true,
-    });
-
-    for (const actions of [
-      ["close", "toggle_maximize"],
-      ["toggle_maximize", "close"],
-    ]) {
-      await setMaximized(false);
-      const results = await webview.evaluate(`(async () => {
+      for (const actions of [
+        ["close", "toggle_maximize"],
+        ["toggle_maximize", "close"],
+      ]) {
+        await setMaximized(false);
+        const results = await webview.evaluate(`(async () => {
         let completion = 0;
         return Promise.all(${JSON.stringify(actions)}.map(async action => {
           try {
@@ -259,30 +278,30 @@ export async function probeWindowChromeControls({
           } catch (error) { return {action, ok:false, error:String(error?.message ?? error), completion:++completion}; }
         }));
       })()`);
-      assert.equal(results.find((r) => r.action === "close").ok, true);
-      const toggle = results.find((r) => r.action === "toggle_maximize");
-      if (!toggle.ok) assert.match(toggle.error, /WindowHidden/);
-      const hidden = await until(
-        nativeState,
-        (value) => !value.visible,
-        "Interleaved close",
-      );
-      const rejected = await invoke("control", { action: "toggle_maximize" });
-      assert.equal(rejected.ok, false);
-      assert.match(rejected.error, /WindowHidden/);
-      assert.equal((await nativeState()).visible, false);
-      const reopened = await reopen();
-      await setMaximized(!reopened.maximized);
-      evidence.cases.push({
-        name: actions.join("-then-"),
-        input: "existing Bridge, no barrier",
-        results,
-        hidden,
-        rejected,
-        passed: true,
-      });
+        assert.equal(results.find((r) => r.action === "close").ok, true);
+        const toggle = results.find((r) => r.action === "toggle_maximize");
+        if (!toggle.ok) assert.match(toggle.error, /WindowHidden/);
+        const hidden = await until(
+          nativeState,
+          (value) => !value.visible,
+          "Interleaved close",
+        );
+        const rejected = await invoke("control", { action: "toggle_maximize" });
+        assert.equal(rejected.ok, false);
+        assert.match(rejected.error, /WindowHidden/);
+        assert.equal((await nativeState()).visible, false);
+        const reopened = await reopen();
+        await setMaximized(!reopened.maximized);
+        evidence.cases.push({
+          name: actions.join("-then-"),
+          input: "existing Bridge, no barrier",
+          results,
+          hidden,
+          rejected,
+          passed: true,
+        });
+      }
     }
-
     await setMaximized(false);
     const oldGeneration = await webview.evaluate(
       "window.__controlsProbe.generation",
@@ -322,7 +341,9 @@ export async function probeWindowChromeControls({
       passed: true,
     });
     process.stdout.write(
-      "Windows controls lifecycle matrix passed: close/Alt+F4, hidden admission, taskbar restore, interleaving, reload and real button recovery.\n",
+      reloadOnly
+        ? "Windows reload, stale generation rejection and real restore button passed.\n"
+        : "Windows controls lifecycle matrix passed: close/Alt+F4, hidden admission, taskbar restore, interleaving, reload and real button recovery.\n",
     );
   } catch (error) {
     evidence.failure = String(error?.stack ?? error);

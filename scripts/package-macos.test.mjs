@@ -56,7 +56,7 @@ test("distribution DMG metadata comes from the Native product manifest", () => {
     `${artifactStem}-macos-x64.dmg`,
   );
   assert.throws(
-    () => macosDistributionForAgentCoreTarget("x86_64-windows-gnu"),
+    () => macosDistributionForAgentCoreTarget("x86_64-windows-msvc"),
     /unsupported macOS package target/u,
   );
   assert.deepEqual(

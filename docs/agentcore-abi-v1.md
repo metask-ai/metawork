@@ -8,12 +8,14 @@
 
 MetaWork 接受 binary ABI version 1。各 target 的 toolchain、build、link、source identity、manifest bytes 与 payload checksum 由 repository lock 唯一定义：
 
-- [Windows x86_64 GNU lock](../build_support/agentcore-bundle.windows-x86_64.lock.json)
-- [Windows arm64 GNU lock](../build_support/agentcore-bundle.windows-aarch64.lock.json)
+- [Windows x86_64 MSVC lock](../build_support/agentcore-bundle.windows-x86_64.lock.json)
+- [Windows arm64 MSVC lock](../build_support/agentcore-bundle.windows-aarch64.lock.json)
 - [macOS arm64 lock](../build_support/agentcore-bundle.macos-aarch64.lock.json)
 - [macOS x86_64 lock](../build_support/agentcore-bundle.macos-x86_64.lock.json)
 
 lock 只有满足当前 revision 接受规则时才可消费；尚未取得新 artifact 的 target 保持 fail closed，不得用旧 lock、其他 target 或伪造 manifest 补齐。
+
+Windows x86_64 与 arm64 的正式消费目标均为 MSVC；Host、官方 Zig package 与 bundle 必须使用相同 architecture、OS 和 MSVC ABI。旧 GNU target、bundle 与混合 ABI identity 均拒绝，不保留 GNU 构建、staging 或运行 fallback。MSVC 编译依赖已安装的 Visual C++ 工具链与相应架构的 Windows SDK；构建成功不替代对应架构的真实运行与分发验收。
 
 本文不复制这些易变值。source commit 相同不证明不同 target 的 artifact bytes 可互换；每个 target 必须独立满足自己的完整 lock。
 

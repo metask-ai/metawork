@@ -49,9 +49,9 @@ const bundle = await validateAgentCoreBundle(bundleRoot, {
 const supportedTargetIds =
   process.platform === "win32"
     ? process.arch === "arm64"
-      ? ["aarch64-windows-gnu", "x86_64-windows-gnu"]
+      ? ["aarch64-windows-msvc", "x86_64-windows-msvc"]
       : process.arch === "x64"
-        ? ["x86_64-windows-gnu"]
+        ? ["x86_64-windows-msvc"]
         : []
     : process.platform === "darwin"
       ? process.arch === "arm64"

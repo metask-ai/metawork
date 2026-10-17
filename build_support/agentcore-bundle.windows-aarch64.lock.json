@@ -11,12 +11,12 @@
     "zig_version": "0.16.0"
   },
   "target": {
-    "id": "aarch64-windows-gnu",
+    "id": "aarch64-windows-msvc",
     "architecture": "aarch64",
     "os": "windows",
-    "abi": "gnu",
-    "zig_target": "aarch64-windows.win10...win11_dt-gnu",
-    "rust_target": "aarch64-pc-windows-gnullvm"
+    "abi": "msvc",
+    "zig_target": "aarch64-windows.win10...win11_dt-msvc",
+    "rust_target": "aarch64-pc-windows-msvc"
   },
   "build": {
     "optimize": "ReleaseSafe",
@@ -42,11 +42,12 @@
     "install_name": null,
     "needed": [
       "ADVAPI32.dll",
-      "api-ms-win-crt-environment-l1-1-0.dll",
+      "VCRUNTIME140.dll",
       "api-ms-win-crt-filesystem-l1-1-0.dll",
-      "api-ms-win-crt-heap-l1-1-0.dll",
-      "api-ms-win-crt-runtime-l1-1-0.dll",
       "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
       "KERNEL32.dll",
       "ntdll.dll",
       "CRYPT32.dll"
@@ -66,11 +67,11 @@
   "files": [
     {
       "path": "lib/metask_agentcore.lib",
-      "sha256": "613548fb775702e8fd252798dd2b9f171483e997841c6d83a2c1734cdff890e9"
+      "sha256": "acad875502217c94d0376caf563d6ee2649ddbe9a156f0fc9b61e6d95fd2225f"
     },
     {
       "path": "lib/metask_agentcore.dll",
-      "sha256": "f1faa58d63ae96cbb3ee90be24efcac203de10014ada96024f710a85e0356e84"
+      "sha256": "dc71fc8ea3caca72599456366a65920ffce5accf398b15f7cdaa033f5679010e"
     },
     {
       "path": "bin/rg.exe",
@@ -114,7 +115,7 @@
     },
     {
       "path": "bindings/rust/link.cfg",
-      "sha256": "83b858a28998dc0257dacebad3c48aa07cf05b42b6eef6bf70526ae5a50fc8c2"
+      "sha256": "86e522c6d85f68e04f330c9038dd77bb2eb5de55d4cb37f01babded5c3750f8a"
     },
     {
       "path": "bindings/rust/build.rs",
@@ -134,7 +135,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "78f1f2f2f58ac33289a8c012978db3f82fd4c1a457346bdfc5dbafb29d4eabbc"
+      "sha256": "1455f5eed68c9984884fa1fb99affda392dce4db904a744337828b8794910f6e"
     }
   ]
 }

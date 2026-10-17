@@ -11,12 +11,12 @@
     "zig_version": "0.16.0"
   },
   "target": {
-    "id": "x86_64-windows-gnu",
+    "id": "x86_64-windows-msvc",
     "architecture": "x86_64",
     "os": "windows",
-    "abi": "gnu",
-    "zig_target": "x86_64-windows.win10...win11_dt-gnu",
-    "rust_target": "x86_64-pc-windows-gnu"
+    "abi": "msvc",
+    "zig_target": "x86_64-windows.win10...win11_dt-msvc",
+    "rust_target": "x86_64-pc-windows-msvc"
   },
   "build": {
     "optimize": "ReleaseSafe",
@@ -42,11 +42,13 @@
     "install_name": null,
     "needed": [
       "ADVAPI32.dll",
-      "api-ms-win-crt-environment-l1-1-0.dll",
+      "VCRUNTIME140.dll",
       "api-ms-win-crt-filesystem-l1-1-0.dll",
-      "api-ms-win-crt-heap-l1-1-0.dll",
-      "api-ms-win-crt-runtime-l1-1-0.dll",
       "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
       "KERNEL32.dll",
       "ntdll.dll",
       "CRYPT32.dll"
@@ -66,11 +68,11 @@
   "files": [
     {
       "path": "lib/metask_agentcore.lib",
-      "sha256": "1cae2c3ceb86367cc7f9d452837c1716305339b4b552f5abcdc51c2194cbcf46"
+      "sha256": "1c672d46ad75e81b501d2cd2df0a88ad1c1634d6c49b05acf7e0b69d55019646"
     },
     {
       "path": "lib/metask_agentcore.dll",
-      "sha256": "05836a80ae3d22db352da8918f708c99688b601429606f0a72f9329e347dc84c"
+      "sha256": "c41922e62d44139d0b1aeef74b799a81ff938fc7cec6c647006e480850ede42d"
     },
     {
       "path": "bin/rg.exe",
@@ -114,7 +116,7 @@
     },
     {
       "path": "bindings/rust/link.cfg",
-      "sha256": "bd75cd9dca9ef91551c46a3762a21aaf9fc6f4152b23a42aa817b703010e392d"
+      "sha256": "beacc02c3caab03ef97a4cac316fa94538e3598992b987265420f74f11278204"
     },
     {
       "path": "bindings/rust/build.rs",
@@ -134,7 +136,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "70feef00bd429c500d2f09721e6cb0fa668f387f9b42430388a6711607e64503"
+      "sha256": "484021822aa5c1618e35b5f01fed18e188581bc632c8009914c7d869551f80ca"
     }
   ]
 }

@@ -15,7 +15,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateAgentCoreBundle } from "./agentcore-bundle.mjs";
+import {
+  defaultAgentCoreTargetId,
+  validateAgentCoreBundle,
+} from "./agentcore-bundle.mjs";
 import { stageAgentCoreBundle } from "./stage-agentcore-bundle.mjs";
 import { verifyStagedAgentCoreBundle } from "./verify-staged-agentcore-bundle.mjs";
 import {
@@ -71,12 +74,12 @@ async function fixture(t, mutateManifest = () => {}) {
     },
     toolchain: { zig_version: "0.16.0" },
     target: {
-      id: "x86_64-windows-gnu",
+      id: "x86_64-windows-msvc",
       architecture: "x86_64",
       os: "windows",
-      abi: "gnu",
-      zig_target: "x86_64-windows.win10...win11_dt-gnu",
-      rust_target: "x86_64-pc-windows-gnu",
+      abi: "msvc",
+      zig_target: "x86_64-windows.win10...win11_dt-msvc",
+      rust_target: "x86_64-pc-windows-msvc",
     },
     build: {
       optimize: "ReleaseSafe",
@@ -183,7 +186,7 @@ const injectedChecks = {
   symbols: "00000000 T metask_agentcore_get_api\n",
 };
 const injectedVerification = {
-  targetId: "x86_64-windows-gnu",
+  targetId: "x86_64-windows-msvc",
   validationOptions: injectedChecks,
 };
 
@@ -193,39 +196,82 @@ function injectedFileOperations(overrides = {}) {
 
 async function seedCanonicalBundle(repositoryRoot) {
   const storageRoot = path.join(repositoryRoot, ".agentcore", "bundles");
-  const target = path.join(storageRoot, "x86_64-windows-gnu");
+  const target = path.join(storageRoot, "x86_64-windows-msvc");
   await mkdir(target, { recursive: true });
   await writeFile(path.join(target, "old"), "old-canonical");
   return { storageRoot, target };
 }
 
-test("accepts a locked revision 19 Windows x64 GNU candidate", async (t) => {
+test("accepts a locked revision 19 Windows x64 MSVC candidate", async (t) => {
   const { root, manifest } = await fixture(t);
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
     expectedManifest: manifest,
   });
-  assert.equal(result.target, "x86_64-windows.win10...win11_dt-gnu");
+  assert.equal(result.target, "x86_64-windows.win10...win11_dt-msvc");
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts a locked revision 19 Windows ARM64 GNU candidate", async (t) => {
+test("accepts a locked revision 19 Windows ARM64 MSVC candidate", async (t) => {
   const { root, manifest } = await fixture(t, (manifest) => {
     manifest.target = {
-      id: "aarch64-windows-gnu",
+      id: "aarch64-windows-msvc",
       architecture: "aarch64",
       os: "windows",
-      abi: "gnu",
-      zig_target: "aarch64-windows.win10...win11_dt-gnu",
-      rust_target: "aarch64-pc-windows-gnullvm",
+      abi: "msvc",
+      zig_target: "aarch64-windows.win10...win11_dt-msvc",
+      rust_target: "aarch64-pc-windows-msvc",
     };
   });
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
     expectedManifest: manifest,
   });
-  assert.equal(result.target, "aarch64-windows.win10...win11_dt-gnu");
+  assert.equal(result.target, "aarch64-windows.win10...win11_dt-msvc");
   assert.deepEqual(result.payloadFiles, fixtureFiles);
+});
+
+test("Windows defaults select MSVC for both architectures", () => {
+  assert.equal(defaultAgentCoreTargetId("win32", "x64"), "x86_64-windows-msvc");
+  assert.equal(
+    defaultAgentCoreTargetId("win32", "arm64"),
+    "aarch64-windows-msvc",
+  );
+});
+
+test("Windows bundles reject retired GNU targets and mixed ABI identities", async (t) => {
+  for (const arch of ["x86_64", "aarch64"]) {
+    for (const [field, value, reason] of [
+      ["id", `${arch}-windows-gnu`, /unsupported AgentCore bundle target/],
+      ["abi", "gnu", /unsupported AgentCore target ABI/],
+      [
+        "zig_target",
+        `${arch}-windows.win10...win11_dt-gnu`,
+        /unsupported AgentCore resolved target/,
+      ],
+      [
+        "rust_target",
+        `${arch}-pc-windows-${arch === "aarch64" ? "gnullvm" : "gnu"}`,
+        /unsupported AgentCore Rust target/,
+      ],
+    ]) {
+      const { root } = await fixture(t, (manifest) => {
+        manifest.target = {
+          id: `${arch}-windows-msvc`,
+          architecture: arch,
+          os: "windows",
+          abi: "msvc",
+          zig_target: `${arch}-windows.win10...win11_dt-msvc`,
+          rust_target: `${arch}-pc-windows-msvc`,
+          [field]: value,
+        };
+      });
+      await assert.rejects(
+        validateAgentCoreBundle(root, injectedChecks),
+        reason,
+      );
+    }
+  }
 });
 
 test("accepts a locked revision 19 macOS arm64 candidate", async (t) => {
@@ -656,7 +702,7 @@ test("stages and verifies only the locked manifest payload", async (t) => {
   });
   assert.equal(
     result.target,
-    path.join(repositoryRoot, ".agentcore", "bundles", "x86_64-windows-gnu"),
+    path.join(repositoryRoot, ".agentcore", "bundles", "x86_64-windows-msvc"),
   );
   assert.deepEqual(
     JSON.parse(await readFile(path.join(result.target, "manifest.json"))),
@@ -672,7 +718,7 @@ test("stages and verifies only the locked manifest payload", async (t) => {
   ]);
   assert.deepEqual(
     await readdir(path.join(repositoryRoot, ".agentcore", "bundles")),
-    ["x86_64-windows-gnu"],
+    ["x86_64-windows-msvc"],
   );
 });
 
@@ -742,7 +788,7 @@ test("copy failure preserves the canonical bundle", async (t) => {
     await readFile(path.join(target, "old"), "utf8"),
     "old-canonical",
   );
-  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-msvc"]);
 });
 
 test("target rename failure preserves the canonical bundle", async (t) => {
@@ -769,7 +815,7 @@ test("target rename failure preserves the canonical bundle", async (t) => {
     await readFile(path.join(target, "old"), "utf8"),
     "old-canonical",
   );
-  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-msvc"]);
 });
 
 test("install rename failure restores the previous canonical bundle", async (t) => {
@@ -785,7 +831,7 @@ test("install rename failure restores the previous canonical bundle", async (t) 
       fileOperations: injectedFileOperations({
         rename: async (from, to) => {
           if (
-            path.basename(from).startsWith(".x86_64-windows-gnu-staging-") &&
+            path.basename(from).startsWith(".x86_64-windows-msvc-staging-") &&
             to === target
           )
             throw new Error("injected install rename failure");
@@ -799,7 +845,7 @@ test("install rename failure restores the previous canonical bundle", async (t) 
     await readFile(path.join(target, "old"), "utf8"),
     "old-canonical",
   );
-  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-msvc"]);
 });
 
 test("failed install and restore leave one recoverable backup", async (t) => {
@@ -824,14 +870,14 @@ test("failed install and restore leave one recoverable backup", async (t) => {
   );
   const residues = await readdir(storageRoot);
   assert.equal(residues.length, 1);
-  assert.match(residues[0], /^\.x86_64-windows-gnu-backup-/);
+  assert.match(residues[0], /^\.x86_64-windows-msvc-backup-/);
 
   await stageAgentCoreBundle({
     repositoryRoot,
     source,
     validationOptions: injectedChecks,
   });
-  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-msvc"]);
   await verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification);
 });
 
@@ -850,7 +896,7 @@ test("backup cleanup failure reports installed state and is recovered next run",
         rm: async (target, options) => {
           if (
             !injected &&
-            path.basename(target).startsWith(".x86_64-windows-gnu-backup-")
+            path.basename(target).startsWith(".x86_64-windows-msvc-backup-")
           ) {
             injected = true;
             throw new Error("injected backup cleanup failure");
@@ -864,7 +910,7 @@ test("backup cleanup failure reports installed state and is recovered next run",
   await verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification);
   assert.equal(
     (await readdir(storageRoot)).filter((entry) =>
-      entry.startsWith(".x86_64-windows-gnu-backup-"),
+      entry.startsWith(".x86_64-windows-msvc-backup-"),
     ).length,
     1,
   );
@@ -874,7 +920,7 @@ test("backup cleanup failure reports installed state and is recovered next run",
     source,
     validationOptions: injectedChecks,
   });
-  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-msvc"]);
 });
 
 test("cleans stale staging and backup residues when canonical exists", async (t) => {
@@ -882,9 +928,9 @@ test("cleans stale staging and backup residues when canonical exists", async (t)
   const repositoryRoot = await repository(t, manifest);
   const storageRoot = path.join(repositoryRoot, ".agentcore", "bundles");
   for (const relativePath of [
-    "x86_64-windows-gnu/old",
-    ".x86_64-windows-gnu-staging-stale/junk",
-    ".x86_64-windows-gnu-backup-stale/old",
+    "x86_64-windows-msvc/old",
+    ".x86_64-windows-msvc-staging-stale/junk",
+    ".x86_64-windows-msvc-backup-stale/old",
   ]) {
     await mkdir(path.dirname(path.join(storageRoot, relativePath)), {
       recursive: true,
@@ -897,18 +943,18 @@ test("cleans stale staging and backup residues when canonical exists", async (t)
     source,
     validationOptions: injectedChecks,
   });
-  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-gnu"]);
+  assert.deepEqual(await readdir(storageRoot), ["x86_64-windows-msvc"]);
 });
 
 test("recovers one backup before staging and rejects ambiguous backups", async (t) => {
   const single = await fixture(t);
   const singleRepository = await repository(t, single.manifest);
   const singleStorage = path.join(singleRepository, ".agentcore", "bundles");
-  await mkdir(path.join(singleStorage, ".x86_64-windows-gnu-backup-one"), {
+  await mkdir(path.join(singleStorage, ".x86_64-windows-msvc-backup-one"), {
     recursive: true,
   });
   await writeFile(
-    path.join(singleStorage, ".x86_64-windows-gnu-backup-one", "old"),
+    path.join(singleStorage, ".x86_64-windows-msvc-backup-one", "old"),
     "old",
   );
   await stageAgentCoreBundle({
@@ -916,7 +962,7 @@ test("recovers one backup before staging and rejects ambiguous backups", async (
     source: single.root,
     validationOptions: injectedChecks,
   });
-  assert.deepEqual(await readdir(singleStorage), ["x86_64-windows-gnu"]);
+  assert.deepEqual(await readdir(singleStorage), ["x86_64-windows-msvc"]);
 
   const multiple = await fixture(t);
   const multipleRepository = await repository(t, multiple.manifest);
@@ -925,10 +971,10 @@ test("recovers one backup before staging and rejects ambiguous backups", async (
     ".agentcore",
     "bundles",
   );
-  await mkdir(path.join(multipleStorage, ".x86_64-windows-gnu-backup-one"), {
+  await mkdir(path.join(multipleStorage, ".x86_64-windows-msvc-backup-one"), {
     recursive: true,
   });
-  await mkdir(path.join(multipleStorage, ".x86_64-windows-gnu-backup-two"), {
+  await mkdir(path.join(multipleStorage, ".x86_64-windows-msvc-backup-two"), {
     recursive: true,
   });
   await assert.rejects(
@@ -946,7 +992,7 @@ test("verify-staged reports a missing canonical bundle", async (t) => {
   const repositoryRoot = await repository(t, manifest);
   await assert.rejects(
     verifyStagedAgentCoreBundle(repositoryRoot, injectedVerification),
-    /staged AgentCore bundle x86_64-windows-gnu is missing/,
+    /staged AgentCore bundle x86_64-windows-msvc is missing/,
   );
 });
 

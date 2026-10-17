@@ -19,6 +19,13 @@ const ArtifactOption = enum {
 };
 
 pub fn build(b: *std.Build) void {
+    // The SDK follows Zig's GNU host default on Windows. Supply our canonical
+    // ABI only when the caller has not selected a target; explicit GNU fails below.
+    if (b.graph.host.result.os.tag == .windows and !b.user_input_options.contains("target")) {
+        _ = b.addUserInputOption("target", b.fmt("{s}-windows.win10...win11_dt-msvc", .{
+            @tagName(b.graph.host.result.cpu.arch),
+        })) catch @panic("cannot configure the Windows MSVC target");
+    }
     addRendererWireGenerator(b);
     if (b.option([]const u8, "install-prefix", "Independent output directory for this artifact")) |prefix|
         b.resolveInstallPrefix(prefix, .{});
@@ -398,10 +405,13 @@ fn agentCoreTargetId(target: std.Target) []const u8 {
             .x86_64 => "x86_64-macos",
             else => @panic("unsupported macOS AgentCore architecture"),
         },
-        .windows => switch (target.cpu.arch) {
-            .aarch64 => "aarch64-windows-gnu",
-            .x86_64 => "x86_64-windows-gnu",
-            else => @panic("unsupported Windows AgentCore architecture"),
+        .windows => blk: {
+            if (target.abi != .msvc) @panic("Windows MetaWork requires the MSVC ABI");
+            break :blk switch (target.cpu.arch) {
+                .aarch64 => "aarch64-windows-msvc",
+                .x86_64 => "x86_64-windows-msvc",
+                else => @panic("unsupported Windows AgentCore architecture"),
+            };
         },
         else => @panic("unsupported AgentCore operating system"),
     };

@@ -2477,11 +2477,18 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
     ].sort(),
   );
   const buildManifest = read("build.zig.zon");
+  assert.match(build, /target\.abi != \.msvc/);
+  for (const source of [build, buildManifest, bundleVerifier, bundlePolicy]) {
+    assert.doesNotMatch(
+      source,
+      /(?:aarch64|x86_64)-windows-gnu|windows-gnullvm/,
+    );
+  }
   for (const target of [
     "aarch64-macos",
     "x86_64-macos",
-    "aarch64-windows-gnu",
-    "x86_64-windows-gnu",
+    "aarch64-windows-msvc",
+    "x86_64-windows-msvc",
   ]) {
     assert.match(buildManifest, new RegExp(`\\.agentcore/bundles/${target}`));
   }
@@ -2498,8 +2505,8 @@ test("AgentCore SDK access is restricted to Agent modules and the test fixture",
   }
   assert.doesNotMatch(build, /\.addObjectFile\(/);
   for (const [target, lock] of [
-    ["aarch64-windows-gnu", "agentcore-bundle.windows-aarch64.lock.json"],
-    ["x86_64-windows-gnu", "agentcore-bundle.windows-x86_64.lock.json"],
+    ["aarch64-windows-msvc", "agentcore-bundle.windows-aarch64.lock.json"],
+    ["x86_64-windows-msvc", "agentcore-bundle.windows-x86_64.lock.json"],
     ["aarch64-macos", "agentcore-bundle.macos-aarch64.lock.json"],
     ["x86_64-macos", "agentcore-bundle.macos-x86_64.lock.json"],
   ]) {

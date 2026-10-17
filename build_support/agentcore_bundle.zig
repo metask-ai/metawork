@@ -75,9 +75,9 @@ pub fn verify(b: *std.Build, root: []const u8) Bundle {
     const manifest_path = b.pathJoin(&.{ root, "manifest.json" });
     const manifest_bytes = readFile(b, manifest_path, 1024 * 1024, "cannot read AgentCore bundle manifest");
     const manifest = parseManifest(b, manifest_bytes);
-    const lock_path = if (std.mem.eql(u8, manifest.target.id, "aarch64-windows-gnu"))
+    const lock_path = if (std.mem.eql(u8, manifest.target.id, "aarch64-windows-msvc"))
         "build_support/agentcore-bundle.windows-aarch64.lock.json"
-    else if (std.mem.eql(u8, manifest.target.id, "x86_64-windows-gnu"))
+    else if (std.mem.eql(u8, manifest.target.id, "x86_64-windows-msvc"))
         "build_support/agentcore-bundle.windows-x86_64.lock.json"
     else if (std.mem.eql(u8, manifest.target.id, "aarch64-macos"))
         "build_support/agentcore-bundle.macos-aarch64.lock.json"
@@ -170,22 +170,22 @@ fn validateTarget(manifest: Manifest) struct {
 } {
     if (!manifest.link.requires_c_runtime or manifest.link.system_frameworks.len != 0)
         @panic("unsupported AgentCore system link inputs");
-    if (std.mem.eql(u8, manifest.target.id, "aarch64-windows-gnu") and
+    if (std.mem.eql(u8, manifest.target.id, "aarch64-windows-msvc") and
         std.mem.eql(u8, manifest.target.os, "windows") and
         std.mem.eql(u8, manifest.target.architecture, "aarch64") and
-        std.mem.eql(u8, manifest.target.abi, "gnu") and
-        std.mem.eql(u8, manifest.target.rust_target, "aarch64-pc-windows-gnullvm") and
-        std.mem.eql(u8, manifest.target.zig_target, "aarch64-windows.win10...win11_dt-gnu") and
+        std.mem.eql(u8, manifest.target.abi, "msvc") and
+        std.mem.eql(u8, manifest.target.rust_target, "aarch64-pc-windows-msvc") and
+        std.mem.eql(u8, manifest.target.zig_target, "aarch64-windows.win10...win11_dt-msvc") and
         stringListsEqual(manifest.link.system_libraries, &.{ "advapi32", "crypt32" }))
     {
         return .{ .deployment_target = null, .sdk_dependency = .windows_arm64 };
     }
-    if (std.mem.eql(u8, manifest.target.id, "x86_64-windows-gnu") and
+    if (std.mem.eql(u8, manifest.target.id, "x86_64-windows-msvc") and
         std.mem.eql(u8, manifest.target.os, "windows") and
         std.mem.eql(u8, manifest.target.architecture, "x86_64") and
-        std.mem.eql(u8, manifest.target.abi, "gnu") and
-        std.mem.eql(u8, manifest.target.rust_target, "x86_64-pc-windows-gnu") and
-        std.mem.eql(u8, manifest.target.zig_target, "x86_64-windows.win10...win11_dt-gnu") and
+        std.mem.eql(u8, manifest.target.abi, "msvc") and
+        std.mem.eql(u8, manifest.target.rust_target, "x86_64-pc-windows-msvc") and
+        std.mem.eql(u8, manifest.target.zig_target, "x86_64-windows.win10...win11_dt-msvc") and
         stringListsEqual(manifest.link.system_libraries, &.{ "advapi32", "crypt32" }))
     {
         return .{ .deployment_target = null, .sdk_dependency = .windows_x64 };

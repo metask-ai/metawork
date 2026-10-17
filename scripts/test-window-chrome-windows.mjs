@@ -51,6 +51,7 @@ const resizeSessionOnly = process.argv.includes("--resize-session-only");
 const evidenceDir = process.env.METAWORK_WINDOW_CHROME_EVIDENCE_DIR;
 const inputSessionOnly = process.argv.includes("--input-session-only");
 const controlsSessionOnly = process.argv.includes("--controls-session-only");
+const reloadSessionOnly = process.argv.includes("--reload-session-only");
 const uiSessionOnly = process.argv.includes("--ui-session-only");
 
 // This harness owns the automation Debug artifact it drives; build before the
@@ -149,7 +150,7 @@ try {
   await rendererChromeReady;
   if (uiSessionOnly) {
     await probeWindowChromeUi({ port: debugPort, runProbe, evidenceDir });
-  } else if (controlsSessionOnly) {
+  } else if (controlsSessionOnly || reloadSessionOnly) {
     await probeControls();
   } else if (inputSessionOnly) {
     await probeWindowChromeInput({ port: debugPort, runProbe, evidenceDir });
@@ -220,13 +221,15 @@ try {
   process.stdout.write(
     uiSessionOnly
       ? "Windows mounted Workbench input and clean shutdown passed.\n"
-      : controlsSessionOnly
-        ? "Windows window controls lifecycle and clean shutdown passed.\n"
-        : inputSessionOnly
-          ? "Windows real input matrix and clean shutdown passed.\n"
-          : resizeSessionOnly
-            ? "Windows top-edge resize/cursors, native edge double click, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
-            : "Windows top-edge resize/cursors, native edge double click, paint/reload, SDK native titlebar dragging/double-click, controls, hide/reopen, and clean shutdown passed.\n",
+      : reloadSessionOnly
+        ? "Windows reload controls and clean shutdown passed.\n"
+        : controlsSessionOnly
+          ? "Windows window controls lifecycle and clean shutdown passed.\n"
+          : inputSessionOnly
+            ? "Windows real input matrix and clean shutdown passed.\n"
+            : resizeSessionOnly
+              ? "Windows top-edge resize/cursors, native edge double click, paint/reload, resize session, controls, hide/reopen, and clean shutdown passed.\n"
+              : "Windows top-edge resize/cursors, native edge double click, paint/reload, SDK native titlebar dragging/double-click, controls, hide/reopen, and clean shutdown passed.\n",
   );
 } catch (error) {
   process.stderr.write(output);
@@ -268,6 +271,7 @@ async function probeControls() {
     port: debugPort,
     runProbe,
     evidenceDir,
+    reloadOnly: reloadSessionOnly,
     openTray: () =>
       execFileAsync(
         process.execPath,

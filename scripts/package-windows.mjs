@@ -38,12 +38,12 @@ const windowsTrayIconRelativePath = path.join(
 
 const windowsArchitecturePolicies = Object.freeze({
   x64: Object.freeze({
-    targetId: "x86_64-windows-gnu",
+    targetId: "x86_64-windows-msvc",
     peMachine: 0x8664,
     innoArchitecture: "x64compatible",
   }),
   arm64: Object.freeze({
-    targetId: "aarch64-windows-gnu",
+    targetId: "aarch64-windows-msvc",
     peMachine: 0xaa64,
     innoArchitecture: "arm64",
   }),

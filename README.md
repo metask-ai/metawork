@@ -31,7 +31,7 @@ npm run dev
 
 ```powershell
 npm ci
-node scripts/stage-agentcore-bundle.mjs C:\absolute\path\to\x86_64-windows.win10...win11_dt-gnu
+node scripts/stage-agentcore-bundle.mjs C:\absolute\path\to\x86_64-windows.win10...win11_dt-msvc
 npm run dev
 ```
 
