@@ -461,6 +461,19 @@ pub const RecoveryStartFacts = struct {
 
 pub const RecoveryWorkspaceTrust = enum { explicitly_trusted, temporary };
 
+pub const RestoreCapabilities = recovery_job.RestoreCapabilities;
+pub const ModelIntentAuthority = recovery_job.ModelIntentAuthority;
+
+pub const ModelRebindStart = struct {
+    source_id: []const u8,
+    selection_revision: u64,
+    catalog_generation: u64,
+    /// Cleared when the bounded attempt takes ownership, including a later
+    /// executor admission failure. Before that point errors consume nothing.
+    capabilities: *?RestoreCapabilities,
+    text: TextProjection,
+};
+
 pub const RecoveryStartInput = struct {
     expected_binding_epoch: u64,
     workspace_id: u64,
@@ -476,6 +489,8 @@ pub const RecoveryStartInput = struct {
     checkpoint_limits: agent.CheckpointLimits,
     notifier: task_execution.Notifier,
     executor: ExecutorPort,
+    rebind: ?ModelRebindStart = null,
+    checkpoint_store_health: ?*std.atomic.Value(checkpoint_store.Health) = null,
 };
 
 pub const RecoveryStartError = agent.Error || std.mem.Allocator.Error || error{
@@ -488,6 +503,9 @@ pub const RecoveryStartError = agent.Error || std.mem.Allocator.Error || error{
     BindingEpochExhausted,
     TaskPersistenceFailed,
     TaskPersistenceOutcomeUnknown,
+    ProjectionCapacity,
+    ExecutionUnavailable,
+    ExecutionGenerationMismatch,
 };
 
 pub const MutationError = std.mem.Allocator.Error || error{
@@ -966,6 +984,8 @@ pub const RecoveryAuthorityQuery = struct {
     target_execution_generation: u64,
     task_model: []const u8,
     protocol: models_contract.Protocol,
+    model_intent: ?recovery_job.ModelIntentAuthority = null,
+    original_restore: bool = false,
 };
 
 pub const RecoveryExternalAuthority = struct {
@@ -985,6 +1005,8 @@ pub const RecoveryEffects = struct {
         RecoveryAuthorityQuery,
     ) RecoveryExternalAuthority,
     queue_binding_fn: *const fn (*anyopaque, u64) anyerror!?DurableCommit,
+    executor: ?ExecutorPort = null,
+    refresh_capabilities_fn: ?*const fn (*anyopaque, u64) bool = null,
 
     fn authority(
         self: RecoveryEffects,
@@ -1034,6 +1056,7 @@ pub const ProjectionAuthority = struct {
     runtime_admission: task_recovery.RuntimeAdmission,
     authority_stable: bool,
     model_selection_availability: task_view.ModelSelectionAvailability,
+    model_rebind_required: bool = false,
 };
 
 /// Command admission uses its own typed observation port. It deliberately
@@ -2634,6 +2657,11 @@ pub const Runtime = struct {
         };
     }
 
+    pub fn validateExecutionBinding(self: *const Runtime, task_id: u64) error{ UnknownTask, ExecutionUnavailable, ExecutionGenerationMismatch }!void {
+        const task = self.findConst(task_id) orelse return error.UnknownTask;
+        _ = try taskExecutionInput(task);
+    }
+
     pub fn runExecutionIdentity(
         self: *const Runtime,
         task_id: u64,
@@ -3920,8 +3948,8 @@ pub const Runtime = struct {
     ) bool {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.executionConst()) |execution| {
-                const credential = execution.input().api_key;
+            var credentials: [3][]const u8 = undefined;
+            for (retainedExecutionCredentials(task, &credentials)) |credential| {
                 if (credential.len != 0 and
                     std.mem.indexOf(u8, value, credential) != null)
                     return true;
@@ -3942,8 +3970,8 @@ pub const Runtime = struct {
         var changed = false;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.executionConst()) |execution| {
-                const credential = execution.input().api_key;
+            var credentials: [3][]const u8 = undefined;
+            for (retainedExecutionCredentials(task, &credentials)) |credential| {
                 if (credential.len != 0)
                     changed = redact_fn(value, credential) or changed;
             }
@@ -3958,8 +3986,8 @@ pub const Runtime = struct {
         var longest: usize = 0;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.executionConst()) |execution| {
-                const credential = execution.input().api_key;
+            var credentials: [3][]const u8 = undefined;
+            for (retainedExecutionCredentials(task, &credentials)) |credential| {
                 if (credential.len > longest and
                     std.mem.startsWith(u8, value, credential))
                     longest = credential.len;
@@ -3975,8 +4003,8 @@ pub const Runtime = struct {
         if (value.len == 0) return false;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            if (task.runtime.executionConst()) |execution| {
-                const credential = execution.input().api_key;
+            var credentials: [3][]const u8 = undefined;
+            for (retainedExecutionCredentials(task, &credentials)) |credential| {
                 if (value.len < credential.len and
                     std.mem.startsWith(u8, credential, value)) return true;
             }
@@ -4000,6 +4028,13 @@ pub const Runtime = struct {
                 } else {
                     snapshot.redactPresentationNoFail(credential);
                 }
+            }
+            if (task.runtime.restore_catalog) |*snapshot| {
+                if (snapshot.identityContainsCredential(credential)) {
+                    effects.releaseProjectionBytes(snapshot.projected_bytes);
+                    snapshot.deinit();
+                    task.runtime.restore_catalog = null;
+                } else snapshot.redactPresentationNoFail(credential);
             }
             redactTaskProjection(task, credential, effects);
         }
@@ -4078,16 +4113,20 @@ pub const Runtime = struct {
             input.expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
         const checkpoint = task.durable.checkpoint;
+        if (input.rebind != null) _ = try taskExecutionInput(task);
         if (input.workspace_id != task.durable.workspace_id or
             input.workspace_epoch != task.durable.workspace_epoch or
-            (checkpoint == null and !freshConversationAllowed(task)) or
+            (input.rebind == null and checkpoint == null and !freshConversationAllowed(task)) or
             (checkpoint != null and input.checkpoint_store == null))
             return error.RecoveryUnavailable;
         if (input.execution.execution_generation == 0 or
-            input.execution.target.protocol != task.durable.execution_protocol)
+            (input.rebind == null and input.execution.target.protocol != task.durable.execution_protocol))
             return error.RecoveryUnavailable;
         if (task.runtime.active_operation != .none or
-            task.runtime.liveConst() != null)
+            (if (input.rebind == null) task.runtime.liveConst() != null else !task.runtime.hasAttachedSession() or task.runtime.close_requested or task.runtime.close_failed or
+                task.runtime.worker_leases.hasLive() or task_state.hasUnfinalizedTerminalEvents(task) or
+                task.model_intent_prepared or task.approval_change != null or task.durable.archived or
+                input.checkpoint_store == null or input.checkpoint_store_health == null))
             return error.RecoveryUnavailable;
         if (self.next_restore_attempt_id == 0 or
             self.next_restore_attempt_id == std.math.maxInt(u64))
@@ -4115,14 +4154,15 @@ pub const Runtime = struct {
         var workspace_live = true;
         errdefer if (workspace_live) workspace.deinit();
         var restored_execution = input.execution;
-        restored_execution.target.model = task.durable.execution_model;
+        if (input.rebind == null) restored_execution.target.model = task.durable.execution_model;
         var execution = try owned_task_execution.OwnedTaskExecution.clone(
             self.allocator,
             restored_execution,
         );
         execution.source_generation = input.source_generation;
+        if (input.rebind) |rebind| execution.model_intent_revision = rebind.selection_revision;
         errdefer execution.deinit();
-        const model = try self.allocator.dupe(u8, task.durable.execution_model);
+        const model = try self.allocator.dupe(u8, restored_execution.target.model);
         var model_live = true;
         errdefer if (model_live) self.allocator.free(model);
         var restore_lease = task.runtime.worker_leases.acquire() catch return error.RestoreBusy;
@@ -4133,7 +4173,12 @@ pub const Runtime = struct {
         var job_initialized = false;
         errdefer if (job_owned) {
             if (job_initialized) {
-                job.deinit();
+                job.state.store(.cancelled, .release);
+                if (job.rebind) |*rebind| if (rebind.projected_model) |value| {
+                    input.rebind.?.text.discardCandidate(value);
+                    rebind.projected_model = null;
+                };
+                if (!job.deinit()) self.recovery_poisoned = true;
             } else {
                 self.allocator.destroy(job);
             }
@@ -4168,17 +4213,59 @@ pub const Runtime = struct {
                 .source_execution_generation = task.durable.execution_generation,
                 .target_execution_generation = input.execution.execution_generation,
                 .task_model = model,
-                .protocol = task.durable.execution_protocol,
+                .protocol = restored_execution.target.protocol,
                 .permission_mode = permission.mode,
                 .shell_policy = permission.shell,
                 .permission_interaction = permission.interaction,
             },
         };
+        job.credential = job.attempt.execution.secret;
         restore_lease_owned = false;
         job_initialized = true;
         checkpoint_live = false;
         workspace_live = false;
         model_live = false;
+        if (input.rebind) |rebind_input| {
+            const intent = task.durable.model_intent orelse return error.RecoveryUnavailable;
+            if (intent.revision != rebind_input.selection_revision or !std.mem.eql(u8, intent.source_id, rebind_input.source_id) or
+                !std.mem.eql(u8, intent.model_id, model)) return error.RecoveryUnavailable;
+            const installed = task.runtime.executionConst().?;
+            var original = try owned_task_execution.OwnedTaskExecution.clone(self.allocator, installed.input());
+            errdefer original.deinit();
+            original.source_generation = installed.source_generation;
+            original.model_intent_revision = installed.model_intent_revision;
+            const original_model = try self.allocator.dupe(u8, task.durable.execution_model);
+            errdefer self.allocator.free(original_model);
+            const source_id = try self.allocator.dupe(u8, rebind_input.source_id);
+            errdefer self.allocator.free(source_id);
+            const projected = try rebind_input.text.project(model, models_contract.Limits.model_id_bytes, input.execution.api_key, 0);
+            errdefer rebind_input.text.discardCandidate(projected.value);
+            var access = try task.runtime.acquireAccess();
+            errdefer access.deinit();
+            const capabilities = rebind_input.capabilities.* orelse return error.RecoveryUnavailable;
+            job.rebind = .{
+                .source_id = source_id,
+                .selection_revision = rebind_input.selection_revision,
+                .source_generation = input.source_generation,
+                .catalog_generation = rebind_input.catalog_generation,
+                .approval_revision = task.durable.approval_revision,
+                .last_run_id = task_policy.lastConversationRunId(task) orelse 0,
+                .last_compact_id = task_policy.lastConversationCompactId(task),
+                .original_execution = original.take(),
+                .original_credential = &.{},
+                .original_model = original_model,
+                .capabilities = capabilities,
+                .projected_model = projected.value,
+                .baseline_access = access.take(),
+                .store_health = input.checkpoint_store_health.?,
+            };
+            rebind_input.capabilities.* = null;
+            job.rebind.?.original_credential = job.rebind.?.original_execution.secret;
+            job.export_checkpoint_fn = exportRecoveryCheckpoint;
+            job.attempt.permission_mode = capabilities.original.permission_mode;
+            job.attempt.shell_policy = capabilities.original.shell_policy;
+            job.attempt.permission_interaction = capabilities.original.permission_interaction;
+        }
         task.runtime.active_operation = .{ .restore = .{ .id = attempt_id } };
         task.runtime.restore_job = job;
         task.runtime.last_restore_failure = null;
@@ -4238,6 +4325,14 @@ pub const Runtime = struct {
         task: *const task_state.Task,
         external: ProjectionAuthority,
     ) task_recovery.Projection {
+        if (task.runtime.active_operation == .none and task.runtime.hasAttachedSession() and external.model_rebind_required) {
+            return .{
+                .continuation = .{ .unavailable = if (task.runtime.last_restore_failure != null) .session_recovery_failed else .session_recovery_required },
+                .recovery_available = !external.shutting_down and !task.durable.archived and task.read_only_history == null and
+                    external.task_persistence_ready and external.checkpoint_store_ready and external.workspace_identity_exact and
+                    external.automatic_owner_exact and external.authority_stable and external.runtime_admission == .available,
+            };
+        }
         return task_recovery.project(self.recoveryAdmissionFacts(task, external));
     }
 
@@ -4485,7 +4580,11 @@ pub const Runtime = struct {
             task.runtime.close_completion.store(.none, .release);
             switch (completion) {
                 .closed => {
-                    std.debug.assert(!task.runtime.worker_leases.hasLive());
+                    const rebind_close = if (task.runtime.restore_job) |job| if (job.rebind) |rebind|
+                        rebind.phase == .closing_original or rebind.phase == .closing_candidate
+                    else
+                        false else false;
+                    std.debug.assert(task.runtime.worker_leases.liveCount() == @as(usize, if (rebind_close) 1 else 0));
                     result.durable_changed = excludePendingConversationTail(task) or
                         result.durable_changed;
                     std.debug.assert(
@@ -4562,17 +4661,243 @@ pub const Runtime = struct {
         return changed;
     }
 
+    fn finishRecovery(self: *Runtime, task: *task_state.Task, job: *recovery_job.Job, release: ReleaseEffects) void {
+        if (job.rebind) |*rebind| {
+            if (rebind.projected_model) |value| {
+                release.releaseProjectionBytes(value.len);
+                self.allocator.free(value);
+                rebind.projected_model = null;
+            }
+            if (task.runtime.restore_catalog) |*snapshot| {
+                release.releaseProjectionBytes(snapshot.projected_bytes);
+                snapshot.deinit();
+                task.runtime.restore_catalog = null;
+            }
+        }
+        task.runtime.restore_job = null;
+        task.runtime.active_operation = .none;
+        if (!job.deinit()) {
+            self.recovery_poisoned = true;
+            task.runtime.last_restore_failure = .candidate_cleanup_failed;
+        }
+    }
+
+    fn rebindAuthority(task: *const task_state.Task, job: *const recovery_job.Job, effects: RecoveryEffects) RecoveryExternalAuthority {
+        const rebind = &job.rebind.?;
+        return effects.authority(.{
+            .task_id = task.durable.id,
+            .workspace_id = task.durable.workspace_id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .target_execution_generation = job.attempt.target_execution_generation,
+            .task_model = job.attempt.task_model,
+            .protocol = job.attempt.protocol,
+            .model_intent = if (rebind.phase == .restoring_original) null else rebind.authority(),
+            .original_restore = rebind.phase == .restoring_original,
+        });
+    }
+
+    fn enqueueRecovery(job: *recovery_job.Job, effects: RecoveryEffects) void {
+        job.outcome = .none;
+        job.state.store(.queued, .release);
+        const executor = effects.executor orelse {
+            job.outcome = .{ .failure = .runtime_unavailable };
+            job.state.store(.completed, .release);
+            return;
+        };
+        executor.enqueue(job, job, recovery_job.Job.execute, recovery_job.Job.cancelQueued) catch |err| {
+            job.outcome = .{ .failure = if (err == error.QueueFull) .runtime_busy else .runtime_unavailable };
+            job.state.store(.completed, .release);
+        };
+    }
+
+    fn beginOriginalRestore(self: *Runtime, task: *task_state.Task, job: *recovery_job.Job, effects: RecoveryEffects, release: ReleaseEffects) void {
+        const rebind = &job.rebind.?;
+        if (!rebind.original_execution.owned or effects.refresh_capabilities_fn == null or
+            !effects.refresh_capabilities_fn.?(effects.context, task.durable.id))
+        {
+            self.finishRecovery(task, job, release);
+            return;
+        }
+        const authority = rebindAuthority(task, job, effects);
+        if (authority.shutting_down or !authority.workspace_authority_exact or !authority.automatic_owner_exact) {
+            self.finishRecovery(task, job, release);
+            return;
+        }
+        job.credential = &.{};
+        job.attempt.execution.deinit();
+        job.attempt.execution = rebind.original_execution.take();
+        job.credential = job.attempt.execution.secret;
+        self.allocator.free(job.attempt.task_model);
+        job.attempt.task_model = rebind.original_model.?;
+        rebind.original_model = null;
+        job.attempt.protocol = job.attempt.execution.protocol;
+        job.attempt.source_execution_generation = task.durable.execution_generation;
+        job.attempt.target_execution_generation = job.attempt.execution.execution_generation;
+        job.attempt.binding_epoch = task.durable.binding_epoch;
+        job.attempt.checkpoint.?.anchor.binding_epoch = task.durable.binding_epoch;
+        rebind.phase = .restoring_original;
+        job.binding_commit = .not_started;
+        job.cancellation.store(false, .release);
+        enqueueRecovery(job, effects);
+    }
+
+    /// Advances preparation on the composition thread. Core export/restore,
+    /// history confirmation and close each retain their existing worker owner.
+    fn syncRebindPreparation(self: *Runtime, task: *task_state.Task, job: *recovery_job.Job, effects: RecoveryEffects, release: ReleaseEffects, notifier: task_execution.Notifier) enum { waiting, changed, candidate } {
+        const rebind = &job.rebind.?;
+        switch (rebind.phase) {
+            .exporting_baseline => {
+                if (job.outcome == .baseline) {
+                    var duplicate = job.outcome.baseline.clone(self.allocator) catch {
+                        task.runtime.last_restore_failure = .checkpoint_io;
+                        self.finishRecovery(task, job, release);
+                        return .changed;
+                    };
+                    if (job.attempt.checkpoint) |*previous| previous.deinit(self.allocator);
+                    job.attempt.checkpoint = duplicate;
+                    duplicate = undefined;
+                    rebind.baseline = job.outcome.baseline;
+                    job.outcome = .none;
+                    rebind.phase = .confirming_baseline;
+                    return .changed;
+                }
+                task.runtime.last_restore_failure = job.failure() orelse .checkpoint_io;
+                if (rebind.export_poisoned) if (task.runtime.attached()) |attached| {
+                    attached.health = .session_poisoned;
+                };
+                self.finishRecovery(task, job, release);
+                return .changed;
+            },
+            .confirming_baseline => {
+                switch (job.binding_commit) {
+                    .pending, .outcome_unknown => return .waiting,
+                    .not_started => {
+                        if (job.cancellation.load(.acquire)) {
+                            task.runtime.last_restore_failure = .cancelled;
+                            self.finishRecovery(task, job, release);
+                            return .changed;
+                        }
+                        const candidate: task_state.CheckpointCandidate = .{ .record = rebind.baseline.?, .metrics = .{ .chunk_count = 0, .export_duration_ns = 0 } };
+                        const overlay = beginCheckpointCoverageOverlay(task, &candidate) orelse {
+                            task.runtime.last_restore_failure = .checkpoint_mismatch;
+                            self.finishRecovery(task, job, release);
+                            return .changed;
+                        };
+                        const previous = task.durable.checkpoint;
+                        const previous_anchor = task.durable.checkpoint_anchor;
+                        task.durable.checkpoint = rebind.baseline;
+                        task.durable.checkpoint_anchor = .available;
+                        const commit = effects.queueBinding(task.durable.id) catch |err| failed: {
+                            break :failed @as(?DurableCommit, if (err == error.TaskBusy or err == error.QueueFull) null else .failed);
+                        };
+                        task.durable.checkpoint = previous;
+                        task.durable.checkpoint_anchor = previous_anchor;
+                        rollbackCheckpointCoverageOverlay(task, overlay);
+                        if (commit) |outcome| job.binding_commit = switch (outcome) {
+                            .committed => .committed,
+                            .failed => .failed,
+                            .outcome_unknown => .outcome_unknown,
+                        };
+                        return if (job.binding_commit == .not_started) .waiting else .changed;
+                    },
+                    .failed => {
+                        task.runtime.last_restore_failure = task.runtime.last_restore_failure orelse .binding_persistence_failed;
+                        self.finishRecovery(task, job, release);
+                        return .changed;
+                    },
+                    .committed => {
+                        const candidate: task_state.CheckpointCandidate = .{ .record = rebind.baseline.?, .metrics = .{ .chunk_count = 0, .export_duration_ns = 0 } };
+                        _ = beginCheckpointCoverageOverlay(task, &candidate) orelse unreachable;
+                        if (task.durable.checkpoint) |*old| old.deinit(self.allocator);
+                        task.durable.checkpoint = rebind.baseline;
+                        task.durable.checkpoint_anchor = .available;
+                        task.durable.checkpoint_attempt = .none;
+                        rebind.baseline = null;
+                        job.binding_commit = .not_started;
+                        const authority = rebindAuthority(task, job, effects);
+                        if (job.cancellation.load(.acquire) or authority.shutting_down or !authority.workspace_authority_exact or
+                            !authority.automatic_owner_exact or !authority.target_execution_authority_exact)
+                        {
+                            task.runtime.last_restore_failure = if (job.cancellation.load(.acquire)) .cancelled else .restore_rejected;
+                            self.finishRecovery(task, job, release);
+                            return .changed;
+                        }
+                        std.debug.assert(task.runtime.worker_leases.liveCount() == 1);
+                        const attached = task.runtime.attached().?;
+                        task.runtime.restore_catalog = attached.pinned_catalog;
+                        attached.pinned_catalog = null;
+                        rebind.phase = .closing_original;
+                        startCloseWorker(task, notifier, false) catch {
+                            task.runtime.attached().?.pinned_catalog = task.runtime.restore_catalog;
+                            task.runtime.restore_catalog = null;
+                            task.runtime.last_restore_failure = .runtime_busy;
+                            self.finishRecovery(task, job, release);
+                        };
+                        return .changed;
+                    },
+                }
+            },
+            .closing_original, .closing_candidate => {
+                if (task.runtime.close_thread != null) return .waiting;
+                if (task.runtime.close_failed) {
+                    if (rebind.phase == .closing_original) if (task.runtime.live()) |live| {
+                        live.pinned_catalog = task.runtime.restore_catalog;
+                        task.runtime.restore_catalog = null;
+                    };
+                    task.runtime.last_restore_failure = .candidate_cleanup_failed;
+                    self.finishRecovery(task, job, release);
+                    return .changed;
+                }
+                if (task.runtime.attachment != .detached) return .waiting;
+                const authority = rebindAuthority(task, job, effects);
+                if (authority.shutting_down) {
+                    task.runtime.last_restore_failure = .cancelled;
+                    self.finishRecovery(task, job, release);
+                    return .changed;
+                }
+                if (rebind.phase == .closing_candidate or job.cancellation.load(.acquire) or
+                    !authority.workspace_authority_exact or !authority.automatic_owner_exact or !authority.target_execution_authority_exact)
+                {
+                    rebind.failure = rebind.failure orelse .restore_rejected;
+                    self.beginOriginalRestore(task, job, effects, release);
+                    return .changed;
+                }
+                rebind.phase = .restoring_target;
+                enqueueRecovery(job, effects);
+                return .changed;
+            },
+            .restoring_target, .restoring_original => {
+                if (job.outcome == .candidate) return .candidate;
+                task.runtime.last_restore_failure = job.failure() orelse .restore_rejected;
+                if (rebind.phase == .restoring_target) {
+                    rebind.failure = task.runtime.last_restore_failure;
+                    self.beginOriginalRestore(task, job, effects, release);
+                } else self.finishRecovery(task, job, release);
+                return .changed;
+            },
+        }
+    }
+
     pub fn syncRecoveryCompletions(
         self: *Runtime,
         effects: RecoveryEffects,
         release: ReleaseEffects,
+        notifier: task_execution.Notifier,
     ) RecoverySync {
         var result: RecoverySync = .{};
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
             const job = task.runtime.restore_job orelse continue;
             if (!job.completionReady()) continue;
-            const external = effects.authority(.{
+            if (job.rebind != null) switch (self.syncRebindPreparation(task, job, effects, release, notifier)) {
+                .waiting => continue,
+                .changed => {
+                    result.changed = true;
+                    continue;
+                },
+                .candidate => {},
+            };
+            const external = if (job.rebind != null) rebindAuthority(task, job, effects) else effects.authority(.{
                 .task_id = task.durable.id,
                 .workspace_id = task.durable.workspace_id,
                 .workspace_epoch = task.durable.workspace_epoch,
@@ -4587,7 +4912,12 @@ pub const Runtime = struct {
             if (job.outcome == .candidate) {
                 const rejection: ?recovery_job.Failure = if (job.cancellation.load(.acquire)) .cancelled else job.outcome.candidate.rejection;
                 if (rejection) |reason| task.runtime.last_restore_failure = reason;
-                const checkpoint_matches = if (job.attempt.checkpoint) |expected|
+                const checkpoint_matches = if (job.rebind != null and job.rebind.?.phase == .restoring_original) original: {
+                    const expected = job.attempt.checkpoint.?;
+                    const current = task.durable.checkpoint orelse break :original false;
+                    break :original std.mem.eql(u8, current.session.logical_session_id, expected.session.logical_session_id) and
+                        current.session.last_run_id == expected.session.last_run_id and current.session.last_compact_id == expected.session.last_compact_id;
+                } else if (job.attempt.checkpoint) |expected|
                     if (task.durable.checkpoint) |record|
                         checkpointIdentityEqual(record.blob, expected.blob) and task_policy.checkpointMatchesCurrentHistory(task, record)
                     else
@@ -4608,8 +4938,8 @@ pub const Runtime = struct {
                         .workspace_root = external.workspace_root,
                         .source_execution_generation = task.durable.execution_generation,
                         .target_execution_generation = external.target_execution_generation,
-                        .task_model = task.durable.execution_model,
-                        .protocol = task.durable.execution_protocol,
+                        .task_model = if (job.rebind != null) job.attempt.task_model else task.durable.execution_model,
+                        .protocol = if (job.rebind != null) job.attempt.protocol else task.durable.execution_protocol,
                         .active_attempt_id = active_attempt_id,
                         .shutting_down = external.shutting_down,
                         .archived = task.durable.archived,
@@ -4621,23 +4951,34 @@ pub const Runtime = struct {
                     },
                 );
                 var install_candidate = allowed;
-                if (job.attempt.source_execution_generation != job.attempt.target_execution_generation) {
+                const advances_binding = job.attempt.source_execution_generation != job.attempt.target_execution_generation;
+                if (advances_binding or job.rebind != null) {
                     switch (job.binding_commit) {
                         .pending, .outcome_unknown => continue,
                         .not_started => if (allowed) adoption: {
                             const previous_epoch = task.durable.binding_epoch;
-                            if (previous_epoch == std.math.maxInt(u64)) {
+                            if (advances_binding and previous_epoch == std.math.maxInt(u64)) {
                                 task.runtime.last_restore_failure = .binding_epoch_exhausted;
                                 install_candidate = false;
                                 break :adoption;
                             }
-                            const next_epoch = previous_epoch + 1;
-                            if (task.durable.checkpoint) |*record| {
+                            const next_epoch = previous_epoch + @as(u64, if (advances_binding) 1 else 0);
+                            const previous_checkpoint = task.durable.checkpoint;
+                            const previous_model = task.durable.execution_model;
+                            const previous_protocol = task.durable.execution_protocol;
+                            var checkpoint = if (job.rebind != null) job.outcome.candidate.checkpoint else previous_checkpoint;
+                            if (advances_binding) if (checkpoint) |*record| {
                                 record.adoptBindingEpoch(previous_epoch, next_epoch) catch {
                                     task.runtime.last_restore_failure = .binding_persistence_failed;
                                     install_candidate = false;
                                     break :adoption;
                                 };
+                            };
+                            task.durable.checkpoint = checkpoint;
+                            if (job.rebind) |rebind| {
+                                if (rebind.phase == .restoring_target or !std.mem.eql(u8, previous_model, job.attempt.task_model))
+                                    task.durable.execution_model = rebind.projected_model.?;
+                                task.durable.execution_protocol = job.attempt.protocol;
                             }
                             task.durable.execution_generation = job.attempt.target_execution_generation;
                             task.durable.binding_epoch = next_epoch;
@@ -4647,7 +4988,9 @@ pub const Runtime = struct {
                             };
                             task.durable.execution_generation = job.attempt.source_execution_generation;
                             task.durable.binding_epoch = previous_epoch;
-                            if (task.durable.checkpoint) |*record| record.anchor.binding_epoch = previous_epoch;
+                            task.durable.checkpoint = previous_checkpoint;
+                            task.durable.execution_model = previous_model;
+                            task.durable.execution_protocol = previous_protocol;
                             // null means an accepted worker or temporarily full
                             // writer. Composition marks pending upon admission.
                             if (commit) |outcome| job.binding_commit = switch (outcome) {
@@ -4663,8 +5006,24 @@ pub const Runtime = struct {
                             // authority became stale after the writer started.
                             std.debug.assert(task.durable.binding_epoch == job.attempt.binding_epoch);
                             std.debug.assert(task.durable.execution_generation == job.attempt.source_execution_generation);
-                            const next_epoch = task.durable.binding_epoch + 1;
-                            if (task.durable.checkpoint) |*record| record.adoptBindingEpoch(task.durable.binding_epoch, next_epoch) catch unreachable;
+                            const previous_epoch = task.durable.binding_epoch;
+                            const next_epoch = previous_epoch + @as(u64, if (advances_binding) 1 else 0);
+                            if (job.rebind) |*rebind| {
+                                var record = job.outcome.candidate.checkpoint.?;
+                                if (advances_binding) record.adoptBindingEpoch(previous_epoch, next_epoch) catch unreachable;
+                                if (task.durable.checkpoint) |*old| old.deinit(self.allocator);
+                                task.durable.checkpoint = record;
+                                job.outcome.candidate.checkpoint = null;
+                                if (rebind.phase == .restoring_target or !std.mem.eql(u8, task.durable.execution_model, job.attempt.task_model)) {
+                                    const previous_model = task.durable.execution_model;
+                                    task.durable.execution_model = rebind.projected_model.?;
+                                    rebind.projected_model = previous_model;
+                                }
+                                task.durable.execution_protocol = job.attempt.protocol;
+                                if (task.queued_input) |*queued| if (queued.binding_epoch == previous_epoch) {
+                                    queued.binding_epoch = next_epoch;
+                                };
+                            } else if (task.durable.checkpoint) |*record| record.adoptBindingEpoch(previous_epoch, next_epoch) catch unreachable;
                             task.durable.binding_epoch = next_epoch;
                             task.durable.execution_generation = job.attempt.target_execution_generation;
                         },
@@ -4676,24 +5035,45 @@ pub const Runtime = struct {
                     }
                 }
                 var candidate = job.takeCandidate().?;
+                if (candidate.checkpoint) |*record| record.deinit(self.allocator);
                 if (install_candidate) {
                     task.runtime.last_restore_report = candidate.report;
                     task.runtime.last_restore_permission = if (candidate.report) |report| .{
                         .restored_rules = report.restored_permission_rules,
                         .invalidated_rules = report.invalidated_permission_rules,
                     } else null;
-                    task.runtime.mcp_authority_at_creation = .unavailable;
-                    task.initial_catalog_preparation = .uninitialized;
+                    var pinned: ?product_skill.catalog.Snapshot = null;
+                    if (job.rebind) |*rebind| {
+                        pinned = task.runtime.restore_catalog;
+                        task.runtime.restore_catalog = null;
+                        if (pinned) |*snapshot| for (snapshot.skills) |*skill| {
+                            const granted = if (rebind.capabilities.skill) |inputs| inputs.borrow().policy.granted_skill_ids else &.{};
+                            skill.enabled = skill.enabled and for (granted) |id| {
+                                if (std.mem.eql(u8, id, skill.skill_id)) break true;
+                            } else false;
+                        };
+                        if (pinned) |*snapshot| if (candidate.report) |report| if (report.invalidated_skill_authority != 0) {
+                            snapshot.health = .degraded;
+                        };
+                        task.initial_catalog_preparation = .unavailable;
+                    } else {
+                        task.runtime.mcp_authority_at_creation = .unavailable;
+                        task.initial_catalog_preparation = .uninitialized;
+                    }
                     task.runtime.attachment = .{ .attached = .{
                         .binding = candidate.takeBinding(),
                         .execution = candidate.takeExecution(),
-                        .pinned_catalog = null,
+                        .pinned_catalog = pinned,
                     } };
                     task.conversation_observation = .{};
-                    task.runtime.last_restore_failure = null;
+                    task.runtime.last_restore_failure = if (job.rebind) |rebind| if (rebind.phase == .restoring_original) rebind.failure else null else null;
                 } else {
                     std.debug.assert(task.runtime.attachment == .detached);
                     release.redactAll(candidate.execution.input().api_key);
+                    job.credential = &.{};
+                    if (job.rebind) |*rebind| if (rebind.original_credential.ptr == candidate.execution.secret.ptr) {
+                        rebind.original_credential = &.{};
+                    };
                     candidate.execution.clearCredential();
                     // Only the ordinary close worker receives this binding.
                     // It is never published as an executable attachment.
@@ -4707,6 +5087,19 @@ pub const Runtime = struct {
                     std.debug.assert(task.runtime.beginClosing());
                     task.runtime.discarding_restore = true;
                     task.runtime.close_requested = true;
+                    if (job.rebind) |*rebind| {
+                        const original_failed = rebind.phase == .restoring_original;
+                        rebind.failure = rebind.failure orelse task.runtime.last_restore_failure orelse .restore_rejected;
+                        if (!original_failed) {
+                            rebind.phase = .closing_candidate;
+                            task.runtime.close_requested = false;
+                            startCloseWorker(task, notifier, true) catch {
+                                task.runtime.close_failed = true;
+                            };
+                            result.changed = true;
+                            continue;
+                        }
+                    }
                 }
             } else if (job.failure()) |failure| {
                 task.runtime.last_restore_failure = failure;
@@ -4729,9 +5122,7 @@ pub const Runtime = struct {
                     else => {},
                 }
             }
-            task.runtime.restore_job = null;
-            task.runtime.active_operation = .none;
-            job.deinit();
+            self.finishRecovery(task, job, release);
             result.changed = true;
         }
         return result;
@@ -4751,7 +5142,7 @@ pub const Runtime = struct {
         result.changed = titles.changed;
         result.durable_changed = titles.durable_changed;
 
-        const recovery = self.syncRecoveryCompletions(effects.recovery, effects.release);
+        const recovery = self.syncRecoveryCompletions(effects.recovery, effects.release, effects.notifier);
         result.changed = recovery.changed or result.changed;
         result.durable_changed = recovery.durable_changed or result.durable_changed;
         result.mcp_refresh_needed = recovery.mcp_refresh_needed;
@@ -6406,11 +6797,7 @@ fn applyModelIntent(
     if (installed.model_intent_revision == intent.revision) return;
     const target = effects.model_target orelse return error.ExecutionUnavailable;
     if (!std.mem.eql(u8, intent.model_id, target.target.model)) return error.ExecutionGenerationMismatch;
-    if (installed.source_generation == 0 or installed.source_generation != target.source_generation or
-        installed.protocol != target.target.protocol or
-        !std.mem.eql(u8, installed.provider_id, target.target.provider_id) or
-        !std.mem.eql(u8, installed.base_url, target.target.base_url) or
-        !std.mem.eql(u8, installed.secret, target.api_key))
+    if (!installed.matchesSource(target))
         return error.ExecutionGenerationMismatch;
     if (std.mem.eql(u8, intent.model_id, task.durable.execution_model)) {
         installed.model_intent_revision = intent.revision;
@@ -6495,6 +6882,53 @@ fn requestPermissionTermination(
         .already_terminal => .already_terminal,
         .stale_run => .stale_run,
         .session_closing => .session_closing,
+    };
+}
+
+/// Read-only secret views stay stable while the worker transfers its owned
+/// execution into a candidate. No worker mutates these composition views.
+fn retainedExecutionCredentials(task: *const task_state.Task, output: *[3][]const u8) []const []const u8 {
+    var count: usize = 0;
+    if (task.runtime.executionConst()) |execution| {
+        output[count] = execution.secret;
+        count += 1;
+    }
+    if (task.runtime.restore_job) |job| {
+        output[count] = job.credential;
+        count += 1;
+        if (job.rebind) |rebind| {
+            output[count] = rebind.original_credential;
+            count += 1;
+        }
+    }
+    return output[0..count];
+}
+
+fn exportRecoveryCheckpoint(job: *recovery_job.Job, access: *task_agent_session.Access, model: []const u8) recovery_job.ExportOutcome {
+    const rebind = &job.rebind.?;
+    var work: approval_job.CheckpointWork = .{
+        .access = access.*,
+        .store = job.store.?,
+        .store_health = rebind.store_health,
+        .limits = job.checkpoint_limits,
+        .task_id = job.attempt.task_id,
+        .binding_epoch = job.attempt.binding_epoch,
+        .approval_revision = rebind.approval_revision,
+        .last_run_id = rebind.last_run_id,
+        .last_compact_id = rebind.last_compact_id,
+        .model = model,
+        .expected_mode = job.attempt.permission_mode,
+        .target_mode = job.attempt.permission_mode,
+        .mutate = false,
+    };
+    return switch (approval_job.exportCheckpoint(job.allocator, &job.cancellation, &work)) {
+        .checkpoint => |record| .{ .checkpoint = record },
+        .failure => |failure| .{ .failure = .{ .reason = switch (failure.reason) {
+            .cancelled => .cancelled,
+            .busy => .runtime_busy,
+            else => .checkpoint_io,
+        }, .poisoned = failure.restore_required } },
+        .none, .history, .retired => unreachable,
     };
 }
 
@@ -7003,6 +7437,7 @@ fn deinitTask(
 ) void {
     std.debug.assert(!task.runtime.worker_leases.hasLive());
     std.debug.assert(task.runtime.restore_job == null);
+    std.debug.assert(task.runtime.restore_catalog == null);
     releaseAttachmentNoFail(self, task, effects, .cold_start);
     if (task.queued_input) |*queued| {
         releaseQueuedRaw(self, queued, effects);

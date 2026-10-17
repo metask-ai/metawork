@@ -51,7 +51,7 @@ npm test
 
 模型元数据的定向 Native 入口为 `zig build test-model-metadata`，使用同一 canonical bundle 与正式 module graph，覆盖 Models parser/合同/持久化和受影响的 Host serializer、Bridge 入站 fixture。Renderer 侧运行 typecheck 与 `scripts/workbench-contract.test.mjs`、`scripts/new-task-model-selection.test.mjs`。纯模型字段解析修正可用此入口观察完整字段、ownership、严格 wire 与刷新行为，避免重复无关生命周期测试。
 
-Task 模型意图与选择的定向入口为 `zig build test-task-model-selection`，覆盖 revision CAS、默认配置独立性、confirmed history 写入及未知结果读回、Host 投影与严格 Bridge payload。真实 Task/Run/queued input 和 Session setModel 行为归 `test-lifecycle`；Renderer 运行 typecheck 与 `task-model-selection`、`new-task-model-selection`、`bridge-client`、`workbench-contract` suites。模型选择不得改变已有 Run 的执行及权限事实；跨连接 rebind 仍须完整生命周期验收。
+Task 模型意图与选择的定向入口为 `zig build test-task-model-selection`，覆盖 revision CAS、默认配置独立性、confirmed history 写入及未知结果读回、Host 投影、严格 Bridge payload 与逐 generation 的不可变 Run protocol 历史。真实 Task/Run/queued input 和 Session setModel 行为归 `test-lifecycle`；其中跨连接事务必须观察完整目标配置、基线确认、旧 Session 释放、目标 checkpoint adoption、失败后一次原配置恢复，以及排队输入成功续跑或失败 held。Renderer 运行 typecheck 与 `task-model-selection`、`new-task-model-selection`、`bridge-client`、`workbench-contract` suites。模型选择不得改变已有 Run 的执行及权限事实；fixture 不替代真实 Core、能力连续性和桌面验收。
 
 同进程能力输入由 `test-mcp-catalog` 验证 MCP 原来源指纹、跨 generation 交集、收缩/不扩大及分配失败；`test-lifecycle` 验证 Skill query/Session/捕获 owner 的精确释放与 Runtime shutdown fence、capture 分配失败不改 authority、成功权限 mutation 后捕获，以及替换失败。`test-mcp-interop` 使用当前 canonical Core、真实临时 Skill 和本地 HTTP MCP：export 后释放原 Session/query owner，额外查询更宽目录，使用原输入恢复并实际执行原 Skill/MCP；未授权 Skill 仍被拒绝，缩小 ceiling 返回 degraded 并撤销旧 Skill。Core session allow/deny 在恢复前各由一次真实 UI 回应建立，恢复后同参数允许/拒绝均不再询问，MCP trace 精确检查实际调用且无历史重放。模型端为本地协议 fixture，不将该证据扩大为远端供应商兼容性承诺。
 

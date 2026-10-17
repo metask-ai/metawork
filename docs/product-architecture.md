@@ -334,6 +334,8 @@ Durable Task record 与 runtime attachment 必须分离。durable record 不保�
 
 Task 的下一轮模型意图是可空的 `ModelRef` 与非零 selection revision，独立于已安装 binding 以及历史 Run 的 execution 事实。它只保存有界、有效 UTF-8、无控制字符的来源和模型 identity，不含 credential 或连接 authority。旧 Task frame 缺少该可选字段时保持未知意图，不能从当前全局默认选择推断来源；读写继续保留原 binding、Run 历史与 checkpoint。该附属记录在既有 framed history 内编码，不改变 frame identity 或替换历史存储。
 
+Run 的 execution generation 与 protocol 是接纳时冻结的历史事实，同一 generation 必须使用同一 protocol。非终态 Run 及属于当前 Task generation 的 Run 必须与当前 binding protocol 一致；旧 generation 的终态 Run 可以使用不同 protocol，连接切换不得重写或隔离这些合法历史。
+
 审批模式由 Task 当前 profile 与自动评审事实派生，连同非零 approval revision 随 Task 恢复；合法旧 metadata 缺少 revision 时从初始 revision 恢复，不重写历史 Run 的 profile。全局 default mode 独立持久化，缺少新字段的合法旧 metadata 从原 default profile 派生，缺少 Task 自动评审事实时保持人工。历史 Run 的 profile 可以不同于 Task 当前 profile，UI 审计按所属 Run 的 profile 与 interaction 校验，不能因当前模式变化丢弃合法旧决定。运行期 generation、当前评审 identity 和 in-flight job 不进入 durable history，恢复不得重放待决评审或审批。UI 历史只保存来源、typed permission 摘要与脱敏有界理由，不保存原始输入或模型输出；旧非取消 UI 决定缺少来源时按用户恢复，取消保持无来源。历史决定、理由和摘要本身不具有当前授权效力。
 
 Run/compact 的 terminal result 由 Agent 以自包含事实返回，Product 在预留 record 中 no-fail、write-once 提交后才能通知、释放 worker reference 或推进后续事务。queued-before-execute 由 Product 生成独立的 pre-execution terminal fact；Agent Session snapshot 只描述 live lifecycle，不承担历史 terminal truth。
@@ -420,6 +422,12 @@ checkpoint 必须与 covered 前沿精确相等，并且不能存在 pending ope
 成功 candidate 回到主线程后必须再次校验全部 source/target token、attachment、archive/removal、replacement 与 shutdown。持久 adoption 前失效的 candidate 只销毁。若 target generation 与 durable binding 不同，主线程只编码有界、无 secret 的候选历史，由既有共享 bounded history writer 执行一次 durable adoption transaction，同时推进 Task binding、binding epoch 与存在的 checkpoint anchor；保存待决时，旧内存 binding 不变，candidate 与恢复 lease 保留，不能发布 attachment。确认提交后先接受 canonical binding，再重新校验 Session 安装资格；外部 authority 在保存期间失效时丢弃 Session，但不得回滚或覆盖已确认的 binding。明确失败结束 attempt 并拒绝 candidate；结果未知保留 exact 候选历史、Session 与 lease，冻结其他 history write/recovery，只有显式恢复动作可以排队执行不写入、不 quarantine 的 canonical 读回。读回仍未知或取消不得丢弃候选、隐式重试或推测结果；确认 candidate 或旧 canonical 后才分别接受或拒绝 adoption。事务期间的独立产品事实由后续共享 writer 补齐，补写失败不得由生命周期轮询自动重试。
 
 被拒绝的恢复 candidate 必须线性转交同一有界 Session close/release owner，不得在主线程同步调用 Agent destroy，也不得短暂发布可执行 attachment。转交前脱敏产品事实并清除 candidate 的 Host credential 副本，关闭 owner 只保留资源释放所需 metadata 和 Binding。它没有已接纳的 Run，可以在恢复 lease 释放后直接进入异步关闭；关闭成功才 detach，关闭失败保留真实 closing/attached owner、诊断和不可执行状态。即使失败报告为 reusable，也不能将这个未获安装资格的 candidate 变成可执行 attachment；生命周期轮询不得自动重试，既有显式 Host close 动作仍可安全重试。
+
+同进程显式模型意图要求更换连接或 protocol 时，沿本节同一 operation、恢复 worker、history writer 与关闭 owner 执行重绑定。原 attachment 必须 idle 且事件、worker 和权限 mutation 静止；先冻结完整目标配置、原配置和实际能力输入，导出并确认基线 checkpoint，才能关闭并释放原 Session。此时目标 protocol 不必等于原 protocol，但 checkpoint 的模型与操作前沿 expectation 仍使用原始精确事实；恢复后调用官方 `setModel`，再导出与目标实际模型一致的 checkpoint。不得同时保留两个相同逻辑 Session identity 的 live handle，或发送中间模型请求。
+
+Skill 的原 pinned 投影留在 Task attachment，由主线程管理；worker 只接收 Agent-owned 恢复输入。原 Skill grant、MCP selector/来源与实际 permission mode、shell policy、interaction 是恢复上限，还须与 Product 当前 Workspace、来源开关和工具授权求交，发布前再次核验。选择 revision、Models source/catalog authority、审批 revision、Workspace 或生命周期变化使目标 candidate 失去安装资格；不能采用更新的全局能力列表来补齐或扩大原 Task。
+
+目标确认前失败时，保留原模型意图和待发送输入。原 Session 已释放的，候选必须先经普通关闭 owner 清理，才允许使用原配置、同一基线和当前授权上限执行至多一次恢复；失败后保持真实 detached/closing 状态。回退不接纳 Run、不回放审批或用户输入，也不将原模型伪装成已安装的目标。确认目标 binding 后，合法排队输入的 anchor 在同一 Task 事务内随 epoch 推进；失败且未确认 binding 时不推进 anchor。若 authority 在 durable commit 期间变化，仍须先接受已确认的 canonical binding，再清理候选并独立提交必要的原配置恢复，不能倒退已确认的 epoch。
 
 关闭必须接纳已确认的 durable binding，即使不再安装 Session；未知结果不能因关闭而重写历史或启动读回。释放 candidate 和 lease 后仍保留未知事务屏障，下一次启动从实际 canonical binding/anchor 恢复。进程若在 durable adoption 后、attachment install 前退出，下次启动同样使用已推进的 binding/anchor，不改写历史 Run provenance。
 

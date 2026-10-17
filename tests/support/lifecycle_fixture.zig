@@ -355,6 +355,8 @@ pub const FakeCore = struct {
     checkpoint_restores: usize = 0,
     restore_last_run_id: u64 = 0,
     restore_last_compact_id: u64 = 0,
+    restore_session_id: [wire.MAX_SESSION_ID_BYTES_V1]u8 = @splat(0),
+    restore_session_id_len: usize = 0,
     restore_controlled: bool = false,
     restore_after_create: bool = false,
     restore_entered: bool = false,
@@ -525,6 +527,14 @@ pub const FakeCore = struct {
         self.lock();
         self.session_create_failures += 1;
         self.unlock();
+    }
+
+    pub fn setRestoredLogicalId(self: *FakeCore, id: []const u8) void {
+        std.debug.assert(id.len != 0 and id.len <= self.restore_session_id.len);
+        self.lock();
+        defer self.unlock();
+        @memcpy(self.restore_session_id[0..id.len], id);
+        self.restore_session_id_len = id.len;
     }
 
     pub fn forceNextMcpRefreshStatus(self: *FakeCore, status: u32) void {
@@ -1467,7 +1477,11 @@ pub fn sessionRestore(
     for (&fake_core.sessions) |*session| {
         if (session.in_use) continue;
         var session_id = [_]u8{0} ** wire.MAX_SESSION_ID_BYTES_V1;
-        const id = std.fmt.bufPrint(
+        const id = if (fake_core.restore_session_id_len != 0) preserved: {
+            const length = fake_core.restore_session_id_len;
+            @memcpy(session_id[0..length], fake_core.restore_session_id[0..length]);
+            break :preserved session_id[0..length];
+        } else std.fmt.bufPrint(
             &session_id,
             "{d:0>24}",
             .{fake_core.session_created + 1},
@@ -1574,6 +1588,8 @@ pub fn sessionDescribe(
         "ffffffffffffffffffffffff"
     else
         session.session_id[0..session.session_id_len];
+    const model_json = std.json.Stringify.valueAlloc(std.testing.allocator, if (session.model_len != 0) session.model[0..session.model_len] else "fixture-model", .{}) catch return wire.STATUS_OUT_OF_MEMORY;
+    defer std.testing.allocator.free(model_json);
     const encoded = if (malformed)
         std.fmt.bufPrint(&session.description_buffer, "{{}}", .{}) catch {
             diagnostic(out_error);
@@ -1583,7 +1599,7 @@ pub fn sessionDescribe(
         (if (session.restore_degraded)
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
@@ -1592,13 +1608,14 @@ pub fn sessionDescribe(
                     generation,
                     permissionModeName(session.permission_mode_code),
                     session.policy_generation,
+                    model_json,
                     profile_json,
                 },
             )
         else
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":\"fixture-model\",\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
@@ -1607,6 +1624,7 @@ pub fn sessionDescribe(
                     generation,
                     permissionModeName(session.permission_mode_code),
                     session.policy_generation,
+                    model_json,
                     profile_json,
                 },
             )) catch {

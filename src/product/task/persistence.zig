@@ -2939,7 +2939,7 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !validPermissionProfile(run.permission_profile) or
             !validPermissionInteraction(run.permission_interaction) or
             !std.mem.eql(u8, run.permission_interaction, task.permission_interaction) or
-            !std.mem.eql(u8, run.execution_protocol, task.binding.protocol) or
+            ((!terminalRunPhase(run.phase) or run.execution_generation == task.binding.execution_generation) and !std.mem.eql(u8, run.execution_protocol, task.binding.protocol)) or
             !validText(run.assistant, limits.max_assistant_message_bytes, true) or
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or
             run.tools.len > limits.max_tools_per_run or run.next_activity_order == 0)
@@ -2976,7 +2976,8 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             if (!oneOf(failure, &.{ "consumer_rejected", "dependency_contract_failure" }))
                 return error.Invalid;
         for (task.runs[0..index]) |previous|
-            if (previous.id == run.id or previous.generation == run.generation)
+            if (previous.id == run.id or previous.generation == run.generation or
+                (previous.execution_generation == run.execution_generation and !std.mem.eql(u8, previous.execution_protocol, run.execution_protocol)))
                 return error.Invalid;
         try validateRunInput(run.input, limits);
         for (run.tools, 0..) |tool, tool_index| {
@@ -3993,7 +3994,7 @@ test "corrupt Task identity cannot manufacture a global failure" {
     try std.testing.expectEqual(@as(usize, 0), recovered.value.failures.len);
 }
 
-test "task store round-trips per-run execution generations across binding adoption" {
+test "task store round-trips immutable per-run execution generations and protocols across binding adoption" {
     var workspaces = [_]WorkspaceWire{.{
         .id = 1,
         .epoch = 1,
@@ -4009,7 +4010,7 @@ test "task store round-trips per-run execution generations across binding adopti
         .coverage = "covered",
         .generation = 1,
         .execution_generation = 13,
-        .execution_protocol = "openai_chat_completions",
+        .execution_protocol = "anthropic_messages",
         .execution_model = "model",
         .permission_profile = "approval_required",
         .permission_interaction = "interactive",
@@ -4052,6 +4053,7 @@ test "task store round-trips per-run execution generations across binding adopti
     runs[1].coverage = "excluded";
     runs[1].generation = 2;
     runs[1].execution_generation = 17;
+    runs[1].execution_protocol = "openai_chat_completions";
     runs[1].input.text = "after adoption";
     runs[1].elapsed_ms = null;
     runs[1].submitted_at_unix_ms = null;
@@ -4146,6 +4148,8 @@ test "task store round-trips per-run execution generations across binding adopti
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].binding.execution_generation);
     try std.testing.expectEqual(@as(u64, 13), decoded.value.tasks[0].runs[0].execution_generation);
     try std.testing.expectEqual(@as(u64, 17), decoded.value.tasks[0].runs[1].execution_generation);
+    try std.testing.expectEqualStrings("anthropic_messages", decoded.value.tasks[0].runs[0].execution_protocol);
+    try std.testing.expectEqualStrings("openai_chat_completions", decoded.value.tasks[0].runs[1].execution_protocol);
     try std.testing.expectEqualStrings("covered", decoded.value.tasks[0].runs[0].coverage);
     try std.testing.expectEqualStrings("excluded", decoded.value.tasks[0].runs[1].coverage);
     try std.testing.expectEqualStrings(
@@ -4182,6 +4186,26 @@ test "task store round-trips per-run execution generations across binding adopti
         "dependency_contract_failure",
         decoded.value.tasks[0].runs[1].event_projection_failure.?,
     );
+    // Different protocols require different execution identities. Neither a
+    // current nor a historical generation may describe two protocols.
+    const state: StateWire = .{
+        .default_permission_profile = "full_access",
+        .next_workspace_id = 2,
+        .next_workspace_recent_order = 2,
+        .next_task_id = 2,
+        .next_task_recent_order = 2,
+        .workspaces = &workspaces,
+        .tasks = &tasks,
+    };
+    runs[1].execution_protocol = "gemini_native";
+    try std.testing.expectError(error.TaskStoreEncodeFailed, encode(&output, state, testLimits()));
+    runs[1].execution_protocol = "openai_chat_completions";
+    runs[0].execution_generation = 17;
+    try std.testing.expectError(error.TaskStoreEncodeFailed, encode(&output, state, testLimits()));
+    runs[0].execution_generation = 13;
+    runs[1].execution_generation = 13;
+    tasks[0].binding.execution_generation = 19;
+    try std.testing.expectError(error.TaskStoreEncodeFailed, encode(&output, state, testLimits()));
 }
 
 test "task store rejects states that would violate the product contract" {

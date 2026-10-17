@@ -32,7 +32,7 @@ pub const CheckpointWork = struct {
     approval_revision: u64,
     last_run_id: u64,
     last_compact_id: u64,
-    model: []u8,
+    model: []const u8,
     expected_mode: agent.PermissionMode,
     target_mode: agent.PermissionMode,
     mutate: bool,
@@ -79,8 +79,9 @@ pub const Job = struct {
         const prior = self.state.cmpxchgStrong(.queued, .running, .acq_rel, .acquire);
         std.debug.assert(prior == null);
         self.outcome = self.run();
+        const notifier = self.notifier;
         self.state.store(.completed, .release);
-        self.notifier.notify();
+        notifier.notify();
     }
 
     pub fn cancelQueued(context: *anyopaque) void {
@@ -90,8 +91,9 @@ pub const Job = struct {
         std.debug.assert(prior == null);
         // Publish completion last, after every worker-owned result.
         self.outcome = .{ .failure = .{ .reason = .cancelled, .restore_required = false } };
+        const notifier = self.notifier;
         self.state.store(.cancelled, .release);
-        self.notifier.notify();
+        notifier.notify();
     }
 
     pub fn requestCancellation(self: *Job) void {
@@ -148,84 +150,88 @@ pub const Job = struct {
                 work.store.delete(work.identity);
                 return .retired;
             },
-            .checkpoint => |*work| {
-                if (work.store_health.load(.acquire) != .ready) return fail(.checkpoint_failed, false);
-                var writer = work.store.begin(work.task_id, work.limits.hard_bytes) catch return fail(.checkpoint_failed, false);
-                defer writer.deinit();
-                var mutated = false;
-                var generation: ?u64 = null;
-                if (work.mutate) {
-                    const result = work.access.updatePermissionMode(work.expected_mode, work.target_mode) catch |err| {
-                        const poisoned = work.access.sessionState() == .poisoned;
-                        return fail(switch (err) {
-                            error.PermissionModeBudgetRequired => .budget_required,
-                            error.SessionNotIdle => .busy,
-                            else => .mode_update_failed,
-                        }, poisoned);
-                    };
-                    mutated = result.changed;
-                    generation = result.policy_generation;
-                    if (!mutated) return fail(.dependency_contract, true);
-                }
-                if (self.cancelled.load(.acquire)) return fail(.cancelled, mutated);
-                var sink = Sink{ .writer = &writer, .cancelled = &self.cancelled };
-                var outcome = work.access.exportCheckpoint(
-                    work.limits,
-                    .{ .context = &sink, .write_fn = Sink.write },
-                    work.last_run_id,
-                    work.last_compact_id,
-                    work.model,
-                ) catch return fail(.checkpoint_failed, mutated or work.access.sessionState() == .poisoned);
-                defer outcome.deinit();
-                if (outcome == .failure) return fail(
-                    if (outcome.failure.reason == .busy) .busy else .checkpoint_failed,
-                    mutated or outcome.failure.disposition == .poisoned,
-                );
-                const success = &outcome.success;
-                if (generation) |expected| if (success.description.policy_generation != expected)
-                    return fail(.dependency_contract, true);
-                if (!permissionModeMatches(success.description.permission_mode, if (work.mutate) work.target_mode else work.expected_mode))
-                    return fail(.dependency_contract, true);
-                const logical_id = self.allocator.dupe(u8, success.description.session_id) catch return fail(.checkpoint_failed, mutated);
-                const model = self.allocator.dupe(u8, success.description.model) catch {
-                    self.allocator.free(logical_id);
-                    return fail(.checkpoint_failed, mutated);
-                };
-                var record = checkpoint_record.Record{
-                    .blob = .{
-                        .task_id = work.task_id,
-                        .generation = success.checkpoint.generation,
-                        .digest = success.checkpoint.digest,
-                        .byte_size = success.checkpoint.total_bytes,
-                    },
-                    .session = .{
-                        .logical_session_id = logical_id,
-                        .last_run_id = success.description.last_run_id,
-                        .last_compact_id = success.description.last_compact_id,
-                        .model = model,
-                    },
-                    .anchor = .{ .terminal = .{ .approval = work.approval_revision }, .binding_epoch = work.binding_epoch },
-                };
-                _ = writer.commit(record.blob.generation, record.blob.digest, record.blob.byte_size) catch |err| {
-                    if (err == error.BlobAlreadyExists) {
-                        // Identical exports may use an existing immutable blob,
-                        // but only after the canonical reader verifies it.
-                        var existing = work.store.openVerified(record.blob, &self.cancelled) catch {
-                            record.deinit(self.allocator);
-                            return fail(.checkpoint_failed, mutated);
-                        };
-                        existing.deinit();
-                        return .{ .checkpoint = record };
-                    }
-                    if (err == error.PersistenceOutcomeUnknown) work.store_health.store(.outcome_unknown, .release);
-                    record.deinit(self.allocator);
-                    return fail(if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .checkpoint_failed, mutated);
-                };
-                return .{ .checkpoint = record };
-            },
+            .checkpoint => |*work| return exportCheckpoint(self.allocator, &self.cancelled, work),
         }
     }
 };
+
+/// Export work shared by approval changes and execution rebind. The caller
+/// retains Access ownership and confirms the returned record separately.
+pub fn exportCheckpoint(allocator: std.mem.Allocator, cancelled: *const std.atomic.Value(bool), work: *CheckpointWork) Outcome {
+    if (work.store_health.load(.acquire) != .ready) return Job.fail(.checkpoint_failed, false);
+    var writer = work.store.begin(work.task_id, work.limits.hard_bytes) catch return Job.fail(.checkpoint_failed, false);
+    defer writer.deinit();
+    var mutated = false;
+    var generation: ?u64 = null;
+    if (work.mutate) {
+        const result = work.access.updatePermissionMode(work.expected_mode, work.target_mode) catch |err| {
+            const poisoned = work.access.sessionState() == .poisoned;
+            return Job.fail(switch (err) {
+                error.PermissionModeBudgetRequired => .budget_required,
+                error.SessionNotIdle => .busy,
+                else => .mode_update_failed,
+            }, poisoned);
+        };
+        mutated = result.changed;
+        generation = result.policy_generation;
+        if (!mutated) return Job.fail(.dependency_contract, true);
+    }
+    if (cancelled.load(.acquire)) return Job.fail(.cancelled, mutated);
+    var sink = Sink{ .writer = &writer, .cancelled = cancelled };
+    var outcome = work.access.exportCheckpoint(
+        work.limits,
+        .{ .context = &sink, .write_fn = Sink.write },
+        work.last_run_id,
+        work.last_compact_id,
+        work.model,
+    ) catch return Job.fail(.checkpoint_failed, mutated or work.access.sessionState() == .poisoned);
+    defer outcome.deinit();
+    if (outcome == .failure) return Job.fail(
+        if (outcome.failure.reason == .busy) .busy else .checkpoint_failed,
+        mutated or outcome.failure.disposition == .poisoned,
+    );
+    const success = &outcome.success;
+    if (generation) |expected| if (success.description.policy_generation != expected)
+        return Job.fail(.dependency_contract, true);
+    if (!permissionModeMatches(success.description.permission_mode, if (work.mutate) work.target_mode else work.expected_mode))
+        return Job.fail(.dependency_contract, true);
+    const logical_id = allocator.dupe(u8, success.description.session_id) catch return Job.fail(.checkpoint_failed, mutated);
+    const model = allocator.dupe(u8, success.description.model) catch {
+        allocator.free(logical_id);
+        return Job.fail(.checkpoint_failed, mutated);
+    };
+    var record = checkpoint_record.Record{
+        .blob = .{
+            .task_id = work.task_id,
+            .generation = success.checkpoint.generation,
+            .digest = success.checkpoint.digest,
+            .byte_size = success.checkpoint.total_bytes,
+        },
+        .session = .{
+            .logical_session_id = logical_id,
+            .last_run_id = success.description.last_run_id,
+            .last_compact_id = success.description.last_compact_id,
+            .model = model,
+        },
+        .anchor = .{ .terminal = .{ .approval = work.approval_revision }, .binding_epoch = work.binding_epoch },
+    };
+    _ = writer.commit(record.blob.generation, record.blob.digest, record.blob.byte_size) catch |err| {
+        if (err == error.BlobAlreadyExists) {
+            // Identical exports may use an existing immutable blob,
+            // but only after the canonical reader verifies it.
+            var existing = work.store.openVerified(record.blob, cancelled) catch {
+                record.deinit(allocator);
+                return Job.fail(.checkpoint_failed, mutated);
+            };
+            existing.deinit();
+            return .{ .checkpoint = record };
+        }
+        if (err == error.PersistenceOutcomeUnknown) work.store_health.store(.outcome_unknown, .release);
+        record.deinit(allocator);
+        return Job.fail(if (err == error.PersistenceOutcomeUnknown) .outcome_unknown else .checkpoint_failed, mutated);
+    };
+    return .{ .checkpoint = record };
+}
 
 fn permissionModeMatches(mode: anytype, expected: agent.PermissionMode) bool {
     return std.mem.eql(u8, @tagName(mode), @tagName(expected));

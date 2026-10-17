@@ -3994,6 +3994,131 @@ pub const Runtime = struct {
         };
     }
 
+    fn prepareTaskRestoreFilters(self: *Runtime, task_id: u64, original: *const lifecycle.SessionRestoreInputs) Error!struct { skill: ?*lifecycle.SkillRestoreInputs, mcp: ?*lifecycle.McpSelection, mcp_catalog_generation: ?u64 } {
+        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
+        var skill: ?*lifecycle.SkillRestoreInputs = null;
+        errdefer if (skill) |value| value.deinit() catch {};
+        if (original.skill) |captured| {
+            const pinned = task.runtime.pinnedCatalogConst() orelse retained: {
+                break :retained if (task.runtime.restore_catalog) |*snapshot| snapshot else return error.CatalogUnavailable;
+            };
+            const ids = try self.skill.restoreCeiling(task.durable.workspace_id, task.durable.workspace_epoch, pinned.view());
+            defer self.skill.allocator.free(ids);
+            skill = try captured.narrow(.{ .granted_skill_ids = ids });
+        }
+        if (original.mcp) |captured| {
+            const mcp = if (self.mcp) |*value| value else return error.RecoveryUnavailable;
+            var authority = try mcp.restoreAuthority(captured);
+            const selection = authority.selection;
+            authority.selection = null;
+            const generation = authority.catalog_generation;
+            authority.deinit();
+            return .{ .skill = skill, .mcp = selection, .mcp_catalog_generation = generation };
+        }
+        return .{ .skill = skill, .mcp = null, .mcp_catalog_generation = null };
+    }
+
+    fn sameRestoreFilters(capabilities: *const task_runtime.RestoreCapabilities, current: anytype) bool {
+        if (capabilities.mcp_catalog_generation != current.mcp_catalog_generation) return false;
+        const before_ids = if (capabilities.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
+        const after_ids = if (current.skill) |value| value.borrow().policy.granted_skill_ids else &.{};
+        if (before_ids.len != after_ids.len) return false;
+        for (before_ids, after_ids) |before, after| if (!std.mem.eql(u8, before, after)) return false;
+        const before_tools = if (capabilities.mcp) |value| value.selectedTools() else &.{};
+        const after_tools = if (current.mcp) |value| value.selectedTools() else &.{};
+        if (before_tools.len != after_tools.len) return false;
+        for (before_tools, after_tools) |before, after|
+            if (!std.mem.eql(u8, before.server_id, after.server_id) or !std.mem.eql(u8, before.name, after.name)) return false;
+        return true;
+    }
+
+    fn modelRestoreCapabilitiesExact(self: *Runtime, task_id: u64) bool {
+        const task = self.task_runtime.find(task_id) orelse return false;
+        const job = task.runtime.restore_job orelse return false;
+        const rebind = if (job.rebind) |*value| value else return false;
+        if (task.durable.approval_revision != rebind.approval_revision) return false;
+        const current = self.prepareTaskRestoreFilters(task_id, &rebind.capabilities.original) catch return false;
+        defer if (current.skill) |value| value.deinit() catch {};
+        defer if (current.mcp) |value| value.deinit();
+        return sameRestoreFilters(&rebind.capabilities, current);
+    }
+
+    fn refreshModelRestoreCapabilities(context: *anyopaque, task_id: u64) bool {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        const task = self.task_runtime.find(task_id) orelse return false;
+        const job = task.runtime.restore_job orelse return false;
+        const rebind = if (job.rebind) |*value| value else return false;
+        const current = self.prepareTaskRestoreFilters(task_id, &rebind.capabilities.original) catch return false;
+        if (rebind.capabilities.skill) |value| value.deinit() catch {
+            rebind.capabilities.skill = null;
+            if (current.skill) |replacement| replacement.deinit() catch {};
+            if (current.mcp) |replacement| replacement.deinit();
+            return false;
+        };
+        if (rebind.capabilities.mcp) |value| value.deinit();
+        rebind.capabilities.skill = current.skill;
+        rebind.capabilities.mcp = current.mcp;
+        rebind.capabilities.mcp_catalog_generation = current.mcp_catalog_generation;
+        return true;
+    }
+
+    fn beginTaskModelRebind(self: *Runtime, task_id: u64, expected_binding_epoch: u64, target: *const models_contract.OwnedSourceCandidate) Error!u64 {
+        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
+        if (task.runtime.active_operation != .none or task.runtime.worker_leases.hasLive()) return error.RestoreBusy;
+        if (!task.runtime.hasAttachedSession() or task.durable.archived or task.read_only_history != null) return error.RecoveryUnavailable;
+        if (!self.task_persistence_health.operational() or self.checkpoint_store == null or self.checkpoint_store_health.load(.acquire) != .ready)
+            return error.RecoveryUnavailable;
+        const workspace = try self.workspace.taskRunAuthority(task.durable.workspace_id, task.durable.workspace_epoch);
+        const binding = self.workspace.recoveryBinding(workspace.id) orelse return error.RecoveryUnavailable;
+        const home = self.canonical_user_home orelse return error.RecoveryUnavailable;
+        const intent = task.durable.model_intent orelse return error.RecoveryUnavailable;
+        const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
+        self.redactAllProductProjectionsNoFail(target.input().api_key);
+        var access = try task.runtime.acquireAccess();
+        defer access.deinit();
+        var original = try access.captureRestoreInputs();
+        var original_owned = true;
+        defer if (original_owned) original.deinit() catch {};
+        const filters = try self.prepareTaskRestoreFilters(task_id, &original);
+        var capabilities: ?task_runtime.RestoreCapabilities = .{
+            .original = original,
+            .skill = filters.skill,
+            .mcp = filters.mcp,
+            .mcp_catalog_generation = filters.mcp_catalog_generation,
+        };
+        original_owned = false;
+        defer if (capabilities) |*value| value.deinit() catch {};
+        const generation = self.nextExecutionGeneration(@max(self.executionGeneration(), task.durable.execution_generation)) catch return error.ExecutionUnavailable;
+        const execution = target.input();
+        const config: models_contract.ConfigInput = .{ .execution_generation = generation, .target = execution.target, .api_key = execution.api_key };
+        const attempt = try self.task_runtime.startRecovery(task_id, .{
+            .expected_binding_epoch = expected_binding_epoch,
+            .workspace_id = workspace.id,
+            .workspace_epoch = task.durable.workspace_epoch,
+            .workspace_root = binding.canonical_root,
+            .canonical_user_home = home,
+            .workspace_trust = switch (binding.trust) {
+                .explicitly_trusted => .explicitly_trusted,
+                .temporary => .temporary,
+            },
+            .workspace_kind = switch (binding.kind) {
+                .manual => .manual,
+                .automatic => .automatic,
+            },
+            .execution = config,
+            .source_generation = execution.source_generation,
+            .agent_runtime = self.agent_runtime,
+            .checkpoint_store = self.checkpoint_store,
+            .checkpoint_store_health = &self.checkpoint_store_health,
+            .checkpoint_limits = checkpoint_export_limits,
+            .notifier = .{ .context = self.change_notifier.context, .notify_fn = self.change_notifier.wake },
+            .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
+            .rebind = .{ .source_id = intent.source_id, .selection_revision = intent.revision, .catalog_generation = authority.catalog_generation, .capabilities = &capabilities, .text = self.taskRuntimeTextProjection() },
+        });
+        self.bumpRevision();
+        return attempt;
+    }
+
     /// Admits an explicit attachment reconstruction. Success means only that
     /// the bounded recovery attempt was enqueued; the canonical Snapshot owns
     /// publication of the eventual result.
@@ -4004,6 +4129,12 @@ pub const Runtime = struct {
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
         if (self.task_runtime.findConst(task_id)) |task| if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
+        if (self.task_runtime.findConst(task_id)) |task| if (task.runtime.hasAttachedSession()) {
+            var target = try self.resolveTaskRunModel(task_id);
+            defer if (target) |*value| value.deinit();
+            if (target) |*value| if (!task.runtime.executionConst().?.matchesSource(value.input()))
+                return self.beginTaskModelRebind(task_id, expected_binding_epoch, value);
+        };
         if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input) |queued| if (queued.state == .waiting) return error.QueuedInputPresent;
         self.syncLifecycle();
         const facts = try self.task_runtime.recoveryStartFacts(
@@ -4545,6 +4676,7 @@ pub const Runtime = struct {
         for (self.task_runtime.tasks) |entry| {
             const task = entry orelse continue;
             if (task.model_intent_prepared) continue;
+            if (task.runtime.active_operation == .restore) continue;
             const completed = self.task_runtime.queuedInputCompletion(task.durable.id) orelse continue;
             const reason: ?task_runtime.QueuedInputReason = if (!completed) .run_not_completed else if (self.schedule.hasPendingSubmittedOccurrence(task.durable.id)) .schedule_completion_unconfirmed else null;
             if (reason) |held_reason| {
@@ -4558,6 +4690,10 @@ pub const Runtime = struct {
                 .multimodal => unreachable,
             };
             _ = self.admitTaskRun(task.durable.id, queued.binding_epoch, input, queued.revision) catch |err| {
+                if (err == error.RestoreBusy) {
+                    const current = self.task_runtime.findConst(task.durable.id).?;
+                    if (current.runtime.restore_job != null or current.runtime.worker_leases.hasLive()) continue;
+                }
                 if (self.task_runtime.holdQueuedInput(task.durable.id, null, queuedInputRejection(err))) self.bumpRevision();
                 continue;
             };
@@ -4590,6 +4726,22 @@ pub const Runtime = struct {
             return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
             return error.BindingEpochMismatch;
+        const current_task = self.task_runtime.findConst(task_id).?;
+        if (current_task.durable.archived or current_task.read_only_history != null or current_task.deletion != .idle or
+            current_task.runtime.close_failed or current_task.runtime.close_requested or current_task.runtime.hasClosingSession()) return error.TaskClosing;
+        if (current_task.runtime.attachedConst()) |attached| if (attached.health != .available) return error.TaskClosing;
+        if (current_task.runtime.attachedConst()) |attached| if (attached.health == .available and !current_task.runtime.close_failed)
+            try self.task_runtime.validateExecutionBinding(task_id);
+        var model_target = try self.resolveTaskRunModel(task_id);
+        defer if (model_target) |*target| target.deinit();
+        if (model_target) |*target| {
+            const task = self.task_runtime.findConst(task_id).?;
+            if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(target.input())) {
+                if (queued_revision != null and task.runtime.last_restore_failure != null) return error.RestoreFailed;
+                _ = try self.beginTaskModelRebind(task_id, binding_epoch, target);
+                return error.RestoreBusy;
+            };
+        }
         if (!self.task_runtime.continuationAvailable(
             task_id,
             self.taskRuntimeProjectionEffects(),
@@ -4676,8 +4828,6 @@ pub const Runtime = struct {
             .preparation = &order_preparation,
         };
         var operation_effects = self.taskRuntimeOperationEffects();
-        var model_target = try self.resolveTaskRunModel(task_id);
-        defer if (model_target) |*target| target.deinit();
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
         var queue_acceptance = QueuedRunAcceptanceContext{ .runtime = &self.task_runtime, .task_id = task_id, .revision = queued_revision orelse 0, .release = operation_effects.release };
         if (queued_revision != null) operation_effects.run_acceptance = .{ .context = &queue_acceptance, .accept_fn = consumeQueuedInput, .irreversible = true };
@@ -6784,6 +6934,7 @@ pub const Runtime = struct {
             .authority_stable = !self.shutting_down and
                 self.canonical_user_home != null and workspace.exists,
             .model_selection_availability = self.taskModelSelectionAvailability(query),
+            .model_rebind_required = self.taskModelNeedsRebind(query.task_id),
         };
     }
 
@@ -6808,26 +6959,39 @@ pub const Runtime = struct {
         return if (loading) .catalog_loading else .catalog_unavailable;
     }
 
+    fn taskModelNeedsRebind(self: *Runtime, task_id: u64) bool {
+        const task = self.task_runtime.findConst(task_id) orelse return false;
+        const intent = task.durable.model_intent orelse return false;
+        const installed = task.runtime.executionConst() orelse return false;
+        if (installed.model_intent_revision == intent.revision) return false;
+        const authority = self.taskModelIntentAuthority(task_id) orelse return false;
+        const protocol = self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) orelse return false;
+        const provider_matches = if (std.mem.eql(u8, intent.source_id, models_contract.metask_source_id))
+            std.mem.eql(u8, installed.provider_id, "metask")
+        else
+            std.mem.startsWith(u8, installed.provider_id, "custom_provider:") and std.mem.eql(u8, installed.provider_id["custom_provider:".len..], intent.source_id);
+        return installed.source_generation != authority.source_generation or installed.protocol != protocol or !provider_matches;
+    }
+
+    fn taskModelIntentAuthority(self: *Runtime, task_id: u64) ?task_runtime.ModelIntentAuthority {
+        const task = self.task_runtime.findConst(task_id) orelse return null;
+        const intent = task.durable.model_intent orelse return null;
+        const models = self.modelsView();
+        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id))
+            return .{ .source_id = intent.source_id, .selection_revision = intent.revision, .source_generation = provider.source_generation, .catalog_generation = provider.catalog_generation };
+        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id))
+            return .{ .source_id = intent.source_id, .selection_revision = intent.revision, .source_generation = provider.source_generation, .catalog_generation = provider.catalog_generation };
+        return null;
+    }
+
     fn resolveTaskRunModel(self: *Runtime, task_id: u64) Error!?models_contract.OwnedSourceCandidate {
         const task = self.task_runtime.findConst(task_id) orelse return error.UnknownTask;
         if (task.model_intent_prepared) return error.TaskPersistenceOutcomeUnknown;
         const intent = task.durable.model_intent orelse return null;
         if (task.runtime.executionConst()) |installed|
             if (installed.model_intent_revision == intent.revision) return null;
-        const models = self.modelsView();
-        var source_generation: u64 = 0;
-        var catalog_generation: u64 = 0;
-        for (models.providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id)) {
-            source_generation = provider.source_generation;
-            catalog_generation = provider.catalog_generation;
-            break;
-        };
-        for (models.custom_providers) |provider| if (std.mem.eql(u8, provider.id, intent.source_id)) {
-            source_generation = provider.source_generation;
-            catalog_generation = provider.catalog_generation;
-            break;
-        };
-        return (self.custom_providers.resolveModel(intent.modelRef(), source_generation, catalog_generation) catch |err| switch (err) {
+        const authority = self.taskModelIntentAuthority(task_id) orelse return error.ExecutionUnavailable;
+        return (self.custom_providers.resolveModel(intent.modelRef(), authority.source_generation, authority.catalog_generation) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.ExecutionUnavailable,
         }) orelse return error.ExecutionUnavailable;
@@ -7825,7 +7989,15 @@ pub const Runtime = struct {
             null,
             query.task_id,
         );
-        const execution_exact = self.modelsDefaultCurrent() and
+        const model_intent_exact = if (query.model_intent) |authority| exact: {
+            const task = self.task_runtime.findConst(query.task_id) orelse break :exact false;
+            const intent = task.durable.model_intent orelse break :exact false;
+            if (task.model_intent_prepared or intent.revision != authority.selection_revision or !std.mem.eql(u8, intent.source_id, authority.source_id) or
+                !std.mem.eql(u8, intent.model_id, query.task_model)) break :exact false;
+            break :exact self.custom_providers.sourceModelProtocol(intent.modelRef(), authority.source_generation, authority.catalog_generation) == query.protocol and
+                self.modelRestoreCapabilitiesExact(query.task_id);
+        } else if (query.original_restore) self.modelRestoreCapabilitiesExact(query.task_id) else false;
+        const execution_exact = if (query.model_intent != null or query.original_restore) model_intent_exact else self.modelsDefaultCurrent() and
             self.execution_state.recoveryAuthorityExact(
                 query.target_execution_generation,
                 query.protocol,
@@ -7842,7 +8014,7 @@ pub const Runtime = struct {
                 .manual => .manual,
                 .automatic => .automatic,
             },
-            .target_execution_generation = if (self.execution_state.ready())
+            .target_execution_generation = if (query.model_intent != null or query.original_restore) query.target_execution_generation else if (self.execution_state.ready())
                 self.execution_state.generation()
             else
                 0,
@@ -7871,6 +8043,8 @@ pub const Runtime = struct {
             .context = self,
             .authority_fn = taskRuntimeRecoveryAuthority,
             .queue_binding_fn = queueTaskRuntimeBinding,
+            .executor = .{ .context = self, .enqueue_fn = enqueueTaskRuntimeExecutor, .cancel_fn = cancelTaskRuntimeExecutor },
+            .refresh_capabilities_fn = refreshModelRestoreCapabilities,
         };
     }
 

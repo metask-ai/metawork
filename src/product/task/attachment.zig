@@ -143,6 +143,9 @@ pub const PermissionReviewState = struct {
 pub const State = struct {
     attachment: Attachment = .{ .detached = .cold_start },
     mcp_authority_at_creation: McpAuthorityAtCreation = .unavailable,
+    /// Main-thread projection retained across the old Session's close and a
+    /// possible original restore. Workers receive only Agent-owned inputs.
+    restore_catalog: ?catalog_snapshot.Snapshot = null,
     worker_leases: worker_lease.WorkerLeaseSet = .{},
     pending_ui_request_id: u64 = 0,
     pending_ui_order: u64 = 0,

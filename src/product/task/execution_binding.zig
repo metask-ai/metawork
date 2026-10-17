@@ -76,6 +76,12 @@ pub const OwnedTaskExecution = struct {
         };
     }
 
+    pub fn matchesSource(self: *const OwnedTaskExecution, target: models_contract.SourceCandidateInput) bool {
+        return self.owned and self.source_generation != 0 and self.source_generation == target.source_generation and
+            self.protocol == target.target.protocol and std.mem.eql(u8, self.provider_id, target.target.provider_id) and
+            std.mem.eql(u8, self.base_url, target.target.base_url) and std.mem.eql(u8, self.secret, target.api_key);
+    }
+
     /// A rejected restore retains only the metadata needed to close its
     /// Session owner. It cannot keep a credential for future execution.
     pub fn clearCredential(self: *OwnedTaskExecution) void {

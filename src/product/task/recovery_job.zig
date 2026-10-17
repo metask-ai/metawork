@@ -269,6 +269,7 @@ pub const Candidate = struct {
     /// A created Session always returns to the Task's ordinary close owner,
     /// including a cancellation or mutation failure before publication.
     rejection: ?Failure = null,
+    checkpoint: ?checkpoint_record.Record = null,
 
     pub fn takeExecution(self: *Candidate) owned_execution.OwnedTaskExecution {
         return self.execution.take();
@@ -283,6 +284,75 @@ pub const Outcome = union(enum) {
     none,
     failure: Failure,
     candidate: Candidate,
+    baseline: checkpoint_record.Record,
+};
+
+pub const ExportOutcome = union(enum) {
+    checkpoint: checkpoint_record.Record,
+    failure: struct { reason: Failure, poisoned: bool },
+};
+
+pub const RebindPhase = enum {
+    exporting_baseline,
+    confirming_baseline,
+    closing_original,
+    restoring_target,
+    closing_candidate,
+    restoring_original,
+};
+
+pub const ModelIntentAuthority = struct {
+    source_id: []const u8,
+    selection_revision: u64,
+    source_generation: u64,
+    catalog_generation: u64,
+};
+
+pub const RestoreCapabilities = struct {
+    original: agent.SessionRestoreInputs,
+    skill: ?*agent.SkillRestoreInputs,
+    mcp: ?*agent.McpSelection,
+    mcp_catalog_generation: ?u64 = null,
+
+    pub fn deinit(self: *RestoreCapabilities) agent.Error!void {
+        if (self.mcp) |selection| selection.deinit();
+        var failure: ?agent.Error = null;
+        if (self.skill) |inputs| inputs.deinit() catch |err| {
+            failure = err;
+        };
+        self.original.deinit() catch |err| {
+            failure = err;
+        };
+        self.* = undefined;
+        if (failure) |err| return err;
+    }
+};
+
+/// Process-only authority kept until publication or one original restore.
+/// Only the composition thread mutates phase or the retained projection.
+pub const Rebind = struct {
+    phase: RebindPhase = .exporting_baseline,
+    source_id: []u8,
+    selection_revision: u64,
+    source_generation: u64,
+    catalog_generation: u64,
+    approval_revision: u64,
+    last_run_id: u64,
+    last_compact_id: u64,
+    original_execution: owned_execution.OwnedTaskExecution,
+    original_credential: []const u8,
+    original_model: ?[]u8,
+    capabilities: RestoreCapabilities,
+    projected_model: ?[]u8,
+    baseline: ?checkpoint_record.Record = null,
+    baseline_access: ?agent_session.Access,
+    store_health: *std.atomic.Value(checkpoint_store.Health),
+    failure: ?Failure = null,
+    export_poisoned: bool = false,
+
+    pub fn authority(self: *const Rebind) ModelIntentAuthority {
+        return .{ .source_id = self.source_id, .selection_revision = self.selection_revision, .source_generation = self.source_generation, .catalog_generation = self.catalog_generation };
+    }
 };
 
 pub const State = enum(u8) {
@@ -309,6 +379,11 @@ pub const Job = struct {
     lease: worker_lease.WorkerLease,
     binding_commit: BindingCommit = .not_started,
     unknown_history: ?[]u8 = null,
+    rebind: ?Rebind = null,
+    export_checkpoint_fn: ?*const fn (*Job, *agent_session.Access, []const u8) ExportOutcome = null,
+    /// Borrowed from the transferred execution owner. Workers never mutate
+    /// this view; composition clears it before freeing a rejected execution.
+    credential: []const u8 = &.{},
 
     pub fn execute(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
@@ -320,8 +395,9 @@ pub const Job = struct {
         );
         std.debug.assert(claimed == null);
         self.outcome = self.run();
+        const notifier = self.notifier;
         self.state.store(.completed, .release);
-        self.notifier.notify();
+        notifier.notify();
     }
 
     pub fn cancelQueued(context: *anyopaque) void {
@@ -335,8 +411,9 @@ pub const Job = struct {
         );
         std.debug.assert(prior == null);
         self.outcome = .{ .failure = .cancelled };
+        const notifier = self.notifier;
         self.state.store(.cancelled, .release);
-        self.notifier.notify();
+        notifier.notify();
     }
 
     pub fn requestCancellation(self: *Job) void {
@@ -356,22 +433,35 @@ pub const Job = struct {
                 self.outcome = .none;
                 break :candidate candidate;
             },
-            .none, .failure => null,
+            .none, .failure, .baseline => null,
         };
     }
 
     pub fn failure(self: *const Job) ?Failure {
         return switch (self.outcome) {
             .failure => |reason| reason,
-            .none, .candidate => null,
+            .none, .candidate, .baseline => null,
         };
     }
 
-    pub fn deinit(self: *Job) void {
+    pub fn deinit(self: *Job) bool {
         std.debug.assert(self.completionReady());
         // Composition must install or transfer the candidate to its ordinary
         // closing owner before freeing the restore attempt.
         std.debug.assert(self.outcome != .candidate);
+        var cleanup_ok = true;
+        if (self.outcome == .baseline) self.outcome.baseline.deinit(self.allocator);
+        if (self.rebind) |*rebind| {
+            std.debug.assert(rebind.projected_model == null);
+            if (rebind.baseline_access) |*access| access.deinit();
+            if (rebind.baseline) |*baseline| baseline.deinit(self.allocator);
+            rebind.capabilities.deinit() catch {
+                cleanup_ok = false;
+            };
+            if (rebind.original_model) |model| self.allocator.free(model);
+            rebind.original_execution.deinit();
+            self.allocator.free(rebind.source_id);
+        }
         if (self.unknown_history) |bytes| self.allocator.free(bytes);
         self.allocator.free(self.attempt.task_model);
         self.attempt.execution.deinit();
@@ -381,11 +471,26 @@ pub const Job = struct {
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);
+        return cleanup_ok;
     }
 
     fn run(self: *Job) Outcome {
         if (self.cancellation.load(.acquire))
             return .{ .failure = .cancelled };
+
+        if (self.rebind) |*rebind| if (rebind.phase == .exporting_baseline) {
+            var access = rebind.baseline_access.?.take();
+            rebind.baseline_access = null;
+            defer access.deinit();
+            const result = self.export_checkpoint_fn.?(self, &access, rebind.original_execution.model);
+            return switch (result) {
+                .checkpoint => |record| .{ .baseline = record },
+                .failure => |failure_value| failed: {
+                    rebind.export_poisoned = failure_value.poisoned;
+                    break :failed .{ .failure = failure_value.reason };
+                },
+            };
+        };
 
         const execution = self.attempt.execution.input();
         const options: agent.SessionOpenOptions = .{
@@ -410,9 +515,9 @@ pub const Job = struct {
             },
             .canonical_user_home = self.attempt.workspace.canonical_user_home,
             .workspace_epoch = self.attempt.workspace.epoch_token,
-            .skill_catalog = null,
-            .skill_policy = null,
-            .mcp_selection = null,
+            .skill_catalog = if (self.rebind) |rebind| if (rebind.capabilities.skill) |inputs| inputs.borrow().catalog else null else null,
+            .skill_policy = if (self.rebind) |rebind| if (rebind.capabilities.skill) |inputs| inputs.borrow().policy else null else null,
+            .mcp_selection = if (self.rebind) |rebind| rebind.capabilities.mcp else null,
             .operation_id_floor = .{
                 .last_run_id = self.attempt.run_id_floor,
                 .last_compact_id = self.attempt.compact_id_floor,
@@ -453,10 +558,21 @@ pub const Job = struct {
         };
         access.deinit();
 
+        var target_checkpoint: ?checkpoint_record.Record = null;
+        if (self.rebind != null) {
+            var export_access = binding.acquireAccess() catch return self.rejectCandidate(&binding, report, .restore_rejected);
+            defer export_access.deinit();
+            switch (self.export_checkpoint_fn.?(self, &export_access, self.attempt.task_model)) {
+                .checkpoint => |record| target_checkpoint = record,
+                .failure => |failure_value| return self.rejectCandidate(&binding, report, failure_value.reason),
+            }
+        }
+
         return .{ .candidate = .{
             .binding = binding.take(),
             .report = report,
             .execution = self.attempt.execution.take(),
+            .checkpoint = target_checkpoint,
         } };
     }
 
