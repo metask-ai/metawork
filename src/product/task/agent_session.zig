@@ -214,8 +214,8 @@ pub const Access = struct {
         return self.get().setModel(model);
     }
 
-    pub fn captureMcpRestoreSelection(self: *Access) !?*agent.McpRestoreSelection {
-        return self.get().captureMcpRestoreSelection();
+    pub fn captureRestoreInputs(self: *Access) !agent.SessionRestoreInputs {
+        return self.get().captureRestoreInputs();
     }
 
     pub fn sessionState(self: *Access) agent.SessionState {

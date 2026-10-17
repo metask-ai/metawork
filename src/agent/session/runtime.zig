@@ -279,14 +279,15 @@ pub const Runtime = struct {
         return acquisition;
     }
 
-    /// Consumes one opaque Host catalog handle. The AgentCore release function
-    /// is called exactly once even if it reports failure.
+    /// Consumes one Host lease reference. Only its last release calls Core,
+    /// exactly once even if that call reports failure.
     pub fn releaseSkillCatalog(
         self: *Runtime,
         lease: *CatalogLease,
     ) Error!void {
         if (!catalog.belongsTo(lease, self))
             return error.CatalogBindingMismatch;
+        if (!catalog.releaseReference(lease)) return;
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.runtime == null or self.active_catalog_leases == 0) {
             self.sessions_mutex.unlock(self.io);
@@ -789,6 +790,13 @@ pub const Runtime = struct {
             ) catch return error.InvalidSkillPolicy
         else
             undefined;
+        const skill_restore_inputs = if (options.skill_catalog) |lease|
+            try root.SkillRestoreInputs.init(self, lease, options.skill_policy.?)
+        else
+            null;
+        // The caller still owns its synchronous borrow, so this reference
+        // cannot be the last one on a failed create.
+        errdefer if (skill_restore_inputs) |inputs| inputs.deinit() catch unreachable;
 
         self.sessions_mutex.lockUncancelable(self.io);
         defer self.sessions_mutex.unlock(self.io);
@@ -847,6 +855,8 @@ pub const Runtime = struct {
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
             .permission_interaction = options.permission_interaction,
+            .shell_policy = options.shell_policy,
+            .skill_restore_inputs = skill_restore_inputs,
             .mcp_restore_selection = mcp_restore_selection,
             .control_block = control_block,
             .next_run_id = options.operation_id_floor.last_run_id,
@@ -995,6 +1005,11 @@ pub const Runtime = struct {
         const session = try self.allocator.create(Session);
         var session_installed = false;
         defer if (!session_installed) self.allocator.destroy(session);
+        const skill_restore_inputs = if (session_options.skill_catalog) |lease|
+            try root.SkillRestoreInputs.init(self, lease, session_options.skill_policy.?)
+        else
+            null;
+        defer if (!session_installed) if (skill_restore_inputs) |inputs| inputs.deinit() catch unreachable;
         const provider_id = try self.allocator.dupe(u8, binding.target.provider_id);
         defer if (!session_installed) self.allocator.free(provider_id);
         const control_block = try self.allocator.create(SessionControlBlock);
@@ -1099,6 +1114,8 @@ pub const Runtime = struct {
             .workspace_home = workspace_home,
             .workspace_epoch = workspace_epoch,
             .permission_interaction = session_options.permission_interaction,
+            .shell_policy = session_options.shell_policy,
+            .skill_restore_inputs = skill_restore_inputs,
             .mcp_restore_selection = mcp_restore_selection,
             .control_block = control_block,
             .next_run_id = session_options.operation_id_floor.last_run_id,

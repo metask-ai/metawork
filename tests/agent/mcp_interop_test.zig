@@ -578,6 +578,58 @@ const RestoreBytes = struct {
     }
 };
 
+const PermissionRun = struct {
+    session: *agent.Session,
+    run_id: u64,
+    done: std.atomic.Value(bool) = .init(false),
+    result: ?agent.TerminalResult = null,
+    failure: ?anyerror = null,
+
+    fn execute(self: *@This()) void {
+        defer self.done.store(true, .release);
+        var run = self.session.beginRun(self.run_id) catch |err| {
+            self.failure = err;
+            return;
+        };
+        self.result = run.execute();
+        run.deinit();
+    }
+};
+
+fn runWithPermission(runtime: *agent.Runtime, session: *agent.Session, run_id: u64, choice: agent.PermissionChoice) !struct { terminal: agent.TerminalResult, answers: usize } {
+    var work = PermissionRun{ .session = session, .run_id = run_id };
+    const thread = std.Thread.spawn(.{}, PermissionRun.execute, .{&work}) catch |err| {
+        try session.cancelPreparedRun(run_id);
+        return err;
+    };
+    var joined = false;
+    defer if (!joined) {
+        _ = session.requestTermination(run_id, .{ .interrupted = .user_cancel }) catch {};
+        thread.join();
+        if (work.result) |*result| result.deinit();
+    };
+    var previous_request: ?u64 = null;
+    var answers: usize = 0;
+    for (0..10_000) |_| {
+        while (runtime.takeEvent()) |value| {
+            var event = value;
+            event.deinit();
+        }
+        if (work.done.load(.acquire)) break;
+        if (session.pendingUiRequest()) |request| if (previous_request == null or previous_request.? != request) {
+            try session.respondPermission(run_id, request, choice);
+            previous_request = request;
+            answers += 1;
+        };
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    if (!work.done.load(.acquire)) return error.TestUnexpectedResult;
+    thread.join();
+    joined = true;
+    if (work.failure) |err| return err;
+    return .{ .terminal = work.result.?, .answers = answers };
+}
+
 fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -623,6 +675,34 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
         std.testing.allocator,
     );
     defer std.testing.allocator.free(workspace_root);
+    for ([_][]const u8{ "skill-source/restore-allowed", "skill-source/restore-blocked" }) |directory|
+        try tmp.dir.createDirPath(std.testing.io, directory);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "skill-source/restore-allowed/SKILL.md",
+        .data = "---\nname: restore-allowed\ndescription: Allowed pinned restore fixture\n---\nPINNED_RESTORE_SKILL: return the pinned skill result.\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "skill-source/restore-blocked/SKILL.md",
+        .data = "---\nname: restore-blocked\ndescription: Blocked pinned restore fixture\n---\nThis skill must remain ungranted.\n",
+    });
+    const skill_source = try tmp.dir.realPathFileAlloc(std.testing.io, "skill-source", std.testing.allocator);
+    defer std.testing.allocator.free(skill_source);
+    const home = root_storage[0..root_len];
+    const query: agent.CatalogQuery = .{
+        .canonical_user_home = home,
+        .target = .{ .workspace = .{ .canonical_root = workspace_root, .epoch = "restore-fixture" } },
+        .additional_sources = &.{.{ .canonical_root = skill_source, .scope = .user, .source_instance_id = "restore-source" }},
+    };
+    var skills = try runtime.querySkillCatalog(query);
+    defer skills.projection.deinit();
+    var lease_owned = true;
+    defer if (lease_owned) runtime.releaseSkillCatalog(skills.lease) catch unreachable;
+    const allowed = for (skills.projection.skills) |skill| {
+        if (std.mem.eql(u8, skill.invocation_name, "restore-allowed")) break skill;
+    } else return error.TestUnexpectedResult;
+    const blocked = for (skills.projection.skills) |skill| {
+        if (std.mem.eql(u8, skill.invocation_name, "restore-blocked")) break skill;
+    } else return error.TestUnexpectedResult;
     const open_options: agent.SessionOpenOptions = .{
         .model_binding = .{
             .target = .{
@@ -633,20 +713,24 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
             },
             .credential = "fixture-credential",
         },
-        .permission_mode = .full_access,
+        .permission_mode = .default,
         .shell_policy = .unrestricted,
         .workspace = .{
             .canonical_root = workspace_root,
             .trust = .explicitly_trusted,
         },
         .mcp_selection = selection,
+        .canonical_user_home = home,
+        .workspace_epoch = "restore-fixture",
+        .skill_catalog = skills.lease,
+        .skill_policy = .{ .granted_skill_ids = &.{allowed.skill_id} },
     };
     const session = try runtime.createSession(open_options);
     const run_id = try session.prepareRun(.{ .text = "Call the selected echo tool." });
-    var run = try session.beginRun(run_id);
-    var terminal = run.execute();
-    run.deinit();
+    const allowed_run = try runWithPermission(runtime, session, run_id, .allow_session);
+    var terminal = allowed_run.terminal;
     defer terminal.deinit();
+    try std.testing.expectEqual(@as(usize, 1), allowed_run.answers);
     try std.testing.expectEqual(@as(?agent.TerminalFailure, null), terminal.failure);
     try std.testing.expectEqual(@as(?agent.Status, .ok), terminal.abi_status);
     try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), terminal.stop_reason);
@@ -654,8 +738,18 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
         var event = event_value;
         event.deinit();
     }
-    const saved = (try session.captureMcpRestoreSelection()).?;
-    defer saved.deinit();
+    const deny_run_id = try session.prepareRun(.{ .text = "Deny this echo tool." });
+    const refused_run = try runWithPermission(runtime, session, deny_run_id, .deny_session);
+    var refused = refused_run.terminal;
+    defer refused.deinit();
+    try std.testing.expectEqual(@as(usize, 1), refused_run.answers);
+    try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), refused.stop_reason);
+    var saved = try session.captureRestoreInputs();
+    defer saved.deinit() catch unreachable;
+    try std.testing.expectEqual(agent.PermissionMode.default, saved.permission_mode);
+    try std.testing.expectEqual(@as(usize, 1), saved.skill.?.borrow().policy.granted_skill_ids.len);
+    try runtime.releaseSkillCatalog(skills.lease);
+    lease_owned = false;
     const limits: agent.CheckpointLimits = .{
         .hard_bytes = 16 * 1024 * 1024,
         .max_section_bytes = 16 * 1024 * 1024,
@@ -666,7 +760,7 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     };
     var bytes = RestoreBytes{};
     defer bytes.bytes.deinit(std.testing.allocator);
-    var exported = try session.exportCheckpoint(limits, .{ .context = &bytes, .write_fn = RestoreBytes.write }, run_id, 0, open_options.model_binding.target.model);
+    var exported = try session.exportCheckpoint(limits, .{ .context = &bytes, .write_fn = RestoreBytes.write }, deny_run_id, 0, open_options.model_binding.target.model);
     defer exported.deinit();
     const checkpoint = switch (exported) {
         .success => |value| value,
@@ -674,18 +768,35 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     };
     try session.close(.session_close);
     try runtime.releaseClosedSession(session);
+    // A newly queried catalog has extra authority, but it cannot replace the
+    // immutable lease and grant set captured from the original Session.
+    try tmp.dir.createDirPath(std.testing.io, "skill-source/restore-extra");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "skill-source/restore-extra/SKILL.md",
+        .data = "---\nname: restore-extra\ndescription: Newly available ungranted skill\n---\nThis new skill must not enter the old policy.\n",
+    });
+    var broader = try runtime.querySkillCatalog(query);
+    defer broader.projection.deinit();
+    defer runtime.releaseSkillCatalog(broader.lease) catch unreachable;
+    try std.testing.expect(broader.projection.skills.len > skills.projection.skills.len);
     const current = switch (try runtime.activateMcp()) {
         .activated => |value| value,
         else => return error.TestUnexpectedResult,
     };
     defer current.deinit();
-    const prepared = try runtime.prepareMcpRestoreSelection(saved, current);
+    const prepared = try runtime.prepareMcpRestoreSelection(saved.mcp.?, current);
     defer prepared.deinit();
     try std.testing.expectEqual(@as(usize, 1), prepared.selectedTools().len);
     try std.testing.expectEqualStrings("echo", prepared.selectedTools()[0].name);
     var restore_options = open_options;
     restore_options.mcp_selection = prepared;
-    restore_options.operation_id_floor.last_run_id = run_id;
+    restore_options.permission_mode = saved.permission_mode;
+    restore_options.shell_policy = saved.shell_policy;
+    restore_options.permission_interaction = saved.permission_interaction;
+    const pinned = saved.skill.?.borrow();
+    restore_options.skill_catalog = pinned.catalog;
+    restore_options.skill_policy = pinned.policy;
+    restore_options.operation_id_floor.last_run_id = deny_run_id;
     const restored = try runtime.restoreSessionRoute(.{
         .session = restore_options,
         .checkpoint_limits = limits,
@@ -693,21 +804,81 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
         .expectation = .{
             .logical_session_id = checkpoint.description.session_id,
             .checkpoint_generation = checkpoint.checkpoint.generation,
-            .last_run_id = run_id,
+            .last_run_id = deny_run_id,
             .last_compact_id = 0,
             .model = open_options.model_binding.target.model,
         },
     });
     try std.testing.expectEqual(agent.CheckpointRestoreHealth.complete, restored.report.health);
+    try std.testing.expect(restored.report.restored_permission_rules >= 2);
     const next = try restored.session.prepareRun(.{ .text = "Call the restored echo tool." });
-    try std.testing.expect(next > run_id);
-    var continuation = try restored.session.beginRun(next);
-    var continued = continuation.execute();
-    continuation.deinit();
+    try std.testing.expect(next > deny_run_id);
+    const continuation = try runWithPermission(runtime, restored.session, next, .allow_session);
+    var continued = continuation.terminal;
     defer continued.deinit();
+    try std.testing.expectEqual(@as(usize, 0), continuation.answers);
     if (continued.failure != null) std.debug.print("restored MCP run status={any} stop={any} signal={any} diagnostic={s}\n", .{ continued.abi_status, continued.stop_reason, continued.termination_signal, continued.diagnostic() });
     try std.testing.expectEqual(@as(?agent.TerminalFailure, null), continued.failure);
     try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), continued.stop_reason);
+    const repeat_denial_id = try restored.session.prepareRun(.{ .text = "Deny this echo tool." });
+    const repeat_denial = try runWithPermission(runtime, restored.session, repeat_denial_id, .allow_session);
+    var denied_again = repeat_denial.terminal;
+    defer denied_again.deinit();
+    try std.testing.expectEqual(@as(usize, 0), repeat_denial.answers);
+    try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), denied_again.stop_reason);
+    while (runtime.takeEvent()) |event_value| {
+        var event = event_value;
+        event.deinit();
+    }
+    const skill_run_id = try restored.session.prepareRun(.{ .skill = .{ .skill_id = allowed.skill_id, .catalog_revision = skills.projection.revision, .argument_values = &.{} } });
+    var skill_run = try restored.session.beginRun(skill_run_id);
+    var skill_terminal = skill_run.execute();
+    skill_run.deinit();
+    defer skill_terminal.deinit();
+    try std.testing.expectEqual(@as(?agent.TerminalFailure, null), skill_terminal.failure);
+    try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), skill_terminal.stop_reason);
+    while (runtime.takeEvent()) |event_value| {
+        var event = event_value;
+        event.deinit();
+    }
+    const denied_id = try restored.session.prepareRun(.{ .skill = .{ .skill_id = blocked.skill_id, .catalog_revision = skills.projection.revision, .argument_values = &.{} } });
+    var denied_run = try restored.session.beginRun(denied_id);
+    var denied = denied_run.execute();
+    denied_run.deinit();
+    defer denied.deinit();
+    try std.testing.expectEqual(@as(?agent.Status, .skill_policy_violation), denied.abi_status);
+    try restored.session.close(.session_close);
+    try runtime.releaseClosedSession(restored.session);
+    const extra = for (broader.projection.skills) |skill| {
+        if (std.mem.eql(u8, skill.invocation_name, "restore-extra")) break skill;
+    } else return error.TestUnexpectedResult;
+    const narrower = try saved.skill.?.narrow(.{ .granted_skill_ids = &.{extra.skill_id} });
+    defer narrower.deinit() catch unreachable;
+    try std.testing.expectEqual(@as(usize, 0), narrower.borrow().policy.granted_skill_ids.len);
+    restore_options.skill_catalog = narrower.borrow().catalog;
+    restore_options.skill_policy = narrower.borrow().policy;
+    restore_options.operation_id_floor.last_run_id = denied_id;
+    bytes.offset = 0;
+    const degraded = try runtime.restoreSessionRoute(.{
+        .session = restore_options,
+        .checkpoint_limits = limits,
+        .source = .{ .context = &bytes, .read_fn = RestoreBytes.read },
+        .expectation = .{
+            .logical_session_id = checkpoint.description.session_id,
+            .checkpoint_generation = checkpoint.checkpoint.generation,
+            .last_run_id = deny_run_id,
+            .last_compact_id = 0,
+            .model = open_options.model_binding.target.model,
+        },
+    });
+    try std.testing.expectEqual(agent.CheckpointRestoreHealth.degraded, degraded.report.health);
+    try std.testing.expect(degraded.report.invalidated_skill_authority > 0);
+    const revoked_id = try degraded.session.prepareRun(.{ .skill = .{ .skill_id = allowed.skill_id, .catalog_revision = skills.projection.revision, .argument_values = &.{} } });
+    var revoked_run = try degraded.session.beginRun(revoked_id);
+    var revoked = revoked_run.execute();
+    revoked_run.deinit();
+    defer revoked.deinit();
+    try std.testing.expectEqual(@as(?agent.Status, .skill_policy_violation), revoked.abi_status);
     const trace = try tmp.dir.readFileAlloc(
         std.testing.io,
         "execution-trace.jsonl",
@@ -719,6 +890,7 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
         std.debug.print("MCP execution trace:\n{s}\n", .{trace});
     try std.testing.expect(std.mem.indexOf(u8, trace, "\"method\":\"tools/call\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "echo-from-agentcore") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "PINNED_RESTORE_SKILL") != null);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, trace, "\"method\":\"tools/call\""));
 }
 

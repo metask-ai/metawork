@@ -142,6 +142,7 @@ const ProjectionStorage = struct {
 };
 
 const LeaseStorage = struct {
+    references: std.atomic.Value(usize) = .init(1),
     allocator: std.mem.Allocator,
     api: sdk.Api,
     owner: *anyopaque,
@@ -235,6 +236,24 @@ pub fn query(
     );
     raw_owned = false;
     return .{ .lease = lease, .projection = projection };
+}
+
+pub fn retain(lease: *Lease) Error!void {
+    const owned = leaseStorage(lease);
+    var count = owned.references.load(.monotonic);
+    while (count != std.math.maxInt(usize)) {
+        std.debug.assert(count != 0);
+        count = owned.references.cmpxchgWeak(count, count + 1, .monotonic, .monotonic) orelse return;
+    }
+    return error.CatalogResourceLimit;
+}
+
+/// True transfers the final reference to the Runtime release transaction.
+/// Non-final releases do not call Core or acquire the Runtime mutex.
+pub fn releaseReference(lease: *Lease) bool {
+    const previous = leaseStorage(lease).references.fetchSub(1, .acq_rel);
+    std.debug.assert(previous != 0);
+    return previous == 1;
 }
 
 pub fn release(lease: *Lease) Error!void {

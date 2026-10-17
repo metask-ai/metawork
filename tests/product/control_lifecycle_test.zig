@@ -2442,7 +2442,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"id\":\"1\"",
         "\"continuationUnavailableReason\":\"session_recovery_failed\"",
     );
-    fake_core.armControlledRestore();
+    fake_core.armControlledRestoreAfterCreate();
     defer fake_core.releaseControlledRestore();
     fake_core.lock();
     const restores_before_execution_replacement = fake_core.checkpoint_restores;
@@ -2464,6 +2464,9 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"id\":\"1\"",
         "\"activeOperation\":null",
     );
+    // Rejected publication hands a real candidate to the ordinary close
+    // worker. Restore completion alone does not prove that worker finished.
+    try waitTaskSnapshot(&restored, "\"id\":\"1\"", "\"unavailableReason\":\"runtime_detached\"");
     fake_core.lock();
     const restores_after_execution_replacement = fake_core.checkpoint_restores;
     const sessions_destroyed_after_execution_replacement = fake_core.session_destroyed;
@@ -2713,7 +2716,7 @@ test "restart recovery revalidates live authority and continues the same Convers
         "\"continuationRecoveryAvailable\":true",
     );
 
-    fake_core.armControlledRestore();
+    fake_core.armControlledRestoreAfterCreate();
     fake_core.lock();
     const restores_before_workspace_removal = fake_core.checkpoint_restores;
     const sessions_destroyed_before_workspace_removal = fake_core.session_destroyed;
@@ -8171,7 +8174,10 @@ test "recovery binding confirmation retains candidates and never writes on the m
         }
         defer history.close_released.store(true, .release);
         try installControlExecutionGeneration(&control, 2);
-        _ = try control.openWorkspace(input);
+        const restored_workspace = try control.openWorkspace(input);
+        // This scenario owns a one-slot executor. Finish unrelated catalog
+        // preparation before testing recovery's controlled history writer.
+        try settleWorkspaceSkillQueries(&control, restored_workspace);
         const task = control.task_runtime.find(task_id).?;
         const main_commits = history.main_commits;
         fake_core.lock();

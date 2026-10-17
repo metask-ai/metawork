@@ -265,6 +265,7 @@ pub const FakeCore = struct {
     catalog_source_count: usize = 0,
     catalog_sources: [wire.MAX_SKILL_SOURCES_V1]CatalogSourceObservation = @splat(.{}),
     catalog_releases: usize = 0,
+    catalog_release_failures: usize = 0,
     catalog_refreshes: usize = 0,
     mcp_refreshes: usize = 0,
     mcp_descriptions: usize = 0,
@@ -354,6 +355,7 @@ pub const FakeCore = struct {
     restore_last_run_id: u64 = 0,
     restore_last_compact_id: u64 = 0,
     restore_controlled: bool = false,
+    restore_after_create: bool = false,
     restore_entered: bool = false,
     allow_restore: bool = false,
     checkpoint_export_controlled: bool = false,
@@ -671,6 +673,16 @@ pub const FakeCore = struct {
         self.lock();
         defer self.unlock();
         self.restore_controlled = true;
+        self.restore_after_create = false;
+        self.restore_entered = false;
+        self.allow_restore = false;
+    }
+
+    pub fn armControlledRestoreAfterCreate(self: *FakeCore) void {
+        self.lock();
+        defer self.unlock();
+        self.restore_controlled = true;
+        self.restore_after_create = true;
         self.restore_entered = false;
         self.allow_restore = false;
     }
@@ -1124,6 +1136,10 @@ pub fn skillCatalogRelease(
     }
     catalog_entry.released = true;
     fake_core.catalog_releases += 1;
+    if (fake_core.catalog_release_failures != 0) {
+        fake_core.catalog_release_failures -= 1;
+        return wire.STATUS_CORE_ERROR;
+    }
     return wire.STATUS_OK;
 }
 
@@ -1397,7 +1413,7 @@ pub fn sessionRestore(
     fake_core.forced_checkpoint_restore_status = null;
     const restore_degraded = fake_core.forced_checkpoint_restore_degraded;
     fake_core.forced_checkpoint_restore_degraded = false;
-    if (fake_core.restore_controlled) {
+    if (fake_core.restore_controlled and !fake_core.restore_after_create) {
         fake_core.restore_controlled = false;
         fake_core.restore_entered = true;
         fake_core.checkpoint_condition.broadcast(std.testing.io);
@@ -1486,6 +1502,13 @@ pub fn sessionRestore(
         );
         out_session.?.* = @ptrCast(session);
         out_report.?.* = .{ .ptr = @ptrCast(encoded.ptr), .len = encoded.len };
+        if (fake_core.restore_controlled and fake_core.restore_after_create) {
+            fake_core.restore_controlled = false;
+            fake_core.restore_entered = true;
+            fake_core.checkpoint_condition.broadcast(std.testing.io);
+            while (!fake_core.allow_restore)
+                fake_core.checkpoint_condition.waitUncancelable(std.testing.io, &fake_core.mutex);
+        }
         return wire.STATUS_OK;
     }
     diagnostic(out_error);

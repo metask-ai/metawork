@@ -53,7 +53,7 @@ npm test
 
 Task 模型意图与选择的定向入口为 `zig build test-task-model-selection`，覆盖 revision CAS、默认配置独立性、confirmed history 写入及未知结果读回、Host 投影与严格 Bridge payload。真实 Task/Run/queued input 和 Session setModel 行为归 `test-lifecycle`；Renderer 运行 typecheck 与 `task-model-selection`、`new-task-model-selection`、`bridge-client`、`workbench-contract` suites。模型选择不得改变已有 Run 的执行及权限事实；跨连接 rebind 仍须完整生命周期验收。
 
-MCP 同进程恢复输入由 `test-mcp-catalog` 验证来源指纹、跨 generation 选择交集、授权不扩大、收缩及分配失败原子性；`test-lifecycle` 覆盖 Session 复制、替换失败及清空责任。`test-mcp-interop` 使用当前 canonical Core 和真实本地 HTTP MCP，以文本和图片工具结果验证 export、释放原 Session、重新验证选择、restore 与实际续跑调用；模型端为本地协议 fixture，不将此证据扩大为远端供应商兼容性承诺。
+同进程能力输入由 `test-mcp-catalog` 验证 MCP 原来源指纹、跨 generation 交集、收缩/不扩大及分配失败；`test-lifecycle` 验证 Skill query/Session/捕获 owner 的精确释放与 Runtime shutdown fence、capture 分配失败不改 authority、成功权限 mutation 后捕获，以及替换失败。`test-mcp-interop` 使用当前 canonical Core、真实临时 Skill 和本地 HTTP MCP：export 后释放原 Session/query owner，额外查询更宽目录，使用原输入恢复并实际执行原 Skill/MCP；未授权 Skill 仍被拒绝，缩小 ceiling 返回 degraded 并撤销旧 Skill。Core session allow/deny 在恢复前各由一次真实 UI 回应建立，恢复后同参数允许/拒绝均不再询问，MCP trace 精确检查实际调用且无历史重放。模型端为本地协议 fixture，不将该证据扩大为远端供应商兼容性承诺。
 
 `npm test` 必须校验 canonical staged AgentCore bundle、执行 Renderer typecheck，并运行自动发现的 Node tests 与正式 Native test graph。Node 和 Native 阶段都必须得到结果；一侧失败不得遮蔽另一侧。bundle 缺失或不匹配时必须明确失败，不能跳过 AgentCore 用例后报告成功。
 

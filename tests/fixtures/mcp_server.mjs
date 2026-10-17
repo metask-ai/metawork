@@ -103,6 +103,13 @@ function startHttp() {
                 part.type === "text" &&
                 part.text?.includes("Call the restored echo tool."),
             );
+          const deniedCall = payload.messages
+            ?.at(-1)
+            ?.content?.some(
+              (part) =>
+                part.type === "text" &&
+                part.text?.includes("Deny this echo tool."),
+            );
           if (
             restoredCall &&
             (!toolResult || !mcpTool || mcpTools.length !== 1)
@@ -111,13 +118,15 @@ function startHttp() {
               "restored context or original MCP authority was lost",
             );
           const providerBody =
-            providerCalls === 0 || restoredCall
+            providerCalls === 0 || restoredCall || deniedCall
               ? providerToolSse(
                   `mcp-message-${providerCalls + 1}`,
                   `mcp-call-${providerCalls + 1}`,
                   mcpTool.name,
                   {
-                    text: "echo-from-agentcore",
+                    text: deniedCall
+                      ? "deny-from-agentcore"
+                      : "echo-from-agentcore",
                   },
                 )
               : providerTextSse(
