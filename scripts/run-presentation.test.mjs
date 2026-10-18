@@ -73,6 +73,7 @@ function run(overrides = {}) {
     finishedAtUnixMs: null,
     terminal: null,
     usage: { input: "0", output: "0", cacheRead: "0", cacheCreation: "0" },
+    additionalInputs: [],
     tools: [],
     fileChanges: null,
     ...overrides,
@@ -240,4 +241,48 @@ test("Run disclosure remains collapsed unless the user explicitly opens it", () 
     expanded: true,
   });
   assert.equal(observeRunProcessDisclosure(manual).expanded, true);
+});
+
+test("only adopted messages with real anchors enter technical process order", () => {
+  const message = {
+    id: "1",
+    operationId: "input-1",
+    text: "constraint",
+    redacted: false,
+    state: "adopted",
+    sequence: 1,
+    adoptedTurn: 2,
+    order: "2",
+  };
+  const presentation = deriveRunPresentation(
+    run({
+      additionalInputs: [
+        message,
+        {
+          ...message,
+          id: "2",
+          operationId: "input-2",
+          sequence: 2,
+          adoptedTurn: null,
+          order: null,
+        },
+        {
+          ...message,
+          id: "3",
+          operationId: "input-3",
+          sequence: 3,
+          state: "unadopted",
+          adoptedTurn: null,
+          order: null,
+        },
+      ],
+      tools: [tool("before", "1"), tool("after", "3")],
+    }),
+  );
+  assert.deepEqual(presentation.inputs, [message]);
+  assert.equal(presentation.processCanCollapse, true);
+  assert.deepEqual(
+    presentation.tools.map((tool) => tool.order),
+    ["1", "3"],
+  );
 });

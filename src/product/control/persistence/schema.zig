@@ -22,6 +22,10 @@ pub const migrations: []const sql.Migration = &.{ .{
     .version = 5,
     .name = "task_model_intent",
     .sql = @embedFile("migrations/0005_task_model_intent.sql"),
+}, .{
+    .version = 6,
+    .name = "run_additional_inputs",
+    .sql = @embedFile("migrations/0006_run_additional_inputs.sql"),
 } };
 
 comptime {

@@ -18,8 +18,6 @@ pub const TaskCreateInput = runtime_impl.TaskCreateInput;
 pub const TaskMcpAuthorityAtCreation = runtime_impl.TaskMcpAuthorityAtCreation;
 pub const TaskWorkspaceRequest = runtime_impl.TaskWorkspaceRequest;
 pub const TaskRunInput = runtime_impl.TaskRunInput;
-pub const QueuedInputResult = runtime_impl.QueuedInputResult;
-pub const QueuedInputReason = runtime_impl.QueuedInputReason;
 pub const AttachmentArchiveTool = product_attachment.ArchiveTool;
 pub const AttachmentFormat = product_attachment.Format;
 pub const AttachmentCandidate = product_attachment.Candidate;
@@ -87,3 +85,7 @@ pub const TransportFailureStage = runtime_impl.TransportFailureStage;
 pub const TransportFailureReport = runtime_impl.TransportFailureReport;
 pub const TransportFailureDecision = runtime_impl.TransportFailureDecision;
 pub const decideTransportFailure = runtime_impl.decideTransportFailure;
+
+pub const SendInputResult = runtime_impl.SendInputResult;
+pub const SendInputReason = runtime_impl.SendInputReason;
+pub const InputTarget = runtime_impl.InputTarget;

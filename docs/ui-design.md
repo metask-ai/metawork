@@ -514,8 +514,8 @@ Execution binding availability 是下一次 admission 的独立前置事实，�
 | waiting_user + permission review = reviewing | Automatic review     | 自动评审中   | 可直接批准、拒绝或停止      |
 | waiting_user + no active permission review   | Needs your attention | 需要你处理   | 回答、批准、拒绝或停止      |
 | run phase = stopping                         | Stopping             | 正在停止     | 等待真实结果                |
-| run phase = running                          | Working              | 正在工作     | 草拟、排队下一条或停止      |
-| run phase = queued                           | Queued               | 排队中       | 排队下一条或停止            |
+| run phase = running                          | Working              | 正在工作     | 草拟、发送文本插话或停止      |
+| run phase = queued                           | Queued               | 排队中       | 草拟或停止            |
 | no active Run + outcome = completed          | Completed            | 已完成       | 继续输入、打开结果          |
 | no active Run + outcome = cancelled          | Stopped              | 已停止       | 继续输入或重试              |
 | no active Run + outcome = failed             | Failed               | 失败         | 修复问题、重试或继续        |
@@ -723,7 +723,7 @@ Composer 布局与输入规则：
 
 Composer 是唯一 active operation 停止入口：
 
-- `queued / running / waiting_user` 时在 Composer 发送位置显示 `Stop task`；空输入时仅显示停止，有文本或 Skill 草稿时切换为普通发送图标主按钮，隐藏停止按钮，名称沿用“发送消息”，点击或 Enter 将下一条交给 Host 待发送槽位，保留 IME 与 Shift+Enter 换行语义；
+- 活跃 Run 的空草稿只显示 `Stop task`；有文本、Skill 或附件内容时只显示发送，发送不可用或等待回执时仍保留同一禁用发送按钮，不并列停止。两种按钮使用相同 44px 尺寸。点击或 Enter 直接向绑定的当前 Run 发送文本，保留 IME 与 Shift+Enter 换行语义；
 - manual compact 为 `queued / compacting` 时在同一位置显示 `Stop compacting`，替换发送按钮；
 - `stopping` 时保留该位置的禁用停止按钮，阻止重复请求并等待真实结果；
 - 顶部命令栏不重复显示 Task Stop，窗口控制和检查器入口保持全局职责；
@@ -750,23 +750,24 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 | Task state             | Composer behavior |
 | --- | --- |
-| draft / idle | 文本、附件、普通发送；存在 held 时禁用发送，先编辑或撤回 |
-| queued / running | 可编辑下一条草稿；空输入仅停止，有内容时只显示普通发送图标，清空后恢复停止 |
-| waiting_user | 时间线审批仍是首要处理面，底部保留“请在上方处理请求”；可草拟或排队，不能替代审批回答 |
-| stopping | 保留禁用停止按钮与停止说明，不再入队 |
-| compact queued/running | 可编辑本地草稿，不支持在 compact 后排队；保留压缩停止入口 |
-| failed / interrupted | 恢复输入；排队消息保留并解释原因，不自动继续 |
+| draft / idle | 文本、附件、普通发送，按既有新 Run 准入 |
+| queued / starting | 可编辑草稿，发送禁用并解释尚未就绪；空草稿显示 Stop |
+| running | 就绪时可直接发送文本插话；空草稿显示 Stop |
+| waiting_user | 时间线请求仍是首要处理面；可发送文本插话，不能替代请求回答；空草稿显示 Stop |
+| stopping | 草稿保留，有内容时发送禁用，空草稿时 Stop 禁用，等待真实结果 |
+| compact queued/running | 可编辑本地草稿，发送禁用；保留压缩停止入口 |
+| failed / interrupted | 追加消息按事实显示未采纳或未知；用户显式再次发送才执行 |
 
 
 表中的 `idle` 仍受 execution binding availability 约束；`rebind_required / unavailable` 时以 §6.4 的只读说明和动作替代发送控件。
 
 输入区中的模式选择只有在语义明确时才出现。审批模式在 New task 输入框左下角作为紧凑下拉菜单出现，紧邻模型选择，只显示当前模式名称；展开列出三种模式名称及各自一句简短说明，不在输入框上方保留独立设置区或铺开说明，不得与模型、执行强度或显示密度混为一谈；已有 Task 只读显示自己采用的模式，不提供会话中切换或 disabled 预告。
 
-运行中的输入不会发送给当前 Run，也不使用 `UiBackend.poll()` 模拟 steering。运行中草拟与空闲时使用相同发送图标，不以“排队发送”另起按钮文案，也不常驻草拟/排队提示；已提交后的等待由顶部待发送条表达，发送被禁用时才解释具体原因。排队发送的范围与保留规则以[产品需求](requirements.md#53-task)为准；“排队中”标签仍只表示已接纳 Run 等待 executor，不指待发送槽位。附件草稿、已有槽位、停止中或尚未核对的操作禁用排队，并给出具体说明，不静默降级为普通发送。
+插话直接使用 Agent submitInput，不使用 `UiBackend.poll()`。运行中仍使用相同发送图标，并以轻量提示说明文本等待后续步骤采纳。未就绪、Skill Run、Skill/附件草稿、停止中或单次发送仍在调用期间禁用发送并说明原因；保留完整草稿。连接暂时不可用时，已有本地草稿保持可编辑且不因连接状态变化失焦；发送与其他 Host 操作仍禁用，恢复连接不自动发送。“排队中”仅表示已接纳 Run 等待 Executor，没有待发送条、撤回动作或自动续跑。
 
-待发送消息以一行紧凑条贴合输入框顶部，与时间线和审批面独立。行内只显示“待发送”或“未自动发送：原因”、安全内容的单行省略预览，以及带可访问名称的编辑、撤回图标；不保留独立标题、常驻说明行或多行预览，不显示内部 identity、计时重试或虚构进度。预览的原生悬停提示包含完整内容、当前 Run 完成并收尾后发送的时机，以及消息仅在本次应用运行期间保留；完整安全预览与状态保持可供辅助技术读取。操作触控区域保持至少 44px，窄窗不换行或横向溢出。编辑只在输入框为空时可用，成功撤回后才放回草稿，普通撤回丢弃内容；归档确认和删除/移除目录确认必须说明对应丢弃行为。现有归档没有待发送消息时仍可直接执行。
+追加消息在所属 Run 中完整显示安全正文与等待采纳、已采纳、本轮未采纳或结果未知状态，不隐藏在默认折叠的技术过程内。input_adopted 有真实锚点时，技术过程按 Host 活动顺序显示简短采纳标记；仅终态计数确认时说明位置未知，不制造时间线。未采纳或未知消息提供“放回编辑器”，复用既有草稿替换保护；该动作不发送，未知状态同时提示再次发送可能重复工作。
 
-命令超时后以 [Bridge 对账合同](renderer-bridge-contract.md)为唯一依据：没有匹配证据时显示“消息去向尚未确认”，提供刷新，不自动恢复成可重发消息；再次使用原输入必须明确确认可能重复。成功回执不清除较新草稿，编辑撤回与新输入竞争时保留撤回内容供用户显式放回或舍弃，不覆盖新草稿。正常自动发出的 Run 不抢焦点、不强制滚动或打开右栏；左侧不新增排队槽位图标，既有未读 completion receipt 不改变，Schedule 完成确认及通知先于自动续跑。
+命令超时后按 [Bridge 对账合同](renderer-bridge-contract.md)刷新并显示结果未知，不自动重发，不阻塞后续新意图；成功回执只清除同版本草稿，旧 connection 的迟到回执不能清除新草稿或抢回焦点。消息采纳不强制滚动或打开右栏；左侧不新增消息槽位图标，既有 completion receipt 与 Schedule 完成确认语义不改变。
 
 
 ### 8.2 文件附件
@@ -1310,9 +1311,9 @@ Account 错误必须保留本地 Workspace、Task 和草稿。OAuth 尚未完成
 
 ### 19.3 Task 状态
 
-- 运行 Run 中的空/文本/Skill/附件草稿分别呈现正确的停止和排队动作，文本与 Skill 的 Enter 均不破坏 IME、换行和 Slash 选择；审批始终保留独立处理面；
-- waiting、held、响应丢失、无匹配证据与撤回草稿冲突都有可访问的说明和恢复动作；普通停止、审批切换和用户入口竞态不会意外发出；
-- 较新草稿、切换 Task、重载、旧连接迟到响应及自动续跑不丢输入、不重发、不抢焦点；桌面和约 390px、深浅主题、键盘、长内容及减少动效均须验收；
+- 运行 Run 中的空草稿显示 Stop，文本/Skill/附件草稿只显示发送或禁用原因，两按钮尺寸一致；Enter 不破坏 IME、换行和 Slash 选择；审批始终保留独立处理面；
+- 等待采纳、已采纳、未采纳、未知与响应丢失都有可访问说明；仅真实采纳锚点进入过程顺序，放回编辑器不执行；
+- 较新草稿、切换 Task、重载及旧连接迟到响应不丢输入、不重发、不抢焦点；桌面和约 390px、深浅主题、键盘、长内容及减少动效均须验收；
 
 - New task；
 - Queued；

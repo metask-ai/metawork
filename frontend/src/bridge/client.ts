@@ -1,7 +1,5 @@
-import {
-  decodeQueueInputResult,
-  decodeWithdrawQueuedInputResult,
-} from "./decode-contracts.ts";
+import type { InputTarget } from "./contracts.ts";
+import { decodeSendInputResult } from "./decode-contracts.ts";
 import {
   commands,
   events,
@@ -822,41 +820,37 @@ export class BridgeClient {
     );
   }
 
-  async queueInput(
+  async sendInput(
     operationId: string,
     taskId: string,
     expectedBindingEpoch: string,
-    runId: string,
+    expectedExecution: InputTarget,
     input: TaskRunInput,
   ) {
-    return decodeQueueInputResult(
-      await this.invoke(commands.queueInput, {
+    const result = decodeSendInputResult(
+      await this.invoke(commands.sendInput, {
         operationId,
         taskId,
         expectedBindingEpoch,
-        runId,
+        expectedExecution,
         input,
       }),
       taskId,
       operationId,
     );
-  }
-  async withdrawQueuedInput(
-    operationId: string,
-    taskId: string,
-    runId: string,
-    revision: string,
-  ) {
-    return decodeWithdrawQueuedInputResult(
-      await this.invoke(commands.withdrawQueuedInput, {
-        operationId,
-        taskId,
-        runId,
-        revision,
-      }),
-      taskId,
-      operationId,
-    );
+    if (
+      (expectedExecution.kind === "run" &&
+        result.outcome !== "rejected" &&
+        (result.outcome === "started" ||
+          result.runId !== expectedExecution.runId)) ||
+      (expectedExecution.kind === "idle" &&
+        (result.outcome === "submitted" || result.outcome === "unknown"))
+    )
+      throw new RendererBridgeContractError(
+        "invalid_response",
+        "Input receipt does not match its execution target",
+      );
+    return result;
   }
 
   createAttachmentAdd(recover: () => Promise<void>) {

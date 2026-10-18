@@ -1,4 +1,5 @@
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
+import { AdditionalInputs } from "./AdditionalInputs.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
 import {
   useCallback,
@@ -442,6 +443,10 @@ export function TaskContent({
                 onCopy={() => copyRunInput(run.input)}
               />
             </div>
+            <AdditionalInputs
+              inputs={run.additionalInputs}
+              onRestore={onPrepareRetry}
+            />
             {(visibleOutputParts.length > 0 ||
               run.output.provisionalRedacted ||
               run.output.redacted) && (

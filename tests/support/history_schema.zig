@@ -51,12 +51,17 @@ fn validateState(allocator: std.mem.Allocator, state: wire.StateWire) !void {
             .append_text_fn = Restore.append,
             .free_fn = Restore.free,
             .free_text_fn = Restore.freeText,
+            .reserve_bytes_fn = Restore.reserveBytes,
+            .release_bytes_fn = Restore.releaseBytes,
         }, task);
     }
 }
 
 const Restore = struct {
     allocator: std.mem.Allocator,
+
+    fn reserveBytes(_: *anyopaque, _: usize) error{ProjectionCapacity}!void {}
+    fn releaseBytes(_: *anyopaque, _: usize) void {}
 
     fn from(context: *anyopaque) *@This() {
         return @ptrCast(@alignCast(context));
@@ -492,6 +497,7 @@ fn writeRun(batch: *Batch, v: wire.RunWire, task_id: u64, ordinal: usize) !void 
         .outcome = ot(v.outcome),
         .cause = ot(v.cause),
         .input_json = try batch.json(v.input),
+        .additional_inputs_json = try batch.json(v.additional_inputs),
         .commentary_ends_json = try batch.json(v.commentary_ends),
         .file_change_observation = ot(v.file_change_observation),
         .diagnostic = b(v.diagnostic),
@@ -527,6 +533,7 @@ fn readRun(row: Record) !wire.RunWire {
     v.outcome = try row.ot("outcome");
     v.cause = try row.ot("cause");
     v.input = try row.json(wire.RunInputWire, "input_json");
+    v.additional_inputs = try row.json([]wire.AdditionalInputWire, "additional_inputs_json");
     v.commentary_ends = try row.json([]const u64, "commentary_ends_json");
     v.file_change_observation = try row.ot("file_change_observation");
     v.diagnostic = try row.b("diagnostic");
@@ -667,7 +674,8 @@ comptime {
     if (std.meta.fields(wire.WorkspaceWire).len != 7) @compileError("Review every history SQL field mapping after WorkspaceWire changes");
     if (std.meta.fields(wire.TaskWire).len != 23) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
-    if (std.meta.fields(wire.RunWire).len != 29) @compileError("Review every history SQL field mapping after RunWire changes");
+    if (std.meta.fields(wire.RunWire).len != 30) @compileError("Review every history SQL field mapping after RunWire changes");
+    if (std.meta.fields(wire.AdditionalInputWire).len != 8) @compileError("Review history input JSON mapping after AdditionalInputWire changes");
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");
     if (std.meta.fields(wire.FileChangeWire).len != 11) @compileError("Review every history SQL field mapping after FileChangeWire changes");
     if (std.meta.fields(wire.CompactWire).len != 11) @compileError("Review every history SQL field mapping after CompactWire changes");

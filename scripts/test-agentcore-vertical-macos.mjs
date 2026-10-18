@@ -33,7 +33,7 @@ import {
 import { probeWindowChromeUi } from "./window-chrome-ui.mjs";
 import { invokeWebViewBridge } from "./webview-bridge-probe.mjs";
 import { runApprovalModeVertical } from "./agentcore-approval-vertical.mjs";
-import { runQueuedInputVertical } from "./agentcore-queued-input-vertical.mjs";
+import { runActiveInputVertical } from "./agentcore-active-input-vertical.mjs";
 import { runModelSwitchVertical } from "./agentcore-model-switch-vertical.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -71,6 +71,14 @@ const appCwd = process.env.METAWORK_TEST_APP_CWD
   ? path.resolve(root, process.env.METAWORK_TEST_APP_CWD)
   : root;
 const automationDir = path.join(appCwd, ".zig-cache", "native-sdk-automation");
+const relativeAutomation = path.relative(root, path.resolve(automationDir));
+if (
+  !relativeAutomation ||
+  relativeAutomation === ".." ||
+  relativeAutomation.startsWith(`..${path.sep}`) ||
+  path.isAbsolute(relativeAutomation)
+)
+  throw new Error("Automation cleanup target must stay inside this repository");
 const visualCaptureDir = process.env.METAWORK_VISUAL_CAPTURE_DIR
   ? path.resolve(process.env.METAWORK_VISUAL_CAPTURE_DIR)
   : null;
@@ -137,6 +145,13 @@ const commandTimeoutMs = 20_000;
 const runTimeoutMs = 60_000;
 const workspace = await mkdtemp(join(tmpdir(), "metawork-agentcore-vertical-"));
 const fixtureRoot = await realpath(workspace);
+if (
+  path.dirname(fixtureRoot) !== (await realpath(tmpdir())) ||
+  !path.basename(fixtureRoot).startsWith("metawork-agentcore-vertical-")
+)
+  throw new Error(
+    "Temporary workspace cleanup target is outside the task fixture directory",
+  );
 await mkdir(join(fixtureRoot, "work"));
 const canonicalWorkspace = await realpath(join(fixtureRoot, "work"));
 // Match production: owned originals live outside the Task's Workspace.
@@ -395,7 +410,7 @@ let exitState = null;
 let lastCheckpointObservation = null;
 let app;
 let exited;
-const queuedInputOnly = process.env.METAWORK_QUEUED_INPUT_ONLY === "1";
+const activeInputOnly = process.env.METAWORK_ACTIVE_INPUT_ONLY === "1";
 startApplication();
 
 desktopVertical: try {
@@ -405,7 +420,7 @@ desktopVertical: try {
     await stopApplication("model switch verification complete");
     break desktopVertical;
   }
-  if (!queuedInputOnly) {
+  if (!activeInputOnly) {
     await captureVisual("new-task", 1320, 812);
     await probeWindowsWebViewFocusWithColdProfileRetry();
     await captureVisual("search-keyboard", 1320, 812, false, true);
@@ -574,7 +589,7 @@ desktopVertical: try {
       `Workspace catalog omitted the review Skill projection: ${JSON.stringify(catalogSnapshot)}`,
     );
   const finishApprovalRestart =
-    process.platform === "win32" && !queuedInputOnly
+    process.platform === "win32" && !activeInputOnly
       ? await runApprovalModeVertical({
           invoke: invokeBridge,
           snapshot,
@@ -615,7 +630,7 @@ desktopVertical: try {
     assert.equal(refreshedCatalog.accepted, true);
     catalogSnapshot = await readCatalog();
   }
-  const verifyQueuedRestart = await runQueuedInputVertical({
+  const verifyActiveRestart = await runActiveInputVertical({
     invoke: invokeBridge,
     snapshot,
     poll,
@@ -624,20 +639,21 @@ desktopVertical: try {
     toolSse,
     workspaceId,
     workspaceEpoch: expectedWorkspaceEpoch,
+    workspaceRoot: canonicalWorkspace,
     catalog: catalogSnapshot,
-    queueInRenderer: chromeProbePort === null ? null : queueInRenderer,
+    sendInRenderer: chromeProbePort === null ? null : sendInRenderer,
     verifyRendererDraft:
-      chromeProbePort === null ? null : verifyQueuedRendererDraft,
+      chromeProbePort === null ? null : verifyActiveRendererDraft,
   });
-  if (queuedInputOnly) {
-    await stopApplication("queued input restart");
+  if (activeInputOnly) {
+    await stopApplication("active input restart");
     await rm(automationDir, { recursive: true, force: true });
     startApplication();
     await waitForBridge();
-    await verifyQueuedRestart();
-    await stopApplication("queued input verification complete");
+    await verifyActiveRestart();
+    await stopApplication("active input verification complete");
     process.stdout.write(
-      "AgentCore queued input desktop vertical passed: Text/Skill, stop, failure, title cleanup, timeout reconciliation, draft focus and restart.\n",
+      "AgentCore active input desktop vertical passed: receipt/adoption, permission wait, final/stop/failure, Skill refusal, timeout reconciliation, draft focus and restart.\n",
     );
     break desktopVertical;
   }
@@ -1563,7 +1579,7 @@ desktopVertical: try {
   startApplication();
   await waitForBridge();
   const restoredSnapshot = await snapshot();
-  await verifyQueuedRestart();
+  await verifyActiveRestart();
   const restoredTask = restoredSnapshot.tasks.find(
     (item) => item.id === taskId,
   );
@@ -2830,7 +2846,7 @@ async function selectRenderedMode(taskId, targetMode) {
   }
 }
 
-async function resizeQueuedVisualWindow(width, height) {
+async function resizeActiveInputVisualWindow(width, height) {
   await execFileAsync(
     "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     [
@@ -2842,7 +2858,7 @@ async function resizeQueuedVisualWindow(width, height) {
       "-ProcessId",
       String(app.pid),
       "-OutputPath",
-      path.join(root, ".zig-cache", "queued-input-resize.png"),
+      path.join(root, ".zig-cache", "active-input-resize.png"),
       "-Width",
       String(width),
       "-Height",
@@ -2852,14 +2868,23 @@ async function resizeQueuedVisualWindow(width, height) {
   );
 }
 
-async function queueInRenderer(taskId, text) {
-  await resizeQueuedVisualWindow(1320, 812);
+async function sendInRenderer(taskId, text) {
+  await resizeActiveInputVisualWindow(1320, 812);
   const webview = await connectTestWebView(chromeProbePort, {
     requestTimeoutMs: commandTimeoutMs,
   });
+  const newerDraft =
+    "Unsent draft remains editable while the current Run works";
   try {
+    await webview.evaluate(`(() => {
+      window.__activeInputUiErrors=0;
+      const original=console.error;
+      console.error=function(...args){window.__activeInputUiErrors++;original.apply(this,args);};
+      window.addEventListener('error',()=>window.__activeInputUiErrors++);
+      window.addEventListener('unhandledrejection',()=>window.__activeInputUiErrors++);
+    })()`);
     await poll(
-      async () =>
+      () =>
         webview.evaluate(`(() => {
       const row=[...document.querySelectorAll('.task-list-item')].find(node=>node.dataset.taskId===${JSON.stringify(taskId)});
       if(!row) return false;
@@ -2867,79 +2892,99 @@ async function queueInRenderer(taskId, text) {
       return Boolean(document.querySelector('.composer-shell textarea:not(:disabled)'));
     })()`),
       commandTimeoutMs,
-      "queued input rendered Task selection",
+      "active input rendered Task",
     );
     await webview.evaluate(
       `document.querySelector('.composer-shell textarea').focus()`,
     );
     await webview.send("Input.insertText", { text });
     await poll(
-      async () =>
+      () =>
         webview.evaluate(
-          `document.querySelector('.composer-queue')?.disabled===false`,
+          `document.querySelector('.composer-send')?.disabled===false && document.querySelector('.composer-stop')===null`,
         ),
       commandTimeoutMs,
-      "rendered Queue primary action",
+      "content shows Send only",
     );
     await webview.evaluate(`(() => {
-      const transport=window.chrome.webview;
-      const post=transport.postMessage;
-      window.__queueOriginalPost=post;
-      window.__queueInvokeCount=0;
-      window.__queueClickedAt=Date.now();
+      const transport=window.chrome.webview, post=transport.postMessage;
+      window.__activeInputOriginalPost=post;window.__activeInputCalls=0;
       transport.postMessage=function(message) {
         const envelope=typeof message==='string'?JSON.parse(message):message;
-        if(envelope.command==='metawork.tasks.queueInput') {
-          window.__queueInvokeCount++;
-          if(window.__queueInvokeCount===1) {
-            setTimeout(()=>post.call(transport,message),11000);
-            return;
-          }
+        if(envelope.command==='metawork.tasks.sendInput') {
+          window.__activeInputCalls++;
+          setTimeout(()=>post.call(transport,message),11000);
+          return;
         }
         return post.call(transport,message);
       };
-      document.querySelector('.composer-queue').click();
+      document.querySelector('.composer-send').click();
     })()`);
-    const timedOut = await webview.evaluate(`(async () => {
-      await new Promise(resolve=>setTimeout(resolve,10100));
-      const status=document.querySelector('.queued-input-reconciliation');
-      return {calls:window.__queueInvokeCount,unconfirmed:Boolean(status && /unconfirmed|尚未确认/.test(status.textContent))};
-    })()`);
-    assert.equal(timedOut.calls, 1);
-    assert.equal(timedOut.unconfirmed, true);
+    assert.equal(
+      await webview.evaluate(`document.querySelector('.composer-stop')===null`),
+      true,
+    );
+    await webview.evaluate(
+      `document.querySelector('.composer-shell textarea').focus();document.querySelector('.composer-shell textarea').select()`,
+    );
+    await webview.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "Backspace",
+      windowsVirtualKeyCode: 8,
+    });
+    await webview.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Backspace",
+      windowsVirtualKeyCode: 8,
+    });
+    await poll(
+      () =>
+        webview.evaluate(
+          `document.querySelector('.composer-shell textarea')?.value==='' && document.querySelector('.composer-stop')?.disabled===false && document.querySelector('.composer-send')===null`,
+        ),
+      commandTimeoutMs,
+      "empty busy draft shows Stop only",
+    );
+    assert.deepEqual(
+      await webview.evaluate(
+        `(() => {const r=document.querySelector('.composer-stop').getBoundingClientRect();return [r.width,r.height];})()`,
+      ),
+      [44, 44],
+    );
+    await webview.send("Input.insertText", { text: newerDraft });
     await poll(
       async () => {
         const task = (await snapshot()).tasks.find(
           (item) => item.id === taskId,
         );
-        return task?.queuedInput?.input.text === text;
+        return task.runs[0].additionalInputs.some(
+          (message) => message.text === text,
+        );
       },
-      commandTimeoutMs,
-      "Host slot after Renderer timeout",
+      20_000,
+      "single delayed input reaches this Run after Renderer timeout",
     );
     await poll(
-      async () =>
-        webview.evaluate(
-          `document.querySelector('.queued-input-card')!==null && document.querySelector('.composer-shell textarea')?.value===''`,
-        ),
+      () =>
+        webview.evaluate(`document.querySelector('.additional-input')!==null`),
       commandTimeoutMs,
-      "receipt reconciles the submitted draft",
+      "additional input history visible",
     );
-    await webview.evaluate(
-      `document.querySelector('.composer-shell textarea').focus()`,
+    assert.deepEqual(
+      await webview.evaluate(
+        `({calls:window.__activeInputCalls,text:document.querySelector('.composer-shell textarea')?.value})`,
+      ),
+      { calls: 1, text: newerDraft },
     );
-    await webview.send("Input.insertText", {
-      text: "Draft kept while queued Run starts",
-    });
     if (visualCaptureDir) {
       await mkdir(visualCaptureDir, { recursive: true });
       for (const [name, width, theme] of [
-        ["queued-desktop-light", 1320, "light"],
-        ["queued-desktop-dark", 1320, "dark"],
-        ["queued-narrow-light", 390, "light"],
-        ["queued-narrow-dark", 390, "dark"],
+        ["active-desktop-light", 1320, "light"],
+        ["active-desktop-dark", 1320, "dark"],
+        ["active-narrow-light", 390, "light"],
+        ["active-narrow-dark", 390, "dark"],
       ]) {
-        await resizeQueuedVisualWindow(width, 812);
+        await resizeActiveInputVisualWindow(width, 812);
         await webview.evaluate(
           `document.documentElement.dataset.theme=${JSON.stringify(theme)}`,
         );
@@ -2947,23 +2992,19 @@ async function queueInRenderer(taskId, text) {
           features: [{ name: "prefers-reduced-motion", value: "reduce" }],
         });
         await poll(
-          async () =>
+          () =>
             webview.evaluate(`(() => {
-          if(innerWidth>${width} || innerWidth<${width}-32) throw new Error('queued viewport size did not follow physical resize');
-          const card=document.querySelector('.queued-input-card');
-          const action=document.querySelector('.composer-stop, .composer-queue');
-          if(!card || !action) return false;
-          const r=card.getBoundingClientRect();
+          if(innerWidth>${width} || innerWidth<${width}-32) return false;
+          const message=document.querySelector('.additional-input'), actions=[...document.querySelectorAll('.composer-send,.composer-stop')];
+          if(!message || actions.length!==1 || !actions[0].classList.contains('composer-send')) return false;
+          const r=message.getBoundingClientRect();
           if(r.width===0 || r.left < -1 || r.right>innerWidth+1) return false;
-          for(const button of [action,...card.querySelectorAll('button')]) {
-            const b=button.getBoundingClientRect();
-            if(b.height<43 || b.left< -1 || b.right>innerWidth+1) throw new Error('queued control outside viewport or too small');
-          }
-          if(document.documentElement.scrollWidth>innerWidth) throw new Error('queued view has horizontal overflow');
+          for(const action of actions) {const b=action.getBoundingClientRect();if(b.height<43 || b.left < -1 || b.right>innerWidth+1) throw new Error('active input control outside viewport or too small');}
+          if(document.documentElement.scrollWidth>innerWidth) throw new Error('active input horizontal overflow');
           return true;
         })()`),
           commandTimeoutMs,
-          `queued input ${name} geometry`,
+          `active input ${name} geometry`,
         );
         const png = await webview.send("Page.captureScreenshot", {
           format: "png",
@@ -2975,47 +3016,44 @@ async function queueInRenderer(taskId, text) {
         );
       }
     }
-    await resizeQueuedVisualWindow(1320, 812);
+    await resizeActiveInputVisualWindow(1320, 812);
     await webview.evaluate(
       `delete document.documentElement.dataset.theme;document.querySelector('.composer-shell textarea').focus()`,
     );
     await webview.send("Emulation.setEmulatedMedia", { features: [] });
-  } catch (error) {
+    return newerDraft;
+  } finally {
     await webview
       .evaluate(
-        `if(window.__queueOriginalPost) window.chrome.webview.postMessage=window.__queueOriginalPost`,
+        `if(window.__activeInputOriginalPost){window.chrome.webview.postMessage=window.__activeInputOriginalPost;delete window.__activeInputOriginalPost;}`,
       )
       .catch(() => {});
-    throw error;
-  } finally {
     webview.close();
   }
 }
 
-async function verifyQueuedRendererDraft(taskId, text) {
+async function verifyActiveRendererDraft(taskId, text) {
   const webview = await connectTestWebView(chromeProbePort, {
     requestTimeoutMs: commandTimeoutMs,
   });
   try {
-    const clickedAt = await webview.evaluate(`window.__queueClickedAt`);
-    if (Date.now() - clickedAt < 10_200)
-      await new Promise((resolve) =>
-        setTimeout(resolve, 10_200 - (Date.now() - clickedAt)),
-      );
     const observed = await webview.evaluate(`(() => {
       const textarea=document.querySelector('.composer-shell textarea');
-      return {text:textarea?.value,focused:document.activeElement===textarea,calls:window.__queueInvokeCount,task:document.querySelector('.task-list-item[aria-current="page"]')?.dataset.taskId};
+      return {text:textarea?.value,focused:document.activeElement===textarea,calls:window.__activeInputCalls,task:document.querySelector('.task-list-item[aria-current="page"]')?.dataset.taskId};
     })()`);
-    assert.equal(observed.text, text);
-    assert.equal(observed.focused, true);
-    assert.equal(observed.calls, 1);
-    assert.equal(observed.task, taskId);
+    assert.deepEqual(observed, { text, focused: true, calls: 1, task: taskId });
+    assert.equal(await webview.evaluate(`window.__activeInputUiErrors`), 0);
+    if (visualCaptureDir) {
+      const png = await webview.send("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: false,
+      });
+      await writeFile(
+        path.join(visualCaptureDir, "active-adopted-desktop-light.png"),
+        Buffer.from(png.data, "base64"),
+      );
+    }
   } finally {
-    await webview
-      .evaluate(
-        `if(window.__queueOriginalPost) {window.chrome.webview.postMessage=window.__queueOriginalPost;delete window.__queueOriginalPost;}`,
-      )
-      .catch(() => {});
     webview.close();
   }
 }
@@ -3259,8 +3297,8 @@ async function removeWorkspaceWithRetry() {
 function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let served = 0;
   let titleCompletions = 0;
-  let queuedTitle = null;
   let reviewRequests = 0;
+  let inputReviewRequests = 0;
   let officeReviewRequests = 0;
   let releaseReview = null;
   let providerError = null;
@@ -3337,18 +3375,27 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
             );
             return;
           }
-          assert.equal(
-            review.evidence.user_intent,
-            "mode-review-current-request",
-          );
           assert.equal(review.host.delegation, "current_request_only");
           assert.equal(review.evidence.request.tool_name, "Bash");
-          reviewRequests++;
-          assert.equal(
-            reviewRequests,
-            1,
-            "current request was automatically reviewed twice",
-          );
+          if (review.evidence.user_intent === "input-review-constraint") {
+            inputReviewRequests++;
+            assert.equal(
+              inputReviewRequests,
+              1,
+              "interjection must not schedule another review",
+            );
+          } else {
+            assert.equal(
+              review.evidence.user_intent,
+              "mode-review-current-request",
+            );
+            reviewRequests++;
+            assert.equal(
+              reviewRequests,
+              1,
+              "current request was automatically reviewed twice",
+            );
+          }
           await new Promise((resolve) => {
             releaseReview = resolve;
           });
@@ -3375,34 +3422,6 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
           return;
         }
         if (request.headers["x-api-key"] !== undefined) {
-          if (
-            queuedTitle &&
-            payload.messages?.[0]?.content === queuedTitle.input &&
-            typeof payload.system === "string" &&
-            payload.system.startsWith("Generate a concise title")
-          ) {
-            assert.equal(
-              request.headers["x-api-key"],
-              "metawork-agentcore-vertical-fixture-key",
-            );
-            assert.equal(payload.model, "claude-sonnet-4-20250514");
-            queuedTitle.entered = true;
-            await queuedTitle.promise;
-            if (response.destroyed) return;
-            response.writeHead(200, {
-              "content-type": "application/json",
-              connection: "close",
-            });
-            response.end(
-              JSON.stringify({
-                type: "message",
-                content: [{ type: "text", text: "Queued title audit" }],
-                stop_reason: "end_turn",
-                usage: { input_tokens: 1, output_tokens: 1 },
-              }),
-            );
-            return;
-          }
           if (
             request.headers["x-api-key"] !==
               "metawork-agentcore-vertical-fixture-key" ||
@@ -3489,18 +3508,8 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     enqueue(...fixtures) {
       queue.splice(served, 0, ...fixtures);
     },
-    holdQueuedTitle(input) {
-      let release;
-      const promise = new Promise((resolve) => {
-        release = resolve;
-      });
-      queuedTitle = { input, entered: false, promise, release };
-    },
-    get queuedTitleEntered() {
-      return queuedTitle?.entered === true;
-    },
-    releaseQueuedTitle() {
-      queuedTitle?.release();
+    get inputReviewRequests() {
+      return inputReviewRequests;
     },
     get reviewRequests() {
       return reviewRequests;
@@ -3536,7 +3545,6 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
     },
     close() {
       releaseReview?.();
-      queuedTitle?.release();
       return new Promise((resolve) => server.close(resolve));
     },
   };

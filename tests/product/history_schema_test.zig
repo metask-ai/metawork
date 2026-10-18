@@ -884,3 +884,27 @@ const Count = struct {
         return .{ .context = self, .receive_fn = receive };
     }
 };
+
+test "additional input migration preserves old Run rows with an empty history array" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const path = try temporaryPath(arena.allocator(), temporary.dir);
+    {
+        const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations[0..5]);
+        defer database.destroy() catch unreachable;
+        var statements = std.mem.splitScalar(u8, @embedFile("history_schema_minimal.sql"), ';');
+        while (statements.next()) |raw| {
+            const statement = std.mem.trim(u8, raw, " \r\n\t");
+            if (statement.len == 0) continue;
+            try std.testing.expectEqual(sql.MutationOutcome.committed, database.capability().mutate(&.{.{ .statement = .{ .sql = statement } }}));
+        }
+    }
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .{ .file = path }, schema.migrations);
+    defer database.destroy() catch unreachable;
+    var count: Count = .{};
+    try std.testing.expectEqual(sql.QueryOutcome.ok, database.capability().query("SELECT COUNT(*) FROM runs WHERE additional_inputs_json='[]' AND input_json='{}' AND assistant=X'61'", &.{}, count.receiver()));
+    try std.testing.expectEqual(@as(?i64, 1), count.value);
+    try std.testing.expectEqual(sql.MutationOutcome.constraint, database.capability().mutate(&.{.{ .statement = .{ .sql = "UPDATE runs SET additional_inputs_json=X'61'" } }}));
+}

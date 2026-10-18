@@ -133,11 +133,7 @@ export function ComposerFooter({
   onCancelAttachments,
   onRemoveAttachment,
   onSubmit,
-  canQueue = false,
-  onQueueInput,
-  queueDisabledReason,
   sendDisabledReason,
-  queuedInputCard,
   quietDraftChange = false,
   onStop,
   onSlashCommand,
@@ -204,11 +200,7 @@ export function ComposerFooter({
   onCancelAttachments?: () => void;
   onRemoveAttachment: (token: string) => void;
   onSubmit: () => void;
-  canQueue?: boolean;
-  onQueueInput?: () => void;
-  queueDisabledReason?: MessageId;
   sendDisabledReason?: MessageId;
-  queuedInputCard?: ReactNode;
   quietDraftChange?: boolean;
   onStop: () => void;
   onSlashCommand: (command: SlashCommandName) => void;
@@ -261,26 +253,15 @@ export function ComposerFooter({
   const skillDraftCurrent =
     draft.kind !== "skill" || isSkillDraftCurrent(draft, skillCatalog);
   const draftWithinLimits = composerDraftWithinLimits(draft);
-  const showQueueAction = Boolean(
-    onQueueInput &&
-    stopAction === "run" &&
-    !stopDisabled &&
-    (composerDraftHasContent(draft) ||
-      (draft.kind === "multimodal" && draft.attachments.length > 0)),
-  );
   const sendEnabled =
-    (showQueueAction ? canQueue : canSubmit) &&
-    !attachmentBusy &&
-    slashInput === null &&
-    draftWithinLimits;
+    canSubmit && !attachmentBusy && slashInput === null && draftWithinLimits;
   const submitPrimary = () => {
     const input =
       draft.kind === "skill"
         ? firstSkillArgumentRef.current
         : textareaRef.current;
     if (input && !input.disabled) input.focus({ preventScroll: true });
-    if (showQueueAction) onQueueInput?.();
-    else onSubmit();
+    onSubmit();
   };
   const candidates = useMemo(
     () =>
@@ -568,7 +549,6 @@ export function ComposerFooter({
             onRefresh={onRefreshSkillCatalog}
           />
         )}
-        {queuedInputCard}
         <Composer
           state={
             unavailable || archived || closing
@@ -892,15 +872,15 @@ export function ComposerFooter({
             </div>
             {stopAction ? (
               <div className="composer-run-actions">
-                {showQueueAction ? (
+                {stopAction === "run" && composerDraftHasContent(draft) ? (
                   <Button
                     type="button"
                     variant="primary"
                     size="icon"
                     ref={sendButtonRef}
-                    className="composer-send composer-queue"
+                    className="composer-send"
                     aria-label={t("run.submit")}
-                    title={t(queueDisabledReason ?? "run.submit")}
+                    title={t(sendDisabledReason ?? "run.submit")}
                     disabled={!sendEnabled}
                     onClick={submitPrimary}
                   >
@@ -981,21 +961,13 @@ export function ComposerFooter({
           onSelect={onSelectWorkspace}
         />
       </div>
-      {runInFlight &&
-        (onQueueInput && stopAction === "run" ? (
-          showQueueAction &&
-          queueDisabledReason && (
-            <p className="composer-draft-note" role="status">
-              {t(queueDisabledReason)}
-            </p>
-          )
-        ) : (
-          <p className="composer-draft-note">{t("run.draft_only")}</p>
-        ))}
-      {!runInFlight && sendDisabledReason && (
+      {sendDisabledReason && (
         <p className="composer-draft-note" role="status">
           {t(sendDisabledReason)}
         </p>
+      )}
+      {runInFlight && !sendDisabledReason && (
+        <p className="composer-draft-note">{t("input.hint")}</p>
       )}
     </footer>
   );

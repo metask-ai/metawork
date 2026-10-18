@@ -86,6 +86,16 @@ pub const RunControlLease = struct {
     generation: u64,
     released: bool = false,
 
+    pub fn submitInput(self: *const RunControlLease, input_id: u64, text: []const u8) control.InputSubmission {
+        std.debug.assert(!self.released);
+        return self.block.session.submitControlledInput(self.run_id, self.generation, input_id, text);
+    }
+
+    pub fn inputObservation(self: *const RunControlLease) control.InputObservation {
+        std.debug.assert(!self.released);
+        return self.block.session.controlledInputObservation(self.run_id, self.generation);
+    }
+
     pub fn requestTermination(
         self: *const RunControlLease,
         signal: control.TerminationSignal,
