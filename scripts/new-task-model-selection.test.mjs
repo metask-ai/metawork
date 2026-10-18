@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  modelDisplayLabel,
   modelOptionId,
+  readyModelOptions,
   newTaskModelSelectionState,
 } from "../frontend/src/app/new-task-model-selection.ts";
 
@@ -92,7 +94,7 @@ test("a new Task starts from the active default without emitting an override", (
     state.selectedModelId,
     modelOptionId({ sourceId: "metask", modelId: "model-1" }),
   );
-  assert.equal(state.selectedModelLabel, "Metask · Model one");
+  assert.equal(state.selectedModelLabel, "Model one");
   assert.equal(state.intent, null);
   assert.deepEqual(
     state.options.map((option) => option.selectionId),
@@ -146,9 +148,27 @@ test("a catalog change invalidates a draft model instead of silently falling bac
   assert.equal(state.editable, true);
   assert.equal(state.valid, false);
   assert.equal(state.intent, null);
+  assert.equal(state.selectedModelLabel, "removed-model");
   assert.equal(
     state.selectedModelId,
     modelOptionId({ sourceId: "metask", modelId: "removed-model" }),
+  );
+});
+
+test("model labels show only the model name even when a catalog or source is unavailable", () => {
+  const models = metaskModels();
+  models.availability = "unavailable";
+  models.providers[0].catalogState = "failed";
+  assert.equal(
+    modelDisplayLabel(models, { sourceId: "metask", modelId: "model-2" }),
+    "Model two",
+  );
+  assert.equal(
+    modelDisplayLabel(models, {
+      sourceId: "removed-provider",
+      modelId: "same-model",
+    }),
+    "same-model",
   );
 });
 
@@ -191,7 +211,7 @@ test("a ready custom source can select another model for only the new Task", () 
   );
 
   assert.equal(state.editable, true);
-  assert.equal(state.selectedModelLabel, "provider-1 · Custom two");
+  assert.equal(state.selectedModelLabel, "Custom two");
   assert.deepEqual(state.intent, {
     targetModelRef: requested,
     expectedSourceGeneration: "23",
@@ -245,12 +265,12 @@ test("identical model ids from different connections remain distinct and invalid
     admission(models.defaultSelection),
     requested,
   );
-  assert.equal(state.options.length, 3);
-  assert.equal(
-    new Set(state.options.map((option) => option.selectionId)).size,
-    3,
+  assert.equal(state.options.length, 1);
+  assert.deepEqual(
+    state.options.map((option) => option.modelRef),
+    [requested],
   );
-  assert.equal(state.selectedModelLabel, "Other · Model one");
+  assert.equal(state.selectedModelLabel, "Model one");
   assert.deepEqual(state.intent, {
     targetModelRef: requested,
     expectedSourceGeneration: "23",
@@ -265,4 +285,79 @@ test("identical model ids from different connections remain distinct and invalid
   assert.equal(unavailable.valid, false);
   assert.equal(unavailable.selectedModelId, modelOptionId(requested));
   assert.equal(unavailable.intent, null);
+  assert.deepEqual(unavailable.options, []);
+  assert.equal(unavailable.selectedModelLabel, "Model one");
+  assert.deepEqual(
+    readyModelOptions(models, "metask").map(
+      (option) => option.modelRef.sourceId,
+    ),
+    ["metask", "metask"],
+  );
+});
+
+test("a Composer only lists the chosen Provider even when other Providers have ready models", () => {
+  const models = metaskModels();
+  models.customProviders = [
+    {
+      id: "cc",
+      displayName: "cc",
+      state: "ready",
+      credentialStatus: "ready",
+      enabled: true,
+      sourceGeneration: "23",
+      catalogGeneration: "29",
+      models: [{ id: "gpt-5.6-sol", displayName: "", metadata, ready: true }],
+    },
+  ];
+  const metask = newTaskModelSelectionState(
+    models,
+    admission(models.defaultSelection),
+    null,
+  );
+  assert.deepEqual(
+    metask.options.map((option) => option.modelRef.sourceId),
+    ["metask", "metask"],
+  );
+  assert.deepEqual(
+    metask.options.map((option) => option.displayName),
+    ["Model one", "Model two"],
+  );
+  const custom = newTaskModelSelectionState(
+    models,
+    admission({ sourceId: "cc", modelId: "gpt-5.6-sol" }),
+    null,
+  );
+  assert.deepEqual(
+    custom.options.map((option) => option.modelRef.sourceId),
+    ["cc"],
+  );
+  assert.equal(custom.selectedModelLabel, "gpt-5.6-sol");
+  assert.deepEqual(
+    custom.options.map((option) => option.displayName),
+    ["gpt-5.6-sol"],
+  );
+  const retainedDraft = newTaskModelSelectionState(
+    models,
+    admission({ sourceId: "cc", modelId: "gpt-5.6-sol" }),
+    { sourceId: "metask", modelId: "model-2" },
+  );
+  assert.deepEqual(
+    retainedDraft.options.map((option) => option.modelRef.sourceId),
+    ["metask", "metask"],
+  );
+  models.providers[0].catalogState = "unavailable";
+  assert.deepEqual(
+    newTaskModelSelectionState(models, admission(models.defaultSelection), null)
+      .options,
+    [],
+  );
+  models.defaultSelection = null;
+  const unselected = newTaskModelSelectionState(
+    models,
+    { ...admission(null), available: false },
+    null,
+  );
+  assert.deepEqual(unselected.options, []);
+  assert.equal(unselected.editable, false);
+  assert.deepEqual(readyModelOptions(models, null), []);
 });

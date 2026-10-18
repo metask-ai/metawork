@@ -107,7 +107,10 @@ import {
   submitTaskInstruction,
   type EnsureTaskContinuationResult,
 } from "../features/composer/submitTaskInstruction.ts";
-import { newTaskModelSelectionState } from "./new-task-model-selection.ts";
+import {
+  modelDisplayLabel,
+  newTaskModelSelectionState,
+} from "./new-task-model-selection.ts";
 import {
   composerDraftHasContent,
   composerDraftToRunInput,
@@ -977,8 +980,11 @@ export default function App() {
   const metaskProvider = snapshot.models.providers.find(
     (provider) => provider.id === "metask",
   );
-  const taskModelOptions = readyModelOptions(snapshot.models);
   const taskIntent = activeTask?.modelIntent;
+  const taskModelOptions = readyModelOptions(
+    snapshot.models,
+    taskIntent?.modelRef.sourceId ?? null,
+  );
   const displayedTaskModelId = taskIntent
     ? modelOptionId(taskIntent.modelRef)
     : "";
@@ -1008,15 +1014,11 @@ export default function App() {
       (model) => model.id === snapshot.models.metaskSelection?.modelId,
     ),
   );
-  const taskIntentLabel =
-    taskModelOption?.displayName ??
-    taskIntent?.modelRef.modelId ??
-    activeTask?.binding.model ??
-    selectedModelLabel;
-  const taskModelLabel =
-    taskIntent && activeTask?.activeOperation !== null
-      ? t("task.model_pending", { model: taskIntentLabel })
-      : taskIntentLabel;
+  const taskModelLabel = taskIntent
+    ? modelDisplayLabel(snapshot.models, taskIntent.modelRef)
+    : activeTask
+      ? activeTask.binding.model
+      : selectedModelLabel;
   const taskModelPolicy = taskModelSelectionPolicy(activeTask);
 
   // The Host result is already committed. A failed follow-up refresh is
@@ -3217,9 +3219,11 @@ export default function App() {
               : newTaskDraftActive
                 ? t("settings.new_task_model_help")
                 : t(
-                    taskModelSelectionMessageId(
-                      activeTask?.modelSelectionAvailability,
-                    ),
+                    taskModelPolicy.selectable && taskModelOptions.length === 0
+                      ? "settings.task_model_catalog_unavailable"
+                      : taskModelSelectionMessageId(
+                          activeTask?.modelSelectionAvailability,
+                        ),
                   )
         }
         defaultSelectionMissing={
@@ -3407,6 +3411,7 @@ export default function App() {
               <TaskInformation
                 key={activeTask.id}
                 task={activeTask}
+                models={snapshot.models}
                 permissionProfilesEnabled={
                   snapshot.capabilities.permissionProfiles
                 }

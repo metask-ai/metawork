@@ -213,8 +213,8 @@ pub fn main() !void {
     var options = std.mem.zeroes(wire.RunOptionsV1);
     options.struct_size = @sizeOf(wire.RunOptionsV1);
     options.max_turns = 1;
-    // Match MetaWork's Host-owned time context policy rather than enabling
-    // the SDK's new default currentDate block in transport fixtures.
+    // This transport-only SDK fixture omits dates. The Host probe validates
+    // production Core date injection separately.
     options.time_context_code = wire.TIME_CONTEXT_OFF;
     var result = std.mem.zeroes(wire.RunResultV1);
     var diagnostic = std.mem.zeroes(wire.OwnedBytesV1);

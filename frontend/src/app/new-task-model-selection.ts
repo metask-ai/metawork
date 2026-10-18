@@ -30,9 +30,9 @@ export function newTaskModelSelectionState(
   admission: NewTaskAdmissionView,
   requested: ModelRef | null,
 ): NewTaskModelSelectionState {
-  const active = admission.activeModelRef;
-  const options = readyModelOptions(models);
-  const selected = requested ?? active;
+  const selected =
+    requested ?? admission.activeModelRef ?? models.defaultSelection;
+  const options = readyModelOptions(models, selected?.sourceId ?? null);
   const requestedOption = requested
     ? options.find(
         (option) =>
@@ -65,7 +65,7 @@ export function newTaskModelSelectionState(
     valid,
     options,
     selectedModelId: selected ? modelOptionId(selected) : "",
-    selectedModelLabel: selectedOption?.displayName || selected?.modelId || "",
+    selectedModelLabel: selected ? modelDisplayLabel(models, selected) : "",
     selectedMetadata: selectedOption?.metadata ?? null,
     intent,
   };
@@ -75,25 +75,32 @@ export function modelOptionId(model: ModelRef): string {
   return JSON.stringify([model.sourceId, model.modelId]);
 }
 
-export function readyModelOptions(models: ModelsView): NewTaskModelOption[] {
-  if (models.availability !== "ready") return [];
-  return [
-    "metask",
-    ...models.customProviders.map((provider) => provider.id),
-  ].flatMap((sourceId) => {
-    const authority = resolveAuthority(models, sourceId);
-    if (!authority) return [];
-    return authority.options.map((option) => {
-      const modelRef = { sourceId, modelId: option.selectionId };
-      return {
-        ...option,
-        modelRef,
-        selectionId: modelOptionId(modelRef),
-        sourceGeneration: authority.sourceGeneration,
-        catalogGeneration: authority.catalogGeneration,
-        displayName: `${authority.displayName} · ${option.displayName}`,
-      };
-    });
+export function modelDisplayLabel(models: ModelsView, model: ModelRef): string {
+  const provider =
+    models.providers.find((candidate) => candidate.id === model.sourceId) ??
+    models.customProviders.find((candidate) => candidate.id === model.sourceId);
+  return (
+    provider?.models.find((candidate) => candidate.id === model.modelId)
+      ?.displayName || model.modelId
+  );
+}
+
+export function readyModelOptions(
+  models: ModelsView,
+  sourceId: string | null,
+): NewTaskModelOption[] {
+  if (models.availability !== "ready" || sourceId === null) return [];
+  const authority = resolveAuthority(models, sourceId);
+  if (!authority) return [];
+  return authority.options.map((option) => {
+    const modelRef = { sourceId, modelId: option.selectionId };
+    return {
+      ...option,
+      modelRef,
+      selectionId: modelOptionId(modelRef),
+      sourceGeneration: authority.sourceGeneration,
+      catalogGeneration: authority.catalogGeneration,
+    };
   });
 }
 
@@ -111,7 +118,6 @@ function resolveAuthority(models: ModelsView, sourceId: string) {
       return null;
     return {
       sourceId,
-      displayName: provider.displayName || "Metask",
       sourceGeneration: provider.sourceGeneration,
       catalogGeneration: provider.catalogGeneration,
       options: provider.models.map((model) => ({
@@ -136,7 +142,6 @@ function resolveAuthority(models: ModelsView, sourceId: string) {
     return null;
   return {
     sourceId,
-    displayName: provider.displayName || provider.id,
     sourceGeneration: provider.sourceGeneration,
     catalogGeneration: provider.catalogGeneration,
     options: provider.models

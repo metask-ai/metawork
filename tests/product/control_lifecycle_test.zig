@@ -1678,6 +1678,12 @@ test "new Task model selection binds only the created Task and rejects stale aut
         "fixture-model",
         workbench.newTaskAdmissionView().active_model_ref.?.model_id,
     );
+    const run_id = try workbench.runTask(task_id, .{ .text = "Use the model selected before the first send" });
+    try waitControlSnapshot(&workbench, "\"phase\":\"completed\"");
+    const task = workbench.task_runtime.findConst(task_id).?;
+    try std.testing.expectEqual(run_id, task.durable.runs[0].?.id);
+    try std.testing.expectEqualStrings("fixture-model-2", task.durable.runs[0].?.execution_model);
+    try std.testing.expectEqual(intent.revision, task.runtime.executionConst().?.model_intent_revision);
 }
 
 test "new Task model selection is independent of default execution admission" {

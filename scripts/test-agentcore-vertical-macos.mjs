@@ -1976,16 +1976,11 @@ async function assertMultimodalProviderRequest(payload, text) {
   assert.equal(context.type, "text");
   assert.match(
     context.text,
-    /^<system-reminder>[\s\S]*# metawork-time-context\n[\s\S]*<\/system-reminder>$/,
+    /^<system-reminder>[\s\S]*# currentDate\n[\s\S]*<\/system-reminder>$/,
   );
   assert.match(
     context.text,
-    /Current date \((?:system local|UTC)\): \d{4}-\d{2}-\d{2}\n|Current date for this Run: unavailable\./,
-  );
-  assert.ok(
-    context.text.includes(
-      "Your knowledge cutoff does not indicate the current date.",
-    ),
+    /Today's date is \d{4}-\d{2}-\d{2} \([A-Za-z]+\)\. (?:Time zone:|The date is in UTC;)/,
   );
   assert.deepEqual(instruction, { type: "text", text });
   for (const [index, image] of [png, jpeg].entries()) {

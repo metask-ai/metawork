@@ -1403,7 +1403,7 @@ function renderComposer(overrides = {}) {
   };
 }
 
-test("Task model trigger keeps the Host label for unavailable and next-run selections", () => {
+test("Task model trigger keeps the model name when the selection leaves the catalog", () => {
   for (const options of [
     [],
     [
@@ -1416,14 +1416,14 @@ test("Task model trigger keeps the Host label for unavailable and next-run selec
   ]) {
     renderComposer({
       modelEditable: true,
-      modelLabel: "Next run: retained Task model",
+      modelLabel: "Task model",
       selectedModelId: "selected",
       modelOptions: options,
     });
     assert.equal(
       document.querySelector(".composer-model-trigger .selection-trigger-value")
         .textContent,
-      "Next run: retained Task model",
+      "Task model",
     );
     cleanup();
   }
@@ -3000,6 +3000,151 @@ test("App first accepted send clears its original version after Task handoff wit
   assert.equal(fixture.textarea.disabled, false);
   await user.type(fixture.textarea, "follow-up");
   assert.equal(fixture.textarea.value, "follow-up");
+});
+
+test("App Composer scopes model choices to its Provider and preserves the actual Run model", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { newTask: true });
+  const provider = fixture.snapshot.models.providers[0];
+  const model = provider.models[0];
+  provider.models = [
+    { ...model, id: "minimax-m3", displayName: "minimax-m3" },
+    { ...model, id: "glm-5.3-flash", displayName: "glm-5.3-flash" },
+  ];
+  fixture.snapshot.models.customProviders = [
+    {
+      id: "cc",
+      builtinProviderId: null,
+      displayName: "cc",
+      protocol: "anthropic_messages",
+      normalizedBaseUrl: "https://custom.example.com/v1",
+      state: "ready",
+      credentialStatus: "ready",
+      enabled: true,
+      providerRevision: "1",
+      sourceGeneration: "23",
+      catalogGeneration: "29",
+      models: [
+        {
+          ...model,
+          id: "gpt-5.6-sol",
+          displayName: "gpt-5.6-sol",
+          ready: true,
+          testStatus: "connected",
+        },
+      ],
+    },
+  ];
+  const defaultModel = { sourceId: "metask", modelId: "minimax-m3" };
+  fixture.snapshot.models.defaultSelection = defaultModel;
+  fixture.snapshot.newTaskAdmission.activeModelRef = defaultModel;
+  await fixture.publish();
+  const selector = screen.getByRole("combobox", { name: "Default model" });
+  await waitFor(() => assert.match(selector.textContent, /minimax-m3/));
+  const user = userEvent.setup({ document });
+  await user.click(selector);
+  assert.equal(screen.queryByRole("option", { name: /gpt-5.6-sol/ }), null);
+  await user.click(
+    await screen.findByRole("option", { name: /glm-5.3-flash/ }),
+  );
+  await user.type(fixture.textarea, "How can we forecast the weather?{Enter}");
+  await waitFor(() => assert.equal(fixture.creations(), 1));
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  assert.deepEqual(
+    BridgeClient.prototype.createTask.mock.calls[0].arguments[3],
+    {
+      targetModelRef: { sourceId: "metask", modelId: "glm-5.3-flash" },
+      expectedSourceGeneration: provider.sourceGeneration,
+      expectedCatalogGeneration: provider.catalogGeneration,
+    },
+  );
+  fixture.task.binding.model = "glm-5.3-flash";
+  fixture.task.modelIntent = {
+    modelRef: { sourceId: "metask", modelId: "glm-5.3-flash" },
+    selectionRevision: "1",
+    state: "committed",
+  };
+  await fixture.created();
+  fixture.snapshot.tasks = [fixture.task];
+  await fixture.publish();
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  const { readFile } = await import("node:fs/promises");
+  const run = JSON.parse(
+    await readFile(
+      "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+      "utf8",
+    ),
+  ).tasks[0].runs[0];
+  run.execution.model = "glm-5.3-flash";
+  fixture.task.activeOperation = { kind: "run", id: run.id };
+  fixture.task.currentRunId = run.id;
+  fixture.task.currentRunPhase = run.phase;
+  fixture.task.runs = [run];
+  await fixture.settle();
+  await fixture.publish();
+  await waitFor(() => {
+    const label = document.querySelector(".composer-model-trigger").textContent;
+    assert.equal(label, "glm-5.3-flash");
+    assert.doesNotMatch(label, /Next run/);
+  });
+  ctx.mock.method(
+    BridgeClient.prototype,
+    "selectTaskModel",
+    async (_taskId, _revision, modelRef) => {
+      fixture.task.modelIntent = {
+        modelRef,
+        selectionRevision: "2",
+        state: "committed",
+      };
+      return {
+        accepted: true,
+        taskId: fixture.task.id,
+        selectionRevision: "2",
+        reason: null,
+      };
+    },
+  );
+  fixture.snapshot.models.defaultSelection = {
+    sourceId: "cc",
+    modelId: "gpt-5.6-sol",
+  };
+  fixture.snapshot.newTaskAdmission.activeModelRef =
+    fixture.snapshot.models.defaultSelection;
+  await fixture.publish();
+  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  assert.equal(screen.queryByRole("option", { name: /gpt-5.6-sol/ }), null);
+  await user.click(await screen.findByRole("option", { name: /minimax-m3/ }));
+  await waitFor(() => {
+    const label = document.querySelector(".composer-model-trigger").textContent;
+    assert.equal(label, "minimax-m3");
+    assert.doesNotMatch(label, /Next run/);
+  });
+  await user.click(screen.getByRole("button", { name: "Task information" }));
+  const fact = screen.getByText("Current run model").parentElement;
+  assert.equal(fact.querySelector("dd").textContent, "glm-5.3-flash");
+  assert.equal(
+    screen.getByText("Selected provider").parentElement.querySelector("dd")
+      .textContent,
+    "Metask",
+  );
+  assert.equal(
+    screen.getByText("Current run protocol").parentElement.querySelector("dd")
+      .textContent,
+    "Anthropic Messages",
+  );
+  await user.keyboard("{Escape}");
+  assert.deepEqual(fixture.snapshot.models.defaultSelection, {
+    sourceId: "cc",
+    modelId: "gpt-5.6-sol",
+  });
+  await user.click(
+    screen.getByRole("button", { name: "New task", exact: true }),
+  );
+  await user.click(screen.getByRole("combobox", { name: "Default model" }));
+  assert.ok(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
+  assert.equal(
+    screen.queryByRole("option", { name: /minimax-m3|glm-5.3-flash/ }),
+    null,
+  );
 });
 
 test("App late send result preserves another Task's draft and focus", async (ctx) => {

@@ -837,6 +837,11 @@ export const zhCN: Record<MessageId, string> = {
   "inspector.context_pressure_detail":
     "当前 {current} tokens · {compact} 时自动压缩 · 上限 {limit}",
   "task.information": "任务信息",
+  "task.selected_provider": "所选 Provider",
+  "task.current_run_model": "本轮模型",
+  "task.last_run_model": "最近一轮模型",
+  "task.current_run_protocol": "本轮协议",
+  "task.last_run_protocol": "最近一轮协议",
   "task.information_scope":
     "MCP 表示创建任务时的工具选择，不代表当前连接状态；审批模式显示此会话当前设置。",
   "conversation.context_observed": "当前会话最近一次观测，不是实时用量。",
@@ -918,6 +923,7 @@ export const zhCN: Record<MessageId, string> = {
   "account.logout_short": "退出登录…",
   "account.api_fallback": "Metask API",
   "account.model_fallback": "可用模型",
+  "account.unknown_provider": "来源未知",
   "settings.title": "设置",
   "settings.back": "返回工作台",
   "settings.intro": "管理 MetaWork 开始新任务时使用的默认配置。",
@@ -1194,7 +1200,7 @@ export const zhCN: Record<MessageId, string> = {
     "这会清除本机 Metask 凭据，新的 Metask 模型使用将不可用；自定义模型、任务记录、工作区文件和已有任务绑定都会保留。",
   "settings.task_binding_model":
     "此任务保留原执行配置；当前默认配置无法安全修改它的模型。",
-  "settings.task_model_help": "选择此任务下一轮使用的模型。",
+  "settings.task_model_help": "选择此任务发送消息时使用的模型。",
   "settings.task_model_catalog_loading": "模型目录正在更新，完成后可继续选择。",
   "settings.task_model_catalog_unavailable":
     "当前模型目录不可用；任务仍保留原模型，目录恢复后可再次选择。",
@@ -1243,7 +1249,6 @@ export const zhCN: Record<MessageId, string> = {
   "mutation.reason.model_changed":
     "任务模型已在其他位置更新，请刷新后重新选择。",
   "task.model.updated": "任务模型已更新。",
-  "task.model_pending": "下一轮使用：{model}",
   "mutation.reason.recovery_unavailable": "当前保存状态已无法恢复此会话。",
   "mutation.reason.queued_input_present": "请先编辑或撤回待发送消息。",
   "mutation.reason.persistence_unavailable":
