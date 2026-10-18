@@ -18,6 +18,15 @@ export function isRunInFlight(task: TaskView | null): boolean {
   return task?.currentRunPhase != null;
 }
 
+export function pendingInputContinuation(
+  task: TaskView | null,
+): RunView | null {
+  const run = task?.runs.at(-1);
+  return run?.additionalInputs.some((input) => input.state === "continuing")
+    ? run
+    : null;
+}
+
 function activeCompact(task: TaskView) {
   return task.activeOperation?.kind === "compact"
     ? (task.compacts.find(

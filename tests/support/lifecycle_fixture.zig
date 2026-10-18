@@ -260,6 +260,8 @@ pub const FakeCore = struct {
     omit_input_adopted_event: bool = false,
     forced_input_status: ?u32 = null,
     forced_input_run_status: ?u32 = null,
+    expected_run_text: ?[]const u8 = null,
+    run_text_matches: bool = false,
     input_signal: ?*CallbackSignal = null,
     mutex: std.Io.Mutex = .init,
     catalog_condition: std.Io.Condition = .init,
@@ -1927,7 +1929,12 @@ pub fn sessionRunInput(
         run_options.context_blocks != null or run_options.context_block_count != 0)
         return wire.STATUS_INVALID_ARGUMENT;
     switch (typed_input.kind_code) {
-        wire.RUN_INPUT_TEXT => {},
+        wire.RUN_INPUT_TEXT => {
+            fake_core.lock();
+            defer fake_core.unlock();
+            if (fake_core.expected_run_text) |expected|
+                fake_core.run_text_matches = std.mem.eql(u8, expected, sdk.borrowedBytes(typed_input.text) catch return wire.STATUS_INVALID_ARGUMENT);
+        },
         wire.RUN_INPUT_MULTIMODAL => {
             const parts = (typed_input.parts orelse return wire.STATUS_INVALID_ARGUMENT)[0..@intCast(typed_input.part_count)];
             fake_core.lock();

@@ -275,7 +275,22 @@ export function TaskContent({
       null)
     : null;
   const latestCopyableId = latestCopyableResponseId(task?.runs ?? []);
-  const latestInputId = task?.runs.at(-1)?.id ?? null;
+  const transferredRunIds = new Set(
+    task?.runs.flatMap((run) =>
+      run.additionalInputs.flatMap((input) =>
+        input.state === "transferred" && input.transferredToRunId
+          ? [input.transferredToRunId]
+          : [],
+      ),
+    ),
+  );
+  const latestInputId =
+    task?.runs
+      .filter(
+        (run) =>
+          run.additionalInputs.length > 0 || !transferredRunIds.has(run.id),
+      )
+      .at(-1)?.id ?? null;
   const hasExcludedCompactHistory =
     task?.compacts.some(
       (compact) => compact.conversationCoverage === "excluded",
@@ -337,6 +352,20 @@ export function TaskContent({
     });
     node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
     setShowJumpLatest(false);
+  }
+
+  function locateRun(runId: string) {
+    const node = viewport.current;
+    if (!node || !task || !task.runs.some((run) => run.id === runId)) return;
+    const target = node.querySelector<HTMLElement>(`[data-run-id="${runId}"]`);
+    if (!target) return;
+    target.scrollIntoView({ block: "start", behavior: "instant" });
+    (
+      target.querySelector<HTMLElement>(
+        ':scope > .ai-message[data-role="user"]',
+      ) ?? target
+    ).focus({ preventScroll: true });
+    updateReadingState();
   }
 
   const followDeferredOutput = useCallback(() => {
@@ -427,28 +456,38 @@ export function TaskContent({
         }
 
         return (
-          <section className="ai-exchange" key={`${task.id}:${run.id}`}>
-            <Message role="user">
-              <TaskInput input={run.input} />
-            </Message>
-            <div className="input-copy-actions">
-              {submittedTime && (
-                <MessageTime
-                  className="input-submitted-time"
-                  time={submittedTime}
-                />
-              )}
-              <CopyButton
-                className="input-copy-action"
-                data-latest={
-                  run.id === latestInputId && run.additionalInputs.length === 0
-                }
-                copyLabel={t("copy.input")}
-                copiedLabel={t("copy.copied")}
-                failedLabel={t("copy.failed")}
-                onCopy={() => copyRunInput(run.input)}
-              />
-            </div>
+          <section
+            className="ai-exchange focus-ring"
+            data-run-id={run.id}
+            key={`${task.id}:${run.id}`}
+            tabIndex={-1}
+          >
+            {!transferredRunIds.has(run.id) && (
+              <>
+                <Message role="user" tabIndex={-1} className="focus-ring">
+                  <TaskInput input={run.input} />
+                </Message>
+                <div className="input-copy-actions">
+                  {submittedTime && (
+                    <MessageTime
+                      className="input-submitted-time"
+                      time={submittedTime}
+                    />
+                  )}
+                  <CopyButton
+                    className="input-copy-action"
+                    data-latest={
+                      run.id === latestInputId &&
+                      run.additionalInputs.length === 0
+                    }
+                    copyLabel={t("copy.input")}
+                    copiedLabel={t("copy.copied")}
+                    failedLabel={t("copy.failed")}
+                    onCopy={() => copyRunInput(run.input)}
+                  />
+                </div>
+              </>
+            )}
             <div className="run-reading-flow">
               {readingFlow.map((entry) =>
                 entry.kind === "input" ? (
@@ -460,6 +499,7 @@ export function TaskContent({
                       entry.input.id === run.additionalInputs.at(-1)?.id
                     }
                     onRestore={onPrepareRetry}
+                    onLocate={locateRun}
                   />
                 ) : entry.parts.some((part) => part.content) ||
                   entry.redacted ? (

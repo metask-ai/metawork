@@ -305,6 +305,8 @@ pub const Runtime = struct {
     notifier: Notifier,
     background_available: bool = false,
     changed: bool = false,
+    /// Result of this reconciliation pass, including failures before persistence.
+    completion_confirmation_failed_task: ?u64 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -545,6 +547,7 @@ pub const Runtime = struct {
         redaction: Redaction,
         tasks: TaskEffects,
     ) bool {
+        self.completion_confirmation_failed_task = null;
         var changed = self.reconcileBindingsNoFail(binding, redaction);
         changed = self.reconcileCompletionNoFail(tasks, redaction) or changed;
         return changed;
@@ -842,7 +845,10 @@ pub const Runtime = struct {
     ) bool {
         var changed = false;
         while (self.nextCompletionResolution(tasks)) |resolution| {
-            if (!self.finishCompletionNoFail(resolution, redaction)) break;
+            if (!self.finishCompletionNoFail(resolution, redaction)) {
+                self.completion_confirmation_failed_task = resolution.pending.task_id;
+                break;
+            }
             changed = true;
         }
         return changed;
@@ -1577,7 +1583,7 @@ test "permission-required scheduled occurrence stops without waiting for UI" {
     try std.testing.expectEqual(@as(u64, 42), effects.notification_task_id);
 }
 
-test "queued input completion gate includes submitted occurrences skipped after earlier write failure" {
+test "input continuation gate includes submitted occurrences skipped after earlier write failure" {
     var effects: TestEffects = .{};
     var tasks: TestTasks = .{ .next_task_id = 41 };
     var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 2, .max_projection_bytes = 8192 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
@@ -1590,12 +1596,43 @@ test "queued input completion gate includes submitted occurrences skipped after 
     tasks.terminal = .{ .outcome = .completed, .permission_required = false };
     effects.fail_commit_at = effects.commits + 1;
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expectEqual(@as(?u64, 41), runtime.completion_confirmation_failed_task);
     try std.testing.expect(runtime.hasPendingSubmittedOccurrence(41));
     try std.testing.expect(runtime.hasPendingSubmittedOccurrence(42));
     try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(43));
     effects.fail_commit_at = null;
     try std.testing.expectEqual(PersistenceRecoveryOutcome.recovered, runtime.recoverPersistence(redaction));
     _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+    try std.testing.expect(runtime.completion_confirmation_failed_task == null);
     try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(41));
     try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(42));
+}
+
+test "input continuation observes completion allocation failure even when persistence stays ready" {
+    var observed_allocation_failure = false;
+    for (0..12) |failure_index| {
+        var effects: TestEffects = .{};
+        var tasks: TestTasks = .{};
+        var runtime = try Runtime.init(std.testing.allocator, .{ .max_items = 1, .max_projection_bytes = 4096 }, .{ .timer = effects.timer(), .persistence = effects.persistence() });
+        defer runtime.deinit();
+        const redaction = testRedaction(&effects);
+        const id = try runtime.create(testDefinition("source", "source"), testBinding(), redaction);
+        _ = try runtime.runNow(id, 1, redaction, tasks.effects());
+        tasks.terminal = .{ .outcome = .completed, .permission_required = false };
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = failure_index });
+        runtime.allocator = failing.allocator();
+        defer runtime.allocator = std.testing.allocator;
+        _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+        if (runtime.hasPendingSubmittedOccurrence(42)) {
+            observed_allocation_failure = true;
+            try std.testing.expectEqual(@as(?u64, 42), runtime.completion_confirmation_failed_task);
+            // Clone/encode failure does not have to touch store health.
+            try std.testing.expectEqual(.ready, runtime.persistenceHealth());
+            runtime.allocator = std.testing.allocator;
+            _ = runtime.reconcileNoFail(testBinding(), redaction, tasks.effects());
+            try std.testing.expect(!runtime.hasPendingSubmittedOccurrence(42));
+            try std.testing.expect(runtime.completion_confirmation_failed_task == null);
+        }
+    }
+    try std.testing.expect(observed_allocation_failure);
 }

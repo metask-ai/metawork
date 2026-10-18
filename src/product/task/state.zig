@@ -415,11 +415,11 @@ pub const RunInputRecord = union(enum) {
 // Fixed message metadata is charged to the shared projection budget. Its
 // sixfold JSON allowance covers identities and adoption structure even when
 // redaction leaves the safe text empty.
-pub const additional_input_projection_bytes: usize = 160;
+pub const additional_input_projection_bytes: usize = 224;
 
-pub const AdditionalInputState = enum { pending, adopted, unadopted, unknown };
+pub const AdditionalInputState = enum { pending, adopted, unadopted, unknown, transferred };
 
-/// Safe history only; never a source of execution or recovery input.
+/// Safe history fields plus separately owned, runtime-only execution text.
 pub const AdditionalInput = struct {
     id: u64,
     /// Reading position at submission, independent of Core adoption order.
@@ -432,6 +432,11 @@ pub const AdditionalInput = struct {
     adopted_turn: ?u32 = null,
     order: ?u64 = null,
     state: AdditionalInputState = .pending,
+    transferred_to_run_id: ?u64 = null,
+    /// Execution-only owned text; never serialized or reconstructed from history.
+    raw_text: ?[]u8 = null,
+    /// Cancellation belongs to this accepted input, not later sends in the Run.
+    continuation_cancel_reason: ?SendInputReason = null,
 
     pub fn operationId(self: *const AdditionalInput) []const u8 {
         return self.operation_id[0..self.operation_id_len];
@@ -465,6 +470,10 @@ pub const SendInputReason = enum {
     resource_limit,
     checkpoint_budget_required,
     admission_failed,
+    continuation_cancelled,
+    combined_input_too_large,
+    checkpoint_failed,
+    schedule_failed,
 };
 
 pub const SendInputResult = struct {
@@ -609,6 +618,12 @@ pub const RunRecord = struct {
     permission_interaction: PermissionInteraction,
     input: RunInputRecord,
     additional_inputs: [agent.max_submitted_inputs]?AdditionalInput = @splat(null),
+    input_continuation_pending: bool = false,
+    input_continuation_cancelled: bool = false,
+    input_continuation_attempted: bool = false,
+    input_continuation_schedule_gate: bool = false,
+    input_continuation_binding_epoch: u64 = 0,
+    input_continuation_failure: ?SendInputReason = null,
     next_input_id: u64 = 1,
     /// Worker writes before publishing terminal; readers require that publication.
     completed_input_counts: ?agent.InputCounts = null,

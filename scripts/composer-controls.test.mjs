@@ -2392,6 +2392,60 @@ test("unadopted and uncertain history can only be put back in the editor", async
   ]);
 });
 
+test("continuation rejection explains the next Run without claiming a preserved draft or active task", async () => {
+  const { AdditionalInput } = await vite.ssrLoadModule(
+    "/src/features/tasks/AdditionalInput.tsx",
+  );
+  for (const locale of ["en-US", "zh-CN"]) {
+    for (const reason of ["admission_failed", "task_busy"]) {
+      const view = render(
+        createElement(
+          I18nContext.Provider,
+          {
+            value: {
+              locale,
+              setLocale() {},
+              t: (id, values) => translate(locale, id, values),
+            },
+          },
+          createElement(AdditionalInput, {
+            input: {
+              id: "1",
+              operationId: "continuation-rejected",
+              text: "safe preview",
+              afterOutputCount: 0,
+              redacted: false,
+              sequence: 1,
+              adoptedTurn: null,
+              order: null,
+              state: "unadopted",
+              transferredToRunId: null,
+              continuationReason: reason,
+            },
+            onRestore() {},
+            onLocate() {},
+          }),
+        ),
+      );
+      const message = translate(
+        locale,
+        reason === "admission_failed"
+          ? "input.continuation.failed"
+          : "input.continuation.busy",
+      );
+      assert.ok(view.container.textContent.includes(message));
+      assert.doesNotMatch(
+        view.container.textContent,
+        /草稿已保留|该任务正在执行中|draft.*preserved|task is already running/i,
+      );
+      assert.ok(
+        view.getByRole("button", { name: translate(locale, "input.restore") }),
+      );
+      view.unmount();
+    }
+  }
+});
+
 test("a saved Workspace can be selected directly without opening the folder picker", async () => {
   const selected = [];
   let pickers = 0;
@@ -3291,6 +3345,108 @@ test("App never waits for a current Run to become ready and never sends its reta
   );
   fireEvent.keyDown(fixture.textarea, { key: "Enter" });
   await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  await fixture.settle();
+});
+
+function finishWithPendingContinuation(fixture) {
+  const run = fixture.task.runs[0];
+  Object.assign(run, {
+    phase: "completed",
+    activity: null,
+    terminal: {
+      outcome: "completed",
+      cause: null,
+      diagnosticDisposition: "absent",
+    },
+    additionalInputs: [
+      {
+        id: "1",
+        afterOutputCount: 0,
+        operationId: "already-submitted",
+        text: "submitted follow up",
+        redacted: false,
+        sequence: 1,
+        adoptedTurn: null,
+        order: null,
+        state: "continuing",
+        transferredToRunId: null,
+        continuationReason: null,
+      },
+    ],
+  });
+  Object.assign(fixture.task, {
+    activeOperation: null,
+    currentRunPhase: null,
+    inputReady: false,
+    continuationAvailable: false,
+    continuationRecoveryAvailable: false,
+  });
+  return run;
+}
+
+test("App can Stop a completed source while its continuation is reserved", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  const source = finishWithPendingContinuation(fixture);
+  await fixture.publish();
+  await waitFor(() =>
+    assert.ok(
+      screen.getByText("Not included in this Run; continuing after cleanup"),
+    ),
+  );
+  assert.equal(fixture.textarea.disabled, false);
+  assert.equal(
+    screen.queryByRole("button", { name: "Put back in the editor" }),
+    null,
+  );
+  const stop = screen.getByRole("button", { name: "Stop task" });
+  assert.equal(stop.disabled, false);
+  fireEvent.click(stop);
+  await waitFor(() =>
+    assert.deepEqual(fixture.cancellations, [[fixture.task.id, source.id]]),
+  );
+  assert.deepEqual(fixture.inputs, []);
+});
+
+test("App preserves the new draft across cleanup and transfer without submitting it", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  const editor = fixture.textarea;
+  const source = finishWithPendingContinuation(fixture);
+  await fixture.publish();
+  fireEvent.change(editor, { target: { value: "new unsent draft" } });
+  fireEvent.keyDown(editor, { key: "Enter" });
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  assert.equal(editor.value, "new unsent draft");
+  assert.deepEqual(fixture.inputs, []);
+  const target = structuredClone(source);
+  Object.assign(target, {
+    id: "8",
+    phase: "running",
+    terminal: null,
+    activity: { kind: "waiting_model" },
+    additionalInputs: [],
+  });
+  Object.assign(source.additionalInputs[0], {
+    state: "transferred",
+    transferredToRunId: target.id,
+  });
+  fixture.task.runs.push(target);
+  Object.assign(fixture.task, {
+    activeOperation: { kind: "run", id: target.id },
+    currentRunId: target.id,
+    currentRunPhase: "running",
+    inputReady: true,
+    continuationAvailable: true,
+  });
+  await fixture.publish();
+  await waitFor(() =>
+    assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false),
+  );
+  assert.equal(editor.value, "new unsent draft");
+  assert.deepEqual(fixture.inputs, []);
+  fireEvent.keyDown(editor, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.deepEqual(fixture.targets, [{ kind: "run", runId: target.id }]);
   await fixture.settle();
 });
 

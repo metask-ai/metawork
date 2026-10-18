@@ -1155,6 +1155,7 @@ pub const Runtime = struct {
     file_change_executor: ?*executor_impl.Executor,
     file_change_lane: ?*file_change_io.Lane,
     shutting_down: bool = false,
+    advancing_input_continuations: bool = false,
     executor_shutdown: bool = false,
     attachment_executor_shutdown: bool = false,
     preview_executor_shutdown: bool = false,
@@ -4689,7 +4690,12 @@ pub const Runtime = struct {
     }
 
     fn admitTaskRun(self: *Runtime, task_id: u64, expected_binding_epoch: u64, input: TaskRunInput) Error!u64 {
+        return self.admitTaskRunWithSource(task_id, expected_binding_epoch, input, null);
+    }
+
+    fn admitTaskRunWithSource(self: *Runtime, task_id: u64, expected_binding_epoch: u64, input: TaskRunInput, source: ?u64) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
+        if (self.task_runtime.inputContinuation(task_id) != null) return error.TaskBusy;
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
@@ -4815,7 +4821,9 @@ pub const Runtime = struct {
             .rollback_fn = rollbackTaskWorkspaceOrder,
         };
         var prepared = try self.task_runtime.startRun(task_id, expected_binding_epoch, task_input, workspace_effect, operation_effects);
+        if (source) |id| self.task_runtime.markInputTransferred(task_id, id, prepared.id());
         self.commitTaskStateBestEffort() catch |err| {
+            if (source) |id| self.task_runtime.markInputTransferred(task_id, id, null);
             prepared.rollback();
             return err;
         };
@@ -4824,7 +4832,7 @@ pub const Runtime = struct {
             if (order_preparation.isActive())
                 self.workspace.commitOrder(&order_preparation);
             self.bumpRevision();
-            if (operation_effects.run_acceptance.irreversible)
+            if (operation_effects.run_acceptance.irreversible or source != null)
                 return prepared.id();
             return err;
         };
@@ -4961,7 +4969,8 @@ pub const Runtime = struct {
     }
 
     fn detachTaskSession(self: *Runtime, task_id: u64) Error!void {
-        self.syncLifecycle();
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         if (try self.task_runtime.beginDetach(
             task_id,
             self.taskRuntimeOperationEffects(),
@@ -5413,6 +5422,7 @@ pub const Runtime = struct {
     /// projection, then schedules/reaps independently owned permission reviews.
     pub fn syncLifecycle(self: *Runtime) void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
+        self.advanceInputContinuations();
         self.syncPermissionReviews();
         if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
     }
@@ -5442,11 +5452,28 @@ pub const Runtime = struct {
             changed = true;
             durable_changed = true;
         }
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (self.task_runtime.inputContinuation(task.durable.id)) |source| {
+                if (self.schedule.hasPendingSubmittedOccurrence(task.durable.id))
+                    source.input_continuation_schedule_gate = true;
+            }
+        };
         if (self.schedule.reconcileNoFail(
             self.scheduleExecutionBinding(),
             self.scheduleRedaction(),
             self.scheduleTaskEffects(),
         )) changed = true;
+        for (self.task_runtime.tasks) |entry| if (entry) |task| {
+            if (self.task_runtime.inputContinuation(task.durable.id)) |source| {
+                if (!source.input_continuation_schedule_gate) continue;
+                const pending = self.schedule.hasPendingSubmittedOccurrence(task.durable.id);
+                if (self.schedule.persistenceHealth() != .ready or
+                    (pending and self.schedule.completion_confirmation_failed_task == task.durable.id))
+                {
+                    changed = self.task_runtime.cancelInputContinuation(task.durable.id, source.id, .schedule_failed) or changed;
+                } else if (!pending) source.input_continuation_schedule_gate = false;
+            }
+        };
         if (self.schedule.takeChanged()) changed = true;
         if (durable_changed) self.commitTaskStateNoFail();
         if (self.task_runtime.syncDeletions(
@@ -5455,6 +5482,59 @@ pub const Runtime = struct {
         ).changed) changed = true;
         if (changed) self.bumpRevision();
         return task_sync.mcp_refresh_needed;
+    }
+
+    fn advanceInputContinuations(self: *Runtime) void {
+        if (self.advancing_input_continuations) return;
+        self.advancing_input_continuations = true;
+        defer self.advancing_input_continuations = false;
+        for (self.task_runtime.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            const source = self.task_runtime.inputContinuation(task.durable.id) orelse continue;
+            if (self.shutting_down) {
+                _ = self.task_runtime.cancelInputContinuation(task.durable.id, source.id, .shutting_down);
+                self.bumpRevision();
+                continue;
+            }
+            if (task.runtime.worker_leases.hasLive() or !source.event_stream_finalized or
+                source.input_continuation_schedule_gate) continue;
+            switch (source.checkpoint.state.load(.acquire)) {
+                .exporting, .candidate_ready, .failure_ready => continue,
+                .settled => if (source.coverage != .covered) {
+                    _ = self.task_runtime.cancelInputContinuation(task.durable.id, source.id, .checkpoint_failed);
+                    self.bumpRevision();
+                    continue;
+                },
+                .none => {},
+            }
+            if (source.input_continuation_binding_epoch != task.durable.binding_epoch) {
+                _ = self.task_runtime.cancelInputContinuation(task.durable.id, source.id, .binding_changed);
+                self.bumpRevision();
+                continue;
+            }
+            // Consuming the reservation and normal admission are synchronous.
+            // An attempted batch cannot be reactivated by lifecycle re-entry.
+            source.input_continuation_pending = false;
+            source.input_continuation_attempted = true;
+            const merged = self.task_runtime.mergeInputContinuation(source, self.limits.max_user_message_bytes) catch |err| {
+                source.input_continuation_failure = if (err == error.InputContinuationTooLarge) .combined_input_too_large else .resource_limit;
+                self.task_runtime.discardInputPayloads(source);
+                self.bumpRevision();
+                continue;
+            };
+            defer {
+                std.crypto.secureZero(u8, merged);
+                self.allocator.free(merged);
+            }
+            _ = self.admitTaskRunWithSource(task.durable.id, source.input_continuation_binding_epoch, .{ .text = merged }, source.id) catch |err| {
+                source.input_continuation_failure = sendInputRejection(err);
+                self.task_runtime.discardInputPayloads(source);
+                self.bumpRevision();
+                continue;
+            };
+            self.task_runtime.discardInputPayloads(source);
+            self.bumpRevision();
+        }
     }
 
     /// Consumes the canonical Agent event stream and owns the complete product

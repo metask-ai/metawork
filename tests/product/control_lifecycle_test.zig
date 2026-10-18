@@ -77,11 +77,14 @@ const ReviewScenario = struct {
         try installControlExecution(&self.control);
         var input = productControlTaskInput();
         input.approval_mode = .manual;
-        if (configuration.directories.canonical_user_home != null) {
-            const workspace_id = try self.control.openWorkspace(input);
-            const catalog = try waitCatalogReady(&self.control, workspace_id);
-            self.task_id = try self.control.createTaskInWorkspace(workspace_id, try self.control.workspaceEpoch(workspace_id), 1, self.control.newTaskAdmissionView().active_selection_revision, null, catalog.revision, catalog.selection_revision, .{ .interactive = .manual });
-        } else self.task_id = try self.control.createTask(input);
+        self.task_id = try self.control.createTask(input);
+        // A fresh test home has no Skill directory. Ordinary text admission
+        // waits for initial discovery, but does not require a ready catalog.
+        for (0..5000) |_| {
+            self.control.syncLifecycle();
+            if (self.control.task_runtime.catalogProjection(self.task_id).?.availability != .loading) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
         _ = try self.control.runTask(self.task_id, .{ .text = "Perform the bounded operation without disclosing fixture-secret" });
         try waitControlSnapshot(&self.control, if (plan == .ui_wait) "\"currentRunPhase\":\"waiting_ui\"" else "\"inputReady\":true");
         return self;
@@ -4469,6 +4472,7 @@ fn directoryEntryCount(dir: std.Io.Dir) !usize {
 
 const TestScheduleSupport = struct {
     now: u64 = 1_000,
+    commit_result: product_control.SchedulePersistenceCommit = .committed,
     commits: usize = 0,
     recoveries: usize = 0,
     notification_kind: ?product_control.ScheduleNotificationKind = null,
@@ -4492,7 +4496,7 @@ const TestScheduleSupport = struct {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         std.debug.assert(bytes.len != 0);
         self.commits += 1;
-        return .committed;
+        return self.commit_result;
     }
 
     fn recover(
@@ -9689,11 +9693,12 @@ fn settleInputScenario(scenario: *ReviewScenario) !void {
     return error.TestUnexpectedResult;
 }
 
-test "active input targets one Run and unadopted history never launches another" {
+test "active input continues exactly once after normal completion and never repeats adopted input" {
     for ([_]bool{ false, true }) |adopt| {
         const scenario = try ReviewScenario.initForInput(.controlled);
         defer scenario.deinit();
         fake_core.adopt_input_before_receipt = adopt;
+        fake_core.expected_run_text = "new constraint fixture-secret";
         const task = scenario.control.task_runtime.find(scenario.task_id).?;
         const id = task.runtime.active_run_id;
         const epoch = task.durable.binding_epoch;
@@ -9701,17 +9706,23 @@ test "active input targets one Run and unadopted history never launches another"
         try std.testing.expectEqual(.submitted, response.outcome);
         try std.testing.expectEqual(@as(?u64, id), response.run_id);
         try std.testing.expectEqual(@as(?u32, 1), response.sequence);
+        try std.testing.expectEqualStrings("new constraint fixture-secret", task.durable.runs[0].?.additional_inputs[0].?.raw_text.?);
+        try std.testing.expectEqual(@as(usize, "new constraint fixture-secret".len), scenario.control.task_runtime.pending_input_bytes);
         try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[0].?.additional_inputs[0].?.text, "fixture-secret") == null);
         fake_core.releaseControlled();
         try settleInputScenario(scenario);
         const history = &task.durable.runs[0].?.additional_inputs[0].?;
+        try std.testing.expect(history.raw_text == null);
+        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
         try std.testing.expectEqual(@as(u32, 0), history.after_output_count);
-        try std.testing.expectEqual(if (adopt) task_state.AdditionalInputState.adopted else .unadopted, history.state);
+        try std.testing.expectEqual(if (adopt) task_state.AdditionalInputState.adopted else .transferred, history.state);
         try std.testing.expectEqual(adopt, history.order != null);
+        try std.testing.expectEqual(if (adopt) @as(?u64, null) else task.durable.runs[1].?.id, history.transferred_to_run_id);
+        if (!adopt) try std.testing.expect(fake_core.run_text_matches);
         const late = try scenario.control.sendInput("input-late", scenario.task_id, epoch, .{ .run = id }, .{ .text = "do not launch again" });
         try std.testing.expectEqual(.rejected, late.outcome);
-        try std.testing.expect(task.durable.runs[1] == null);
-        try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+        for (0..5) |_| scenario.control.syncLifecycle();
+        try std.testing.expectEqual(@as(usize, if (adopt) 1 else 2), fake_core.run_calls);
     }
 }
 
@@ -9729,8 +9740,21 @@ test "active input accepted during review prevents automatic allow but not manua
     try std.testing.expectEqual(.needs_user, task.permissionReviewPhase());
     _ = try scenario.control.respondUi(scenario.task_id, task.runtime.active_run_id, review.identity.request_id, .{ .permission = .deny_once });
     fake_core.releaseControlled();
+    // Observe the successor's permission request before cancelling it: this
+    // fake Core does not suppress a new callback after a pre-callback abort.
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        if (task.durable.runs[1]) |next| {
+            if (task.runtime.pending_ui_request_id != 0) {
+                try scenario.control.cancel(scenario.task_id, next.id);
+                break;
+            }
+        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
     try settleInputScenario(scenario);
-    try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+    try std.testing.expectEqual(.transferred, task.durable.runs[0].?.additional_inputs[0].?.state);
+    try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
 }
 
 test "active input before review preparation stays manual and automatic deny remains valid" {
@@ -9834,4 +9858,322 @@ test "active input terminal counts do not invent an adoption anchor or certainty
         try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
         try std.testing.expect(task.runtime.active_operation == .none);
     }
+}
+
+test "active input merges the unadopted suffix in order and preserves submitted anchors" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const source = &task.durable.runs[0].?;
+    fake_core.adopt_input_before_receipt = true;
+    _ = try scenario.control.sendInput("adopt-first", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "already handled" });
+    fake_core.adopt_input_before_receipt = false;
+    _ = try scenario.control.sendInput("next-one", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "first fixture-secret" });
+    _ = try scenario.control.sendInput("next-two", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "second" });
+    fake_core.expected_run_text = "first fixture-secret\n\nsecond";
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    try std.testing.expect(fake_core.run_text_matches);
+    try std.testing.expectEqual(.adopted, source.additional_inputs[0].?.state);
+    for (source.additional_inputs[1..3]) |entry| {
+        try std.testing.expectEqual(.transferred, entry.?.state);
+        try std.testing.expectEqual(@as(?u64, task.durable.runs[1].?.id), entry.?.transferred_to_run_id);
+        try std.testing.expectEqual(@as(u32, 0), entry.?.after_output_count);
+        try std.testing.expect(entry.?.raw_text == null);
+    }
+    try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
+    try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+}
+
+test "active input terminal reservation rejects competing sends and a late Stop cancels it" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const source = &task.durable.runs[0].?;
+    _ = try scenario.control.sendInput("late", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "follow up" });
+    var lease = try task.runtime.worker_leases.acquire();
+    defer if (lease.isActive()) lease.deinit();
+    fake_core.releaseControlled();
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        if (source.input_continuation_pending) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(source.input_continuation_pending);
+    try std.testing.expect(task.runtime.active_operation == .none);
+    try std.testing.expectError(error.TaskBusy, scenario.control.runTask(scenario.task_id, .{ .text = "new draft" }));
+    try scenario.control.cancel(scenario.task_id, source.id);
+    try std.testing.expect(source.input_continuation_cancelled);
+    try std.testing.expect(!task.runtime.cancel_requested);
+    try std.testing.expectEqual(.continuation_cancelled, source.input_continuation_failure.?);
+    lease.deinit();
+    try settleInputScenario(scenario);
+    try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
+    try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+}
+
+test "active input Stop before terminal never continues and releases the payload" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const source = &task.durable.runs[0].?;
+    _ = try scenario.control.sendInput("stop", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "do not repeat" });
+    try scenario.control.cancel(scenario.task_id, source.id);
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
+    try std.testing.expect(source.additional_inputs[0].?.raw_text == null);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+}
+
+test "active input continuation capacity failure is final and does not create a target" {
+    for ([_]bool{ false, true }) |too_large| {
+        const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), if (too_large) 2 else 1, .controlled, true);
+        defer scenario.deinit();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const source = &task.durable.runs[0].?;
+        _ = try scenario.control.sendInput("one", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "12345" });
+        _ = try scenario.control.sendInput("two", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "67890" });
+        if (too_large) scenario.control.limits.max_user_message_bytes = 11;
+        fake_core.releaseControlled();
+        try settleInputScenario(scenario);
+        try std.testing.expect(source.input_continuation_attempted);
+        try std.testing.expectEqual(if (too_large) task_state.SendInputReason.combined_input_too_large else .capacity_reached, source.input_continuation_failure.?);
+        for (source.additional_inputs[0..2]) |entry| {
+            try std.testing.expectEqual(.unadopted, entry.?.state);
+            try std.testing.expect(entry.?.transferred_to_run_id == null and entry.?.raw_text == null);
+        }
+        scenario.control.limits.max_user_message_bytes = 256 * 1024;
+        for (0..5) |_| scenario.control.syncLifecycle();
+        try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+    }
+}
+
+test "active input Schedule confirmation precedes transfer and failed confirmation never revives" {
+    for ([_]bool{ false, true }) |fail_confirmation| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path_len = try tmp.dir.realPath(std.testing.io, &path_buffer);
+        var root = try product_control.AutomaticWorkspaceRoot.open(std.testing.io, std.testing.allocator, path_buffer[0..path_len]);
+        defer root.deinit();
+        var schedule: TestScheduleSupport = .{};
+        var configuration = productControlConfiguration();
+        configuration.directories.testing_automatic_workspace_root = &root;
+        configuration.schedule_timer = schedule.timer();
+        configuration.schedule_persistence = schedule.persistence();
+        const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+        defer scenario.deinit();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const source = &task.durable.runs[0].?;
+        const schedule_id = try scenario.control.createScheduledTask(.{
+            .title = "source occurrence",
+            .binding = scheduledBinding(&scenario.control),
+            .permission_profile = .approval_required,
+            .input = "source input",
+            .recurrence = .{ .once = .{ .at_unix_seconds = 2000 } },
+        });
+        // Model the durable submitted occurrence pointing at this live Task.
+        const store = &scenario.control.schedule.store;
+        const item = store.find(schedule_id).?;
+        try store.claim(item, 1000, 1000, .manual);
+        try store.finalizeClaimSubmitted(item, 1000, .manual, scenario.task_id);
+        _ = try scenario.control.sendInput("schedule-late", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "next input" });
+        if (fail_confirmation) schedule.commit_result = .failed;
+        fake_core.releaseControlled();
+        try settleInputScenario(scenario);
+        const message = source.additional_inputs[0].?;
+        if (fail_confirmation) {
+            try std.testing.expectEqual(.unadopted, message.state);
+            try std.testing.expectEqual(.schedule_failed, source.input_continuation_failure.?);
+            try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+            schedule.commit_result = .committed;
+            _ = scenario.control.recoverScheduledTaskStore(scenario.control.currentRevision());
+            for (0..5) |_| scenario.control.syncLifecycle();
+            try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+        } else {
+            try std.testing.expectEqual(.transferred, message.state);
+            try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
+            try std.testing.expect(!scenario.control.schedule.hasPendingSubmittedOccurrence(scenario.task_id));
+            const recorded = store.find(schedule_id).?.last_occurrence.?;
+            try std.testing.expectEqual(.completed, recorded.task_outcome.?);
+        }
+        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+    }
+}
+
+test "active input terminal reservation obeys accepted archive approval and workspace cancellation" {
+    const Action = enum { archive_task, approval, workspace };
+    for (std.enums.values(Action)) |action| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var history: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+        defer scenario.deinit();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const source = &task.durable.runs[0].?;
+        _ = try scenario.control.sendInput("cancel-intent", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "follow up" });
+        var lease = try task.runtime.worker_leases.acquire();
+        defer if (lease.isActive()) lease.deinit();
+        fake_core.releaseControlled();
+        for (0..5000) |_| {
+            try scenario.control.drainAgentEvents();
+            if (source.input_continuation_pending) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(source.input_continuation_pending);
+        switch (action) {
+            .archive_task => try scenario.control.setTaskArchived(scenario.task_id, true),
+            .approval => _ = try scenario.control.setApprovalMode(scenario.task_id, .auto_review, task.durable.binding_epoch, task.durable.approval_revision),
+            .workspace => try scenario.control.removeWorkspace(task.durable.workspace_id),
+        }
+        try std.testing.expect(source.input_continuation_cancelled);
+        try std.testing.expect(!source.input_continuation_pending);
+        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+        lease.deinit();
+        try settleInputScenario(scenario);
+        try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+    }
+}
+
+test "active input approval cancellation applies only to existing messages and rejected sends cannot reopen it" {
+    const Next = enum { none, rejected, accepted, accepted_then_stop };
+    for (std.enums.values(Next)) |next| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var history: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+        defer scenario.deinit();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const source = &task.durable.runs[0].?;
+        const epoch = task.durable.binding_epoch;
+        _ = try scenario.control.sendInput("before-mode-change", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = "old cancelled message" });
+        _ = try scenario.control.setApprovalMode(scenario.task_id, .auto_review, epoch, task.durable.approval_revision);
+        for (0..5000) |_| {
+            scenario.control.syncLifecycle();
+            if (task.approval_change == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(.auto_review, try scenario.control.taskApprovalMode(scenario.task_id));
+        try std.testing.expect(source.input_continuation_cancelled);
+        try std.testing.expect(source.additional_inputs[0].?.raw_text == null);
+        try std.testing.expectEqual(.continuation_cancelled, source.additional_inputs[0].?.continuation_cancel_reason.?);
+
+        if (next == .rejected) {
+            fake_core.forced_input_status = wire.STATUS_TOO_LATE;
+            const response = try scenario.control.sendInput("rejected-after-change", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = "rejected message" });
+            try std.testing.expectEqual(.rejected, response.outcome);
+            try std.testing.expect(source.input_continuation_cancelled);
+            fake_core.forced_input_status = null;
+        } else if (next == .accepted or next == .accepted_then_stop) {
+            for ([_][]const u8{ "new first message", "new second message" }, 0..) |text, i| {
+                const response = try scenario.control.sendInput(if (i == 0) "new-1" else "new-2", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = text });
+                try std.testing.expectEqual(.submitted, response.outcome);
+            }
+            try std.testing.expect(!source.input_continuation_cancelled);
+            try std.testing.expect(source.input_continuation_failure == null);
+            fake_core.expected_run_text = "new first message\n\nnew second message";
+            if (next == .accepted_then_stop) try scenario.control.cancel(scenario.task_id, source.id);
+        }
+        fake_core.releaseControlled();
+        try settleInputScenario(scenario);
+        try std.testing.expectEqual(@as(usize, if (next == .accepted) 2 else 1), fake_core.run_calls);
+        try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
+        try std.testing.expect(source.additional_inputs[0].?.transferred_to_run_id == null);
+        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+        if (next == .accepted) {
+            try std.testing.expect(fake_core.run_text_matches);
+            for (source.additional_inputs[1..3]) |entry| {
+                try std.testing.expectEqual(.transferred, entry.?.state);
+                try std.testing.expectEqual(@as(?u64, task.durable.runs[1].?.id), entry.?.transferred_to_run_id);
+            }
+        }
+        var snapshot_storage: [512 * 1024]u8 = undefined;
+        const snapshot = try scenario.control.writeSnapshot(&snapshot_storage);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer parsed.deinit();
+        const inputs = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("additionalInputs").?.array.items;
+        try std.testing.expectEqualStrings("continuation_cancelled", inputs[0].object.get("continuationReason").?.string);
+    }
+}
+
+test "active input accepted target remains transferred when Executor enqueue fails" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const source = &task.durable.runs[0].?;
+    _ = try scenario.control.sendInput("enqueue", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "real failed target" });
+    var lease = try task.runtime.worker_leases.acquire();
+    defer if (lease.isActive()) lease.deinit();
+    fake_core.releaseControlled();
+    for (0..5000) |_| {
+        try scenario.control.drainAgentEvents();
+        if (source.input_continuation_pending) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(source.input_continuation_pending);
+    scenario.control.executor.shutdown();
+    lease.deinit();
+    try settleInputScenario(scenario);
+    const target = &task.durable.runs[1].?;
+    try std.testing.expect(task_state.productTerminalFacts(target) != null);
+    try std.testing.expectEqual(.transferred, source.additional_inputs[0].?.state);
+    try std.testing.expectEqual(@as(?u64, target.id), source.additional_inputs[0].?.transferred_to_run_id);
+    try std.testing.expect(source.input_continuation_failure == null);
+    try scenario.control.cancel(scenario.task_id, source.id);
+    for (0..5) |_| scenario.control.syncLifecycle();
+    try std.testing.expectEqual(.transferred, source.additional_inputs[0].?.state);
+    try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+    try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+}
+
+test "active input ordinary continuation ignores unrelated Schedule persistence failure" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    _ = try scenario.control.sendInput("unrelated-schedule", scenario.task_id, task.durable.binding_epoch, .{ .run = task.runtime.active_run_id }, .{ .text = "continue ordinary input" });
+    scenario.control.schedule.persistence_health = .write_failed;
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    try std.testing.expectEqual(.transferred, task.durable.runs[0].?.additional_inputs[0].?.state);
+    try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
+}
+
+test "active input checkpoint export failure ends continuation without retry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer store.deinit();
+    var history: TaskPersistenceProbe = .{};
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = history.capability();
+    configuration.checkpoint_store = .{ .file_store = &store };
+    const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const source = &task.durable.runs[0].?;
+    _ = try scenario.control.sendInput("checkpoint-failure", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "do not lose the boundary" });
+    fake_core.forceNextCheckpointExportStatus(wire.STATUS_RESOURCE_LIMIT);
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
+    try std.testing.expectEqual(.checkpoint_failed, source.input_continuation_failure.?);
+    try std.testing.expect(source.additional_inputs[0].?.raw_text == null);
+    for (0..5) |_| scenario.control.syncLifecycle();
+    try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+    try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
 }

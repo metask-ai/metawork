@@ -646,6 +646,8 @@ desktopVertical: try {
       chromeProbePort === null ? null : observeActiveReadingBeforeAdoption,
     verifyRendererDraft:
       chromeProbePort === null ? null : verifyActiveRendererDraft,
+    observeTransferred:
+      chromeProbePort === null ? null : observeTransferredInput,
   });
   if (activeInputOnly) {
     await stopApplication("active input restart");
@@ -655,7 +657,7 @@ desktopVertical: try {
     await verifyActiveRestart();
     await stopApplication("active input verification complete");
     process.stdout.write(
-      "AgentCore active input desktop vertical passed: receipt/adoption, permission wait, final/stop/failure, Skill refusal, timeout reconciliation, draft focus and restart.\n",
+      "AgentCore active input desktop vertical passed: receipt/adoption, permission wait, merged final-output continuation, stop/failure, target navigation, Skill refusal, timeout reconciliation, draft focus and restart.\n",
     );
     break desktopVertical;
   }
@@ -3102,6 +3104,106 @@ async function verifyActiveRendererDraft(taskId, text) {
       );
     }
   } finally {
+    webview.close();
+  }
+}
+
+async function observeTransferredInput(taskId, targetRunId) {
+  const webview = await connectTestWebView(chromeProbePort, {
+    requestTimeoutMs: commandTimeoutMs,
+  });
+  const observations = [];
+  try {
+    await poll(
+      () =>
+        webview.evaluate(`(() => {
+      const row=[...document.querySelectorAll('.task-list-item')].find(node=>node.dataset.taskId===${JSON.stringify(taskId)});
+      if(!row) return false;
+      if(row.getAttribute('aria-current')!=='page') {row.click();return false;}
+      return document.querySelectorAll('.additional-input[data-state="transferred"]').length===2;
+    })()`),
+      commandTimeoutMs,
+      "transferred inputs in the real reading surface",
+    );
+    const inputCopies = await webview.evaluate(`(() => {
+      const source=[...document.querySelectorAll('.additional-input[data-state="transferred"] .task-input-copy')];
+      const copies=[...document.querySelectorAll('.ai-message[data-role="user"] .task-input-copy')];
+      const target=document.querySelector('[data-run-id="${targetRunId}"]');
+      return {counts:source.map(message=>copies.filter(copy=>copy.textContent.includes(message.textContent)).length),targetInput:!!target.querySelector(':scope > .ai-message[data-role="user"]'),targetMetadata:!!target.querySelector(':scope > .input-copy-actions')};
+    })()`);
+    assert.deepEqual(inputCopies, {
+      counts: [1, 1],
+      targetInput: false,
+      targetMetadata: false,
+    });
+    const focus = await webview.evaluate(`(() => {
+      const button=document.querySelector('.additional-input-target');
+      if(!button) throw new Error('Missing transfer destination action');
+      button.click();
+      return document.activeElement?.closest('[data-run-id]')?.dataset.runId;
+    })()`);
+    assert.equal(focus, targetRunId);
+    for (const [name, width, theme] of [
+      ["continuation-desktop-light", 1320, "light"],
+      ["continuation-desktop-dark", 1320, "dark"],
+      ["continuation-narrow-light", 390, "light"],
+      ["continuation-narrow-dark", 390, "dark"],
+    ]) {
+      await resizeActiveInputVisualWindow(width, 812);
+      await webview.send("Emulation.setEmulatedMedia", {
+        features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+      });
+      await webview.evaluate(
+        `document.documentElement.dataset.theme=${JSON.stringify(theme)}`,
+      );
+      const geometry = await poll(
+        () =>
+          webview.evaluate(`(() => {
+        if(innerWidth>${width} || innerWidth<${width}-32) return false;
+        const messages=[...document.querySelectorAll('.additional-input')];
+        const buttons=[...document.querySelectorAll('.additional-input-target')];
+        if(messages.length!==2 || buttons.length!==2) return false;
+        if(document.querySelector('.additional-input-restore')) throw new Error('Transferred input still offers a replay action');
+        for(const button of buttons) {
+          const r=button.getBoundingClientRect();
+          if(r.height<43 || r.left<0 || r.right>innerWidth) throw new Error('Transfer action outside viewport or too small');
+          if(parseFloat(getComputedStyle(button).fontSize)>13 || getComputedStyle(button).borderTopWidth==='0px') throw new Error('Transfer action has lost its compact button appearance');
+        }
+        if(document.documentElement.scrollWidth>innerWidth) throw new Error('Continuation horizontal overflow');
+        if(!document.querySelector('[data-run-id="${targetRunId}"]')) throw new Error('Transfer target is not a real exchange');
+        messages[0].scrollIntoView({block:'start'});
+        return {width:innerWidth,theme:document.documentElement.dataset.theme,states:messages.map(node=>node.dataset.state),targets:buttons.length,errors:window.__activeInputUiErrors??0};
+      })()`),
+        commandTimeoutMs,
+        `${name} transfer geometry`,
+      );
+      assert.equal(geometry.errors, 0);
+      observations.push({ name, ...geometry });
+      if (visualCaptureDir) {
+        await mkdir(visualCaptureDir, { recursive: true });
+        const png = await webview.send("Page.captureScreenshot", {
+          format: "png",
+          captureBeyondViewport: false,
+        });
+        await writeFile(
+          path.join(visualCaptureDir, `${name}.png`),
+          Buffer.from(png.data, "base64"),
+        );
+      }
+    }
+    if (visualCaptureDir)
+      await writeFile(
+        path.join(visualCaptureDir, "continuation-dom.json"),
+        JSON.stringify({ taskId, targetRunId, focus, observations }, null, 2),
+      );
+  } finally {
+    await resizeActiveInputVisualWindow(1320, 812);
+    await webview
+      .evaluate("delete document.documentElement.dataset.theme")
+      .catch(() => {});
+    await webview
+      .send("Emulation.setEmulatedMedia", { features: [] })
+      .catch(() => {});
     webview.close();
   }
 }
