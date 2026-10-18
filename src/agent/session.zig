@@ -79,6 +79,10 @@ pub const TerminalFailure = session_control.TerminalFailure;
 pub const SessionDisposition = session_control.SessionDisposition;
 pub const DurableBudgetObservation = session_control.DurableBudgetObservation;
 pub const TerminalResult = session_control.TerminalResult;
+pub const InputCounts = session_control.InputCounts;
+pub const InputObservation = session_control.InputObservation;
+pub const InputRejection = session_control.InputRejection;
+pub const InputSubmission = session_control.InputSubmission;
 pub const CompactOutcome = session_control.CompactOutcome;
 pub const CompactTerminalResult = session_control.CompactTerminalResult;
 pub const TerminationRequestResult = session_control.TerminationRequestResult;
@@ -484,12 +488,14 @@ pub const SessionSnapshot = struct {
     active_run_id: u64,
     active_compact_id: u64,
     pending_ui_request_id: ?u64,
+    input: InputObservation = .{},
 };
 
 pub const PendingUiRequest = struct {
     session_id: u64,
     run_id: u64,
     request_id: u64,
+    input_adopted_count: u32 = 0,
     json: []u8,
     allocator: std.mem.Allocator,
 
@@ -609,6 +615,11 @@ pub const Session = struct {
     run_started: bool = false,
     core_call_in_progress: bool = false,
     abort_calls_in_progress: usize = 0,
+    input_calls_in_progress: usize = 0,
+    input_ready: bool = false,
+    input_window_started: bool = false,
+    submitted_inputs: session_control.SubmittedInputs = .{},
+    input_counts: ?InputCounts = null,
     run_done: bool = true,
     run_input: ?OwnedRunInput = null,
     terminal_diagnostic: ?[]u8 = null,
@@ -630,6 +641,7 @@ pub const Session = struct {
     active_callback_refs: usize = 0,
     ui_active: bool = false,
     ui_request_id: u64 = 0,
+    ui_input_adopted_count: u32 = 0,
     ui_answered: bool = false,
     ui_request_json: ?[]u8 = null,
     ui_request_value: ?*const sdk.UiRequest = null,
@@ -703,6 +715,11 @@ pub const Session = struct {
         std.debug.assert(!self.run_started);
         std.debug.assert(!self.core_call_in_progress);
         std.debug.assert(self.abort_calls_in_progress == 0);
+        std.debug.assert(self.input_calls_in_progress == 0);
+        self.input_ready = false;
+        self.input_window_started = false;
+        self.submitted_inputs = .{};
+        self.input_counts = null;
         self.next_run_id += 1;
         self.next_run_generation += 1;
         const run_id = self.next_run_id;
@@ -1300,6 +1317,99 @@ pub const Session = struct {
         if (should_abort) self.abortRun(run_id, .{ .callback_failure = .ui });
     }
 
+    fn inputObservationLocked(self: *const Session) InputObservation {
+        return .{
+            .ready = self.input_ready and self.core_call_in_progress and !self.run_done and
+                !self.cancel_requested and !self.dependency_contract_failure and
+                (self.state == .running or self.state == .waiting_ui),
+            .accepted = self.submitted_inputs.accepted,
+            .adopted = self.submitted_inputs.adopted,
+            .submitting = self.input_calls_in_progress != 0,
+        };
+    }
+
+    pub fn controlledInputObservation(self: *Session, run_id: u64, generation: u64) InputObservation {
+        self.lock();
+        defer self.unlock();
+        if (run_id != self.active_run_id or generation != self.active_run_generation) return .{};
+        return self.inputObservationLocked();
+    }
+
+    pub fn submitControlledInput(self: *Session, run_id: u64, generation: u64, input_id: u64, text: []const u8) InputSubmission {
+        self.lock();
+        if (run_id != self.active_run_id or generation != self.active_run_generation) {
+            self.unlock();
+            return .{ .rejected = .stale_run };
+        }
+        if (self.cancel_requested or self.state == .closing) {
+            self.unlock();
+            return .{ .rejected = .stopping };
+        }
+        if (!self.inputObservationLocked().ready) {
+            self.unlock();
+            return .{ .rejected = if (self.run_done) .too_late else .not_ready };
+        }
+        if (self.run_input == null or self.run_input.? == .skill) {
+            self.unlock();
+            return .{ .rejected = .unsupported_input };
+        }
+        if (text.len > self.agent_runtime.max_prompt_bytes or
+            std.mem.trim(u8, text, " \t\r\n").len == 0 or !std.unicode.utf8ValidateSlice(text))
+        {
+            self.unlock();
+            return .{ .rejected = .invalid_input };
+        }
+        const slot = self.submitted_inputs.register(input_id) catch |err| {
+            self.unlock();
+            return .{ .rejected = if (err == error.ResourceLimit) .resource_limit else .invalid_input };
+        };
+        self.input_calls_in_progress += 1;
+        self.unlock();
+
+        var receipt = std.mem.zeroes(wire.InputReceiptV1);
+        var diagnostic = emptyOwnedBytes();
+        const raw_status = self.agent_runtime.api.session().submitInput(
+            self.raw,
+            run_id,
+            input_id,
+            sdk.bytesView(text),
+            &receipt,
+            &diagnostic,
+        );
+        const valid_diagnostic = sdk.borrowedBytes(.{ .ptr = diagnostic.ptr, .len = diagnostic.len }) catch null;
+        const diagnostic_valid = if (valid_diagnostic) |bytes| std.unicode.utf8ValidateSlice(bytes) else false;
+        releaseOwned(self.agent_runtime.api, &diagnostic);
+        const status = sdk.Status.fromCode(raw_status) catch null;
+
+        self.lock();
+        var outcome: InputSubmission = .unknown;
+        if (diagnostic_valid) if (status) |known| {
+            if (known == .ok) {
+                if (receipt.struct_size == @sizeOf(wire.InputReceiptV1) and allZero(&receipt.reserved) and
+                    self.submitted_inputs.receipt(slot, receipt.sequence)) outcome = .{ .accepted = receipt.sequence };
+            } else {
+                const rejection: ?InputRejection = switch (known) {
+                    .invalid_argument => .invalid_input,
+                    .resource_limit => .resource_limit,
+                    .checkpoint_budget_required => .checkpoint_budget_required,
+                    .stale_run => .stale_run,
+                    .too_late => .too_late,
+                    .invalid_state => .unavailable,
+                    else => null,
+                };
+                if (rejection) |reason| if (self.submitted_inputs.refuse(slot)) {
+                    outcome = .{ .rejected = reason };
+                };
+            }
+        };
+        if (outcome == .unknown) self.dependency_contract_failure = true;
+        self.input_calls_in_progress -= 1;
+        self.broadcast();
+        self.unlock();
+        if (outcome == .unknown) _ = self.requestControlledTermination(run_id, generation, .{ .callback_failure = .event });
+        return outcome;
+    }
+
     pub fn requestControlledTermination(
         self: *Session,
         run_id: u64,
@@ -1416,6 +1526,7 @@ pub const Session = struct {
     pub const PendingUiObservation = struct {
         run_id: u64,
         request_id: u64,
+        input_adopted_count: u32 = 0,
     };
 
     /// Bounded execution observation that exposes neither Session lifecycle nor
@@ -1424,7 +1535,7 @@ pub const Session = struct {
         self.lock();
         defer self.unlock();
         if (!self.ui_active) return null;
-        return .{ .run_id = self.active_run_id, .request_id = self.ui_request_id };
+        return .{ .run_id = self.active_run_id, .request_id = self.ui_request_id, .input_adopted_count = self.ui_input_adopted_count };
     }
 
     pub fn copyPendingUiRequest(
@@ -1439,6 +1550,7 @@ pub const Session = struct {
             .session_id = self.id,
             .run_id = self.active_run_id,
             .request_id = self.ui_request_id,
+            .input_adopted_count = self.ui_input_adopted_count,
             .json = try allocator.dupe(u8, json),
             .allocator = allocator,
         };
@@ -1474,6 +1586,7 @@ pub const Session = struct {
             .active_run_id = self.active_run_id,
             .active_compact_id = self.active_compact_id,
             .pending_ui_request_id = if (self.ui_active) self.ui_request_id else null,
+            .input = self.inputObservationLocked(),
         };
     }
 
@@ -1809,6 +1922,8 @@ pub const Session = struct {
 
         self.lock();
         self.core_call_in_progress = false;
+        self.input_ready = false;
+        while (self.input_calls_in_progress != 0) self.wait();
         if (self.active_callback_refs != 0) {
             self.failCoreIdentityLocked();
             while (self.active_callback_refs != 0) self.wait();
@@ -1826,9 +1941,8 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         } else if (typed_status) |known_status| {
-            // Active-Run input is not submitted by this Host. Revision 24
-            // reports these counts on every return, including failed Runs.
-            if (result.input_accepted_count != 0 or result.input_adopted_count != 0) {
+            // Counts are defined on every known status, including failed Runs.
+            if (!self.submitted_inputs.reconcile(result.input_accepted_count, result.input_adopted_count)) {
                 self.dependency_contract_failure = true;
                 failure = .dependency_contract;
                 self.state = .poisoned;
@@ -1895,6 +2009,8 @@ pub const Session = struct {
         if (self.dependency_contract_failure) {
             failure = .dependency_contract;
             self.state = .poisoned;
+        } else {
+            self.input_counts = .{ .accepted = result.input_accepted_count, .adopted = result.input_adopted_count };
         }
         self.run_started = false;
         self.run_done = true;
@@ -2102,6 +2218,7 @@ pub const Session = struct {
                 failure,
             .session_disposition_at_completion = self.dispositionLocked(),
             .durable_budget = durable_budget,
+            .input_counts = if (self.dependency_contract_failure) null else self.input_counts,
         };
     }
 
@@ -2171,6 +2288,34 @@ pub const Session = struct {
                 parsed.deinit();
                 return wire.EVENT_CONTINUE;
             },
+        }
+        self.lock();
+        var input_event_valid = true;
+        switch (parsed.value.known) {
+            .run_state => |state| {
+                if (state.run_id != run_id) {
+                    input_event_valid = false;
+                } else switch (state.phase) {
+                    .starting => {
+                        if (self.input_window_started or state.transition_seq != 1) {
+                            input_event_valid = false;
+                        } else {
+                            self.input_window_started = true;
+                            self.input_ready = self.run_input != null and self.run_input.? != .skill;
+                        }
+                    },
+                    .finalizing, .completed, .failed, .aborted, .poisoned => self.input_ready = false,
+                    else => {},
+                }
+            },
+            .input_adopted => |input| input_event_valid = self.submitted_inputs.adopt(input.input_id, input.sequence, input.turn),
+            else => {},
+        }
+        if (!input_event_valid) self.failCoreIdentityLocked();
+        self.unlock();
+        if (!input_event_valid) {
+            parsed.deinit();
+            return wire.EVENT_FATAL;
         }
         const is_file_changes = switch (parsed.value) {
             .unknown => false,
@@ -2302,6 +2447,7 @@ pub const Session = struct {
             return wire.UI_FATAL;
         }
         self.ui_request_id += 1;
+        self.ui_input_adopted_count = self.submitted_inputs.adopted;
         self.ui_active = true;
         self.ui_answered = false;
         std.debug.assert(self.ui_request_json == null);

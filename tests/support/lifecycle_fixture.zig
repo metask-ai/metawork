@@ -201,6 +201,8 @@ pub const FakePromptProfile = struct {
 };
 
 pub const FakeSession = struct {
+    input_accepted: u32 = 0,
+    input_adopted: u32 = 0,
     prompt_profile: FakePromptProfile = .{},
     in_use: bool = false,
     running: bool = false,
@@ -253,6 +255,12 @@ pub const CatalogSourceObservation = struct {
 };
 
 pub const FakeCore = struct {
+    input_enabled: bool = false,
+    adopt_input_before_receipt: bool = false,
+    omit_input_adopted_event: bool = false,
+    forced_input_status: ?u32 = null,
+    forced_input_run_status: ?u32 = null,
+    input_signal: ?*CallbackSignal = null,
     mutex: std.Io.Mutex = .init,
     catalog_condition: std.Io.Condition = .init,
     checkpoint_condition: std.Io.Condition = .init,
@@ -1999,10 +2007,22 @@ pub fn sessionRunInput(
     }
     session.running = true;
     session.run_id = run_id;
+    session.input_accepted = 0;
+    session.input_adopted = 0;
     const plan = session.plan;
     const permission_generation = session.policy_generation;
     session.broadcast();
     session.unlock();
+
+    if (fake_core.input_enabled) {
+        var buffer: [256]u8 = undefined;
+        const json = std.fmt.bufPrint(
+            &buffer,
+            "{{\"run_state\":{{\"run_id\":{d},\"transition_seq\":1,\"phase\":\"starting\",\"turn\":0,\"tool_calls\":0,\"in_flight_tools\":[]}}}}",
+            .{run_id},
+        ) catch unreachable;
+        if (!emitInputEvent(session, handle, run_id, json)) return wire.STATUS_CALLBACK_FAILED;
+    }
 
     if (plan == .ui_callback_outlives_run) {
         fake_core.lock();
@@ -2318,10 +2338,13 @@ pub fn sessionRunInput(
             else => wire.RUN_CHECKPOINT_NONE,
         };
         if (plan == .invalid_result_flags) result.result_flags = 1 << 31;
+        result.input_accepted_count = session.input_accepted;
+        result.input_adopted_count = session.input_adopted;
         if (plan == .unexpected_input_receipt or plan == .unexpected_input_receipt_failure)
             result.input_accepted_count = 1;
     }
     if (plan == .unexpected_input_receipt_failure) return wire.STATUS_RESOURCE_LIMIT;
+    if (fake_core.forced_input_run_status) |status| return status;
     return wire.STATUS_OK;
 }
 
@@ -2425,11 +2448,47 @@ const fake_session_api = wire.SessionApiV1{
     .destroy = sessionDestroy,
     .run_input = sessionRunInput,
     .abort = sessionAbort,
-    .submit_input = sessionSubmitInputUnavailable,
+    .submit_input = sessionSubmitInput,
 };
 
-fn sessionSubmitInputUnavailable(_: ?*wire.SessionHandle, _: u64, _: ?*const wire.SubmittedInputV1, _: ?*wire.InputReceiptV1, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
-    @panic("MetaWork must not submit active-Run input");
+fn sessionSubmitInput(handle: ?*wire.SessionHandle, run_id: u64, input: ?*const wire.SubmittedInputV1, receipt: ?*wire.InputReceiptV1, diagnostic_out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    if (diagnostic_out) |out| out.* = .{ .ptr = null, .len = 0 };
+    if (fake_core.forced_input_status) |status| return status;
+    const session: *FakeSession = @ptrCast(@alignCast(handle.?));
+    session.lock();
+    if (!session.running or session.run_id != run_id or session.abort_requested) {
+        session.unlock();
+        return wire.STATUS_TOO_LATE;
+    }
+    session.input_accepted += 1;
+    const sequence = session.input_accepted;
+    const adopt = fake_core.adopt_input_before_receipt;
+    if (adopt) session.input_adopted = sequence;
+    session.unlock();
+    if (fake_core.input_signal) |signal| {
+        _ = CallbackSignal.notify(signal);
+        signal.waitUntilFinished();
+    }
+    if (adopt and !fake_core.omit_input_adopted_event) {
+        var buffer: [192]u8 = undefined;
+        const json = std.fmt.bufPrint(&buffer, "{{\"input_adopted\":{{\"input_id\":{d},\"sequence\":{d},\"turn\":2}}}}", .{ input.?.input_id, sequence }) catch unreachable;
+        if (!emitInputEvent(session, handle, run_id, json)) return wire.STATUS_CALLBACK_FAILED;
+    }
+    receipt.?.* = .{ .struct_size = @sizeOf(wire.InputReceiptV1), .sequence = sequence, .reserved = @splat(0) };
+    return wire.STATUS_OK;
+}
+
+fn emitInputEvent(session: *FakeSession, handle: ?*wire.SessionHandle, run_id: u64, json: []const u8) bool {
+    const callback = session.callbacks.on_event orelse return false;
+    const context: wire.RunContextV1 = .{
+        .struct_size = @sizeOf(wire.RunContextV1),
+        .reserved0 = 0,
+        .session = handle,
+        .run_id = run_id,
+        .session_id = sdk.bytesView(session.session_id[0..session.session_id_len]),
+        .reserved = @splat(0),
+    };
+    return callback(session.callbacks.ctx, &context, sdk.bytesView(json)) == wire.EVENT_CONTINUE;
 }
 
 fn unopenedSessionJson(_: ?*wire.SessionHandle, _: ?*wire.OwnedBytesV1, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {

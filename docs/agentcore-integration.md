@@ -93,7 +93,7 @@ unknown observation 继续走官方 unknown 分支并被忽略，不由 MetaWork
 | `UiRequest` JSON  | Core → Host | 同步 callback 请求；与同次 callback 的 `RunContext` 绑定                                                                             |
 | `UiResponse` JSON | Host → Core | 同一 callback 内 answered response；或 unavailable/fatal                                                                             |
 | ABI status        | Core → Host | function 调用层错误，独立于有效 Run 结果                                                                                             |
-| `RunResult`       | Core → Host | status OK 时完整有效；checkpoint budget pre-admission status 只定义 budget 字段                                                      |
+| `RunResult`       | Core → Host | status OK 时完整有效；两个 input counts 在所有已定义返回状态有效；checkpoint budget pre-admission status 另定义 budget 字段                                                      |
 | abort             | Host → Core | 按 Session/Run 的 user/timeout 中断机制                                                                                              |
 | manual compact    | 双向        | Host 分配严格递增 operation ID；Core 返回 typed compact result                                                                       |
 | compact abort     | Host → Core | 只按 active compact operation ID 请求取消，不等待 provider I/O response                                                              |
@@ -101,7 +101,7 @@ unknown observation 继续走官方 unknown 分支并被忽略，不由 MetaWork
 | Skill catalog     | 双向借用    | Runtime query 返回 opaque lease；Session create/idle update 同步借用并保留 Host 引用，最后一个引用释放时才调用 Core release |
 | Skill policy      | Host → Core | fresh create 与 idle update 提交完整 replacement；冷恢复为 null；同进程恢复使用原 pinned catalog 与精确默认拒绝 grant 集合，可按当前 ceiling 收缩 |
 
-MetaWork 不调用 `UiBackend.poll()`，也不借此注入当前 Run 输入。运行中排队由 Product Task 保管，绑定 Run 完成并收尾后才按普通准入创建后续 Run；不是 AgentCore Session 输入队列或 steering capability。停止沿已有 abort 路径处理。
+MetaWork 不调用 `UiBackend.poll()` 注入输入。Agent 对已开始的普通 Run 提供 typed `RunControlLease.submitInput`；generation、输入窗口与提交调用登记由同一 Session lock 校验，SDK 在锁外调用。只有 validated Core starting observation 才开放输入；关闭窗口与登记同锁，Run 收尾须等待已登记提交、callback 和 abort 静止后才能进行 checkpoint 或下一次 Core 操作。lease 只保证对象存活，不代替调用静止屏障。输入关联只保存有界 identity、receipt 与采纳事实，不保存稍后投递的文本。Product 的输入交互及后续 Run 准入由 Product 合同定义，Agent 不调度后续 Run；停止沿已有 abort 路径。
 
 当前 ABI `RunResult` 不包含 `SuspendInfo`、resume token 或 background handle，但包含 checkpoint outcome、durable usage、required checkpoint bytes 与两个 budget stop。unknown status、stop reason、checkpoint outcome、result flag 或不一致组合在 Host validation 层 fail closed；Host 不能制造这些产品状态。
 
@@ -278,9 +278,9 @@ Core 将日期写入本轮用户记录的 `currentDate` system-reminder，系统
 
 ### 每 Session 规则
 
-- 至多一个 in-flight operation；Run、manual compact、model/Skill/permission mutation 与 destroy 互斥；
+- 至多一个 in-flight operation；Run、manual compact、model/Skill/permission mutation 与 destroy 互斥；匹配 Run 的 abort 与文本 submitInput 是受调用静止屏障约束的并发控制调用；
 - Permission rule update 不得改变 Task-owned PermissionProfile；Task 创建后只允许 same-profile Run 与 restore；
-- Session 已有 in-flight operation 时拒绝第二个 Run；Product 的待发送输入不是 Run，不在当前同步调用期间再次调用 `session_run_input`；
+- Session 已有 in-flight operation 时拒绝第二个 Run；追加文本只用匹配当前 Run 的 submitInput，不在当前同步调用期间再次调用 `session_run_input`；
 - run ID 单调且与 Session 绑定；
 - fresh/restore Session 可以分别接收 Product 提供的 Run、compact 与 UI request allocation floor；新 Run/compact id 必须严格大于各自 Product operation history 高水位，新 UI request id 必须严格大于 durable UI history 高水位，这些 floor 都不改变 checkpoint restore expectation；
 - executor queued Run 的有界输入与身份由 Agent 先准备，实际同步 `session_run_input` 在 worker 执行时才进入 Core；不得把 Core BUSY 解释为会话内排队能力；

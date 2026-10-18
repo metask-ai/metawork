@@ -64,7 +64,7 @@ schema 1 manifest 还必须包含精确的 `shared_library = { path, entry_point
 
 每个 required table、entry 与 reserved field 都必须通过官方 discovery 和 SDK validation。ABI 中存在 entry 只证明 Host 必须能正确理解该表面，不代表 MetaWork 产品已经开放对应能力。
 
-MetaWork 不调用 Goal、Team 或 active-Run input submission。Runtime 的 `enable_teams` 为零，Session create/restore 的 `team` 为 null，不建立 Goal continuation Run；运行中排队发送继续由 Product 持有并在既有完成边界接纳。`input_adopted` 和 `goal_updated` 虽由官方 SDK 解码，当前 Agent 消费边界仍明确拒绝；所有 Run 返回的 `input_accepted_count / input_adopted_count` 必须为零，非零属于 dependency contract failure，不能静默取得 Conversation 覆盖事实。
+MetaWork 不调用 Goal 或 Team：Runtime 的 `enable_teams` 为零，Session create/restore 的 `team` 为 null，不建立 Goal continuation Run，`goal_updated` 继续在 Agent 消费边界拒绝。Agent 的当前 Run 文本提交只通过官方 `SessionApi.submitInput`，使用 generation-bound `RunControlLease`。`input_adopted` 必须匹配该 Run 已登记的 input identity、严格递增 sequence 与非零 turn；事件可早于提交回执，不得据未收到事件推断未采纳。所有已定义 Run 返回状态的 `input_accepted_count / input_adopted_count` 均须对账，已采纳必须为已接受的前缀；无可信终态计数时不制造未采纳结论。产品是否开放入口及发送行为由产品合同决定，不从 ABI entry 存在推导。
 
 MetaWork 对全部 Run 显式设置 `TIME_CONTEXT_SYSTEM`，`utc_offset_minutes` 为零，Host `context_blocks` 为 null、count 为零。AgentCore 在普通文本与多模态 Run 开始时生成官方 `currentDate` block，使用 Core 进程的系统时区；Skill Run 按官方语义不增加日期 block。MetaWork 不采样、格式化、补写或建立另一条日期注入路径；恢复历史中的旧日期上下文交由 Core 原样消费。
 
@@ -101,13 +101,15 @@ Host 必须遵守官方 SDK 为 config、slice、handle、owned result 和 callb
 
 Permission request 与 response 必须保持 SDK typed identity：request 的 session/run identity 与同次 `RunContext` 精确一致；response 回显 request ID 与 policy generation；Session-scoped choice 仅在 candidate 存在时使用并回显 exact candidate rule ID；stale、duplicate、错误类型或错误 Session/Run response 必须拒绝。`permission_provenance` 是 control event，不能作为 unknown observation 丢弃。
 
+`submitInput` 仅在 OK 时读取并验证完整 receipt；定义的拒绝 status 为 `invalid_argument | resource_limit | checkpoint_budget_required | stale_run | too_late | invalid_state`，拒绝不改变、取消或污染当前 Run。其他 status、未知值、无效 diagnostic 或不一致 receipt 为合同失败，不得伪装拒绝或重试。输入文本只借用到调用返回。Core 接受不保证本轮采纳；已经发送的 Provider request 不变，也不撤销动作。
+
 ## 5. Status、result 与 operation disposition
 
 Host 必须先校验 function `Status`，再按该 operation 的合法 status set 决定结果内存是否可读：
 
 - `STATUS_OK`：完整校验对应 result 的 struct size、reserved、enum、flag 与跨字段一致性；
-- `STATUS_CHECKPOINT_BUDGET_REQUIRED` 用于 Run 时：Run 未 admission，只读取合同允许的 `struct_size`、`checkpoint_outcome_code`、`result_flags`、`durable_usage_bytes` 与 `required_checkpoint_bytes`，且 outcome 必须为 budget-required；
-- 其他非 OK status：除该 status 明示的 partial result 外，不读取 result 字段，只读取并释放 diagnostic；
+- `STATUS_CHECKPOINT_BUDGET_REQUIRED` 用于 Run 时：Run 未 admission，只读取合同允许的 `struct_size`、`checkpoint_outcome_code`、`result_flags`、`durable_usage_bytes`、`required_checkpoint_bytes` 与两个 input counts，且 outcome 必须为 budget-required；
+- 其他非 OK status：除该 status 明示的 partial result 外，不读取 result 字段，只读取并释放 diagnostic；两个 Run input counts 在所有已定义返回状态上均须验证；
 - unknown status、属于其他 operation 的 known status、unknown enum/flag 或跨字段矛盾都属于 dependency contract failure。
 
 Run、manual compact、Session Skill mutation、Permission mode mutation、checkpoint export、Session describe 与 checkpoint restore 必须分别维护 operation-specific disposition；不能从“SDK 认识某个 status”推断所有 entry 都接受它，也不能用全局 allowlist 代替。

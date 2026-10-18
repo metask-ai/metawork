@@ -28,6 +28,117 @@ const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
 
+test "active input correlates adoption before receipt and never changes the Run" {
+    const Mode = struct { adopt: bool, omit_event: bool = false, fail_run: bool = false };
+    for ([_]Mode{ .{ .adopt = false }, .{ .adopt = true }, .{ .adopt = true, .omit_event = true }, .{ .adopt = true, .fail_run = true } }) |mode| {
+        fake_core.reset();
+        fake_core.input_enabled = true;
+        fake_core.adopt_input_before_receipt = mode.adopt;
+        fake_core.omit_input_adopted_event = mode.omit_event;
+        if (mode.fail_run) fake_core.forced_input_run_status = wire.STATUS_RESOURCE_LIMIT;
+        fake_core.setNextPlan(.controlled);
+        const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+        defer {
+            shutdownTestComposition(runtime) catch unreachable;
+            deinitTestComposition(runtime);
+        }
+        const session = try openSession(runtime);
+        const run_id = try submitSession(session, "original");
+        fake_core.waitRunEntered();
+        const handle = lifecycle.RunControl{ .block = session.control_block, .run_id = run_id, .generation = session.active_run_generation };
+        var lease = handle.tryAcquireLease().?;
+        defer lease.deinit();
+        // The fake announces run entry before the starting callback is delivered.
+        while (!lease.inputObservation().ready) std.Thread.yield() catch {};
+        try std.testing.expectEqual(lifecycle.InputSubmission{ .accepted = 1 }, lease.submitInput(77, "new constraint"));
+        try std.testing.expectEqual(lifecycle.InputSubmission{ .rejected = .invalid_input }, lease.submitInput(77, "duplicate"));
+        try std.testing.expectEqual(!mode.adopt or mode.omit_event, lease.inputObservation().blocksAutomaticAllow());
+        fake_core.forced_input_status = wire.STATUS_RESOURCE_LIMIT;
+        try std.testing.expectEqual(lifecycle.InputSubmission{ .rejected = .resource_limit }, lease.submitInput(78, "refused"));
+        fake_core.forced_input_status = null;
+        fake_core.releaseControlled();
+        try session.waitRun(run_id);
+        var terminal = takeTestTerminal(session, run_id);
+        defer terminal.deinit();
+        try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, if (mode.fail_run) .abi_status else null), terminal.failure);
+        try std.testing.expectEqual(@as(u32, 1), terminal.input_counts.?.accepted);
+        try std.testing.expectEqual(@as(u32, @intFromBool(mode.adopt)), terminal.input_counts.?.adopted);
+        try std.testing.expectEqual(lifecycle.InputSubmission{ .rejected = .too_late }, lease.submitInput(79, "late"));
+        try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+    }
+}
+
+test "active input rejects a lease before Core startup without retaining the message" {
+    fake_core.reset();
+    const runtime = try createTestRuntime(.{ .max_sessions = 1 });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    const id = try session.prepareRun(.{ .text = "root" });
+    var run = try session.beginRun(id);
+    var lease = run.control().tryAcquireLease().?;
+    try std.testing.expectEqual(lifecycle.InputSubmission{ .rejected = .not_ready }, lease.submitInput(1, "early"));
+    lease.deinit();
+    var terminal = run.execute();
+    terminal.deinit();
+    run.deinit();
+}
+
+test "active input call must return before Run completion is published" {
+    fake_core.reset();
+    fake_core.input_enabled = true;
+    var signal: CallbackSignal = .{};
+    signal.arm();
+    fake_core.input_signal = &signal;
+    fake_core.setNextPlan(.controlled);
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 1, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    const session = try openSession(runtime);
+    const id = try submitSession(session, "root");
+    fake_core.waitRunEntered();
+    const handle = lifecycle.RunControl{ .block = session.control_block, .run_id = id, .generation = session.active_run_generation };
+    var lease = handle.tryAcquireLease().?;
+    defer lease.deinit();
+    while (!lease.inputObservation().ready) std.Thread.yield() catch {};
+    const Submission = struct {
+        lease: *const lifecycle.RunControlLease,
+        result: lifecycle.InputSubmission = .unknown,
+        fn run(self: *@This()) void {
+            self.result = self.lease.submitInput(1, "still in SDK");
+        }
+    };
+    var submission: Submission = .{ .lease = &lease };
+    const thread = try std.Thread.spawn(.{}, Submission.run, .{&submission});
+    signal.waitUntilEntered();
+    fake_core.releaseControlled();
+    // Observe the worker after it has closed input admission, not after a sleep.
+    while (true) {
+        session.lock();
+        const running = session.core_call_in_progress;
+        const done = session.run_done;
+        session.unlock();
+        try std.testing.expect(!done);
+        if (!running) break;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(lease.inputObservation().submitting);
+    try std.testing.expect(!lease.inputObservation().ready);
+    signal.markFinished();
+    thread.join();
+    try std.testing.expectEqual(lifecycle.InputSubmission{ .accepted = 1 }, submission.result);
+    try session.waitRun(id);
+    var terminal = takeTestTerminal(session, id);
+    defer terminal.deinit();
+    try std.testing.expect(terminal.failure == null);
+    try std.testing.expectEqual(@as(u32, 1), terminal.input_counts.?.accepted);
+    try std.testing.expectEqual(@as(u32, 0), terminal.input_counts.?.adopted);
+}
+
 test "recovery capacity observation counts only an owned route scheduled for release" {
     fake_core.reset();
     const runtime = try createTestRuntime(.{ .max_sessions = 1 });

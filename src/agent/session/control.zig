@@ -70,6 +70,112 @@ pub const DurableBudgetObservation = struct {
     required_checkpoint_bytes: u64,
 };
 
+pub const InputCounts = struct {
+    accepted: u32,
+    adopted: u32,
+};
+
+pub const InputObservation = struct {
+    ready: bool = false,
+    accepted: u32 = 0,
+    adopted: u32 = 0,
+    submitting: bool = false,
+
+    pub fn blocksAutomaticAllow(self: InputObservation) bool {
+        return self.submitting or self.accepted > self.adopted;
+    }
+};
+
+pub const InputRejection = enum {
+    stale_run,
+    not_ready,
+    stopping,
+    unsupported_input,
+    invalid_input,
+    resource_limit,
+    checkpoint_budget_required,
+    too_late,
+    unavailable,
+};
+
+pub const InputSubmission = union(enum) {
+    accepted: u32,
+    rejected: InputRejection,
+    /// A dependency contract failure cannot be reported as a refusal.
+    unknown,
+};
+
+/// Correlation facts only. No text is retained or scheduled by this ledger.
+/// All access is protected by the owning Session mutex.
+pub const SubmittedInputs = struct {
+    const Entry = struct {
+        id: u64,
+        sequence: ?u32 = null,
+        accepted: bool = false,
+    };
+    entries: [sdk.types.MAX_SUBMITTED_INPUTS_V1]?Entry = @splat(null),
+    accepted: u32 = 0,
+    adopted: u32 = 0,
+
+    pub fn register(self: *SubmittedInputs, id: u64) error{ InvalidInput, ResourceLimit }!usize {
+        if (id == 0) return error.InvalidInput;
+        for (self.entries) |entry| if (entry) |e| {
+            if (e.id == id) return error.InvalidInput;
+        };
+        for (&self.entries, 0..) |*entry, i| if (entry.* == null) {
+            entry.* = .{ .id = id };
+            return i;
+        };
+        return error.ResourceLimit;
+    }
+
+    pub fn receipt(self: *SubmittedInputs, slot: usize, sequence: u32) bool {
+        const entry = &self.entries[slot].?;
+        if (sequence == 0 or sequence > self.entries.len or entry.accepted) return false;
+        if (entry.sequence) |observed| if (observed != sequence) return false;
+        for (self.entries, 0..) |other, i| if (other) |e| {
+            if (i != slot and e.sequence == sequence) return false;
+        };
+        entry.sequence = sequence;
+        entry.accepted = true;
+        self.accepted += 1;
+        return true;
+    }
+
+    pub fn refuse(self: *SubmittedInputs, slot: usize) bool {
+        if (self.entries[slot].?.sequence != null) return false;
+        self.entries[slot] = null;
+        return true;
+    }
+
+    pub fn adopt(self: *SubmittedInputs, id: u64, sequence: u32, turn: u32) bool {
+        if (turn == 0 or sequence != self.adopted + 1) return false;
+        for (&self.entries) |*entry| if (entry.*) |*e| {
+            if (e.id != id) continue;
+            if (e.sequence) |receipt_sequence| if (receipt_sequence != sequence) return false;
+            for (self.entries) |other| if (other) |o| {
+                if (o.id != id and o.sequence == sequence) return false;
+            };
+            e.sequence = sequence;
+            self.adopted = sequence;
+            return true;
+        };
+        return false;
+    }
+
+    pub fn reconcile(self: *const SubmittedInputs, accepted: u32, adopted: u32) bool {
+        if (accepted != self.accepted or adopted > accepted or adopted < self.adopted) return false;
+        for (1..@as(usize, accepted) + 1) |sequence| {
+            var found = false;
+            for (self.entries) |entry| if (entry) |e| {
+                if (e.accepted and e.sequence == @as(u32, @intCast(sequence))) found = true;
+            };
+            if (!found) return false;
+        }
+        return true;
+    }
+};
+
 /// Immutable Agent-owned facts for exactly one begun Run. The caller must copy
 /// the bounded diagnostic into its admission-reserved Run record, then deinit
 /// this value. `session_disposition_at_completion` is a completion-time
@@ -92,6 +198,7 @@ pub const TerminalResult = struct {
     failure: ?TerminalFailure,
     session_disposition_at_completion: SessionDisposition,
     durable_budget: ?DurableBudgetObservation = null,
+    input_counts: ?InputCounts = null,
 
     pub fn diagnostic(self: *const TerminalResult) []const u8 {
         return self.diagnostic_storage[0..self.diagnostic_len];
