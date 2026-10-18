@@ -659,6 +659,24 @@ export const enUS = {
   "input.locate_target": "View next Run",
   "input.continuation_wait":
     "Finishing cleanup before processing submitted messages; edit your draft or stop",
+  "input.continuation.failed":
+    "The next Run could not start. Put the messages back in the editor to send them again.",
+  "input.continuation.busy":
+    "Another operation blocked continuation; the next Run did not start.",
+  "input.continuation.execution":
+    "The execution setup is unavailable for continuation; the next Run did not start.",
+  "input.continuation.workspace":
+    "The working directory is unavailable for continuation; the next Run did not start.",
+  "input.continuation.capability":
+    "A required capability or catalog is unavailable; the next Run did not start.",
+  "input.continuation.input":
+    "The continuation input did not pass validation; the next Run did not start.",
+  "input.continuation.capacity":
+    "There is not enough capacity for continuation; the next Run did not start.",
+  "input.continuation.shutting_down":
+    "The app is shutting down; the next Run did not start.",
+  "input.continuation.unavailable":
+    "The task is not eligible for continuation; the next Run did not start.",
   "mutation.reason.continuation_cancelled": "Further processing was cancelled.",
   "mutation.reason.combined_input_too_large":
     "The combined messages exceed the input limit. Send them separately.",

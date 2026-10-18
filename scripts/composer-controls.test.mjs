@@ -2392,6 +2392,60 @@ test("unadopted and uncertain history can only be put back in the editor", async
   ]);
 });
 
+test("continuation rejection explains the next Run without claiming a preserved draft or active task", async () => {
+  const { AdditionalInput } = await vite.ssrLoadModule(
+    "/src/features/tasks/AdditionalInput.tsx",
+  );
+  for (const locale of ["en-US", "zh-CN"]) {
+    for (const reason of ["admission_failed", "task_busy"]) {
+      const view = render(
+        createElement(
+          I18nContext.Provider,
+          {
+            value: {
+              locale,
+              setLocale() {},
+              t: (id, values) => translate(locale, id, values),
+            },
+          },
+          createElement(AdditionalInput, {
+            input: {
+              id: "1",
+              operationId: "continuation-rejected",
+              text: "safe preview",
+              afterOutputCount: 0,
+              redacted: false,
+              sequence: 1,
+              adoptedTurn: null,
+              order: null,
+              state: "unadopted",
+              transferredToRunId: null,
+              continuationReason: reason,
+            },
+            onRestore() {},
+            onLocate() {},
+          }),
+        ),
+      );
+      const message = translate(
+        locale,
+        reason === "admission_failed"
+          ? "input.continuation.failed"
+          : "input.continuation.busy",
+      );
+      assert.ok(view.container.textContent.includes(message));
+      assert.doesNotMatch(
+        view.container.textContent,
+        /草稿已保留|该任务正在执行中|draft.*preserved|task is already running/i,
+      );
+      assert.ok(
+        view.getByRole("button", { name: translate(locale, "input.restore") }),
+      );
+      view.unmount();
+    }
+  }
+});
+
 test("a saved Workspace can be selected directly without opening the folder picker", async () => {
   const selected = [];
   let pickers = 0;

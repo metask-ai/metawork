@@ -1,13 +1,47 @@
 import type {
   AdditionalInputView,
   RunInputView,
+  SendInputReason,
 } from "../../bridge/contracts.ts";
 import { useId } from "react";
 import { Message } from "../../components/ai/Message.tsx";
 import { CopyButton } from "../../components/ui/CopyButton.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { useI18n } from "../../i18n/context.ts";
+import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { copyRunInput } from "./response-copy.ts";
+
+const continuationReasonMessages = {
+  binding_changed: "input.continuation.execution",
+  binding_unavailable: "input.continuation.execution",
+  task_unavailable: "input.continuation.unavailable",
+  task_busy: "input.continuation.busy",
+  workspace_unavailable: "input.continuation.workspace",
+  workspace_changed: "input.continuation.workspace",
+  workspace_removing: "input.continuation.workspace",
+  catalog_loading: "input.continuation.capability",
+  catalog_unavailable: "input.continuation.capability",
+  stale_catalog: "input.continuation.capability",
+  skill_not_found: "input.continuation.capability",
+  skill_unavailable: "input.continuation.capability",
+  invalid_skill_arguments: "input.continuation.input",
+  missing_instruction: "input.continuation.input",
+  unsupported_input: "input.continuation.input",
+  unsupported_attachment: "input.continuation.input",
+  capacity_reached: "input.continuation.capacity",
+  shutting_down: "input.continuation.shutting_down",
+  run_changed: "input.continuation.unavailable",
+  run_not_ready: "input.continuation.unavailable",
+  run_stopping: "input.continuation.unavailable",
+  too_late: "input.continuation.unavailable",
+  invalid_input: "input.continuation.input",
+  resource_limit: "input.continuation.capacity",
+  checkpoint_budget_required: "input.continuation.capacity",
+  admission_failed: "input.continuation.failed",
+  continuation_cancelled: "mutation.reason.continuation_cancelled",
+  combined_input_too_large: "mutation.reason.combined_input_too_large",
+  checkpoint_failed: "mutation.reason.checkpoint_failed",
+  schedule_failed: "mutation.reason.schedule_failed",
+} as const satisfies Record<SendInputReason, MessageId>;
 
 export function AdditionalInput({
   input,
@@ -70,7 +104,7 @@ export function AdditionalInput({
         </div>
         {input.continuationReason && (
           <p className="projection-note">
-            {t(`mutation.reason.${input.continuationReason}`)}
+            {t(continuationReasonMessages[input.continuationReason])}
           </p>
         )}
         {input.state === "adopted" && input.order === null && (
