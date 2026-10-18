@@ -9631,7 +9631,7 @@ fn cancelTaskCheckpoints(task: *TestTask) void {
     }
 }
 
-test "approval checkpoint restores before the first Run and rejects a future approval anchor" {
+test "approval checkpoint restores before the first Run independently of the Task model and rejects a future approval anchor" {
     var source = try testRuntime();
     defer source.deinit();
     var scratch = try source.buildTaskStateWire();
@@ -9654,23 +9654,35 @@ test "approval checkpoint restores before the first Run and rejects a future app
     const storage = try std.testing.allocator.alloc(u8, 1024 * 1024);
     defer std.testing.allocator.free(storage);
     var history = TestTaskPersistence{ .storage = storage };
-    for ([_]u64{ 2, 3 }) |anchor_revision| {
-        tasks[0].checkpoint.?.anchor.terminal.id = anchor_revision;
+    // A later Task model selection may be installed before the next Run
+    // checkpoint. The approval checkpoint keeps its own model expectation.
+    const Case = struct { anchor_revision: u64, checkpoint_model: []const u8 };
+    for ([_]Case{
+        .{ .anchor_revision = 2, .checkpoint_model = first.binding.model },
+        .{ .anchor_revision = 2, .checkpoint_model = "model-before-selection" },
+        .{ .anchor_revision = 3, .checkpoint_model = first.binding.model },
+    }) |case| {
+        tasks[0].checkpoint.?.anchor.terminal.id = case.anchor_revision;
+        tasks[0].checkpoint.?.session.model = case.checkpoint_model;
         var output: [128 * 1024]u8 = undefined;
         const bytes = try task_persistence.encode(&output, state, source.taskPersistenceLimits());
         var restored = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{
             .task_persistence = history.capability(bytes),
         });
         defer restored.deinit();
-        if (anchor_revision == 2) {
+        if (case.anchor_revision == 2) {
             const task = restored.task_runtime.find(3) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(restored.task_persistence_health != .degraded);
             try std.testing.expectEqual(@as(u64, 2), task.durable.approval_revision);
             try std.testing.expectEqual(.full_access, task.durable.permission_profile);
             try std.testing.expectEqual(@as(u64, 0), task.durable.next_run_generation);
+            try std.testing.expectEqualStrings(first.binding.model, task.durable.execution_model);
             const record = task.durable.checkpoint orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(u64, 0), record.session.last_run_id);
             try std.testing.expectEqual(@as(u64, 2), record.anchor.terminal.approval);
+            try std.testing.expectEqualStrings(case.checkpoint_model, record.session.model);
             try std.testing.expectEqualStrings("session-before-first-run", record.session.logical_session_id);
+            try std.testing.expect(task_test_policy.checkpointMatchesCurrentHistory(task, record));
         } else {
             try std.testing.expect(restored.task_runtime.find(3) == null);
             try std.testing.expectEqual(.degraded, restored.task_persistence_health);

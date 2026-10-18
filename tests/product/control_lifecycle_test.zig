@@ -1853,6 +1853,34 @@ fn configureTaskRebindTarget(workbench: *product_control.Runtime) !models_contra
     return probe;
 }
 
+/// Adds another ready model to the rebind target connection created above.
+fn configureTaskRebindModel(workbench: *product_control.Runtime, model_id: []const u8) !models_contract.CustomModelTestCommand {
+    const current = workbench.modelsView().custom_providers[0];
+    const present = for (current.models) |model| {
+        if (std.mem.eql(u8, model.id, model_id)) break true;
+    } else false;
+    if (!present) try std.testing.expect(workbench.submitCustomProviderCommand(.{ .add_custom_model = .{
+        .source_id = TaskModelsVault.slot,
+        .expected_provider_revision = current.provider_revision,
+        .expected_catalog_generation = current.catalog_generation,
+        .model = .{ .id = model_id },
+    } }).accepted);
+    const configured = workbench.modelsView().custom_providers[0];
+    const probe: models_contract.CustomModelTestCommand = .{
+        .model = .{ .source_id = TaskModelsVault.slot, .model_id = model_id },
+        .expected_provider_revision = configured.provider_revision,
+        .expected_source_generation = configured.source_generation,
+        .expected_catalog_generation = configured.catalog_generation,
+    };
+    var preparation = switch (workbench.beginCustomProviderProbe(probe)) {
+        .ready => |value| value,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    preparation.deinit();
+    try std.testing.expect(workbench.completeCustomModelTest(probe, true).accepted);
+    return probe;
+}
+
 test "Task source settings stay pinned until an explicit same-model selection installs new authority" {
     for ([_]bool{ false, true }) |replace_credential| {
         fake_core.reset();
@@ -2469,6 +2497,150 @@ test "detached Task restores its committed target across restart without a globa
         try std.testing.expectEqual(@as(u64, if (has_history) 2 else 1), run_id);
         try std.testing.expect(restored.modelsView().default_selection == null);
     };
+}
+
+test "rebind approval checkpoint survives a crash after the next same-connection model Run is admitted" {
+    fake_core.reset();
+    fake_core.setCheckpointGeneration(1);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer store.deinit();
+    const storage = try std.testing.allocator.alloc(u8, product_task.history.max_store_bytes);
+    defer std.testing.allocator.free(storage);
+    var persistence = TaskPersistenceProbe{ .storage = storage };
+    var configuration = productControlConfiguration();
+    configuration.directories.canonical_user_home = home;
+    configuration.task_persistence = persistence.capability();
+    configuration.checkpoint_store = .{ .file_store = &store };
+    const limits: product_control.Limits = .{ .worker_count = 1, .queue_capacity = 2, .max_workspaces = 1, .max_tasks = 1, .max_runs_per_task = 3, .max_tools_per_run = 1 };
+    const runtime = try createTestComposition(.{ .worker_count = 1, .queue_capacity = 2, .max_sessions = 1 });
+    defer {
+        shutdownTestComposition(runtime) catch unreachable;
+        deinitTestComposition(runtime);
+    }
+    var vault: TaskModelsVault = .{};
+    defer TaskModelsVault.delete(&vault, TaskModelsVault.slot) catch unreachable;
+    var first = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+    var first_live = true;
+    defer if (first_live) {
+        fake_core.releaseControlled();
+        first.stopCustomProviders();
+        first.deinit();
+    };
+    try first.startCustomProviders(home, vault.port());
+    try installControlExecution(&first);
+    installTwoModelCatalog(&first);
+    const target = try configureTaskRebindTarget(&first);
+    const next = try configureTaskRebindModel(&first, "next-model");
+    var input = productControlTaskInput();
+    input.workspace_root = home;
+    input.trust = .explicitly_trusted;
+    input.approval_mode = .manual;
+    const id = try first.createTask(input);
+    const task = first.task_runtime.find(id).?;
+    const workspace_id = task.durable.workspace_id;
+    _ = try first.runTask(id, .{ .text = "original context survives the crash" });
+    try waitCheckpointRecord(&first, &persistence);
+    for (0..2000) |_| {
+        first.syncLifecycle();
+        if (!task.runtime.worker_leases.hasLive() and task.runtime.active_operation == .none) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+
+    // Switching connection exports an approval-anchored target checkpoint.
+    var ready = first.modelsView().custom_providers[0];
+    _ = try first.selectTaskModel(id, .{
+        .expected_selection_revision = task.durable.model_intent.?.revision,
+        .target = target.model,
+        .expected_source_generation = ready.source_generation,
+        .expected_catalog_generation = ready.catalog_generation,
+    });
+    fake_core.setRestoredLogicalId(task.durable.checkpoint.?.session.logical_session_id);
+    fake_core.lock();
+    fake_core.restore_last_run_id = 1;
+    fake_core.unlock();
+    const old_epoch = task.durable.binding_epoch;
+    _ = try first.restoreTaskConversation(id, old_epoch);
+    for (0..5000) |_| {
+        try first.drainAgentEvents();
+        first.syncLifecycle();
+        if (task.runtime.restore_job == null and !task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    if (task.runtime.last_restore_failure) |failure| std.debug.print("rebind failed: {s}\n", .{@tagName(failure)});
+    try std.testing.expect(task.runtime.hasAttachedSession());
+    try std.testing.expectEqual(old_epoch + 1, task.durable.binding_epoch);
+    try std.testing.expectEqualStrings("other-model", task.durable.execution_model);
+    try std.testing.expect(task.durable.checkpoint.?.anchor.terminal == .approval);
+    try std.testing.expectEqualStrings("other-model", task.durable.checkpoint.?.session.model);
+
+    // A same-connection selection is installed by Run admission, which
+    // persists the new Task model before that Run can export a checkpoint.
+    ready = first.modelsView().custom_providers[0];
+    _ = try first.selectTaskModel(id, .{
+        .expected_selection_revision = task.durable.model_intent.?.revision,
+        .target = next.model,
+        .expected_source_generation = ready.source_generation,
+        .expected_catalog_generation = ready.catalog_generation,
+    });
+    fake_core.setSessionPlan(.controlled);
+    fake_core.rearmControlled();
+    try std.testing.expectEqual(@as(u64, 2), try first.runTask(id, .{ .text = "interrupted by a crash" }));
+    try waitControlSnapshot(&first, "\"currentRunPhase\":\"running\"");
+    try std.testing.expectEqualStrings("next-model", task.durable.execution_model);
+    try std.testing.expect(task.durable.checkpoint.?.anchor.terminal == .approval);
+    try std.testing.expectEqualStrings("other-model", task.durable.checkpoint.?.session.model);
+    // Restart from the admission commit, as after a crash during the Run.
+    const history = try std.testing.allocator.dupe(u8, storage[0..persistence.len]);
+    defer std.testing.allocator.free(history);
+    try std.testing.expect(std.mem.indexOf(u8, history, "\"kind\":\"approval\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history, "interrupted by a crash") != null);
+    fake_core.releaseControlled();
+    first.shutdownExecutor();
+    first.stopCustomProviders();
+    first.deinit();
+    first_live = false;
+
+    configuration.task_persistence = persistence.capabilityRestored(history);
+    var restored = try product_control.Runtime.init(std.testing.allocator, std.testing.io, runtime, limits, configuration);
+    defer restored.deinit();
+    try std.testing.expect(restored.task_persistence_health != .degraded);
+    try std.testing.expect(restored.task_runtime.findConst(id) != null);
+    try restored.startCustomProviders(home, vault.port());
+    defer restored.stopCustomProviders();
+    _ = try configureTaskRebindTarget(&restored);
+    _ = try configureTaskRebindModel(&restored, "next-model");
+    try std.testing.expectEqual(workspace_id, try restored.openWorkspace(input));
+    const recovered = restored.task_runtime.findConst(id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.detached, std.meta.activeTag(recovered.runtime.attachment));
+    try std.testing.expectEqualStrings("next-model", recovered.durable.execution_model);
+    const checkpoint = recovered.durable.checkpoint.?;
+    try std.testing.expect(checkpoint.anchor.terminal == .approval);
+    try std.testing.expectEqualStrings("other-model", checkpoint.session.model);
+    try std.testing.expectEqual(task_state.ConversationCoverage.excluded, recovered.durable.runs[1].?.coverage);
+
+    // Core restores the recorded model before Product installs the Task model.
+    fake_core.setRestoredLogicalId(checkpoint.session.logical_session_id);
+    fake_core.setRestoredModel("other-model");
+    fake_core.lock();
+    fake_core.restore_last_run_id = 1;
+    fake_core.unlock();
+    _ = try restored.restoreTaskConversation(id, recovered.durable.binding_epoch);
+    for (0..5000) |_| {
+        try restored.drainAgentEvents();
+        restored.syncLifecycle();
+        if (recovered.runtime.restore_job == null and !recovered.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    if (recovered.runtime.last_restore_failure) |failure| std.debug.print("crash recovery failed: {s}\n", .{@tagName(failure)});
+    try std.testing.expect(recovered.runtime.hasAttachedSession());
+    try std.testing.expectEqualStrings("next-model", recovered.durable.execution_model);
+    try std.testing.expectEqualStrings("next-model", recovered.durable.checkpoint.?.session.model);
+    try std.testing.expectEqualStrings("next-model", recovered.runtime.executionConst().?.model);
+    try std.testing.expectEqual(@as(u64, 3), try restored.runTask(id, .{ .text = "continue after the crash" }));
 }
 
 fn waitCatalogReady(

@@ -575,8 +575,9 @@ pub fn checkpointMatchesCurrentHistory(
                     task_state.productTerminalFacts(run) != null
             else
                 false,
-        .approval => |revision| revision <= task.durable.approval_revision and
-            std.mem.eql(u8, record.session.model, task.durable.execution_model),
+        // Like a compact anchor, an approval anchor is not tied to the
+        // mutable Task model. Restore verifies the recorded model in Core.
+        .approval => |revision| revision <= task.durable.approval_revision,
         .compact => |id| id == record.session.last_compact_id and
             if (task_state.findCompact(task.durable.compacts, id)) |compact|
                 compact.coverage == .covered and
@@ -928,6 +929,61 @@ test "checkpoint matches covered frontier and permits only excluded Product tail
 
     task.durable.runs[1].?.coverage = .excluded;
     task.durable.runs[0].?.coverage = .excluded;
+    try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
+}
+
+test "approval checkpoint survives a later Task model change but keeps revision and frontier exact" {
+    var runs = [_]?task_state.RunRecord{
+        terminalRun(1, .covered),
+        terminalRun(2, .excluded),
+    };
+    runs[1].?.execution_model = @constCast("next-model");
+    var compacts: [0]?task_state.CompactRecord = .{};
+    var ui_history: [0]?task_state.UiRecord = .{};
+    var task = task_state.Task{
+        .durable = .{
+            .id = 3,
+            .recent_order = 1,
+            .execution_generation = 1,
+            .execution_protocol = .anthropic_messages,
+            .execution_model = @constCast("next-model"),
+            .permission_profile = .approval_required,
+            .permission_interaction = .interactive,
+            .approval_revision = 2,
+            .workspace_id = 2,
+            .workspace_root = @constCast("root"),
+            .title = @constCast("title"),
+            .runs = &runs,
+            .compacts = &compacts,
+            .ui_history = &ui_history,
+        },
+        .runtime = .{},
+    };
+    // A rebind or approval export anchors this checkpoint to `model`; the
+    // interrupted next Run was admitted with a newly selected model.
+    var record: checkpoint_record.Record = .{
+        .blob = .{
+            .task_id = 3,
+            .generation = 1,
+            .digest = [_]u8{0x5a} ** 32,
+            .byte_size = 1,
+        },
+        .session = .{
+            .logical_session_id = @constCast("logical-session"),
+            .last_run_id = 1,
+            .last_compact_id = 0,
+            .model = @constCast("model"),
+        },
+        .anchor = .{ .terminal = .{ .approval = 2 }, .binding_epoch = 1 },
+    };
+    try std.testing.expect(checkpointMatchesCurrentHistory(&task, record));
+
+    record.anchor.terminal = .{ .approval = 3 };
+    try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
+    record.anchor.terminal = .{ .approval = 2 };
+    task.durable.runs[1].?.coverage = .covered;
+    try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
+    task.durable.runs[1].?.coverage = .pending;
     try std.testing.expect(!checkpointMatchesCurrentHistory(&task, record));
 }
 

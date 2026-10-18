@@ -1380,8 +1380,10 @@ pub fn restoreTask(
                     break :blk persistedTerminalCompactPhase(compact.phase);
                 break :blk false;
             },
-            .approval => |revision| revision <= wire.approval_revision and
-                std.mem.eql(u8, value.session.model, wire.binding.model),
+            // An approval checkpoint owns its model fact. The Task model may
+            // change before the next Run checkpoint; restore uses this record
+            // as the Core expectation and then sets the Task model.
+            .approval => |revision| revision <= wire.approval_revision,
         };
         if (!terminal_found) return error.TaskStoreCorrupt;
     }
