@@ -282,7 +282,7 @@ export function taskDraftVersion(taskId: string): string {
   try {
     composerSessionStorage()?.setItem(`${versionPrefix}${taskId}`, version);
   } catch {
-    /* Queue journaling validates its own write. */
+    /* Keep the current in-memory version. */
   }
   return version;
 }

@@ -577,7 +577,6 @@ export const zhCN: Record<MessageId, string> = {
     "当前执行配置无法承载此会话，请切换到支持该任务模型的账号或连接",
   "run.placeholder_history_read_only":
     "此任务含当前版本无法识别的内容，只能查看；请使用更新的 MetaWork 继续",
-  "run.draft_only": "已在本地保存为草稿。当前工作结束后即可发送。",
   "input.hint": "补充内容提交本轮，等待后续步骤采纳。",
   "input.stopping": "本轮正在停止，草稿会保留。",
   "input.skill_run": "技能运行不支持插话，草稿会保留。",

@@ -854,13 +854,13 @@ export default function App() {
   }, [client, completionAcknowledgement?.key]);
   const workbenchMutationDisabled = bridgeUnavailable;
   const currentTaskScope = activeTask ? `task:${activeTask.id}` : "new-task";
-  const taskMutationDisabled =
-    workbenchMutationDisabled ||
+  const taskMutationPending =
     currentTaskScope in taskPending ||
     Boolean(
       activeTask &&
       (activeTask.approvalChange || approvalRequests[activeTask.id]),
     );
+  const taskMutationDisabled = workbenchMutationDisabled || taskMutationPending;
   const refreshSnapshot = useCallback(() => {
     const current = connection.current;
     return current
@@ -3175,7 +3175,7 @@ export default function App() {
         slashCommands={slashCommands}
         composeDisabled={
           !taskCanCompose ||
-          (taskMutationDisabled && taskPending[currentTaskScope] !== "run")
+          (taskMutationPending && taskPending[currentTaskScope] !== "run")
         }
         attachmentActionsDisabled={
           taskMutationDisabled || pendingTaskSelection.current !== null

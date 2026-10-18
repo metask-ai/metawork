@@ -3330,6 +3330,49 @@ test("App explains that an active Skill Run does not support additional text mes
   );
 });
 
+test("App keeps the current Run draft editable through a transient snapshot failure without submitting on recovery", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  const editor = fixture.textarea;
+  fireEvent.change(editor, {
+    target: { value: "unsent before transport loss" },
+  });
+  editor.focus();
+  const { BridgeClient } = await vite.ssrLoadModule("/src/bridge/client.ts");
+  let reads = 0;
+  let releaseRead;
+  const recovered = new Promise((resolve) => {
+    releaseRead = resolve;
+  });
+  ctx.mock.method(BridgeClient.prototype, "fetchSnapshot", async () => {
+    if (++reads === 1) throw new Error("snapshot temporarily unavailable");
+    await recovered;
+    return structuredClone(fixture.snapshot);
+  });
+  try {
+    await fixture.publish();
+    await waitFor(() =>
+      assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true),
+    );
+    assert.equal(editor.disabled, false);
+    assert.equal(document.activeElement, editor);
+    fireEvent.change(editor, { target: { value: "newer unsent constraint" } });
+    fireEvent.keyDown(editor, { key: "Enter" });
+    assert.equal(fixture.inputs.length, 0);
+    await act(async () => releaseRead());
+    await waitFor(() =>
+      assert.equal(
+        screen.getByRole("button", { name: "Send" }).disabled,
+        false,
+      ),
+    );
+    assert.equal(editor.value, "newer unsent constraint");
+    assert.equal(document.activeElement, editor);
+    assert.equal(fixture.inputs.length, 0);
+  } finally {
+    releaseRead();
+  }
+});
+
 test("App uncertain current-Run submission keeps the draft, unlocks Send and never replays on completion", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { active: true });
   fireEvent.change(fixture.textarea, {

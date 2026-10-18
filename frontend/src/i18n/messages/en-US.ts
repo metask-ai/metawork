@@ -634,8 +634,6 @@ export const enUS = {
     "The current execution cannot run this conversation. Switch to an account or connection that supports the task model",
   "run.placeholder_history_read_only":
     "This task has content this version can't read. You can view it; use a newer MetaWork to continue",
-  "run.draft_only":
-    "Saved locally as a draft. You can send it after the current work finishes.",
   "input.hint":
     "Additional messages target this run and await adoption at a later step.",
   "input.stopping": "This run is stopping. Your draft is preserved.",
