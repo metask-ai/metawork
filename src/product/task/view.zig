@@ -527,7 +527,7 @@ fn writeRun(
         try text_projection.writeJson(writer, record.operationId());
         writer.writeAll(",\"text\":") catch return error.SnapshotTooLarge;
         try text_projection.writeJson(writer, record.text);
-        writer.print(",\"redacted\":{},\"state\":\"{s}\",\"sequence\":", .{ record.redacted, @tagName(record.state) }) catch return error.SnapshotTooLarge;
+        writer.print(",\"redacted\":{},\"afterOutputCount\":{d},\"state\":\"{s}\",\"sequence\":", .{ record.redacted, record.after_output_count, @tagName(record.state) }) catch return error.SnapshotTooLarge;
         if (record.sequence) |sequence| writer.print("{d}", .{sequence}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"adoptedTurn\":") catch return error.SnapshotTooLarge;
         if (record.adopted_turn) |turn| writer.print("{d}", .{turn}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
@@ -1019,8 +1019,7 @@ fn writeRunOutput(
     );
     writer.print(",\"redacted\":{},\"provisionalRedacted\":{}}}", .{
         run.assistant_redacted or output_redacted,
-        run.output_continued_redacted or run.output_segment_redacted or
-            provisional_redacted,
+        run.provisionalRedacted() or provisional_redacted,
     }) catch return error.SnapshotTooLarge;
 }
 

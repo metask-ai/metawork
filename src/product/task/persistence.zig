@@ -700,6 +700,7 @@ pub const RunWire = struct {
 
 pub const AdditionalInputWire = struct {
     id: u64,
+    after_output_count: u32,
     operation_id: []const u8,
     text: []const u8,
     redacted: bool,
@@ -1076,6 +1077,7 @@ fn projectRun(
     for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
         additional_inputs[additional_index] = .{
             .id = record.id,
+            .after_output_count = record.after_output_count,
             .operation_id = record.operationId(),
             .text = record.text,
             .redacted = record.redacted,
@@ -1604,6 +1606,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
         errdefer projection.release_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
         var message: task_state.AdditionalInput = .{
             .id = record.id,
+            .after_output_count = record.after_output_count,
             .operation_id_len = @intCast(record.operation_id.len),
             .text = try projection.copy(record.text, projection.limits.max_user_message_bytes),
             .redacted = record.redacted,
@@ -3019,6 +3022,10 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
         var previous_input_id: u64 = 0;
         var previous_sequence: u32 = 0;
         for (run.additional_inputs) |record| {
+            // A discarded provisional tail can leave an anchor beyond the
+            // surviving output. Bound by capacity, not current output length.
+            if (record.after_output_count > limits.max_commentary_segments_per_run + 1)
+                return error.Invalid;
             if (record.id <= previous_input_id or record.operation_id.len == 0 or record.operation_id.len > 64 or
                 !validText(record.text, limits.max_user_message_bytes, true) or
                 !oneOf(record.state, &.{ "pending", "adopted", "unadopted", "unknown" })) return error.Invalid;
@@ -4810,6 +4817,43 @@ test "permission review audit restores bounded reviewer reasons and rejects inva
         wire.answered_by = source;
         try std.testing.expectError(error.Invalid, validateReviewAudit(wire, task));
     }
+}
+
+test "input anchors require explicit history fields but may outlive discarded output" {
+    const json = "{\"id\":1,\"operation_id\":\"input-1\",\"text\":\"follow up\",\"redacted\":false,\"sequence\":1,\"adopted_turn\":null,\"order\":null,\"state\":\"unadopted\"}";
+    try std.testing.expectError(error.MissingField, std.json.parseFromSlice(AdditionalInputWire, std.testing.allocator, json, .{}));
+    var inputs = [_]AdditionalInputWire{.{
+        .id = 1,
+        .after_output_count = 2,
+        .operation_id = "input-1",
+        .text = "follow up",
+        .redacted = false,
+        .sequence = 1,
+        .adopted_turn = null,
+        .order = null,
+        .state = "unadopted",
+    }};
+    var runs = [_]RunWire{reviewTestRun()};
+    runs[0].additional_inputs = &inputs;
+    var task = reviewTestTask();
+    task.runs = &runs;
+    task.next_run_generation = 1;
+    // Only one final output survives; the second provisional slot was lost.
+    try validateTask(task, testLimits());
+    inputs[0].after_output_count = @intCast(testLimits().max_commentary_segments_per_run + 2);
+    try std.testing.expectError(error.Invalid, validateTask(task, testLimits()));
+
+    runs[0] = reviewTestRun();
+    const old_json = try std.json.Stringify.valueAlloc(std.testing.allocator, runs[0], .{});
+    defer std.testing.allocator.free(old_json);
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, old_json, .{});
+    defer value.deinit();
+    try std.testing.expect(value.value.object.swapRemove("additional_inputs"));
+    const previous = try std.json.Stringify.valueAlloc(std.testing.allocator, value.value, .{});
+    defer std.testing.allocator.free(previous);
+    var parsed = try std.json.parseFromSlice(RunWire, std.testing.allocator, previous, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.value.additional_inputs.len);
 }
 
 test "permission review absent fields preserve previous user history without delegation" {

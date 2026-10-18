@@ -9705,6 +9705,7 @@ test "active input targets one Run and unadopted history never launches another"
         fake_core.releaseControlled();
         try settleInputScenario(scenario);
         const history = &task.durable.runs[0].?.additional_inputs[0].?;
+        try std.testing.expectEqual(@as(u32, 0), history.after_output_count);
         try std.testing.expectEqual(if (adopt) task_state.AdditionalInputState.adopted else .unadopted, history.state);
         try std.testing.expectEqual(adopt, history.order != null);
         const late = try scenario.control.sendInput("input-late", scenario.task_id, epoch, .{ .run = id }, .{ .text = "do not launch again" });
@@ -9805,6 +9806,7 @@ test "active input persisted before adoption restores as unknown without executi
     try std.testing.expectEqual(.unknown, recovered.durable.runs[0].?.additional_inputs[0].?.state);
     try std.testing.expectEqualStrings("Keep this constraint in history only", recovered.durable.runs[0].?.additional_inputs[0].?.text);
     try std.testing.expectEqualStrings("persist-pending", recovered.durable.runs[0].?.additional_inputs[0].?.operationId());
+    try std.testing.expectEqual(@as(u32, 0), recovered.durable.runs[0].?.additional_inputs[0].?.after_output_count);
     const second = recovered.durable.runs[0].?.additional_inputs[1] orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(.unknown, second.state);
     try std.testing.expectEqualStrings("persist-pending-second", second.operationId());

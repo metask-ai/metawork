@@ -19453,7 +19453,7 @@ test "active input wire identity borrows stable Run memory until history encodin
     defer control.deinit();
     const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
     const operation_id = "stable-operation";
-    run.additional_inputs[0] = .{ .id = 1, .operation_id_len = operation_id.len, .text = try control.copyBounded("constraint", control.limits.max_user_message_bytes), .sequence = 1, .redacted = false };
+    run.additional_inputs[0] = .{ .id = 1, .after_output_count = 0, .operation_id_len = operation_id.len, .text = try control.copyBounded("constraint", control.limits.max_user_message_bytes), .sequence = 1, .redacted = false };
     @memcpy(run.additional_inputs[0].?.operation_id[0..operation_id.len], operation_id);
     try Runtime.reserveTaskRuntimeBytes(&control, task_test_state.additional_input_projection_bytes);
     var scratch = try control.buildTaskStateWireWithCheckpoint(null);

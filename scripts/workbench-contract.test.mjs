@@ -3206,6 +3206,11 @@ test("active input shared fixture preserves exact receipts and adoption history"
   );
   for (const change of [
     (input) => (input.state = "held"),
+    (input) => delete input.afterOutputCount,
+    (input) => (input.afterOutputCount = -1),
+    (input) => (input.afterOutputCount = 0.5),
+    (input) => (input.afterOutputCount = 258),
+    (input) => (input.afterOutputCount = null),
     (input) => (input.sequence = 0),
     (input) => (input.order = null),
     (input) => (input.adoptedTurn = 0),
@@ -3216,6 +3221,8 @@ test("active input shared fixture preserves exact receipts and adoption history"
     assert.throws(() => decodeWorkbenchSnapshot(bad));
   }
   const unknown = clone(snapshot);
+  // A discarded provisional slot may leave the anchor past current output.
+  unknown.tasks[0].runs[0].additionalInputs[0].afterOutputCount = 257;
   Object.assign(unknown.tasks[0].runs[0].additionalInputs[0], {
     state: "unknown",
     sequence: null,

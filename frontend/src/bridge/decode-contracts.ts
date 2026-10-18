@@ -6064,6 +6064,7 @@ function decodeAdditionalInputs(
   const records = arrayValue(value, path, (raw, p) => {
     const item = object(raw, p, [
       "id",
+      "afterOutputCount",
       "operationId",
       "text",
       "redacted",
@@ -6104,8 +6105,15 @@ function decodeAdditionalInputs(
         (state !== "adopted" || adoptedTurn > 4294967295))
     )
       fail(p, "invalid adoption anchor");
+    const afterOutputCount = nonNegativeNumber(
+      item.afterOutputCount,
+      `${p}.afterOutputCount`,
+    );
+    if (afterOutputCount > maxCommentarySegmentsPerRun + 1)
+      fail(`${p}.afterOutputCount`, "input anchor exceeds the output capacity");
     return {
       id,
+      afterOutputCount,
       operationId: inputOperationId(item.operationId, `${p}.operationId`),
       text: stringValue(item.text, `${p}.text`),
       redacted: booleanValue(item.redacted, `${p}.redacted`),

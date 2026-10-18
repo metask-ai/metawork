@@ -913,6 +913,7 @@ export type SendInputResult = {
 );
 export type AdditionalInputView = {
   id: string;
+  afterOutputCount: number;
   operationId: string;
   text: string;
   redacted: boolean;

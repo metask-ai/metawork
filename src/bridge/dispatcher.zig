@@ -7407,6 +7407,8 @@ test "active input dispatch preserves receipt after response encoding loss and s
     defer parsed.deinit();
     const receipt = parsed.value.object.get("tasks").?.array.items[0].object.get("sendInputResult").?.object;
     const expected = wire.value.object.get("submitted").?.object;
+    const input = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("additionalInputs").?.array.items[0].object;
+    try std.testing.expectEqual(wire.value.object.get("history").?.object.get("afterOutputCount").?.integer, input.get("afterOutputCount").?.integer);
     try std.testing.expectEqualStrings(expected.get("operationId").?.string, receipt.get("operationId").?.string);
     try std.testing.expectEqualStrings(expected.get("runId").?.string, receipt.get("runId").?.string);
     try std.testing.expectEqualStrings(expected.get("outcome").?.string, receipt.get("outcome").?.string);

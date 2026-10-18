@@ -415,13 +415,15 @@ pub const RunInputRecord = union(enum) {
 // Fixed message metadata is charged to the shared projection budget. Its
 // sixfold JSON allowance covers identities and adoption structure even when
 // redaction leaves the safe text empty.
-pub const additional_input_projection_bytes: usize = 128;
+pub const additional_input_projection_bytes: usize = 160;
 
 pub const AdditionalInputState = enum { pending, adopted, unadopted, unknown };
 
 /// Safe history only; never a source of execution or recovery input.
 pub const AdditionalInput = struct {
     id: u64,
+    /// Reading position at submission, independent of Core adoption order.
+    after_output_count: u32,
     operation_id: [64]u8 = @splat(0),
     operation_id_len: u8,
     text: []u8,
@@ -669,6 +671,19 @@ pub const RunRecord = struct {
     checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
     automatic_title: AutomaticTitle = .{},
+
+    pub fn provisionalRedacted(self: *const RunRecord) bool {
+        return self.output_continued_redacted or self.output_segment_redacted;
+    }
+
+    /// Counts canonical output slots, including empty classified slots and
+    /// redaction placeholders, but never a credential-sensitive held suffix.
+    pub fn outputPartCount(self: *const RunRecord) u32 {
+        const tail = self.assistant_output_kind != null or
+            self.output_continued.committed_len != 0 or
+            self.output_segment.committed_len != 0 or self.provisionalRedacted();
+        return @intCast(self.commentary_count + @intFromBool(tail));
+    }
 };
 
 pub const CompactRecord = struct {
@@ -1870,6 +1885,39 @@ test "compact projection withholds worker terminal until main-thread observation
     const observed = compactProjectionFacts(&compact);
     try std.testing.expectEqual(CompactPhase.compacted, observed.phase);
     try std.testing.expectEqual(@as(u64, 120), observed.terminal.?.before_context_tokens);
+}
+
+test "input reading anchors count safe output slots without exposing held suffixes" {
+    var ends = [_]u64{ 0, 0 };
+    var run: RunRecord = .{
+        .id = 1,
+        .generation = 1,
+        .execution_generation = 1,
+        .execution_protocol = .anthropic_messages,
+        .execution_model = "model",
+        .permission_profile = .approval_required,
+        .permission_interaction = .interactive,
+        .input = .{ .text = .{ .value = @constCast("prompt") } },
+        .commentary_ends = &ends,
+        .tools = &.{},
+        .terminal_diagnostic = @constCast(""),
+    };
+    defer run.output_segment.list.deinit(std.testing.allocator);
+    try run.output_segment.list.appendSlice(std.testing.allocator, "held credential prefix");
+    try std.testing.expectEqual(@as(u32, 0), run.outputPartCount());
+    run.commentary_count = 2; // Sanitized empty groups still own their slots.
+    try std.testing.expectEqual(@as(u32, 2), run.outputPartCount());
+    run.output_segment.committed_len = 4;
+    try std.testing.expectEqual(@as(u32, 3), run.outputPartCount());
+    run.output_segment.committed_len = 0;
+    run.output_segment_redacted = true;
+    try std.testing.expectEqual(@as(u32, 3), run.outputPartCount());
+    run.output_segment_redacted = false;
+    run.output_continued_redacted = true;
+    try std.testing.expectEqual(@as(u32, 3), run.outputPartCount());
+    run.output_continued_redacted = false;
+    run.assistant_output_kind = .partial; // Even an empty classified tail.
+    try std.testing.expectEqual(@as(u32, 3), run.outputPartCount());
 }
 
 test "event drain withholds terminal facts and assistant suffix until finalization" {

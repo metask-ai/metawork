@@ -675,7 +675,8 @@ comptime {
     if (std.meta.fields(wire.TaskWire).len != 23) @compileError("Review every history SQL field mapping after TaskWire changes");
     if (std.meta.fields(wire.ModelIntentWire).len != 3) @compileError("Review every history SQL field mapping after ModelIntentWire changes");
     if (std.meta.fields(wire.RunWire).len != 30) @compileError("Review every history SQL field mapping after RunWire changes");
-    if (std.meta.fields(wire.AdditionalInputWire).len != 8) @compileError("Review history input JSON mapping after AdditionalInputWire changes");
+    // batch.json/row.json preserve the full typed input, including its reading anchor.
+    if (std.meta.fields(wire.AdditionalInputWire).len != 9) @compileError("Review history input JSON mapping after AdditionalInputWire changes");
     if (std.meta.fields(wire.ToolWire).len != 14) @compileError("Review every history SQL field mapping after ToolWire changes");
     if (std.meta.fields(wire.FileChangeWire).len != 11) @compileError("Review every history SQL field mapping after FileChangeWire changes");
     if (std.meta.fields(wire.CompactWire).len != 11) @compileError("Review every history SQL field mapping after CompactWire changes");

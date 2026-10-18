@@ -2358,6 +2358,7 @@ test("unadopted and uncertain history can only be put back in the editor", async
       id: "1",
       operationId: "old",
       text: "safe preview",
+      afterOutputCount: 0,
       redacted: false,
       sequence: null,
       adoptedTurn: null,
