@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-18
+
+### Added
+
+- 既有 Task 现在可以在保留 Task、Conversation 与历史身份的前提下切换其已选 Provider 内的模型；模型选择独立于实际 Session 和历史 Run 持久化，并在后续 Run 前应用。
+- Run 进行期间可以直接提交文本插话；消息以普通用户气泡保留在提交时对应的输出位置，并显示等待采纳、已采纳、本轮未采纳或结果未知状态。
+- Run 正常完成并收尾后，已确认未采纳的输入会按提交顺序合并进入一个真实的后续 Run；消息只显示一次，并可从来源定位后续 Run。停止、失败、中断、结果未知、取消或重启不会触发接续，转入也不代表后续 Run 执行成功。Skill Run、Skill 草稿和附件草稿不支持插话。该机制取代 0.2.4 的下一轮排队输入。
+
+### Changed
+
+- 模型选择器按 Task 已选 Provider 限定候选项；Task 信息与历史 Run 分别显示目标模型和实际执行模型，并简化选择器标签和提示。
+- Task 模型重绑定与分离状态恢复使用已提交的模型来源，并按原有能力与当前授权的交集恢复 MCP、Skill 和权限；失效能力安全收缩，不回退到全局默认配置。
+- Agent 日期与时区上下文改由 AgentCore 生成，Host 不再维护平行的时间上下文实现。
+- AgentCore 升级至 `0.11.0-dev+68ac95c2d42b` / ABI revision 24，并刷新 Windows 与 macOS 的 x86_64/ARM64 bundles；Windows 正式目标由 GNU 切换为 MSVC。
+- Native SDK 升级至 `@zogien/native-sdk 0.11.0-fork.3`，Windows 最小化、最大化、还原和关闭操作改由 SDK 原生窗口控制 API 承担。
+
+### Fixed
+
+- 修复审批 checkpoint 错误依赖 Task 当前模型，以及模型切换和分离状态 Task 恢复中的模型意图映射问题。
+- 修复插话在历史投影中丢失身份标识、接续后的用户消息重复显示，以及接续取消范围和失败提示不准确的问题。
+- 修复传输恢复期间本地草稿无法继续编辑，以及活跃 Run 下 Skill 草稿的不可用原因提示不准确的问题。
+
 ## [0.2.4] - 2026-10-17
 
 ### Added
@@ -385,7 +407,8 @@
 - 定时任务：本地进程内 cron 调度；窗口关闭后继续运行；下次启动执行单次 missed-run reconciliation。
 - 界面：中英双语；统一的 Metask 设计语言字号阶梯与组件体系。
 
-[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.4...HEAD
+[unreleased]: https://github.com/metask-ai/metawork/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/metask-ai/metawork/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/metask-ai/metawork/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/metask-ai/metawork/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/metask-ai/metawork/compare/v0.2.1...v0.2.2
