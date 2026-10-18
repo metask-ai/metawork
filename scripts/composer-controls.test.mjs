@@ -3293,6 +3293,43 @@ test("App never waits for a current Run to become ready and never sends its reta
   await fixture.settle();
 });
 
+test("App explains that an active Skill Run does not support additional text messages", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, {
+    active: true,
+    inputReady: false,
+  });
+  fixture.task.runs[0].input = {
+    kind: "skill",
+    skillId: "review",
+    catalogRevision: "1",
+    invocationName: "review",
+    displayName: "Review",
+    argumentValues: [],
+    redacted: false,
+  };
+  await fixture.publish();
+  await waitFor(() =>
+    assert.ok(
+      screen.getByText(
+        "Skill runs do not support additional messages. Your draft is preserved.",
+      ),
+    ),
+  );
+  fireEvent.change(fixture.textarea, {
+    target: { value: "retain my constraint" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  assert.equal(fixture.inputs.length, 0);
+  assert.equal(fixture.textarea.value, "retain my constraint");
+  assert.equal(
+    screen.queryByText(
+      "This run is not accepting input. Your draft is preserved.",
+    ),
+    null,
+  );
+});
+
 test("App uncertain current-Run submission keeps the draft, unlocks Send and never replays on completion", async (ctx) => {
   const fixture = await renderSubmissionApp(ctx, { active: true });
   fireEvent.change(fixture.textarea, {

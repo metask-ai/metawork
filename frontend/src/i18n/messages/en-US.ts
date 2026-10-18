@@ -639,6 +639,8 @@ export const enUS = {
   "input.hint":
     "Additional messages target this run and await adoption at a later step.",
   "input.stopping": "This run is stopping. Your draft is preserved.",
+  "input.skill_run":
+    "Skill runs do not support additional messages. Your draft is preserved.",
   "input.text_only":
     "Only text can be added during a run. Your draft is preserved.",
   "input.not_ready":

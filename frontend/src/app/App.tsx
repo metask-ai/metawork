@@ -922,6 +922,12 @@ export default function App() {
     (composerDraft.kind !== "skill" || !skillCatalogBusy);
   const sendingToRun =
     !newTaskDraftActive && activeTask?.activeOperation?.kind === "run";
+  const skillRunInFlight =
+    sendingToRun &&
+    activeTask?.runs.some(
+      (run) =>
+        run.id === activeTask.activeOperation?.id && run.input.kind === "skill",
+    );
   const canSubmit =
     !pendingTaskSelection.current &&
     taskCanCompose &&
@@ -949,11 +955,13 @@ export default function App() {
     ? activeTask?.currentRunPhase === "stopping" ||
       Boolean(activeTask && activeTask.id in cancelPending)
       ? "input.stopping"
-      : composerDraft.kind !== "text"
-        ? "input.text_only"
-        : !activeTask?.inputReady
-          ? "input.not_ready"
-          : undefined
+      : skillRunInFlight
+        ? "input.skill_run"
+        : composerDraft.kind !== "text"
+          ? "input.text_only"
+          : !activeTask?.inputReady
+            ? "input.not_ready"
+            : undefined
     : undefined;
   const metaskProvider = snapshot.models.providers.find(
     (provider) => provider.id === "metask",

@@ -580,6 +580,7 @@ export const zhCN: Record<MessageId, string> = {
   "run.draft_only": "已在本地保存为草稿。当前工作结束后即可发送。",
   "input.hint": "补充内容提交本轮，等待后续步骤采纳。",
   "input.stopping": "本轮正在停止，草稿会保留。",
+  "input.skill_run": "技能运行不支持插话，草稿会保留。",
   "input.text_only": "运行中只能发送文本补充，草稿会保留。",
   "input.not_ready": "本轮尚未开放输入，草稿会保留。",
   "input.submitted": "消息已提交给本轮，是否采纳以本轮记录为准。",
