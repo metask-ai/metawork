@@ -107,7 +107,10 @@ import {
   submitTaskInstruction,
   type EnsureTaskContinuationResult,
 } from "../features/composer/submitTaskInstruction.ts";
-import { newTaskModelSelectionState } from "./new-task-model-selection.ts";
+import {
+  modelDisplayLabel,
+  newTaskModelSelectionState,
+} from "./new-task-model-selection.ts";
 import {
   composerDraftHasContent,
   composerDraftToRunInput,
@@ -1008,15 +1011,11 @@ export default function App() {
       (model) => model.id === snapshot.models.metaskSelection?.modelId,
     ),
   );
-  const taskIntentLabel =
-    taskModelOption?.displayName ??
-    taskIntent?.modelRef.modelId ??
-    activeTask?.binding.model ??
-    selectedModelLabel;
-  const taskModelLabel =
-    taskIntent && activeTask?.activeOperation !== null
-      ? t("task.model_pending", { model: taskIntentLabel })
-      : taskIntentLabel;
+  const taskModelLabel = taskIntent
+    ? modelDisplayLabel(snapshot.models, taskIntent.modelRef)
+    : activeTask
+      ? `${t("account.unknown_provider")} · ${activeTask.binding.model}`
+      : selectedModelLabel;
   const taskModelPolicy = taskModelSelectionPolicy(activeTask);
 
   // The Host result is already committed. A failed follow-up refresh is

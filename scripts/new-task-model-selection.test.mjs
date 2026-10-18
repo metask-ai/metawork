@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  modelDisplayLabel,
   modelOptionId,
   newTaskModelSelectionState,
 } from "../frontend/src/app/new-task-model-selection.ts";
@@ -146,9 +147,27 @@ test("a catalog change invalidates a draft model instead of silently falling bac
   assert.equal(state.editable, true);
   assert.equal(state.valid, false);
   assert.equal(state.intent, null);
+  assert.equal(state.selectedModelLabel, "Metask · removed-model");
   assert.equal(
     state.selectedModelId,
     modelOptionId({ sourceId: "metask", modelId: "removed-model" }),
+  );
+});
+
+test("model labels retain Provider identity when a catalog is unavailable or a source is removed", () => {
+  const models = metaskModels();
+  models.availability = "unavailable";
+  models.providers[0].catalogState = "failed";
+  assert.equal(
+    modelDisplayLabel(models, { sourceId: "metask", modelId: "model-2" }),
+    "Metask · Model two",
+  );
+  assert.equal(
+    modelDisplayLabel(models, {
+      sourceId: "removed-provider",
+      modelId: "same-model",
+    }),
+    "removed-provider · same-model",
   );
 });
 

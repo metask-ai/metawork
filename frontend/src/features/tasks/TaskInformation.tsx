@@ -14,6 +14,10 @@ export function TaskInformation({
   triggerRef?: Ref<HTMLButtonElement>;
 }) {
   const { t } = useI18n();
+  const activeRun = task.activeOperation?.kind === "run";
+  const executionRun = activeRun
+    ? task.runs.find((run) => run.id === task.activeOperation?.id)
+    : task.runs.at(-1);
   return (
     <Popover.Root>
       <Popover.Trigger
@@ -29,6 +33,18 @@ export function TaskInformation({
           <Popover.Popup className="task-information">
             <Popover.Title>{t("task.information")}</Popover.Title>
             <dl className="task-facts">
+              {executionRun && (
+                <div>
+                  <dt>
+                    {t(
+                      activeRun
+                        ? "task.current_run_model"
+                        : "task.last_run_model",
+                    )}
+                  </dt>
+                  <dd>{executionRun.execution.model}</dd>
+                </div>
+              )}
               <div>
                 <dt>{t("inspector.mcp_authority")}</dt>
                 <dd>

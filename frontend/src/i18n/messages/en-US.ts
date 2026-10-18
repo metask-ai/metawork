@@ -933,6 +933,8 @@ export const enUS = {
   "inspector.context_pressure_detail":
     "{current} tokens now · auto-compact at {compact} · limit {limit}",
   "task.information": "Task information",
+  "task.current_run_model": "Current run model",
+  "task.last_run_model": "Last run model",
   "task.information_scope":
     "MCP describes tool selection at task creation, not current connection status. Approval mode shows the current conversation setting.",
   "conversation.context_observed":
@@ -1023,6 +1025,7 @@ export const enUS = {
   "account.logout_short": "Sign out…",
   "account.api_fallback": "Metask API",
   "account.model_fallback": "Available model",
+  "account.unknown_provider": "Unknown provider",
   "settings.title": "Settings",
   "settings.back": "Back to workbench",
   "settings.intro":
@@ -1326,7 +1329,8 @@ export const enUS = {
     "This clears Metask credentials from this device. New Metask model use becomes unavailable; custom models, task records, workspace files, and existing task bindings are preserved.",
   "settings.task_binding_model":
     "This task keeps its pinned execution. The current default cannot safely change its model.",
-  "settings.task_model_help": "Choose the model for this task's next run.",
+  "settings.task_model_help":
+    "Choose the model for messages sent in this task.",
   "settings.task_model_catalog_loading":
     "The model catalog is updating. You can choose a model when it finishes.",
   "settings.task_model_catalog_unavailable":
@@ -1387,7 +1391,6 @@ export const enUS = {
   "mutation.reason.model_changed":
     "This task's model changed elsewhere. Refresh and choose again.",
   "task.model.updated": "Task model updated.",
-  "task.model_pending": "Next run: {model}",
   "mutation.reason.task_unavailable": "This task is no longer available.",
   "mutation.reason.recovery_unavailable":
     "This conversation can no longer be restored from the current saved state.",

@@ -4319,6 +4319,39 @@ test("task information uses a keyboard-accessible icon and retains creation MCP 
   }
 });
 
+test("task information shows the actual active or latest Run model independently of the selected model", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  for (const [activeOperation, label, expected] of [
+    [{ kind: "run", id: "7" }, "Current run model", "minimax-m3"],
+    [null, "Last run model", "glm-5.3-flash"],
+  ]) {
+    render(
+      localizedView(
+        createElement(TaskInformation, {
+          task: task({
+            activeOperation,
+            modelIntent: {
+              modelRef: { sourceId: "other", modelId: "selected-model" },
+            },
+            runs: [
+              { id: "7", execution: { model: "minimax-m3" } },
+              { id: "8", execution: { model: "glm-5.3-flash" } },
+            ],
+          }),
+          permissionProfilesEnabled: false,
+        }),
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Task information" }));
+    assert.equal(
+      screen.getByText(label).parentElement.querySelector("dd").textContent,
+      expected,
+    );
+    assert.equal(screen.queryByText("selected-model"), null);
+    cleanup();
+  }
+});
+
 test("task information keeps the full-access boundary visible without a mutation control", async () => {
   const user = userEvent.setup({ document: dom.window.document });
 

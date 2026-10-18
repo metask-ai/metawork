@@ -125,7 +125,7 @@ Workspace
 | Custom Provider      | 自定义 Provider | 用户创建并由 Models 持久化的 Provider |
 | Model                | 模型            | 新 Task 的执行模型，不称模式          |
 | Task Panel           | 任务面板        | 当前 Task 的统一右侧详情容器          |
-| Task information     | 任务信息        | 创建时 authority 的只读说明           |
+| Task information     | 任务信息        | 执行模型与任务 authority 的只读说明   |
 | Current activity     | 当前活动        | Agent 此刻正在进行的可观察动作        |
 | Plan                 | 计划            | 只在有真实结构化计划时显示            |
 | Outputs              | 结果文件        | 用户关心的最终交付，不称 Artifacts    |
@@ -709,7 +709,7 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 - New task 默认显示当前 active Provider 与模型；Composer 菜单列出 Host Models snapshot 中各可用来源的 ready 模型，以来源和模型共同区分候选。选择只用于本次 Task，不修改 global default；明确选择与默认相同时也保留该选择。重新打开 New task 时恢复初始默认意图；
 - 没有可用 global default 时仍允许选择当前可用的其他模型并发送；没有可用候选时提供进入 `Models` 设置的导航。不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
 - Models默认来源、Metask API/protocol/credential authority或 ready Custom Provider模型变化先更新 Models desired selection及对应 revision/source generation，再由 Product Control独立 reconcile active binding generation。两类变化都不热替换已有 live Task；detached历史 Task可在 §6.4的 Conversation restore中采用同 protocol、可承载其 pinned model的当前 credential authority，并通过窄 binding adoption提交新 generation，任意 protocol/model变化仍只能走未来显式 rebind；
-- 已有 Task 的 Composer 从 Host modelIntent 显示下一轮选择；当前 Run 保留原执行模型，运行时选择显示“下一轮使用”。菜单列出所有 ready Metask/Custom Provider，使用完整来源与模型区分同名项，不受 global default 的忙碌状态约束。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用发送及再次选择，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
+- 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，始终使用 `Provider · 模型`，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留可证明的来源身份和模型，历史来源未知时明确显示未知，不猜测 Provider。当前 Run 保留原执行模型，实际执行事实在任务信息中查看。菜单列出所有 ready Metask/Custom Provider，使用完整来源与模型区分同名项，不受 global default 的忙碌状态约束。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用发送及再次选择，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
 
@@ -899,7 +899,7 @@ Renderer 只显示 Host capability projection 声明的模式，不独立审核�
 
 - Run 的 input/output/cache read/cache creation 统计不进入对话、任务信息或右栏，也不保留空 disclosure、隐藏组件或兼容入口；Host/Bridge 的统计、持久化和数据合同不变。不合并为 Task 用量，也不推算总运行耗时；
 - Composer 仅在当前 attached Conversation 有 Host pressure 观测时显示对应 warning/critical 的可读提醒；只有用户打开后才展示最近观测说明和 current/auto-compact/blocking token 数。没有 pressure 时整块隐藏，即使存在 lastAutoCompact 历史也不创建入口；不展示压缩前后 token、dropped/kept、伪百分比、连续实时用量、raw source Run identity 或跨 attachment 历史。Host 清除 pressure 后提醒与已展开详情同步卸载，不由 Renderer 计时或历史推断恢复；
-- Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后只读展示固定 permission profile（受 capability gate 控制）与创建时 MCP 三态，不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
+- Task 标题附近的“任务信息”使用独立 info 图标，仅在用户打开后只读展示实际执行模型、固定 permission profile（受 capability gate 控制）与创建时 MCP 三态。模型取当前 Run 的冻结 execution；没有当前 Run 时取最近一轮 Run，并标明“最近一轮模型”；没有 Run 时不展示执行模型，不用 Composer 选择或 global default 伪造执行事实。MCP 不是实时连接状态，不暗示可热附加。不增加通用设置页或第二个概览；
 - pendingUi 派生“需要处理”定位入口，不存已读或自动展开记忆；只有原始主区审批提供操作按钮。用户点击定位时，overlay 先关闭再滚动/聚焦原请求；停靠面板保持。新请求自身不触发滚动、焦点移动或面板开合，全宽覆盖时定位入口仍可达。
 
 右栏显隐不属于内容目标。内容是当前 Task 内的对象标签会话：可以同时保留多个精确文件预览，File Changes Review 最多保留一个；未打开对象时呈现通用空态。文件预览只从对话内联引用进入，工作过程不重复文件入口；记录审查保留所属 Run 的入口；不扫描文件系统、不自动读取正文。Review 是按文件首次出现顺序纵向展开的连续差异文档，同一 `displayPath` 的稳定顺序记录汇入一个文件区块；不建立记录列表、单条详情页、返回层级、文件树或旧概览兼容开关。

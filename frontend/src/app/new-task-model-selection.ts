@@ -65,7 +65,7 @@ export function newTaskModelSelectionState(
     valid,
     options,
     selectedModelId: selected ? modelOptionId(selected) : "",
-    selectedModelLabel: selectedOption?.displayName || selected?.modelId || "",
+    selectedModelLabel: selected ? modelDisplayLabel(models, selected) : "",
     selectedMetadata: selectedOption?.metadata ?? null,
     intent,
   };
@@ -73,6 +73,19 @@ export function newTaskModelSelectionState(
 
 export function modelOptionId(model: ModelRef): string {
   return JSON.stringify([model.sourceId, model.modelId]);
+}
+
+export function modelDisplayLabel(models: ModelsView, model: ModelRef): string {
+  const provider =
+    models.providers.find((candidate) => candidate.id === model.sourceId) ??
+    models.customProviders.find((candidate) => candidate.id === model.sourceId);
+  const providerName =
+    provider?.displayName ||
+    (model.sourceId === "metask" ? "Metask" : model.sourceId);
+  const modelName =
+    provider?.models.find((candidate) => candidate.id === model.modelId)
+      ?.displayName || model.modelId;
+  return `${providerName} · ${modelName}`;
 }
 
 export function readyModelOptions(models: ModelsView): NewTaskModelOption[] {
