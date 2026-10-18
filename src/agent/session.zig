@@ -1763,6 +1763,9 @@ pub const Session = struct {
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
         options.max_turns = 16;
+        // Product owns the existing per-Run time block. Revision 24's
+        // automatic date block must not add a second time context.
+        options.time_context_code = wire.TIME_CONTEXT_OFF;
         var time_text_buffer: [session_time_context.max_text_bytes]u8 = undefined;
         var time_block = std.mem.zeroes(wire.ContextBlockV1);
         // The official ABI accepts Host context only for text/multimodal Run.
@@ -1851,6 +1854,13 @@ pub const Session = struct {
             failure = .dependency_contract;
             self.state = .poisoned;
         } else if (typed_status) |known_status| {
+            // Active-Run input is not submitted by this Host. Revision 24
+            // reports these counts on every return, including failed Runs.
+            if (result.input_accepted_count != 0 or result.input_adopted_count != 0) {
+                self.dependency_contract_failure = true;
+                failure = .dependency_contract;
+                self.state = .poisoned;
+            }
             const disposition = runStatusDisposition(known_status, has_images);
             if (disposition == null) {
                 self.dependency_contract_failure = true;
@@ -2561,6 +2571,8 @@ fn compactStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
         .image_input_unsupported,
+        .image_input_capability_unknown,
+        .goal_conflict,
         => null,
     };
 }
@@ -2591,6 +2603,8 @@ fn isCompactAbortStatus(status: sdk.Status) bool {
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
         .image_input_unsupported,
+        .image_input_capability_unknown,
+        .goal_conflict,
         => false,
     };
 }
@@ -2626,12 +2640,15 @@ fn skillUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition {
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
         .image_input_unsupported,
+        .image_input_capability_unknown,
+        .goal_conflict,
         => null,
     };
 }
 
 fn runStatusDisposition(status: sdk.Status, has_images: bool) ?SessionStatusDisposition {
-    if (status == .image_input_unsupported) return if (has_images) .reusable else null;
+    if (status == .image_input_unsupported or status == .image_input_capability_unknown)
+        return if (has_images) .reusable else null;
     return switch (status) {
         .out_of_memory,
         .invalid_state,
@@ -2663,6 +2680,8 @@ fn runStatusDisposition(status: sdk.Status, has_images: bool) ?SessionStatusDisp
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
         .image_input_unsupported,
+        .image_input_capability_unknown,
+        .goal_conflict,
         => null,
     };
 }
@@ -2719,6 +2738,8 @@ fn isAbortStatus(status: sdk.Status) bool {
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
         .image_input_unsupported,
+        .image_input_capability_unknown,
+        .goal_conflict,
         => false,
     };
 }
@@ -2754,6 +2775,8 @@ fn isSessionDestroyStatus(status: sdk.Status) bool {
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
         .image_input_unsupported,
+        .image_input_capability_unknown,
+        .goal_conflict,
         => false,
     };
 }
@@ -2789,6 +2812,8 @@ pub fn mcpUpdateStatusDisposition(status: sdk.Status) ?SessionStatusDisposition 
         .logical_session_conflict,
         .skill_catalog_incomplete,
         .image_input_unsupported,
+        .image_input_capability_unknown,
+        .goal_conflict,
         => null,
     };
 }

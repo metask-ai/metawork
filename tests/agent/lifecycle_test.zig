@@ -919,7 +919,7 @@ test "malformed compact result poisons Session and queued compact can be cancell
     try closeSession(session, .session_close);
 }
 
-test "Runtime rejects missing revision 19 child tables and entries" {
+test "Runtime rejects missing revision 24 child tables and entries" {
     var api = fake_api;
     api.skill = null;
     try std.testing.expectError(
@@ -933,6 +933,50 @@ test "Runtime rejects missing revision 19 child tables and entries" {
     );
 
     var session_api = api.session.?.*;
+    session_api.submit_input = null;
+    api = fake_api;
+    api.session = &session_api;
+    try std.testing.expectError(error.UnsupportedAbi, lifecycle.Runtime.initWithApi(
+        std.testing.io,
+        std.testing.allocator,
+        &api,
+        .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
+    ));
+    inline for (.{ "goal", "team" }) |field| {
+        api = fake_api;
+        @field(api, field) = null;
+        try std.testing.expectError(error.UnsupportedAbi, lifecycle.Runtime.initWithApi(
+            std.testing.io,
+            std.testing.allocator,
+            &api,
+            .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
+        ));
+    }
+    inline for (.{ "get", "set", "update", "clear" }) |field| {
+        var table = fake_api.goal.?.*;
+        @field(table, field) = null;
+        api = fake_api;
+        api.goal = &table;
+        try std.testing.expectError(error.UnsupportedAbi, lifecycle.Runtime.initWithApi(
+            std.testing.io,
+            std.testing.allocator,
+            &api,
+            .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
+        ));
+    }
+    inline for (.{ "describe", "poll" }) |field| {
+        var table = fake_api.team.?.*;
+        @field(table, field) = null;
+        api = fake_api;
+        api.team = &table;
+        try std.testing.expectError(error.UnsupportedAbi, lifecycle.Runtime.initWithApi(
+            std.testing.io,
+            std.testing.allocator,
+            &api,
+            .{ .run_time_source = lifecycle.RunTimeSource.unavailable, .max_sessions = 1 },
+        ));
+    }
+    session_api = fake_api.session.?.*;
     session_api.run_input = null;
     api = fake_api;
     api.session = &session_api;
@@ -3206,6 +3250,9 @@ test "status is validated before RunResult and invalid results poison the Sessio
         .{ .plan = .unknown_status, .expected_status = 42, .expected_stop = null },
         .{ .plan = .stale_compact_status, .expected_status = wire.STATUS_STALE_COMPACT, .expected_stop = null },
         .{ .plan = .image_input_unsupported_status, .expected_status = wire.STATUS_IMAGE_INPUT_UNSUPPORTED, .expected_stop = null },
+        .{ .plan = .image_input_capability_unknown_status, .expected_status = wire.STATUS_IMAGE_INPUT_CAPABILITY_UNKNOWN, .expected_stop = null },
+        .{ .plan = .unexpected_input_receipt, .expected_status = wire.STATUS_OK, .expected_stop = null },
+        .{ .plan = .unexpected_input_receipt_failure, .expected_status = wire.STATUS_RESOURCE_LIMIT, .expected_stop = null },
     };
     for (cases) |case| {
         fake_core.setNextPlan(case.plan);

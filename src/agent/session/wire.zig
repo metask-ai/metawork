@@ -100,6 +100,8 @@ fn coreEventTextValid(event: sdk.DecodedCoreEvent) bool {
     return switch (event) {
         .unknown => |unknown| validUtf8(&.{ unknown.tag, unknown.payload_json }),
         .known => |known| switch (known) {
+            // These capabilities have no MetaWork owner or product contract.
+            .input_adopted, .goal_updated => false,
             .text_chunk, .thinking_chunk => |text| std.unicode.utf8ValidateSlice(text),
             .tool_start => |tool| validUtf8(&.{ tool.id, tool.name, tool.input }),
             .tool_progress => |progress| validUtf8(&.{ progress.id, progress.text }),
@@ -214,7 +216,7 @@ pub fn providerKindCode(value: Protocol) u32 {
 pub fn protocolKindCode(value: Protocol) u32 {
     return switch (value) {
         .openai_responses => wire.OPENAI_PROTOCOL_RESPONSES,
-        // ABI revision 19 uses code zero for these three explicit protocols.
+        // ABI revision 24 uses code zero for these three explicit protocols.
         // That wire encoding does not define a MetaWork protocol default.
         .openai_chat_completions, .anthropic_messages, .gemini_native => wire.PROTOCOL_DEFAULT,
     };
@@ -280,6 +282,13 @@ test "AgentCore JSON callbacks reject invalid UTF-8 at the ownership boundary" {
         error.InvalidPayload,
         decodeUiRequest(std.testing.allocator, invalid_ui),
     );
+}
+
+test "AgentCore unopened Goal and active-Run input events are refused" {
+    for ([_][]const u8{
+        "{\"input_adopted\":{\"input_id\":1,\"sequence\":1,\"turn\":2}}",
+        "{\"goal_updated\":{\"id\":\"0123456789abcdef01234567\",\"objective\":\"ship it\",\"status\":\"active\",\"token_budget\":null,\"tokens_used\":0,\"time_used_ms\":0,\"created_at_ms\":1,\"updated_at_ms\":1}}",
+    }) |encoded| try std.testing.expectError(error.InvalidPayload, decodeCoreEvent(std.testing.allocator, encoded));
 }
 
 test "degradable event classifier accepts only one valid file_changes envelope" {

@@ -186,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
         try restored.session.setModel("unknown-provider-test-model");
         var rejected = try execute(restored.session, .{ .multimodal = &.{.{ .image = .{ .format = .png, .bytes = png } }} });
         defer rejected.deinit();
-        if (rejected.abi_status != .image_input_unsupported or rejected.failure != .abi_status or
+        if (rejected.abi_status != .image_input_capability_unknown or rejected.failure != .abi_status or
             rejected.stop_reason != null or rejected.durable_budget != null or
             restored.session.snapshot().state != .idle)
             return error.InvalidImageRejection;

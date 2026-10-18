@@ -374,6 +374,8 @@ fn failureForStatus(status: sdk.Status, local: LocalSourceFailure) Failure {
         .invalid_mcp_selection,
         .skill_catalog_incomplete,
         .image_input_unsupported,
+        .image_input_capability_unknown,
+        .goal_conflict,
         .ok,
         => dependencyFailure(.restore),
     };

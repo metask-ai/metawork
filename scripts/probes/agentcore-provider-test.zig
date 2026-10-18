@@ -213,6 +213,9 @@ pub fn main() !void {
     var options = std.mem.zeroes(wire.RunOptionsV1);
     options.struct_size = @sizeOf(wire.RunOptionsV1);
     options.max_turns = 1;
+    // Match MetaWork's Host-owned time context policy rather than enabling
+    // the SDK's new default currentDate block in transport fixtures.
+    options.time_context_code = wire.TIME_CONTEXT_OFF;
     var result = std.mem.zeroes(wire.RunResultV1);
     var diagnostic = std.mem.zeroes(wire.OwnedBytesV1);
     defer releaseOwned(api, &diagnostic);
@@ -355,7 +358,7 @@ pub fn main() !void {
         releaseOwned(api, &diagnostic);
         const rejected_run_id = restored_run_id + 1;
         const rejected = api.session().runMultimodal(restored, rejected_run_id, &parts, &options, &result, &diagnostic);
-        if (rejected != wire.STATUS_IMAGE_INPUT_UNSUPPORTED or provider_test.event_count != events_before)
+        if (rejected != wire.STATUS_IMAGE_INPUT_CAPABILITY_UNKNOWN or provider_test.event_count != events_before)
             return error.UnexpectedImageRejection;
         releaseOwned(api, &diagnostic);
         try expectOk(api, "restore_multimodal_model", api.sessionControl().setModel()(restored, agentcore.bytesView("__MODEL__"), null));

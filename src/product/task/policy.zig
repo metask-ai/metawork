@@ -221,7 +221,7 @@ pub fn classifyAgentTerminal(
                 .skill_policy_violation => .skill_policy_violation,
                 .skill_unavailable => .skill_unavailable,
                 .resource_limit, .checkpoint_budget_required => .resource_limit,
-                .image_input_unsupported => .image_input_unsupported,
+                .image_input_unsupported, .image_input_capability_unknown => .image_input_unsupported,
                 else => null,
             }
         else

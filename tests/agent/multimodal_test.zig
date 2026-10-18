@@ -178,26 +178,28 @@ test "multimodal shared budget rejects before any allocation" {
 
 test "multimodal image capability rejection matches the submitted media kind" {
     const Shape = enum { text, image };
-    for ([_]Shape{ .text, .image }) |shape| {
-        fixture.fake_core.reset();
-        fixture.fake_core.setNextPlan(.image_input_unsupported_status);
-        const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
-        defer destroy(runtime);
-        const session = try fixture.openSession(runtime);
-        const input: agent.RunInput = .{ .multimodal = switch (shape) {
-            .text => &.{.{ .text = "text only" }},
-            .image => &.{image},
-        } };
-        const matches = shape == .image;
-        var terminal = try execute(session, input);
-        defer terminal.deinit();
-        try std.testing.expectEqual(agent.Status.image_input_unsupported, terminal.abi_status.?);
-        try std.testing.expectEqual(@as(?agent.StopReason, null), terminal.stop_reason);
-        try std.testing.expectEqual(@as(?agent.DurableBudgetObservation, null), terminal.durable_budget);
-        try std.testing.expectEqual(if (matches) agent.TerminalFailure.abi_status else .dependency_contract, terminal.failure.?);
-        try std.testing.expectEqual(if (matches) agent.SessionState.idle else .poisoned, session.snapshot().state);
-        try std.testing.expectEqual(0, used(runtime));
-        if (matches) try session.cancelPreparedRun(try session.prepareRun(.{ .text = "retry" }));
+    for ([_]fixture.Plan{ .image_input_unsupported_status, .image_input_capability_unknown_status }) |plan| {
+        for ([_]Shape{ .text, .image }) |shape| {
+            fixture.fake_core.reset();
+            fixture.fake_core.setNextPlan(plan);
+            const runtime = try fixture.createTestRuntime(.{ .max_sessions = 1 });
+            defer destroy(runtime);
+            const session = try fixture.openSession(runtime);
+            const input: agent.RunInput = .{ .multimodal = switch (shape) {
+                .text => &.{.{ .text = "text only" }},
+                .image => &.{image},
+            } };
+            const matches = shape == .image;
+            var terminal = try execute(session, input);
+            defer terminal.deinit();
+            try std.testing.expectEqual(if (plan == .image_input_unsupported_status) agent.Status.image_input_unsupported else .image_input_capability_unknown, terminal.abi_status.?);
+            try std.testing.expectEqual(@as(?agent.StopReason, null), terminal.stop_reason);
+            try std.testing.expectEqual(@as(?agent.DurableBudgetObservation, null), terminal.durable_budget);
+            try std.testing.expectEqual(if (matches) agent.TerminalFailure.abi_status else .dependency_contract, terminal.failure.?);
+            try std.testing.expectEqual(if (matches) agent.SessionState.idle else .poisoned, session.snapshot().state);
+            try std.testing.expectEqual(0, used(runtime));
+            if (matches) try session.cancelPreparedRun(try session.prepareRun(.{ .text = "retry" }));
+        }
     }
 }
 

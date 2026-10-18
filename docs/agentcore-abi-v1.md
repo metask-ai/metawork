@@ -45,22 +45,30 @@ schema 1 manifest 还必须包含精确的 `shared_library = { path, entry_point
 接受的 ABI identity 为：
 
 - `binary_abi_version = 1`；
-- `binary_abi_revision = 19`；
+- `binary_abi_revision = 24`；
 - discovery symbol 仅为 `metask_agentcore_get_api`；
-- root `binary_abi_table_size = 64`；
-- Runtime、Session、SessionControl、Skill、MCP 子表大小依次为 24、40、80、32、40 bytes；
-- root 与全部五个子表均为 mandatory；struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零。
+- root `binary_abi_table_size = 80`；
+- Runtime、Session、SessionControl、Skill、MCP、Goal、Team 子表大小依次为 24、48、80、32、40、40、24 bytes；
+- root 与全部七个子表均为 mandatory；struct size 必须精确匹配，Host 提供的 reserved 字段必须全部为零。
 
 `ApiV1` surface 为：
 
-- root：owned buffer release，以及 Runtime、Session、SessionControl、Skill、MCP 子表指针；
+- root：owned buffer release，以及 Runtime、Session、SessionControl、Skill、MCP、Goal、Team 子表指针；
 - Runtime：create、destroy；
-- Session：create、destroy、typed Run、Run abort；
+- Session：create、destroy、typed Run、Run abort、active-Run input submission；
 - SessionControl：restore、describe、model、Permission rules、manual compact/abort、checkpoint export、idle-only prompt profile replacement、idle-only Permission mode replacement；
 - Skill：Workspace catalog resolve/release、Skill policy bind；
-- MCP：Runtime configuration apply/refresh/describe、Session selection replacement。
+- MCP：Runtime configuration apply/refresh/describe、Session selection replacement；
+- Goal：get、set、update、clear；
+- Team：describe、poll。
 
 每个 required table、entry 与 reserved field 都必须通过官方 discovery 和 SDK validation。ABI 中存在 entry 只证明 Host 必须能正确理解该表面，不代表 MetaWork 产品已经开放对应能力。
+
+MetaWork 不调用 Goal、Team 或 active-Run input submission。Runtime 的 `enable_teams` 为零，Session create/restore 的 `team` 为 null，不建立 Goal continuation Run；运行中排队发送继续由 Product 持有并在既有完成边界接纳。`input_adopted` 和 `goal_updated` 虽由官方 SDK 解码，当前 Agent 消费边界仍明确拒绝；所有 Run 返回的 `input_accepted_count / input_adopted_count` 必须为零，非零属于 dependency contract failure，不能静默取得 Conversation 覆盖事实。
+
+revision 22 引入默认 `currentDate` block。MetaWork 对全部 Run 显式设置 `TIME_CONTEXT_OFF`，继续仅对普通文本和多模态 Run 传递既有 `metawork-time-context`；Skill 不增加时间 block。Host 不通过默认零值启用第二条时间注入路径。
+
+revision 21 的 Host model-capability declarations 当前保持空，不改变 Models 与 Session 的既有能力消费边界。官方 `describe.image_input` observation 由 SDK 完整验证，不进入产品投影。模型图片能力未确定时的 `image_input_capability_unknown`，按下述图片 admission 拒绝规则消费。
 
 revision 18 的 `SessionCreateConfigV1.prompt_profile` 与 `RunOptionsV1.context_blocks/context_block_count` 分别占用原 reserved words，其他 reserved 字段必须继续为零；不得用旧 struct layout 调用新 ABI。`set_prompt_profile` 是 mandatory entry，但 MetaWork 当前不开放 prompt customization，Session 创建传入 Agent-owned 固定产品身份 profile（见 [集成契约](agentcore-integration.md#session-产品身份)）。每次普通文本或多模态 Run 通过官方 `ContextBlockV1` 传入唯一 label 为 `metawork-time-context` 的 Host 时间事实，`context_block_count` 为一；label/text 与 block 均同步借用至 Core 调用返回，不改写用户原始输入；时间事实不写入 Session prompt profile，也不建立私有协议。Skill Run 必须传 null blocks 与零 count。Core 将其作为 Run 用户记录的 system-reminder 消费，Conversation/checkpoint 保留遵循官方语义；它不是 system-role 指令。采样与失败语义由 [AgentCore 集成契约](agentcore-integration.md#每-run-时间上下文) 定义。官方 SDK 完整校验 `describe.prompt` 与 `prompt_manifest` observation，Agent 明确消费该 observation 而不投影或持久化它；这不建立产品 prompt editor 或提示审计能力。
 
@@ -68,9 +76,9 @@ revision 18 的 `SessionCreateConfigV1.prompt_profile` 与 `RunOptionsV1.context
 
 Runtime 只有一个 `create` entry，第二个参数是可空 `RuntimePluginConfigV1`；不得为不同 plugin 配置建立第二条 create ABI 路径。MCP `apply_configuration` 接受完整 declarative replacement：Host 必须使用非零 desired revision，并校验 status、report size、disposition、desired/active revision 与 reserved fields；只有 `APPLIED` 转移 replacement ownership，`SUPERSEDED` 或 `REJECTED` 不得取得该 ownership，malformed report 必须 fail closed。
 
-当前 `SessionHostConfigV1.protocol_kind_code` 将调用方明确选择的协议映射为对应 ABI 编码：`openai_responses` 使用 `OPENAI_PROTOCOL_RESPONSES`；`openai_chat_completions`、`anthropic_messages` 和 `gemini_native` 使用 `PROTOCOL_DEFAULT`。这里的 `PROTOCOL_DEFAULT` 只表示 ABI 编码，不定义 MetaWork 的默认协议；协议选择合同见 [Completion 架构](completion-architecture.md#3-provider-与协议)。`RunInputV1` 的 parts/count 与 reserved layout 由官方 helper 构造；revision 19 只定义文本与图片 part，不定义 document part、文档输入上限或文档能力拒绝 status。公共输入、ownership 和预算合同见 [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入)。
+当前 `SessionHostConfigV1.protocol_kind_code` 将调用方明确选择的协议映射为对应 ABI 编码：`openai_responses` 使用 `OPENAI_PROTOCOL_RESPONSES`；`openai_chat_completions`、`anthropic_messages` 和 `gemini_native` 使用 `PROTOCOL_DEFAULT`。这里的 `PROTOCOL_DEFAULT` 只表示 ABI 编码，不定义 MetaWork 的默认协议；协议选择合同见 [Completion 架构](completion-architecture.md#3-provider-与协议)。`RunInputV1` 的 parts/count 与 reserved layout 由官方 helper 构造；当前 revision 只定义文本与图片 part，不定义 document part、文档输入上限或文档能力拒绝 status。公共输入、ownership 和预算合同见 [AgentCore 集成契约](agentcore-integration.md#agent-session-多模态输入)。
 
-ABI revision 19 将 `image_input_unsupported` 定义为本次 Run 含图片时的 admission 拒绝；在 Text、Skill、仅文本 parts、compact、mutation、export、describe 或 restore 路径出现时属于 dependency contract failure。不能因为 SDK 认识该值就在错误的 operation 或输入形状上放行。
+`image_input_unsupported` 和 `image_input_capability_unknown` 仅作为本次 Run 含图片时的 admission 拒绝；在 Text、Skill、仅文本 parts、compact、mutation、export、describe 或 restore 路径出现时属于 dependency contract failure。`goal_conflict` 不属于 MetaWork 当前开放 operation 的合法 status。不能因为 SDK 认识这些值就在错误的 operation 或输入形状上放行。
 
 binary ABI 接受政策只接受当前 revision，不建立旧 ABI 调用路径。升级必须保留已有产品历史与 checkpoint；旧 checkpoint 只交由当前官方 Core 的 restore 消费，不建立 Host 兼容 parser 或迁移格式。替换 artifact 的恢复 Gate 必须使用上一版 Core 导出的非空原始 checkpoint，核对 Session identity、运行与 checkpoint 元数据，并以恢复后的实际 Run 证明旧 Conversation 被消费；仅空 Session 恢复不足以通过。无法恢复时沿 typed failure 明确失败，保留原始 bytes，不静默创建空 Conversation。该 Gate 不承诺任意未来 revision 的跨版本恢复；当前 revision 的 export/restore 完整性与生命周期验证仍为必需。
 

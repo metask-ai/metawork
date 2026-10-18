@@ -274,6 +274,8 @@ pub fn classify(event: sdk.DecodedCoreEvent) EventClass {
             .run_state,
             .stream_done,
             .permission_provenance,
+            .input_adopted,
+            .goal_updated,
             => .control,
         },
     };

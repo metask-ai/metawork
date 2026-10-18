@@ -93,8 +93,8 @@ async function fixture(t, mutateManifest = () => {}) {
     contract: {
       binary_abi_status: "experimental",
       binary_abi_version: 1,
-      binary_abi_revision: 19,
-      binary_abi_table_size: 64,
+      binary_abi_revision: 24,
+      binary_abi_table_size: 80,
     },
     shared_library: {
       path: "lib/metask_agentcore.dll",
@@ -202,7 +202,7 @@ async function seedCanonicalBundle(repositoryRoot) {
   return { storageRoot, target };
 }
 
-test("accepts a locked revision 19 Windows x64 MSVC candidate", async (t) => {
+test("accepts a locked revision 24 Windows x64 MSVC candidate", async (t) => {
   const { root, manifest } = await fixture(t);
   const result = await validateAgentCoreBundle(root, {
     ...injectedChecks,
@@ -212,7 +212,7 @@ test("accepts a locked revision 19 Windows x64 MSVC candidate", async (t) => {
   assert.deepEqual(result.payloadFiles, fixtureFiles);
 });
 
-test("accepts a locked revision 19 Windows ARM64 MSVC candidate", async (t) => {
+test("accepts a locked revision 24 Windows ARM64 MSVC candidate", async (t) => {
   const { root, manifest } = await fixture(t, (manifest) => {
     manifest.target = {
       id: "aarch64-windows-msvc",
@@ -274,7 +274,7 @@ test("Windows bundles reject retired GNU targets and mixed ABI identities", asyn
   }
 });
 
-test("accepts a locked revision 19 macOS arm64 candidate", async (t) => {
+test("accepts a locked revision 24 macOS arm64 candidate", async (t) => {
   const candidate = await fixture(t, (manifest) => {
     manifest.target = {
       id: "aarch64-macos",
@@ -307,7 +307,7 @@ test("accepts a locked revision 19 macOS arm64 candidate", async (t) => {
   assert.equal(path.basename(result.libraryPath), "libmetask_agentcore.a");
 });
 
-test("accepts a locked revision 19 macOS x64 candidate when cross-building on arm64 macOS", async (t) => {
+test("accepts a locked revision 24 macOS x64 candidate when cross-building on arm64 macOS", async (t) => {
   const candidate = await fixture(t, (manifest) => {
     manifest.target = {
       id: "x86_64-macos",
@@ -443,7 +443,7 @@ test("staged preflight refuses a retired revision lock", async (t) => {
     source: candidate.root,
     validationOptions: injectedChecks,
   });
-  candidate.manifest.contract.binary_abi_revision = 18;
+  candidate.manifest.contract.binary_abi_revision = 19;
   await writeFile(
     path.join(
       root,
@@ -454,7 +454,7 @@ test("staged preflight refuses a retired revision lock", async (t) => {
   );
   await assert.rejects(
     verifyStagedAgentCoreBundle(root, injectedVerification),
-    /requires a revision 19 repository lock/,
+    /requires a revision 24 repository lock/,
   );
 });
 
@@ -478,7 +478,7 @@ test("rejects a missing or legacy binary ABI revision", async (t) => {
   );
 
   const unsupported = await fixture(t, (manifest) => {
-    manifest.contract.binary_abi_revision = 18;
+    manifest.contract.binary_abi_revision = 19;
   });
   await assert.rejects(
     validateAgentCoreBundle(unsupported.root, injectedChecks),
@@ -488,7 +488,7 @@ test("rejects a missing or legacy binary ABI revision", async (t) => {
 
 test("rejects incorrect ABI table size and legacy contract fields", async (t) => {
   const table = await fixture(t, (manifest) => {
-    manifest.contract.binary_abi_table_size = 136;
+    manifest.contract.binary_abi_table_size = 64;
   });
   await assert.rejects(
     validateAgentCoreBundle(table.root, injectedChecks),

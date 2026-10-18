@@ -9,7 +9,7 @@ const maxManifestBytes = 1024 * 1024;
 const maxPayloadBytes = 128 * 1024 * 1024;
 const maxPayloadFiles = 256;
 const supportedAbiVersion = 1;
-const supportedAbiRevision = 19;
+const supportedAbiRevision = 24;
 
 const targetPolicies = [
   {
@@ -26,7 +26,7 @@ const targetPolicies = [
     optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
     abiRevision: supportedAbiRevision,
-    abiTableSize: 64,
+    abiTableSize: 80,
     lock: path.join(
       "build_support",
       "agentcore-bundle.windows-aarch64.lock.json",
@@ -46,7 +46,7 @@ const targetPolicies = [
     optimize: "ReleaseSafe",
     systemLibraries: ["advapi32", "crypt32"],
     abiRevision: supportedAbiRevision,
-    abiTableSize: 64,
+    abiTableSize: 80,
     lock: path.join(
       "build_support",
       "agentcore-bundle.windows-x86_64.lock.json",
@@ -66,7 +66,7 @@ const targetPolicies = [
     optimize: "ReleaseSafe",
     systemLibraries: [],
     abiRevision: supportedAbiRevision,
-    abiTableSize: 64,
+    abiTableSize: 80,
     lock: path.join(
       "build_support",
       "agentcore-bundle.macos-aarch64.lock.json",
@@ -86,7 +86,7 @@ const targetPolicies = [
     optimize: "ReleaseSafe",
     systemLibraries: [],
     abiRevision: supportedAbiRevision,
-    abiTableSize: 64,
+    abiTableSize: 80,
     lock: path.join("build_support", "agentcore-bundle.macos-x86_64.lock.json"),
   },
 ];

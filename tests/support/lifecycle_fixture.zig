@@ -93,6 +93,9 @@ pub const Plan = enum {
     unknown_status,
     stale_compact_status,
     image_input_unsupported_status,
+    image_input_capability_unknown_status,
+    unexpected_input_receipt,
+    unexpected_input_receipt_failure,
 };
 
 pub const FakeRuntime = struct {};
@@ -865,6 +868,7 @@ pub fn runtimeCreate(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     }
+    std.debug.assert(config.?.enable_teams == 0);
     fake_core.lock();
     defer fake_core.unlock();
     fake_core.runtime_created += 1;
@@ -939,6 +943,7 @@ pub fn sessionCreate(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
+    std.debug.assert(host.team == null);
     const key = sdk.borrowedBytes(host.api_key) catch {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
@@ -1421,6 +1426,7 @@ pub fn sessionRestore(
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
     };
+    std.debug.assert(host.team == null);
     const source = input.source orelse {
         diagnostic(out_error);
         return wire.STATUS_INVALID_ARGUMENT;
@@ -1611,7 +1617,7 @@ pub fn sessionDescribe(
         (if (session.restore_degraded)
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"degraded\",\"invalidated_skill_authority\":1,\"invalidated_permission_rules\":1,\"invalidated_mcp_bindings\":1,\"issues\":[{{\"issue_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"subsystem\":\"mcp\",\"reason\":\"unavailable\",\"skill_id\":null,\"permission_rule_id\":null,\"server_binding_identity\":null,\"authority_binding\":null,\"canonical_name\":null}}]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
@@ -1627,7 +1633,7 @@ pub fn sessionDescribe(
         else
             std.fmt.bufPrint(
                 &session.description_buffer,
-                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
+                "{{\"schema\":\"agentcore.session-description/v1\",\"session_id\":\"{s}\",\"origin\":\"{s}\",\"lifecycle\":\"idle\",\"registered\":true,\"last_run_id\":{d},\"last_compact_id\":{d},\"checkpoint_generation\":{d},\"permission_mode\":\"{s}\",\"policy_generation\":{d},\"catalog_generation\":0,\"model\":{s},\"image_input\":{{\"supported\":false,\"source\":\"unknown\"}},\"conversation\":{{\"message_count\":0,\"compact_boundary\":0}},\"skill\":{{\"catalog_revision\":null}},\"mcp\":{{\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"tools\":[]}},\"prompt\":{{\"profile\":{s},\"manifest\":null}},\"budget\":{{\"hard_bytes\":1024,\"soft_bytes\":512,\"durable_usage_bytes\":0,\"available_bytes\":1024,\"compaction_recommended\":false,\"last_outcome\":\"none\",\"required_bytes\":0}},\"restore\":{{\"health\":\"complete\",\"invalidated_skill_authority\":0,\"invalidated_permission_rules\":0,\"invalidated_mcp_bindings\":0,\"issues\":[]}}}}",
                 .{
                     described_session_id,
                     if (session.restored) "restored" else "fresh",
@@ -1910,6 +1916,7 @@ pub fn sessionRunInput(
         return wire.STATUS_INVALID_ARGUMENT;
     }));
     const run_options = options orelse return wire.STATUS_INVALID_ARGUMENT;
+    std.debug.assert(run_options.time_context_code == wire.TIME_CONTEXT_OFF);
     if (run_options.struct_size != @sizeOf(wire.RunOptionsV1))
         return wire.STATUS_INVALID_ARGUMENT;
     if (typed_input.kind_code == wire.RUN_INPUT_SKILL) {
@@ -2299,10 +2306,16 @@ pub fn sessionRunInput(
         diagnostic(out_error);
         return wire.STATUS_STALE_COMPACT;
     }
-    if (plan == .image_input_unsupported_status) {
-        if (out_result) |result| @memset(std.mem.asBytes(result), 0xA5);
+    if (plan == .image_input_unsupported_status or plan == .image_input_capability_unknown_status) {
+        if (out_result) |result| {
+            // Other result fields remain undefined on this refusal; revision
+            // 24 defines only active-input counts on every return.
+            @memset(std.mem.asBytes(result), 0xA5);
+            result.input_accepted_count = 0;
+            result.input_adopted_count = 0;
+        }
         diagnostic(out_error);
-        return wire.STATUS_IMAGE_INPUT_UNSUPPORTED;
+        return if (plan == .image_input_unsupported_status) wire.STATUS_IMAGE_INPUT_UNSUPPORTED else wire.STATUS_IMAGE_INPUT_CAPABILITY_UNKNOWN;
     }
     if (out_result) |result| {
         result.* = std.mem.zeroes(wire.RunResultV1);
@@ -2325,7 +2338,10 @@ pub fn sessionRunInput(
             else => wire.RUN_CHECKPOINT_NONE,
         };
         if (plan == .invalid_result_flags) result.result_flags = 1 << 31;
+        if (plan == .unexpected_input_receipt or plan == .unexpected_input_receipt_failure)
+            result.input_accepted_count = 1;
     }
+    if (plan == .unexpected_input_receipt_failure) return wire.STATUS_RESOURCE_LIMIT;
     return wire.STATUS_OK;
 }
 
@@ -2429,6 +2445,43 @@ const fake_session_api = wire.SessionApiV1{
     .destroy = sessionDestroy,
     .run_input = sessionRunInput,
     .abort = sessionAbort,
+    .submit_input = sessionSubmitInputUnavailable,
+};
+
+fn sessionSubmitInputUnavailable(_: ?*wire.SessionHandle, _: u64, _: ?*const wire.SubmittedInputV1, _: ?*wire.InputReceiptV1, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    @panic("MetaWork must not submit active-Run input");
+}
+
+fn unopenedSessionJson(_: ?*wire.SessionHandle, _: ?*wire.OwnedBytesV1, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    @panic("MetaWork must not call Goal or Team entries");
+}
+
+fn unopenedGoalSet(_: ?*wire.SessionHandle, _: ?*const wire.GoalSetV1, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    @panic("MetaWork must not set a Goal");
+}
+
+fn unopenedGoalUpdate(_: ?*wire.SessionHandle, _: ?*const wire.GoalUpdateV1, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    @panic("MetaWork must not update a Goal");
+}
+
+fn unopenedGoalClear(_: ?*wire.SessionHandle, _: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+    @panic("MetaWork must not clear a Goal");
+}
+
+const fake_goal_api = wire.GoalApiV1{
+    .struct_size = @sizeOf(wire.GoalApiV1),
+    .reserved0 = 0,
+    .get = unopenedSessionJson,
+    .set = unopenedGoalSet,
+    .update = unopenedGoalUpdate,
+    .clear = unopenedGoalClear,
+};
+
+const fake_team_api = wire.TeamApiV1{
+    .struct_size = @sizeOf(wire.TeamApiV1),
+    .reserved0 = 0,
+    .describe = unopenedSessionJson,
+    .poll = unopenedSessionJson,
 };
 
 fn sessionSetPromptProfile(handle: ?*wire.SessionHandle, profile: ?*const wire.PromptProfileV1, out_diagnostic: ?*wire.OwnedBytesV1) callconv(.c) u32 {
@@ -2547,6 +2600,8 @@ pub const fake_api = wire.ApiV1{
     .session_control = &fake_session_control_api,
     .skill = &fake_skill_api,
     .mcp = &fake_mcp_api,
+    .goal = &fake_goal_api,
+    .team = &fake_team_api,
 };
 
 pub fn createCompletion(
