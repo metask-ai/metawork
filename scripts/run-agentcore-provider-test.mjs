@@ -345,60 +345,51 @@ function assertHostIdentity(payload, child) {
   else assert.ok(prompt.includes("When you encounter an obstacle"));
 }
 
-const timeExpectations = [
-  [
-    "Current date (system local): 2026-10-09",
-    "System timezone: Asia/Shanghai (IANA), UTC+08:00",
-  ],
-  [
-    "Current date (system local): 2026-10-10",
-    "System timezone: Asia/Shanghai (IANA), UTC+08:00",
-  ],
-  [
-    "Current date (system local): 2026-10-09",
-    "System timezone: Pacific Standard Time (Windows), UTC-07:00",
-  ],
-  [
-    "Current date (system local): 2026-10-09",
-    "System timezone: identity unavailable, UTC+05:45",
-  ],
-  [
-    "Current date (UTC): 2026-10-10",
-    "System local timezone and offset: unavailable.",
-  ],
-  [
-    "Current date for this Run: unavailable. Do not infer it from earlier Runs.",
-  ],
-];
+const probeStartedAt = new Date();
 
-function verifyHostTime(users, expectations = timeExpectations) {
-  assert.equal(users.length, expectations.length);
-  return users.map((parts, index) => {
+function calendarDate(instant, utc) {
+  const year = utc ? instant.getUTCFullYear() : instant.getFullYear();
+  const month = (utc ? instant.getUTCMonth() : instant.getMonth()) + 1;
+  const day = utc ? instant.getUTCDate() : instant.getDate();
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function verifyCoreTime(users) {
+  return users.map((parts) => {
     assert.ok(
       parts[0]?.text?.startsWith("<system-reminder>"),
-      "Host time must precede the original Run input",
+      "Core date must precede the original Run input",
     );
     const match = /^<system-reminder>([\s\S]*?)<\/system-reminder>\s*/.exec(
       parts[0].text,
     );
-    assert.ok(match, "Host time must use the official Core context wrapper");
-    assert.ok(match[1].includes("# metawork-time-context\n"));
-    assert.doesNotMatch(match[1], /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
-    for (const expected of expectations[index])
-      assert.ok(
-        match[1].includes(expected),
-        `Run ${index + 1}: missing ${expected}`,
+    assert.ok(match, "Core date must use its official context wrapper");
+    const date =
+      /# currentDate\nToday's date is (\d{4}-\d{2}-\d{2}) \((Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\)\. (Time zone: [^\n]+\.|The date is in UTC; the user's time zone is unknown\.)/.exec(
+        match[1],
       );
+    assert.ok(date, "Core must provide the current date and timezone");
+    const utc = date[3].startsWith("The date is in UTC;");
     assert.ok(
-      match[1].includes(
-        "Your knowledge cutoff does not indicate the current date.",
-      ),
+      [
+        calendarDate(probeStartedAt, utc),
+        calendarDate(new Date(), utc),
+      ].includes(date[1]),
+      "Core date must match the process calendar during the probe",
     );
     assert.equal(
-      parts.filter((part) => part.text?.includes("# metawork-time-context\n"))
-        .length,
-      1,
+      new Intl.DateTimeFormat("en-US", {
+        weekday: "long",
+        timeZone: "UTC",
+      }).format(new Date(`${date[1]}T00:00:00Z`)),
+      date[2],
     );
+    assert.equal(
+      parts.filter((part) => part.text?.includes("# currentDate\n")).length,
+      1,
+      "Each Run must have exactly one Core date block",
+    );
+    assert.doesNotMatch(JSON.stringify(parts), /metawork-time-context/);
     const remaining = parts[0].text.slice(match[0].length);
     return [...(remaining ? [{ text: remaining }] : []), ...parts.slice(1)];
   });
@@ -465,7 +456,7 @@ const server = createServer((request, response) => {
           );
         assertHostIdentity(payload, requestCount >= 8);
         const prompt = systemPrompt(payload);
-        assert.ok(!prompt.includes("metawork-time-context"));
+        assert.ok(!prompt.includes("currentDate"));
         if (requestCount === 0) baselineSystemPrompt = prompt;
         else if (requestCount < 6)
           assert.equal(
@@ -477,16 +468,11 @@ const server = createServer((request, response) => {
       if (hostMode && requestCount >= 6) {
         const originalUsers = userParts(activeProvider, payload);
         const users =
-          requestCount < 8
-            ? verifyHostTime(
-                originalUsers,
-                originalUsers.map(() => timeExpectations[5]),
-              )
-            : originalUsers;
+          requestCount < 8 ? verifyCoreTime(originalUsers) : originalUsers;
         if (requestCount >= 8)
           assert.ok(
-            !JSON.stringify(users).includes("metawork-time-context"),
-            "Skill Run must not carry unsupported Host context blocks",
+            !JSON.stringify(users).includes("# currentDate"),
+            "Skill Run must not carry date context blocks",
           );
         const latest = JSON.stringify(users.at(-1));
         assert.ok(
@@ -501,12 +487,7 @@ const server = createServer((request, response) => {
       }
       if ((hostMode || requestCount > 0) && requestCount < 6) {
         const originalUsers = userParts(activeProvider, payload);
-        const users = hostMode
-          ? verifyHostTime(
-              originalUsers,
-              timeExpectations.slice(0, requestCount + 1),
-            )
-          : originalUsers;
+        const users = hostMode ? verifyCoreTime(originalUsers) : originalUsers;
         const expectedUsers = [
           [{ text: "Reply with one short sentence." }],
           [

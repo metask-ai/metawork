@@ -339,7 +339,6 @@ fn activateHttpFixture(protocol_version: []const u8, framing: []const u8) !void 
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
-        .run_time_source = agent.RunTimeSource.unavailable,
         .max_sessions = 1,
         .mcp_input = &runtime_build.input.?,
     });
@@ -416,7 +415,6 @@ fn runCatalogInterop(
     }});
     defer input.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
-        .run_time_source = agent.RunTimeSource.unavailable,
         .max_sessions = 1,
         .mcp_input = &input,
     });
@@ -518,7 +516,6 @@ test "canonical AgentCore AUTO downgrades a bare HTTP 400 probe" {
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
-        .run_time_source = agent.RunTimeSource.unavailable,
         .max_sessions = 1,
         .mcp_input = &runtime_build.input.?,
     });
@@ -656,7 +653,6 @@ fn expectSelectedHttpToolResult(result_kind: []const u8) !void {
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
-        .run_time_source = agent.RunTimeSource.unavailable,
         .max_sessions = 1,
         .mcp_input = &runtime_build.input.?,
     });
@@ -982,7 +978,6 @@ test "expired MCP authority is typed and the same model succeeds after refresh" 
     );
     defer runtime_build.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
-        .run_time_source = agent.RunTimeSource.unavailable,
         .max_sessions = 1,
         .mcp_input = &runtime_build.input.?,
     });
@@ -1074,7 +1069,7 @@ test "MCP product chain reaches new Task authority after add restart refresh and
     const initial_runtime = try agent.Runtime.init(
         std.testing.io,
         std.testing.allocator,
-        .{ .run_time_source = agent.RunTimeSource.unavailable, .max_sessions = 2 },
+        .{ .max_sessions = 2 },
     );
     var initial_runtime_owned = true;
     errdefer if (initial_runtime_owned) {
@@ -1170,7 +1165,6 @@ test "MCP product chain reaches new Task authority after add restart refresh and
         std.testing.io,
         std.testing.allocator,
         .{
-            .run_time_source = agent.RunTimeSource.unavailable,
             .max_sessions = 2,
             .mcp_input = &runtime_build.input.?,
         },
@@ -1302,7 +1296,6 @@ test "canonical AgentCore contains an invalid real-server catalog" {
     }});
     defer input.deinit();
     const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{
-        .run_time_source = agent.RunTimeSource.unavailable,
         .max_sessions = 1,
         .mcp_input = &input,
     });
@@ -1605,7 +1598,7 @@ fn expectProductTaskSwitch(source_protocol: models_contract.Protocol, target_pro
     var registry = DurableRegistry{ .storage = registry_bytes };
     var runtime_build = try mcp_platform.buildRuntime(std.testing.io, std.testing.allocator, &preparation, .{});
     defer runtime_build.deinit();
-    const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .run_time_source = agent.RunTimeSource.unavailable, .max_sessions = 1, .mcp_input = &runtime_build.input.? });
+    const runtime = try agent.Runtime.init(std.testing.io, std.testing.allocator, .{ .max_sessions = 1, .mcp_input = &runtime_build.input.? });
     var runtime_owned = true;
     defer if (runtime_owned) {
         runtime.shutdown() catch unreachable;

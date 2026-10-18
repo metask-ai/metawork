@@ -3,11 +3,6 @@
 //! feed a bounded sink. No callback calls WebView or registers desktop tools.
 
 const std = @import("std");
-const session_time_context = @import("session/time_context.zig");
-
-pub const RunTimeSource = session_time_context.Source;
-pub const RunTimeSnapshot = session_time_context.Snapshot;
-pub const RunTimeZoneIdentity = session_time_context.Identity;
 const multimodal = @import("session/multimodal.zig");
 const builtin = @import("builtin");
 const sdk = @import("metask_agentcore");
@@ -457,7 +452,6 @@ pub const SessionRestoreRoute = struct {
 
 pub const Limits = struct {
     max_sessions: usize,
-    run_time_source: ?RunTimeSource = null,
     /// Consumed exactly once during successful Agent Runtime construction.
     /// Build this input before Runtime init so attributable MCP preparation
     /// failures can select the ordinary empty Runtime path.
@@ -1758,35 +1752,13 @@ pub const Session = struct {
         }
         const input = &self.run_input.?;
         const has_images = input.* == .multimodal and input.multimodal.has_images;
-        self.unlock();
 
         var options = std.mem.zeroes(wire.RunOptionsV1);
         options.struct_size = @sizeOf(wire.RunOptionsV1);
         options.max_turns = 16;
-        // Product owns the existing per-Run time block. Revision 24's
-        // automatic date block must not add a second time context.
-        options.time_context_code = wire.TIME_CONTEXT_OFF;
-        var time_text_buffer: [session_time_context.max_text_bytes]u8 = undefined;
-        var time_block = std.mem.zeroes(wire.ContextBlockV1);
-        // The official ABI accepts Host context only for text/multimodal Run.
-        // Skill must retain null blocks and zero count.
-        if (input.* != .skill) {
-            const time_text = session_time_context.format(&time_text_buffer, self.agent_runtime.run_time_source.sample()) catch unreachable;
-            time_block.struct_size = @sizeOf(wire.ContextBlockV1);
-            time_block.label = sdk.bytesView(session_time_context.label);
-            time_block.text = sdk.bytesView(time_text);
-            options.context_blocks = @ptrCast(&time_block);
-            options.context_block_count = 1;
-        }
-        // Platform sampling is pre-Core preparation. Cancellation or close
-        // during that unlocked work must converge before entering Core.
-        self.lock();
-        if (self.cancel_requested or self.state == .closing) {
-            const terminal = self.finishBeforeCoreCallLocked();
-            self.unlock();
-            _ = self.agent_runtime.notifyEventConsumer();
-            return terminal;
-        }
+        // Core samples the process date and timezone at Run admission.
+        // Skill Runs carry no date block under the same SYSTEM policy.
+        options.time_context_code = wire.TIME_CONTEXT_SYSTEM;
         self.core_call_in_progress = true;
         self.unlock();
         // A successful Core call must still populate and validate the complete
@@ -2862,5 +2834,4 @@ test {
     _ = session_control;
     _ = session_binding;
     _ = session_runtime;
-    _ = session_time_context;
 }

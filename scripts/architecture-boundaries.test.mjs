@@ -2803,51 +2803,30 @@ test("Native compatibility seams have exact owners and symbol allowlists", () =>
   );
 });
 
-test("Run local timezone has one Application consumer and exact read-only OS symbols", () => {
-  const seam = "src/native_sdk_compat/run_local_timezone.zig";
-  assert.deepEqual(
-    zigFiles("src/").filter((file) =>
-      read(file).includes("native_sdk_compat/run_local_timezone.zig"),
-    ),
-    ["src/app/run_time_context.zig"],
-  );
+test("AgentCore owns Run dates without a Host clock or timezone seam", () => {
+  const session = read("src/agent/session.zig");
   assert.match(
-    read("src/app/run_time_context.zig"),
-    /native_sdk\.runtime\.nowMs\(\)/,
-  );
-  assert.match(read("docs/architecture.md"), /`run_local_timezone`/);
-  assert.doesNotMatch(read(seam), /@import\("(?:native_sdk|metawork_agent)"\)/);
-  assert.deepEqual(
-    externSymbols(read("src/native_sdk_compat/run_local_timezone/macos.zig"), [
-      "CoreFoundation",
-    ]),
-    [
-      "CFRelease",
-      "CFStringCreateWithCString",
-      "CFStringGetCString",
-      "CFTimeZoneCopySystem",
-      "CFTimeZoneCreateWithName",
-      "CFTimeZoneGetName",
-      "CFTimeZoneGetSecondsFromGMT",
-      "CFTimeZoneResetSystem",
-    ].sort(),
-  );
-  assert.deepEqual(
-    externSymbols(
-      read("src/native_sdk_compat/run_local_timezone/windows.zig"),
-      ["kernel32"],
-    ),
-    [
-      "FileTimeToSystemTime",
-      "GetDynamicTimeZoneInformation",
-      "SystemTimeToFileTime",
-      "SystemTimeToTzSpecificLocalTimeEx",
-    ].sort(),
+    session,
+    /options\.time_context_code = wire\.TIME_CONTEXT_SYSTEM/,
   );
   assert.doesNotMatch(
-    read("src/native_sdk_compat/run_local_timezone/macos.zig") +
-      read("src/native_sdk_compat/run_local_timezone/windows.zig"),
-    /CFTimeZoneSetDefault|SetDynamicTimeZoneInformation|SetTimeZoneInformation|SetLocalTime|GetLocalTime/,
+    session,
+    /run_time_source|metawork-time-context|options\.context_blocks\s*=/,
+  );
+  for (const path of [
+    "src/agent/session/time_context.zig",
+    "src/app/run_time_context.zig",
+    "src/native_sdk_compat/run_local_timezone.zig",
+    "src/native_sdk_compat/run_local_timezone/macos.zig",
+    "src/native_sdk_compat/run_local_timezone/windows.zig",
+  ])
+    assert.ok(
+      !existsSync(new URL(path, root)),
+      `retired date implementation: ${path}`,
+    );
+  assert.doesNotMatch(
+    read("src/app.zig") + read("src/agent/session/runtime.zig"),
+    /run_time_source/,
   );
 });
 

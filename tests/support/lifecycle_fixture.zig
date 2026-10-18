@@ -310,9 +310,6 @@ pub const FakeCore = struct {
     skill_run_seen: bool = false,
     skill_input_matches: bool = false,
     expected_multimodal_parts: ?[]const wire.RunInputPartV1 = null,
-    run_time_text: [2048]u8 = undefined,
-    run_time_text_len: usize = 0,
-    run_time_observations: usize = 0,
     multimodal_input_matches: bool = false,
     multimodal_part_count: usize = 0,
     multimodal_prompt_bytes: usize = 0,
@@ -1916,28 +1913,11 @@ pub fn sessionRunInput(
         return wire.STATUS_INVALID_ARGUMENT;
     }));
     const run_options = options orelse return wire.STATUS_INVALID_ARGUMENT;
-    std.debug.assert(run_options.time_context_code == wire.TIME_CONTEXT_OFF);
-    if (run_options.struct_size != @sizeOf(wire.RunOptionsV1))
+    std.debug.assert(run_options.time_context_code == wire.TIME_CONTEXT_SYSTEM);
+    std.debug.assert(run_options.utc_offset_minutes == 0);
+    if (run_options.struct_size != @sizeOf(wire.RunOptionsV1) or
+        run_options.context_blocks != null or run_options.context_block_count != 0)
         return wire.STATUS_INVALID_ARGUMENT;
-    if (typed_input.kind_code == wire.RUN_INPUT_SKILL) {
-        if (run_options.context_blocks != null or run_options.context_block_count != 0)
-            return wire.STATUS_INVALID_ARGUMENT;
-    } else {
-        if (run_options.context_block_count != 1) return wire.STATUS_INVALID_ARGUMENT;
-        const blocks = run_options.context_blocks orelse return wire.STATUS_INVALID_ARGUMENT;
-        const block = blocks[0];
-        if (block.struct_size != @sizeOf(wire.ContextBlockV1) or block.reserved0 != 0 or !std.mem.allEqual(u64, &block.reserved, 0))
-            return wire.STATUS_INVALID_ARGUMENT;
-        const context_label = sdk.borrowedBytes(block.label) catch return wire.STATUS_INVALID_ARGUMENT;
-        const context_text = sdk.borrowedBytes(block.text) catch return wire.STATUS_INVALID_ARGUMENT;
-        if (!std.mem.eql(u8, context_label, "metawork-time-context") or context_text.len > fake_core.run_time_text.len)
-            return wire.STATUS_INVALID_ARGUMENT;
-        fake_core.lock();
-        @memcpy(fake_core.run_time_text[0..context_text.len], context_text);
-        fake_core.run_time_text_len = context_text.len;
-        fake_core.run_time_observations += 1;
-        fake_core.unlock();
-    }
     switch (typed_input.kind_code) {
         wire.RUN_INPUT_TEXT => {},
         wire.RUN_INPUT_MULTIMODAL => {
@@ -3063,13 +3043,11 @@ pub fn createTestComposition(limits: TestCompositionLimits) !*lifecycle.Runtime 
 }
 
 pub fn createTestRuntime(limits: lifecycle.Limits) !*lifecycle.Runtime {
-    var configured = limits;
-    if (configured.run_time_source == null) configured.run_time_source = lifecycle.RunTimeSource.unavailable;
     return lifecycle.Runtime.initWithApi(
         std.testing.io,
         std.testing.allocator,
         &fake_api,
-        configured,
+        limits,
     );
 }
 

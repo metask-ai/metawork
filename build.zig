@@ -69,11 +69,6 @@ pub fn build(b: *std.Build) void {
         test_modules.app.linkFramework("AppKit", .{});
     }
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
-    const run_time_step = b.step("test-run-time-context", "Run Agent time context and native local timezone tests");
-    for ([_]*std.Build.Module{ test_modules.app, test_modules.agent_session }) |module| {
-        const tests = b.addTest(.{ .root_module = module, .filters = &.{ "Run time", "Run local timezone" } });
-        run_time_step.dependOn(&b.addRunArtifact(tests).step);
-    }
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
     const window_chrome_tests = b.addTest(.{
