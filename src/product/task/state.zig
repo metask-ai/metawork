@@ -435,6 +435,8 @@ pub const AdditionalInput = struct {
     transferred_to_run_id: ?u64 = null,
     /// Execution-only owned text; never serialized or reconstructed from history.
     raw_text: ?[]u8 = null,
+    /// Cancellation belongs to this accepted input, not later sends in the Run.
+    continuation_cancel_reason: ?SendInputReason = null,
 
     pub fn operationId(self: *const AdditionalInput) []const u8 {
         return self.operation_id[0..self.operation_id_len];

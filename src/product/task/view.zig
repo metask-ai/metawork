@@ -537,8 +537,9 @@ fn writeRun(
         writer.writeAll(",\"transferredToRunId\":") catch return error.SnapshotTooLarge;
         try writeInputId(writer, record.transferred_to_run_id);
         writer.writeAll(",\"continuationReason\":") catch return error.SnapshotTooLarge;
-        if (record.state == .unadopted and run.input_continuation_failure != null)
-            jsonValue(writer, @tagName(run.input_continuation_failure.?)) catch return error.SnapshotTooLarge
+        const continuation_reason = record.continuation_cancel_reason orelse run.input_continuation_failure;
+        if (record.state == .unadopted and continuation_reason != null)
+            jsonValue(writer, @tagName(continuation_reason.?)) catch return error.SnapshotTooLarge
         else
             writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;

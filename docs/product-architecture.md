@@ -159,7 +159,7 @@ Task 只在来源 Run 正常 completed、完整事件排空后计数整体可信
 
 Control 在主线程等待来源事件、Session 调用、worker lease 与 checkpoint 全部收尾；checkpoint 失败结束本批。有关联待确认 Scheduled occurrence 时，必须先确认原 Run 结果并成功写盘，复用 pending occurrence 与 persistence health，并观察本次确认的明确失败（包括未改变健康状态的分配或编码失败）；不能让后续 Run 替换 Schedule 观察的终态，不等待系统通知送达。失败或未知取消相关批次，恢复存储不复活；无关 Task 不受此门禁影响。等待期间 Task 拒绝冲突的新 Run、发送、compact 与 restore，但不伪造来源 Run 的 active phase。收尾完成后，认领与一次普通准入在同一主线程同步完成，不发布中间空闲状态；准入仍检查 binding、工作目录、模型、审批、容量、存储与 shutdown，不能被自身预留阻挡。
 
-取消意图绑定来源 Run，独立于普通 cancel_requested。有效 Stop、归档、删除、移除 Workspace、关闭 Task、显式退出、实际审批修改或 authority 失效，在目标接纳前均结束本批；来源已 terminal 仍可停止预留，旧来源 Stop 不影响已接纳目标。隐藏窗口、切页面或 Renderer 断连不取消 Host 意图。来源转入关联与真实目标 Run 在同一候选历史中发布；准备失败且目标回滚时恢复未采纳，普通准入已接纳的目标即使 enqueue 失败也保留真实终态与转入关联。沿用普通 admission 的 best-effort 历史写入语义，不从写入错误推断执行未接纳、不自动重试。目标后续失败或停止不回流来源；完成通知与未读回执语义保持现状。
+取消意图绑定来源 Run，独立于普通 cancel_requested。有效 Stop、归档、删除、移除 Workspace、关闭 Task、显式退出、实际审批修改或 authority 失效，在目标接纳前均结束本批；来源已 terminal 仍可停止预留，旧来源 Stop 不影响已接纳目标。取消只覆盖当时已有的消息；若审批修改后来源仍在运行，随后新接收的插话可以形成新批次，但不得恢复旧消息的接续。隐藏窗口、切页面或 Renderer 断连不取消 Host 意图。来源转入关联与真实目标 Run 在同一候选历史中发布；准备失败且目标回滚时恢复未采纳，普通准入已接纳的目标即使 enqueue 失败也保留真实终态与转入关联。沿用普通 admission 的 best-effort 历史写入语义，不从写入错误推断执行未接纳、不自动重试。目标后续失败或停止不回流来源；完成通知与未读回执语义保持现状。
 
 
 Product Task 还拥有绑定 Run identity 的 completion receipt。durable `completion_seen_run_id` 只记录 Renderer 已明确观察的当前最新 terminal `completed` Run；Product projection 只在该 Run identity 与 receipt 不同且它仍是最新 terminal outcome 时发布未读 identity。acknowledgement 必须同时携带 Task/Run identity，迟到、重复、其他 outcome、已删除 Task 或已被新 terminal Run 取代的请求无副作用；它不改变 Task `recent_order`。归档在同一 Task mutation 中确认当前 completion。Renderer 只报告中央 Task 工作面是否真正暴露，不从本地缓存、选择状态或时间推断 canonical receipt。

@@ -10042,6 +10042,73 @@ test "active input terminal reservation obeys accepted archive approval and work
     }
 }
 
+test "active input approval cancellation applies only to existing messages and rejected sends cannot reopen it" {
+    const Next = enum { none, rejected, accepted, accepted_then_stop };
+    for (std.enums.values(Next)) |next| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(home);
+        var history: TaskPersistenceProbe = .{};
+        var configuration = productControlConfiguration();
+        configuration.directories.canonical_user_home = home;
+        configuration.task_persistence = history.capability();
+        const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+        defer scenario.deinit();
+        const task = scenario.control.task_runtime.find(scenario.task_id).?;
+        const source = &task.durable.runs[0].?;
+        const epoch = task.durable.binding_epoch;
+        _ = try scenario.control.sendInput("before-mode-change", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = "old cancelled message" });
+        _ = try scenario.control.setApprovalMode(scenario.task_id, .auto_review, epoch, task.durable.approval_revision);
+        for (0..5000) |_| {
+            scenario.control.syncLifecycle();
+            if (task.approval_change == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(task.approval_change == null);
+        try std.testing.expectEqual(.auto_review, try scenario.control.taskApprovalMode(scenario.task_id));
+        try std.testing.expect(source.input_continuation_cancelled);
+        try std.testing.expect(source.additional_inputs[0].?.raw_text == null);
+        try std.testing.expectEqual(.continuation_cancelled, source.additional_inputs[0].?.continuation_cancel_reason.?);
+
+        if (next == .rejected) {
+            fake_core.forced_input_status = wire.STATUS_TOO_LATE;
+            const response = try scenario.control.sendInput("rejected-after-change", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = "rejected message" });
+            try std.testing.expectEqual(.rejected, response.outcome);
+            try std.testing.expect(source.input_continuation_cancelled);
+            fake_core.forced_input_status = null;
+        } else if (next == .accepted or next == .accepted_then_stop) {
+            for ([_][]const u8{ "new first message", "new second message" }, 0..) |text, i| {
+                const response = try scenario.control.sendInput(if (i == 0) "new-1" else "new-2", scenario.task_id, epoch, .{ .run = source.id }, .{ .text = text });
+                try std.testing.expectEqual(.submitted, response.outcome);
+            }
+            try std.testing.expect(!source.input_continuation_cancelled);
+            try std.testing.expect(source.input_continuation_failure == null);
+            fake_core.expected_run_text = "new first message\n\nnew second message";
+            if (next == .accepted_then_stop) try scenario.control.cancel(scenario.task_id, source.id);
+        }
+        fake_core.releaseControlled();
+        try settleInputScenario(scenario);
+        try std.testing.expectEqual(@as(usize, if (next == .accepted) 2 else 1), fake_core.run_calls);
+        try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
+        try std.testing.expect(source.additional_inputs[0].?.transferred_to_run_id == null);
+        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+        if (next == .accepted) {
+            try std.testing.expect(fake_core.run_text_matches);
+            for (source.additional_inputs[1..3]) |entry| {
+                try std.testing.expectEqual(.transferred, entry.?.state);
+                try std.testing.expectEqual(@as(?u64, task.durable.runs[1].?.id), entry.?.transferred_to_run_id);
+            }
+        }
+        var snapshot_storage: [512 * 1024]u8 = undefined;
+        const snapshot = try scenario.control.writeSnapshot(&snapshot_storage);
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, snapshot, .{});
+        defer parsed.deinit();
+        const inputs = parsed.value.object.get("tasks").?.array.items[0].object.get("runs").?.array.items[0].object.get("additionalInputs").?.array.items;
+        try std.testing.expectEqualStrings("continuation_cancelled", inputs[0].object.get("continuationReason").?.string);
+    }
+}
+
 test "active input accepted target remains transferred when Executor enqueue fails" {
     const scenario = try ReviewScenario.initForInput(.controlled);
     defer scenario.deinit();

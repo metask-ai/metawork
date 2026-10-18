@@ -1848,6 +1848,8 @@ pub const Runtime = struct {
             .accepted => |sequence| {
                 raw_owned = false;
                 run.additional_inputs[index].?.sequence = sequence;
+                run.input_continuation_cancelled = false;
+                run.input_continuation_failure = null;
                 result.outcome = .submitted;
                 result.input_id = id;
                 result.sequence = sequence;
@@ -1913,6 +1915,9 @@ pub const Runtime = struct {
             run.input_continuation_cancelled = true;
             run.input_continuation_pending = false;
             run.input_continuation_failure = reason;
+            for (&run.additional_inputs) |*input| if (input.*) |*record| {
+                if (record.raw_text != null) record.continuation_cancel_reason = reason;
+            };
             self.discardInputPayloads(run);
             changed = true;
         };
@@ -1923,7 +1928,7 @@ pub const Runtime = struct {
         var size: usize = 0;
         var count: usize = 0;
         for (run.additional_inputs) |entry| if (entry) |record| {
-            if (record.state != .unadopted) continue;
+            if (record.state != .unadopted or record.continuation_cancel_reason != null) continue;
             const raw = record.raw_text orelse return error.MissingInputPayload;
             const separator: usize = if (count == 0) 0 else 2;
             if (size > max or separator > max - size or raw.len > max - size - separator)
@@ -1935,7 +1940,7 @@ pub const Runtime = struct {
         const merged = try self.allocator.alloc(u8, size);
         var offset: usize = 0;
         for (run.additional_inputs) |entry| if (entry) |record| {
-            if (record.state != .unadopted) continue;
+            if (record.state != .unadopted or record.continuation_cancel_reason != null) continue;
             if (offset != 0) {
                 @memcpy(merged[offset..][0..2], "\n\n");
                 offset += 2;
@@ -1952,6 +1957,7 @@ pub const Runtime = struct {
         const run = task_state.findRun(task.durable.runs, source_id) orelse unreachable;
         for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
             if (record.state != .unadopted and record.state != .transferred) continue;
+            if (record.continuation_cancel_reason != null) continue;
             record.state = if (target_id != null) .transferred else .unadopted;
             record.transferred_to_run_id = target_id;
         };
