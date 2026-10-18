@@ -1352,6 +1352,81 @@ test("interjections use ordinary user bubbles between stable assistant reading b
   ]);
 });
 
+test("continuation and transfer preserve the submitted bubble and locate the real target", () => {
+  const message = {
+    id: "1",
+    afterOutputCount: 0,
+    operationId: "follow-up",
+    text: "A later question",
+    redacted: false,
+    sequence: 1,
+    adoptedTurn: null,
+    order: null,
+    state: "continuing",
+    transferredToRunId: null,
+    continuationReason: null,
+  };
+  const source = run({
+    additionalInputs: [message],
+    output: {
+      commentary: [],
+      response: "Original answer",
+      responseKind: "final",
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const current = task({ currentRunId: source.id, runs: [source] });
+  const view = render(taskContentElement(current));
+  const bubble = view.container.querySelector(".additional-input .ai-message");
+  const answer = view.container.querySelector(".agent-response");
+  assert.equal(
+    screen.queryByRole("button", { name: "Put back in the editor" }),
+    null,
+  );
+  const target = run({
+    id: "10",
+    input: { kind: "text", text: message.text, redacted: false },
+  });
+  view.rerender(
+    taskContentElement(
+      {
+        ...current,
+        currentRunId: target.id,
+        runs: [
+          {
+            ...source,
+            additionalInputs: [
+              {
+                ...message,
+                state: "transferred",
+                transferredToRunId: target.id,
+              },
+            ],
+          },
+          target,
+        ],
+      },
+      "2",
+    ),
+  );
+  assert.equal(
+    view.container.querySelector(".additional-input .ai-message"),
+    bubble,
+  );
+  assert.equal(view.container.querySelector(".agent-response"), answer);
+  assert.equal(
+    screen.queryByRole("button", { name: "Put back in the editor" }),
+    null,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "View next Run" }));
+  assert.equal(
+    document.activeElement,
+    view.container.querySelector('[data-run-id="10"]'),
+  );
+});
+
 test("an interjection after a live tail preserves that tail through growth and commentary closure", async () => {
   const message = {
     id: "1",

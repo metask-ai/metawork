@@ -587,10 +587,12 @@ export const zhCN: Record<MessageId, string> = {
   "input.position_unknown": "具体采纳位置未确认。",
   "input.state.pending": "已提交本轮，尚未采纳",
   "input.state.adopted": "已纳入本轮上下文",
-  "input.state.unadopted": "本轮结束前未采纳，不会自动执行",
+  "input.state.unadopted": "本轮未纳入，未继续处理",
   "input.state.unknown": "是否纳入本轮上下文尚未确认",
   "input.state.continuing": "本轮未纳入，收尾后继续处理",
   "input.state.transferred": "本轮未处理，已转入下一轮",
+  "input.locate_target": "查看下一轮",
+  "input.continuation_wait": "正在收尾，随后处理已提交的消息；可编辑草稿或停止",
   "mutation.reason.continuation_cancelled": "已取消后续处理。",
   "mutation.reason.combined_input_too_large":
     "多条消息合并后超过单轮输入容量，请拆分发送。",

@@ -3253,6 +3253,12 @@ test("active input shared fixture preserves exact receipts and adoption history"
   transferred.tasks[0].currentRunId = "2";
   transferred.tasks[0].activeOperation.id = "2";
   assert.deepEqual(decodeWorkbenchSnapshot(transferred), transferred);
+  const failedSource = clone(transferred);
+  Object.assign(failedSource.tasks[0].runs[0], {
+    phase: "failed",
+    terminal: terminal("failed"),
+  });
+  assert.throws(() => decodeWorkbenchSnapshot(failedSource));
   transferred.tasks[0].runs.pop();
   assert.throws(() => decodeWorkbenchSnapshot(transferred));
   assert.throws(() => decodeSendInputResult(wire.submitted, "1", "other"));

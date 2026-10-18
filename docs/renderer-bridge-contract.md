@@ -232,9 +232,9 @@ Task snapshot 必填 `inputReady: boolean` 和 nullable `sendInputResult`。inpu
 
 Renderer 同一 Task 一次只发起一个调用，调用前仅记 operationId 与草稿版本元数据，不保留待执行 payload。超时解除本地 busy 并刷新 Snapshot；只按匹配 operationId 的回执或对应消息已采纳事实确认，空数组或旧结果不能证明失败。未知去向保留草稿并提示可能重复，允许用户提交新意图，不自动重发、转投下一 Run、等待初始化后补发或重连后恢复发送。成功只清除原草稿版本；旧 connection 响应不能修改新草稿。历史放回编辑器只编辑，不调用发送。
 
-`tasks.run` 精确返回 `{ accepted, taskId, runId, reason }`，accepted 时 runId 非空且 reason=null，rejected 时相反；拒绝原因沿用新 Run admission，不能因历史存在未采纳消息阻止 run、compact 或 restore。
+`tasks.run` 精确返回 `{ accepted, taskId, runId, reason }`，accepted 时 runId 非空且 reason=null，rejected 时相反；拒绝原因沿用新 Run admission。仅运行时 `continuing` 预留阻止冲突的 run、send、compact 或 restore；普通历史中的未采纳消息不构成忙碌。Host 正常完成后的接续不属于 Renderer 重试：原轮提交锚点不变，等待中不提供恢复动作，转入关联指向真实目标，允许定位目标且不重复提供发送动作。失败原因只在内存中投影，重启后不恢复接续。
 
-`metawork.tasks.cancel` payload 精确为 `{ taskId, runId }`，成功 acknowledgement 为 `{ taskId, runId, cancelRequested: true }`，只表示停止请求已处理，最终结果仍取 canonical Snapshot。旧 Run 的停止不能影响后续 Run。Stop 独立于发送回执，超时只刷新，不重发或组合另一条发送命令。
+`metawork.tasks.cancel` payload 精确为 `{ taskId, runId }`，成功 acknowledgement 为 `{ taskId, runId, cancelRequested: true }`，只表示停止请求已处理，最终结果仍取 canonical Snapshot。来源 Run 已 terminal 但仍有接续预留时，同一命令取消该预留；目标已接纳后，旧 Run 的停止不能影响后续 Run。Stop 独立于发送回执，超时只刷新，不重发或组合另一条发送命令。
 
 `metawork.tasks.compact` payload 精确为 `{ taskId, expectedBindingEpoch }`，结果精确为 `{ accepted, taskId, operationId, reason }`。`accepted=true` 表示 Product 已建立该 Compact operation identity，不承诺 executor enqueue 或 Agent compact 成功；即使紧随其后的 queue submit 失败，command 仍返回该 accepted `operationId`，随后 canonical Task snapshot 以同一 operation 发布 `phase=failed, cause=resource_limit` 并清除 active operation。Renderer 必须等待 snapshot terminal，不得把 accepted acknowledgement 改判为 command rejection、恢复旧状态或自动重放。
 

@@ -339,6 +339,16 @@ export function TaskContent({
     setShowJumpLatest(false);
   }
 
+  function locateRun(runId: string) {
+    const node = viewport.current;
+    if (!node || !task || !task.runs.some((run) => run.id === runId)) return;
+    const target = node.querySelector<HTMLElement>(`[data-run-id="${runId}"]`);
+    if (!target) return;
+    target.scrollIntoView({ block: "start", behavior: "instant" });
+    target.focus({ preventScroll: true });
+    updateReadingState();
+  }
+
   const followDeferredOutput = useCallback(() => {
     const node = viewport.current;
     const taskId = task?.id;
@@ -427,7 +437,12 @@ export function TaskContent({
         }
 
         return (
-          <section className="ai-exchange" key={`${task.id}:${run.id}`}>
+          <section
+            className="ai-exchange focus-ring"
+            data-run-id={run.id}
+            tabIndex={-1}
+            key={`${task.id}:${run.id}`}
+          >
             <Message role="user">
               <TaskInput input={run.input} />
             </Message>
@@ -460,6 +475,7 @@ export function TaskContent({
                       entry.input.id === run.additionalInputs.at(-1)?.id
                     }
                     onRestore={onPrepareRetry}
+                    onLocate={locateRun}
                   />
                 ) : entry.parts.some((part) => part.content) ||
                   entry.redacted ? (

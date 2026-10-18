@@ -9744,6 +9744,13 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .additional-input-restore {
   min-height: 44px;
 }
+.additional-input-target {
+  min-height: 44px;
+}
+.additional-input[data-state="transferred"] .additional-input-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 @media (max-width: 560px) {
   .additional-input-metadata {
     max-width: 88%;

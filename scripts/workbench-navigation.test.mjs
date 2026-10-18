@@ -27,6 +27,7 @@ import {
   isRunInFlight,
   searchWorkbench,
   taskDisplayState,
+  pendingInputContinuation,
   orderedTasks,
   taskSignals,
   workspaceDirectoryLabel,
@@ -48,6 +49,7 @@ function run(id, text, assistant, outcome, toolContent = "", cause = null) {
       model: "fixture-model",
     },
     input: { kind: "text", text, redacted: false },
+    additionalInputs: [],
     output: {
       commentary: [],
       response: assistant,
@@ -104,6 +106,24 @@ function task(overrides) {
     ...overrides,
   };
 }
+
+test("continuation is a Task reservation without a fabricated active Run phase", () => {
+  const source = run("9", "question", "answer", "completed");
+  source.additionalInputs = [{ state: "continuing" }];
+  const current = task({ currentRunId: source.id, runs: [source] });
+  assert.equal(isRunInFlight(current), false);
+  assert.equal(pendingInputContinuation(current), source);
+  assert.deepEqual(taskDisplayState(current), {
+    kind: "outcome",
+    value: "completed",
+  });
+  source.additionalInputs[0].state = "transferred";
+  assert.equal(pendingInputContinuation(current), null);
+  assert.deepEqual(taskDisplayState(current), {
+    kind: "outcome",
+    value: "completed",
+  });
+});
 
 test("Task list stays flat while ordering action before recency", () => {
   const tasks = [

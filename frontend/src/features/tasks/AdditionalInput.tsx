@@ -13,10 +13,12 @@ export function AdditionalInput({
   input,
   latest = false,
   onRestore,
+  onLocate,
 }: {
   input: AdditionalInputView;
   latest?: boolean;
   onRestore: (input: RunInputView) => void;
+  onLocate: (runId: string) => void;
 }) {
   const { t } = useI18n();
   const statusId = useId();
@@ -39,7 +41,11 @@ export function AdditionalInput({
       </Message>
       <div className="additional-input-metadata">
         <div className="additional-input-actions">
-          <p className="additional-input-state" id={statusId}>
+          <p
+            className="additional-input-state"
+            id={statusId}
+            aria-live="polite"
+          >
             {t(`input.state.${input.state}`)}
           </p>
           <CopyButton
@@ -50,7 +56,23 @@ export function AdditionalInput({
             failedLabel={t("copy.failed")}
             onCopy={() => copyRunInput(textInput)}
           />
+          {input.state === "transferred" && input.transferredToRunId && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="additional-input-target"
+              onClick={() => onLocate(input.transferredToRunId!)}
+            >
+              {t("input.locate_target")}
+            </Button>
+          )}
         </div>
+        {input.continuationReason && (
+          <p className="projection-note">
+            {t(`mutation.reason.${input.continuationReason}`)}
+          </p>
+        )}
         {input.state === "adopted" && input.order === null && (
           <p className="projection-note">{t("input.position_unknown")}</p>
         )}

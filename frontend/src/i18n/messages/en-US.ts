@@ -651,11 +651,14 @@ export const enUS = {
   "input.state.pending": "Submitted to this run, not yet adopted",
   "input.state.adopted": "Added to this run’s context",
   "input.state.unadopted":
-    "Not adopted before this run ended; no automatic execution",
+    "Not adopted in this Run; further processing was not started",
   "input.state.continuing":
     "Not included in this Run; continuing after cleanup",
   "input.state.transferred":
     "Not processed in this Run; transferred to the next Run",
+  "input.locate_target": "View next Run",
+  "input.continuation_wait":
+    "Finishing cleanup before processing submitted messages; edit your draft or stop",
   "mutation.reason.continuation_cancelled": "Further processing was cancelled.",
   "mutation.reason.combined_input_too_large":
     "The combined messages exceed the input limit. Send them separately.",

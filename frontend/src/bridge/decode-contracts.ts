@@ -3274,7 +3274,10 @@ function decodeTask(value: unknown, path: string): TaskView {
           !runs.some((target) => target.id === input.transferredToRunId))
       )
         fail(path, "input transfer must target a later Run in the same Task");
-      if (input.state === "continuing" && run.terminal?.outcome !== "completed")
+      if (
+        (input.state === "continuing" || input.state === "transferred") &&
+        run.terminal?.outcome !== "completed"
+      )
         fail(
           path,
           "only a normally completed Run can await input continuation",

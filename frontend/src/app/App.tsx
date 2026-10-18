@@ -165,6 +165,7 @@ import { useI18n, type MessageId } from "../i18n/context.ts";
 import {
   searchWorkbench,
   selectActiveTask,
+  pendingInputContinuation,
   taskDisplayState,
   taskSignals,
   workspaceDirectoryLabel,
@@ -872,14 +873,18 @@ export default function App() {
   const inputReceipts = useRef(
     new Map<string, { operationId: string; draftVersion: string | null }>(),
   );
+  const inputContinuation = pendingInputContinuation(activeTask);
   const taskCanCompose =
     newTaskDraftActive ||
     (activeTask?.lifecycle === "open" &&
       (activeTask.activeOperation?.kind === "run" ||
+        inputContinuation !== null ||
         activeTask.continuationAvailable ||
         activeTask.continuationRecoveryAvailable) &&
       !activeTask.archived);
-  const taskOperationInFlight = Boolean(activeTask?.activeOperation);
+  const taskOperationInFlight = Boolean(
+    activeTask?.activeOperation || inputContinuation,
+  );
   const composerWorkspaceId =
     activeTask?.workspaceId || workbench.draftWorkspaceId;
   const composerWorkspace = snapshot.workspaces.find(
@@ -951,18 +956,20 @@ export default function App() {
         !taskOperationInFlight &&
         (newTaskDraftActive ||
           activeTask?.skillCatalog.availability !== "loading"));
-  const inputDisabledReason: MessageId | undefined = taskOperationInFlight
-    ? activeTask?.currentRunPhase === "stopping" ||
-      Boolean(activeTask && activeTask.id in cancelPending)
-      ? "input.stopping"
-      : skillRunInFlight
-        ? "input.skill_run"
-        : composerDraft.kind !== "text"
-          ? "input.text_only"
-          : !activeTask?.inputReady
-            ? "input.not_ready"
-            : undefined
-    : undefined;
+  const inputDisabledReason: MessageId | undefined = inputContinuation
+    ? "input.continuation_wait"
+    : taskOperationInFlight
+      ? activeTask?.currentRunPhase === "stopping" ||
+        Boolean(activeTask && activeTask.id in cancelPending)
+        ? "input.stopping"
+        : skillRunInFlight
+          ? "input.skill_run"
+          : composerDraft.kind !== "text"
+            ? "input.text_only"
+            : !activeTask?.inputReady
+              ? "input.not_ready"
+              : undefined
+      : undefined;
   const metaskProvider = snapshot.models.providers.find(
     (provider) => provider.id === "metask",
   );
@@ -2367,14 +2374,17 @@ export default function App() {
       !activeTask ||
       cancelPendingTasks.current.has(activeTask.id) ||
       activeTask.currentRunId === "0" ||
-      activeTask.currentRunPhase === null
+      (activeTask.currentRunPhase === null && !inputContinuation)
     )
       return;
     const taskId = activeTask.id;
     setCancelPendingForTask(taskId, true);
     try {
       try {
-        await client.cancel(activeTask.id, activeTask.currentRunId);
+        await client.cancel(
+          activeTask.id,
+          inputContinuation?.id ?? activeTask.currentRunId,
+        );
       } catch (error) {
         if (
           await reconcileCommandTimeout(error, "operation.run_stop", {
@@ -3113,7 +3123,7 @@ export default function App() {
           lifecycleOpen: activeTask.lifecycle === "open",
           continuationAvailable: activeTask.continuationAvailable,
           archived: activeTask.archived,
-          activeOperation: activeTask.activeOperation !== null,
+          activeOperation: taskOperationInFlight,
           hasFinalizedRun: activeTask.runs.length > 0,
         }
       : null,
@@ -3283,10 +3293,12 @@ export default function App() {
         defaultRecoveryDisabled={bridgeUnavailable || executionBusy}
         actionDisabled={workbenchMutationDisabled || workspaceBusy}
         stopAction={
-          activeTask?.activeOperation?.kind === "run" ||
-          activeTask?.activeOperation?.kind === "compact"
-            ? activeTask.activeOperation.kind
-            : null
+          inputContinuation
+            ? "run"
+            : activeTask?.activeOperation?.kind === "run" ||
+                activeTask?.activeOperation?.kind === "compact"
+              ? activeTask.activeOperation.kind
+              : null
         }
         stopDisabled={
           bridgeUnavailable ||
