@@ -15,6 +15,7 @@ export async function runActiveInputVertical({
   workspaceRoot,
   catalog,
   sendInRenderer,
+  observeReadingBeforeAdoption,
   verifyRendererDraft,
 }) {
   const read = async (id) =>
@@ -105,10 +106,19 @@ export async function runActiveInputVertical({
       : "printf active-input";
   const adopted = await create("Current Run input audit");
   const parent = gate(
-    toolSse("active-tool", "active-command", "Bash", {
-      command,
-      description: "Require an explicit permission answer",
-    }),
+    toolSse(
+      "active-tool",
+      "active-command",
+      "Bash",
+      {
+        command,
+        description: "Require an explicit permission answer",
+      },
+      "Explanation before the second interjection.\n\n" +
+        "A visible commentary paragraph keeps the earlier reading surface available.\n\n".repeat(
+          18,
+        ),
+    ),
   );
   const text =
     "Preserve this explicit constraint\nhttps://example.test/" +
@@ -141,6 +151,7 @@ export async function runActiveInputVertical({
     let current = await read(adopted.id);
     assert.equal(current.runs.length, 1);
     assert.equal(current.runs[0].additionalInputs[0].state, "pending");
+    assert.equal(current.runs[0].additionalInputs[0].afterOutputCount, 0);
     parent.release();
     current = await poll(
       async () => {
@@ -164,11 +175,14 @@ export async function runActiveInputVertical({
     );
     current = await read(adopted.id);
     assert.equal(current.pendingUi.requestId, pending.requestId);
+    assert.equal(current.runs[0].additionalInputs[1].afterOutputCount, 1);
     assert.ok(
       current.runs[0].additionalInputs.every(
         (message) => message.state === "pending",
       ),
     );
+    if (observeReadingBeforeAdoption)
+      await observeReadingBeforeAdoption(adopted.id);
     await invoke("metawork.tasks.respondUi", {
       taskId: adopted.id,
       runId,
@@ -396,6 +410,12 @@ export async function runActiveInputVertical({
     );
     await assertNoSuccessor(current);
     const restored = await read(adopted.id);
+    assert.deepEqual(
+      restored.runs[0].additionalInputs.map(
+        (message) => message.afterOutputCount,
+      ),
+      [0, 1],
+    );
     assert.deepEqual(
       restored.runs[0].additionalInputs.map((message) => message.state),
       ["adopted", "adopted"],
