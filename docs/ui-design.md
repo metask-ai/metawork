@@ -699,17 +699,17 @@ New task 页面以 Composer 为绝对主视觉。其上方使用直接的行动�
 ┌────────────────────────────────────────────────────┐
 │ 描述你希望 MetaWork 完成什么……                   │
 │                                                    │
-│ 模型：当前连接 · 当前模型 ▾                  发送 │
+│ 模型：当前模型 ▾                             发送 │
 └────────────────────────────────────────────────────┘
   Workspace：metawork ▾
 ```
 
 模型选择规则：
 
-- New task 默认显示当前 active Provider 与模型；Composer 菜单列出 Host Models snapshot 中各可用来源的 ready 模型，以来源和模型共同区分候选。选择只用于本次 Task，不修改 global default；明确选择与默认相同时也保留该选择。重新打开 New task 时恢复初始默认意图；
-- 没有可用 global default 时仍允许选择当前可用的其他模型并发送；没有可用候选时提供进入 `Models` 设置的导航。不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
+- New task 默认显示当前 active 模型；Composer 模型按钮和菜单项只显示模型名称，内部仍以来源和模型共同区分候选。菜单仅列出当前已选 Provider 的 ready 模型；已有草稿保留其明确选择的来源，其余从 Host 当前默认配置确定，不能合并其他 Provider 的候选。选择只用于本次 Task，不修改 global default；明确选择与默认相同时也保留该选择。重新打开 New task 时恢复初始默认意图；
+- 没有可用 global default 时，已有明确来源仍允许选择该来源当前可用的模型并发送；没有已选 Provider 或该 Provider 没有可用候选时提供进入 `Models` 设置的导航，不回退到其他 Provider。不得显示完整 secret，也不得直接提交默认选择。草稿已选模型因 catalog/authority 变化失效时保留可见选择、禁用发送并要求重选，不能静默显示或执行默认模型；
 - Models默认来源、Metask API/protocol/credential authority或 ready Custom Provider模型变化先更新 Models desired selection及对应 revision/source generation，再由 Product Control独立 reconcile active binding generation。两类变化都不热替换已有 live Task；detached历史 Task可在 §6.4的 Conversation restore中采用同 protocol、可承载其 pinned model的当前 credential authority，并通过窄 binding adoption提交新 generation，任意 protocol/model变化仍只能走未来显式 rebind；
-- 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，始终使用 `Provider · 模型`，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留可证明的来源身份和模型，历史来源未知时明确显示未知，不猜测 Provider。当前 Run 保留原执行模型，实际执行事实在任务信息中查看。菜单列出所有 ready Metask/Custom Provider，使用完整来源与模型区分同名项，不受 global default 的忙碌状态约束。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用发送及再次选择，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
+- 已有 Task 的 Composer 从 Host modelIntent 显示所选模型，按钮和菜单项只显示模型名称，不随运行状态增加“下一轮使用”等前缀；来源或模型离开可用目录时仍保留模型名称，找不到显示名称时使用保存的模型 id。Provider 保留在设置页与任务信息中：任务信息按 modelIntent 显示“所选 Provider”，来源已移除时保留来源 id，历史来源未知时明确显示未知，不根据模型名或全局默认猜测 Provider；本轮或最近一轮的实际模型与协议直接取自对应 Run 记录，不能用所选模型覆盖执行事实。菜单仅列出 Task modelIntent 所属 Provider 的 ready 模型，不受 global default 的来源变化或忙碌状态约束；当前来源不可用或历史来源未知时保留模型事实，不借用其他 Provider 的目录。Host modelSelectionAvailability 决定目录可用性；modelIntent.state=outcome_unknown 时显示未确认原因并禁用发送及再次选择，保留输入并引导既有历史恢复。明确保存失败和过期 revision 刷新 Host 事实，不预测成功、不自动重发，不保留 Renderer 本地模型真源；
 - 正在更新默认模型时只禁用相关选择和发送 admission，不冻结导航、历史阅读或其他 Task；
 - 模型不可用时说明原因并给出刷新或设置入口，不能留下永久 disabled selector。
 

@@ -1,15 +1,17 @@
 import type { Ref } from "react";
-import type { TaskView } from "../../bridge/contracts.ts";
+import type { ModelsView, TaskView } from "../../bridge/contracts.ts";
 import { Popover } from "../../components/ui/popover.tsx";
 import { Icon } from "../../components/ui/Icon.tsx";
 import { useI18n } from "../../i18n/context.ts";
 
 export function TaskInformation({
   task,
+  models,
   permissionProfilesEnabled,
   triggerRef,
 }: {
   task: TaskView;
+  models: ModelsView;
   permissionProfilesEnabled: boolean;
   triggerRef?: Ref<HTMLButtonElement>;
 }) {
@@ -18,6 +20,14 @@ export function TaskInformation({
   const executionRun = activeRun
     ? task.runs.find((run) => run.id === task.activeOperation?.id)
     : task.runs.at(-1);
+  const sourceId = task.modelIntent?.modelRef.sourceId;
+  const provider =
+    models.providers.find((candidate) => candidate.id === sourceId) ??
+    models.customProviders.find((candidate) => candidate.id === sourceId);
+  const providerLabel =
+    provider?.displayName ||
+    (sourceId === "metask" ? "Metask" : sourceId) ||
+    t("account.unknown_provider");
   return (
     <Popover.Root>
       <Popover.Trigger
@@ -33,17 +43,37 @@ export function TaskInformation({
           <Popover.Popup className="task-information">
             <Popover.Title>{t("task.information")}</Popover.Title>
             <dl className="task-facts">
+              <div>
+                <dt>{t("task.selected_provider")}</dt>
+                <dd>{providerLabel}</dd>
+              </div>
               {executionRun && (
-                <div>
-                  <dt>
-                    {t(
-                      activeRun
-                        ? "task.current_run_model"
-                        : "task.last_run_model",
-                    )}
-                  </dt>
-                  <dd>{executionRun.execution.model}</dd>
-                </div>
+                <>
+                  <div>
+                    <dt>
+                      {t(
+                        activeRun
+                          ? "task.current_run_model"
+                          : "task.last_run_model",
+                      )}
+                    </dt>
+                    <dd>{executionRun.execution.model}</dd>
+                  </div>
+                  <div>
+                    <dt>
+                      {t(
+                        activeRun
+                          ? "task.current_run_protocol"
+                          : "task.last_run_protocol",
+                      )}
+                    </dt>
+                    <dd>
+                      {t(
+                        `settings.custom_provider_protocol.${executionRun.execution.protocol}`,
+                      )}
+                    </dd>
+                  </div>
+                </>
               )}
               <div>
                 <dt>{t("inspector.mcp_authority")}</dt>

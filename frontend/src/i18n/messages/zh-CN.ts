@@ -837,8 +837,11 @@ export const zhCN: Record<MessageId, string> = {
   "inspector.context_pressure_detail":
     "当前 {current} tokens · {compact} 时自动压缩 · 上限 {limit}",
   "task.information": "任务信息",
+  "task.selected_provider": "所选 Provider",
   "task.current_run_model": "本轮模型",
   "task.last_run_model": "最近一轮模型",
+  "task.current_run_protocol": "本轮协议",
+  "task.last_run_protocol": "最近一轮协议",
   "task.information_scope":
     "MCP 表示创建任务时的工具选择，不代表当前连接状态；审批模式显示此会话当前设置。",
   "conversation.context_observed": "当前会话最近一次观测，不是实时用量。",

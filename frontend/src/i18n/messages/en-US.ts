@@ -933,8 +933,11 @@ export const enUS = {
   "inspector.context_pressure_detail":
     "{current} tokens now · auto-compact at {compact} · limit {limit}",
   "task.information": "Task information",
+  "task.selected_provider": "Selected provider",
   "task.current_run_model": "Current run model",
   "task.last_run_model": "Last run model",
+  "task.current_run_protocol": "Current run protocol",
+  "task.last_run_protocol": "Last run protocol",
   "task.information_scope":
     "MCP describes tool selection at task creation, not current connection status. Approval mode shows the current conversation setting.",
   "conversation.context_observed":

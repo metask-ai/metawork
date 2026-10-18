@@ -4282,6 +4282,13 @@ test("Run statistics remain data, not conversation content or empty disclosures"
   assert.deepEqual(value, original);
 });
 
+const taskInformationModels = JSON.parse(
+  await readFile(
+    "frontend/src/bridge/__fixtures__/workbench-snapshot.fixture",
+    "utf8",
+  ),
+).models;
+
 test("task information uses a keyboard-accessible icon and retains creation MCP and readonly permission", async () => {
   const user = userEvent.setup({ document: dom.window.document });
   for (const [mcpAuthority, expected] of [
@@ -4293,6 +4300,7 @@ test("task information uses a keyboard-accessible icon and retains creation MCP 
       localizedView(
         createElement(TaskInformation, {
           task: task({ mcpAuthority, permissionProfile: "approval_required" }),
+          models: taskInformationModels,
           permissionProfilesEnabled: true,
         }),
       ),
@@ -4319,11 +4327,23 @@ test("task information uses a keyboard-accessible icon and retains creation MCP 
   }
 });
 
-test("task information shows the actual active or latest Run model independently of the selected model", async () => {
+test("task information separates the selected Provider from the actual active or latest Run model and protocol", async () => {
   const user = userEvent.setup({ document: dom.window.document });
-  for (const [activeOperation, label, expected] of [
-    [{ kind: "run", id: "7" }, "Current run model", "minimax-m3"],
-    [null, "Last run model", "glm-5.3-flash"],
+  for (const [activeOperation, label, expected, protocolLabel, protocol] of [
+    [
+      { kind: "run", id: "7" },
+      "Current run model",
+      "minimax-m3",
+      "Current run protocol",
+      "OpenAI Chat Completions",
+    ],
+    [
+      null,
+      "Last run model",
+      "glm-5.3-flash",
+      "Last run protocol",
+      "Anthropic Messages",
+    ],
   ]) {
     render(
       localizedView(
@@ -4334,10 +4354,26 @@ test("task information shows the actual active or latest Run model independently
               modelRef: { sourceId: "other", modelId: "selected-model" },
             },
             runs: [
-              { id: "7", execution: { model: "minimax-m3" } },
-              { id: "8", execution: { model: "glm-5.3-flash" } },
+              {
+                id: "7",
+                execution: {
+                  model: "minimax-m3",
+                  protocol: "openai_chat_completions",
+                },
+              },
+              {
+                id: "8",
+                execution: {
+                  model: "glm-5.3-flash",
+                  protocol: "anthropic_messages",
+                },
+              },
             ],
           }),
+          models: {
+            ...taskInformationModels,
+            customProviders: [{ id: "other", displayName: "Other Provider" }],
+          },
           permissionProfilesEnabled: false,
         }),
       ),
@@ -4348,6 +4384,47 @@ test("task information shows the actual active or latest Run model independently
       expected,
     );
     assert.equal(screen.queryByText("selected-model"), null);
+    assert.equal(
+      screen.getByText("Selected provider").parentElement.querySelector("dd")
+        .textContent,
+      "Other Provider",
+    );
+    assert.equal(
+      screen.getByText(protocolLabel).parentElement.querySelector("dd")
+        .textContent,
+      protocol,
+    );
+    cleanup();
+  }
+});
+
+test("task information preserves a removed Provider ID and never guesses the source of legacy history", async () => {
+  const user = userEvent.setup({ document: dom.window.document });
+  for (const [sourceId, expected] of [
+    ["removed-provider", "removed-provider"],
+    [null, "Unknown provider"],
+  ]) {
+    render(
+      localizedView(
+        createElement(TaskInformation, {
+          task: task({
+            modelIntent: sourceId
+              ? { modelRef: { sourceId, modelId: "model" } }
+              : null,
+          }),
+          models: taskInformationModels,
+          permissionProfilesEnabled: false,
+        }),
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Task information" }));
+    assert.equal(
+      screen.getByText("Selected provider").parentElement.querySelector("dd")
+        .textContent,
+      expected,
+    );
+    assert.equal(screen.queryByText("Last run model"), null);
+    assert.equal(screen.queryByText("Last run protocol"), null);
     cleanup();
   }
 });
@@ -4359,6 +4436,7 @@ test("task information keeps the full-access boundary visible without a mutation
     localizedView(
       createElement(TaskInformation, {
         task: task({ permissionProfile: "full_access" }),
+        models: taskInformationModels,
         permissionProfilesEnabled: true,
       }),
     ),

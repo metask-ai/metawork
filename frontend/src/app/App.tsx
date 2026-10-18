@@ -980,8 +980,11 @@ export default function App() {
   const metaskProvider = snapshot.models.providers.find(
     (provider) => provider.id === "metask",
   );
-  const taskModelOptions = readyModelOptions(snapshot.models);
   const taskIntent = activeTask?.modelIntent;
+  const taskModelOptions = readyModelOptions(
+    snapshot.models,
+    taskIntent?.modelRef.sourceId ?? null,
+  );
   const displayedTaskModelId = taskIntent
     ? modelOptionId(taskIntent.modelRef)
     : "";
@@ -1014,7 +1017,7 @@ export default function App() {
   const taskModelLabel = taskIntent
     ? modelDisplayLabel(snapshot.models, taskIntent.modelRef)
     : activeTask
-      ? `${t("account.unknown_provider")} · ${activeTask.binding.model}`
+      ? activeTask.binding.model
       : selectedModelLabel;
   const taskModelPolicy = taskModelSelectionPolicy(activeTask);
 
@@ -3216,9 +3219,11 @@ export default function App() {
               : newTaskDraftActive
                 ? t("settings.new_task_model_help")
                 : t(
-                    taskModelSelectionMessageId(
-                      activeTask?.modelSelectionAvailability,
-                    ),
+                    taskModelPolicy.selectable && taskModelOptions.length === 0
+                      ? "settings.task_model_catalog_unavailable"
+                      : taskModelSelectionMessageId(
+                          activeTask?.modelSelectionAvailability,
+                        ),
                   )
         }
         defaultSelectionMissing={
@@ -3406,6 +3411,7 @@ export default function App() {
               <TaskInformation
                 key={activeTask.id}
                 task={activeTask}
+                models={snapshot.models}
                 permissionProfilesEnabled={
                   snapshot.capabilities.permissionProfiles
                 }

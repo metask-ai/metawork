@@ -106,7 +106,11 @@ export async function runModelSwitchVertical({
       windowsVirtualKeyCode: virtualKey,
     });
   };
-  const inspectRunModel = async (expectedModel, captureName) => {
+  const inspectRunModel = async (
+    expectedModel,
+    captureName,
+    expectedProvider,
+  ) => {
     const point = await wait(
       () =>
         webview.evaluate(
@@ -129,7 +133,7 @@ export async function runModelSwitchVertical({
     await wait(
       () =>
         webview.evaluate(
-          `(() => { const panel=document.querySelector('.task-information'); if(!panel?.getClientRects().length) return false; const row=[...panel.querySelectorAll('.task-facts > div')].find(item=>/本轮模型|Current run model/.test(item.querySelector('dt')?.textContent ?? '')); if(row?.querySelector('dd')?.textContent!==${JSON.stringify(expectedModel)}) throw new Error('Task information does not preserve the active Run model'); const r=panel.getBoundingClientRect(); if(r.left< -1 || r.right>innerWidth+1 || panel.scrollWidth>panel.clientWidth+1) throw new Error('Task information overflows'); return true; })()`,
+          `(() => { const panel=document.querySelector('.task-information'); if(!panel?.getClientRects().length) return false; const rows=[...panel.querySelectorAll('.task-facts > div')]; const fact=pattern=>rows.find(item=>pattern.test(item.querySelector('dt')?.textContent ?? ''))?.querySelector('dd')?.textContent; if(fact(/本轮模型|Current run model/)!==${JSON.stringify(expectedModel)}) throw new Error('Task information does not preserve the active Run model'); if(fact(/所选 Provider|Selected provider/)!==${JSON.stringify(expectedProvider)}) throw new Error('Task information does not retain the selected Provider'); if(fact(/本轮协议|Current run protocol/)!=='Anthropic Messages') throw new Error('Task information borrowed the new Provider protocol for an active Run'); const r=panel.getBoundingClientRect(); if(r.left< -1 || r.right>innerWidth+1 || panel.scrollWidth>panel.clientWidth+1) throw new Error('Task information overflows'); return true; })()`,
         ),
       "Task information shows the actual Run model",
     );
@@ -151,6 +155,10 @@ export async function runModelSwitchVertical({
     );
   };
   try {
+    // Match the sync vertical: this probe owns WebView input, while native
+    // foreground and system-key verification remain a separate gate.
+    await webview.send("Page.bringToFront");
+    await webview.send("Emulation.setFocusEmulationEnabled", { enabled: true });
     const initial = await snapshot();
     assert.equal(initial.models.customProviders.length, 1);
     const source = initial.models.customProviders[0];
@@ -329,6 +337,7 @@ export async function runModelSwitchVertical({
       await inspectRunModel(
         admission.activeModelRef.modelId,
         `model-information-${name}`,
+        source.displayName,
       );
     }
     await webview.send("Emulation.setDeviceMetricsOverride", {
@@ -344,7 +353,7 @@ export async function runModelSwitchVertical({
     const point = await wait(
       () =>
         webview.evaluate(
-          `(() => { const option=[...document.querySelectorAll('.composer-model-menu [role="option"]')].find(item=>item.textContent.includes('Target model')); if(!option || option.getAttribute('aria-disabled')==='true') return null; option.scrollIntoView({block:'nearest'}); const r=option.getBoundingClientRect(), x=r.left+r.width/2,y=r.top+r.height/2; if(document.elementFromPoint(x,y)?.closest('[role="option"]')!==option) return null; return {x,y}; })()`,
+          `(() => { const option=[...document.querySelectorAll('.composer-model-menu [role="option"]')].find(item=>item.textContent.includes('Target model')); if(!option || option.getAttribute('aria-disabled')==='true') return null; if(option.textContent.trim()!=='Target model') throw new Error('Model option includes a Provider label'); option.scrollIntoView({block:'nearest'}); const r=option.getBoundingClientRect(), x=r.left+r.width/2,y=r.top+r.height/2; if(document.elementFromPoint(x,y)?.closest('[role="option"]')!==option) return null; return {x,y}; })()`,
         ),
       "target model menu option",
     );
@@ -370,9 +379,9 @@ export async function runModelSwitchVertical({
     await wait(
       () =>
         webview.evaluate(
-          `(() => { const label=document.querySelector('.composer-model-trigger')?.textContent ?? ''; return label.includes('Target model') && !/下一轮|Next run/.test(label); })()`,
+          `document.querySelector('.composer-model-trigger')?.textContent.trim()==='Target model'`,
         ),
-      "Renderer shows only the selected Provider and model",
+      "Renderer shows only the selected model name",
     );
     const pending = await webview.send("Page.captureScreenshot", {
       format: "png",
@@ -385,6 +394,7 @@ export async function runModelSwitchVertical({
     await inspectRunModel(
       admission.activeModelRef.modelId,
       "model-information-after-selection",
+      source.displayName,
     );
     releaseSource();
     await wait(async () => {
