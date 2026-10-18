@@ -642,6 +642,8 @@ desktopVertical: try {
     workspaceRoot: canonicalWorkspace,
     catalog: catalogSnapshot,
     sendInRenderer: chromeProbePort === null ? null : sendInRenderer,
+    observeReadingBeforeAdoption:
+      chromeProbePort === null ? null : observeActiveReadingBeforeAdoption,
     verifyRendererDraft:
       chromeProbePort === null ? null : verifyActiveRendererDraft,
   });
@@ -2997,6 +2999,10 @@ async function sendInRenderer(taskId, text) {
           if(innerWidth>${width} || innerWidth<${width}-32) return false;
           const message=document.querySelector('.additional-input'), actions=[...document.querySelectorAll('.composer-send,.composer-stop')];
           if(!message || actions.length!==1 || !actions[0].classList.contains('composer-send')) return false;
+          const bubble=message.querySelector('.ai-message[data-role="user"]');
+          if(!bubble) throw new Error('interjection must use the shared user message');
+          const shared=document.querySelector('.ai-exchange > .ai-message[data-role="user"]');
+          if(getComputedStyle(message).borderTopWidth!=='0px' || getComputedStyle(bubble).backgroundColor!==getComputedStyle(shared).backgroundColor) throw new Error('interjection still renders a separate card');
           const r=message.getBoundingClientRect();
           if(r.width===0 || r.left < -1 || r.right>innerWidth+1) return false;
           for(const action of actions) {const b=action.getBoundingClientRect();if(b.height<43 || b.left < -1 || b.right>innerWidth+1) throw new Error('active input control outside viewport or too small');}
@@ -3032,6 +3038,34 @@ async function sendInRenderer(taskId, text) {
   }
 }
 
+async function observeActiveReadingBeforeAdoption(taskId) {
+  const webview = await connectTestWebView(chromeProbePort, {
+    requestTimeoutMs: commandTimeoutMs,
+  });
+  try {
+    await poll(
+      () =>
+        webview.evaluate(
+          `document.querySelectorAll('.run-reading-flow .additional-input').length===2`,
+        ),
+      commandTimeoutMs,
+      "both interjections in the actual reading surface",
+    );
+    const order = await webview.evaluate(`(() => {
+      const flow=document.querySelector('.run-reading-flow');
+      const messages=[...flow.querySelectorAll('.ai-message')];
+      const viewport=document.querySelector('.ai-conversation-viewport');
+      viewport.scrollTop=0;viewport.dispatchEvent(new Event('scroll',{bubbles:true}));
+      const first=flow.querySelector('.additional-input .ai-message');
+      window.__activeReadingObservation={first,top:first.getBoundingClientRect().top};
+      return messages.map(node=>node.dataset.role);
+    })()`);
+    assert.deepEqual(order, ["user", "assistant", "user"]);
+  } finally {
+    webview.close();
+  }
+}
+
 async function verifyActiveRendererDraft(taskId, text) {
   const webview = await connectTestWebView(chromeProbePort, {
     requestTimeoutMs: commandTimeoutMs,
@@ -3042,7 +3076,21 @@ async function verifyActiveRendererDraft(taskId, text) {
       return {text:textarea?.value,focused:document.activeElement===textarea,calls:window.__activeInputCalls,task:document.querySelector('.task-list-item[aria-current="page"]')?.dataset.taskId};
     })()`);
     assert.deepEqual(observed, { text, focused: true, calls: 1, task: taskId });
+    const reading = await webview.evaluate(`(() => {
+      const flow=document.querySelector('.run-reading-flow');
+      const first=flow.querySelector('.additional-input .ai-message');
+      const before=window.__activeReadingObservation;
+      return {roles:[...flow.querySelectorAll('.ai-message')].map(node=>node.dataset.role),same:first===before.first,shift:Math.abs(first.getBoundingClientRect().top-before.top),following:document.querySelector('.ai-conversation-viewport').scrollTop,states:[...flow.querySelectorAll('.additional-input')].map(node=>node.dataset.state)};
+    })()`);
+    assert.deepEqual(reading.roles, ["user", "assistant", "user", "assistant"]);
+    assert.deepEqual(reading.states, ["adopted", "adopted"]);
+    assert.equal(reading.same, true);
+    assert.ok(reading.shift <= 1, JSON.stringify(reading));
+    assert.equal(reading.following, 0);
     assert.equal(await webview.evaluate(`window.__activeInputUiErrors`), 0);
+    await webview.evaluate(
+      `(() => {const viewport=document.querySelector('.ai-conversation-viewport');viewport.scrollTop=viewport.scrollHeight;viewport.dispatchEvent(new Event('scroll',{bubbles:true}));})()`,
+    );
     if (visualCaptureDir) {
       const png = await webview.send("Page.captureScreenshot", {
         format: "png",

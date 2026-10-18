@@ -2349,8 +2349,8 @@ test("unavailable interjection preserves the draft and shows only disabled Send"
 });
 
 test("unadopted and uncertain history can only be put back in the editor", async () => {
-  const { AdditionalInputs } = await vite.ssrLoadModule(
-    "/src/features/tasks/AdditionalInputs.tsx",
+  const { AdditionalInput } = await vite.ssrLoadModule(
+    "/src/features/tasks/AdditionalInput.tsx",
   );
   const restored = [];
   const inputs = [
@@ -2358,6 +2358,7 @@ test("unadopted and uncertain history can only be put back in the editor", async
       id: "1",
       operationId: "old",
       text: "safe preview",
+      afterOutputCount: 0,
       redacted: false,
       sequence: null,
       adoptedTurn: null,
@@ -2375,8 +2376,8 @@ test("unadopted and uncertain history can only be put back in the editor", async
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(AdditionalInputs, {
-        inputs,
+      createElement(AdditionalInput, {
+        input: inputs[0],
         onRestore: (input) => restored.push(input),
       }),
     ),

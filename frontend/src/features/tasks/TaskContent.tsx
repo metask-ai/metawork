@@ -1,7 +1,8 @@
 import { RunDiagnostics } from "./RunDiagnostics.tsx";
-import { AdditionalInputs } from "./AdditionalInputs.tsx";
+import { AdditionalInput } from "./AdditionalInput.tsx";
 import { runFileReferenceLinks } from "../../workbench/run-file-references.ts";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -32,7 +33,7 @@ import { Tooltip } from "../../components/ui/tooltip.tsx";
 import { useI18n, type MessageId } from "../../i18n/context.ts";
 import { RunProcess } from "./RunProcess.tsx";
 import { RunFileChangesSummary } from "./RunFileChanges.tsx";
-import { deriveAssistantOutputParts } from "./assistant-output.ts";
+import { deriveRunReadingFlow } from "./assistant-output.ts";
 import {
   deriveRunPresentation,
   formatRunTimestamp,
@@ -375,8 +376,11 @@ export function TaskContent({
         const isCurrent = run.id === currentRun?.id;
         const terminal = run.terminal;
         const presentation = deriveRunPresentation(run);
-        const outputParts = deriveAssistantOutputParts(run.id, run.output);
-        const visibleOutputParts = outputParts.filter((part) => part.content);
+        const readingFlow = deriveRunReadingFlow(
+          run.id,
+          run.output,
+          run.additionalInputs,
+        );
         const responseCopyable = responseCopyEligible(run);
         const submittedTime = formatRunTimestamp(
           locale,
@@ -436,61 +440,78 @@ export function TaskContent({
               )}
               <CopyButton
                 className="input-copy-action"
-                data-latest={run.id === latestInputId}
+                data-latest={
+                  run.id === latestInputId && run.additionalInputs.length === 0
+                }
                 copyLabel={t("copy.input")}
                 copiedLabel={t("copy.copied")}
                 failedLabel={t("copy.failed")}
                 onCopy={() => copyRunInput(run.input)}
               />
             </div>
-            <AdditionalInputs
-              inputs={run.additionalInputs}
-              onRestore={onPrepareRetry}
-            />
-            {(visibleOutputParts.length > 0 ||
-              run.output.provisionalRedacted ||
-              run.output.redacted) && (
-              <Message role="assistant" className="run-assistant-output">
-                {visibleOutputParts.map((part) => {
-                  const streaming = part.disposition === "provisional";
-                  const response =
-                    part.disposition === "final" ||
-                    part.disposition === "partial";
-                  return (
-                    <Markdown
-                      className={`assistant-output-part ${
-                        response ? "agent-response" : "run-commentary-item"
-                      }`}
-                      data-output-identity={part.identity}
-                      data-output-disposition={part.disposition}
-                      key={part.identity}
-                      references={streaming ? undefined : references}
-                      interactive={!streaming}
-                      webLink={streaming ? undefined : webLink}
-                      streaming={streaming}
-                      onStreamingCommit={followDeferredOutput}
-                      codeCopy={
-                        response && responseCopyable
-                          ? {
-                              label: t("copy.code"),
-                              copiedLabel: t("copy.copied"),
-                              failedLabel: t("copy.failed"),
-                              onCopy: copyCodeText,
-                            }
-                          : undefined
-                      }
-                    >
-                      {part.content}
-                    </Markdown>
-                  );
-                })}
-                {(run.output.provisionalRedacted || run.output.redacted) && (
-                  <p className="projection-note">
-                    {t("privacy.sensitive_hidden")}
-                  </p>
-                )}
-              </Message>
-            )}
+            <div className="run-reading-flow">
+              {readingFlow.map((entry) =>
+                entry.kind === "input" ? (
+                  <AdditionalInput
+                    key={entry.identity}
+                    input={entry.input}
+                    latest={
+                      run.id === latestInputId &&
+                      entry.input.id === run.additionalInputs.at(-1)?.id
+                    }
+                    onRestore={onPrepareRetry}
+                  />
+                ) : entry.parts.some((part) => part.content) ||
+                  entry.redacted ? (
+                  <Fragment key={entry.identity}>
+                    <Message role="assistant" className="run-assistant-output">
+                      {entry.parts
+                        .filter((part) => part.content)
+                        .map((part) => {
+                          const streaming = part.disposition === "provisional";
+                          const response =
+                            part.disposition === "final" ||
+                            part.disposition === "partial";
+                          return (
+                            <Markdown
+                              className={`assistant-output-part ${
+                                response
+                                  ? "agent-response"
+                                  : "run-commentary-item"
+                              }`}
+                              data-output-identity={part.identity}
+                              data-output-disposition={part.disposition}
+                              key={part.identity}
+                              references={streaming ? undefined : references}
+                              interactive={!streaming}
+                              webLink={streaming ? undefined : webLink}
+                              streaming={streaming}
+                              onStreamingCommit={followDeferredOutput}
+                              codeCopy={
+                                response && responseCopyable
+                                  ? {
+                                      label: t("copy.code"),
+                                      copiedLabel: t("copy.copied"),
+                                      failedLabel: t("copy.failed"),
+                                      onCopy: copyCodeText,
+                                    }
+                                  : undefined
+                              }
+                            >
+                              {part.content}
+                            </Markdown>
+                          );
+                        })}
+                      {entry.redacted && (
+                        <p className="projection-note">
+                          {t("privacy.sensitive_hidden")}
+                        </p>
+                      )}
+                    </Message>
+                  </Fragment>
+                ) : null,
+              )}
+            </div>
             {presentation.active && (
               <RunProcess
                 presentation={presentation}

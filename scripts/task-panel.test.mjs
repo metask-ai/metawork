@@ -1270,6 +1270,170 @@ test("growing provisional Markdown preserves follow state, text selection, and C
   assert.equal(selection.toString(), "Selectable");
 });
 
+test("interjections use ordinary user bubbles between stable assistant reading blocks", () => {
+  const message = {
+    id: "1",
+    afterOutputCount: 1,
+    operationId: "follow-up",
+    text: "Make the report HTML",
+    redacted: false,
+    sequence: 1,
+    adoptedTurn: null,
+    order: null,
+    state: "pending",
+  };
+  const activeRun = run({
+    phase: "running",
+    terminal: null,
+    activity: { kind: "writing_response" },
+    additionalInputs: [message],
+    output: {
+      commentary: ["First explanation"],
+      response: "",
+      responseKind: null,
+      provisional: "**Live answer**",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const current = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(current));
+  const flow = view.container.querySelector(".run-reading-flow");
+  assert.deepEqual(
+    [...flow.querySelectorAll(".ai-message")].map((node) => node.textContent),
+    ["First explanation", "Make the report HTML", "Live answer"],
+  );
+  const bubble = flow.querySelector('.ai-message[data-role="user"]');
+  const tail = flow.querySelector('[data-output-identity="9:output:1"]');
+  const tailParent = tail.parentElement;
+  const restored = [];
+  view.rerender(
+    taskContentElement(
+      {
+        ...current,
+        runs: [
+          {
+            ...activeRun,
+            additionalInputs: [{ ...message, state: "unadopted" }],
+            phase: "completed",
+            terminal: terminal(),
+            activity: null,
+            output: {
+              ...activeRun.output,
+              response: "**Live answer**",
+              responseKind: "final",
+              provisional: "",
+            },
+          },
+        ],
+      },
+      "2",
+      { onPrepareRetry: (input) => restored.push(input) },
+    ),
+  );
+  assert.equal(flow.querySelector('.ai-message[data-role="user"]'), bubble);
+  assert.equal(flow.querySelector('[data-output-identity="9:output:1"]'), tail);
+  assert.equal(tail.parentElement, tailParent);
+  assert.match(
+    document.getElementById(bubble.getAttribute("aria-describedby"))
+      .textContent,
+    /not adopted/i,
+  );
+  assert.deepEqual(restored, []);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Put back in the editor" }),
+  );
+  assert.deepEqual(restored, [
+    { kind: "text", text: message.text, redacted: false },
+  ]);
+});
+
+test("an interjection after a live tail preserves that tail through growth and commentary closure", async () => {
+  const message = {
+    id: "1",
+    afterOutputCount: 2,
+    operationId: "during-stream",
+    text: "Keep this constraint",
+    redacted: false,
+    sequence: 1,
+    adoptedTurn: null,
+    order: null,
+    state: "pending",
+  };
+  const activeRun = run({
+    phase: "running",
+    terminal: null,
+    activity: { kind: "writing_response" },
+    output: {
+      commentary: ["Earlier explanation"],
+      response: "",
+      responseKind: null,
+      provisional: "Live prefix",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const current = task({
+    currentRunId: "9",
+    currentRunPhase: "running",
+    runs: [activeRun],
+  });
+  const view = render(taskContentElement(current));
+  const part = view.container.querySelector(
+    '[data-output-identity="9:output:1"]',
+  );
+  const parent = part.parentElement;
+  const update = (additionalInputs, output, revision) => {
+    view.rerender(
+      taskContentElement(
+        { ...current, runs: [{ ...activeRun, additionalInputs, output }] },
+        revision,
+      ),
+    );
+  };
+  update([message], activeRun.output, "2");
+  const flow = view.container.querySelector(".run-reading-flow");
+  const bubble = flow.querySelector('.ai-message[data-role="user"]');
+  update(
+    [message],
+    { ...activeRun.output, provisional: "Live prefix\n\nContinued text" },
+    "3",
+  );
+  await waitFor(() => assert.ok(screen.getByText("Continued text")));
+  assert.deepEqual(
+    [...flow.querySelectorAll(".ai-message")].map((node) => node.dataset.role),
+    ["assistant", "user"],
+  );
+  assert.ok(parent.contains(screen.getByText("Continued text")));
+
+  update(
+    [{ ...message, state: "adopted", adoptedTurn: 2, order: "1" }],
+    {
+      ...activeRun.output,
+      commentary: ["Earlier explanation", "Live prefix\n\nContinued text"],
+      provisional: "Answer after adoption",
+    },
+    "4",
+  );
+  await waitFor(() => assert.ok(screen.getByText("Answer after adoption")));
+  assert.equal(flow.querySelector('[data-output-identity="9:output:1"]'), part);
+  assert.equal(part.parentElement, parent);
+  assert.equal(part.dataset.outputDisposition, "commentary");
+  assert.equal(flow.querySelector('.ai-message[data-role="user"]'), bubble);
+  assert.deepEqual(
+    [...flow.querySelectorAll(".ai-message")].map((node) => node.textContent),
+    [
+      "Earlier explanationLive prefix\nContinued text",
+      "Keep this constraint",
+      "Answer after adoption",
+    ],
+  );
+});
+
 test("output classification preserves the same parent and part DOM roots", () => {
   const activeRun = run({
     phase: "running",

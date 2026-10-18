@@ -32,6 +32,7 @@
   },
   "history": {
     "id": "1",
+    "afterOutputCount": 0,
     "operationId": "input-1",
     "text": "follow up",
     "redacted": false,

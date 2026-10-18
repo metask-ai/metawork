@@ -1823,6 +1823,7 @@ pub const Runtime = struct {
         run.next_input_id += 1;
         var record: task_state.AdditionalInput = .{
             .id = id,
+            .after_output_count = run.outputPartCount(),
             .operation_id_len = result.operation_id_len,
             .text = projected.value,
             .redacted = projected.redacted,

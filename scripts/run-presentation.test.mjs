@@ -248,6 +248,7 @@ test("only adopted messages with real anchors enter technical process order", ()
     id: "1",
     operationId: "input-1",
     text: "constraint",
+    afterOutputCount: 0,
     redacted: false,
     state: "adopted",
     sequence: 1,

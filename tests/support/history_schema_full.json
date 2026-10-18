@@ -53,18 +53,13 @@
             "catalog_revision": "catalog-r",
             "invocation_name": "inspect",
             "display_name": "Inspect",
-            "argument_values": [
-              "arg\u0000one",
-              "arg-two 世"
-            ],
+            "argument_values": ["arg\u0000one", "arg-two 世"],
             "attachments": null,
             "redacted": true
           },
           "assistant": "note\nanswer\u0000世",
           "assistant_redacted": true,
-          "commentary_ends": [
-            5
-          ],
+          "commentary_ends": [5],
           "assistant_output_kind": "final",
           "assistant_output_start": 5,
           "submitted_at_unix_ms": 1789700000123,
@@ -145,6 +140,7 @@
             {
               "id": 1,
               "operation_id": "history-input",
+              "after_output_count": 2,
               "text": "preserve this constraint",
               "redacted": false,
               "sequence": 1,

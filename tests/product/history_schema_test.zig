@@ -45,6 +45,28 @@ test "history schema preserves optional source-qualified Task model intent" {
     }
 }
 
+test "history input JSON preserves reading anchors beyond surviving output" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const state = try history.fixture(allocator);
+    state.tasks[0].runs[0].additional_inputs = try allocator.dupe(history.wire.AdditionalInputWire, &.{.{
+        .id = 1,
+        .after_output_count = 2,
+        .operation_id = "input-1",
+        .text = "follow up",
+        .redacted = false,
+        .sequence = 1,
+        .adopted_turn = null,
+        .order = null,
+        .state = "unadopted",
+    }});
+    const database = try storage.sqlite.Database.create(std.testing.io, std.testing.allocator, .memory, schema.migrations);
+    defer database.destroy() catch unreachable;
+    _ = try save(allocator, database.capability(), state);
+    try expectSame(allocator, database.capability(), state);
+}
+
 test "Task model intent migration preserves old Task rows with no intent" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
