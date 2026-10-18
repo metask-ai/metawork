@@ -2553,9 +2553,9 @@ async function renderSubmissionApp(
     ) => {
       assert.deepEqual(
         expectedExecution,
-        active
+        task.activeOperation?.kind === "run"
           ? { kind: "run", runId: task.currentRunId }
-          : { kind: "idle", lastRunId: null },
+          : { kind: "idle", lastRunId: task.runs.at(-1)?.id ?? null },
       );
       inputs.push([taskId, expectedBindingEpoch, input]);
       targets.push(expectedExecution);
@@ -2567,17 +2567,19 @@ async function renderSubmissionApp(
           taskId,
           operationId,
           outcome: result.accepted
-            ? active
+            ? expectedExecution.kind === "run"
               ? "submitted"
               : "started"
             : "rejected",
           runId: result.accepted
-            ? active
+            ? expectedExecution.kind === "run"
               ? expectedExecution.runId
               : "1"
             : null,
-          inputId: result.accepted && active ? "1" : null,
-          sequence: result.accepted && active ? 1 : null,
+          inputId:
+            result.accepted && expectedExecution.kind === "run" ? "1" : null,
+          sequence:
+            result.accepted && expectedExecution.kind === "run" ? 1 : null,
           reason: result.accepted ? null : result.reason,
         };
       });
@@ -3318,4 +3320,69 @@ test("App uncertain current-Run submission keeps the draft, unlocks Send and nev
   await fixture.publish();
   assert.equal(fixture.inputs.length, 1);
   assert.equal(fixture.textarea.value, "possibly submitted");
+});
+
+test("App resolves a late canonical input receipt without erasing a newer draft or resending", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  fireEvent.change(fixture.textarea, {
+    target: { value: "original uncertain input" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  await fixture.settle(new Error("response lost"));
+  await screen.findAllByText(/Submission is unconfirmed/);
+  fireEvent.change(fixture.textarea, {
+    target: { value: "newer unsent draft" },
+  });
+  fixture.task.sendInputResult = {
+    taskId: fixture.task.id,
+    operationId: fixture.operationIds[0],
+    outcome: "submitted",
+    runId: fixture.task.currentRunId,
+    inputId: "1",
+    sequence: 1,
+    reason: null,
+  };
+  await fixture.publish();
+  await waitFor(() =>
+    assert.equal(screen.queryAllByText(/Submission is unconfirmed/).length, 0),
+  );
+  assert.equal(fixture.textarea.value, "newer unsent draft");
+  assert.equal(fixture.inputs.length, 1);
+});
+
+test("App idle follow-up targets the last historical Run when currentRunId is zero", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  const previous = fixture.task.runs[0].id;
+  fixture.task.activeOperation = null;
+  fixture.task.currentRunId = "0";
+  fixture.task.currentRunPhase = null;
+  fixture.task.inputReady = false;
+  Object.assign(fixture.task.runs[0], {
+    phase: "completed",
+    activity: null,
+    terminal: {
+      outcome: "completed",
+      cause: null,
+      diagnosticDisposition: "absent",
+    },
+  });
+  await fixture.publish();
+  await waitFor(() =>
+    assert.equal(
+      document.querySelector(".ai-composer")?.getAttribute("data-state"),
+      "normal",
+    ),
+  );
+  fireEvent.change(fixture.textarea, {
+    target: { value: "Explicit next Run" },
+  });
+  await waitFor(() =>
+    assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false),
+  );
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.deepEqual(fixture.targets, [{ kind: "idle", lastRunId: previous }]);
+  await fixture.settle();
+  assert.equal(fixture.textarea.value, "");
 });

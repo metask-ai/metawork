@@ -9794,6 +9794,7 @@ test "active input persisted before adoption restores as unknown without executi
     defer scenario.deinit();
     const task = scenario.control.task_runtime.find(scenario.task_id).?;
     _ = try scenario.control.sendInput("persist-pending", scenario.task_id, task.durable.binding_epoch, .{ .run = task.runtime.active_run_id }, .{ .text = "Keep this constraint in history only" });
+    _ = try scenario.control.sendInput("persist-pending-second", scenario.task_id, task.durable.binding_epoch, .{ .run = task.runtime.active_run_id }, .{ .text = "Second independent constraint" });
     const saved = try std.testing.allocator.dupe(u8, bytes[0..history.len]);
     defer std.testing.allocator.free(saved);
     var restart = productControlConfiguration();
@@ -9803,6 +9804,11 @@ test "active input persisted before adoption restores as unknown without executi
     const recovered = restored.task_runtime.find(scenario.task_id).?;
     try std.testing.expectEqual(.unknown, recovered.durable.runs[0].?.additional_inputs[0].?.state);
     try std.testing.expectEqualStrings("Keep this constraint in history only", recovered.durable.runs[0].?.additional_inputs[0].?.text);
+    try std.testing.expectEqualStrings("persist-pending", recovered.durable.runs[0].?.additional_inputs[0].?.operationId());
+    const second = recovered.durable.runs[0].?.additional_inputs[1] orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(.unknown, second.state);
+    try std.testing.expectEqualStrings("persist-pending-second", second.operationId());
+    try std.testing.expectEqualStrings("Second independent constraint", second.text);
     try std.testing.expect(recovered.runtime.active_operation == .none);
     try std.testing.expect(!recovered.runtime.hasAttachedSession());
     restored.syncLifecycle();

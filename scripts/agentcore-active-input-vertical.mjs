@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { access } from "node:fs/promises";
+import { join } from "node:path";
 
 // Real Desktop → Bridge → Product → staged AgentCore. Only Provider replies are scripted.
 export async function runActiveInputVertical({
@@ -10,13 +12,14 @@ export async function runActiveInputVertical({
   toolSse,
   workspaceId,
   workspaceEpoch,
+  workspaceRoot,
   catalog,
   sendInRenderer,
   verifyRendererDraft,
 }) {
   const read = async (id) =>
     (await snapshot()).tasks.find((task) => task.id === id);
-  async function create(title) {
+  async function create(title, approvalMode = "manual") {
     const admission = (await snapshot()).newTaskAdmission;
     const result = await invoke("metawork.tasks.create", {
       workspace: {
@@ -29,7 +32,7 @@ export async function runActiveInputVertical({
       modelSelection: null,
       expectedSkillCatalogRevision: catalog.catalog.revision,
       expectedSkillSelectionRevision: catalog.catalog.selectionRevision,
-      approvalMode: "manual",
+      approvalMode,
     });
     assert.equal(result.accepted, true, JSON.stringify(result));
     await invoke("metawork.tasks.rename", { taskId: result.taskId, title });
@@ -194,6 +197,90 @@ export async function runActiveInputVertical({
   await assertNoSuccessor(adopted);
   if (retainedDraft && verifyRendererDraft)
     await verifyRendererDraft(adopted.id, retainedDraft);
+
+  const reviewTask = await create(
+    "Pending input blocks automatic allow",
+    "auto_review",
+  );
+  const marker = join(workspaceRoot, "active-input-must-not-execute.txt");
+  const reviewCommand =
+    process.platform === "win32"
+      ? `powershell -NoProfile -Command "Set-Content -LiteralPath '${marker.replaceAll("'", "''")}' -Value unexpected"`
+      : `touch '${marker.replaceAll("'", "'\\''")}'`;
+  const reviewRun = await start(
+    reviewTask,
+    { kind: "text", text: "input-review-constraint" },
+    [
+      {
+        body: toolSse("input-review-tool", "input-review-command", "Bash", {
+          command: reviewCommand,
+        }),
+        initialDelayMs: 0,
+        frameDelayMs: 0,
+      },
+      (payload) => {
+        assert.ok(
+          JSON.stringify(payload).includes(
+            "Do not execute the pending command",
+          ),
+        );
+        return {
+          body: textSse(
+            "input-review-final",
+            "The user constraint was adopted after manual refusal",
+          ),
+          initialDelayMs: 0,
+          frameDelayMs: 0,
+        };
+      },
+    ],
+  );
+  await poll(
+    async () => provider.inputReviewRequests === 1,
+    20_000,
+    "real automatic review is waiting",
+  );
+  const reviewRequest = (await read(reviewTask.id)).pendingUi;
+  try {
+    assert.equal(
+      (
+        await submit(
+          reviewTask,
+          reviewRun,
+          "Do not execute the pending command",
+          "review-veto",
+        )
+      ).outcome,
+      "submitted",
+    );
+  } finally {
+    provider.releaseReview();
+  }
+  const manual = await poll(
+    async () => {
+      const task = await read(reviewTask.id);
+      return task.permissionReviewState === "needs_user" &&
+        task.pendingUi?.requestId === reviewRequest.requestId
+        ? task
+        : null;
+    },
+    20_000,
+    "unadopted constraint turns automatic allow into manual attention",
+  );
+  assert.equal(manual.runs[0].additionalInputs[0].state, "pending");
+  await assert.rejects(access(marker), { code: "ENOENT" });
+  await invoke("metawork.tasks.respondUi", {
+    taskId: reviewTask.id,
+    runId: reviewRun,
+    requestId: reviewRequest.requestId,
+    kind: "permission",
+    permission: "deny_once",
+  });
+  const reviewed = await settled(reviewTask.id);
+  assert.equal(reviewed.runs[0].additionalInputs[0].state, "adopted");
+  assert.equal(provider.inputReviewRequests, 1);
+  await assert.rejects(access(marker), { code: "ENOENT" });
+  await assertNoSuccessor(reviewTask);
 
   for (const mode of ["final", "stop", "failure"]) {
     const task = await create(`Input ${mode} audit`);

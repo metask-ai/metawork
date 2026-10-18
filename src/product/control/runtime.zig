@@ -19447,3 +19447,18 @@ test "Product Control snapshot serializer omits image formats when attachments a
     defer std.testing.allocator.free(encoded);
     try std.testing.expectEqualStrings(std.mem.trim(u8, contract_fixture.attachments_unavailable, "\r\n"), encoded);
 }
+
+test "active input wire identity borrows stable Run memory until history encoding completes" {
+    var control = try testRuntime();
+    defer control.deinit();
+    const run = &control.task_runtime.tasks[0].?.durable.runs[0].?;
+    const operation_id = "stable-operation";
+    run.additional_inputs[0] = .{ .id = 1, .operation_id_len = operation_id.len, .text = try control.copyBounded("constraint", control.limits.max_user_message_bytes), .sequence = 1, .redacted = false };
+    @memcpy(run.additional_inputs[0].?.operation_id[0..operation_id.len], operation_id);
+    try Runtime.reserveTaskRuntimeBytes(&control, task_test_state.additional_input_projection_bytes);
+    var scratch = try control.buildTaskStateWireWithCheckpoint(null);
+    defer scratch.deinit();
+    const projected = scratch.state.tasks[0].runs[0].additional_inputs[0];
+    try std.testing.expectEqual(run.additional_inputs[0].?.operationId().ptr, projected.operation_id.ptr);
+    try std.testing.expectEqualStrings(operation_id, projected.operation_id);
+}

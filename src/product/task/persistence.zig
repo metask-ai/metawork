@@ -1073,7 +1073,7 @@ fn projectRun(
     const additional_inputs = try allocator.alloc(AdditionalInputWire, additional_count);
     errdefer allocator.free(additional_inputs);
     var additional_index: usize = 0;
-    for (run.additional_inputs) |entry| if (entry) |record| {
+    for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
         additional_inputs[additional_index] = .{
             .id = record.id,
             .operation_id = record.operationId(),

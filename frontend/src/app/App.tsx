@@ -1056,6 +1056,14 @@ export default function App() {
               adopted
             ) {
               inputReceipts.current.delete(taskId);
+              setStatuses((current) =>
+                current[`task:${taskId}`]?.id === "input.unknown"
+                  ? publishStatus(
+                      current,
+                      quietStatus("input.submitted", { scope: "task", taskId }),
+                    )
+                  : current,
+              );
               if (
                 pending.draftVersion !== null &&
                 taskDraftVersion(taskId) === pending.draftVersion
@@ -1969,8 +1977,12 @@ export default function App() {
       return;
     }
     const expectedLastRunId =
-      !newTaskDraftActive && activeTask?.currentRunId !== "0"
-        ? (activeTask?.currentRunId ?? null)
+      !newTaskDraftActive && activeTask
+        ? activeTask.runs.reduce<string | null>(
+            (last, run) =>
+              last === null || BigInt(run.id) > BigInt(last) ? run.id : last,
+            null,
+          )
         : null;
     const existingTaskId = activeTask?.id ?? null;
     const workspace =

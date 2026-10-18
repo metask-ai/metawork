@@ -639,6 +639,7 @@ desktopVertical: try {
     toolSse,
     workspaceId,
     workspaceEpoch: expectedWorkspaceEpoch,
+    workspaceRoot: canonicalWorkspace,
     catalog: catalogSnapshot,
     sendInRenderer: chromeProbePort === null ? null : sendInRenderer,
     verifyRendererDraft:
@@ -2875,6 +2876,13 @@ async function sendInRenderer(taskId, text) {
   const newerDraft =
     "Unsent draft remains editable while the current Run works";
   try {
+    await webview.evaluate(`(() => {
+      window.__activeInputUiErrors=0;
+      const original=console.error;
+      console.error=function(...args){window.__activeInputUiErrors++;original.apply(this,args);};
+      window.addEventListener('error',()=>window.__activeInputUiErrors++);
+      window.addEventListener('unhandledrejection',()=>window.__activeInputUiErrors++);
+    })()`);
     await poll(
       () =>
         webview.evaluate(`(() => {
@@ -2913,10 +2921,8 @@ async function sendInRenderer(taskId, text) {
       document.querySelector('.composer-send').click();
     })()`);
     assert.equal(
-      await webview.evaluate(
-        `document.querySelector('.composer-stop')?.disabled`,
-      ),
-      false,
+      await webview.evaluate(`document.querySelector('.composer-stop')===null`),
+      true,
     );
     await webview.evaluate(
       `document.querySelector('.composer-shell textarea').focus();document.querySelector('.composer-shell textarea').select()`,
@@ -3036,6 +3042,17 @@ async function verifyActiveRendererDraft(taskId, text) {
       return {text:textarea?.value,focused:document.activeElement===textarea,calls:window.__activeInputCalls,task:document.querySelector('.task-list-item[aria-current="page"]')?.dataset.taskId};
     })()`);
     assert.deepEqual(observed, { text, focused: true, calls: 1, task: taskId });
+    assert.equal(await webview.evaluate(`window.__activeInputUiErrors`), 0);
+    if (visualCaptureDir) {
+      const png = await webview.send("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: false,
+      });
+      await writeFile(
+        path.join(visualCaptureDir, "active-adopted-desktop-light.png"),
+        Buffer.from(png.data, "base64"),
+      );
+    }
   } finally {
     webview.close();
   }
@@ -3281,6 +3298,7 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   let served = 0;
   let titleCompletions = 0;
   let reviewRequests = 0;
+  let inputReviewRequests = 0;
   let officeReviewRequests = 0;
   let releaseReview = null;
   let providerError = null;
@@ -3357,18 +3375,27 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
             );
             return;
           }
-          assert.equal(
-            review.evidence.user_intent,
-            "mode-review-current-request",
-          );
           assert.equal(review.host.delegation, "current_request_only");
           assert.equal(review.evidence.request.tool_name, "Bash");
-          reviewRequests++;
-          assert.equal(
-            reviewRequests,
-            1,
-            "current request was automatically reviewed twice",
-          );
+          if (review.evidence.user_intent === "input-review-constraint") {
+            inputReviewRequests++;
+            assert.equal(
+              inputReviewRequests,
+              1,
+              "interjection must not schedule another review",
+            );
+          } else {
+            assert.equal(
+              review.evidence.user_intent,
+              "mode-review-current-request",
+            );
+            reviewRequests++;
+            assert.equal(
+              reviewRequests,
+              1,
+              "current request was automatically reviewed twice",
+            );
+          }
           await new Promise((resolve) => {
             releaseReview = resolve;
           });
@@ -3480,6 +3507,9 @@ function createProvider(queue, { initialDelayMs = 0, frameDelayMs = 0 } = {}) {
   return {
     enqueue(...fixtures) {
       queue.splice(served, 0, ...fixtures);
+    },
+    get inputReviewRequests() {
+      return inputReviewRequests;
     },
     get reviewRequests() {
       return reviewRequests;
