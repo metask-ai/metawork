@@ -15164,10 +15164,13 @@ test "output segments commit commentary and a continued final while discarding r
         "{\"text_chunk\":\"done\"}",
         "{\"output_segment_end\":{\"index\":4,\"turn\":3,\"group\":2,\"disposition\":\"final\",\"bytes\":4}}",
     };
-    for (events) |encoded| {
+    const expected_slots = [_]u32{ 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3 };
+    for (events, expected_slots) |encoded, slots| {
         var envelope = try testEnvelope(route, 7, encoded);
         defer envelope.deinit();
         try control.applyEvent(&envelope);
+        // continued and an in-group discard retain the same safe tail slot.
+        try std.testing.expectEqual(slots, run.outputPartCount());
     }
 
     try std.testing.expectEqualStrings("look again half done", run.assistant.list.items);
@@ -15485,10 +15488,12 @@ test "discarded output requires an in-group retry without committing bytes" {
         "{\"text_chunk\":\"rolled back\"}",
         "{\"output_segment_end\":{\"index\":0,\"turn\":1,\"group\":4,\"disposition\":\"discarded\",\"bytes\":11}}",
     };
-    for (events) |encoded| {
+    const expected_slots = [_]u32{ 0, 1, 0 };
+    for (events, expected_slots) |encoded, slots| {
         var envelope = try testEnvelope(route, 7, encoded);
         defer envelope.deinit();
         try control.applyEvent(&envelope);
+        try std.testing.expectEqual(slots, run.outputPartCount());
     }
     try std.testing.expectEqualStrings("", run.assistant.list.items);
 
