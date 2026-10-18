@@ -154,6 +154,7 @@ function run(overrides = {}) {
     elapsedMs: "12000",
     terminal: terminal(),
     usage: { input: "12", output: "5", cacheRead: "0", cacheCreation: "0" },
+    additionalInputs: [],
     tools: [],
     ...overrides,
   };

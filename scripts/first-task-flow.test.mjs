@@ -84,9 +84,25 @@ test("the first send uses Host generations and creates one Task before its Run",
           reason: null,
         };
       },
-      async run(taskId, expectedBindingEpoch, input) {
+      async sendInput(
+        operationId,
+        taskId,
+        expectedBindingEpoch,
+        expectedExecution,
+        input,
+      ) {
+        assert.match(operationId, /^[!-~]{1,64}$/);
+        assert.deepEqual(expectedExecution, { kind: "idle", lastRunId: null });
         calls.push(["run", taskId, expectedBindingEpoch, input]);
-        return { accepted: true, taskId, runId: "9", reason: null };
+        return {
+          outcome: "started",
+          taskId,
+          operationId,
+          inputId: null,
+          sequence: null,
+          runId: "9",
+          reason: null,
+        };
       },
     },
     taskId: null,
@@ -140,9 +156,23 @@ test("the first Skill send pins its selected catalog before typed execution", as
           reason: null,
         };
       },
-      async run(...args) {
-        calls.push(["run", ...args]);
-        return { accepted: true, taskId: "41", runId: "9", reason: null };
+      async sendInput(
+        operationId,
+        taskId,
+        expectedBindingEpoch,
+        expectedExecution,
+        input,
+      ) {
+        calls.push(["run", taskId, expectedBindingEpoch, input]);
+        return {
+          outcome: "started",
+          taskId: "41",
+          operationId,
+          inputId: null,
+          sequence: null,
+          runId: "9",
+          reason: null,
+        };
       },
     },
     taskId: null,
@@ -184,7 +214,7 @@ test("a creation failure never starts a Run or invents a Task", async () => {
       async createTask() {
         throw failure;
       },
-      async run() {
+      async sendInput() {
         runCalled = true;
       },
     },
@@ -216,7 +246,7 @@ test("a Host-rejected creation preserves the structured product reason", async (
           reason: "execution_changed",
         };
       },
-      async run() {
+      async sendInput() {
         assert.fail("a rejected creation cannot start a Run");
       },
     },
@@ -244,9 +274,23 @@ test("the first send can request an Automatic Workspace without a prior identity
         calls.push(["create", ...args]);
         return { accepted: true, taskId: "1", bindingEpoch: "1", reason: null };
       },
-      async run(...args) {
-        calls.push(["run", ...args]);
-        return { accepted: true, taskId: "1", runId: "1", reason: null };
+      async sendInput(
+        operationId,
+        taskId,
+        expectedBindingEpoch,
+        expectedExecution,
+        input,
+      ) {
+        calls.push(["run", taskId, expectedBindingEpoch, input]);
+        return {
+          outcome: "started",
+          taskId: "1",
+          operationId,
+          inputId: null,
+          sequence: null,
+          runId: "1",
+          reason: null,
+        };
       },
     },
     taskId: null,
@@ -279,7 +323,7 @@ test("a Run failure reports the real created Task for draft recovery", async () 
           reason: null,
         };
       },
-      async run() {
+      async sendInput() {
         throw failure;
       },
     },
@@ -314,11 +358,25 @@ test("sending on an existing Task uses its binding epoch and never creates", asy
           reason: null,
         };
       },
-      async run(taskId, expectedBindingEpoch, input) {
+      async sendInput(
+        operationId,
+        taskId,
+        expectedBindingEpoch,
+        expectedExecution,
+        input,
+      ) {
         assert.equal(taskId, "9");
         assert.equal(expectedBindingEpoch, "12");
         assert.deepEqual(input, { kind: "text", text: "Continue" });
-        return { accepted: true, taskId, runId: "10", reason: null };
+        return {
+          outcome: "started",
+          taskId,
+          operationId,
+          inputId: null,
+          sequence: null,
+          runId: "10",
+          reason: null,
+        };
       },
     },
     taskId: "9",
@@ -344,9 +402,23 @@ test("a detached Task restores before its first continued Run", async () => {
       async createTask() {
         assert.fail("existing Task must not create a Task");
       },
-      async run(taskId, expectedBindingEpoch, input) {
+      async sendInput(
+        operationId,
+        taskId,
+        expectedBindingEpoch,
+        expectedExecution,
+        input,
+      ) {
         calls.push(["run", taskId, expectedBindingEpoch, input]);
-        return { accepted: true, taskId, runId: "11", reason: null };
+        return {
+          outcome: "started",
+          taskId,
+          operationId,
+          inputId: null,
+          sequence: null,
+          runId: "11",
+          reason: null,
+        };
       },
     },
     taskId: "9",
@@ -381,9 +453,16 @@ test("a failed detached restore never sends the pending Run", async () => {
       async createTask() {
         assert.fail("existing Task must not create a Task");
       },
-      async run() {
+      async sendInput() {
         runCalled = true;
-        return { accepted: true, taskId: "9", runId: "11", reason: null };
+        return {
+          outcome: "started",
+          taskId: "9",
+          inputId: null,
+          sequence: null,
+          runId: "11",
+          reason: null,
+        };
       },
     },
     taskId: "9",
@@ -414,11 +493,20 @@ test("a recovered Run CAS rejection uses the adopted epoch once and never retrie
       async createTask() {
         assert.fail("existing Task must not create a Task");
       },
-      async run(taskId, expectedBindingEpoch, input) {
+      async sendInput(
+        operationId,
+        taskId,
+        expectedBindingEpoch,
+        expectedExecution,
+        input,
+      ) {
         calls.push(["run", taskId, expectedBindingEpoch, input]);
         return {
-          accepted: false,
+          outcome: "rejected",
           taskId,
+          operationId,
+          inputId: null,
+          sequence: null,
           runId: null,
           reason: "binding_changed",
         };
@@ -461,10 +549,13 @@ test("a Host-rejected Run preserves the structured product reason", async () => 
       async createTask() {
         assert.fail("existing Task must not create a Task");
       },
-      async run(taskId) {
+      async sendInput(operationId, taskId) {
         return {
-          accepted: false,
+          outcome: "rejected",
           taskId,
+          operationId,
+          inputId: null,
+          sequence: null,
           runId: null,
           reason: "binding_changed",
         };
@@ -495,7 +586,7 @@ test("an existing Task without a binding epoch fails closed", async () => {
       async createTask() {
         assert.fail("existing Task must not create a Task");
       },
-      async run() {
+      async sendInput() {
         runCalled = true;
       },
     },

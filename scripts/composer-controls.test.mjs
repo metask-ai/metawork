@@ -2304,135 +2304,68 @@ test("Models reports an authoritative empty conversation catalog without signing
   assert.deepEqual(view.selections.model, []);
 });
 
-test("queued Text switches from Send to Stop when cleared and preserves IME and Shift newline", () => {
-  let queues = 0,
-    stops = 0;
+test("current Run switches from Send to Stop only when the draft is empty and preserves IME", () => {
+  let stops = 0;
   const composer = renderComposer({
     stopAction: "run",
     stopDisabled: false,
     runInFlight: true,
-    canSubmit: false,
-    canQueue: true,
-    onQueueInput() {
-      queues++;
-    },
     onStop() {
       stops++;
     },
   });
   fireEvent.keyDown(composer.textarea, { key: "Enter", shiftKey: true });
   fireEvent.keyDown(composer.textarea, { key: "Enter", isComposing: true });
-  assert.equal(queues, 0);
+  assert.equal(composer.submissions(), 0);
   fireEvent.keyDown(composer.textarea, { key: "Enter" });
-  assert.equal(queues, 1);
-  assert.equal(composer.submissions(), 0);
+  assert.equal(composer.submissions(), 1);
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
-  assert.equal(queues, 2);
-  assert.equal(composer.submissions(), 0);
+  assert.equal(composer.submissions(), 2);
   assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
   fireEvent.change(composer.textarea, { target: { value: "" } });
   assert.equal(screen.queryByRole("button", { name: "Send" }), null);
   fireEvent.click(screen.getByRole("button", { name: "Stop task" }));
   assert.equal(stops, 1);
-  assert.equal(queues, 2);
 });
 
-test("structured Skill Enter uses Queue and confirmed queue cleanup does not steal outside focus", async () => {
-  let queues = 0;
-  const draft = {
-    kind: "skill",
-    skillId: "review",
-    invocationName: "review",
-    displayName: "Review",
-    catalogRevision: "4",
-    selectionRevision: "1",
-    argumentNames: ["File"],
-    argumentValues: ["src/main.zig"],
-    maxValues: 1,
-  };
+test("unavailable interjection preserves the draft and shows only disabled Send", () => {
+  let stops = 0;
   const composer = renderComposer({
-    draft,
-    quietDraftChange: true,
     stopAction: "run",
     stopDisabled: false,
     runInFlight: true,
     canSubmit: false,
-    canQueue: true,
-    onQueueInput() {
-      queues++;
-    },
-    skillCatalog: {
-      availability: "ready",
-      revision: "4",
-      selectionRevision: "1",
-      skills: [
-        {
-          skillId: "review",
-          invocationName: "review",
-          displayName: "Review",
-          description: "",
-          argumentNames: ["File"],
-          maxValues: 1,
-          enabled: true,
-        },
-      ],
-      issues: [],
-      redacted: false,
+    sendDisabledReason: "input.not_ready",
+    onStop() {
+      stops++;
     },
   });
-  const argument = document.querySelector(".skill-arguments input");
-  assert.ok(argument);
-  fireEvent.keyDown(argument, { key: "Enter" });
-  assert.equal(queues, 1);
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  fireEvent.keyDown(composer.textarea, { key: "Enter" });
   assert.equal(composer.submissions(), 0);
-  const outside = document.createElement("button");
-  outside.textContent = "outside";
-  document.body.append(outside);
-  outside.focus();
-  act(() => composer.setDraft({ kind: "text", text: "" }));
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.equal(document.activeElement, outside);
-  outside.remove();
+  assert.ok(composer.textarea.value.length > 0);
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  assert.equal(stops, 0);
 });
 
-test("queued card edits only an empty draft and unconfirmed reuse needs explicit confirmation", async () => {
-  const { QueuedInputCard } = await vite.ssrLoadModule(
-    "/src/features/composer/QueuedInputCard.tsx",
+test("unadopted and uncertain history can only be put back in the editor", async () => {
+  const { AdditionalInputs } = await vite.ssrLoadModule(
+    "/src/features/tasks/AdditionalInputs.tsx",
   );
-  let edits = 0,
-    withdrawals = 0;
-  const resolutions = [],
-    dialogStates = [];
-  const base = {
-    queued: {
-      revision: "1",
-      runId: "7",
-      input: { kind: "text", text: "queued safe preview", redacted: false },
-      state: "waiting",
-      heldReason: null,
-      queuedAtUnixMs: null,
+  const restored = [];
+  const inputs = [
+    {
+      id: "1",
+      operationId: "old",
+      text: "safe preview",
+      redacted: false,
+      sequence: null,
+      adoptedTurn: null,
+      order: null,
+      state: "unknown",
     },
-    pending: null,
-    busy: false,
-    error: null,
-    draftEmpty: false,
-    preserveCurrent: false,
-    disabled: false,
-    onEdit() {
-      edits++;
-    },
-    onWithdraw() {
-      withdrawals++;
-    },
-    onRefresh() {},
-    onResolve(value) {
-      resolutions.push(value);
-    },
-    onConfirmationOpenChange(value) {
-      dialogStates.push(value);
-    },
-  };
-  const element = (props) =>
+  ];
+  const view = render(
     createElement(
       I18nContext.Provider,
       {
@@ -2442,38 +2375,20 @@ test("queued card edits only an empty draft and unconfirmed reuse needs explicit
           t: (id, values) => translate("en-US", id, values),
         },
       },
-      createElement(QueuedInputCard, props),
-    );
-  const view = render(element(base));
-  assert.equal(screen.getByRole("button", { name: "Edit" }).disabled, true);
-  fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
-  assert.equal(withdrawals, 1);
-  assert.equal(edits, 0);
-  assert.match(
-    screen.getByText("queued safe preview").textContent,
-    /queued safe preview/,
+      createElement(AdditionalInputs, {
+        inputs,
+        onRestore: (input) => restored.push(input),
+      }),
+    ),
   );
-  view.rerender(element({ ...base, draftEmpty: true }));
-  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-  assert.equal(edits, 1);
-  const pending = {
-    operationId: "lost",
-    kind: "queue",
-    intent: "queue",
-    draftVersion: "1",
-    draft: { kind: "text", text: "original" },
-    phase: "unconfirmed",
-  };
-  view.rerender(element({ ...base, queued: null, pending, draftEmpty: true }));
-  fireEvent.click(screen.getByRole("button", { name: "Use original input" }));
-  const dialog = await screen.findByRole("alertdialog");
-  assert.match(dialog.textContent, /could create a duplicate/);
-  assert.deepEqual(resolutions, []);
+  assert.match(view.container.textContent, /Sending it again may repeat work/);
+  assert.deepEqual(restored, []);
   fireEvent.click(
-    within(dialog).getByRole("button", { name: "Use original input" }),
+    screen.getByRole("button", { name: "Put back in the editor" }),
   );
-  assert.deepEqual(resolutions, [true]);
-  assert.equal(dialogStates.at(-1), false);
+  assert.deepEqual(restored, [
+    { kind: "text", text: "safe preview", redacted: false },
+  ]);
 });
 
 test("a saved Workspace can be selected directly without opening the folder picker", async () => {
@@ -2541,7 +2456,13 @@ test("new Task approval menu explains each mode only when opened and changes the
 // Exercise the actual App so state, draft handoff and DOM focus are verified together.
 async function renderSubmissionApp(
   ctx,
-  { newTask = false, draft = null, attachmentsEnabled } = {},
+  {
+    newTask = false,
+    draft = null,
+    attachmentsEnabled,
+    active = false,
+    inputReady = true,
+  } = {},
 ) {
   window.sessionStorage.clear();
   window.matchMedia = (query) => ({
@@ -2571,6 +2492,23 @@ async function renderSubmissionApp(
     currentRunPhase: null,
     runs: [],
   });
+  if (active) {
+    const live = structuredClone(snapshot.tasks[0].runs[0]);
+    Object.assign(live, {
+      phase: "running",
+      terminal: null,
+      activity: { kind: "waiting_model" },
+      additionalInputs: [],
+    });
+    Object.assign(task, {
+      activeOperation: { kind: "run", id: live.id },
+      currentRunId: live.id,
+      currentRunPhase: "running",
+      runs: [live],
+      pendingUi: null,
+      inputReady,
+    });
+  }
   task.skillCatalog.availability = "unavailable";
   snapshot.tasks = newTask ? [] : [task];
   let revision;
@@ -2581,7 +2519,10 @@ async function renderSubmissionApp(
   const running = new Promise((resolve) => {
     resolveRun = resolve;
   });
-  const inputs = [];
+  const inputs = [],
+    targets = [],
+    operationIds = [],
+    cancellations = [];
   let creations = 0;
   for (const [name, fn] of Object.entries({
     available: () => true,
@@ -2599,9 +2540,47 @@ async function renderSubmissionApp(
       creations += 1;
       return creating;
     },
-    run: (...args) => {
-      inputs.push(args);
-      return running;
+    cancel: async (taskId, runId) => {
+      cancellations.push([taskId, runId]);
+      return { taskId, runId, cancelRequested: true };
+    },
+    sendInput: (
+      operationId,
+      taskId,
+      expectedBindingEpoch,
+      expectedExecution,
+      input,
+    ) => {
+      assert.deepEqual(
+        expectedExecution,
+        active
+          ? { kind: "run", runId: task.currentRunId }
+          : { kind: "idle", lastRunId: null },
+      );
+      inputs.push([taskId, expectedBindingEpoch, input]);
+      targets.push(expectedExecution);
+      operationIds.push(operationId);
+      return running.then((result) => {
+        if (result instanceof Error) throw result;
+        if (result.outcome) return result;
+        return {
+          taskId,
+          operationId,
+          outcome: result.accepted
+            ? active
+              ? "submitted"
+              : "started"
+            : "rejected",
+          runId: result.accepted
+            ? active
+              ? expectedExecution.runId
+              : "1"
+            : null,
+          inputId: result.accepted && active ? "1" : null,
+          sequence: result.accepted && active ? 1 : null,
+          reason: result.accepted ? null : result.reason,
+        };
+      });
     },
   }))
     ctx.mock.method(BridgeClient.prototype, name, fn);
@@ -2637,6 +2616,9 @@ async function renderSubmissionApp(
     snapshot,
     task,
     inputs,
+    targets,
+    operationIds,
+    cancellations,
     creations: () => creations,
     publish: async () => {
       snapshot.revision = String(BigInt(snapshot.revision) + 1n);
@@ -3260,4 +3242,80 @@ test("App leaving Task creation preserves drafts and current input when preparat
     readNewTaskDraft(unscopedNewTaskDraftId).text,
     "first instruction",
   );
+});
+
+test("App sends to the current Run without preparation and shows Stop when its busy draft is cleared", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  const editor = fixture.textarea;
+  fireEvent.change(editor, { target: { value: "new constraint" } });
+  fireEvent.keyDown(editor, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  assert.deepEqual(fixture.targets, [
+    { kind: "run", runId: fixture.task.currentRunId },
+  ]);
+  assert.equal(fixture.creations(), 0);
+  fireEvent.change(editor, { target: { value: "newer unsent intent" } });
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  fireEvent.change(editor, { target: { value: "" } });
+  const stop = screen.getByRole("button", { name: "Stop task" });
+  assert.equal(stop.disabled, false);
+  fireEvent.click(stop);
+  await waitFor(() => assert.equal(fixture.cancellations.length, 1));
+  fireEvent.change(editor, { target: { value: "newer unsent intent" } });
+  await fixture.settle();
+  assert.equal(editor.value, "newer unsent intent");
+  assert.equal(fixture.inputs.length, 1);
+});
+
+test("App never waits for a current Run to become ready and never sends its retained draft later", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, {
+    active: true,
+    inputReady: false,
+  });
+  fireEvent.change(fixture.textarea, {
+    target: { value: "retain until I explicitly send" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  assert.equal(fixture.inputs.length, 0);
+  assert.equal(screen.getByRole("button", { name: "Send" }).disabled, true);
+  assert.equal(screen.queryByRole("button", { name: "Stop task" }), null);
+  fixture.task.inputReady = true;
+  await fixture.publish();
+  assert.equal(fixture.inputs.length, 0);
+  assert.equal(fixture.textarea.value, "retain until I explicitly send");
+  await waitFor(() =>
+    assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false),
+  );
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  await fixture.settle();
+});
+
+test("App uncertain current-Run submission keeps the draft, unlocks Send and never replays on completion", async (ctx) => {
+  const fixture = await renderSubmissionApp(ctx, { active: true });
+  fireEvent.change(fixture.textarea, {
+    target: { value: "possibly submitted" },
+  });
+  fireEvent.keyDown(fixture.textarea, { key: "Enter" });
+  await waitFor(() => assert.equal(fixture.inputs.length, 1));
+  await fixture.settle(new Error("response lost"));
+  assert.equal(fixture.textarea.value, "possibly submitted");
+  await waitFor(() =>
+    assert.equal(screen.getByRole("button", { name: "Send" }).disabled, false),
+  );
+  fixture.task.activeOperation = null;
+  fixture.task.currentRunPhase = "completed";
+  fixture.task.inputReady = false;
+  Object.assign(fixture.task.runs[0], {
+    phase: "completed",
+    activity: null,
+    terminal: {
+      outcome: "completed",
+      cause: null,
+      diagnosticDisposition: "absent",
+    },
+  });
+  await fixture.publish();
+  assert.equal(fixture.inputs.length, 1);
+  assert.equal(fixture.textarea.value, "possibly submitted");
 });

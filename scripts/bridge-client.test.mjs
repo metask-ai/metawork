@@ -981,98 +981,99 @@ test("Run wire preserves expanded UTF-8 text with JSON escapes", async () => {
   await client.run("1", "1", { kind: "text", text });
 });
 
-test("queue commands submit their exact operation identity once and never retry timeouts", async () => {
+test("sendInput binds one operation to one execution target", async () => {
   const calls = [];
+  const receipt = {
+    operationId: "input-1",
+    taskId: "1",
+    outcome: "submitted",
+    runId: "3",
+    inputId: "1",
+    sequence: 1,
+    reason: null,
+  };
   const client = new BridgeClient({
     bridge: bridgeWith(async (command, payload) => {
       calls.push({ command, payload });
-      if (command.endsWith("queueInput"))
-        return {
-          operationId: payload.operationId,
-          taskId: payload.taskId,
-          accepted: true,
-          revision: "1",
-          reason: null,
-        };
-      return {
-        operationId: payload.operationId,
-        taskId: payload.taskId,
-        withdrawn: true,
-        revision: payload.revision,
-        reason: null,
-        input: { kind: "text", text: "follow up", redacted: false },
-      };
+      return receipt;
     }),
   });
-  await client.queueInput("queue-1", "1", "2", "3", {
-    kind: "text",
-    text: "follow up",
-  });
-  await client.withdrawQueuedInput("withdraw-1", "1", "3", "1");
+  const target = { kind: "run", runId: "3" };
+  const input = { kind: "text", text: "follow up" };
+  assert.deepEqual(
+    await client.sendInput("input-1", "1", "2", target, input),
+    receipt,
+  );
   assert.deepEqual(calls, [
     {
-      command: "metawork.tasks.queueInput",
+      command: "metawork.tasks.sendInput",
       payload: {
-        operationId: "queue-1",
+        operationId: "input-1",
         taskId: "1",
         expectedBindingEpoch: "2",
-        runId: "3",
-        input: { kind: "text", text: "follow up" },
-      },
-    },
-    {
-      command: "metawork.tasks.withdrawQueuedInput",
-      payload: {
-        operationId: "withdraw-1",
-        taskId: "1",
-        runId: "3",
-        revision: "1",
+        expectedExecution: target,
+        input,
       },
     },
   ]);
+  for (const change of [
+    { operationId: "other" },
+    { runId: "4" },
+    { outcome: "started", inputId: null, sequence: null },
+  ]) {
+    Object.assign(receipt, change);
+    await assert.rejects(client.sendInput("input-1", "1", "2", target, input));
+    Object.assign(receipt, {
+      operationId: "input-1",
+      runId: "3",
+      outcome: "submitted",
+      inputId: "1",
+      sequence: 1,
+    });
+  }
+  await assert.rejects(
+    client.sendInput(
+      "input-1",
+      "1",
+      "2",
+      { kind: "idle", lastRunId: null },
+      input,
+    ),
+  );
 });
 
-test("queue and withdrawal timeout invoke Host once even when the response arrives later", async () => {
-  for (const kind of ["queue", "withdraw"]) {
-    let resolve;
-    let calls = 0;
-    const client = new BridgeClient({
-      commandTimeoutMs: 1,
-      bridge: bridgeWith(() => {
-        calls += 1;
-        return new Promise((done) => {
-          resolve = done;
-        });
-      }),
-    });
-    const operation =
-      kind === "queue"
-        ? client.queueInput("q-timeout", "1", "1", "1", {
-            kind: "text",
-            text: "next",
-          })
-        : client.withdrawQueuedInput("w-timeout", "1", "1", "1");
-    await assert.rejects(operation, BridgeCommandTimeoutError);
-    assert.equal(calls, 1);
-    resolve(
-      kind === "queue"
-        ? {
-            operationId: "q-timeout",
-            taskId: "1",
-            accepted: true,
-            revision: "1",
-            reason: null,
-          }
-        : {
-            operationId: "w-timeout",
-            taskId: "1",
-            withdrawn: true,
-            revision: "1",
-            reason: null,
-            input: { kind: "text", text: "next", redacted: false },
-          },
-    );
-    await new Promise((done) => setTimeout(done, 2));
-    assert.equal(calls, 1);
-  }
+test("input timeout and late response never resend or retarget", async () => {
+  let resolve,
+    calls = 0;
+  const client = new BridgeClient({
+    commandTimeoutMs: 1,
+    bridge: bridgeWith(() => {
+      calls++;
+      return new Promise((done) => {
+        resolve = done;
+      });
+    }),
+  });
+  await assert.rejects(
+    client.sendInput(
+      "lost",
+      "1",
+      "1",
+      { kind: "run", runId: "3" },
+      { kind: "text", text: "next" },
+    ),
+    BridgeCommandTimeoutError,
+  );
+  assert.equal(calls, 1);
+  resolve({
+    operationId: "lost",
+    taskId: "1",
+    outcome: "submitted",
+    runId: "3",
+    inputId: "1",
+    sequence: 1,
+    reason: null,
+  });
+  await new Promise((done) => setTimeout(done, 2));
+  assert.equal(calls, 1);
 });

@@ -675,6 +675,7 @@ pub const RunWire = struct {
     permission_profile: []const u8,
     permission_interaction: []const u8,
     input: RunInputWire,
+    additional_inputs: []AdditionalInputWire = &.{},
     assistant: []const u8,
     assistant_redacted: bool,
     commentary_ends: []const u64,
@@ -695,6 +696,17 @@ pub const RunWire = struct {
     diagnostic_redacted: bool,
     event_projection_failure: ?[]const u8,
     next_activity_order: u64,
+};
+
+pub const AdditionalInputWire = struct {
+    id: u64,
+    operation_id: []const u8,
+    text: []const u8,
+    redacted: bool,
+    sequence: ?u32,
+    adopted_turn: ?u32,
+    order: ?u64,
+    state: []const u8,
 };
 
 pub const RunInputWire = struct {
@@ -861,6 +873,7 @@ pub fn deinitTaskWires(allocator: std.mem.Allocator, tasks: []TaskWire) void {
             if (run.input.attachments) |items| allocator.free(items);
             for (run.tools) |tool|
                 if (tool.file_refs) |references| allocator.free(references);
+            allocator.free(run.additional_inputs);
             allocator.free(run.tools);
             if (run.file_changes) |changes| {
                 for (changes) |change| if (change.artifact) |artifact|
@@ -915,6 +928,7 @@ pub fn projectTask(
         if (run.input.attachments) |items| allocator.free(items);
         for (run.tools) |tool|
             if (tool.file_refs) |references| allocator.free(references);
+        allocator.free(run.additional_inputs);
         allocator.free(run.tools);
         if (run.file_changes) |changes| {
             for (changes) |change| if (change.artifact) |artifact|
@@ -1052,6 +1066,26 @@ fn projectRun(
     allocator: std.mem.Allocator,
     run: *task_state.RunRecord,
 ) std.mem.Allocator.Error!RunWire {
+    var additional_count: usize = 0;
+    for (run.additional_inputs) |entry| if (entry != null) {
+        additional_count += 1;
+    };
+    const additional_inputs = try allocator.alloc(AdditionalInputWire, additional_count);
+    errdefer allocator.free(additional_inputs);
+    var additional_index: usize = 0;
+    for (run.additional_inputs) |entry| if (entry) |record| {
+        additional_inputs[additional_index] = .{
+            .id = record.id,
+            .operation_id = record.operationId(),
+            .text = record.text,
+            .redacted = record.redacted,
+            .sequence = record.sequence,
+            .adopted_turn = record.adopted_turn,
+            .order = record.order,
+            .state = @tagName(record.state),
+        };
+        additional_index += 1;
+    };
     const tool_count = countPresent(task_state.ToolView, run.tools);
     const tools = try allocator.alloc(ToolWire, tool_count);
     errdefer allocator.free(tools);
@@ -1225,6 +1259,7 @@ fn projectRun(
         .permission_profile = @tagName(run.permission_profile),
         .permission_interaction = @tagName(run.permission_interaction),
         .input = input,
+        .additional_inputs = additional_inputs,
         .assistant = run.assistant.list.items[0..run.assistant.committed_len],
         .assistant_redacted = run.assistant_redacted,
         .commentary_ends = run.commentary_ends[0..run.commentary_count],
@@ -1320,6 +1355,9 @@ pub const RestoreProjection = struct {
         context: *anyopaque,
         target: *task_state.TrackedText,
     ) void,
+
+    reserve_bytes_fn: *const fn (*anyopaque, usize) error{ProjectionCapacity}!void,
+    release_bytes_fn: *const fn (*anyopaque, usize) void,
 
     fn copy(self: RestoreProjection, value: []const u8, max: usize) ProjectionError![]u8 {
         return self.copy_fn(self.context, value, max);
@@ -1552,6 +1590,32 @@ fn restoreCheckpointRecord(
 }
 
 fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_state.RunRecord {
+    if (wire.additional_inputs.len > agent.max_submitted_inputs) return error.TaskStoreCorrupt;
+    var additional: [agent.max_submitted_inputs]?task_state.AdditionalInput = @splat(null);
+    var restored_additional: usize = 0;
+    errdefer for (additional[0..restored_additional]) |entry| {
+        projection.free(entry.?.text);
+        projection.release_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
+    };
+    for (wire.additional_inputs, 0..) |record, index| {
+        if (record.operation_id.len == 0 or record.operation_id.len > 64) return error.TaskStoreCorrupt;
+        const input_state = parseEnum(task_state.AdditionalInputState, record.state) orelse return error.TaskStoreCorrupt;
+        try projection.reserve_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
+        errdefer projection.release_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
+        var message: task_state.AdditionalInput = .{
+            .id = record.id,
+            .operation_id_len = @intCast(record.operation_id.len),
+            .text = try projection.copy(record.text, projection.limits.max_user_message_bytes),
+            .redacted = record.redacted,
+            .sequence = record.sequence,
+            .adopted_turn = record.adopted_turn,
+            .order = record.order,
+            .state = if (input_state == .pending) .unknown else input_state,
+        };
+        @memcpy(message.operation_id[0..message.operation_id_len], record.operation_id);
+        additional[index] = message;
+        restored_additional += 1;
+    }
     const persisted_coverage = parseEnum(
         task_state.ConversationCoverage,
         wire.coverage,
@@ -1677,6 +1741,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             wire.permission_interaction,
         ) orelse return error.TaskStoreCorrupt,
         .input = input,
+        .additional_inputs = additional,
         .assistant = assistant,
         .assistant_redacted = wire.assistant_redacted,
         .commentary_ends = commentary_ends,
@@ -2156,6 +2221,10 @@ fn deinitRestoredRun(projection: RestoreProjection, run: *task_state.RunRecord) 
     projection.allocator.free(run.file_changes);
     projection.allocator.free(run.commentary_ends);
     deinitRestoredRunInput(projection, &run.input);
+    for (run.additional_inputs) |entry| if (entry) |record| {
+        projection.free(record.text);
+        projection.release_bytes_fn(projection.context, task_state.additional_input_projection_bytes);
+    };
     if (run.assistant.list.capacity != 0) projection.freeText(&run.assistant);
     if (run.execution_model_owned)
         projection.free(@constCast(run.execution_model));
@@ -2946,6 +3015,23 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
             !validText(run.diagnostic, limits.max_terminal_diagnostic_bytes, true) or
             run.tools.len > limits.max_tools_per_run or run.next_activity_order == 0)
             return error.Invalid;
+        if (run.additional_inputs.len > agent.max_submitted_inputs) return error.Invalid;
+        var previous_input_id: u64 = 0;
+        var previous_sequence: u32 = 0;
+        for (run.additional_inputs) |record| {
+            if (record.id <= previous_input_id or record.operation_id.len == 0 or record.operation_id.len > 64 or
+                !validText(record.text, limits.max_user_message_bytes, true) or
+                !oneOf(record.state, &.{ "pending", "adopted", "unadopted", "unknown" })) return error.Invalid;
+            for (record.operation_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.Invalid;
+            previous_input_id = record.id;
+            if (record.sequence) |sequence| {
+                if (sequence <= previous_sequence or sequence > agent.max_submitted_inputs) return error.Invalid;
+                previous_sequence = sequence;
+            } else if (oneOf(record.state, &.{ "adopted", "unadopted" })) return error.Invalid;
+            if ((record.adopted_turn == null) != (record.order == null)) return error.Invalid;
+            if (record.adopted_turn) |turn| if (turn == 0 or record.order.? == 0 or
+                record.order.? >= run.next_activity_order or !std.mem.eql(u8, record.state, "adopted")) return error.Invalid;
+        }
         if ((run.assistant_output_kind == null) != (run.assistant_output_start == null))
             return error.Invalid;
         if (run.submitted_at_unix_ms) |submitted_at|

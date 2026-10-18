@@ -45,6 +45,7 @@ pub const InputCounts = session_impl.InputCounts;
 pub const InputObservation = session_impl.InputObservation;
 pub const InputRejection = session_impl.InputRejection;
 pub const InputSubmission = session_impl.InputSubmission;
+pub const max_submitted_inputs = session_impl.max_submitted_inputs;
 pub const DurableBudgetObservation = session_impl.DurableBudgetObservation;
 pub const CheckpointLogicalSessionOrigin = session_impl.CheckpointLogicalSessionOrigin;
 pub const CheckpointSessionLifecycle = session_impl.CheckpointSessionLifecycle;

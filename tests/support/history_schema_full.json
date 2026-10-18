@@ -140,7 +140,19 @@
           "diagnostic_truncated": true,
           "diagnostic_redacted": true,
           "event_projection_failure": null,
-          "next_activity_order": 8
+          "next_activity_order": 8,
+          "additional_inputs": [
+            {
+              "id": 1,
+              "operation_id": "history-input",
+              "text": "preserve this constraint",
+              "redacted": false,
+              "sequence": 1,
+              "adopted_turn": null,
+              "order": null,
+              "state": "adopted"
+            }
+          ]
         }
       ],
       "compacts": [

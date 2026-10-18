@@ -17,12 +17,9 @@ import {
 } from "./wire-codec.ts";
 import { compactPhases } from "./contracts.ts";
 import {
-  queuedInputReasons,
-  type QueuedInput,
-  type QueuedInputView,
-  type QueuedInputResult,
-  type QueueInputResult,
-  type WithdrawQueuedInputResult,
+  sendInputReasons,
+  type SendInputResult,
+  type AdditionalInputView,
 } from "./contracts.ts";
 import {
   compactCauses,
@@ -371,7 +368,6 @@ const taskCreateReasons = [
   "shutting_down",
 ] as const;
 const taskRunReasons = [
-  "queued_input_present",
   "binding_changed",
   "binding_unavailable",
   "task_unavailable",
@@ -402,7 +398,6 @@ const taskModelSelectionReasons = [
   "capacity_reached",
 ] as const;
 const taskCompactReasons = [
-  "queued_input_present",
   "binding_changed",
   "binding_unavailable",
   "task_unavailable",
@@ -412,7 +407,6 @@ const taskCompactReasons = [
   "shutting_down",
 ] as const;
 const taskRestoreReasons = [
-  "queued_input_present",
   "binding_changed",
   "task_unavailable",
   "recovery_unavailable",
@@ -2375,6 +2369,7 @@ function decodeRun(value: unknown, path: string): RunView {
     "permissionInteraction",
     "execution",
     "input",
+    "additionalInputs",
     "output",
     "activity",
     "terminal",
@@ -2551,6 +2546,10 @@ function decodeRun(value: unknown, path: string): RunView {
     ),
     execution,
     input: decodeRunInput(item.input, `${path}.input`),
+    additionalInputs: decodeAdditionalInputs(
+      item.additionalInputs,
+      `${path}.additionalInputs`,
+    ),
     output,
     activity,
     elapsedMs,
@@ -3145,139 +3144,17 @@ function decodeTaskApprovalResult(
   return { revision, outcome, reason };
 }
 
-function queueOperationId(value: unknown, path: string): string {
+function inputOperationId(value: unknown, path: string): string {
   const id = stringValue(value, path);
   if (!/^[!-~]{1,64}$/.test(id))
     fail(path, "expected bounded printable operation identity");
   return id;
 }
-function decodeQueuedInputView(value: unknown, path: string): QueuedInputView {
-  const kind = enumValue((value as JsonObject)?.kind, `${path}.kind`, [
-    "text",
-    "skill",
-  ] as const);
-  if (kind === "text") {
-    const input = decodeRunInput(value, path);
-    if (input.kind !== "text") fail(path, "expected queued text");
-    return input;
-  }
-  const item = object(value, path, [
-    "kind",
-    "skillId",
-    "catalogRevision",
-    "selectionRevision",
-    "invocationName",
-    "displayName",
-    "argumentValues",
-    "redacted",
-  ]);
-  const { selectionRevision, ...safe } = item;
-  const input = decodeRunInput(safe, path);
-  if (input.kind !== "skill") fail(path, "expected queued Skill");
-  return {
-    ...input,
-    selectionRevision: positiveWireId(
-      selectionRevision,
-      `${path}.selectionRevision`,
-    ),
-  };
-}
-function decodeQueuedInput(value: unknown, path: string): QueuedInput | null {
-  if (value === null) return null;
-  const item = object(value, path, [
-    "revision",
-    "runId",
-    "input",
-    "state",
-    "heldReason",
-    "queuedAtUnixMs",
-  ]);
-  const state = enumValue(item.state, `${path}.state`, [
-    "waiting",
-    "held",
-  ] as const);
-  const heldReason = nullableEnum(
-    item.heldReason,
-    `${path}.heldReason`,
-    queuedInputReasons,
-  );
-  if ((state === "waiting") !== (heldReason === null))
-    fail(path, "queue state and held reason must agree");
-  const queuedAtUnixMs =
-    item.queuedAtUnixMs === null
-      ? null
-      : positiveWireId(item.queuedAtUnixMs, `${path}.queuedAtUnixMs`);
-  if (queuedAtUnixMs !== null && BigInt(queuedAtUnixMs) > 8640000000000000n)
-    fail(path, "timestamp outside displayable range");
-  return {
-    revision: positiveWireId(item.revision, `${path}.revision`),
-    runId: positiveWireId(item.runId, `${path}.runId`),
-    input: decodeQueuedInputView(item.input, `${path}.input`),
-    state,
-    heldReason,
-    queuedAtUnixMs,
-  };
-}
-function decodeQueuedInputResult(
-  value: unknown,
-  path: string,
-): QueuedInputResult | null {
-  if (value === null) return null;
-  const item = object(value, path, [
-    "operationId",
-    "kind",
-    "outcome",
-    "revision",
-    "reason",
-    "input",
-  ]);
-  const kind = enumValue(item.kind, `${path}.kind`, [
-    "queue",
-    "withdraw",
-  ] as const);
-  const outcome = enumValue(item.outcome, `${path}.outcome`, [
-    "queued",
-    "withdrawn",
-    "rejected",
-  ] as const);
-  const revision =
-    item.revision === null
-      ? null
-      : positiveWireId(item.revision, `${path}.revision`);
-  const reason = nullableEnum(
-    item.reason,
-    `${path}.reason`,
-    queuedInputReasons,
-  );
-  const input =
-    item.input === null
-      ? null
-      : decodeQueuedInputView(item.input, `${path}.input`);
-  if (outcome === "rejected") {
-    if (reason === null || revision !== null || input !== null)
-      fail(path, "rejected queue operation must carry only a reason");
-  } else if (
-    reason !== null ||
-    revision === null ||
-    (outcome === "queued"
-      ? kind !== "queue" || input !== null
-      : kind !== "withdraw" || input === null)
-  )
-    fail(path, "queue operation result is inconsistent");
-  return {
-    operationId: queueOperationId(item.operationId, `${path}.operationId`),
-    kind,
-    outcome,
-    revision,
-    reason,
-    input,
-  };
-}
 
 function decodeTask(value: unknown, path: string): TaskView {
   const item = object(value, path, [
-    "queuedInput",
-    "queuedInputResult",
+    "inputReady",
+    "sendInputResult",
     "id",
     "recentOrder",
     "title",
@@ -3602,16 +3479,15 @@ function decodeTask(value: unknown, path: string): TaskView {
     `${path}.uiHistory`,
     decodeUiRecord,
   );
-  const queuedInput = decodeQueuedInput(
-    item.queuedInput,
-    `${path}.queuedInput`,
-  );
-  const queuedInputResult = decodeQueuedInputResult(
-    item.queuedInputResult,
-    `${path}.queuedInputResult`,
-  );
-  if (queuedInput !== null && !runs.some((run) => run.id === queuedInput.runId))
-    fail(path, "queued input must reference a projected Run");
+  const sendInputResult =
+    item.sendInputResult === null
+      ? null
+      : decodeSendInputResult(
+          item.sendInputResult,
+          positiveWireId(item.id, `${path}.id`),
+          undefined,
+          `${path}.sendInputResult`,
+        );
   const runIds = new Set(runs.map((run) => run.id));
   if (
     (context.pressure !== null && !runIds.has(context.pressure.sourceRunId)) ||
@@ -3730,8 +3606,8 @@ function decodeTask(value: unknown, path: string): TaskView {
   if (continuationAvailable && continuationRecoveryAvailable)
     fail(path, "continuation and recovery cannot both be available");
   return {
-    queuedInput,
-    queuedInputResult,
+    inputReady: booleanValue(item.inputReady, `${path}.inputReady`),
+    sendInputResult,
     id: positiveWireId(item.id, `${path}.id`),
     recentOrder: positiveWireId(item.recentOrder, `${path}.recentOrder`),
     title: stringValue(item.title, `${path}.title`),
@@ -5650,83 +5526,6 @@ export function decodeTaskRunResult(
   };
 }
 
-export function decodeQueueInputResult(
-  value: unknown,
-  expectedTaskId: string,
-  expectedOperationId: string,
-): QueueInputResult {
-  const item = object(value, "$", [
-    "operationId",
-    "taskId",
-    "accepted",
-    "revision",
-    "reason",
-  ]);
-  const taskId = positiveWireId(item.taskId, "$.taskId");
-  const operationId = queueOperationId(item.operationId, "$.operationId");
-  if (taskId !== expectedTaskId || operationId !== expectedOperationId)
-    fail("$", "queue response identity mismatch");
-  const accepted = booleanValue(item.accepted, "$.accepted");
-  if (accepted) {
-    if (item.reason !== null) fail("$.reason", "expected null");
-    return {
-      accepted,
-      taskId,
-      operationId,
-      revision: positiveWireId(item.revision, "$.revision"),
-      reason: null,
-    };
-  }
-  if (item.revision !== null) fail("$.revision", "expected null");
-  return {
-    accepted,
-    taskId,
-    operationId,
-    revision: null,
-    reason: enumValue(item.reason, "$.reason", queuedInputReasons),
-  };
-}
-export function decodeWithdrawQueuedInputResult(
-  value: unknown,
-  expectedTaskId: string,
-  expectedOperationId: string,
-): WithdrawQueuedInputResult {
-  const item = object(value, "$", [
-    "operationId",
-    "taskId",
-    "withdrawn",
-    "revision",
-    "reason",
-    "input",
-  ]);
-  const taskId = positiveWireId(item.taskId, "$.taskId");
-  const operationId = queueOperationId(item.operationId, "$.operationId");
-  if (taskId !== expectedTaskId || operationId !== expectedOperationId)
-    fail("$", "queue response identity mismatch");
-  const withdrawn = booleanValue(item.withdrawn, "$.withdrawn");
-  if (withdrawn) {
-    if (item.reason !== null) fail("$.reason", "expected null");
-    return {
-      withdrawn,
-      taskId,
-      operationId,
-      revision: positiveWireId(item.revision, "$.revision"),
-      input: decodeQueuedInputView(item.input, "$.input"),
-      reason: null,
-    };
-  }
-  if (item.revision !== null || item.input !== null)
-    fail("$", "rejected withdrawal cannot return input");
-  return {
-    withdrawn,
-    taskId,
-    operationId,
-    revision: null,
-    input: null,
-    reason: enumValue(item.reason, "$.reason", queuedInputReasons),
-  };
-}
-
 export function decodeTaskCompletionSeenResult(
   value: unknown,
   expectedTaskId: string,
@@ -6249,4 +6048,158 @@ export function decodeAttachmentCancelResult(
   }
   const item = object(value, "$", ["status", "released"]);
   return { status, released: booleanValue(item.released, "$.released") };
+}
+
+function inputSequence(value: unknown, path: string): number {
+  const result = positiveNumber(value, path);
+  if (result > 64) fail(path, "input sequence exceeds the Run limit");
+  return result;
+}
+function decodeAdditionalInputs(
+  value: unknown,
+  path: string,
+): AdditionalInputView[] {
+  let previousId = 0n;
+  let previousSequence = 0;
+  const records = arrayValue(value, path, (raw, p) => {
+    const item = object(raw, p, [
+      "id",
+      "operationId",
+      "text",
+      "redacted",
+      "sequence",
+      "adoptedTurn",
+      "order",
+      "state",
+    ]);
+    const id = positiveU64WireId(item.id, `${p}.id`);
+    if (BigInt(id) <= previousId) fail(p, "input identities must increase");
+    previousId = BigInt(id);
+    const sequence =
+      item.sequence === null
+        ? null
+        : inputSequence(item.sequence, `${p}.sequence`);
+    if (sequence !== null) {
+      if (sequence <= previousSequence)
+        fail(p, "input sequences must increase");
+      previousSequence = sequence;
+    }
+    const state = enumValue(item.state, `${p}.state`, [
+      "pending",
+      "adopted",
+      "unadopted",
+      "unknown",
+    ] as const);
+    const adoptedTurn =
+      item.adoptedTurn === null
+        ? null
+        : positiveNumber(item.adoptedTurn, `${p}.adoptedTurn`);
+    const order =
+      item.order === null ? null : positiveU64WireId(item.order, `${p}.order`);
+    if ((state === "adopted" || state === "unadopted") && sequence === null)
+      fail(p, "a confirmed input requires its receipt");
+    if (
+      (adoptedTurn === null) !== (order === null) ||
+      (adoptedTurn !== null &&
+        (state !== "adopted" || adoptedTurn > 4294967295))
+    )
+      fail(p, "invalid adoption anchor");
+    return {
+      id,
+      operationId: inputOperationId(item.operationId, `${p}.operationId`),
+      text: stringValue(item.text, `${p}.text`),
+      redacted: booleanValue(item.redacted, `${p}.redacted`),
+      sequence,
+      state,
+      adoptedTurn,
+      order,
+    };
+  });
+  if (records.length > 64) fail(path, "too many additional inputs");
+  return records;
+}
+
+export function decodeSendInputResult(
+  value: unknown,
+  expectedTaskId: string,
+  expectedOperationId?: string,
+  path = "$",
+): SendInputResult {
+  const item = object(value, path, [
+    "taskId",
+    "operationId",
+    "outcome",
+    "runId",
+    "inputId",
+    "sequence",
+    "reason",
+  ]);
+  const taskId = positiveU64WireId(item.taskId, `${path}.taskId`);
+  const operationId = inputOperationId(item.operationId, `${path}.operationId`);
+  if (
+    taskId !== expectedTaskId ||
+    (expectedOperationId !== undefined && operationId !== expectedOperationId)
+  )
+    fail(path, "input result identity mismatch");
+  const outcome = enumValue(item.outcome, `${path}.outcome`, [
+    "started",
+    "submitted",
+    "rejected",
+    "unknown",
+  ] as const);
+  if (outcome === "rejected") {
+    if (item.runId !== null || item.inputId !== null || item.sequence !== null)
+      fail(path, "a refusal cannot report accepted identities");
+    return {
+      taskId,
+      operationId,
+      outcome,
+      runId: null,
+      inputId: null,
+      sequence: null,
+      reason: enumValue(item.reason, `${path}.reason`, sendInputReasons),
+    };
+  }
+  if (item.reason !== null)
+    fail(
+      path,
+      "accepted or uncertain submissions cannot have a refusal reason",
+    );
+  const runId = positiveU64WireId(item.runId, `${path}.runId`);
+  if (outcome === "started") {
+    if (item.inputId !== null || item.sequence !== null)
+      fail(path, "root input has no additional receipt");
+    return {
+      taskId,
+      operationId,
+      outcome,
+      runId,
+      inputId: null,
+      sequence: null,
+      reason: null,
+    };
+  }
+  const inputId = positiveU64WireId(item.inputId, `${path}.inputId`);
+  if (outcome === "unknown") {
+    if (item.sequence !== null)
+      fail(path, "an uncertain submission has no validated receipt");
+    return {
+      taskId,
+      operationId,
+      outcome,
+      runId,
+      inputId,
+      sequence: null,
+      reason: null,
+    };
+  }
+  return {
+    taskId,
+    operationId,
+    outcome,
+    runId,
+    inputId,
+    sequence: inputSequence(item.sequence, `${path}.sequence`),
+    reason: null,
+  };
 }

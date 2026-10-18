@@ -149,11 +149,11 @@ Automatic admission 在完成上述证明后才创建候选目录、临时 Works
 
 每个 Task 在创建时取得 owned ExecutionConfig 和 immutable binding epoch。默认配置变化不热替换已有 Task；显式改变 Task execution 必须在 Task idle、authority 精确且持久化 candidate 可提交时形成新的 binding。Run、manual compact 与 Conversation recovery 共享 Task-owned active-operation 槽；删除和 Session replacement 是独立生命周期用例，必须与该槽互斥并等待已有 operation 收口，不能通过不同入口并发改变同一个 attachment。
 
-Task Runtime 独立持有至多一条文本或 Skill 待发送输入，以及最近一次显式排队/撤回操作的有界结果。待发送输入不占 active-operation 槽，入队不创建 Run；它绑定当时的 Run identity、binding epoch 和单调槽位 revision。原始执行输入与安全投影分别 owned、有界并计入容量；原始输入不得进入 Snapshot、日志、history 或 checkpoint。普通发送在槽位非空时拒绝；waiting 同时阻止手动压缩与恢复，held 允许用户显式恢复但不因此重新激活消息。
+发送显式绑定 idle 的最后 Run identity 或当前 active Run identity，并校验 Task binding。idle 仅能按既有 admission 创建一次 Run；active 仅能借用该 Run 的控制 lease 调用 Agent submitInput，未就绪、停止中、Skill Run、非文本及过期目标立即拒绝。两种目标不能在竞争中互换；Control 不持有待执行输入，不等待 readiness、不注册稍后发送回调、不按终态创建下一轮。
 
-自动发送只在完整 lifecycle 同步最后执行：绑定 Run 的 Product terminal 与事件流已收口、所有 worker lease 均释放、没有 active operation、审批切换或 shutdown，且 Schedule 已确认该 Task 的 submitted occurrence。正常完成才通过与普通发送共用的当前准入；其他结局或准入失败转为稳定 held，不自动重试或恢复对话。Schedule 存储失败或前序 occurrence 使本 Task 的完成观察尚未确认时，消息保留为 schedule_completion_unconfirmed，不以全局 Schedule 健康冻结无关 Task。消费直接复用现有 Run acceptance effect；接纳之前失败保留，接纳之后即使执行队列满也由已创建的普通 Run 表达结果，不重新排队。
+Task 在调用前预留有界 identity 和安全消息投影，原始文本仅借用到当次同步调用返回；拒绝释放候选，接受保留 receipt sequence，合同失败保留 unknown。记录归属于原 Run，只供历史展示、对账和权限上下文使用，不能成为执行来源。事件 input_adopted 提供真实 turn 与活动顺序；终态在 event-drain barrier 后以 Agent 权威计数收口接受前缀为 adopted/unadopted，计数无效时剩余记录为 unknown，已知采纳事实保留。仅由计数确认的采纳不伪造活动位置。
 
-停止、撤回、归档、删除及移除 Workspace 的入口先做事实收口，再校验并处理用户意图，不能由命令自身的前置同步抢先自动发送。有效普通停止和实际接纳的审批切换先将 waiting 改为 held，再请求取消；相同模式或拒绝的命令无此副作用。归档、Task 删除及 Workspace 移除仅在生效边界丢弃消息，拒绝或移除回滚不能提前丢弃。后台 Run 的正常返回、启动失败与排队取消共用退出清理：捕获独立通知句柄，销毁 job 并释放最后占用，再执行 required wake；通知对象必须存活到全部 worker join。Application 开始退出时关闭 admission，迟到唤醒不得产生新 Run。
+自动审批使用根输入及该 request 创建时 Agent 已确认采纳的完整前缀；不得截断约束后批准。prepare 与接纳 allow_once 时均检查该 Run 的已接受未采纳输入和正在进行的 submit 调用，存在任一项则结束自动审核并交给人工，不等待输入、不重复审核；有效 deny 保留原语义。插话不能作为权限授权或替代 UI 回答。Stop 沿用独立 abort 入口；Agent 关闭提交窗口并等待已登记调用返回后，才能导出 checkpoint、发起其他 Core 调用或销毁 Session。worker 的退出清理及通知对象仍须保持到最后 lease 释放和全部 worker join；shutdown 关闭所有新 admission。
 
 
 Product Task 还拥有绑定 Run identity 的 completion receipt。durable `completion_seen_run_id` 只记录 Renderer 已明确观察的当前最新 terminal `completed` Run；Product projection 只在该 Run identity 与 receipt 不同且它仍是最新 terminal outcome 时发布未读 identity。acknowledgement 必须同时携带 Task/Run identity，迟到、重复、其他 outcome、已删除 Task 或已被新 terminal Run 取代的请求无副作用；它不改变 Task `recent_order`。归档在同一 Task mutation 中确认当前 completion。Renderer 只报告中央 Task 工作面是否真正暴露，不从本地缓存、选择状态或时间推断 canonical receipt。
@@ -326,7 +326,7 @@ Agent Session、callback、UI request、event pump、close race、错误映射�
 
 ### 4.2 Durable history 与 runtime attachment
 
-待发送输入与最近排队操作结果只存在于当前 Host 的 Task 内存中，不写入 durable history 或 checkpoint。Renderer 重载、断连和导航不撤销已接纳的输入；退出或崩溃后不恢复，不自动重放。最近结果仅用于 operation identity 的响应丢失对账：自动消费槽位不清掉结果，下一次显式排队操作可以替换它；不建立结果历史或跨重启 exactly-once 承诺。
+追加消息的安全文本、identity、receipt sequence、采纳状态与真实活动锚点随所属 Run 持久化；不持久化可执行 payload。旧历史缺少消息数组解释为空；恢复将仍为 pending 的消息降为 unknown，仅供阅读，不提交给新 Session。Task 最近一次发送结果只在 Host 内存中保留，下一次显式发送可替换，用于响应丢失对账；不建立结果历史或跨重启 exactly-once 承诺。重载、断连和导航不撤销 Core 已接受的输入，也不触发重发。
 
 Product history 保存用户可观察且跨重启仍有意义的 Workspace、Task、用户消息、已提交 assistant 输出、Tool 结果、File Changes metadata/artifact reference、UI 决策、Run/compact terminal fact、execution provenance 与 checkpoint reference。完整产品范围以[产品需求](requirements.md)为准。
 

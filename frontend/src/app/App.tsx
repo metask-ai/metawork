@@ -1,6 +1,7 @@
-import { useQueuedInput } from "../features/composer/useQueuedInput.ts";
-import { QueuedInputCard } from "../features/composer/QueuedInputCard.tsx";
-import { taskDraftVersion } from "../features/composer/drafts.ts";
+import {
+  taskDraftVersion,
+  newComposerOperationId,
+} from "../features/composer/drafts.ts";
 import {
   useCallback,
   useEffect,
@@ -147,6 +148,7 @@ import type {
   SkillMutationResult,
   SkillEnablementResult,
   TaskRunReason,
+  SendInputReason,
   TaskModelSelectionReason,
   TaskModelSelectionAvailability,
   ModelRef,
@@ -206,6 +208,7 @@ type MutationReason =
   | TaskCompactReason
   | TaskRestoreReason
   | TaskRunReason
+  | SendInputReason
   | TaskModelSelectionReason;
 
 function mutationReasonMessageId(reason: MutationReason): MessageId {
@@ -274,10 +277,6 @@ export default function App() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [confirmArchiveTaskId, setConfirmArchiveTaskId] = useState<
-    string | null
-  >(null);
-  const [queueConfirmationOpen, setQueueConfirmationOpen] = useState(false);
   const [fileChanges, setFileChanges] = useState<FileChangesUiState>({
     kind: "closed",
   });
@@ -327,7 +326,7 @@ export default function App() {
   const [approvalRequests, setApprovalRequests] = useState(
     approvalRequestsRef.current.view(),
   );
-  const approvalSnapshotRef = useRef<WorkbenchSnapshot | null>(null);
+  const latestSnapshotRef = useRef<WorkbenchSnapshot | null>(null);
   const [cancelPending, setCancelPending] = useState<Record<string, true>>({});
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [accountCancelBusy, setAccountCancelBusy] = useState(false);
@@ -818,8 +817,7 @@ export default function App() {
     workbenchRoute: route === "workbench",
     settingsOpen,
     searchOpen,
-    modalOpen:
-      confirmDelete || confirmArchiveTaskId !== null || queueConfirmationOpen,
+    modalOpen: confirmDelete,
     taskStageExposed,
     documentAttention,
     bridgeAvailable: !bridgeUnavailable,
@@ -870,22 +868,15 @@ export default function App() {
       : Promise.reject(new Error("Workbench connection is unavailable"));
   }, []);
 
-  const queuedInput = useQueuedInput({
-    client,
-    snapshot,
-    ready: !bridgeUnavailable,
-    generation: bridgeGeneration,
-    generationRef: bridgeGenerationRef,
-    drafts: taskDrafts,
-    refresh: refreshSnapshot,
-  });
-  const queueOperation = activeTask
-    ? queuedInput.operation(activeTask.id)
-    : null;
+  // Correlation metadata only: no input payload, retry, or execution callback.
+  const inputReceipts = useRef(
+    new Map<string, { operationId: string; draftVersion: string | null }>(),
+  );
   const taskCanCompose =
     newTaskDraftActive ||
     (activeTask?.lifecycle === "open" &&
-      (activeTask.continuationAvailable ||
+      (activeTask.activeOperation?.kind === "run" ||
+        activeTask.continuationAvailable ||
         activeTask.continuationRecoveryAvailable) &&
       !activeTask.archived);
   const taskOperationInFlight = Boolean(activeTask?.activeOperation);
@@ -929,54 +920,41 @@ export default function App() {
     composerDraftWithinLimits(composerDraft) &&
     skillDraftCurrent &&
     (composerDraft.kind !== "skill" || !skillCatalogBusy);
-  const queueBlocked = Boolean(
-    activeTask && queuedInput.blocked(activeTask.id),
-  );
+  const sendingToRun =
+    !newTaskDraftActive && activeTask?.activeOperation?.kind === "run";
   const canSubmit =
     !pendingTaskSelection.current &&
-    activeTask?.modelIntent?.state !== "outcome_unknown" &&
     taskCanCompose &&
-    (!newTaskDraftActive ||
-      snapshot.newTaskAdmission.available ||
-      newTaskModelState.intent !== null) &&
-    (!newTaskDraftActive || newTaskWorkspaceReady) &&
-    (!newTaskDraftActive || newTaskModelState.valid) &&
-    !taskOperationInFlight &&
-    (newTaskDraftActive ||
-      activeTask?.skillCatalog.availability !== "loading") &&
     composerContentReady &&
     !attachmentBusy &&
     !taskMutationDisabled &&
     !workspaceBusy &&
-    (newTaskDraftActive || (!activeTask?.queuedInput && !queueBlocked));
-  const canQueue = Boolean(
-    !newTaskDraftActive &&
-    activeTask &&
-    taskCanCompose &&
-    activeTask.activeOperation?.kind === "run" &&
-    ["queued", "running", "waiting_ui"].includes(
-      activeTask.currentRunPhase ?? "",
-    ) &&
-    !(activeTask.id in cancelPending) &&
-    !activeTask.queuedInput &&
-    !queueBlocked &&
-    activeTask.skillCatalog.availability !== "loading" &&
-    composerContentReady &&
-    composerDraft.kind !== "multimodal" &&
-    !attachmentBusy &&
-    !taskMutationDisabled &&
-    !workspaceBusy,
-  );
-  const queueDisabledReason: MessageId | undefined = queueBlocked
-    ? "queue.resolve_first"
-    : activeTask?.queuedInput
-      ? "queue.occupied"
-      : composerDraft.kind === "multimodal"
-        ? "queue.attachments_unsupported"
-        : activeTask?.currentRunPhase === "stopping" ||
-            Boolean(activeTask && activeTask.id in cancelPending)
-          ? "queue.stopping"
-          : undefined;
+    (sendingToRun
+      ? Boolean(
+          activeTask?.inputReady &&
+          composerDraft.kind === "text" &&
+          !(activeTask.id in cancelPending) &&
+          composerWorkspace?.authorization === "available",
+        )
+      : activeTask?.modelIntent?.state !== "outcome_unknown" &&
+        (!newTaskDraftActive ||
+          snapshot.newTaskAdmission.available ||
+          newTaskModelState.intent !== null) &&
+        (!newTaskDraftActive ||
+          (newTaskWorkspaceReady && newTaskModelState.valid)) &&
+        !taskOperationInFlight &&
+        (newTaskDraftActive ||
+          activeTask?.skillCatalog.availability !== "loading"));
+  const inputDisabledReason: MessageId | undefined = taskOperationInFlight
+    ? activeTask?.currentRunPhase === "stopping" ||
+      Boolean(activeTask && activeTask.id in cancelPending)
+      ? "input.stopping"
+      : composerDraft.kind !== "text"
+        ? "input.text_only"
+        : !activeTask?.inputReady
+          ? "input.not_ready"
+          : undefined
+    : undefined;
   const metaskProvider = snapshot.models.providers.find(
     (provider) => provider.id === "metask",
   );
@@ -1049,11 +1027,43 @@ export default function App() {
           conversationRecovery.current.observeSnapshot(next, generation);
           skillPreparation.current.observeSnapshot(next, generation);
           observeUiResponseSnapshot(next);
-          approvalSnapshotRef.current = next;
+          latestSnapshotRef.current = next;
           publishApprovalObservations(
             approvalRequestsRef.current.observe(next, generation),
           );
           setApprovalRequests(approvalRequestsRef.current.view());
+          for (const [taskId, pending] of inputReceipts.current) {
+            const task = next.tasks.find((item) => item.id === taskId);
+            if (!task) {
+              if (!pendingTaskDraftRetention.current.has(taskId))
+                inputReceipts.current.delete(taskId);
+              continue;
+            }
+            const receipt = task.sendInputResult;
+            if (receipt?.operationId !== pending.operationId) continue;
+            const adopted =
+              receipt.outcome === "unknown" &&
+              task.runs.some((run) =>
+                run.additionalInputs.some(
+                  (message) =>
+                    message.operationId === pending.operationId &&
+                    message.state === "adopted",
+                ),
+              );
+            if (
+              receipt.outcome === "started" ||
+              receipt.outcome === "submitted" ||
+              adopted
+            ) {
+              inputReceipts.current.delete(taskId);
+              if (
+                pending.draftVersion !== null &&
+                taskDraftVersion(taskId) === pending.draftVersion
+              )
+                taskDrafts.clearDraft(taskId);
+            } else if (receipt.outcome === "rejected")
+              inputReceipts.current.delete(taskId);
+          }
           const projectedTaskIds = next.tasks.map((task) => task.id);
           const discardedAttachments = taskDrafts.pruneDrafts([
             ...projectedTaskIds,
@@ -1114,7 +1124,7 @@ export default function App() {
           skillPreparation.current.resetGeneration(generation);
           bridgeGenerationRef.current = generation;
           approvalRequestsRef.current.reset(generation);
-          approvalSnapshotRef.current = null;
+          latestSnapshotRef.current = null;
           setApprovalRequests({});
           if (attachmentOperation.current) {
             attachmentOperation.current.cancelled = true;
@@ -1266,16 +1276,6 @@ export default function App() {
     }
     setRightPanelOpen(true);
     if (taskPanel.activeTab) focusTaskPanelTab(taskPanel.activeTab.tabId);
-  }
-
-  function closeArchiveConfirmation() {
-    const id = confirmArchiveTaskId;
-    setConfirmArchiveTaskId(null);
-    window.requestAnimationFrame(() =>
-      document
-        .querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id ?? "")}"]`)
-        ?.focus(),
-    );
   }
 
   function closeDeleteConfirmation() {
@@ -1555,7 +1555,7 @@ export default function App() {
     const intent = approvalRequestsRef.current.view()[taskId]?.intent;
     try {
       await refreshSnapshot();
-      const observed = approvalSnapshotRef.current?.tasks.find(
+      const observed = latestSnapshotRef.current?.tasks.find(
         (task) => task.id === taskId,
       );
       if (intent && observed && !observed.approvalChange) {
@@ -1904,6 +1904,74 @@ export default function App() {
     const submitted = composerDraft;
     const input = composerDraftToRunInput(submitted);
     if (!input) return;
+    const operationId = newComposerOperationId();
+    const rememberInput = (taskId: string, id: string) => {
+      inputReceipts.current.set(taskId, {
+        operationId: id,
+        draftVersion:
+          taskDrafts.getDraft(taskId) === submitted
+            ? taskDraftVersion(taskId)
+            : null,
+      });
+    };
+    if (!newTaskDraftActive && activeTask?.activeOperation?.kind === "run") {
+      const task = activeTask;
+      const runId = task.activeOperation!.id;
+      const generation = bridgeGenerationRef.current;
+      const scope = `task:${task.id}`;
+      if (!beginTaskPendingOperation(scope, "run")) return;
+      rememberInput(task.id, operationId);
+      try {
+        let receipt;
+        try {
+          receipt = await client.sendInput(
+            operationId,
+            task.id,
+            task.binding.epoch,
+            { kind: "run", runId },
+            input,
+          );
+        } catch {
+          await refreshSnapshot().catch(() => undefined);
+          const observed = latestSnapshotRef.current?.tasks.find(
+            (item) => item.id === task.id,
+          )?.sendInputResult;
+          if (observed?.operationId === operationId) receipt = observed;
+        }
+        if (bridgeGenerationRef.current !== generation) return;
+        if (receipt?.outcome === "submitted") {
+          if (inputReceipts.current.get(task.id)?.operationId === operationId)
+            inputReceipts.current.delete(task.id);
+          taskDrafts.acknowledgeDraft(task.id, submitted);
+          setStatus(
+            quietStatus("input.submitted", { scope: "task", taskId: task.id }),
+          );
+        } else if (receipt?.outcome === "rejected") {
+          if (inputReceipts.current.get(task.id)?.operationId === operationId)
+            inputReceipts.current.delete(task.id);
+          setStatus(
+            attentionStatus(mutationReasonMessageId(receipt.reason), {
+              scope: "task",
+              taskId: task.id,
+            }),
+          );
+        } else
+          setStatus(
+            attentionStatus("input.unknown", {
+              scope: "task",
+              taskId: task.id,
+            }),
+          );
+        await refreshSnapshot().catch(() => undefined);
+      } finally {
+        endTaskPendingOperation(scope);
+      }
+      return;
+    }
+    const expectedLastRunId =
+      !newTaskDraftActive && activeTask?.currentRunId !== "0"
+        ? (activeTask?.currentRunId ?? null)
+        : null;
     const existingTaskId = activeTask?.id ?? null;
     const workspace =
       newTaskDraftActive && composerWorkspace
@@ -1923,8 +1991,11 @@ export default function App() {
     if (submittedDraftId) newTaskDrafts.setDraft(submittedDraftId, submitted);
     else if (existingTaskId) taskDrafts.setDraft(existingTaskId, submitted);
     try {
-      const result = await submitTaskInstruction({
+      let result = await submitTaskInstruction({
         client,
+        operationId,
+        expectedLastRunId,
+        onBeforeSend: rememberInput,
         taskId: existingTaskId,
         workspace,
         expectedExecutionGeneration: snapshot.newTaskAdmission.activeGeneration,
@@ -2039,25 +2110,40 @@ export default function App() {
         await refreshSnapshot().catch(() => undefined);
         return;
       }
-      if (result.kind === "run_failed") {
-        if (
-          await reconcileCommandTimeout(result.error, "operation.run_submit", {
+      if (result.kind === "input_unknown") {
+        setStatus(
+          attentionStatus("input.unknown", {
             scope: "task",
             taskId: result.taskId,
-          })
-        )
-          return;
-        setStatus(
-          attentionStatus(
-            "run.start_failed",
-            { scope: "task", taskId: result.taskId },
-            {
-              diagnostic: errorText(result.error),
-            },
-          ),
+          }),
         );
         await refreshSnapshot().catch(() => undefined);
         return;
+      }
+      if (result.kind === "run_failed") {
+        await refreshSnapshot().catch(() => undefined);
+        const failedTaskId = result.taskId;
+        const receipt = latestSnapshotRef.current?.tasks.find(
+          (task) => task.id === failedTaskId,
+        )?.sendInputResult;
+        if (
+          receipt?.operationId === operationId &&
+          receipt.outcome === "started"
+        ) {
+          result = {
+            kind: "started",
+            taskId: result.taskId,
+            created: result.created,
+          };
+        } else {
+          setStatus(
+            attentionStatus("input.unknown", {
+              scope: "task",
+              taskId: result.taskId,
+            }),
+          );
+          return;
+        }
       }
       if (result.kind === "run_rejected") {
         await refreshSnapshot().catch(() => undefined);
@@ -2683,11 +2769,7 @@ export default function App() {
     }
   }
 
-  async function setArchived(
-    archived: boolean,
-    task = activeTask,
-    queueDiscardConfirmed = false,
-  ) {
+  async function setArchived(archived: boolean, task = activeTask) {
     if (
       !task ||
       workbenchMutationDisabled ||
@@ -2695,10 +2777,6 @@ export default function App() {
       task.activeOperation !== null
     )
       return;
-    if (archived && task.queuedInput && !queueDiscardConfirmed) {
-      setConfirmArchiveTaskId(task.id);
-      return;
-    }
     const taskId = task.id;
     const scope = `task:${taskId}`;
     if (!beginTaskPendingOperation(scope, "archive")) return;
@@ -3033,54 +3111,7 @@ export default function App() {
       )}
       <ComposerFooter
         textareaRef={composer}
-        canQueue={canQueue}
-        onQueueInput={
-          !newTaskDraftActive && activeTask
-            ? () => {
-                if (canQueue) void queuedInput.submit(activeTask);
-              }
-            : undefined
-        }
-        queueDisabledReason={queueDisabledReason}
-        sendDisabledReason={
-          !newTaskDraftActive && activeTask
-            ? queueBlocked
-              ? "queue.resolve_first"
-              : activeTask.queuedInput
-                ? "queue.held_first"
-                : undefined
-            : undefined
-        }
-        quietDraftChange={Boolean(
-          activeTask && queuedInput.quietDraft(activeTask.id),
-        )}
-        queuedInputCard={
-          !newTaskDraftActive && activeTask ? (
-            <QueuedInputCard
-              key={activeTask.id}
-              onConfirmationOpenChange={setQueueConfirmationOpen}
-              queued={activeTask.queuedInput}
-              pending={queueOperation}
-              busy={queuedInput.isBusy(activeTask.id)}
-              error={queuedInput.error(activeTask.id)}
-              draftEmpty={!composerDraftHasContent(composerDraft)}
-              preserveCurrent={Boolean(
-                queueOperation &&
-                composerDraftHasContent(composerDraft) &&
-                taskDraftVersion(activeTask.id) !== queueOperation.draftVersion,
-              )}
-              disabled={bridgeUnavailable}
-              onEdit={() => void queuedInput.withdraw(activeTask, "edit")}
-              onWithdraw={() =>
-                void queuedInput.withdraw(activeTask, "discard")
-              }
-              onRefresh={() => void refreshSnapshot().catch(() => undefined)}
-              onResolve={(restore) =>
-                queuedInput.recover(activeTask.id, restore)
-              }
-            />
-          ) : undefined
-        }
+        sendDisabledReason={inputDisabledReason}
         approvalModeControl={
           newTaskDraftActive ? (
             <NewTaskApprovalModeMenu
@@ -3985,58 +4016,6 @@ export default function App() {
           className="workbench-view"
           data-view={newTaskDraftActive ? "new-task" : "task"}
         >
-          <AlertDialog.Root
-            open={confirmArchiveTaskId !== null}
-            onOpenChange={(open) => {
-              if (!open) closeArchiveConfirmation();
-            }}
-          >
-            <AlertDialog.Portal>
-              <AlertDialog.Backdrop />
-              <AlertDialog.Popup>
-                <AlertDialog.Title>
-                  {t("queue.archive_title")}
-                </AlertDialog.Title>
-                <AlertDialog.Description>
-                  {t("queue.discard_on_action")}
-                </AlertDialog.Description>
-                <div className="delete-confirmation-actions">
-                  <Button
-                    autoFocus
-                    type="button"
-                    variant="secondary"
-                    size="md"
-                    onClick={closeArchiveConfirmation}
-                  >
-                    {t("common.cancel")}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="danger"
-                    size="md"
-                    disabled={
-                      bridgeUnavailable ||
-                      !snapshot.tasks.some(
-                        (task) =>
-                          task.id === confirmArchiveTaskId &&
-                          task.activeOperation === null,
-                      )
-                    }
-                    onClick={() => {
-                      const target = snapshot.tasks.find(
-                        (task) => task.id === confirmArchiveTaskId,
-                      );
-                      if (!target) return;
-                      setConfirmArchiveTaskId(null);
-                      void setArchived(true, target, true);
-                    }}
-                  >
-                    {t("queue.archive_confirm")}
-                  </Button>
-                </div>
-              </AlertDialog.Popup>
-            </AlertDialog.Portal>
-          </AlertDialog.Root>
           {activeTask && (
             <AlertDialog.Root
               open={confirmDelete}
@@ -4050,8 +4029,6 @@ export default function App() {
                   </AlertDialog.Title>
                   <AlertDialog.Description id="task-delete-description">
                     {t("task.delete_confirm_body")}
-                    {activeTask.queuedInput &&
-                      ` ${t("queue.discard_on_action")}`}
                   </AlertDialog.Description>
                   <div className="delete-confirmation-actions">
                     <Button

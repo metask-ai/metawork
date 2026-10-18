@@ -2900,7 +2900,7 @@ button.run-process-tool:hover {
 
 .ai-activity-details {
   border: 1px solid var(--ui-border);
-  color: var(--ui-content-secondary);
+  color: var(--ui-content-muted);
   background: var(--ui-surface-panel);
 }
 
@@ -8468,8 +8468,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 
 .composer-send {
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   place-items: center;
   border: 0;
@@ -8489,95 +8489,6 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-}
-
-.composer-run-actions .composer-stop {
-  width: 44px;
-  height: 44px;
-}
-
-.composer-queue {
-  width: 44px;
-  min-height: 44px;
-  white-space: nowrap;
-}
-
-.queued-input-card {
-  display: grid;
-  min-width: 0;
-  margin: 0 12px -1px;
-  border: 1px solid var(--ui-border);
-  border-bottom: 0;
-  border-radius: 12px 12px 0 0;
-  background: var(--ui-surface-panel);
-  color: var(--ui-content-primary);
-  font-size: var(--text-label);
-  overflow-wrap: anywhere;
-}
-
-.queued-input-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  padding: 0 4px 0 12px;
-  gap: 8px;
-}
-.queued-input-copy {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-  border-radius: 6px;
-}
-.queued-input-state {
-  flex-shrink: 0;
-  max-width: 50%;
-  color: var(--ui-content-muted);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.queued-input-state[data-held] {
-  color: var(--ui-content-warning);
-}
-.queued-input-preview {
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.queued-input-card p {
-  margin: 0;
-}
-.queued-input-row > .queued-input-actions {
-  flex-shrink: 0;
-  flex-wrap: nowrap;
-  gap: 0;
-}
-.queued-input-row button {
-  min-width: 44px;
-}
-.queued-input-card > .queued-input-error,
-.queued-input-reconciliation {
-  padding: 8px 12px;
-}
-.queued-input-actions {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.queued-input-actions button {
-  min-height: 44px;
-  white-space: normal;
-}
-.queued-input-reconciliation {
-  display: grid;
-  gap: 8px;
-}
-.queued-input-error {
-  color: var(--ui-content-warning);
 }
 
 .composer-default-recovery {
@@ -8611,8 +8522,8 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 
 .composer-stop {
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   border-radius: 50%;
   font-size: var(--text-lead);
@@ -9786,4 +9697,39 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
   margin: 0;
   overflow-wrap: anywhere;
   user-select: text;
+}
+
+.additional-inputs {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.additional-input {
+  min-width: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+}
+.additional-input-state {
+  margin: 0 0 8px;
+  color: var(--ui-content-muted);
+  font-size: var(--text-label);
+}
+.additional-input[data-state="unadopted"] .additional-input-state,
+.additional-input[data-state="unknown"] .additional-input-state {
+  color: var(--ui-content-warning);
+}
+.additional-input-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.additional-input button {
+  margin-top: 8px;
+  min-height: 44px;
+}
+.run-process-input {
+  min-width: 0;
+  padding: 8px 12px;
+  color: var(--ui-content-muted);
+  overflow-wrap: anywhere;
 }

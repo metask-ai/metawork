@@ -599,7 +599,7 @@ React stop command
 → publish terminal state
 ```
 
-stop 不进入普通 FIFO，不能被文本或 queue message 阻塞。abort 只请求中断；UI 必须等待真实 Run 返回后才能显示 terminal state。
+stop 不进入普通 FIFO，也不等待插话回执。abort 只请求中断；UI 必须等待真实 Run 返回后才能显示 terminal state。
 
 Manual compact 的反向控制遵循同一产品原则，但使用独立 identity 与 ABI entry：
 
@@ -617,7 +617,7 @@ React stop compact command
 
 Compact abort 同样不进入普通 FIFO；accepted cancellation 最终必须由 `session_compact` 返回 `STATUS_OK + COMPACT_ABORTED` 才能发布 aborted，acknowledgement 本身不构成 terminal product state。`too_late / stale_compact / invalid_argument / invalid_state` 仍等待并独立验证原 compact result；只有 abort `STATUS_OK` 与非 aborted terminal 的组合属于 dependency contract failure。Compact terminal publication 直接成为产品 terminal fact，不复制 Run 的 event-drain barrier。
 
-运行中排队由 Product Task 的独立内存槽位持有文本或 Skill，入队不调用 AgentCore、不分配 Run identity、不占 active-operation 槽。只有绑定 Run 正常完成、事件 drain 与全部 worker lease 收口后，Product Control 才调用与普通发送共用的 Agent preparation/admission；输入在现有 Run acceptance effect 处消费。异常结局或准入失败保留，不自动恢复会话、重试或重放工具。并发、停止、Schedule 与退出规则由 [Product 架构](product-architecture.md)定义，不改变本节 AgentCore Session 串行化合同。
+当前 Run 插话只通过绑定 Run identity/generation 的 Agent 控制 lease 调用官方 submitInput，Core readiness、并发登记与收尾 barrier 遵守本合同的 Session 规则。Product 不持待执行输入或自动下一轮动作；安全历史、审批和响应丢失对账由 [Product 架构](product-architecture.md)及 [Renderer Bridge 合同](renderer-bridge-contract.md)定义。executor queued Run 仍按原 admission 工作，不能把该调度状态当成插话 readiness。
 
 ## 14. Shell 边界
 

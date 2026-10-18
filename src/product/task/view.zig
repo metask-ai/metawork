@@ -166,18 +166,10 @@ pub fn writeProjection(writer: *std.Io.Writer, input: Input) Error!void {
         };
         std.json.Stringify.value(wire, .{}, writer) catch return error.SnapshotTooLarge;
     } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"queuedInput\":") catch return error.SnapshotTooLarge;
-    if (task.queued_input) |queued| {
-        writer.print("{{\"revision\":\"{d}\",\"runId\":\"{d}\",\"input\":", .{ queued.revision, queued.run_id }) catch return error.SnapshotTooLarge;
-        try writeInput(writer, input.text, queued.input, queued.selection_revision);
-        writer.print(",\"state\":\"{s}\",\"heldReason\":", .{@tagName(queued.state)}) catch return error.SnapshotTooLarge;
-        if (queued.held_reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeAll(",\"queuedAtUnixMs\":") catch return error.SnapshotTooLarge;
-        if (queued.queued_at_unix_ms) |at| writer.print("\"{d}\"", .{at}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-        writer.writeByte('}') catch return error.SnapshotTooLarge;
-    } else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"queuedInputResult\":") catch return error.SnapshotTooLarge;
-    if (task.queued_input_result) |result| try writeQueuedInputResult(writer, input.text, result) else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"inputReady\":") catch return error.SnapshotTooLarge;
+    writer.writeAll(if (inputReady(task)) "true" else "false") catch return error.SnapshotTooLarge;
+    writer.writeAll(",\"sendInputResult\":") catch return error.SnapshotTooLarge;
+    if (task.send_input_result) |result| try writeSendInputResult(writer, input.text, result) else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.print(",\"workspaceId\":\"{d}\",\"permissionProfile\":\"{s}\",\"approvalMode\":\"{s}\",\"permissionReviewState\":\"{s}\",\"binding\":{{\"epoch\":\"{d}\",\"availability\":\"{s}\",\"protocol\":\"{s}\",\"model\":", .{
         task.durable.workspace_id,
         @tagName(task.durable.permission_profile),
@@ -458,15 +450,36 @@ pub fn writeInput(writer: *std.Io.Writer, text_projection: TextProjection, input
     }
 }
 
-pub fn writeQueuedInputResult(writer: *std.Io.Writer, text: TextProjection, result: task_state.QueuedInputResult) Error!void {
-    writer.writeAll("{\"operationId\":") catch return error.SnapshotTooLarge;
+fn inputReady(task: *const task_state.Task) bool {
+    const id = switch (task.runtime.active_operation) {
+        .run => |id| id,
+        else => return false,
+    };
+    const run = task_state.findRun(task.durable.runs, id) orelse return false;
+    if (run.input == .skill or task_state.terminalPayload(run) != null or
+        task.runtime.cancel_requested or task.approval_change != null or
+        run.pending_termination.load(.acquire) != .none or
+        run.agent_handoff.load(.acquire) != .running) return false;
+    var lease = run.run_control.tryAcquireLease() orelse return false;
+    defer lease.deinit();
+    return lease.inputObservation().ready;
+}
+
+fn writeInputId(writer: *std.Io.Writer, id: ?u64) Error!void {
+    if (id) |value| writer.print("\"{d}\"", .{value}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+}
+
+pub fn writeSendInputResult(writer: *std.Io.Writer, text: TextProjection, result: task_state.SendInputResult) Error!void {
+    writer.print("{{\"taskId\":\"{d}\",\"operationId\":", .{result.task_id}) catch return error.SnapshotTooLarge;
     try text.writeJson(writer, result.operationId());
-    writer.print(",\"kind\":\"{s}\",\"outcome\":\"{s}\",\"revision\":", .{ @tagName(result.kind), @tagName(result.outcome) }) catch return error.SnapshotTooLarge;
-    if (result.revision) |revision| writer.print("\"{d}\"", .{revision}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    writer.print(",\"outcome\":\"{s}\",\"runId\":", .{@tagName(result.outcome)}) catch return error.SnapshotTooLarge;
+    try writeInputId(writer, result.run_id);
+    writer.writeAll(",\"inputId\":") catch return error.SnapshotTooLarge;
+    try writeInputId(writer, result.input_id);
+    writer.writeAll(",\"sequence\":") catch return error.SnapshotTooLarge;
+    if (result.sequence) |sequence| writer.print("{d}", .{sequence}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"reason\":") catch return error.SnapshotTooLarge;
     if (result.reason) |reason| jsonValue(writer, @tagName(reason)) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
-    if (result.input) |value| try writeInput(writer, text, value, result.selection_revision) else writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeByte('}') catch return error.SnapshotTooLarge;
 }
 
@@ -505,6 +518,24 @@ fn writeRun(
         writer.writeAll("null") catch return error.SnapshotTooLarge;
     writer.writeAll(",\"input\":") catch return error.SnapshotTooLarge;
     try writeInput(writer, text_projection, run.input, null);
+    writer.writeAll(",\"additionalInputs\":[") catch return error.SnapshotTooLarge;
+    var first_input = true;
+    for (run.additional_inputs) |entry| if (entry) |record| {
+        if (!first_input) writer.writeByte(',') catch return error.SnapshotTooLarge;
+        first_input = false;
+        writer.print("{{\"id\":\"{d}\",\"operationId\":", .{record.id}) catch return error.SnapshotTooLarge;
+        try text_projection.writeJson(writer, record.operationId());
+        writer.writeAll(",\"text\":") catch return error.SnapshotTooLarge;
+        try text_projection.writeJson(writer, record.text);
+        writer.print(",\"redacted\":{},\"state\":\"{s}\",\"sequence\":", .{ record.redacted, @tagName(record.state) }) catch return error.SnapshotTooLarge;
+        if (record.sequence) |sequence| writer.print("{d}", .{sequence}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"adoptedTurn\":") catch return error.SnapshotTooLarge;
+        if (record.adopted_turn) |turn| writer.print("{d}", .{turn}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
+        writer.writeAll(",\"order\":") catch return error.SnapshotTooLarge;
+        try writeInputId(writer, record.order);
+        writer.writeByte('}') catch return error.SnapshotTooLarge;
+    };
+    writer.writeByte(']') catch return error.SnapshotTooLarge;
     try writeRunOutput(writer, text_projection, run);
     writer.writeAll(",\"activity\":") catch return error.SnapshotTooLarge;
     try writeRunActivity(writer, projection.activity);

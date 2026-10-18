@@ -290,11 +290,45 @@ pub const TaskRun = struct {
     expectedBindingEpoch: []const u8,
     input: std.json.Value,
 };
-pub const TaskQueueInput = struct { operationId: []const u8, taskId: []const u8, expectedBindingEpoch: []const u8, runId: []const u8, input: std.json.Value };
-pub const TaskWithdrawQueuedInput = struct { operationId: []const u8, taskId: []const u8, runId: []const u8, revision: []const u8 };
-pub fn validateQueueOperationId(value: []const u8) !void {
+pub const TaskSendInput = struct { operationId: []const u8, taskId: []const u8, expectedBindingEpoch: []const u8, expectedExecution: std.json.Value, input: std.json.Value };
+pub fn validateInputOperationId(value: []const u8) !void {
     if (value.len == 0 or value.len > 64) return error.InvalidBridgePayload;
     for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidBridgePayload;
+}
+
+pub fn parseInputTarget(value: std.json.Value) !product_control.InputTarget {
+    const object = switch (value) {
+        .object => |object| object,
+        else => return error.InvalidBridgePayload,
+    };
+    if (object.count() != 2) return error.InvalidBridgePayload;
+    const kind_value = object.get("kind") orelse return error.InvalidBridgePayload;
+    const kind = switch (kind_value) {
+        .string => |text| text,
+        else => return error.InvalidBridgePayload,
+    };
+    if (std.mem.eql(u8, kind, "idle")) {
+        const last = object.get("lastRunId") orelse return error.InvalidBridgePayload;
+        return .{ .idle = switch (last) {
+            .null => null,
+            .string => |text| id: {
+                const parsed = try parseWireId(text);
+                if (parsed == 0) return error.InvalidBridgePayload;
+                break :id parsed;
+            },
+            else => return error.InvalidBridgePayload,
+        } };
+    }
+    if (std.mem.eql(u8, kind, "run")) {
+        const run = object.get("runId") orelse return error.InvalidBridgePayload;
+        const id = switch (run) {
+            .string => |text| try parseWireId(text),
+            else => return error.InvalidBridgePayload,
+        };
+        if (id == 0) return error.InvalidBridgePayload;
+        return .{ .run = id };
+    }
+    return error.InvalidBridgePayload;
 }
 pub const TaskApprovalMode = struct {
     taskId: []const u8,

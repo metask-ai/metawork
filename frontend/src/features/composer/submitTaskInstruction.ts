@@ -1,3 +1,4 @@
+import { newComposerOperationId } from "./drafts.ts";
 import type {
   TaskCreateReason,
   TaskCreateResult,
@@ -5,8 +6,9 @@ import type {
   ApprovalMode,
   TaskRestoreReason,
   TaskRunInput,
-  TaskRunReason,
-  TaskRunResult,
+  SendInputReason,
+  SendInputResult,
+  InputTarget,
   TaskWorkspaceIntent,
 } from "../../bridge/contracts.ts";
 
@@ -20,11 +22,13 @@ export type TaskSubmissionClient = {
     expectedSkillSelectionRevision: string | null,
     approvalMode: ApprovalMode,
   ) => Promise<TaskCreateResult>;
-  run: (
+  sendInput: (
+    operationId: string,
     taskId: string,
     expectedBindingEpoch: string,
+    expectedExecution: InputTarget,
     input: TaskRunInput,
-  ) => Promise<TaskRunResult>;
+  ) => Promise<SendInputResult>;
 };
 
 export type EnsureTaskContinuationResult =
@@ -34,13 +38,14 @@ export type EnsureTaskContinuationResult =
 
 export type TaskSubmissionResult =
   | { kind: "started"; taskId: string; created: boolean }
+  | { kind: "input_unknown"; taskId: string; created: boolean }
   | { kind: "create_rejected"; reason: TaskCreateReason }
   | { kind: "create_failed"; error: unknown }
   | {
       kind: "run_rejected";
       taskId: string;
       created: boolean;
-      reason: TaskRunReason;
+      reason: SendInputReason;
     }
   | {
       kind: "continuation_rejected";
@@ -70,6 +75,9 @@ export async function submitTaskInstruction({
   ensureContinuation,
   ensureSkills,
   onTaskCreated,
+  operationId = newComposerOperationId(),
+  expectedLastRunId = null,
+  onBeforeSend,
 }: {
   client: TaskSubmissionClient;
   taskId: string | null;
@@ -90,6 +98,9 @@ export async function submitTaskInstruction({
     bindingEpoch: string,
   ) => Promise<{ kind: "ready" } | { kind: "failed"; error: unknown }>;
   onTaskCreated: (taskId: string) => void;
+  operationId?: string;
+  expectedLastRunId?: string | null;
+  onBeforeSend?: (taskId: string, operationId: string) => void;
 }): Promise<TaskSubmissionResult> {
   let targetTaskId = taskId;
   let targetBindingEpoch = expectedBindingEpoch;
@@ -173,8 +184,19 @@ export async function submitTaskInstruction({
     }
   }
   try {
-    const run = await client.run(targetTaskId, targetBindingEpoch, input);
-    if (!run.accepted)
+    onBeforeSend?.(targetTaskId, operationId);
+    const run = await client.sendInput(
+      operationId,
+      targetTaskId,
+      targetBindingEpoch,
+      { kind: "idle", lastRunId: expectedLastRunId },
+      input,
+    );
+    if (run.outcome === "unknown")
+      return { kind: "input_unknown", taskId: targetTaskId, created };
+    if (run.outcome === "submitted")
+      throw new Error("Unexpected current-Run receipt for an idle target");
+    if (run.outcome === "rejected")
       return {
         kind: "run_rejected",
         taskId: targetTaskId,

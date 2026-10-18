@@ -7,6 +7,8 @@ const std = @import("std");
 const agent = @import("metawork_agent");
 const models_contract = @import("metawork_product_models_contract");
 const task_state = @import("product_task_state");
+pub const SendInputResult = task_state.SendInputResult;
+pub const SendInputReason = task_state.SendInputReason;
 const task_persistence = @import("product_task_persistence");
 const task_policy = @import("product_task_policy");
 const task_view = @import("product_task_view");
@@ -28,9 +30,6 @@ const permission_review = @import("product_permission_review");
 
 pub const DurableCommit = task_persistence.Commit;
 pub const RunOutcome = task_state.RunOutcome;
-pub const QueuedInput = task_state.QueuedInput;
-pub const QueuedInputResult = task_state.QueuedInputResult;
-pub const QueuedInputReason = task_state.QueuedInputReason;
 pub const TerminalSummary = struct {
     outcome: RunOutcome,
     permission_required: bool,
@@ -381,13 +380,12 @@ pub const OperationEffects = struct {
 };
 
 pub const RunError = agent.Error || std.mem.Allocator.Error || error{
-    QueuedInputPresent,
     TaskIdle,
     RunChanged,
     RunStopping,
-    QueueOccupied,
     UnsupportedInput,
-    InvalidQueueOperation,
+    InvalidInput,
+    RunNotReady,
     ProjectionCapacity,
     UnknownTask,
     BindingEpochMismatch,
@@ -410,7 +408,6 @@ pub const RunError = agent.Error || std.mem.Allocator.Error || error{
 };
 
 pub const CompactError = agent.Error || std.mem.Allocator.Error || error{
-    QueuedInputPresent,
     ProjectionCapacity,
     UnknownTask,
     BindingEpochMismatch,
@@ -1219,7 +1216,6 @@ pub const Runtime = struct {
         if (task.read_only_history != null) return error.TaskClosing;
         const revision = try self.approvalChangeRevision(task, expected_binding_epoch, expected_revision, target, effects.authority(projectionAuthorityQuery(task)));
         if (revision == task.durable.approval_revision) return revision;
-        _ = self.holdQueuedInput(task_id, null, .approval_mode_changed);
         task.runtime.permission_review.invalidate();
         if (target == .manual and task.runtime.pending_ui_request_id != 0) {
             task.runtime.permission_review.phase = .needs_user;
@@ -1781,150 +1777,89 @@ pub const Runtime = struct {
         };
     }
 
-    pub fn beginQueuedInputOperation(self: *Runtime, task_id: u64, operation_id: []const u8, kind: @FieldType(QueuedInputResult, "kind"), release: ReleaseEffects) RunError!*QueuedInputResult {
-        if (operation_id.len == 0 or operation_id.len > 64) return error.InvalidQueueOperation;
-        for (operation_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidQueueOperation;
+    /// Eligibility never depends on checkpoint storage health.
+    pub fn beginSendInputOperation(self: *Runtime, task_id: u64, operation_id: []const u8) RunError!*task_state.SendInputResult {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (task.queued_input_result) |*previous| {
-            if (previous.input) |*input| deinitRunInput(self, release, input);
-            release.releaseProjectionBytes(previous.input_storage_bytes);
-        }
-        task.queued_input_result = .{ .operation_id = @splat(0), .operation_id_len = @intCast(operation_id.len), .kind = kind, .outcome = .rejected };
-        const result = &task.queued_input_result.?;
+        if (operation_id.len == 0 or operation_id.len > 64) return error.InvalidInput;
+        task.send_input_result = .{ .task_id = task_id, .operation_id_len = @intCast(operation_id.len) };
+        const result = &task.send_input_result.?;
         @memcpy(result.operation_id[0..operation_id.len], operation_id);
         return result;
     }
 
-    pub fn queueInput(self: *Runtime, task_id: u64, binding_epoch: u64, run_id: u64, input: RunInput, effects: OperationEffects) RunError!u64 {
+    /// Immediately targets this Run. Safe history is reserved before the SDK
+    /// effect; neither a rejection nor an uncertain result can schedule work.
+    pub fn submitInput(self: *Runtime, task_id: u64, binding_epoch: u64, run_id: u64, text: []const u8, effects: OperationEffects) RunError!void {
         const task = self.find(task_id) orelse return error.UnknownTask;
-        if (binding_epoch == 0 or binding_epoch != task.durable.binding_epoch) return error.BindingEpochMismatch;
+        if (task.durable.binding_epoch != binding_epoch) return error.BindingEpochMismatch;
         if (task.read_only_history != null or task.durable.archived or task.runtime.close_requested or task.deletion != .idle) return error.TaskClosing;
-        if (task.queued_input != null) return error.QueueOccupied;
         if (task.approval_change != null) return error.TaskBusy;
         switch (task.runtime.active_operation) {
-            .run => |active_id| if (active_id != run_id) return error.RunChanged,
-            .none => return error.TaskIdle,
-            else => return error.TaskBusy,
+            .run => |id| if (id != run_id) return error.RunChanged,
+            else => return error.RunChanged,
         }
         const run = task_state.findRun(task.durable.runs, run_id) orelse return error.RunChanged;
-        if (run.active_phase == .stopping or task.runtime.cancel_requested) return error.RunStopping;
-        if (task_state.terminalPayload(run) != null) return error.TaskIdle;
-        if (input == .multimodal) return error.UnsupportedInput;
-        const execution = try taskExecutionInput(task);
-        var parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
-        _ = try validateRunInput(task, input, effects.limits, &parts);
-        if (input == .text and (!std.unicode.utf8ValidateSlice(input.text) or std.mem.trim(u8, input.text, " \t\r\n").len == 0)) return error.MissingInstruction;
-        var safe = try copyRunInput(self, task, input, execution.api_key, effects);
-        errdefer deinitRunInput(self, effects.release, &safe);
-        if (task.next_queued_input_revision == std.math.maxInt(u64)) return error.ProjectionCapacity;
-        var byte_count: usize = 0;
-        const argument_count: usize = switch (input) {
-            .text => |text| count: {
-                byte_count = text.len;
-                break :count 0;
-            },
-            .skill => |skill| count: {
-                byte_count = skill.skill_id.len + skill.catalog_revision.len;
-                for (skill.argument_values) |value| byte_count += value.len;
-                break :count skill.argument_values.len;
-            },
-            .multimodal => unreachable,
+        if (run.input == .skill) return error.UnsupportedInput;
+        if (task.runtime.cancel_requested or run.pending_termination.load(.acquire) != .none) return error.RunStopping;
+        if (task_state.terminalPayload(run) != null) return error.RunChanged;
+        if (run.agent_handoff.load(.acquire) != .running) return error.RunNotReady;
+        var lease = run.run_control.tryAcquireLease() orelse return error.RunNotReady;
+        defer lease.deinit();
+        if (!lease.inputObservation().ready) return error.RunNotReady;
+        if (!std.unicode.utf8ValidateSlice(text) or std.mem.trim(u8, text, " \t\r\n").len == 0) return error.MissingInstruction;
+        if (text.len > effects.limits.max_user_message_bytes) return error.ProjectionCapacity;
+        if (run.next_input_id == std.math.maxInt(u64)) return error.ProjectionCapacity;
+        var slot: ?usize = null;
+        for (run.additional_inputs, 0..) |entry, i| if (entry == null) {
+            slot = i;
+            break;
         };
-        const safe_storage_bytes = argument_count * @sizeOf([]u8);
-        try effects.text.reserveBytes(safe_storage_bytes);
-        errdefer effects.text.releaseBytes(safe_storage_bytes);
-        const bytes = try effects.text.allocateCapacity(byte_count);
-        errdefer effects.text.discardCandidate(bytes);
-        const argument_bytes = argument_count * @sizeOf([]const u8);
-        try effects.text.reserveBytes(argument_bytes);
-        errdefer effects.text.releaseBytes(argument_bytes);
-        const arguments = try self.allocator.alloc([]const u8, argument_count);
-        errdefer self.allocator.free(arguments);
-        var queued: QueuedInput = .{
-            .revision = task.next_queued_input_revision,
-            .run_id = run_id,
-            .binding_epoch = binding_epoch,
-            .queued_at_unix_ms = effects.run_clock.nowUnixMs(),
-            .bytes = bytes,
-            .arguments = arguments,
-            .raw = undefined,
-            .input = safe,
-            .input_storage_bytes = safe_storage_bytes,
-            .selection_revision = null,
+        const index = slot orelse return error.ProjectionCapacity;
+        try effects.text.reserveBytes(task_state.additional_input_projection_bytes);
+        errdefer effects.text.releaseBytes(task_state.additional_input_projection_bytes);
+        const projected = try effects.text.project(text, effects.limits.max_user_message_bytes, run.redaction_secret, 0);
+        const result = &task.send_input_result.?;
+        const id = run.next_input_id;
+        run.next_input_id += 1;
+        var record: task_state.AdditionalInput = .{
+            .id = id,
+            .operation_id_len = result.operation_id_len,
+            .text = projected.value,
+            .redacted = projected.redacted,
         };
-        switch (input) {
-            .text => |text| {
-                @memcpy(bytes, text);
-                queued.raw = .{ .text = bytes };
+        @memcpy(record.operation_id[0..record.operation_id_len], result.operationId());
+        run.additional_inputs[index] = record;
+        result.run_id = run_id;
+        switch (lease.submitInput(id, text)) {
+            .accepted => |sequence| {
+                run.additional_inputs[index].?.sequence = sequence;
+                result.outcome = .submitted;
+                result.input_id = id;
+                result.sequence = sequence;
             },
-            .skill => |skill| {
-                var offset: usize = 0;
-                const skill_id = copyQueuedBytes(bytes, &offset, skill.skill_id);
-                const catalog_revision = copyQueuedBytes(bytes, &offset, skill.catalog_revision);
-                for (skill.argument_values, arguments) |value, *target| target.* = copyQueuedBytes(bytes, &offset, value);
-                queued.raw = .{ .skill = .{ .skill_id = skill_id, .catalog_revision = catalog_revision, .selection_revision = skill.selection_revision } };
-                queued.selection_revision = skill.selection_revision;
+            .unknown => {
+                run.additional_inputs[index].?.state = .unknown;
+                result.outcome = .unknown;
+                result.input_id = id;
             },
-            .multimodal => unreachable,
+            .rejected => |reason| {
+                effects.text.discardCandidate(projected.value);
+                effects.text.releaseBytes(task_state.additional_input_projection_bytes);
+                run.additional_inputs[index] = null;
+                result.reason = switch (reason) {
+                    .stale_run => .run_changed,
+                    .not_ready => .run_not_ready,
+                    .stopping => .run_stopping,
+                    .unsupported_input => .unsupported_input,
+                    .invalid_input => .invalid_input,
+                    .resource_limit => .resource_limit,
+                    .checkpoint_budget_required => .checkpoint_budget_required,
+                    .too_late => .too_late,
+                    .unavailable => .binding_unavailable,
+                };
+                result.run_id = null;
+            },
         }
-        task.next_queued_input_revision += 1;
-        task.queued_input = queued;
-        return queued.revision;
-    }
-
-    pub fn holdQueuedInput(self: *Runtime, task_id: u64, run_id: ?u64, reason: QueuedInputReason) bool {
-        const task = self.find(task_id) orelse return false;
-        const queued = if (task.queued_input) |*value| value else return false;
-        if (queued.state != .waiting or (run_id != null and queued.run_id != run_id.?)) return false;
-        queued.state = .held;
-        queued.held_reason = reason;
-        return true;
-    }
-
-    /// Eligibility never depends on checkpoint storage health.
-    pub fn queuedInputCompletion(self: *const Runtime, task_id: u64) ?bool {
-        const task = self.findConst(task_id) orelse return null;
-        const queued = task.queued_input orelse return null;
-        if (queued.state != .waiting or task.approval_change != null or
-            task_policy.hasActiveOperation(task) or task.runtime.worker_leases.hasLive() or
-            task_state.hasUnfinalizedTerminalEvents(task)) return null;
-        for (task.durable.runs) |entry| if (entry) |*run| {
-            if (run.id != queued.run_id) continue;
-            const terminal = task_state.productTerminalFacts(run) orelse return null;
-            return terminal.outcome == .completed;
-        };
-        return false;
-    }
-
-    pub fn withdrawQueuedInput(self: *Runtime, task_id: u64, run_id: u64, revision: u64, effects: ReleaseEffects) bool {
-        const task = self.find(task_id) orelse return false;
-        const queued = if (task.queued_input) |*value| value else return false;
-        if (queued.run_id != run_id or queued.revision != revision) return false;
-        const result = &task.queued_input_result.?;
-        result.outcome = .withdrawn;
-        result.revision = revision;
-        result.input = queued.input;
-        result.input_storage_bytes = queued.input_storage_bytes;
-        result.selection_revision = queued.selection_revision;
-        releaseQueuedRaw(self, queued, effects);
-        task.queued_input = null;
-        return true;
-    }
-
-    pub fn discardQueuedInput(self: *Runtime, task_id: u64, effects: ReleaseEffects) void {
-        const task = self.find(task_id) orelse return;
-        if (task.queued_input) |*queued| {
-            releaseQueuedRaw(self, queued, effects);
-            deinitRunInput(self, effects, &queued.input);
-            effects.releaseProjectionBytes(queued.input_storage_bytes);
-            task.queued_input = null;
-        }
-    }
-
-    pub fn discardWorkspaceQueuedInputs(self: *Runtime, workspace_id: u64, effects: ReleaseEffects) void {
-        for (self.tasks) |entry| if (entry) |task| {
-            if (task.durable.workspace_id == workspace_id) self.discardQueuedInput(task.durable.id, effects);
-        };
     }
 
     pub fn startRun(
@@ -1935,19 +1870,7 @@ pub const Runtime = struct {
         workspace: WorkspaceOrderEffect,
         effects: OperationEffects,
     ) RunError!PreparedRun {
-        return self.prepareRun(task_id, expected_binding_epoch, input, workspace, effects, null);
-    }
-
-    pub fn startQueuedRun(
-        self: *Runtime,
-        task_id: u64,
-        revision: u64,
-        workspace: WorkspaceOrderEffect,
-        effects: OperationEffects,
-    ) RunError!PreparedRun {
-        const queued = (self.find(task_id) orelse return error.UnknownTask).queued_input orelse return error.RunChanged;
-        if (queued.revision != revision or queued.state != .waiting) return error.RunChanged;
-        return self.prepareRun(task_id, queued.binding_epoch, queuedExecutionInput(&queued), workspace, effects, revision);
+        return self.prepareRun(task_id, expected_binding_epoch, input, workspace, effects);
     }
 
     fn prepareRun(
@@ -1957,15 +1880,11 @@ pub const Runtime = struct {
         input: RunInput,
         workspace: WorkspaceOrderEffect,
         effects: OperationEffects,
-        queued_revision: ?u64,
     ) RunError!PreparedRun {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
-        if (task.queued_input) |queued| {
-            if (queued_revision == null or queued_revision.? != queued.revision) return error.QueuedInputPresent;
-        } else if (queued_revision != null) return error.RunChanged;
         _ = try taskExecutionInput(task);
         if (task_policy.hasActiveOperation(task) or
             checkpointMutationPending(task, effects.worker.checkpoint.store_health))
@@ -2079,7 +1998,6 @@ pub const Runtime = struct {
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
-        if (task.queued_input) |queued| if (queued.state == .waiting) return error.QueuedInputPresent;
         _ = try taskExecutionInput(task);
         if (task_policy.hasActiveOperation(task) or
             checkpointMutationPending(task, effects.worker.checkpoint.store_health) or
@@ -2194,7 +2112,6 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.UnknownTask;
         const run_record = task_state.findRun(task.durable.runs, run_id) orelse
             return error.NoSuchRun;
-        _ = self.holdQueuedInput(task_id, run_id, .stopped_by_user);
         if (task_state.terminalPayload(run_record) != null) return false;
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
         defer access.deinit();
@@ -2342,6 +2259,10 @@ pub const Runtime = struct {
         const identity = reviewIdentity(task, run, pending.request_id, request.policy_generation);
         task.runtime.permission_review.identity = identity;
         task.runtime.permission_review.phase = .reviewing;
+        if (inputBlocksAutomaticAllow(run)) {
+            _ = self.finishPermissionReview(identity);
+            return null;
+        }
         const execution = task.runtime.execution() orelse return error.ReviewUnavailable;
         var config = execution.input();
         if (config.execution_generation != run.execution_generation or config.target.protocol != run.execution_protocol)
@@ -2357,7 +2278,23 @@ pub const Runtime = struct {
         var writer = std.Io.Writer.fixed(bytes);
         var intent_buffer: [8 * 1024]u8 = undefined;
         defer std.crypto.secureZero(u8, &intent_buffer);
-        const intent = try reviewIntent(&run.input, &intent_buffer);
+        var root_intent_buffer: [8 * 1024]u8 = undefined;
+        defer std.crypto.secureZero(u8, &root_intent_buffer);
+        const root_intent = try reviewIntent(&run.input, &root_intent_buffer);
+        var intent_writer = std.Io.Writer.fixed(&intent_buffer);
+        try intent_writer.writeAll(root_intent);
+        for (1..@as(usize, pending.input_adopted_count) + 1) |sequence| {
+            var found = false;
+            for (run.additional_inputs) |entry| if (entry) |record| {
+                if (record.sequence != @as(u32, @intCast(sequence))) continue;
+                try intent_writer.writeAll("\n\n[Additional user instruction]\n");
+                try intent_writer.writeAll(record.text);
+                found = true;
+                break;
+            };
+            if (!found) return error.ReviewIntentUnavailable;
+        }
+        const intent = intent_writer.buffered();
         if (std.mem.trim(u8, intent, " \t\r\n").len == 0) return error.ReviewIntentUnavailable;
         const context = latestReviewContext(run);
         const input: permission_review.Input = .{
@@ -2422,7 +2359,7 @@ pub const Runtime = struct {
         };
         const choice: PermissionChoice = switch (suggestion.decision) {
             .needs_user => return false,
-            .allow_once => .allow_once,
+            .allow_once => if (inputBlocksAutomaticAllow(run)) return false else .allow_once,
             .deny => .deny_once,
         };
         // Check the exact current SDK request, not just a saved UI observation.
@@ -4522,6 +4459,13 @@ pub const Runtime = struct {
             changed = true;
         }
         if (!run.terminal_observed) {
+            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+                if (record.state == .adopted) continue;
+                record.state = .unknown;
+                if (run.completed_input_counts) |counts| if (record.sequence) |sequence| {
+                    record.state = if (sequence <= counts.adopted) .adopted else .unadopted;
+                };
+            };
             task_policy.foldTerminalDisposition(
                 task,
                 terminal.session_disposition_at_completion,
@@ -5058,9 +5002,6 @@ pub const Runtime = struct {
                                     rebind.projected_model = previous_model;
                                 }
                                 task.durable.execution_protocol = job.attempt.protocol;
-                                if (task.queued_input) |*queued| if (queued.binding_epoch == previous_epoch) {
-                                    queued.binding_epoch = next_epoch;
-                                };
                             } else if (task.durable.checkpoint) |*record| record.adoptBindingEpoch(previous_epoch, next_epoch) catch unreachable;
                             task.durable.binding_epoch = next_epoch;
                             task.durable.execution_generation = job.attempt.target_execution_generation;
@@ -5369,11 +5310,7 @@ fn redactTaskProjection(
     credential: []const u8,
     effects: RedactionEffects,
 ) void {
-    if (task.queued_input) |*queued| redactInputProjection(&queued.input, credential, effects);
-    if (task.queued_input_result) |*result| {
-        _ = effects.redact(result.operation_id[0..result.operation_id_len], credential);
-        if (result.input) |*input| redactInputProjection(input, credential, effects);
-    }
+    if (task.send_input_result) |*result| _ = effects.redact(result.operation_id[0..result.operation_id_len], credential);
     task.durable.title_redacted = effects.redact(task.durable.title, credential) or
         task.durable.title_redacted;
     _ = effects.redact(task.durable.workspace_root, credential);
@@ -5381,6 +5318,10 @@ fn redactTaskProjection(
     for (task.durable.runs) |*entry| {
         const run = &(entry.* orelse continue);
         redactInputProjection(&run.input, credential, effects);
+        for (&run.additional_inputs) |*message| if (message.*) |*record| {
+            record.redacted = effects.redact(record.text, credential) or record.redacted;
+            _ = effects.redact(record.operation_id[0..record.operation_id_len], credential);
+        };
         run.assistant_redacted = effects.redact(
             run.assistant.list.items,
             credential,
@@ -6344,32 +6285,6 @@ fn deinitTool(
     tool.* = undefined;
 }
 
-fn copyQueuedBytes(bytes: []u8, offset: *usize, value: []const u8) []const u8 {
-    const result = bytes[offset.*..][0..value.len];
-    @memcpy(result, value);
-    offset.* += value.len;
-    return result;
-}
-
-pub fn queuedExecutionInput(queued: *const QueuedInput) RunInput {
-    return switch (queued.raw) {
-        .text => |text| .{ .text = text },
-        .skill => |skill| .{ .skill = .{
-            .skill_id = skill.skill_id,
-            .catalog_revision = skill.catalog_revision,
-            .selection_revision = skill.selection_revision,
-            .argument_values = queued.arguments,
-        } },
-    };
-}
-
-fn releaseQueuedRaw(self: *Runtime, queued: *QueuedInput, effects: ReleaseEffects) void {
-    std.crypto.secureZero(u8, queued.bytes);
-    effects.releaseProjectionBytes(queued.bytes.len + queued.arguments.len * @sizeOf([]const u8));
-    self.allocator.free(queued.bytes);
-    self.allocator.free(queued.arguments);
-}
-
 fn deinitRunInput(
     self: *Runtime,
     effects: ReleaseEffects,
@@ -7135,6 +7050,13 @@ fn reviewIdentity(task: *const task_state.Task, run: *const task_state.RunRecord
     };
 }
 
+fn inputBlocksAutomaticAllow(run: *const task_state.RunRecord) bool {
+    if (run.agent_handoff.load(.acquire) != .running) return true;
+    var lease = run.run_control.tryAcquireLease() orelse return true;
+    defer lease.deinit();
+    return lease.inputObservation().blocksAutomaticAllow();
+}
+
 fn latestReviewContext(run: *const task_state.RunRecord) []const u8 {
     if (run.commentary_count == 0) return "No closed Agent commentary is available; prior Tool output is omitted.";
     const end: usize = @intCast(run.commentary_ends[run.commentary_count - 1]);
@@ -7409,6 +7331,10 @@ fn deinitRun(
     if (run.file_changes.len != 0) self.allocator.free(run.file_changes);
     self.allocator.free(run.commentary_ends);
     deinitRunInput(self, effects, &run.input);
+    for (run.additional_inputs) |entry| if (entry) |record| {
+        releaseProjectedSlice(self, effects, record.text);
+        effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);
+    };
     releaseTrackedText(self, effects, &run.assistant);
     releaseTrackedText(self, effects, &run.output_segment);
     releaseTrackedText(self, effects, &run.output_continued);
@@ -7482,15 +7408,6 @@ fn deinitTask(
     std.debug.assert(task.runtime.restore_job == null);
     std.debug.assert(task.runtime.restore_catalog == null);
     releaseAttachmentNoFail(self, task, effects, .cold_start);
-    if (task.queued_input) |*queued| {
-        releaseQueuedRaw(self, queued, effects);
-        deinitRunInput(self, effects, &queued.input);
-        effects.releaseProjectionBytes(queued.input_storage_bytes);
-    }
-    if (task.queued_input_result) |*result| {
-        if (result.input) |*input| deinitRunInput(self, effects, input);
-        effects.releaseProjectionBytes(result.input_storage_bytes);
-    }
     for (task.durable.runs) |*entry| if (entry.*) |*run|
         deinitRun(self, effects, run);
     self.allocator.free(task.durable.runs);

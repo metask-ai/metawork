@@ -26,7 +26,7 @@ test("first submission waits for the exact Task catalog and sends once", async (
         taskId: "9",
         bindingEpoch: "12",
       }),
-      run: async () => {
+      sendInput: async () => {
         runs++;
         return { accepted: true, runId: "1" };
       },
@@ -72,9 +72,9 @@ test("timeout never starts a Run and retains the created Task identity", async (
   let runs = 0;
   const result = await submitTaskInstruction({
     client: {
-      run: async () => {
+      sendInput: async () => {
         runs++;
-        return { accepted: true };
+        return { outcome: "started" };
       },
     },
     taskId: "9",

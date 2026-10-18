@@ -83,6 +83,7 @@ pub const InputCounts = session_control.InputCounts;
 pub const InputObservation = session_control.InputObservation;
 pub const InputRejection = session_control.InputRejection;
 pub const InputSubmission = session_control.InputSubmission;
+pub const max_submitted_inputs: usize = @intCast(wire.MAX_SUBMITTED_INPUTS_V1);
 pub const CompactOutcome = session_control.CompactOutcome;
 pub const CompactTerminalResult = session_control.CompactTerminalResult;
 pub const TerminationRequestResult = session_control.TerminationRequestResult;

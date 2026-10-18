@@ -47,8 +47,9 @@ const build_options = @import("build_options");
 
 pub const TaskMcpAuthorityAtCreation = product_task.McpAuthorityAtCreation;
 
-pub const QueuedInputResult = task_runtime.QueuedInputResult;
-pub const QueuedInputReason = task_runtime.QueuedInputReason;
+pub const SendInputResult = task_runtime.SendInputResult;
+pub const SendInputReason = task_runtime.SendInputReason;
+pub const InputTarget = union(enum) { idle: ?u64, run: u64 };
 
 pub const Error = task_runtime.RunError || task_runtime.Runtime.ApprovalError || attachment_staging.Error || lifecycle.Error || product_attachment.Error || product_schedule.Error || skill_runtime.MutationError || skill_runtime.EnablementError || skill_runtime.EnablementFileStoreError || task_persistence.Error || std.mem.Allocator.Error || std.Thread.SpawnError || error{
     ProjectionCapacity,
@@ -56,6 +57,7 @@ pub const Error = task_runtime.RunError || task_runtime.Runtime.ApprovalError ||
     CompactCapacity,
     ToolCapacity,
     InvalidOutputSegment,
+    InvalidInputAdoption,
     SnapshotTooLarge,
     CloseInProgress,
     TaskBusy,
@@ -120,12 +122,12 @@ pub const Error = task_runtime.RunError || task_runtime.Runtime.ApprovalError ||
 const default_attachment_file_bytes: usize = 100_000_000;
 const default_attachment_count: usize = 8;
 
-pub fn queuedInputRejection(err: anyerror) task_runtime.QueuedInputReason {
+pub fn sendInputRejection(err: anyerror) task_runtime.SendInputReason {
     return switch (err) {
-        error.TaskIdle => .task_idle,
         error.RunChanged => .run_changed,
+        error.RunNotReady => .run_not_ready,
+        error.InvalidInput => .invalid_input,
         error.RunStopping => .run_stopping,
-        error.QueueOccupied => .queue_occupied,
         error.UnsupportedInput => .unsupported_input,
         error.BindingEpochMismatch => .binding_changed,
         error.ExecutionUnavailable, error.ExecutionGenerationMismatch => .binding_unavailable,
@@ -145,19 +147,6 @@ pub fn queuedInputRejection(err: anyerror) task_runtime.QueuedInputReason {
         error.ExecutorShuttingDown => .shutting_down,
         else => .admission_failed,
     };
-}
-
-const QueuedRunAcceptanceContext = struct {
-    runtime: *task_runtime.Runtime,
-    task_id: u64,
-    revision: u64,
-    release: task_runtime.ReleaseEffects,
-};
-fn consumeQueuedInput(context: ?*anyopaque) void {
-    const value: *QueuedRunAcceptanceContext = @ptrCast(@alignCast(context.?));
-    const task = value.runtime.findConst(value.task_id) orelse unreachable;
-    std.debug.assert(task.queued_input.?.revision == value.revision);
-    value.runtime.discardQueuedInput(value.task_id, value.release);
 }
 
 pub const Limits = struct {
@@ -1166,7 +1155,6 @@ pub const Runtime = struct {
     file_change_executor: ?*executor_impl.Executor,
     file_change_lane: ?*file_change_io.Lane,
     shutting_down: bool = false,
-    dispatching_queued_input: bool = false,
     executor_shutdown: bool = false,
     attachment_executor_shutdown: bool = false,
     preview_executor_shutdown: bool = false,
@@ -4147,7 +4135,6 @@ pub const Runtime = struct {
                 (task.runtime.hasAttachedSession() and !task.runtime.executionConst().?.matchesSource(value.input())))
                 return self.beginTaskModelRebind(task_id, expected_binding_epoch, value);
         }
-        if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input) |queued| if (queued.state == .waiting) return error.QueuedInputPresent;
         self.syncLifecycle();
         const facts = try self.task_runtime.recoveryStartFacts(
             task_id,
@@ -4539,11 +4526,62 @@ pub const Runtime = struct {
         input: TaskRunInput,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input != null) return error.QueuedInputPresent;
         self.syncLifecycle();
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
-        return self.admitTaskRun(task_id, binding_epoch, input, null);
+        return self.admitTaskRun(task_id, binding_epoch, input);
+    }
+
+    pub fn sendInput(self: *Runtime, operation_id: []const u8, task_id: u64, binding_epoch: u64, target: InputTarget, input: TaskRunInput) Error!SendInputResult {
+        if (self.containsKnownCredential(operation_id)) return error.InvalidInput;
+        const mcp_refresh_needed = self.syncLifecycleFacts();
+        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
+        const result = try self.task_runtime.beginSendInputOperation(task_id, operation_id);
+        defer {
+            self.syncLifecycle();
+            self.commitTaskStateNoFail();
+            self.bumpRevision();
+        }
+        self.admitInput(task_id, binding_epoch, target, input) catch |err| {
+            result.reason = sendInputRejection(err);
+        };
+        return result.*;
+    }
+
+    pub fn writeSendInputResult(self: *const Runtime, writer: *std.Io.Writer, result: SendInputResult) Error!void {
+        try product_task.writeSendInputResult(writer, self.taskTextProjection(), result);
+    }
+
+    fn admitInput(self: *Runtime, task_id: u64, binding_epoch: u64, target: InputTarget, input: TaskRunInput) Error!void {
+        if (self.shutting_down) return error.ExecutorShuttingDown;
+        const task = self.task_runtime.find(task_id) orelse return error.UnknownTask;
+        if (task.durable.binding_epoch != binding_epoch) return error.BindingEpochMismatch;
+        const result = &task.send_input_result.?;
+        switch (target) {
+            .idle => |expected_last_run| {
+                var previous: u64 = 0;
+                for (task.durable.runs) |entry| if (entry) |run| {
+                    previous = @max(previous, run.id);
+                };
+                if (previous != (expected_last_run orelse 0)) return error.RunChanged;
+                if (task.runtime.active_operation != .none) return error.TaskBusy;
+                const id = self.admitTaskRun(task_id, binding_epoch, input) catch |err| recover: {
+                    // An admitted Run still owns executor failure. Do not report
+                    // a reversible input refusal after its acceptance boundary.
+                    for (task.durable.runs) |entry| if (entry) |run| if (run.id > previous) break :recover run.id;
+                    return err;
+                };
+                result.outcome = .started;
+                result.run_id = id;
+            },
+            .run => |id| {
+                if (input != .text) return error.UnsupportedInput;
+                const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse return error.UnknownTask;
+                const epoch = self.task_runtime.taskWorkspaceEpoch(task_id) orelse return error.UnknownTask;
+                _ = try self.workspace.taskRunAuthority(workspace_id, epoch);
+                try self.task_runtime.submitInput(task_id, binding_epoch, id, input.text, self.taskRuntimeOperationEffects());
+            },
+        }
     }
 
     pub fn taskBindingEpoch(self: *Runtime, task_id: u64) Error!u64 {
@@ -4634,84 +4672,6 @@ pub const Runtime = struct {
         return revision;
     }
 
-    pub fn writeQueuedInputValue(self: *const Runtime, writer: *std.Io.Writer, result: QueuedInputResult) Error!void {
-        if (result.input) |input| try product_task.writeInput(writer, self.taskTextProjection(), input, result.selection_revision) else writer.writeAll("null") catch return error.SnapshotTooLarge;
-    }
-
-    pub fn queueInput(self: *Runtime, operation_id: []const u8, task_id: u64, binding_epoch: u64, run_id: u64, input: TaskRunInput) Error!task_runtime.QueuedInputResult {
-        if (self.containsKnownCredential(operation_id)) return error.InvalidQueueOperation;
-        const mcp_refresh_needed = self.syncLifecycleFacts();
-        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
-        const result = try self.task_runtime.beginQueuedInputOperation(task_id, operation_id, .queue, self.taskRuntimeOperationEffects().release);
-        defer self.bumpRevision();
-        self.admitQueuedInput(task_id, binding_epoch, run_id, input) catch |err| {
-            result.reason = queuedInputRejection(err);
-            return result.*;
-        };
-        result.outcome = .queued;
-        result.revision = self.task_runtime.findConst(task_id).?.queued_input.?.revision;
-        return result.*;
-    }
-
-    fn admitQueuedInput(self: *Runtime, task_id: u64, binding_epoch: u64, run_id: u64, input: TaskRunInput) Error!void {
-        if (self.shutting_down) return error.ExecutorShuttingDown;
-        const workspace_id = self.task_runtime.taskWorkspaceId(task_id) orelse return error.UnknownTask;
-        const epoch = self.task_runtime.taskWorkspaceEpoch(task_id) orelse return error.UnknownTask;
-        _ = try self.workspace.taskRunAuthority(workspace_id, epoch);
-        if ((self.task_runtime.catalogProjection(task_id) orelse return error.UnknownTask).availability == .loading) return error.CatalogLoading;
-        const task_input: task_runtime.RunInput = switch (input) {
-            .text => |text| .{ .text = text },
-            .skill => |skill| .{ .skill = .{ .skill_id = skill.skill_id, .catalog_revision = skill.catalog_revision, .selection_revision = skill.selection_revision, .argument_values = skill.argument_values } },
-            .multimodal => return error.UnsupportedInput,
-        };
-        _ = try self.task_runtime.queueInput(task_id, binding_epoch, run_id, task_input, self.taskRuntimeOperationEffects());
-    }
-
-    pub fn withdrawQueuedInput(self: *Runtime, operation_id: []const u8, task_id: u64, run_id: u64, revision: u64) Error!task_runtime.QueuedInputResult {
-        if (self.containsKnownCredential(operation_id)) return error.InvalidQueueOperation;
-        const mcp_refresh_needed = self.syncLifecycleFacts();
-        defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
-        const result = try self.task_runtime.beginQueuedInputOperation(task_id, operation_id, .withdraw, self.taskRuntimeOperationEffects().release);
-        defer self.bumpRevision();
-        if (self.shutting_down) {
-            result.reason = .shutting_down;
-            return result.*;
-        }
-        if (!self.task_runtime.withdrawQueuedInput(task_id, run_id, revision, self.taskRuntimeOperationEffects().release)) result.reason = .queued_input_changed;
-        return result.*;
-    }
-
-    fn dispatchQueuedInputs(self: *Runtime) void {
-        if (self.shutting_down or self.dispatching_queued_input) return;
-        self.dispatching_queued_input = true;
-        defer self.dispatching_queued_input = false;
-        for (self.task_runtime.tasks) |entry| {
-            const task = entry orelse continue;
-            if (task.model_intent_prepared) continue;
-            if (task.runtime.active_operation == .restore) continue;
-            const completed = self.task_runtime.queuedInputCompletion(task.durable.id) orelse continue;
-            const reason: ?task_runtime.QueuedInputReason = if (!completed) .run_not_completed else if (self.schedule.hasPendingSubmittedOccurrence(task.durable.id)) .schedule_completion_unconfirmed else null;
-            if (reason) |held_reason| {
-                if (self.task_runtime.holdQueuedInput(task.durable.id, null, held_reason)) self.bumpRevision();
-                continue;
-            }
-            const queued = task.queued_input.?;
-            const input: TaskRunInput = switch (task_runtime.queuedExecutionInput(&queued)) {
-                .text => |text| .{ .text = text },
-                .skill => |skill| .{ .skill = .{ .skill_id = skill.skill_id, .catalog_revision = skill.catalog_revision, .selection_revision = skill.selection_revision, .argument_values = skill.argument_values } },
-                .multimodal => unreachable,
-            };
-            _ = self.admitTaskRun(task.durable.id, queued.binding_epoch, input, queued.revision) catch |err| {
-                if (err == error.RestoreBusy) {
-                    const current = self.task_runtime.findConst(task.durable.id).?;
-                    if (current.runtime.restore_job != null or current.runtime.worker_leases.hasLive()) continue;
-                }
-                if (self.task_runtime.holdQueuedInput(task.durable.id, null, queuedInputRejection(err))) self.bumpRevision();
-                continue;
-            };
-        }
-    }
-
     /// Close admission before any Application shutdown drain can reconcile.
     pub fn beginShutdown(self: *Runtime) void {
         self.shutting_down = true;
@@ -4724,16 +4684,12 @@ pub const Runtime = struct {
         input: TaskRunInput,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input != null) return error.QueuedInputPresent;
         self.syncLifecycle();
-        return self.admitTaskRun(task_id, expected_binding_epoch, input, null);
+        return self.admitTaskRun(task_id, expected_binding_epoch, input);
     }
 
-    fn admitTaskRun(self: *Runtime, task_id: u64, expected_binding_epoch: u64, input: TaskRunInput, queued_revision: ?u64) Error!u64 {
+    fn admitTaskRun(self: *Runtime, task_id: u64, expected_binding_epoch: u64, input: TaskRunInput) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (queued_revision == null) {
-            if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input != null) return error.QueuedInputPresent;
-        }
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
         if (expected_binding_epoch == 0 or expected_binding_epoch != binding_epoch)
@@ -4749,7 +4705,6 @@ pub const Runtime = struct {
         if (model_target) |*target| {
             const task = self.task_runtime.findConst(task_id).?;
             if (task.runtime.executionConst()) |installed| if (!installed.matchesSource(target.input())) {
-                if (queued_revision != null and task.runtime.last_restore_failure != null) return error.RestoreFailed;
                 _ = try self.beginTaskModelRebind(task_id, binding_epoch, target);
                 return error.RestoreBusy;
             };
@@ -4841,8 +4796,6 @@ pub const Runtime = struct {
         };
         var operation_effects = self.taskRuntimeOperationEffects();
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
-        var queue_acceptance = QueuedRunAcceptanceContext{ .runtime = &self.task_runtime, .task_id = task_id, .revision = queued_revision orelse 0, .release = operation_effects.release };
-        if (queued_revision != null) operation_effects.run_acceptance = .{ .context = &queue_acceptance, .accept_fn = consumeQueuedInput, .irreversible = true };
         if (attachment_borrow != null) {
             acceptance_context = .{
                 .borrow = &attachment_borrow.?,
@@ -4861,10 +4814,7 @@ pub const Runtime = struct {
             .apply_fn = applyTaskWorkspaceOrder,
             .rollback_fn = rollbackTaskWorkspaceOrder,
         };
-        var prepared = if (queued_revision) |revision|
-            try self.task_runtime.startQueuedRun(task_id, revision, workspace_effect, operation_effects)
-        else
-            try self.task_runtime.startRun(task_id, expected_binding_epoch, task_input, workspace_effect, operation_effects);
+        var prepared = try self.task_runtime.startRun(task_id, expected_binding_epoch, task_input, workspace_effect, operation_effects);
         self.commitTaskStateBestEffort() catch |err| {
             prepared.rollback();
             return err;
@@ -4890,7 +4840,6 @@ pub const Runtime = struct {
         expected_binding_epoch: u64,
     ) Error!u64 {
         if (self.shutting_down) return error.ExecutorShuttingDown;
-        if (self.task_runtime.findConst(task_id)) |task| if (task.queued_input) |queued| if (queued.state == .waiting) return error.QueuedInputPresent;
         self.syncLifecycle();
         const binding_epoch = self.task_runtime.taskBindingEpoch(task_id) orelse
             return error.UnknownTask;
@@ -4965,7 +4914,6 @@ pub const Runtime = struct {
     pub fn cancel(self: *Runtime, task_id: u64, run_id: u64) Error!void {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
-        if (self.task_runtime.holdQueuedInput(task_id, run_id, .stopped_by_user)) self.bumpRevision();
         if (try self.task_runtime.cancelRun(
             task_id,
             run_id,
@@ -5145,7 +5093,6 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         if (try self.task_runtime.setArchived(task_id, archived)) {
-            if (archived) self.task_runtime.discardQueuedInput(task_id, self.taskRuntimeOperationEffects().release);
             self.commitTaskStateNoFail();
             self.bumpRevision();
         }
@@ -5167,7 +5114,6 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         defer if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
         const requested = try self.task_runtime.requestDeletion(task_id);
-        self.task_runtime.discardQueuedInput(task_id, self.taskRuntimeOperationEffects().release);
         if (self.task_runtime.taskWorkspaceId(task_id)) |id| {
             if (self.workspace.facts(id)) |workspace| {
                 if (workspace.kind == .automatic)
@@ -5469,7 +5415,6 @@ pub const Runtime = struct {
         const mcp_refresh_needed = self.syncLifecycleFacts();
         self.syncPermissionReviews();
         if (mcp_refresh_needed) self.recoverExpiredMcpCatalogNoFail();
-        self.dispatchQueuedInputs();
     }
 
     /// Lifecycle facts alone never accept or start a reviewer decision. The
@@ -5544,7 +5489,7 @@ pub const Runtime = struct {
             self.applyEvent(&envelope) catch |err| {
                 if (first_projection_error.* == null)
                     first_projection_error.* = err;
-                if (err == error.InvalidOutputSegment)
+                if (err == error.InvalidOutputSegment or err == error.InvalidInputAdoption)
                     self.recordDependencyContractFailure(
                         envelope.session_id,
                         envelope.run_id,
@@ -7465,6 +7410,8 @@ pub const Runtime = struct {
             .append_text_fn = appendRestoredTaskText,
             .free_fn = freeRestoredTaskText,
             .free_text_fn = freeRestoredTrackedText,
+            .reserve_bytes_fn = reserveTaskRuntimeBytes,
+            .release_bytes_fn = releaseTaskRuntimeBytes,
         };
     }
 
@@ -8357,7 +8304,6 @@ pub const Runtime = struct {
                 .ready => .ready,
             };
             if (self.workspace.applyRemovalState(workspace.id, state)) {
-                if (state == .ready) self.task_runtime.discardWorkspaceQueuedInputs(workspace.id, self.taskRuntimeReleaseEffects());
                 const updated = self.workspace.facts(workspace.id) orelse unreachable;
                 self.skill.setWorkspaceCatalogAuthorized(updated.id, updated.epoch, workspaceSkillCatalogAuthorized(updated), self.skillProjectionBudget()) catch unreachable;
                 changed = true;
@@ -10509,7 +10455,8 @@ fn testRuntimeWithLimits(limits: Limits, configuration: Configuration) !Runtime 
         } },
         .commentary_ends = commentary_ends,
         .active_phase = .running,
-        .agent_handoff = .init(.running),
+        // Projection-only fixture: no live Agent control lease exists.
+        .agent_handoff = .init(.finishing),
         .tools = tools,
         .file_change_observation = .collecting,
         .file_changes = file_changes,

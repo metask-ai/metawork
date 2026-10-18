@@ -365,13 +365,11 @@ export function pruneTaskDrafts(validTaskIds: ReadonlySet<string>): void {
       if (!key) continue;
       const taskId = key.startsWith(versionPrefix)
         ? key.slice(versionPrefix.length)
-        : key.startsWith("metawork.queued-input-operation.v1.")
-          ? key.slice("metawork.queued-input-operation.v1.".length)
-          : key.startsWith(taskPrefix)
-            ? key.slice(taskPrefix.length)
-            : key.startsWith(legacyTaskPrefix)
-              ? key.slice(legacyTaskPrefix.length)
-              : null;
+        : key.startsWith(taskPrefix)
+          ? key.slice(taskPrefix.length)
+          : key.startsWith(legacyTaskPrefix)
+            ? key.slice(legacyTaskPrefix.length)
+            : null;
       if (taskId !== null && !validTaskIds.has(taskId)) stale.push(key);
     }
     for (const key of stale) target.removeItem(key);

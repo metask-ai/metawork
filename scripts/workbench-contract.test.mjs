@@ -1,7 +1,4 @@
-import {
-  decodeQueueInputResult,
-  decodeWithdrawQueuedInputResult,
-} from "../frontend/src/bridge/decode-contracts.ts";
+import { decodeSendInputResult } from "../frontend/src/bridge/decode-contracts.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -3179,64 +3176,63 @@ test("model metadata excludes the deferred limits field", () => {
   assert.throws(() => decodeWorkbenchSnapshot(candidate), /expected keys/);
 });
 
-test("queued input shared wire fixture preserves receipt and safe editable input", () => {
+test("active input shared fixture preserves exact receipts and adoption history", () => {
   const wire = JSON.parse(
     readFileSync(
-      new URL("../src/bridge/queued_input.fixture", import.meta.url),
+      new URL("../src/bridge/active_input.fixture", import.meta.url),
       "utf8",
     ),
   );
   assert.deepEqual(
-    decodeQueueInputResult(wire.queued, "1", "queue-1"),
-    wire.queued,
+    decodeSendInputResult(wire.submitted, "1", "input-1"),
+    wire.submitted,
   );
   assert.deepEqual(
-    decodeWithdrawQueuedInputResult(wire.withdrawn, "1", "withdraw-1"),
-    wire.withdrawn,
+    decodeSendInputResult(wire.rejected, "1", "input-late"),
+    wire.rejected,
   );
-  const snapshot = structuredClone(fixture);
+  const snapshot = clone(fixture);
   const task = snapshot.tasks[0];
   task.id = "1";
   task.currentRunId = "1";
   task.activeOperation.id = "1";
   task.runs[0].id = "1";
-  task.queuedInput = wire.waiting;
-  task.queuedInputResult = wire.receipt;
+  task.sendInputResult = wire.submitted;
+  task.inputReady = true;
+  task.runs[0].additionalInputs = [wire.history];
   assert.deepEqual(
-    decodeWorkbenchSnapshot(snapshot).tasks[0].queuedInput,
-    wire.waiting,
+    decodeWorkbenchSnapshot(snapshot).tasks[0].runs[0].additionalInputs,
+    [wire.history],
   );
   for (const change of [
-    (queued) => (queued.state = "held"),
-    (queued) => (queued.heldReason = "stopped_by_user"),
-    (queued) => (queued.runId = "99"),
-    (queued) =>
-      (queued.input = {
-        kind: "multimodal",
-        text: "",
-        attachments: [],
-        redacted: false,
-      }),
+    (input) => (input.state = "held"),
+    (input) => (input.sequence = 0),
+    (input) => (input.order = null),
+    (input) => (input.adoptedTurn = 0),
+    (input) => (input.operationId = ""),
   ]) {
-    const bad = structuredClone(snapshot);
-    change(bad.tasks[0].queuedInput);
+    const bad = clone(snapshot);
+    change(bad.tasks[0].runs[0].additionalInputs[0]);
     assert.throws(() => decodeWorkbenchSnapshot(bad));
   }
-  snapshot.tasks[0].queuedInput = null;
-  assert.equal(
-    decodeWorkbenchSnapshot(snapshot).tasks[0].queuedInputResult.outcome,
-    "queued",
-  );
-  assert.throws(() => decodeQueueInputResult(wire.queued, "1", "other"));
+  const unknown = clone(snapshot);
+  Object.assign(unknown.tasks[0].runs[0].additionalInputs[0], {
+    state: "unknown",
+    sequence: null,
+    adoptedTurn: null,
+    order: null,
+  });
+  assert.deepEqual(decodeWorkbenchSnapshot(unknown), unknown);
+  assert.throws(() => decodeSendInputResult(wire.submitted, "1", "other"));
   assert.throws(() =>
-    decodeWithdrawQueuedInputResult(
-      { ...wire.withdrawn, input: null },
+    decodeSendInputResult(
+      { ...wire.submitted, sequence: null },
       "1",
-      "withdraw-1",
+      "input-1",
     ),
   );
   assert.throws(() =>
-    decodeQueueInputResult({ ...wire.queued, accepted: false }, "1", "queue-1"),
+    decodeSendInputResult({ ...wire.rejected, runId: "1" }, "1", "input-late"),
   );
 });
 
@@ -3261,18 +3257,15 @@ test("unavailable Host attachment fixture stays decodable without advertising im
 
 test("field mismatch locates missing schema fields without exposing input keys or values", () => {
   const value = clone(fixture);
-  delete value.tasks[0].queuedInput;
-  delete value.tasks[0].queuedInputResult;
+  delete value.tasks[0].inputReady;
+  delete value.tasks[0].sendInputResult;
   const privateKey = "private-input-key-".repeat(1000);
   value.tasks[0][privateKey] = "private-input-value";
   assert.throws(
     () => decodeWorkbenchSnapshot(value),
     (error) => {
       assert.match(error.message, /\$\.tasks\[0\]/);
-      assert.match(
-        error.message,
-        /missing \(2\): queuedInput, queuedInputResult/,
-      );
+      assert.match(error.message, /missing \(2\): inputReady, sendInputResult/);
       assert.match(error.message, /unexpected fields: 1/);
       assert.doesNotMatch(error.message, /private-input/);
       assert.ok(error.message.length < 512);

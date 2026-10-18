@@ -230,6 +230,7 @@ function renderCompletedSurface(
           model: "fixture-model",
         },
         input,
+        additionalInputs: [],
         output: {
           commentary: [],
           response: assistant,
@@ -806,14 +807,14 @@ test("a new Task draft is editable before its first send", () => {
   assert.doesNotMatch(tag(markup, "composer-send") ?? "", /disabled/);
 });
 
-test("an active run replaces the send action with stop in the Composer", () => {
+test("an active Run with content shows only Send", () => {
   const markup = render({
     draft: { kind: "text", text: "Keep working" },
     stopAction: "run",
   });
-  assert.match(markup, /aria-label="Stop task"/);
-  assert.match(markup, /class="[^\"]*composer-stop/);
-  assert.doesNotMatch(markup, /class="[^\"]*composer-send/);
+  assert.doesNotMatch(markup, /aria-label="Stop task"/);
+  assert.doesNotMatch(markup, /class="[^\"]*composer-stop/);
+  assert.match(markup, /class="[^\"]*composer-send/);
 });
 
 test("an unavailable workspace preserves editable text and offers folder reselection", () => {
@@ -1211,54 +1212,33 @@ test("Task completion dot consumes only the canonical unread receipt", () => {
   );
 });
 
-test("an active Run keeps the normal Send icon and shows no queue drafting prompt", () => {
+test("an active Run switches one same-sized action between Send and Stop", () => {
   const markup = render({
     draft: { kind: "text", text: "follow up" },
     stopAction: "run",
     runInFlight: true,
-    onQueueInput() {},
-    canQueue: true,
+    canSubmit: true,
   });
   assert.doesNotMatch(markup, /aria-label="Stop task"/);
   assert.match(markup, /aria-label="Send"/);
-  assert.doesNotMatch(
-    markup,
-    /Queue message|Draft your next message|composer-draft-note/,
-  );
   const stopping = render({
     draft: { kind: "text", text: "follow up" },
     stopAction: "run",
     stopDisabled: true,
     runInFlight: true,
-    onQueueInput() {},
+    canSubmit: false,
+    sendDisabledReason: "input.stopping",
   });
-  assert.doesNotMatch(stopping, /aria-label="Send"/);
+  assert.doesNotMatch(stopping, /aria-label="Stop task"/);
   assert.match(
     stopping,
-    /<button(?=[^>]*aria-label="Stop task")(?=[^>]*disabled)[^>]*>/,
-  );
-  const attachments = render({
-    draft: {
-      kind: "multimodal",
-      text: "",
-      attachments: [
-        {
-          token: "file",
-          kind: "file",
-          displayName: "notes.txt",
-          sizeBytes: "1",
-          redacted: false,
-        },
-      ],
-    },
-    stopAction: "run",
-    onQueueInput() {},
-    canQueue: false,
-    queueDisabledReason: "queue.attachments_unsupported",
-  });
-  assert.match(
-    attachments,
     /<button(?=[^>]*aria-label="Send")(?=[^>]*disabled)[^>]*>/,
   );
-  assert.match(attachments, /Send messages with attachments manually/);
+  const empty = render({
+    draft: { kind: "text", text: "" },
+    stopAction: "run",
+    runInFlight: true,
+  });
+  assert.match(empty, /aria-label="Stop task"/);
+  assert.doesNotMatch(empty, /aria-label="Send"/);
 });

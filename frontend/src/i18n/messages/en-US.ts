@@ -634,74 +634,48 @@ export const enUS = {
     "The current execution cannot run this conversation. Switch to an account or connection that supports the task model",
   "run.placeholder_history_read_only":
     "This task has content this version can't read. You can view it; use a newer MetaWork to continue",
-  "queue.card_label": "Queued message",
-  "queue.waiting_short": "Queued",
-  "queue.waiting": "Send after the current Run finishes and settles",
-  "queue.held": "Not sent automatically: {reason}",
-  "queue.memory_only":
-    "Kept for this app session only. Quitting the app discards it.",
-  "queue.edit": "Edit",
-  "queue.withdraw": "Withdraw",
-  "queue.restore": "Move to composer",
-  "queue.pending": "Queuing message…",
-  "queue.withdrawing": "Withdrawing…",
-  "queue.unconfirmed": "Message outcome is unconfirmed",
-  "queue.draft_conflict": "Message withdrawn. The composer has a newer draft.",
-  "queue.rejected": "Action not completed: {reason}",
-  "queue.storage_unavailable":
-    "Could not save reconciliation information. Your input remains in the draft.",
-  "queue.refresh": "Refresh status",
-  "queue.keep_current": "Keep current draft and continue",
-  "queue.use_original": "Use original input",
-  "queue.continue": "Acknowledge and continue",
-  "queue.discard_returned": "Discard withdrawn message",
-  "queue.uncertain_confirm_body":
-    "This action may already have taken effect. The original message may have been sent; sending it again could create a duplicate. A newer draft will be preserved. Original input is restored only when the composer is empty.",
-  "queue.attachments_unsupported":
-    "Send messages with attachments manually after the current task finishes.",
-  "queue.occupied": "A message is already queued.",
-  "queue.resolve_first": "Resolve the queued message status first.",
-  "queue.held_first": "Edit or withdraw the queued message first.",
-  "queue.stopping": "The task is stopping. Send your message afterward.",
-  "queue.discard_on_action":
-    "When this action takes effect, the queued message will be discarded.",
-  "queue.archive_title": "Archive and discard the queued message?",
-  "queue.archive_confirm": "Archive",
-  "queue.reason.stopped_by_user": "You stopped the current Run.",
-  "queue.reason.approval_mode_changed": "The approval mode changed.",
-  "queue.reason.run_not_completed":
-    "The previous Run did not complete normally. Decide whether to continue.",
-  "queue.reason.schedule_completion_unconfirmed":
-    "The scheduled task result is not yet confirmed.",
-  "queue.reason.task_idle": "The current Run ended. Send the message manually.",
-  "queue.reason.run_changed": "The current Run changed.",
-  "queue.reason.run_stopping": "The current Run is stopping.",
-  "queue.reason.queue_occupied": "A message is already queued.",
-  "queue.reason.queued_input_changed":
-    "The queued message changed. Refresh its status.",
-  "queue.reason.unsupported_input": "Attachments cannot be queued.",
-  "queue.reason.binding_changed": "The task binding changed.",
-  "queue.reason.binding_unavailable": "The model binding is unavailable.",
-  "queue.reason.task_unavailable": "The task is unavailable.",
-  "queue.reason.task_busy": "The task is handling another operation.",
-  "queue.reason.shutting_down": "The app is shutting down.",
-  "queue.reason.workspace_unavailable": "The workspace is unavailable.",
-  "queue.reason.workspace_changed": "The workspace binding changed.",
-  "queue.reason.workspace_removing": "The workspace is being removed.",
-  "queue.reason.catalog_loading": "The Skill catalog is loading.",
-  "queue.reason.catalog_unavailable": "The Skill catalog is unavailable.",
-  "queue.reason.stale_catalog":
-    "The Skill selection is stale. Edit and select it again.",
-  "queue.reason.skill_not_found": "The selected Skill no longer exists.",
-  "queue.reason.skill_unavailable": "The selected Skill is unavailable.",
-  "queue.reason.invalid_skill_arguments":
-    "The Skill arguments are invalid. Edit before sending.",
-  "queue.reason.missing_instruction": "The message has no instruction.",
-  "queue.reason.capacity_reached": "Capacity has been reached.",
-  "queue.reason.admission_failed":
-    "The next message could not be accepted. Handle it manually.",
   "run.draft_only":
     "Saved locally as a draft. You can send it after the current work finishes.",
+  "input.hint":
+    "Additional messages target this run and await adoption at a later step.",
+  "input.stopping": "This run is stopping. Your draft is preserved.",
+  "input.text_only":
+    "Only text can be added during a run. Your draft is preserved.",
+  "input.not_ready":
+    "This run is not accepting input. Your draft is preserved.",
+  "input.submitted":
+    "Message submitted to this run. Its adoption status appears in the run history.",
+  "input.unknown":
+    "Submission is unconfirmed. Check the run history; the message will not be resent automatically.",
+  "input.position_unknown": "The exact adoption position is unconfirmed.",
+  "input.label": "Additional messages for this run",
+  "input.state.pending": "Submitted to this run, not yet adopted",
+  "input.state.adopted": "Added to this run’s context",
+  "input.state.unadopted":
+    "Not adopted before this run ended; no automatic execution",
+  "input.state.unknown":
+    "Whether this was added to the run’s context is unconfirmed",
+  "input.restore": "Put back in the editor",
+  "input.restore_unknown":
+    "The original message may have been processed. Sending it again may repeat work.",
+  "input.adopted_marker": "Adopted user input: {text}",
+  "mutation.reason.run_changed":
+    "The target run has changed. Check it before sending again.",
+  "mutation.reason.run_not_ready":
+    "This run is not accepting input. The message was not sent.",
+  "mutation.reason.run_stopping":
+    "This run is stopping. The message was not sent.",
+  "mutation.reason.too_late": "This run has ended. The message was not sent.",
+  "mutation.reason.invalid_input":
+    "Check the message content before sending again.",
+  "mutation.reason.resource_limit":
+    "This run’s additional input limit was reached. The message was not sent.",
+  "mutation.reason.checkpoint_budget_required":
+    "This run has insufficient context capacity. The message was not sent.",
+  "mutation.reason.unsupported_input":
+    "This additional input is unsupported. Your draft is preserved.",
+  "mutation.reason.admission_failed":
+    "The message could not be admitted. Your draft is preserved.",
   "run.started": "Work started.",
   "run.start_failed":
     "Work could not start. Check your connection and try again.",
@@ -1397,8 +1371,6 @@ export const enUS = {
   "mutation.reason.task_unavailable": "This task is no longer available.",
   "mutation.reason.recovery_unavailable":
     "This conversation can no longer be restored from the current saved state.",
-  "mutation.reason.queued_input_present":
-    "Edit or withdraw the queued message first.",
   "mutation.reason.persistence_unavailable":
     "Model selection cannot be saved. Recover task history first.",
   "mutation.reason.persistence_failed":

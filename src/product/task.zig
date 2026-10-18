@@ -26,10 +26,6 @@ pub const PermissionReviewOutcome = runtime.PermissionReviewOutcome;
 pub const TerminalSummary = runtime.TerminalSummary;
 pub const RunInput = runtime.RunInput;
 pub const RunError = runtime.RunError;
-pub const QueuedInput = runtime.QueuedInput;
-pub const QueuedInputResult = runtime.QueuedInputResult;
-pub const QueuedInputReason = runtime.QueuedInputReason;
-pub const queuedExecutionInput = runtime.queuedExecutionInput;
 pub const MultimodalAttachment = runtime.MultimodalAttachment;
 pub const PermissionChoice = runtime.PermissionChoice;
 pub const UiResponse = runtime.UiResponse;
@@ -73,6 +69,7 @@ pub const FileReferenceRange = state.FileReferenceRangeView;
 pub const ProjectionError = view.Error;
 pub const ProjectionText = view.TextProjection;
 pub const writeInput = view.writeInput;
+pub const writeSendInputResult = view.writeSendInputResult;
 pub const ModelSelectionAvailability = view.ModelSelectionAvailability;
 pub const history = @import("product_task_persistence");
 pub const checkpoint_store = @import("product_task_checkpoint_store");
@@ -92,3 +89,6 @@ pub const testing = if (builtin.is_test) struct {
     pub const deletion_module = deletion;
     pub const view_module = view;
 } else struct {};
+
+pub const SendInputResult = runtime.SendInputResult;
+pub const SendInputReason = runtime.SendInputReason;
