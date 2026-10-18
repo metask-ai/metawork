@@ -536,7 +536,7 @@ test("Settings uses the global stage without retaining the Task sidebar", () => 
 test("Assistant reply is primary and completed does not add a redundant outcome", () => {
   const markup = renderCompletedSurface();
   assert.match(markup, /class="ai-conversation"/);
-  assert.match(markup, /class="ai-message" data-role="user"/);
+  assert.match(markup, /class="ai-message(?: [^"]*)?" data-role="user"/);
   assert.match(
     markup,
     /class="ai-message run-assistant-output" data-role="assistant"/,
@@ -601,7 +601,7 @@ test("excluded conversation history is explained beside its owning Run", () => {
     [],
     { conversationCoverage: "excluded" },
   );
-  const exchange = markup.indexOf('class="ai-exchange"');
+  const exchange = markup.search(/class="ai-exchange(?: |")/);
   const input = markup.indexOf("Inspect the release", exchange);
   const notice = markup.indexOf(
     "This message remains in the task history, but is not included in the restored model context",

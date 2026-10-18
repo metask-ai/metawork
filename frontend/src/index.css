@@ -9746,6 +9746,15 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 }
 .additional-input-target {
   min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
+  color: var(--ui-content-primary);
+  background: var(--ui-surface-panel);
+  font-size: var(--text-label);
+}
+.additional-input-target:hover {
+  background: var(--ui-action-hover-surface);
 }
 .additional-input[data-state="transferred"] .additional-input-actions {
   flex-wrap: wrap;

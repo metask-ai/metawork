@@ -345,7 +345,9 @@ export function TaskContent({
     const target = node.querySelector<HTMLElement>(`[data-run-id="${runId}"]`);
     if (!target) return;
     target.scrollIntoView({ block: "start", behavior: "instant" });
-    target.focus({ preventScroll: true });
+    target
+      .querySelector<HTMLElement>('.ai-message[data-role="user"]')
+      ?.focus({ preventScroll: true });
     updateReadingState();
   }
 
@@ -438,12 +440,11 @@ export function TaskContent({
 
         return (
           <section
-            className="ai-exchange focus-ring"
+            className="ai-exchange"
             data-run-id={run.id}
-            tabIndex={-1}
             key={`${task.id}:${run.id}`}
           >
-            <Message role="user">
+            <Message role="user" tabIndex={-1} className="focus-ring">
               <TaskInput input={run.input} />
             </Message>
             <div className="input-copy-actions">

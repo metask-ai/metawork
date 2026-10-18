@@ -1423,7 +1423,9 @@ test("continuation and transfer preserve the submitted bubble and locate the rea
   fireEvent.click(screen.getByRole("button", { name: "View next Run" }));
   assert.equal(
     document.activeElement,
-    view.container.querySelector('[data-run-id="10"]'),
+    view.container.querySelector(
+      '[data-run-id="10"] .ai-message[data-role="user"]',
+    ),
   );
 });
 
