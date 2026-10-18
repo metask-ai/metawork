@@ -585,7 +585,6 @@ export const zhCN: Record<MessageId, string> = {
   "input.submitted": "消息已提交给本轮，是否采纳以本轮记录为准。",
   "input.unknown": "发送结果尚未确认，请核对本轮记录；系统不会自动重发。",
   "input.position_unknown": "具体采纳位置未确认。",
-  "input.label": "本轮补充消息",
   "input.state.pending": "已提交本轮，尚未采纳",
   "input.state.adopted": "已纳入本轮上下文",
   "input.state.unadopted": "本轮结束前未采纳，不会自动执行",

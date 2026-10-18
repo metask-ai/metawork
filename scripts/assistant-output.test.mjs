@@ -1,7 +1,93 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveAssistantOutputParts } from "../frontend/src/features/tasks/assistant-output.ts";
+import {
+  deriveAssistantOutputParts,
+  deriveRunReadingFlow,
+} from "../frontend/src/features/tasks/assistant-output.ts";
+
+function input(id, afterOutputCount) {
+  return {
+    id,
+    afterOutputCount,
+    text: `input ${id}`,
+    redacted: false,
+    operationId: `send-${id}`,
+    sequence: Number(id),
+    adoptedTurn: null,
+    order: null,
+    state: "pending",
+  };
+}
+
+function readingOrder(out, inputs) {
+  return deriveRunReadingFlow("7", out, inputs).map((entry) =>
+    entry.kind === "input"
+      ? `user:${entry.input.id}`
+      : entry.parts.map((part) => part.ordinal),
+  );
+}
+
+test("submission anchors interleave ordinary input without fragmenting adjacent output", () => {
+  const out = output({ commentary: ["Earlier", "More"], provisional: "Tail" });
+  assert.deepEqual(readingOrder(out, []), [[0, 1, 2]]);
+  assert.deepEqual(readingOrder(out, [input("1", 1), input("2", 1)]), [
+    [0],
+    "user:1",
+    "user:2",
+    [1, 2],
+  ]);
+  assert.deepEqual(readingOrder(out, [input("1", 0)]), ["user:1", [0, 1, 2]]);
+});
+
+test("discarded tails and decreasing anchors cannot reverse user submissions", () => {
+  const inputs = [input("1", 1), input("2", 0), input("3", 257)];
+  assert.deepEqual(readingOrder(output(), inputs), [
+    "user:1",
+    "user:2",
+    "user:3",
+  ]);
+  assert.deepEqual(readingOrder(output({ provisional: "Retry" }), inputs), [
+    [0],
+    "user:1",
+    "user:2",
+    "user:3",
+  ]);
+});
+
+test("empty sanitized slots and redacted tails retain their reading positions", () => {
+  const out = output({
+    commentary: ["Earlier", ""],
+    provisionalRedacted: true,
+  });
+  const flow = deriveRunReadingFlow("7", out, [input("1", 2)]);
+  assert.deepEqual(readingOrder(out, [input("1", 2)]), [[0, 1], "user:1", [2]]);
+  assert.equal(flow[2].redacted, true);
+  assert.equal(flow[0].redacted, false);
+  assert.equal(flow[2].parts[0].disposition, "provisional");
+});
+
+test("adoption and tail classification do not change reading block identities", () => {
+  const before = deriveRunReadingFlow(
+    "7",
+    output({ commentary: ["Earlier"], provisional: "Answer" }),
+    [input("1", 1)],
+  );
+  const after = deriveRunReadingFlow(
+    "7",
+    output({
+      commentary: ["Earlier"],
+      response: "Answer",
+      responseKind: "final",
+    }),
+    [{ ...input("1", 1), state: "adopted", adoptedTurn: 2, order: "4" }],
+  );
+  assert.deepEqual(
+    before.map((entry) => entry.identity),
+    after.map((entry) => entry.identity),
+  );
+  assert.equal(before[2].parts[0].identity, after[2].parts[0].identity);
+});
 
 function output(overrides = {}) {
   return {

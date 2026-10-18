@@ -574,7 +574,7 @@ AgentCore typed CoreEvent
 - Product Task 独占 output-segment 定性、commentary 边界、provisional rollback、Current activity、Tool lifecycle、terminal outcome/cause 和 credential-safe projection；
 - Bridge 运输完整 typed facts，不运输 raw event identity、时间线、private reasoning 或组件状态；
 - `deriveRunPresentation()` 只派生 active、response/process visibility、Host-order Tool 列表、唯一 running Tool presentation 和 terminal notice 条件，不保存或推进产品状态；
-- `TaskContent` 只按 Task/Run 稳定 identity 组合槽位，不把 Snapshot revision 当消息、不从文本或 Tool 内容推断新事实；
+- `TaskContent` 只按 Task/Run 稳定 identity 组合槽位；输出 part 继续使用稳定 ordinal，插话使用 Host 提交锚点纯派生阅读位置，不把 Snapshot revision 当消息、不从文本或 Tool 内容推断新事实；
 - Renderer 本地只拥有 Task+Run disclosure、逐 Tool disclosure、每 Task 阅读位置和 following-latest 等可丢弃 UI 状态；reload 后它们可以重置，不能写回 Product history。
 
 每个 Run exchange 使用以下条件槽位，而不是为每类事件创建节点：
@@ -582,7 +582,7 @@ AgentCore typed CoreEvent
 | 槽位              | 出现条件                                                                  | 更新方式                                                           |
 | ----------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | User instruction  | Run 存在                                                                  | 历史稳定；正文下方始终有复制动作，可用时带弱化提交时间             |
-| Assistant output  | 至少一个非空 commentary、provisional、final/partial 或必要 redaction note | closed commentary 只追加稳定 part；尾部 part 原位增长、定性或回滚  |
+| Assistant output  | 至少一个非空 commentary、provisional、final/partial 或必要 redaction note | 按插话锚点分为连续阅读块；closed part 稳定，尾部原位增长、定性或回滚  |
 | Process surface   | Run active，或 terminal Run 存在 Tool                                     | active 时唯一 live status 原位替换；Tool 技术行始终按所属 Run 展开 |
 | Intervention      | 当前 Run 存在 pending UI                                                  | 只显示唯一可操作控件，不伪装成 Assistant 文本                      |
 | Terminal notice   | partial、非 completed outcome 或完成但无 response                         | 与 partial 合并为唯一准确提示，不重复成功结果                      |
@@ -593,13 +593,13 @@ AgentCore typed CoreEvent
 ```text
 active Run:
   User instruction + optional submitted time + input copy action
-  Assistant output
+  Assistant output interleaved with optional user interjections
   RunProcess = live status header + optional collapsed Tool body
   intervention
 
 terminal Run:
   User instruction + optional submitted time + input copy action
-  Assistant output
+  Assistant output interleaved with optional user interjections
   optional File Changes
   optional collapsed RunProcess when Tools exist
   terminal notice
@@ -622,7 +622,7 @@ Renderer 每次只读取当前完整 `RunOutput`，不在本地累积 text chunk
 | response 已定性但 terminal 尚未发布           | response 可以显示，同时 active process surface 保持 finalizing |
 | formal terminal 已发布                        | activity 必须为 null；未决 provisional 必须为空                |
 
-Renderer 从 `Run identity + output ordinal` 纯派生每个 part 的 identity；provisional 定性只改变 disposition，不改变所属 Assistant message、React key 或 part DOM 根。只有 discarded、空内容或整个 Run 卸载才移除对应节点。credential 清理可能使某个 commentary item 为空，但 Renderer 不合并相邻 item，也不改变后续边界。
+Renderer 从 `Run identity + output ordinal` 纯派生每个 part 的 identity；provisional 定性只改变 disposition，不改变所属 Assistant 阅读块、React key 或 part DOM 根。只有 discarded、空内容或整个 Run 卸载才移除对应节点。credential 清理可能使某个 commentary item 为空，但 Renderer 不合并相邻 item，也不改变后续边界。
 
 provisional 与 closed output 复用同一个安全 GFM 渲染根并始终跳过 raw HTML；代码块、列表、引用和表格可随已到达字节渐进形成，未闭合 Markdown 按当前完整前缀做 best-effort 解析，不引入修复器、第二套 parser、逐字动画或分类时交叉淡入。provisional 必须是惰性交互态：链接与文件引用只显示文字，图片只显示 alt text，代码与整段均无复制动作，也不新增正文 live region；唯一 canonical Activity 负责状态播报。final/partial 或 commentary 定性后才开放其对应链接、结构化文件引用和 terminal-only copy policy。
 
@@ -765,7 +765,7 @@ Skill draft 与 Text draft 一样按 Task/New-task scope 保存在 Renderer sess
 
 插话直接使用 Agent submitInput，不使用 `UiBackend.poll()`。运行中仍使用相同发送图标，并以轻量提示说明文本等待后续步骤采纳。未就绪、Skill Run、Skill/附件草稿、停止中或单次发送仍在调用期间禁用发送并说明原因；保留完整草稿。连接暂时不可用时，已有本地草稿保持可编辑且不因连接状态变化失焦；发送与其他 Host 操作仍禁用，恢复连接不自动发送。“排队中”仅表示已接纳 Run 等待 Executor，没有待发送条、撤回动作或自动续跑。
 
-追加消息在所属 Run 中完整显示安全正文与等待采纳、已采纳、本轮未采纳或结果未知状态，不隐藏在默认折叠的技术过程内。input_adopted 有真实锚点时，技术过程按 Host 活动顺序显示简短采纳标记；仅终态计数确认时说明位置未知，不制造时间线。未采纳或未知消息提供“放回编辑器”，复用既有草稿替换保护；该动作不发送，未知状态同时提示再次发送可能重复工作。
+追加消息复用普通用户指令气泡，安全正文靠右显示，等待采纳、已采纳、本轮未采纳或结果未知状态及复制/恢复动作在气泡下方弱化呈现，不另做边框卡片，不隐藏在默认折叠的技术过程内。采纳只更新状态，不移动消息；已采纳不表示要求已执行完成。Renderer 按 Host 提供的 `afterOutputCount` 将插话放在前 N 个 canonical 输出槽位之后，空的已闭合槽位和脱敏尾部占位仍参与计数，不能先按正文非空过滤再定位。按消息提交顺序对锚点取前缀最大值，再与当前输出槽位数取较小值；同一位置按递增消息 identity 排列，锚点超过实际输出时放在末尾，撤回导致后续锚点下降也不得颠倒用户消息。两个插话边界之间排序后相邻的 Assistant part 连续呈现，不按序号是否连续判断，也不切割同一流式 Markdown。整份临时输出被丢弃并重试时，重试可复用原槽位而显示在插话上方，这是接受的显示差异，不承诺严格的首次出现时间线。input_adopted 有真实采纳锚点时，技术过程按 Host 活动顺序显示简短标记；仅终态计数确认时说明采纳位置未知，不与已知的提交阅读位置混淆。未采纳或未知消息提供“放回编辑器”，复用既有草稿替换保护；该动作不发送，未知状态同时提示再次发送可能重复工作。
 
 命令超时后按 [Bridge 对账合同](renderer-bridge-contract.md)刷新并显示结果未知，不自动重发，不阻塞后续新意图；成功回执只清除同版本草稿，旧 connection 的迟到回执不能清除新草稿或抢回焦点。消息采纳不强制滚动或打开右栏；左侧不新增消息槽位图标，既有 completion receipt 与 Schedule 完成确认语义不改变。
 

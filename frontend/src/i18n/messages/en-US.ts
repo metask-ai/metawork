@@ -648,7 +648,6 @@ export const enUS = {
   "input.unknown":
     "Submission is unconfirmed. Check the run history; the message will not be resent automatically.",
   "input.position_unknown": "The exact adoption position is unconfirmed.",
-  "input.label": "Additional messages for this run",
   "input.state.pending": "Submitted to this run, not yet adopted",
   "input.state.adopted": "Added to this run’s context",
   "input.state.unadopted":
