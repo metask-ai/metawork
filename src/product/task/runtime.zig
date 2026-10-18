@@ -1218,6 +1218,7 @@ pub const Runtime = struct {
         if (task.read_only_history != null) return error.TaskClosing;
         const revision = try self.approvalChangeRevision(task, expected_binding_epoch, expected_revision, target, effects.authority(projectionAuthorityQuery(task)));
         if (revision == task.durable.approval_revision) return revision;
+        _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         task.runtime.permission_review.invalidate();
         if (target == .manual and task.runtime.pending_ui_request_id != 0) {
             task.runtime.permission_review.phase = .needs_user;
@@ -1795,6 +1796,7 @@ pub const Runtime = struct {
     pub fn submitInput(self: *Runtime, task_id: u64, binding_epoch: u64, run_id: u64, text: []const u8, effects: OperationEffects) RunError!void {
         const task = self.find(task_id) orelse return error.UnknownTask;
         if (task.durable.binding_epoch != binding_epoch) return error.BindingEpochMismatch;
+        if (self.inputContinuation(task_id) != null) return error.TaskBusy;
         if (task.read_only_history != null or task.durable.archived or task.runtime.close_requested or task.deletion != .idle) return error.TaskClosing;
         if (task.approval_change != null) return error.TaskBusy;
         switch (task.runtime.active_operation) {
@@ -1840,6 +1842,7 @@ pub const Runtime = struct {
         };
         @memcpy(record.operation_id[0..record.operation_id_len], result.operationId());
         run.additional_inputs[index] = record;
+        run.input_continuation_binding_epoch = binding_epoch;
         result.run_id = run_id;
         switch (lease.submitInput(id, text)) {
             .accepted => |sequence| {
@@ -1889,6 +1892,71 @@ pub const Runtime = struct {
         };
     }
 
+    pub fn inputContinuation(self: *Runtime, task_id: u64) ?*task_state.RunRecord {
+        const task = self.find(task_id) orelse return null;
+        for (task.durable.runs) |*entry| if (entry.*) |*run| {
+            if (run.input_continuation_pending) return run;
+        };
+        return null;
+    }
+
+    pub fn cancelInputContinuation(self: *Runtime, task_id: u64, source_id: ?u64, reason: SendInputReason) bool {
+        const task = self.find(task_id) orelse return false;
+        var changed = false;
+        for (task.durable.runs) |*entry| if (entry.*) |*run| {
+            if (source_id) |id| if (run.id != id) continue;
+            var has_payload = false;
+            for (run.additional_inputs) |input| if (input) |record| {
+                has_payload = has_payload or record.raw_text != null;
+            };
+            if (!run.input_continuation_pending and !has_payload) continue;
+            run.input_continuation_cancelled = true;
+            run.input_continuation_pending = false;
+            run.input_continuation_failure = reason;
+            self.discardInputPayloads(run);
+            changed = true;
+        };
+        return changed;
+    }
+
+    pub fn mergeInputContinuation(self: *Runtime, run: *task_state.RunRecord, max: usize) (std.mem.Allocator.Error || error{ InputContinuationTooLarge, MissingInputPayload })![]u8 {
+        var size: usize = 0;
+        var count: usize = 0;
+        for (run.additional_inputs) |entry| if (entry) |record| {
+            if (record.state != .unadopted) continue;
+            const raw = record.raw_text orelse return error.MissingInputPayload;
+            const separator: usize = if (count == 0) 0 else 2;
+            if (size > max or separator > max - size or raw.len > max - size - separator)
+                return error.InputContinuationTooLarge;
+            size += separator + raw.len;
+            count += 1;
+        };
+        if (count == 0) return error.MissingInputPayload;
+        const merged = try self.allocator.alloc(u8, size);
+        var offset: usize = 0;
+        for (run.additional_inputs) |entry| if (entry) |record| {
+            if (record.state != .unadopted) continue;
+            if (offset != 0) {
+                @memcpy(merged[offset..][0..2], "\n\n");
+                offset += 2;
+            }
+            const raw = record.raw_text.?;
+            @memcpy(merged[offset..][0..raw.len], raw);
+            offset += raw.len;
+        };
+        return merged;
+    }
+
+    pub fn markInputTransferred(self: *Runtime, task_id: u64, source_id: u64, target_id: ?u64) void {
+        const task = self.find(task_id) orelse unreachable;
+        const run = task_state.findRun(task.durable.runs, source_id) orelse unreachable;
+        for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            if (record.state != .unadopted and record.state != .transferred) continue;
+            record.state = if (target_id != null) .transferred else .unadopted;
+            record.transferred_to_run_id = target_id;
+        };
+    }
+
     pub fn startRun(
         self: *Runtime,
         task_id: u64,
@@ -1913,6 +1981,7 @@ pub const Runtime = struct {
             expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
         _ = try taskExecutionInput(task);
+        if (self.inputContinuation(task_id) != null) return error.TaskBusy;
         if (task_policy.hasActiveOperation(task) or
             checkpointMutationPending(task, effects.worker.checkpoint.store_health))
             return error.TaskBusy;
@@ -2022,6 +2091,7 @@ pub const Runtime = struct {
         effects: OperationEffects,
     ) CompactError!PreparedCompact {
         const task = self.find(task_id) orelse return error.UnknownTask;
+        if (self.inputContinuation(task_id) != null) return error.TaskBusy;
         if (expected_binding_epoch == 0 or
             expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
@@ -2139,7 +2209,8 @@ pub const Runtime = struct {
         const task = self.find(task_id) orelse return error.UnknownTask;
         const run_record = task_state.findRun(task.durable.runs, run_id) orelse
             return error.NoSuchRun;
-        if (task_state.terminalPayload(run_record) != null) return false;
+        const continuation_cancelled = self.cancelInputContinuation(task_id, run_id, .continuation_cancelled);
+        if (task_state.terminalPayload(run_record) != null) return continuation_cancelled;
         var access = task.runtime.acquireAccess() catch return error.TaskClosing;
         defer access.deinit();
         const record = prepareCancelledUiRecord(
@@ -2168,7 +2239,7 @@ pub const Runtime = struct {
             .pending, .requested, .already_requested => true,
             .already_finishing, .already_terminal, .stale_run, .session_closing => false,
         };
-        if (!stopping) return false;
+        if (!stopping) return continuation_cancelled;
         task.runtime.permission_review.invalidate();
         if (record) |value| switch (pushUiRecord(task, value)) {
             .inserted, .already_resolved => {},
@@ -2485,6 +2556,7 @@ pub const Runtime = struct {
         const retrying = task.runtime.close_failed and
             task.runtime.hasClosingSession();
         if (task.runtime.live() == null) return false;
+        _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         if (task.runtime.active_operation == .compact) {
             const compact_id = switch (task.runtime.active_operation) {
                 .compact => |id| id,
@@ -2793,6 +2865,7 @@ pub const Runtime = struct {
         if (task.durable.archived == archived) return false;
         task.durable.archived = archived;
         if (archived) {
+            _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
             task.runtime.permission_review.invalidate();
             acknowledgeLatestCompletion(task);
         }
@@ -2848,6 +2921,7 @@ pub const Runtime = struct {
         if (task.deletion == .deleting) return false;
         task.runtime.permission_review.invalidate();
         task.deletion = .deleting;
+        _ = self.cancelInputContinuation(task_id, null, .continuation_cancelled);
         return true;
     }
 
@@ -2943,6 +3017,7 @@ pub const Runtime = struct {
             const task = &(entry.* orelse continue);
             if (task.durable.workspace_id != workspace_id or
                 !task.runtime.hasAttachedSession()) continue;
+            _ = self.cancelInputContinuation(task.durable.id, null, .workspace_removing);
             if (effect.release(task.durable.id) == .failed) return false;
         }
         return true;
@@ -3223,7 +3298,16 @@ pub const Runtime = struct {
             .replace_file_references_fn = replaceEventFileReferences,
             .record_file_changes_fn = recordEventFileChanges,
         };
-        return switch (try task_state.applyEvent(task, envelope, projection)) {
+        const application_result = try task_state.applyEvent(task, envelope, projection);
+        if (application_result == .applied) {
+            const run = task_state.findRun(task.durable.runs, envelope.run_id).?;
+            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+                if (record.state != .adopted) continue;
+                if (record.raw_text) |raw| self.releaseInputPayload(raw);
+                record.raw_text = null;
+            };
+        }
+        return switch (application_result) {
             .unknown => .unknown,
             .unchanged => .unchanged,
             .late_terminal => .{ .late_terminal = .{
@@ -3691,6 +3775,7 @@ pub const Runtime = struct {
         self.permission_reviews_closed = true;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
+            _ = self.cancelInputContinuation(task.durable.id, null, .continuation_cancelled);
             task.runtime.permission_review.invalidate();
             cancelTaskAutomaticTitles(task);
             if (!task.runtime.worker_leases.hasLive()) continue;
@@ -4074,6 +4159,7 @@ pub const Runtime = struct {
         input: RecoveryStartInput,
     ) RecoveryStartError!u64 {
         const task = self.find(task_id) orelse return error.UnknownTask;
+        if (self.inputContinuation(task_id) != null) return error.RestoreBusy;
         if (input.expected_binding_epoch == 0 or
             input.expected_binding_epoch != task.durable.binding_epoch)
             return error.BindingEpochMismatch;
@@ -4487,7 +4573,7 @@ pub const Runtime = struct {
         }
         if (!run.terminal_observed) {
             for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
-                if (record.state == .adopted) continue;
+                if (record.state == .adopted or record.state == .transferred) continue;
                 record.state = .unknown;
                 if (run.completed_input_counts) |counts| if (record.sequence) |sequence| {
                     record.state = if (sequence <= counts.adopted) .adopted else .unadopted;
@@ -4498,7 +4584,21 @@ pub const Runtime = struct {
                 terminal.session_disposition_at_completion,
             );
             run.terminal_observed = true;
-            self.discardInputPayloads(run);
+            const eligible = terminal.outcome == .completed and
+                terminal.session_disposition_at_completion == .reusable and
+                run.event_projection_failure == null and
+                run.completed_input_counts != null and
+                !run.input_continuation_cancelled and !run.input_continuation_attempted;
+            var pending = false;
+            for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+                if (eligible and record.state == .unadopted and record.raw_text != null) {
+                    pending = true;
+                } else {
+                    if (record.raw_text) |raw| self.releaseInputPayload(raw);
+                    record.raw_text = null;
+                }
+            };
+            run.input_continuation_pending = pending;
             changed = true;
         }
         return changed;

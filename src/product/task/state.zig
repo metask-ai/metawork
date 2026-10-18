@@ -620,6 +620,7 @@ pub const RunRecord = struct {
     input_continuation_cancelled: bool = false,
     input_continuation_attempted: bool = false,
     input_continuation_schedule_gate: bool = false,
+    input_continuation_binding_epoch: u64 = 0,
     input_continuation_failure: ?SendInputReason = null,
     next_input_id: u64 = 1,
     /// Worker writes before publishing terminal; readers require that publication.

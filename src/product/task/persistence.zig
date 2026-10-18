@@ -3033,7 +3033,8 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 !validText(record.text, limits.max_user_message_bytes, true) or
                 !oneOf(record.state, &.{ "pending", "adopted", "unadopted", "unknown", "transferred" })) return error.Invalid;
             if (record.transferred_to_run_id) |target_id| {
-                if (!std.mem.eql(u8, record.state, "transferred") or target_id <= run.id)
+                if (!std.mem.eql(u8, record.state, "transferred") or target_id <= run.id or
+                    run.outcome == null or !std.mem.eql(u8, run.outcome.?, "completed"))
                     return error.Invalid;
                 var found = false;
                 for (task.runs) |target| if (target.id == target_id) {
