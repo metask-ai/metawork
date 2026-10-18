@@ -10071,3 +10071,42 @@ test "active input accepted target remains transferred when Executor enqueue fai
     try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
     try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
 }
+
+test "active input ordinary continuation ignores unrelated Schedule persistence failure" {
+    const scenario = try ReviewScenario.initForInput(.controlled);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    _ = try scenario.control.sendInput("unrelated-schedule", scenario.task_id, task.durable.binding_epoch, .{ .run = task.runtime.active_run_id }, .{ .text = "continue ordinary input" });
+    scenario.control.schedule.persistence_health = .write_failed;
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    try std.testing.expectEqual(.transferred, task.durable.runs[0].?.additional_inputs[0].?.state);
+    try std.testing.expectEqual(@as(usize, 2), fake_core.run_calls);
+}
+
+test "active input checkpoint export failure ends continuation without retry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(home);
+    var store = try product_task.checkpoint_store.FileStore.init(std.testing.io, home);
+    defer store.deinit();
+    var history: TaskPersistenceProbe = .{};
+    var configuration = productControlConfiguration();
+    configuration.task_persistence = history.capability();
+    configuration.checkpoint_store = .{ .file_store = &store };
+    const scenario = try ReviewScenario.initConfigured(configuration, 2, .controlled, true);
+    defer scenario.deinit();
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const source = &task.durable.runs[0].?;
+    _ = try scenario.control.sendInput("checkpoint-failure", scenario.task_id, task.durable.binding_epoch, .{ .run = source.id }, .{ .text = "do not lose the boundary" });
+    fake_core.forceNextCheckpointExportStatus(wire.STATUS_RESOURCE_LIMIT);
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    try std.testing.expectEqual(.unadopted, source.additional_inputs[0].?.state);
+    try std.testing.expectEqual(.checkpoint_failed, source.input_continuation_failure.?);
+    try std.testing.expect(source.additional_inputs[0].?.raw_text == null);
+    for (0..5) |_| scenario.control.syncLifecycle();
+    try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
+    try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+}

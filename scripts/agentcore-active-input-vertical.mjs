@@ -17,6 +17,7 @@ export async function runActiveInputVertical({
   sendInRenderer,
   observeReadingBeforeAdoption,
   verifyRendererDraft,
+  observeTransferred,
 }) {
   const read = async (id) =>
     (await snapshot()).tasks.find((task) => task.id === id);
@@ -85,7 +86,11 @@ export async function runActiveInputVertical({
       async () => {
         if (provider.error) throw provider.error;
         const task = await read(id);
-        return task?.activeOperation === null && task.runs.at(-1)?.terminal
+        return task?.activeOperation === null &&
+          task.runs.at(-1)?.terminal &&
+          !task.runs.some((run) =>
+            run.additionalInputs.some((input) => input.state === "continuing"),
+          )
           ? task
           : null;
       },
@@ -296,6 +301,7 @@ export async function runActiveInputVertical({
   await assert.rejects(access(marker), { code: "ENOENT" });
   await assertNoSuccessor(reviewTask);
 
+  const transferredHistory = [];
   for (const mode of ["final", "stop", "failure"]) {
     const task = await create(`Input ${mode} audit`);
     const response = gate(
@@ -310,28 +316,118 @@ export async function runActiveInputVertical({
               },
             }),
           }
-        : textSse(`input-${mode}`, "final answer closes this Run"),
+        : {
+            body: textSse(
+              `input-${mode}`,
+              "This original answer was already streaming before the follow-up question.\n\n".repeat(
+                8,
+              ),
+            ),
+            initialDelayMs: 0,
+            frameDelayMs: mode === "final" ? 500 : 0,
+          },
     );
+    const next = gate(
+      textSse(
+        "continued-final",
+        "The next Run processed both follow-up messages.",
+      ),
+    );
+    const first = "How many are still active?";
+    const second = "Summarize them in Chinese.";
+    const merged = `${first}\n\n${second}`;
     const id = await start(task, { kind: "text", text: "Review" }, [
       response.fixture,
+      ...(mode === "final"
+        ? [
+            (payload) => {
+              assert.ok(
+                JSON.stringify(payload).includes(
+                  JSON.stringify(merged).slice(1, -1),
+                ),
+              );
+              return next.fixture();
+            },
+          ]
+        : []),
     ]);
     try {
       await waitGate(response);
+      if (mode === "final") {
+        response.release();
+        await poll(
+          async () => {
+            const run = (await read(task.id)).runs[0];
+            return run.output.provisional.length > 0 && run.phase === "running";
+          },
+          10_000,
+          "source final response visibly streaming",
+        );
+      }
       const receipt = await submit(
         task,
         id,
-        "Never launch a successor for this input",
+        mode === "final" ? first : "Do not continue after Stop or failure",
         `input-${mode}`,
       );
       assert.equal(receipt.outcome, "submitted", JSON.stringify(receipt));
+      if (mode === "final") {
+        assert.equal(
+          (await submit(task, id, second, "input-final-second")).outcome,
+          "submitted",
+        );
+        assert.deepEqual(
+          (await read(task.id)).runs[0].additionalInputs.map(
+            (input) => input.afterOutputCount,
+          ),
+          [1, 1],
+        );
+      }
       if (mode === "stop")
         await invoke("metawork.tasks.cancel", { taskId: task.id, runId: id });
     } finally {
       response.release();
     }
-    const result = await settled(task.id);
-    assert.equal(result.runs[0].additionalInputs[0].state, "unadopted");
-    await assertNoSuccessor(task);
+    if (mode === "final") {
+      try {
+        await waitGate(next);
+        const transferred = await read(task.id);
+        assert.equal(transferred.runs.length, 2);
+        const target = transferred.runs[1];
+        assert.equal(target.input.text, merged);
+        assert.equal(transferred.runs[0].terminal.outcome, "completed");
+        assert.deepEqual(
+          transferred.runs[0].additionalInputs.map((input) => [
+            input.state,
+            input.transferredToRunId,
+          ]),
+          [
+            ["transferred", target.id],
+            ["transferred", target.id],
+          ],
+        );
+        await invoke("metawork.tasks.cancel", { taskId: task.id, runId: id });
+        assert.equal((await read(task.id)).currentRunId, target.id);
+        assert.equal((await read(task.id)).currentRunPhase, "running");
+        if (observeTransferred) await observeTransferred(task.id, target.id);
+        transferredHistory.push({
+          taskId: task.id,
+          targetId: target.id,
+          text: merged,
+        });
+      } finally {
+        next.release();
+      }
+      const result = await settled(task.id);
+      assert.equal(result.runs.length, 2);
+      assert.equal(result.runs[1].terminal.outcome, "completed");
+      for (let i = 0; i < 3; i++)
+        assert.equal((await read(task.id)).runs.length, 2);
+    } else {
+      const result = await settled(task.id);
+      assert.equal(result.runs[0].additionalInputs[0].state, "unadopted");
+      await assertNoSuccessor(task);
+    }
     const late = await submit(
       task,
       id,
@@ -339,7 +435,7 @@ export async function runActiveInputVertical({
       `late-${mode}`,
     );
     assert.equal(late.outcome, "rejected");
-    assert.equal((await read(task.id)).runs.length, 1);
+    assert.equal((await read(task.id)).runs.length, mode === "final" ? 2 : 1);
   }
 
   const skill = await create("Skill Run rejects interjection");
@@ -409,6 +505,23 @@ export async function runActiveInputVertical({
       "History only after restart",
     );
     await assertNoSuccessor(current);
+    for (const saved of transferredHistory) {
+      const task = await read(saved.taskId);
+      assert.equal(task.runs.length, 2);
+      assert.equal(task.runs[1].id, saved.targetId);
+      assert.equal(task.runs[1].input.text, saved.text);
+      assert.deepEqual(
+        task.runs[0].additionalInputs.map((input) => [
+          input.state,
+          input.transferredToRunId,
+          input.afterOutputCount,
+        ]),
+        [
+          ["transferred", saved.targetId, 1],
+          ["transferred", saved.targetId, 1],
+        ],
+      );
+    }
     const restored = await read(adopted.id);
     assert.deepEqual(
       restored.runs[0].additionalInputs.map(
@@ -421,7 +534,7 @@ export async function runActiveInputVertical({
       ["adopted", "adopted"],
     );
     console.log(
-      "AgentCore active input: real receipt, tool-boundary adoption, independent permission, final/stop/failure, Skill refusal and restart without replay passed.",
+      "AgentCore active input: real receipt, boundary adoption, one merged continuation after streaming final output, old-source Stop isolation, stop/failure without continuation, Skill refusal and restart without replay passed.",
     );
   };
 }
