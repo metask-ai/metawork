@@ -275,7 +275,22 @@ export function TaskContent({
       null)
     : null;
   const latestCopyableId = latestCopyableResponseId(task?.runs ?? []);
-  const latestInputId = task?.runs.at(-1)?.id ?? null;
+  const transferredRunIds = new Set(
+    task?.runs.flatMap((run) =>
+      run.additionalInputs.flatMap((input) =>
+        input.state === "transferred" && input.transferredToRunId
+          ? [input.transferredToRunId]
+          : [],
+      ),
+    ),
+  );
+  const latestInputId =
+    task?.runs
+      .filter(
+        (run) =>
+          run.additionalInputs.length > 0 || !transferredRunIds.has(run.id),
+      )
+      .at(-1)?.id ?? null;
   const hasExcludedCompactHistory =
     task?.compacts.some(
       (compact) => compact.conversationCoverage === "excluded",
@@ -345,9 +360,11 @@ export function TaskContent({
     const target = node.querySelector<HTMLElement>(`[data-run-id="${runId}"]`);
     if (!target) return;
     target.scrollIntoView({ block: "start", behavior: "instant" });
-    target
-      .querySelector<HTMLElement>('.ai-message[data-role="user"]')
-      ?.focus({ preventScroll: true });
+    (
+      target.querySelector<HTMLElement>(
+        ':scope > .ai-message[data-role="user"]',
+      ) ?? target
+    ).focus({ preventScroll: true });
     updateReadingState();
   }
 
@@ -440,31 +457,37 @@ export function TaskContent({
 
         return (
           <section
-            className="ai-exchange"
+            className="ai-exchange focus-ring"
             data-run-id={run.id}
             key={`${task.id}:${run.id}`}
+            tabIndex={-1}
           >
-            <Message role="user" tabIndex={-1} className="focus-ring">
-              <TaskInput input={run.input} />
-            </Message>
-            <div className="input-copy-actions">
-              {submittedTime && (
-                <MessageTime
-                  className="input-submitted-time"
-                  time={submittedTime}
-                />
-              )}
-              <CopyButton
-                className="input-copy-action"
-                data-latest={
-                  run.id === latestInputId && run.additionalInputs.length === 0
-                }
-                copyLabel={t("copy.input")}
-                copiedLabel={t("copy.copied")}
-                failedLabel={t("copy.failed")}
-                onCopy={() => copyRunInput(run.input)}
-              />
-            </div>
+            {!transferredRunIds.has(run.id) && (
+              <>
+                <Message role="user" tabIndex={-1} className="focus-ring">
+                  <TaskInput input={run.input} />
+                </Message>
+                <div className="input-copy-actions">
+                  {submittedTime && (
+                    <MessageTime
+                      className="input-submitted-time"
+                      time={submittedTime}
+                    />
+                  )}
+                  <CopyButton
+                    className="input-copy-action"
+                    data-latest={
+                      run.id === latestInputId &&
+                      run.additionalInputs.length === 0
+                    }
+                    copyLabel={t("copy.input")}
+                    copiedLabel={t("copy.copied")}
+                    failedLabel={t("copy.failed")}
+                    onCopy={() => copyRunInput(run.input)}
+                  />
+                </div>
+              </>
+            )}
             <div className="run-reading-flow">
               {readingFlow.map((entry) =>
                 entry.kind === "input" ? (

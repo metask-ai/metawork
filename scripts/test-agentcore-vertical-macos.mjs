@@ -3125,6 +3125,17 @@ async function observeTransferredInput(taskId, targetRunId) {
       commandTimeoutMs,
       "transferred inputs in the real reading surface",
     );
+    const inputCopies = await webview.evaluate(`(() => {
+      const source=[...document.querySelectorAll('.additional-input[data-state="transferred"] .task-input-copy')];
+      const copies=[...document.querySelectorAll('.ai-message[data-role="user"] .task-input-copy')];
+      const target=document.querySelector('[data-run-id="${targetRunId}"]');
+      return {counts:source.map(message=>copies.filter(copy=>copy.textContent.includes(message.textContent)).length),targetInput:!!target.querySelector(':scope > .ai-message[data-role="user"]'),targetMetadata:!!target.querySelector(':scope > .input-copy-actions')};
+    })()`);
+    assert.deepEqual(inputCopies, {
+      counts: [1, 1],
+      targetInput: false,
+      targetMetadata: false,
+    });
     const focus = await webview.evaluate(`(() => {
       const button=document.querySelector('.additional-input-target');
       if(!button) throw new Error('Missing transfer destination action');

@@ -1423,9 +1423,152 @@ test("continuation and transfer preserve the submitted bubble and locate the rea
   fireEvent.click(screen.getByRole("button", { name: "View next Run" }));
   assert.equal(
     document.activeElement,
-    view.container.querySelector(
-      '[data-run-id="10"] .ai-message[data-role="user"]',
-    ),
+    view.container.querySelector('[data-run-id="10"]'),
+  );
+  assert.equal(screen.getAllByText(message.text).length, 1);
+  assert.equal(
+    view.container.querySelector('[data-run-id="10"] .input-copy-actions'),
+    null,
+  );
+});
+
+test("merged continuation displays each original message once after remount and preserves the full retry input", () => {
+  const messages = [
+    ["Cancelled before the mode change", "unadopted"],
+    ["Already adopted", "adopted"],
+    ["First follow-up", "transferred"],
+    ["Second follow-up", "transferred"],
+  ].map(([text, state], index) => ({
+    id: String(index + 1),
+    afterOutputCount: 0,
+    operationId: `sent-${index + 1}`,
+    text,
+    redacted: false,
+    sequence: index + 1,
+    adoptedTurn: state === "adopted" ? 1 : null,
+    order: state === "adopted" ? "1" : null,
+    state,
+    transferredToRunId: state === "transferred" ? "10" : null,
+    continuationReason: null,
+  }));
+  const merged = `${messages[2].text}\n\n${messages[3].text}`;
+  const target = run({
+    id: "10",
+    input: { kind: "text", text: merged, redacted: false },
+    submittedAtUnixMs: "1700000000000",
+    phase: "failed",
+    terminal: terminal("failed"),
+    output: {
+      commentary: [],
+      response: "",
+      responseKind: null,
+      provisional: "",
+      redacted: false,
+      provisionalRedacted: false,
+    },
+  });
+  const current = task({
+    currentRunId: target.id,
+    runs: [run({ additionalInputs: messages }), target],
+  });
+  const restoredInputs = [];
+  // A fresh mount must derive the same display from saved facts alone.
+  for (const value of [current, JSON.parse(JSON.stringify(current))]) {
+    const view = render(
+      taskContentElement(value, "1", {
+        retryAvailable: true,
+        onPrepareRetry: (input) => restoredInputs.push(input),
+      }),
+    );
+    assert.deepEqual(
+      [
+        ...view.container.querySelectorAll(
+          '.ai-message[data-role="user"] .task-input-copy',
+        ),
+      ].map((node) => node.textContent),
+      [current.runs[0].input.text, ...messages.map((message) => message.text)],
+    );
+    const destination = view.container.querySelector('[data-run-id="10"]');
+    assert.equal(
+      destination.querySelector('.ai-message[data-role="user"]'),
+      null,
+    );
+    assert.equal(destination.querySelector(".input-copy-actions"), null);
+    assert.match(destination.textContent, /Failed/i);
+    assert.equal(
+      view.container
+        .querySelector('.input-copy-action[data-latest="true"]')
+        .closest(".additional-input").dataset.inputId,
+      "4",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy instruction to Composer" }),
+    );
+    assert.deepEqual(restoredInputs.at(-1), target.input);
+    view.unmount();
+  }
+});
+
+test("chained continuation keeps new interjections and independently sent identical text", () => {
+  const message = (id, text, target) => ({
+    id,
+    afterOutputCount: 0,
+    operationId: `sent-${id}`,
+    text,
+    redacted: false,
+    sequence: Number(id),
+    adoptedTurn: null,
+    order: null,
+    state: "transferred",
+    transferredToRunId: target,
+    continuationReason: null,
+  });
+  const first = message("1", "First follow-up", "10");
+  const second = message("2", "Second follow-up", "10");
+  const third = message("1", "New question during continuation", "11");
+  const runs = [
+    run({ additionalInputs: [first, second] }),
+    run({
+      id: "10",
+      input: {
+        kind: "text",
+        text: `${first.text}\n\n${second.text}`,
+        redacted: false,
+      },
+      additionalInputs: [third],
+    }),
+    run({
+      id: "11",
+      input: { kind: "text", text: third.text, redacted: false },
+    }),
+    run({
+      id: "12",
+      input: { kind: "text", text: second.text, redacted: false },
+    }),
+  ];
+  const view = render(taskContentElement(task({ currentRunId: "12", runs })));
+  assert.deepEqual(
+    [
+      ...view.container.querySelectorAll(
+        '.ai-message[data-role="user"] .task-input-copy',
+      ),
+    ].map((node) => node.textContent),
+    [runs[0].input.text, first.text, second.text, third.text, second.text],
+  );
+  fireEvent.click(screen.getAllByRole("button", { name: "View next Run" })[0]);
+  assert.equal(
+    document.activeElement,
+    view.container.querySelector('[data-run-id="10"]'),
+  );
+  assert.equal(
+    view.container.querySelectorAll(".run-assistant-output").length,
+    4,
+  );
+  assert.equal(
+    view.container
+      .querySelector('.input-copy-action[data-latest="true"]')
+      .closest("[data-run-id]").dataset.runId,
+    "12",
   );
 });
 

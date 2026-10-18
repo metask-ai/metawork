@@ -521,6 +521,8 @@ export async function runActiveInputVertical({
           ["transferred", saved.targetId, 1],
         ],
       );
+      if (observeTransferred)
+        await observeTransferred(saved.taskId, saved.targetId);
     }
     const restored = await read(adopted.id);
     assert.deepEqual(
