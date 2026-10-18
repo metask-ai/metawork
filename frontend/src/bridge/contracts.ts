@@ -874,6 +874,10 @@ export const sendInputReasons = [
   "resource_limit",
   "checkpoint_budget_required",
   "admission_failed",
+  "continuation_cancelled",
+  "combined_input_too_large",
+  "checkpoint_failed",
+  "schedule_failed",
 ] as const;
 export type SendInputReason = (typeof sendInputReasons)[number];
 export type InputTarget =
@@ -920,7 +924,15 @@ export type AdditionalInputView = {
   sequence: number | null;
   adoptedTurn: number | null;
   order: string | null;
-  state: "pending" | "adopted" | "unadopted" | "unknown";
+  state:
+    | "pending"
+    | "adopted"
+    | "unadopted"
+    | "unknown"
+    | "continuing"
+    | "transferred";
+  transferredToRunId: string | null;
+  continuationReason: SendInputReason | null;
 };
 
 export type TaskView = {

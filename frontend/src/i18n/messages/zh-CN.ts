@@ -589,6 +589,13 @@ export const zhCN: Record<MessageId, string> = {
   "input.state.adopted": "已纳入本轮上下文",
   "input.state.unadopted": "本轮结束前未采纳，不会自动执行",
   "input.state.unknown": "是否纳入本轮上下文尚未确认",
+  "input.state.continuing": "本轮未纳入，收尾后继续处理",
+  "input.state.transferred": "本轮未处理，已转入下一轮",
+  "mutation.reason.continuation_cancelled": "已取消后续处理。",
+  "mutation.reason.combined_input_too_large":
+    "多条消息合并后超过单轮输入容量，请拆分发送。",
+  "mutation.reason.checkpoint_failed": "本轮收尾未成功，未继续处理消息。",
+  "mutation.reason.schedule_failed": "定时执行结果未能确认，未继续处理消息。",
   "input.restore": "放回输入框",
   "input.restore_unknown": "原消息可能已处理，重新发送可能重复执行。",
   "input.adopted_marker": "纳入用户补充：{text}",

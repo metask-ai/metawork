@@ -527,12 +527,20 @@ fn writeRun(
         try text_projection.writeJson(writer, record.operationId());
         writer.writeAll(",\"text\":") catch return error.SnapshotTooLarge;
         try text_projection.writeJson(writer, record.text);
-        writer.print(",\"redacted\":{},\"afterOutputCount\":{d},\"state\":\"{s}\",\"sequence\":", .{ record.redacted, record.after_output_count, @tagName(record.state) }) catch return error.SnapshotTooLarge;
+        const continuing = run.input_continuation_pending and record.state == .unadopted and record.raw_text != null;
+        writer.print(",\"redacted\":{},\"afterOutputCount\":{d},\"state\":\"{s}\",\"sequence\":", .{ record.redacted, record.after_output_count, if (continuing) "continuing" else @tagName(record.state) }) catch return error.SnapshotTooLarge;
         if (record.sequence) |sequence| writer.print("{d}", .{sequence}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"adoptedTurn\":") catch return error.SnapshotTooLarge;
         if (record.adopted_turn) |turn| writer.print("{d}", .{turn}) catch return error.SnapshotTooLarge else writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeAll(",\"order\":") catch return error.SnapshotTooLarge;
         try writeInputId(writer, record.order);
+        writer.writeAll(",\"transferredToRunId\":") catch return error.SnapshotTooLarge;
+        try writeInputId(writer, record.transferred_to_run_id);
+        writer.writeAll(",\"continuationReason\":") catch return error.SnapshotTooLarge;
+        if (record.state == .unadopted and run.input_continuation_failure != null)
+            jsonValue(writer, @tagName(run.input_continuation_failure.?)) catch return error.SnapshotTooLarge
+        else
+            writer.writeAll("null") catch return error.SnapshotTooLarge;
         writer.writeByte('}') catch return error.SnapshotTooLarge;
     };
     writer.writeByte(']') catch return error.SnapshotTooLarge;

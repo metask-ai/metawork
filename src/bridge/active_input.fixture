@@ -39,6 +39,8 @@
     "sequence": 1,
     "adoptedTurn": 2,
     "order": "3",
-    "state": "adopted"
+    "state": "adopted",
+    "transferredToRunId": null,
+    "continuationReason": null
   }
 }

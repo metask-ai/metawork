@@ -9701,10 +9701,14 @@ test "active input targets one Run and unadopted history never launches another"
         try std.testing.expectEqual(.submitted, response.outcome);
         try std.testing.expectEqual(@as(?u64, id), response.run_id);
         try std.testing.expectEqual(@as(?u32, 1), response.sequence);
+        try std.testing.expectEqualStrings("new constraint fixture-secret", task.durable.runs[0].?.additional_inputs[0].?.raw_text.?);
+        try std.testing.expectEqual(@as(usize, "new constraint fixture-secret".len), scenario.control.task_runtime.pending_input_bytes);
         try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[0].?.additional_inputs[0].?.text, "fixture-secret") == null);
         fake_core.releaseControlled();
         try settleInputScenario(scenario);
         const history = &task.durable.runs[0].?.additional_inputs[0].?;
+        try std.testing.expect(history.raw_text == null);
+        try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
         try std.testing.expectEqual(@as(u32, 0), history.after_output_count);
         try std.testing.expectEqual(if (adopt) task_state.AdditionalInputState.adopted else .unadopted, history.state);
         try std.testing.expectEqual(adopt, history.order != null);

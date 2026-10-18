@@ -1134,6 +1134,8 @@ pub const Runtime = struct {
     next_task_id: u64 = 1,
     next_recent_order: u64 = 1,
     next_restore_attempt_id: u64 = 1,
+    /// Runtime-wide execution-only input ownership, separate from safe projection.
+    pending_input_bytes: usize = 0,
     late_terminal_event_count: u64 = 0,
     recovery_poisoned: bool = false,
     agent_runtime_shutdown_complete: bool = false,
@@ -1526,6 +1528,7 @@ pub const Runtime = struct {
         for (self.approval_jobs) |entry| std.debug.assert(entry == null);
         std.debug.assert(!self.approval_cleanup_leases.hasLive());
         for (self.tasks) |entry| std.debug.assert(entry == null);
+        std.debug.assert(self.pending_input_bytes == 0);
         self.allocator.free(self.tasks);
         for (self.failures.items) |failure| self.allocator.free(failure.reason);
         self.failures.deinit(self.allocator);
@@ -1815,6 +1818,12 @@ pub const Runtime = struct {
             break;
         };
         const index = slot orelse return error.ProjectionCapacity;
+        if (text.len > agent.max_submitted_input_bytes - self.pending_input_bytes)
+            return error.ProjectionCapacity;
+        const raw = try self.allocator.dupe(u8, text);
+        self.pending_input_bytes += raw.len;
+        var raw_owned = true;
+        defer if (raw_owned) self.releaseInputPayload(raw);
         try effects.text.reserveBytes(task_state.additional_input_projection_bytes);
         errdefer effects.text.releaseBytes(task_state.additional_input_projection_bytes);
         const projected = try effects.text.project(text, effects.limits.max_user_message_bytes, run.redaction_secret, 0);
@@ -1827,18 +1836,21 @@ pub const Runtime = struct {
             .operation_id_len = result.operation_id_len,
             .text = projected.value,
             .redacted = projected.redacted,
+            .raw_text = raw,
         };
         @memcpy(record.operation_id[0..record.operation_id_len], result.operationId());
         run.additional_inputs[index] = record;
         result.run_id = run_id;
         switch (lease.submitInput(id, text)) {
             .accepted => |sequence| {
+                raw_owned = false;
                 run.additional_inputs[index].?.sequence = sequence;
                 result.outcome = .submitted;
                 result.input_id = id;
                 result.sequence = sequence;
             },
             .unknown => {
+                raw_owned = false;
                 run.additional_inputs[index].?.state = .unknown;
                 result.outcome = .unknown;
                 result.input_id = id;
@@ -1861,6 +1873,20 @@ pub const Runtime = struct {
                 result.run_id = null;
             },
         }
+    }
+
+    fn releaseInputPayload(self: *Runtime, raw: []u8) void {
+        std.debug.assert(self.pending_input_bytes >= raw.len);
+        self.pending_input_bytes -= raw.len;
+        std.crypto.secureZero(u8, raw);
+        self.allocator.free(raw);
+    }
+
+    pub fn discardInputPayloads(self: *Runtime, run: *task_state.RunRecord) void {
+        for (&run.additional_inputs) |*entry| if (entry.*) |*record| {
+            if (record.raw_text) |raw| self.releaseInputPayload(raw);
+            record.raw_text = null;
+        };
     }
 
     pub fn startRun(
@@ -3358,7 +3384,7 @@ pub const Runtime = struct {
                 finished_at_ms,
                 finished_at_unix_ms,
             )) continue;
-            _ = settleActiveRunTerminal(task);
+            _ = self.settleActiveRunTerminal(task);
             task.durable.recent_order = self.takeRecentOrder();
             changed = true;
         }
@@ -4424,7 +4450,7 @@ pub const Runtime = struct {
                 task.runtime.active_run_id,
             ) orelse continue;
             if (task_state.productTerminalFacts(run) != null) {
-                const terminal_changed = settleActiveRunTerminal(task);
+                const terminal_changed = self.settleActiveRunTerminal(task);
                 result.changed = terminal_changed or result.changed;
                 result.durable_changed = terminal_changed or result.durable_changed;
                 continue;
@@ -4444,7 +4470,7 @@ pub const Runtime = struct {
         return result;
     }
 
-    fn settleActiveRunTerminal(task: *task_state.Task) bool {
+    fn settleActiveRunTerminal(self: *Runtime, task: *task_state.Task) bool {
         const run = task_state.findRun(
             task.durable.runs,
             task.runtime.active_run_id,
@@ -4472,6 +4498,7 @@ pub const Runtime = struct {
                 terminal.session_disposition_at_completion,
             );
             run.terminal_observed = true;
+            self.discardInputPayloads(run);
             changed = true;
         }
         return changed;
@@ -7332,6 +7359,7 @@ fn deinitRun(
     if (run.file_changes.len != 0) self.allocator.free(run.file_changes);
     self.allocator.free(run.commentary_ends);
     deinitRunInput(self, effects, &run.input);
+    self.discardInputPayloads(run);
     for (run.additional_inputs) |entry| if (entry) |record| {
         releaseProjectedSlice(self, effects, record.text);
         effects.releaseProjectionBytes(task_state.additional_input_projection_bytes);

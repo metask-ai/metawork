@@ -3207,6 +3207,11 @@ test("active input shared fixture preserves exact receipts and adoption history"
   for (const change of [
     (input) => (input.state = "held"),
     (input) => delete input.afterOutputCount,
+    (input) => delete input.transferredToRunId,
+    (input) => delete input.continuationReason,
+    (input) => (input.transferredToRunId = "2"),
+    (input) => (input.state = "transferred"),
+    (input) => (input.continuationReason = "schedule_failed"),
     (input) => (input.afterOutputCount = -1),
     (input) => (input.afterOutputCount = 0.5),
     (input) => (input.afterOutputCount = 258),
@@ -3230,6 +3235,26 @@ test("active input shared fixture preserves exact receipts and adoption history"
     order: null,
   });
   assert.deepEqual(decodeWorkbenchSnapshot(unknown), unknown);
+  const transferred = clone(snapshot);
+  const sourceRun = transferred.tasks[0].runs[0];
+  const targetRun = clone(sourceRun);
+  targetRun.id = "2";
+  targetRun.additionalInputs = [];
+  sourceRun.phase = "completed";
+  sourceRun.activity = null;
+  sourceRun.terminal = terminal("completed");
+  Object.assign(sourceRun.additionalInputs[0], {
+    state: "transferred",
+    adoptedTurn: null,
+    order: null,
+    transferredToRunId: "2",
+  });
+  transferred.tasks[0].runs.push(targetRun);
+  transferred.tasks[0].currentRunId = "2";
+  transferred.tasks[0].activeOperation.id = "2";
+  assert.deepEqual(decodeWorkbenchSnapshot(transferred), transferred);
+  transferred.tasks[0].runs.pop();
+  assert.throws(() => decodeWorkbenchSnapshot(transferred));
   assert.throws(() => decodeSendInputResult(wire.submitted, "1", "other"));
   assert.throws(() =>
     decodeSendInputResult(

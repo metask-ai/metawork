@@ -708,6 +708,7 @@ pub const AdditionalInputWire = struct {
     adopted_turn: ?u32,
     order: ?u64,
     state: []const u8,
+    transferred_to_run_id: ?u64 = null,
 };
 
 pub const RunInputWire = struct {
@@ -1085,6 +1086,7 @@ fn projectRun(
             .adopted_turn = record.adopted_turn,
             .order = record.order,
             .state = @tagName(record.state),
+            .transferred_to_run_id = record.transferred_to_run_id,
         };
         additional_index += 1;
     };
@@ -1614,6 +1616,7 @@ fn restoreRun(projection: RestoreProjection, wire: RunWire) RestoreError!task_st
             .adopted_turn = record.adopted_turn,
             .order = record.order,
             .state = if (input_state == .pending) .unknown else input_state,
+            .transferred_to_run_id = record.transferred_to_run_id,
         };
         @memcpy(message.operation_id[0..message.operation_id_len], record.operation_id);
         additional[index] = message;
@@ -3028,13 +3031,22 @@ fn validateTask(task: TaskWire, limits: Limits) !void {
                 return error.Invalid;
             if (record.id <= previous_input_id or record.operation_id.len == 0 or record.operation_id.len > 64 or
                 !validText(record.text, limits.max_user_message_bytes, true) or
-                !oneOf(record.state, &.{ "pending", "adopted", "unadopted", "unknown" })) return error.Invalid;
+                !oneOf(record.state, &.{ "pending", "adopted", "unadopted", "unknown", "transferred" })) return error.Invalid;
+            if (record.transferred_to_run_id) |target_id| {
+                if (!std.mem.eql(u8, record.state, "transferred") or target_id <= run.id)
+                    return error.Invalid;
+                var found = false;
+                for (task.runs) |target| if (target.id == target_id) {
+                    found = true;
+                };
+                if (!found) return error.Invalid;
+            } else if (std.mem.eql(u8, record.state, "transferred")) return error.Invalid;
             for (record.operation_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.Invalid;
             previous_input_id = record.id;
             if (record.sequence) |sequence| {
                 if (sequence <= previous_sequence or sequence > agent.max_submitted_inputs) return error.Invalid;
                 previous_sequence = sequence;
-            } else if (oneOf(record.state, &.{ "adopted", "unadopted" })) return error.Invalid;
+            } else if (oneOf(record.state, &.{ "adopted", "unadopted", "transferred" })) return error.Invalid;
             if ((record.adopted_turn == null) != (record.order == null)) return error.Invalid;
             if (record.adopted_turn) |turn| if (turn == 0 or record.order.? == 0 or
                 record.order.? >= run.next_activity_order or !std.mem.eql(u8, record.state, "adopted")) return error.Invalid;
@@ -4854,6 +4866,40 @@ test "input anchors require explicit history fields but may outlive discarded ou
     var parsed = try std.json.parseFromSlice(RunWire, std.testing.allocator, previous, .{});
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 0), parsed.value.additional_inputs.len);
+}
+
+test "input transfers require an actual later Run and old inputs have no transfer" {
+    var inputs = [_]AdditionalInputWire{.{
+        .id = 1,
+        .after_output_count = 1,
+        .operation_id = "sent",
+        .text = "follow up",
+        .redacted = false,
+        .sequence = 1,
+        .adopted_turn = null,
+        .order = null,
+        .state = "transferred",
+        .transferred_to_run_id = 2,
+    }};
+    var runs = [_]RunWire{ reviewTestRun(), reviewTestRun() };
+    runs[0].additional_inputs = &inputs;
+    runs[1].id = 2;
+    runs[1].generation = 2;
+    var task = reviewTestTask();
+    task.runs = &runs;
+    task.next_run_generation = 2;
+    try validateTask(task, testLimits());
+    for ([_]?u64{ null, 0, 1, 3 }) |target| {
+        inputs[0].transferred_to_run_id = target;
+        try std.testing.expectError(error.Invalid, validateTask(task, testLimits()));
+    }
+    inputs[0].transferred_to_run_id = 2;
+    inputs[0].state = "unadopted";
+    try std.testing.expectError(error.Invalid, validateTask(task, testLimits()));
+    const old = "{\"id\":1,\"after_output_count\":1,\"operation_id\":\"old\",\"text\":\"follow up\",\"redacted\":false,\"sequence\":1,\"adopted_turn\":null,\"order\":null,\"state\":\"unadopted\"}";
+    var parsed = try std.json.parseFromSlice(AdditionalInputWire, std.testing.allocator, old, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.transferred_to_run_id == null);
 }
 
 test "permission review absent fields preserve previous user history without delegation" {

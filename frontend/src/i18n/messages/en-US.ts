@@ -652,6 +652,17 @@ export const enUS = {
   "input.state.adopted": "Added to this run’s context",
   "input.state.unadopted":
     "Not adopted before this run ended; no automatic execution",
+  "input.state.continuing":
+    "Not included in this Run; continuing after cleanup",
+  "input.state.transferred":
+    "Not processed in this Run; transferred to the next Run",
+  "mutation.reason.continuation_cancelled": "Further processing was cancelled.",
+  "mutation.reason.combined_input_too_large":
+    "The combined messages exceed the input limit. Send them separately.",
+  "mutation.reason.checkpoint_failed":
+    "Run cleanup failed; messages were not continued.",
+  "mutation.reason.schedule_failed":
+    "The scheduled result could not be confirmed; messages were not continued.",
   "input.state.unknown":
     "Whether this was added to the run’s context is unconfirmed",
   "input.restore": "Put back in the editor",

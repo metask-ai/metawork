@@ -3266,6 +3266,21 @@ function decodeTask(value: unknown, path: string): TaskView {
     `${path}.mcpAuthority`,
   );
   const runs = arrayValue(item.runs, `${path}.runs`, decodeRun);
+  for (const run of runs) {
+    for (const input of run.additionalInputs) {
+      if (
+        input.transferredToRunId !== null &&
+        (BigInt(input.transferredToRunId) <= BigInt(run.id) ||
+          !runs.some((target) => target.id === input.transferredToRunId))
+      )
+        fail(path, "input transfer must target a later Run in the same Task");
+      if (input.state === "continuing" && run.terminal?.outcome !== "completed")
+        fail(
+          path,
+          "only a normally completed Run can await input continuation",
+        );
+    }
+  }
   const permissionProfile = enumValue(
     item.permissionProfile,
     `${path}.permissionProfile`,
@@ -6065,6 +6080,8 @@ function decodeAdditionalInputs(
     const item = object(raw, p, [
       "id",
       "afterOutputCount",
+      "transferredToRunId",
+      "continuationReason",
       "operationId",
       "text",
       "redacted",
@@ -6090,6 +6107,8 @@ function decodeAdditionalInputs(
       "adopted",
       "unadopted",
       "unknown",
+      "continuing",
+      "transferred",
     ] as const);
     const adoptedTurn =
       item.adoptedTurn === null
@@ -6097,8 +6116,30 @@ function decodeAdditionalInputs(
         : positiveNumber(item.adoptedTurn, `${p}.adoptedTurn`);
     const order =
       item.order === null ? null : positiveU64WireId(item.order, `${p}.order`);
-    if ((state === "adopted" || state === "unadopted") && sequence === null)
+    if (
+      (state === "adopted" ||
+        state === "unadopted" ||
+        state === "continuing" ||
+        state === "transferred") &&
+      sequence === null
+    )
       fail(p, "a confirmed input requires its receipt");
+    const transferredToRunId =
+      item.transferredToRunId === null
+        ? null
+        : positiveU64WireId(item.transferredToRunId, `${p}.transferredToRunId`);
+    if ((state === "transferred") !== (transferredToRunId !== null))
+      fail(p, "a transferred input requires its target Run");
+    const continuationReason =
+      item.continuationReason === null
+        ? null
+        : enumValue(
+            item.continuationReason,
+            `${p}.continuationReason`,
+            sendInputReasons,
+          );
+    if (continuationReason !== null && state !== "unadopted")
+      fail(p, "only an unadopted input can have a continuation failure");
     if (
       (adoptedTurn === null) !== (order === null) ||
       (adoptedTurn !== null &&
@@ -6121,6 +6162,8 @@ function decodeAdditionalInputs(
       state,
       adoptedTurn,
       order,
+      transferredToRunId,
+      continuationReason,
     };
   });
   if (records.length > 64) fail(path, "too many additional inputs");
