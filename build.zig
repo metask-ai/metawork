@@ -268,11 +268,11 @@ pub fn build(b: *std.Build) void {
     }
     model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{
         .root_module = test_modules.product_control_runtime,
-        .filters = &.{ "complete model metadata", "snapshot serializer", "Automatic Workspace snapshot" },
+        .filters = &.{ "complete model metadata", "snapshot serializer", "Automatic Workspace snapshot", "image settings" },
     })).step);
     model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{
         .root_module = test_modules.bridge,
-        .filters = &.{"complete model metadata"},
+        .filters = &.{ "complete model metadata", "image settings", "Dispatcher validates authority" },
     })).step);
     const task_model_step = b.step("test-task-model-selection", "Run Task model intent, selection and strict Bridge tests");
     task_model_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = test_modules.product_task_persistence })).step);

@@ -177,6 +177,7 @@ pub const ProviderView = struct {
 };
 
 pub const ModelsView = struct {
+    image_generation: MetaskImageView = .{ .catalog_state = .unavailable, .catalog_generation = 0 },
     availability: CatalogState,
     persistence_health: PersistenceHealth,
     providers: []const ProviderView = &.{},

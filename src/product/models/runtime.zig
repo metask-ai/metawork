@@ -268,6 +268,7 @@ pub const Runtime = struct {
             .selection_revision = self.registry.selection_revision,
             .operation = if (self.catalog_attempt == null) .idle else .refreshing_catalog,
             .error_code = if (!self.store_healthy) .persistence_unavailable else self.metask_error,
+            .image_generation = self.imageView(),
             .builtin_provider_presets = builtin_providers.views(),
             .custom_providers = self.registry.views(),
         };

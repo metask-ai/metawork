@@ -3378,3 +3378,83 @@ test("actual interrupted Compact fixture is accepted by the existing snapshot de
   ];
   assert.deepEqual(decodeWorkbenchSnapshot(value), value);
 });
+
+test("image catalog projection remains independent and rejects execution authority", () => {
+  const value = clone(fixture);
+  const imageModel = {
+    ...clone(value.models.providers[0].models[0]),
+    id: "image-model",
+    displayName: "Image model",
+  };
+  const dialogue = clone(value.models.defaultSelection);
+  value.models.imageGeneration = {
+    catalogState: "ready",
+    catalogGeneration: "7",
+    models: [imageModel],
+    selection: null,
+    selectionRevision: "0",
+    selectionAvailable: false,
+    errorCode: "none",
+  };
+  assert.deepEqual(
+    decodeWorkbenchSnapshot(value).models.defaultSelection,
+    dialogue,
+  );
+  value.models.imageGeneration.selection = {
+    sourceId: "metask",
+    modelId: "image-model",
+  };
+  value.models.imageGeneration.selectionRevision = "1";
+  value.models.imageGeneration.selectionAvailable = true;
+  assert.equal(
+    decodeWorkbenchSnapshot(value).models.imageGeneration.selectionAvailable,
+    true,
+  );
+  const ready = clone(value);
+  value.models.imageGeneration.selection = {
+    sourceId: "metask",
+    modelId: "removed-model",
+  };
+  value.models.imageGeneration.selectionAvailable = false;
+  assert.doesNotThrow(() => decodeWorkbenchSnapshot(value));
+  for (const key of [
+    "credential",
+    "bearer",
+    "endpoint",
+    "principalRef",
+    "authorizationGeneration",
+    "protocol",
+    "sourceGeneration",
+  ]) {
+    const bad = clone(ready);
+    bad.models.imageGeneration[key] = "forbidden";
+    assert.throws(() => decodeWorkbenchSnapshot(bad));
+  }
+  for (const mutate of [
+    (v) => {
+      delete v.models.imageGeneration;
+    },
+    (v) => {
+      v.models.imageGeneration.selection.sourceId = "custom";
+    },
+    (v) => {
+      v.models.imageGeneration.selection = null;
+    },
+    (v) => {
+      v.models.imageGeneration.catalogGeneration = "0";
+    },
+    (v) => {
+      v.models.imageGeneration.selectionRevision = "0";
+    },
+    (v) => {
+      v.models.imageGeneration.catalogState = "needs_authentication";
+    },
+    (v) => {
+      v.models.imageGeneration.models.push(clone(imageModel));
+    },
+  ]) {
+    const bad = clone(ready);
+    mutate(bad);
+    assert.throws(() => decodeWorkbenchSnapshot(bad));
+  }
+});
