@@ -69,6 +69,28 @@ pub fn build(b: *std.Build) void {
         test_modules.app.linkFramework("AppKit", .{});
     }
     const lifecycle_fixture = createLifecycleFixture(b, test_modules, bundle.link_libc);
+    const image_unit = b.createModule(.{
+        .root_source_file = b.path("src/agent/generate_image.zig"),
+        .target = test_modules.agent.resolved_target,
+        .optimize = test_modules.agent.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    image_unit.addImport("agent_http_transport", test_modules.agent_http_transport);
+    const image_tests = b.addTest(.{ .name = "metawork-generate-image-unit", .root_module = image_unit });
+    const image_unit_run = b.addRunArtifact(image_tests);
+    b.step("test-generate-image-unit", "Run GenerateImage codec and argument tests").dependOn(&image_unit_run.step);
+    artifacts.tests.step.dependOn(&image_unit_run.step);
+    const image_codec_unit = b.createModule(.{
+        .root_source_file = b.path("src/agent/image_generation.zig"),
+        .target = test_modules.agent.resolved_target,
+        .optimize = test_modules.agent.optimize,
+        .link_libc = bundle.link_libc,
+    });
+    image_codec_unit.addImport("agent_http_transport", test_modules.agent_http_transport);
+    const image_codec_tests = b.addTest(.{ .name = "metawork-image-generation-unit", .root_module = image_codec_unit });
+    const image_codec_run = b.addRunArtifact(image_codec_tests);
+    b.step("test-image-generation-unit", "Run bounded Images Generation tests").dependOn(&image_codec_run.step);
+    artifacts.tests.step.dependOn(&image_codec_run.step);
     test_modules.app.addImport("lifecycle_fixture", lifecycle_fixture);
     test_modules.bridge.addImport("lifecycle_fixture", lifecycle_fixture);
     const window_chrome_tests = b.addTest(.{
@@ -496,6 +518,7 @@ const WiredModules = struct {
     agent: *std.Build.Module,
     agent_model_binding: *std.Build.Module,
     agent_completion: *std.Build.Module,
+    agent_http_transport: *std.Build.Module,
     product_permission_review: *std.Build.Module,
     agent_session: *std.Build.Module,
     agent_catalog: *std.Build.Module,
@@ -975,6 +998,11 @@ fn wireAgentCore(
         .optimize = root_module.optimize,
     });
     agent_model_binding.addImport("agent_protocol", agent_protocol);
+    const agent_http_transport = b.createModule(.{
+        .root_source_file = b.path("src/agent/completion/transport.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
     const agent_completion = b.createModule(.{
         .root_source_file = b.path("src/agent/completion.zig"),
         .target = target,
@@ -982,6 +1010,7 @@ fn wireAgentCore(
     });
     agent_completion.addImport("agent_protocol", agent_protocol);
     agent_completion.addImport("agent_model_binding", agent_model_binding);
+    agent_completion.addImport("agent_http_transport", agent_http_transport);
     const product_permission_review = b.createModule(.{
         .root_source_file = b.path("src/product/permission/review.zig"),
         .target = target,
@@ -1068,6 +1097,7 @@ fn wireAgentCore(
     session.addImport("app_manifest_zon", existingImport(runner, "app_manifest_zon"));
     session.addImport("agent_protocol", agent_protocol);
     session.addImport("agent_model_binding", agent_model_binding);
+    session.addImport("agent_http_transport", agent_http_transport);
     session.addImport("event_pump", event_pump);
     session.addImport("agent_catalog", agent_catalog);
     session.addImport("agent_mcp_runtime", agent_mcp_runtime);
@@ -2008,6 +2038,7 @@ fn wireAgentCore(
         .agent = agent,
         .agent_model_binding = agent_model_binding,
         .agent_completion = agent_completion,
+        .agent_http_transport = agent_http_transport,
         .product_permission_review = product_permission_review,
         .agent_session = session,
         .agent_catalog = agent_catalog,

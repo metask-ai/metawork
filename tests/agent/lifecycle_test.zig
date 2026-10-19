@@ -20,6 +20,33 @@ const cancelSession = fixture.cancelSession;
 const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
+
+test "GenerateImage isolated initializer registers one fixed tool without changing product init" {
+    const Http = struct {
+        fn perform(_: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, _: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
+            return error.Unexpected;
+        }
+    };
+    fake_core.reset();
+    const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &fake_api, .{ .max_sessions = 1 }, .{
+        .transport = .{ .perform_fn = Http.perform },
+    });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    try std.testing.expect(fake_core.image_tool_seen);
+    const session = try openSession(runtime);
+    try std.testing.expectEqual(@as(usize, 11), fake_core.last_allowed_tool_count);
+    try std.testing.expectEqualStrings("GenerateImage", std.mem.sliceTo(&fake_core.last_allowed_tool_names[10], 0));
+    const run_id = try session.prepareRun(.{ .text = "ordinary text remains available" });
+    var run = try session.beginRun(run_id);
+    defer run.deinit();
+    var terminal = run.execute();
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, null), terminal.failure);
+    try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
+}
 const deinitTestComposition = fixture.deinitTestComposition;
 const createTestComposition = fixture.createTestComposition;
 const createTestRuntime = fixture.createTestRuntime;

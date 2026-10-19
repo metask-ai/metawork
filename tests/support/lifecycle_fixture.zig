@@ -301,6 +301,7 @@ pub const FakeCore = struct {
     buffer_releases: usize = 0,
     credential_seen: bool = false,
     zero_host_tools_seen: bool = false,
+    image_tool_seen: bool = false,
     builtin_allowlist_seen: bool = false,
     last_allowed_tool_count: usize = 0,
     last_allowed_tool_names: [16][32]u8 = [_][32]u8{.{0} ** 32} ** 16,
@@ -879,6 +880,12 @@ pub fn runtimeCreate(
     fake_core.lock();
     defer fake_core.unlock();
     fake_core.runtime_created += 1;
+    fake_core.image_tool_seen = if (config.?.host_tools) |tools|
+        config.?.host_tool_count == 1 and
+            std.mem.eql(u8, sdk.borrowedBytes(tools[0].name) catch "", "GenerateImage") and
+            tools[0].execute != null and tools[0].release_result != null
+    else
+        false;
     fake_core.zero_host_tools_seen = config.?.host_tools == null and
         config.?.host_tool_count == 0 and
         config.?.builtin_tools != null and
