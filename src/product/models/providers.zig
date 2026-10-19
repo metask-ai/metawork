@@ -100,6 +100,7 @@ pub const Registry = struct {
     metask_protocol: ?contract.Protocol = null,
     metask_source_generation: u64 = 0,
     metask_selection_revision: u64 = 0,
+    metask_image_intent: ?MetaskImageIntent = null,
     default_source_id: []u8 = &.{},
     default_model_id: []u8 = &.{},
     selection_revision: u64 = 0,
@@ -121,6 +122,7 @@ pub const Registry = struct {
         self.model_view_storage.deinit(self.allocator);
         self.freeSelectionText(&self.metask_principal_ref);
         self.freeSelectionText(&self.metask_model_id);
+        self.freeImageIntent();
         self.freeSelectionText(&self.default_source_id);
         self.freeSelectionText(&self.default_model_id);
         self.* = undefined;
@@ -133,6 +135,8 @@ pub const Registry = struct {
         result.metask_source_generation = self.metask_source_generation;
         result.metask_selection_revision = self.metask_selection_revision;
         result.selection_revision = self.selection_revision;
+        if (self.metask_image_intent) |intent|
+            try result.configureMetaskImage(intent.principal_ref, intent.model_id, intent.selection_revision);
         try result.pending_credential_deletions.ensureTotalCapacity(
             self.allocator,
             self.pending_credential_deletions.items.len,
@@ -639,6 +643,50 @@ pub const Registry = struct {
         }
     }
 
+    /// Borrowed public intent. A null model records an explicit clear without
+    /// resetting its revision; this is not a credential or execution binding.
+    pub const MetaskImageIntent = struct {
+        principal_ref: []const u8,
+        model_id: ?[]const u8,
+        selection_revision: u64,
+    };
+
+    pub fn metaskImageIntent(self: *const Registry) ?MetaskImageIntent {
+        return self.metask_image_intent;
+    }
+
+    pub fn configureMetaskImage(
+        self: *Registry,
+        principal_ref: []const u8,
+        model_id: ?[]const u8,
+        selection_revision: u64,
+    ) (std.mem.Allocator.Error || Error)!void {
+        if (!validImageIdentity(principal_ref, contract.Limits.principal_ref_bytes) or
+            selection_revision == 0)
+            return error.InvalidData;
+        if (model_id) |model|
+            if (!validImageIdentity(model, contract.Limits.model_id_bytes)) return error.InvalidData;
+        if (self.metask_image_intent) |previous|
+            if (selection_revision <= previous.selection_revision) return error.InvalidData;
+        const principal = try self.allocator.dupe(u8, principal_ref);
+        errdefer self.allocator.free(principal);
+        const model = if (model_id) |value| try self.allocator.dupe(u8, value) else null;
+        self.freeImageIntent();
+        self.metask_image_intent = .{
+            .principal_ref = principal,
+            .model_id = model,
+            .selection_revision = selection_revision,
+        };
+    }
+
+    fn freeImageIntent(self: *Registry) void {
+        if (self.metask_image_intent) |intent| {
+            self.allocator.free(intent.principal_ref);
+            if (intent.model_id) |model| self.allocator.free(model);
+        }
+        self.metask_image_intent = null;
+    }
+
     pub fn defaultSelection(self: *const Registry) ?contract.ModelRef {
         if (self.default_source_id.len == 0) return null;
         return .{
@@ -1071,10 +1119,24 @@ const CanonicalProviderWire = struct {
 const CanonicalWire = struct {
     schema: u32,
     metask: ?MetaskIntentWire,
+    metask_image: ?Registry.MetaskImageIntent = null,
     default_selection: ?ModelRefWire,
     selection_revision: u64,
     pending_credential_deletions: []const []const u8,
     custom_providers: []const CanonicalProviderWire,
+
+    pub fn jsonStringify(self: CanonicalWire, writer: anytype) !void {
+        try writer.beginObject();
+        inline for (std.meta.fields(CanonicalWire)) |field| {
+            // Preserve the existing canonical shape when image intent is absent,
+            // including all other null fields and the existing byte budget.
+            if (!std.mem.eql(u8, field.name, "metask_image") or self.metask_image != null) {
+                try writer.objectField(field.name);
+                try writer.write(@field(self, field.name));
+            }
+        }
+        try writer.endObject();
+    }
 };
 
 pub fn encodeAlloc(
@@ -1124,6 +1186,7 @@ pub fn encodeAlloc(
     const wire: CanonicalWire = .{
         .schema = 2,
         .metask = metask,
+        .metask_image = registry.metaskImageIntent(),
         .default_selection = default_selection,
         .selection_revision = registry.selection_revision,
         .pending_credential_deletions = registry.pending_credential_deletions.items,
@@ -1160,6 +1223,8 @@ pub fn decode(
     var result = Registry.init(allocator);
     errdefer result.deinit();
     result.selection_revision = wire.selection_revision;
+    if (wire.metask_image) |intent|
+        try result.configureMetaskImage(intent.principal_ref, intent.model_id, intent.selection_revision);
     if (wire.metask) |metask| {
         if ((wire.schema == 1) != (metask.api_key_id != null))
             return error.InvalidData;
@@ -1270,6 +1335,130 @@ test "canonical decode preserves allocation exhaustion" {
             "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}",
         ),
     );
+}
+
+test "legacy Models canonical remains image-unset and preserves its shape" {
+    const canonical = "{\"schema\":2,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}";
+    var registry = try decode(std.testing.allocator, canonical);
+    defer registry.deinit();
+    try std.testing.expect(registry.metaskImageIntent() == null);
+    const encoded = try encodeAlloc(std.testing.allocator, &registry);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualStrings(canonical, encoded);
+    var migrated = try decode(std.testing.allocator, "{\"schema\":1,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[]}");
+    defer migrated.deinit();
+    try std.testing.expect(migrated.metaskImageIntent() == null);
+}
+
+test "image intent clone clear restart and account replacement preserve dialogue and custom Providers" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.configureMetask("principal-a", "chat", .anthropic_messages, 3, 5, null);
+    try registry.selectMetaskDefault(7);
+    try testCreate(&registry, .{
+        .provider_id = "custom",
+        .spec = .{
+            .display_name = "Custom",
+            .protocol = .openai_responses,
+            .normalized_base_url = "https://example.com/v1/responses",
+        },
+        .credential_slot = .{ .id = "custom" },
+        .model = .{ .id = "custom-chat" },
+    });
+    try registry.configureMetaskImage("principal-a", "image-a", 1);
+    var cloned = try registry.clone();
+    defer cloned.deinit();
+    try cloned.configureMetaskImage(cloned.metaskImageIntent().?.principal_ref, null, 2);
+    try std.testing.expectEqualStrings("image-a", registry.metaskImageIntent().?.model_id.?);
+    const encoded = try encodeAlloc(std.testing.allocator, &cloned);
+    defer std.testing.allocator.free(encoded);
+    var restored = try decode(std.testing.allocator, encoded);
+    defer restored.deinit();
+    const cleared = restored.metaskImageIntent().?;
+    try std.testing.expectEqualStrings("principal-a", cleared.principal_ref);
+    try std.testing.expect(cleared.model_id == null);
+    try std.testing.expectEqual(@as(u64, 2), cleared.selection_revision);
+    try std.testing.expectError(error.InvalidData, restored.configureMetaskImage("principal-a", "image-a", 1));
+    try std.testing.expectError(error.InvalidData, restored.configureMetaskImage("principal-b", "image-b", 2));
+    try restored.configureMetaskImage("principal-b", "image-b", 3);
+    const replacement = try encodeAlloc(std.testing.allocator, &restored);
+    defer std.testing.allocator.free(replacement);
+    var restarted = try decode(std.testing.allocator, replacement);
+    defer restarted.deinit();
+    const selected = restarted.metaskImageIntent().?;
+    try std.testing.expectEqualStrings("principal-b", selected.principal_ref);
+    try std.testing.expectEqualStrings("image-b", selected.model_id.?);
+    try std.testing.expectEqual(@as(u64, 3), selected.selection_revision);
+    try std.testing.expectEqualStrings("principal-a", restarted.metaskIntent().?.principal_ref);
+    try std.testing.expectEqualStrings("chat", restarted.metaskIntent().?.model_id);
+    try std.testing.expectEqual(@as(u64, 5), restarted.metaskIntent().?.selection_revision);
+    try std.testing.expectEqual(@as(u64, 3), restarted.metaskIntent().?.source_generation);
+    try std.testing.expectEqualStrings("chat", restarted.defaultSelection().?.model_id);
+    try std.testing.expectEqual(@as(u64, 7), restarted.selection_revision);
+    try std.testing.expectEqualStrings("custom-chat", restarted.views()[0].models[0].id);
+}
+
+test "image intent rejects malformed durable records and invalid identity without mutation" {
+    const invalid_records = [_][]const u8{
+        "{\"principal_ref\":\"\",\"model_id\":\"image\",\"selection_revision\":1}",
+        "{\"principal_ref\":\"p\",\"model_id\":\"\",\"selection_revision\":1}",
+        "{\"principal_ref\":\"p\",\"model_id\":null,\"selection_revision\":0}",
+        "{\"principal_ref\":\"p\",\"model_id\":\"image\",\"selection_revision\":0}",
+        "{\"principal_ref\":\"p\",\"model_id\":\"image\",\"selection_revision\":-1}",
+        "{\"principal_ref\":\"p\",\"selection_revision\":1}",
+        "{\"principal_ref\":\"p\",\"model_id\":\"image\",\"selection_revision\":1,\"endpoint\":\"https://example.com\"}",
+        "{\"principal_ref\":\"p\\n\",\"model_id\":\"image\",\"selection_revision\":1}",
+    };
+    for (invalid_records) |record| {
+        const input = try std.fmt.allocPrint(std.testing.allocator, "{{\"schema\":2,\"metask\":null,\"default_selection\":null,\"selection_revision\":0,\"pending_credential_deletions\":[],\"custom_providers\":[],\"metask_image\":{s}}}", .{record});
+        defer std.testing.allocator.free(input);
+        try std.testing.expectError(error.InvalidData, decode(std.testing.allocator, input));
+    }
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.configureMetaskImage("principal", "image", 1);
+    const too_long = [_]u8{'a'} ** (contract.Limits.model_id_bytes + 1);
+    for ([_][]const u8{ "", "bad\n", "\xff", &too_long }) |invalid|
+        try std.testing.expectError(error.InvalidData, registry.configureMetaskImage("principal", invalid, 2));
+    const principal_too_long = [_]u8{'a'} ** (contract.Limits.principal_ref_bytes + 1);
+    for ([_][]const u8{ "", "bad\x00", "\xff", &principal_too_long }) |invalid|
+        try std.testing.expectError(error.InvalidData, registry.configureMetaskImage(invalid, "image", 2));
+    try std.testing.expectEqualStrings("image", registry.metaskImageIntent().?.model_id.?);
+    try std.testing.expectEqual(@as(u64, 1), registry.metaskImageIntent().?.selection_revision);
+}
+
+test "image intent allocation failures preserve previous selection and owned copies" {
+    for (0..2) |offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var registry = Registry.init(failing.allocator());
+        defer registry.deinit();
+        try registry.configureMetaskImage("principal", "image", 1);
+        failing.fail_index = failing.alloc_index + offset;
+        try std.testing.expectError(error.OutOfMemory, registry.configureMetaskImage("replacement", "new-image", 2));
+        try std.testing.expectEqualStrings("principal", registry.metaskImageIntent().?.principal_ref);
+        try std.testing.expectEqualStrings("image", registry.metaskImageIntent().?.model_id.?);
+        try std.testing.expectEqual(@as(u64, 1), registry.metaskImageIntent().?.selection_revision);
+    }
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var registry = Registry.init(allocator);
+            defer registry.deinit();
+            try registry.configureMetaskImage("principal", "image", 1);
+            var cloned = try registry.clone();
+            defer cloned.deinit();
+            const bytes = try encodeAlloc(allocator, &cloned);
+            defer allocator.free(bytes);
+            var restored = try decode(allocator, bytes);
+            defer restored.deinit();
+            try std.testing.expectEqualStrings("image", restored.metaskImageIntent().?.model_id.?);
+        }
+    }.run, .{});
+}
+
+fn validImageIdentity(value: []const u8, max_bytes: usize) bool {
+    if (value.len == 0 or value.len > max_bytes or !std.unicode.utf8ValidateSlice(value)) return false;
+    for (value) |byte| if (std.ascii.isControl(byte)) return false;
+    return true;
 }
 
 fn providerHasModel(provider: *const OwnedProvider, model_id: []const u8) bool {
