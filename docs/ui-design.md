@@ -1026,6 +1026,7 @@ Workspace 列表、打开、迁移、清理和重新授权不属于 Settings sur
 - `persistenceHealth = recovery_required` 显示单一显式恢复确认面；文案必须说明 Host 会先尝试恢复合法配置，只有文件缺失或确认损坏时才清空，不得无条件承诺删除 Provider 或模型配置。操作成功后完全以新 snapshot 为准；失败保留恢复面，不由 Renderer 猜测磁盘结果或自动重放；
 - 进入该设置 route只渲染 Host已提交的 Models projection，不触发隐藏同步；用户显式点击 `重新同步`时才刷新 Metask provider目录。已提交 intent在同步期间保持可读，`重新同步`只用于失败恢复或页面保持打开期间发生的 Metask外部变更，不能成为打开下拉框或切换默认值的前置步骤；
 - 页面以一组连续的 `Provider → 默认模型` 控件显示并修改 global default，并在组头持续显示当前已提交的 `Provider · Model`；Provider 限定 source authority，只有最终选择默认模型时才提交完整 `ModelRef`。Models 是唯一允许提交 global default 的产品页面；
+- 正式生图设置入口与 Host Tool 共同通过发布验收后开放；在此之前只独立验证组件，不按登录或模型就绪状态提前显露入口。`Models` 在对话默认配置之外提供独立的“生图模型”区域，复用现有选择器、按钮和目录同步操作；只列出 Host 发布的 Metask 图片候选，显式选择或清除，不提供生成、连接测试、价格估算、endpoint 或 credential 输入。区域分别呈现需登录、同步中、目录失败、未选择、无候选、已选择及所选模型不可用状态；失效选择保留模型标识且可显式清除。保存期间禁用重复提交；失败提示核对当前设置，选择状态始终以 canonical snapshot 为准，不自动重放。持续说明可能收费、更改对下一次 Run 生效及仅保存 PNG，不显示内部 revision/generation，也不把配置成功表述为工具已启用或图片已生成；
 - Metask 的 credential authority 由 OAuth 会话隐式提供，Models 页面不显示或选择 API Key；user-managed Provider 的已保存 credential 只在独立 Providers 页面管理，Models 页面也不重复投影凭据步骤；
 - Metask protocol 固定为 Anthropic Messages，Renderer 不提供 protocol、base URL 或 credential 编辑入口；
 - 切换 Provider 只准备并收窄当前模型候选，不会隐式替换 global default，也不改写 durable Task 历史或正在运行的 Session；

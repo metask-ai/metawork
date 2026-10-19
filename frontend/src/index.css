@@ -9714,3 +9714,61 @@ html[data-metawork-window-maximized="true"] .window-control-restore {
 .additional-input {
   min-width: 0;
 }
+
+.settings-image-content {
+  padding: 18px;
+}
+.settings-image-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.settings-image-heading p {
+  margin: 0;
+  color: var(--settings-muted);
+  font-size: var(--text-control);
+  line-height: 1.6;
+}
+.settings-image-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  margin-top: 16px;
+}
+.settings-image-trigger {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+}
+.settings-image-status,
+.settings-image-note,
+.settings-image-error {
+  margin: 12px 0 0;
+  font-size: var(--text-control);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.settings-image-status {
+  color: var(--settings-ink);
+}
+.settings-image-note {
+  color: var(--settings-muted);
+}
+.settings-image-error,
+.settings-image-status[data-unavailable] {
+  color: var(--ui-content-error);
+}
+@media (max-width: 640px) {
+  .settings-image-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .settings-image-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings-image-controls > button {
+    justify-self: start;
+  }
+}

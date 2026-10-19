@@ -28,6 +28,7 @@ pub const RunInput = runtime.RunInput;
 pub const Submission = runtime.Submission;
 pub const InputSubmission = runtime.InputSubmission;
 pub const InputAction = runtime.InputAction;
+pub const OwnedImageExecution = state.OwnedImageExecution;
 pub const RunError = runtime.RunError;
 pub const MultimodalAttachment = runtime.MultimodalAttachment;
 pub const PermissionChoice = runtime.PermissionChoice;

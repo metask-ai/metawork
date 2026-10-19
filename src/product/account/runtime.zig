@@ -1930,13 +1930,23 @@ test "authorization lease requires authenticated matching unexpired credentials"
     runtime.commit(&authenticated);
 
     var lease = (try runtime.authorizationLease()).?;
+    defer lease.deinit();
     const generation = lease.authorization_generation;
-    lease.deinit();
     try std.testing.expect(runtime.acceptsAuthorizationGeneration(generation));
 
+    // Run preparation must call the lease capability at admission. Neither
+    // cached authenticated state nor a matching generation proves the clock
+    // still permits a new consumer, and no notification is needed to expire it.
+    platform.now_unix_seconds = null;
+    try std.testing.expect((try runtime.authorizationLease()) == null);
+    try std.testing.expect(!runtime.acceptsAuthorizationGeneration(generation));
     platform.now_unix_seconds = 101;
     try std.testing.expect((try runtime.authorizationLease()) == null);
     try std.testing.expect(!runtime.acceptsAuthorizationGeneration(generation));
+    try std.testing.expectEqual(contract.AccountState.authenticated, runtime.view().state);
+    try std.testing.expectEqual(generation, runtime.authorization_generation);
+    // Already handed-off owned credentials retain their independent lifetime.
+    try std.testing.expectEqualStrings("access-token", lease.access_token);
 }
 
 test "incomplete profile identity still issues an authorization lease" {

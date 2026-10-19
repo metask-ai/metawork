@@ -123,6 +123,15 @@ export const initialWorkbenchState: WorkbenchState = {
       },
     },
     models: {
+      imageGeneration: {
+        catalogState: "unavailable",
+        catalogGeneration: "0",
+        models: [],
+        selection: null,
+        selectionRevision: "0",
+        selectionAvailable: false,
+        errorCode: "persistence_unavailable",
+      },
       availability: "needs_authentication",
       persistenceHealth: "unavailable",
       providers: [],

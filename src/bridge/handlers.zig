@@ -40,6 +40,11 @@ pub const ConfigureMetaskSelection = struct {
     expectedMetaskSelectionRevision: []const u8,
     expectedCatalogGeneration: []const u8,
 };
+pub const ConfigureMetaskImageSelection = struct {
+    modelId: ?[]const u8,
+    expectedSelectionRevision: []const u8,
+    expectedCatalogGeneration: []const u8,
+};
 pub const ModelCapabilities = struct {
     textInput: ?bool = null,
     audioInput: ?bool = null,
@@ -1041,4 +1046,22 @@ test "complete model metadata incoming declarations retain capabilities and toke
     try std.testing.expectEqual(@as(?bool, true), parsed.value.capabilities.output.text);
     inline for (.{ "{\"limits\":{}}", "{\"capabilities\":{\"output\":{\"audio\":\"true\"}}}" }) |invalid|
         try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ModelMetadata, invalid));
+}
+
+test "image settings consume only the exact nullable model intent and CAS fields" {
+    var selected = try parsePayload(ConfigureMetaskImageSelection, "{\"modelId\":\"image-1\",\"expectedSelectionRevision\":\"0\",\"expectedCatalogGeneration\":\"7\"}");
+    defer selected.deinit();
+    try std.testing.expectEqualStrings("image-1", selected.value.modelId.?);
+    var cleared = try parsePayload(ConfigureMetaskImageSelection, "{\"modelId\":null,\"expectedSelectionRevision\":\"1\",\"expectedCatalogGeneration\":\"7\"}");
+    defer cleared.deinit();
+    try std.testing.expect(cleared.value.modelId == null);
+    inline for (.{
+        "{\"expectedSelectionRevision\":\"1\",\"expectedCatalogGeneration\":\"7\"}",
+        "{\"modelId\":42,\"expectedSelectionRevision\":\"1\",\"expectedCatalogGeneration\":\"7\"}",
+        "{\"modelId\":null,\"expectedSelectionRevision\":1,\"expectedCatalogGeneration\":\"7\"}",
+        "{\"modelId\":null,\"expectedSelectionRevision\":\"1\",\"expectedCatalogGeneration\":\"7\",\"bearer\":\"forbidden\"}",
+        "{\"modelId\":null,\"expectedSelectionRevision\":\"1\",\"expectedCatalogGeneration\":\"7\",\"endpoint\":\"https://example.test\"}",
+        "{\"modelId\":null,\"expectedSelectionRevision\":\"1\",\"expectedCatalogGeneration\":\"7\",\"principalRef\":\"other-account\"}",
+        "{\"modelId\":null,\"expectedSelectionRevision\":\"1\",\"expectedCatalogGeneration\":\"7\",\"sourceId\":\"custom\"}",
+    }) |payload| try std.testing.expectError(error.InvalidBridgePayload, parsePayload(ConfigureMetaskImageSelection, payload));
 }

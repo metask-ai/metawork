@@ -1170,6 +1170,7 @@ pub const Runtime = struct {
     canonical_user_home: ?[]u8,
     custom_provider_capabilities: CustomProviderCapabilities,
     completion_factory: CompletionFactory,
+    image_run_preparation: ?control_ports.ImageRunPreparation = null,
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -2710,6 +2711,21 @@ pub const Runtime = struct {
         return result;
     }
 
+    pub fn configureMetaskImageSelection(
+        self: *Runtime,
+        command: models_contract.ConfigureMetaskImageSelectionCommand,
+    ) models_contract.CommandResult {
+        if (self.shutting_down) return .rejected(.operation_in_progress);
+        // This is a metadata mutation. Account's committed identity supplies
+        // ownership; an execution authorization lease is acquired per Run.
+        const account = self.account_projection.view();
+        if (account.state != .authenticated or account.account_id.len == 0)
+            return .rejected(.authorization_unavailable);
+        const result = self.custom_providers.configureMetaskImageSelection(account.account_id, command);
+        if (result.accepted) self.bumpRevision();
+        return result;
+    }
+
     pub fn submitCustomProviderCommand(
         self: *Runtime,
         command: models_contract.CustomProviderCommand,
@@ -3961,6 +3977,10 @@ pub const Runtime = struct {
         var model_target = try self.resolveTaskRunModel(task.id());
         defer if (model_target) |*target| target.deinit();
         var run_effects = self.taskRuntimeOperationEffects();
+        const image_workspace = try self.workspace.taskRunAuthority(workspace.id, workspace.epoch);
+        var image = self.prepareRunImage(image_workspace);
+        defer if (image) |*value| value.deinit();
+        run_effects.image_execution = &image;
         run_effects.model_target = if (model_target) |*target| target.input() else null;
         var run = try self.task_runtime.startRun(
             task.id(),
@@ -4888,6 +4908,9 @@ pub const Runtime = struct {
             .preparation = &order_preparation,
         };
         var operation_effects = self.taskRuntimeOperationEffects();
+        var image = self.prepareRunImage(workspace);
+        defer if (image) |*value| value.deinit();
+        operation_effects.image_execution = &image;
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
         if (staged.borrow != null) {
             acceptance_context = .{
@@ -6626,21 +6649,9 @@ pub const Runtime = struct {
                 @tagName(provider.catalog_state),
             }) catch return error.SnapshotTooLarge;
             try self.projectedJsonValue(writer, provider.principal_ref);
-            writer.writeAll(",\"models\":[") catch return error.SnapshotTooLarge;
-            for (provider.models, 0..) |model, index| {
-                if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
-                writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, model.id);
-                writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
-                try self.projectedJsonValue(writer, model.display_name);
-                writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
-                try writeModelMetadata(writer, model.metadata);
-                writer.print(",\"metadataProvenance\":\"{s}\"", .{
-                    @tagName(model.metadata_provenance),
-                }) catch return error.SnapshotTooLarge;
-                writer.writeByte('}') catch return error.SnapshotTooLarge;
-            }
-            writer.print("],\"catalogGeneration\":\"{d}\",\"sourceGeneration\":\"{d}\",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
+            writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
+            try self.writeCatalogModels(writer, provider.models);
+            writer.print(",\"catalogGeneration\":\"{d}\",\"sourceGeneration\":\"{d}\",\"errorCode\":\"{s}\",\"safeDiagnostic\":", .{
                 provider.catalog_generation,
                 provider.source_generation,
                 @tagName(provider.error_code),
@@ -6674,7 +6685,9 @@ pub const Runtime = struct {
             try self.projectedJsonValue(writer, preset.documentation_url);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         }
-        writer.writeAll("],\"customProviders\":[") catch return error.SnapshotTooLarge;
+        writer.writeAll("],\"imageGeneration\":") catch return error.SnapshotTooLarge;
+        try self.writeImageGenerationModels(writer, view.image_generation);
+        writer.writeAll(",\"customProviders\":[") catch return error.SnapshotTooLarge;
         try self.writeCustomProviders(writer, view.custom_providers);
         writer.writeAll("]}") catch return error.SnapshotTooLarge;
     }
@@ -6691,6 +6704,31 @@ pub const Runtime = struct {
             try self.projectedJsonValue(writer, model_ref.model_id);
             writer.writeByte('}') catch return error.SnapshotTooLarge;
         } else writer.writeAll("null") catch return error.SnapshotTooLarge;
+    }
+
+    fn writeCatalogModels(self: *Runtime, writer: *std.Io.Writer, models: []const models_contract.ModelView) Error!void {
+        writer.writeByte('[') catch return error.SnapshotTooLarge;
+        for (models, 0..) |model, index| {
+            if (index != 0) writer.writeByte(',') catch return error.SnapshotTooLarge;
+            writer.writeAll("{\"id\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, model.id);
+            writer.writeAll(",\"displayName\":") catch return error.SnapshotTooLarge;
+            try self.projectedJsonValue(writer, model.display_name);
+            writer.writeAll(",\"metadata\":") catch return error.SnapshotTooLarge;
+            try writeModelMetadata(writer, model.metadata);
+            writer.print(",\"metadataProvenance\":\"{s}\"}}", .{@tagName(model.metadata_provenance)}) catch return error.SnapshotTooLarge;
+        }
+        writer.writeByte(']') catch return error.SnapshotTooLarge;
+    }
+
+    fn writeImageGenerationModels(self: *Runtime, writer: *std.Io.Writer, view: models_contract.MetaskImageView) Error!void {
+        writer.print("{{\"catalogState\":\"{s}\",\"catalogGeneration\":\"{d}\",\"selectionRevision\":\"{d}\",\"selectionAvailable\":{},\"errorCode\":\"{s}\",\"selection\":", .{
+            @tagName(view.catalog_state), view.catalog_generation, view.selection_revision, view.selection_available, @tagName(view.error_code),
+        }) catch return error.SnapshotTooLarge;
+        try self.writeOptionalModelRef(writer, view.selection);
+        writer.writeAll(",\"models\":") catch return error.SnapshotTooLarge;
+        try self.writeCatalogModels(writer, view.models);
+        writer.writeAll("}") catch return error.SnapshotTooLarge;
     }
 
     fn writeCustomProviders(
@@ -7904,13 +7942,13 @@ pub const Runtime = struct {
         context: *anyopaque,
         value: []const u8,
         max: usize,
-        sensitive: []const u8,
+        sensitive: []const []const u8,
         reclaimable: usize,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})!task_runtime.ProjectedText {
         const self: *Runtime = @ptrCast(@alignCast(context));
         std.debug.assert(reclaimable <= self.projection_bytes);
         self.projection_bytes -= reclaimable;
-        const projected = self.copyProjected(value, max, sensitive) catch |err|
+        const projected = self.copyProjectedSecrets(value, max, sensitive) catch |err|
             return restore: {
                 self.projection_bytes += reclaimable;
                 break :restore switch (err) {
@@ -8815,13 +8853,22 @@ pub const Runtime = struct {
         max: usize,
         credential: []const u8,
     ) Error!ProjectedCopy {
+        return self.copyProjectedSecrets(value, max, &.{credential});
+    }
+
+    fn copyProjectedSecrets(
+        self: *Runtime,
+        value: []const u8,
+        max: usize,
+        credentials: []const []const u8,
+    ) Error!ProjectedCopy {
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(scratch);
         const result = sanitizeInto(
             scratch,
             value,
-            credential,
+            credentials,
         );
         return .{
             .value = try self.copyBounded(scratch[0..result.len], max),
@@ -8843,7 +8890,7 @@ pub const Runtime = struct {
         const result = sanitizeInto(
             scratch,
             value,
-            credential,
+            &.{credential},
         );
         try self.replaceTracked(target, scratch[0..result.len], max);
         return result;
@@ -9095,7 +9142,7 @@ pub const Runtime = struct {
         const result = sanitizeInto(
             &record.detail,
             permission.arguments_json,
-            credential,
+            &.{credential},
         );
         record.detail_len = result.len;
         record.detail_truncated = result.truncated;
@@ -9154,9 +9201,23 @@ pub const Runtime = struct {
         };
     }
 
+    pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {
+        self.image_run_preparation = preparation;
+    }
+
+    fn prepareRunImage(self: *Runtime, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
+        const preparation = self.image_run_preparation orelse return null;
+        const image = preparation.prepare(workspace) orelse return null;
+        // Scrub facts written before this newly acquired credential was known.
+        self.redactAllProductProjectionsNoFail(image.candidate.input().bearer);
+        return image;
+    }
+
     pub fn modelsManagement(self: *Runtime) control_ports.ModelsManagement {
         return .{
             .context = self,
+            .image_view_fn = controlImageView,
+            .prepare_image_candidate_fn = controlPrepareImageCandidate,
             .start_custom_providers_fn = controlStartCustomProviders,
             .start_custom_providers_unavailable_fn = controlStartCustomProvidersUnavailable,
             .stop_custom_providers_fn = controlStopCustomProviders,
@@ -9424,6 +9485,12 @@ fn controlStopCustomProviders(context: *anyopaque) void {
 }
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
+}
+fn controlImageView(context: *anyopaque) models_contract.MetaskImageView {
+    return controlOwner(context).custom_providers.imageView();
+}
+fn controlPrepareImageCandidate(context: *anyopaque, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
+    return controlOwner(context).custom_providers.prepareImageCandidate(input);
 }
 fn controlCreateCustomProvider(context: *anyopaque, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
     return controlOwner(context).createCustomProviderWithCredential(secret, spec);
@@ -9760,7 +9827,7 @@ fn commitTerminal(
         const diagnostic_projection = sanitizeInto(
             run.terminal_diagnostic,
             diagnostic,
-            run.redaction_secret,
+            &run.redactionSecrets(),
         );
         run.terminal_payload = .{
             .exclude_on_product_terminal = false,
@@ -9917,12 +9984,20 @@ const SanitizeResult = struct {
     redacted: bool,
 };
 
-fn sanitizeInto(destination: []u8, value: []const u8, secret: []const u8) SanitizeResult {
+fn sanitizeInto(destination: []u8, value: []const u8, secrets: []const []const u8) SanitizeResult {
     var read: usize = 0;
     var write: usize = 0;
     var redacted = false;
     while (read < value.len) {
-        if (credentialEndAtCodepoint(value, read, secret)) |redaction_end| {
+        var match_end: usize = 0;
+        var cursor = read;
+        while (cursor == read or cursor < match_end) : (cursor += utf8CodepointLen(value, cursor)) {
+            for (secrets) |secret| if (credentialEndAtCodepoint(value, cursor, secret)) |end| {
+                match_end = @max(match_end, end);
+            };
+        }
+        if (match_end != 0) {
+            const redaction_end = match_end;
             const marker_len = @min(redaction_end - read, 3);
             if (marker_len > destination.len - write) break;
             @memset(destination[write..][0..marker_len], '*');
@@ -9943,9 +10018,9 @@ fn sanitizeInto(destination: []u8, value: []const u8, secret: []const u8) Saniti
 fn projectTaskWorkerText(
     destination: []u8,
     value: []const u8,
-    secret: []const u8,
+    secrets: []const []const u8,
 ) if (builtin.is_test) task_test_execution.Projection else void {
-    const projected = sanitizeInto(destination, value, secret);
+    const projected = sanitizeInto(destination, value, secrets);
     return .{
         .len = projected.len,
         .truncated = projected.truncated,
@@ -18367,7 +18442,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
             .kind = .permission,
             .state = .allowed_once,
         };
-        const detail = sanitizeInto(&record.detail, "Continue?", "");
+        const detail = sanitizeInto(&record.detail, "Continue?", &.{});
         record.detail_len = detail.len;
         control.pushUiRecord(view, record);
     }
@@ -19711,4 +19786,65 @@ test "active input wire identity borrows stable Run memory until history encodin
     const projected = scratch.state.tasks[0].runs[0].additional_inputs[0];
     try std.testing.expectEqual(run.additional_inputs[0].?.operationId().ptr, projected.operation_id.ptr);
     try std.testing.expectEqualStrings(operation_id, projected.operation_id);
+}
+
+test "image settings bind Host identity without reading credentials or changing dialogue admission" {
+    test_agent_runtime.io = std.testing.io;
+    var control = try Runtime.init(std.testing.allocator, std.testing.io, &test_agent_runtime, testLimits(), .{});
+    defer control.deinit();
+    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .authenticated, .account_id = "account-1", .display_name = "Fixture" } });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(directory);
+    var vault: TestCustomProviderVault = .{};
+    try control.startCustomProviders(directory, vault.port());
+    defer control.stopCustomProviders();
+    _ = try createReadyTestCustomProvider(&control);
+    const provider = control.modelsView().custom_providers[0];
+    try std.testing.expect(control.selectModelsDefault(.{
+        .selection = .{ .source_id = TestCustomProviderVault.slot, .model_id = "gpt-5" },
+        .expected_selection_revision = control.modelsView().selection_revision,
+        .expected_source_generation = provider.source_generation,
+        .expected_catalog_generation = provider.catalog_generation,
+    }).accepted);
+    const dialogue_revision = control.modelsView().selection_revision;
+    const active_generation = control.newTaskAdmissionView().active_generation;
+    const body = "{\"object\":\"list\",\"has_more\":false,\"data\":[{\"id\":\"image-only\",\"object\":\"model\",\"type\":\"model\",\"capabilities\":{\"endpoints\":{\"images_generations\":{\"supported\":true}}}}]}";
+    try std.testing.expectEqual(models_contract.ModelsError.none, try models_aggregate.TestSupport.refreshMetaskCatalogResponse(&control.custom_providers, "account-1", body));
+    const initial = control.modelsView().image_generation;
+    try std.testing.expect(initial.selection == null);
+    try std.testing.expectEqual(@as(usize, 1), initial.models.len);
+    var command: models_contract.ConfigureMetaskImageSelectionCommand = .{
+        .selection = .{ .source_id = models_contract.metask_source_id, .model_id = "image-only" },
+        .expected_selection_revision = 0,
+        .expected_catalog_generation = initial.catalog_generation,
+    };
+    // Image settings require no access token or dialogue credential resolution.
+    vault.read_fails = true;
+    try std.testing.expect(control.configureMetaskImageSelection(command).accepted);
+    try std.testing.expect(control.modelsView().image_generation.selection_available);
+    try std.testing.expectEqual(dialogue_revision, control.modelsView().selection_revision);
+    try std.testing.expectEqual(active_generation, control.newTaskAdmissionView().active_generation);
+    try std.testing.expectEqual(models_contract.ManagementError.generation_mismatch, control.configureMetaskImageSelection(command).error_code.?);
+    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .authenticated, .account_id = "account-2", .display_name = "Other" } });
+    command.expected_selection_revision = 1;
+    command.selection = null;
+    try std.testing.expectEqual(models_contract.ManagementError.authorization_unavailable, control.configureMetaskImageSelection(command).error_code.?);
+    control.commitAccountFactNoFail(.{ .kind = .signed_out, .view = .{ .state = .signed_out } });
+    try std.testing.expectEqual(models_contract.ManagementError.authorization_unavailable, control.configureMetaskImageSelection(command).error_code.?);
+    control.commitAccountFactNoFail(.{ .kind = .session_changed, .view = .{ .state = .authenticated, .account_id = "account-1", .display_name = "Fixture" } });
+    try std.testing.expect(control.configureMetaskImageSelection(command).accepted);
+    const cleared = control.modelsView().image_generation;
+    try std.testing.expect(cleared.selection == null);
+    try std.testing.expectEqual(@as(u64, 2), cleared.selection_revision);
+    try std.testing.expectEqual(dialogue_revision, control.modelsView().selection_revision);
+    var snapshot: [256 * 1024]u8 = undefined;
+    const encoded = try control.writeSnapshot(&snapshot);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"imageGeneration\":{\"catalogState\":\"ready\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"selectionRevision\":\"2\",\"selectionAvailable\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "refreshed-secret") == null);
+    const persisted = try tmp.dir.readFileAlloc(std.testing.io, "models.json", std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(persisted);
+    try std.testing.expect(std.mem.indexOf(u8, persisted, "refreshed-secret") == null);
 }

@@ -22,6 +22,38 @@ const ModelBinding = model_binding.ModelBinding;
 // Intentional same-module cycle: Runtime owns the runtime lifecycle while
 // Session remains the composition root for the Session-bound domain object.
 const session_runtime = @import("session/runtime.zig");
+const image_generation = @import("image_generation.zig");
+const generate_image = @import("generate_image.zig");
+const image_http = @import("agent_http_transport");
+
+pub const ImageGenerationTestOptions = struct {
+    transport: image_http.Transport,
+    limits: image_generation.Limits = .{},
+};
+pub const ImageGenerationTestBinding = image_generation.BindingInput;
+pub const ImageGenerationOutput = image_generation.Output;
+pub const ImageGenerationOutputResult = image_generation.OutputResult;
+pub const ImageGenerationOutputFailure = image_generation.OutputFailure;
+pub const ImageGenerationCancellation = image_http.Cancellation;
+pub const ImageGenerationReceipt = image_generation.Receipt;
+pub const ImageGenerationLimits = image_generation.Limits;
+pub const image_generation_limits = image_generation.production_limits;
+/// Binding bytes are borrowed only through preparation. Effect contexts remain
+/// borrowed through Run quiescence and are retained by the Host execution owner.
+pub const ImageGenerationRunInput = struct {
+    binding: image_generation.BindingInput,
+    transport: image_http.Transport,
+};
+
+const RunImage = struct {
+    binding: image_generation.OwnedBinding,
+    transport: image_http.Transport,
+
+    fn deinit(self: *RunImage, allocator: std.mem.Allocator) void {
+        self.binding.deinit(allocator);
+        self.* = undefined;
+    }
+};
 
 pub const OwnedCoreEvent = event_pump.OwnedCoreEvent;
 pub const MultimodalInputLimits = multimodal.InputLimits;
@@ -35,6 +67,12 @@ pub const PermissionDecisionSource = sdk.protocol.PermissionDecisionSource;
 pub const PermissionCallbackOutcome = sdk.protocol.PermissionCallbackOutcome;
 pub const PermissionProvenance = sdk.protocol.PermissionProvenance;
 pub const PermissionToolNamespace = sdk.protocol.PermissionToolNamespace;
+
+/// Trusted effects for the fixed Host tool, independent of model arguments.
+/// A same-named MCP or built-in tool does not inherit this description.
+pub fn imageGenerationPermissionContext(namespace: PermissionToolNamespace, name: []const u8) ?[]const u8 {
+    return if (namespace == .host and std.mem.eql(u8, name, generate_image.name)) generate_image.description else null;
+}
 pub const RunState = sdk.protocol.RunState;
 pub const RunStatePhase = sdk.protocol.RunStatePhase;
 pub const CatalogHealth = catalog.Health;
@@ -588,6 +626,10 @@ pub const CoreSessionIdentity = union(enum) {
 
 pub const Session = struct {
     agent_runtime: *Runtime,
+    image_fixture_binding: ?image_generation.OwnedBinding = null,
+    run_image: ?RunImage = null,
+    image_sends: usize = 0,
+    image_calls: [image_generation.max_active_calls]?*image_generation.Call = @splat(null),
     id: u64,
     provider_id: []u8,
     protocol: Protocol,
@@ -673,6 +715,37 @@ pub const Session = struct {
         self: *Session,
         input: RunInput,
     ) (Error || std.mem.Allocator.Error)!u64 {
+        var image: ?RunImage = image: {
+            self.lock();
+            defer self.unlock();
+            const fixture = if (self.image_fixture_binding) |*value| value else break :image null;
+            break :image .{
+                .binding = fixture.clone(self.agent_runtime.allocator) catch |err|
+                    return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidRunInput,
+                .transport = self.agent_runtime.image_test.?.transport,
+            };
+        };
+        defer if (image) |*value| value.deinit(self.agent_runtime.allocator);
+        return self.prepareRunOwnedImage(input, &image);
+    }
+
+    /// Freeze one Host-resolved image configuration with the Run. A null input
+    /// explicitly means unavailable; no Session fixture/default is consulted.
+    pub fn prepareRunWithImage(
+        self: *Session,
+        input: RunInput,
+        image_input: ?ImageGenerationRunInput,
+    ) (Error || std.mem.Allocator.Error)!u64 {
+        var image: ?RunImage = if (image_input) |value| .{
+            .binding = image_generation.OwnedBinding.init(self.agent_runtime.allocator, value.binding) catch |err|
+                return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidRunInput,
+            .transport = value.transport,
+        } else null;
+        defer if (image) |*value| value.deinit(self.agent_runtime.allocator);
+        return self.prepareRunOwnedImage(input, &image);
+    }
+
+    fn prepareRunOwnedImage(self: *Session, input: RunInput, image: *?RunImage) (Error || std.mem.Allocator.Error)!u64 {
         var owned_input = try OwnedRunInput.init(
             self.agent_runtime.allocator,
             input,
@@ -718,6 +791,11 @@ pub const Session = struct {
         std.debug.assert(!self.core_call_in_progress);
         std.debug.assert(self.abort_calls_in_progress == 0);
         std.debug.assert(self.input_calls_in_progress == 0);
+        for (self.image_calls) |call| std.debug.assert(call == null);
+        std.debug.assert(self.run_image == null);
+        self.run_image = image.*;
+        image.* = null;
+        self.image_sends = 0;
         self.input_ready = false;
         self.input_window_started = false;
         self.submitted_inputs = .{};
@@ -1934,6 +2012,7 @@ pub const Session = struct {
         var completed_input = self.run_input.?;
         self.run_input = null;
         completed_input.deinit(self.agent_runtime.allocator);
+        self.clearRunImageLocked();
         var stop_reason: ?sdk.StopReason = null;
         var raw_stop_reason_code: ?u32 = null;
         var failure: ?TerminalFailure = null;
@@ -2037,6 +2116,7 @@ pub const Session = struct {
             input.deinit(self.agent_runtime.allocator);
             self.run_input = null;
         }
+        self.clearRunImageLocked();
         self.run_started = false;
         self.run_done = true;
         if (self.state != .closing and self.state != .poisoned) self.state = .idle;
@@ -2073,6 +2153,7 @@ pub const Session = struct {
             input.deinit(self.agent_runtime.allocator);
             self.run_input = null;
         }
+        self.clearRunImageLocked();
         if (self.terminal_diagnostic) |buffer| {
             self.agent_runtime.allocator.free(buffer);
             self.terminal_diagnostic = null;
@@ -2238,6 +2319,8 @@ pub const Session = struct {
         std.debug.assert(self.active_callback_refs == 0);
         std.debug.assert(self.compact_done);
         std.debug.assert(self.skill_restore_inputs == null);
+        std.debug.assert(self.run_image == null);
+        if (self.image_fixture_binding) |*binding| binding.deinit(self.agent_runtime.allocator);
         self.control_block.deinit();
         self.agent_runtime.allocator.destroy(self.control_block);
         if (self.run_input) |*input|
@@ -2252,6 +2335,148 @@ pub const Session = struct {
         self.agent_runtime.allocator.free(self.workspace_home);
         self.agent_runtime.allocator.free(self.workspace_epoch);
         if (self.mcp_restore_selection) |selection| selection.deinit();
+    }
+
+    pub fn configureImageGenerationForTesting(self: *Session, input: ?ImageGenerationTestBinding) !void {
+        if (self.agent_runtime.image_test == null) return error.InvalidLimits;
+        var owned: ?image_generation.OwnedBinding = if (input) |binding|
+            try image_generation.OwnedBinding.initForTesting(self.agent_runtime.allocator, binding)
+        else
+            null;
+        errdefer if (owned) |*binding| binding.deinit(self.agent_runtime.allocator);
+        self.lock();
+        defer self.unlock();
+        if (self.state != .idle) return error.SessionNotIdle;
+        if (self.image_fixture_binding) |*binding| binding.deinit(self.agent_runtime.allocator);
+        self.image_fixture_binding = owned;
+    }
+
+    fn clearRunImageLocked(self: *Session) void {
+        for (self.image_calls) |call| std.debug.assert(call == null);
+        if (self.run_image) |*image| image.deinit(self.agent_runtime.allocator);
+        self.run_image = null;
+    }
+
+    fn imageLimits(self: *const Session) image_generation.Limits {
+        return if (self.agent_runtime.image_test) |options| options.limits else image_generation.production_limits;
+    }
+
+    pub fn executeImage(context: ?*anyopaque, raw_run: ?*const wire.RunContextV1, arguments: wire.BytesViewV1, out: ?*wire.OwnedBytesV1) callconv(.c) u32 {
+        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return wire.HOST_FATAL));
+        const result_out = out orelse return wire.HOST_FATAL;
+        result_out.* = emptyOwnedBytes();
+        const identity = sdk.validateRunContext(raw_run) catch return wire.HOST_FATAL;
+        runtime.sessions_mutex.lockUncancelable(runtime.io);
+        var retained: ?*Session = null;
+        for (runtime.sessions) |entry| {
+            const candidate = entry orelse continue;
+            candidate.lock();
+            const matches = candidate.raw != null and candidate.raw.? == identity.session;
+            candidate.unlock();
+            if (matches) {
+                if (candidate.retainCoreCallback(raw_run) != null) retained = candidate;
+                break;
+            }
+        }
+        runtime.sessions_mutex.unlock(runtime.io);
+        const self = retained orelse return wire.HOST_FATAL;
+        defer self.releaseCoreCallback();
+        // Keep working and result capacity in one reservation through publication.
+        // Allocate the owned result before sending or committing anything.
+        const limits = self.imageLimits();
+        if (!runtime.image_budget.acquire(limits.workingBytes()))
+            return staticImageFailure(runtime, result_out, image_capacity_result);
+        var reserved = limits.workingBytes();
+        defer runtime.image_budget.release(reserved);
+        const allocation_len = @sizeOf(ImageResultHeader) + limits.result_bytes;
+        const allocation = runtime.allocator.alloc(u8, allocation_len) catch
+            return staticImageFailure(runtime, result_out, image_capacity_result);
+        var transferred = false;
+        defer if (!transferred) runtime.allocator.free(allocation);
+        const outcome = self.performImage(arguments);
+        const encoded = generate_image.result(allocation[@sizeOf(ImageResultHeader)..], outcome) catch
+            return staticImageFailure(runtime, result_out, image_unknown_result);
+        reserved -= allocation_len;
+        transferred = true;
+        std.mem.bytesAsValue(ImageResultHeader, allocation[0..@sizeOf(ImageResultHeader)]).* = .{ .allocation_len = allocation_len };
+        result_out.* = .{ .ptr = @constCast(encoded.ptr), .len = encoded.len };
+        _ = runtime.image_results_created.fetchAdd(1, .monotonic);
+        return if (outcome == .saved) wire.HOST_OK else wire.HOST_FAILED;
+    }
+
+    const ImageResultHeader = image_generation.ResultHeader;
+    const image_capacity_result = "{\"status\":\"capacity\"}";
+    const image_unknown_result = "{\"status\":\"outcome_unknown\"}";
+
+    fn staticImageFailure(runtime: *Runtime, output: *wire.OwnedBytesV1, bytes: []const u8) u32 {
+        output.* = .{ .ptr = @constCast(bytes.ptr), .len = bytes.len };
+        _ = runtime.image_results_created.fetchAdd(1, .monotonic);
+        return wire.HOST_FAILED;
+    }
+
+    pub fn releaseImageResult(context: ?*anyopaque, out: ?*wire.OwnedBytesV1) callconv(.c) void {
+        const runtime: *Runtime = @ptrCast(@alignCast(context orelse return));
+        const result_out = out orelse return;
+        const ptr = result_out.ptr orelse return;
+        if (ptr == image_capacity_result.ptr or ptr == image_unknown_result.ptr) {
+            _ = runtime.image_results_released.fetchAdd(1, .monotonic);
+            result_out.* = emptyOwnedBytes();
+            return;
+        }
+        const allocation_ptr = ptr - @sizeOf(ImageResultHeader);
+        const header = std.mem.bytesAsValue(ImageResultHeader, allocation_ptr[0..@sizeOf(ImageResultHeader)]).*;
+        runtime.allocator.free(allocation_ptr[0..header.allocation_len]);
+        runtime.image_budget.release(header.allocation_len);
+        _ = runtime.image_results_released.fetchAdd(1, .monotonic);
+        result_out.* = emptyOwnedBytes();
+    }
+
+    fn performImage(self: *Session, arguments: wire.BytesViewV1) image_generation.Outcome {
+        const runtime = self.agent_runtime;
+        const limits = self.imageLimits();
+        if (arguments.len > limits.prompt_bytes * 6 + 64) return .{ .failed = .invalid_arguments };
+        const bytes = sdk.borrowedBytes(arguments) catch return .{ .failed = .invalid_arguments };
+        const prompt = generate_image.prompt(runtime.allocator, bytes, limits.prompt_bytes) catch return .{ .failed = .invalid_arguments };
+        defer runtime.allocator.free(prompt);
+        self.lock();
+        if (self.state == .closing or self.state == .closed or self.termination_signal != null) {
+            self.unlock();
+            return .{ .failed = .cancelled };
+        }
+        const image = if (self.run_image) |*value| value else {
+            self.unlock();
+            return .{ .failed = .unavailable };
+        };
+        const transport = image.transport;
+        var call: image_generation.Call = .{
+            .cancellation = image_http.Cancellation.init(transport),
+            .deadline_ns = std.Io.Timestamp.now(runtime.io, .awake).nanoseconds + @as(i96, limits.timeout_ms) * std.time.ns_per_ms,
+            .io = runtime.io,
+        };
+        var slot: ?usize = null;
+        for (self.image_calls, 0..) |active, i| if (active == null) {
+            slot = i;
+            break;
+        };
+        if (slot == null or self.image_sends >= limits.sends_per_run) {
+            self.unlock();
+            return .{ .failed = .capacity };
+        }
+        self.image_calls[slot.?] = &call;
+        self.image_sends += 1;
+        self.unlock();
+        defer {
+            self.lock();
+            self.image_calls[slot.?] = null;
+            if (!call.sent) self.image_sends -= 1;
+            self.unlock();
+        }
+        const watchdog = std.Thread.spawn(.{}, image_generation.Call.watchdog, .{&call}) catch return .{ .failed = .capacity };
+        defer {
+            call.finished.store(true, .release);
+            watchdog.join();
+        }
+        return image_generation.perform(runtime.allocator, transport, &image.binding, prompt, limits, &call);
     }
 
     pub fn onEvent(
@@ -2642,6 +2867,7 @@ pub const Session = struct {
 
 fn setTerminationSignalLocked(self: *Session, signal: TerminationSignal) void {
     if (self.termination_signal == null) self.termination_signal = signal;
+    for (self.image_calls) |call| if (call) |active| active.cancellation.request();
 }
 
 fn isRunProgressState(state: SessionState) bool {
@@ -2977,6 +3203,8 @@ fn releaseOwned(api: sdk.Api, buffer: *wire.OwnedBytesV1) void {
 }
 
 test {
+    _ = image_generation;
+    _ = generate_image;
     _ = multimodal;
     _ = session_wire;
     _ = session_control;

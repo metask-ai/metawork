@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const types = @import("completion/types.zig");
-const transport = @import("completion/transport.zig");
+const transport = @import("agent_http_transport");
 const codec = @import("completion/codec.zig");
 const openai = @import("completion/openai_codec.zig");
 const responses = @import("completion/openai_responses_codec.zig");

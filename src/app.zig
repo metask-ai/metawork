@@ -13,7 +13,7 @@ const mcp_platform = @import("metawork_mcp_platform");
 const mcp_oauth = @import("metawork_mcp_oauth");
 const account_coordinator = @import("app/account_coordinator.zig");
 const account_platform_binding = @import("app/account_platform_binding.zig");
-const models_coordinator = @import("app/models_coordinator.zig");
+const models_coordinator = @import("models_coordinator");
 const models_automation_vault = @import("app/models_automation_vault.zig");
 const models_platform_binding = @import("app/models_platform_binding.zig");
 const metask_http_transport = @import("app/metask_http_transport.zig");
@@ -697,6 +697,8 @@ pub fn run(init: std.process.Init) !void {
     models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
+    control.setImageRunPreparation(models_coordinator_state.imageRunPreparation());
+    defer control.setImageRunPreparation(null);
     account_coordinator_state.setCommitObserver(.{
         .context = &models_coordinator_state,
         .notify_fn = notifyModelsAuthorizationChanged,
@@ -779,6 +781,7 @@ test {
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(metask_http_transport);
     std.testing.refAllDecls(models_automation_vault);
+    std.testing.refAllDecls(models_coordinator);
     std.testing.refAllDecls(attachment_images);
 }
 

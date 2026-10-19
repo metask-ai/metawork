@@ -16,6 +16,8 @@ const session_wire = @import("wire.zig");
 const model_binding = @import("agent_model_binding");
 const capabilities = @import("../capabilities.zig");
 const session_binding = @import("binding.zig");
+const image = @import("../image_generation.zig");
+const image_tool = @import("../generate_image.zig");
 // Intentional same-module cycle with session.zig; Runtime and Session retain
 // direct typed references without introducing a speculative context layer.
 const root = @import("../session.zig");
@@ -63,6 +65,10 @@ const McpRefreshLease = struct {
 const max_mcp_configuration_applies: usize = 128;
 
 pub const Runtime = struct {
+    image_test: ?root.ImageGenerationTestOptions = null,
+    image_budget: image.Budget = .{ .limit = 0 },
+    image_results_created: std.atomic.Value(usize) = .init(0),
+    image_results_released: std.atomic.Value(usize) = .init(0),
     io: std.Io,
     allocator: std.mem.Allocator,
     api: sdk.Api,
@@ -104,7 +110,7 @@ pub const Runtime = struct {
         allocator: std.mem.Allocator,
         limits: Limits,
     ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Runtime {
-        return initWithValidatedApi(io, allocator, try sdk.Api.discover(), limits);
+        return initWithValidatedApi(io, allocator, try sdk.Api.discover(), limits, null);
     }
 
     /// Test-only injection boundary. `raw_api` is borrowed for the Agent
@@ -115,7 +121,16 @@ pub const Runtime = struct {
         raw_api: *const wire.ApiV1,
         limits: Limits,
     ) (Error || std.mem.Allocator.Error || error{UnsupportedAbi})!*Runtime {
-        return initWithValidatedApi(io, allocator, try sdk.Api.validate(raw_api), limits);
+        return initWithValidatedApi(io, allocator, try sdk.Api.validate(raw_api), limits, null);
+    }
+
+    /// Isolated acceptance only. No product initializer accepts this option.
+    pub fn initImageGenerationForTesting(io: std.Io, allocator: std.mem.Allocator, limits: Limits, options: root.ImageGenerationTestOptions) !*Runtime {
+        return initWithValidatedApi(io, allocator, try sdk.Api.discover(), limits, options);
+    }
+
+    pub fn initImageGenerationWithApiForTesting(io: std.Io, allocator: std.mem.Allocator, raw_api: *const wire.ApiV1, limits: Limits, options: root.ImageGenerationTestOptions) !*Runtime {
+        return initWithValidatedApi(io, allocator, try sdk.Api.validate(raw_api), limits, options);
     }
 
     fn initWithValidatedApi(
@@ -123,6 +138,7 @@ pub const Runtime = struct {
         allocator: std.mem.Allocator,
         api: sdk.Api,
         limits: Limits,
+        image_test: ?root.ImageGenerationTestOptions,
     ) (Error || std.mem.Allocator.Error)!*Runtime {
         if (limits.max_sessions == 0 or limits.max_prompt_bytes == 0 or limits.max_multimodal_input_bytes == 0 or limits.event_capacity == 0 or
             limits.event_bytes == 0 or limits.per_session_event_capacity == 0 or
@@ -133,6 +149,7 @@ pub const Runtime = struct {
             limits.event_ready_timeout.nanoseconds <= 0 or
             limits.event_ready_retry_interval.nanoseconds > limits.event_ready_timeout.nanoseconds)
             return error.InvalidLimits;
+        if (image_test) |options| if (!options.limits.validate()) return error.InvalidLimits;
         const mcp_owner_id = try allocateMcpOwnerId();
         _ = std.math.mul(usize, limits.event_capacity, limits.max_event_bytes) catch
             return error.InvalidLimits;
@@ -171,6 +188,18 @@ pub const Runtime = struct {
         runtime_config.builtin_tool_count = builtin_views.len;
         runtime_config.host_tools = null;
         runtime_config.host_tool_count = 0;
+        var image_descriptor = std.mem.zeroes(wire.HostToolV1);
+        if (image_test != null) {
+            image_descriptor.struct_size = @sizeOf(wire.HostToolV1);
+            image_descriptor.ctx = self;
+            image_descriptor.name = sdk.bytesView(image_tool.name);
+            image_descriptor.description = sdk.bytesView(image_tool.description);
+            image_descriptor.input_schema_json = sdk.bytesView(image_tool.schema);
+            image_descriptor.execute = Session.executeImage;
+            image_descriptor.release_result = Session.releaseImageResult;
+            runtime_config.host_tools = @ptrCast(&image_descriptor);
+            runtime_config.host_tool_count = 1;
+        }
         const mcp_registry_generation = if (limits.mcp_input) |input|
             input.generation
         else
@@ -197,6 +226,8 @@ pub const Runtime = struct {
         }
 
         self.* = .{
+            .image_test = image_test,
+            .image_budget = .{ .limit = if (image_test) |options| options.limits.memory_bytes else image.production_limits.memory_bytes },
             .io = io,
             .allocator = allocator,
             .api = api,
@@ -913,10 +944,11 @@ pub const Runtime = struct {
         // active-Run journal remains disabled until a crash-recovery policy is
         // defined for its intent/result evidence.
         host_config.run_journal_mode_code = wire.RUN_JOURNAL_EPHEMERAL;
-        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len);
+        const allowed_views = try self.allocator.alloc(wire.BytesViewV1, capabilities.builtins.len + @intFromBool(self.image_test != null));
         defer self.allocator.free(allowed_views);
         for (capabilities.builtins, 0..) |builtin, index|
             allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
+        if (self.image_test != null) allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
         host_config.allowed_tools = if (allowed_views.len == 0) null else allowed_views.ptr;
         host_config.allowed_tool_count = allowed_views.len;
         var config = std.mem.zeroes(wire.SessionCreateConfigV1);
@@ -1045,11 +1077,12 @@ pub const Runtime = struct {
         }
         const allowed_views = try self.allocator.alloc(
             wire.BytesViewV1,
-            capabilities.builtins.len,
+            capabilities.builtins.len + @intFromBool(self.image_test != null),
         );
         defer self.allocator.free(allowed_views);
         for (capabilities.builtins, 0..) |builtin, index|
             allowed_views[index] = sdk.bytesView(capabilities.wireName(builtin));
+        if (self.image_test != null) allowed_views[capabilities.builtins.len] = sdk.bytesView(image_tool.name);
 
         self.sessions_mutex.lockUncancelable(self.io);
         if (self.shutting_down.load(.acquire)) {
@@ -1427,6 +1460,8 @@ pub const Runtime = struct {
             }
         }
         std.debug.assert(self.multimodal_input_budget.used.load(.monotonic) == 0);
+        std.debug.assert(self.image_budget.used.load(.acquire) == 0);
+        std.debug.assert(self.image_results_created.load(.acquire) == self.image_results_released.load(.acquire));
         self.events.deinit();
         self.mcp_servers.deinit();
         for (self.retired_mcp_servers.items) |*servers| servers.deinit();

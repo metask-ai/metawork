@@ -8,6 +8,8 @@ const account = @import("metawork_account_contract");
 const models_contract = @import("metawork_product_models_contract");
 const models_ports = @import("product_models_ports");
 const product_schedule = @import("metawork_product_schedule");
+const product_task = @import("metawork_product_task");
+const workspace = @import("metawork_product_workspace");
 const mcp = @import("metawork_product_mcp");
 const mcp_contract = mcp.contract;
 
@@ -42,6 +44,8 @@ pub const AccountCommitSink = struct {
 /// Control keeps registry/default-selection transactions behind these calls.
 pub const ModelsManagement = struct {
     context: *anyopaque,
+    image_view_fn: *const fn (*anyopaque) models_contract.MetaskImageView,
+    prepare_image_candidate_fn: *const fn (*anyopaque, models_contract.ImagePreparationInput) models_contract.ImagePreparation,
     start_custom_providers_fn: *const fn (*anyopaque, []const u8, models_ports.CredentialVault) anyerror!void,
     start_custom_providers_unavailable_fn: *const fn (*anyopaque) void,
     stop_custom_providers_fn: *const fn (*anyopaque) void,
@@ -57,6 +61,12 @@ pub const ModelsManagement = struct {
     complete_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, *models_ports.OwnedCatalogCompletion) models_contract.ModelsError,
     fail_metask_catalog_refresh_fn: *const fn (*anyopaque, u64, u64, models_contract.ModelsError, []const u8) void,
     metask_authorization_unavailable_fn: *const fn (*anyopaque) void,
+    pub fn imageView(self: ModelsManagement) models_contract.MetaskImageView {
+        return self.image_view_fn(self.context);
+    }
+    pub fn prepareImageCandidate(self: ModelsManagement, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
+        return self.prepare_image_candidate_fn(self.context, input);
+    }
     pub fn startCustomProviders(self: ModelsManagement, directory: []const u8, vault: models_ports.CredentialVault) anyerror!void {
         try self.start_custom_providers_fn(self.context, directory, vault);
     }
@@ -101,6 +111,17 @@ pub const ModelsManagement = struct {
     }
     pub fn setMetaskAuthorizationUnavailable(self: ModelsManagement) void {
         self.metask_authorization_unavailable_fn(self.context);
+    }
+};
+
+/// Main-thread admission call only. The returned owned value contains no
+/// mutable aggregate pointer; only the scoped effect owner is retained.
+pub const ImageRunPreparation = struct {
+    context: *anyopaque,
+    prepare_fn: *const fn (*anyopaque, workspace.TaskAuthority) ?product_task.OwnedImageExecution,
+
+    pub fn prepare(self: ImageRunPreparation, authority: workspace.TaskAuthority) ?product_task.OwnedImageExecution {
+        return self.prepare_fn(self.context, authority);
     }
 };
 

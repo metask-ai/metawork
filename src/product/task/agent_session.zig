@@ -230,6 +230,10 @@ pub const Access = struct {
         return self.get().prepareRun(input);
     }
 
+    pub fn prepareRunWithImage(self: *Access, input: agent.RunInput, image: ?agent.ImageGenerationRunInput) !u64 {
+        return self.get().prepareRunWithImage(input, image);
+    }
+
     pub fn beginRunOutcome(self: *Access, run_id: u64) agent.BeginRunOutcome {
         return self.get().beginRunOutcome(run_id);
     }

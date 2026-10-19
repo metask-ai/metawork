@@ -20,6 +20,33 @@ const cancelSession = fixture.cancelSession;
 const closeSession = fixture.closeSession;
 const takeTestTerminal = fixture.takeTestTerminal;
 const shutdownTestComposition = fixture.shutdownTestComposition;
+
+test "GenerateImage isolated initializer registers one fixed tool without changing product init" {
+    const Http = struct {
+        fn perform(_: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, _: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
+            return error.Unexpected;
+        }
+    };
+    fake_core.reset();
+    const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &fake_api, .{ .max_sessions = 1 }, .{
+        .transport = .{ .perform_fn = Http.perform },
+    });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    try std.testing.expect(fake_core.image_tool_seen);
+    const session = try openSession(runtime);
+    try std.testing.expectEqual(@as(usize, 11), fake_core.last_allowed_tool_count);
+    try std.testing.expectEqualStrings("GenerateImage", std.mem.sliceTo(&fake_core.last_allowed_tool_names[10], 0));
+    const run_id = try session.prepareRun(.{ .text = "ordinary text remains available" });
+    var run = try session.beginRun(run_id);
+    defer run.deinit();
+    var terminal = run.execute();
+    defer terminal.deinit();
+    try std.testing.expectEqual(@as(?lifecycle.TerminalFailure, null), terminal.failure);
+    try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
+}
 const deinitTestComposition = fixture.deinitTestComposition;
 const createTestComposition = fixture.createTestComposition;
 const createTestRuntime = fixture.createTestRuntime;
@@ -27,6 +54,331 @@ const closeOnThread = fixture.closeOnThread;
 const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
+
+const ImageRunWork = struct {
+    session: *lifecycle.Session,
+    id: u64,
+    result: ?lifecycle.TerminalResult = null,
+    fn execute(self: *@This()) void {
+        var run = self.session.beginRun(self.id) catch @panic("image fake Run failed");
+        self.result = run.execute();
+        run.deinit();
+    }
+};
+
+const ImageInvocation = struct {
+    tool: wire.HostToolV1,
+    identity: wire.RunContextV1,
+    result: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 },
+    status: u32 = wire.HOST_FATAL,
+    fn execute(self: *@This()) void {
+        self.status = self.tool.execute.?(self.tool.ctx, &self.identity, sdk.bytesView("{\"prompt\":\"red pixel\"}"), &self.result);
+    }
+    fn release(self: *@This()) void {
+        self.tool.release_result.?(self.tool.ctx, &self.result);
+    }
+};
+
+fn imageIdentity(session: *lifecycle.Session, id: u64) wire.RunContextV1 {
+    const raw: *fixture.FakeSession = @ptrCast(@alignCast(session.raw.?));
+    var result = std.mem.zeroes(wire.RunContextV1);
+    result.struct_size = @sizeOf(wire.RunContextV1);
+    result.session = session.raw;
+    result.run_id = id;
+    result.session_id = sdk.bytesView(raw.session_id[0..raw.session_id_len]);
+    return result;
+}
+
+const ImageNoEffects = struct {
+    calls: usize = 0,
+    fn perform(context: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, _: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        return error.Unexpected;
+    }
+    fn commit(_: *anyopaque, _: []const u8, _: *const lifecycle.CompletionCancellation) lifecycle.ImageGenerationOutputResult {
+        return .{ .failed = .{ .code = .write_failed } };
+    }
+};
+
+test "GenerateImage fake Core rejects wrong Run Session identity and callbacks after close" {
+    for (0..4) |fault| {
+        fake_core.reset();
+        fake_core.setNextPlan(.controlled);
+        var network: ImageNoEffects = .{};
+        const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform } });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "identity injection" });
+        var work: ImageRunWork = .{ .session = session, .id = id };
+        const thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+        fake_core.waitRunEntered();
+        var invocation: ImageInvocation = .{ .tool = fake_core.image_tool.?, .identity = imageIdentity(session, id) };
+        // Bind the same identity through a legitimate, unavailable image result.
+        invocation.execute();
+        try std.testing.expectEqual(wire.HOST_FAILED, invocation.status);
+        try std.testing.expect(std.mem.indexOf(u8, try sdk.borrowedBytes(.{ .ptr = invocation.result.ptr, .len = invocation.result.len }), "unavailable") != null);
+        invocation.release();
+        try std.testing.expect(invocation.result.ptr == null and invocation.result.len == 0);
+        switch (fault) {
+            0 => invocation.identity.run_id += 1,
+            1 => invocation.identity.session = @ptrFromInt(1),
+            2 => invocation.identity.session_id = sdk.bytesView("different-session"),
+            3 => try session.close(.session_close),
+            else => unreachable,
+        }
+        invocation.execute();
+        try std.testing.expectEqual(wire.HOST_FATAL, invocation.status);
+        try std.testing.expect(invocation.result.ptr == null and invocation.result.len == 0);
+        fake_core.releaseControlled();
+        thread.join();
+        work.result.?.deinit();
+        try std.testing.expectEqual(@as(usize, 0), network.calls);
+        try std.testing.expectEqual(@as(usize, 1), runtime.image_results_created.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), runtime.image_results_released.load(.acquire));
+    }
+}
+
+const ImageAllocationGate = struct {
+    parent: std.mem.Allocator = std.testing.allocator,
+    armed: std.atomic.Value(bool) = .init(false),
+    entered: std.Io.Semaphore = .{},
+    proceed: std.Io.Semaphore = .{},
+    watched: ?[]const u8 = null,
+    watched_freed: bool = false,
+    watched_zero: bool = false,
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.armed.swap(false, .acq_rel)) {
+            self.entered.post(std.testing.io);
+            self.proceed.waitUncancelable(std.testing.io);
+        }
+        return self.parent.rawAlloc(len, alignment, ra);
+    }
+    fn resize(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawResize(bytes, alignment, len, ra);
+    }
+    fn remap(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawRemap(bytes, alignment, len, ra);
+    }
+    fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.watched) |target| if (bytes.ptr == target.ptr and bytes.len == target.len) {
+            self.watched_freed = true;
+            self.watched_zero = true;
+            for (bytes) |byte| if (byte != 0) {
+                self.watched_zero = false;
+                break;
+            };
+            self.watched = null;
+        };
+        self.parent.rawFree(bytes, alignment, ra);
+    }
+};
+
+test "GenerateImage per-Run credentials are zeroed on every exit without opening the product Gate" {
+    for (0..5) |action| {
+        fake_core.reset();
+        var observing: ImageAllocationGate = .{};
+        var network: ImageNoEffects = .{};
+        const runtime = if (action == 4)
+            try lifecycle.Runtime.initWithApi(std.testing.io, observing.allocator(), &fake_api, .{ .max_sessions = 1 })
+        else
+            try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, observing.allocator(), &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform } });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRunWithImage(.{ .text = "one frozen image Run" }, .{
+            .binding = .{
+                .endpoint = "https://image-policy.example.test/v1/images/generations",
+                .model = "fixture-image",
+                .credential = "owned-run-secret",
+                .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit },
+            },
+            .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform },
+        });
+        observing.watched = session.run_image.?.binding.credential;
+        switch (action) {
+            0 => try session.cancelPreparedRun(id),
+            1 => try session.close(.session_close),
+            2, 3, 4 => {
+                var run = try session.beginRun(id);
+                defer run.deinit();
+                if (action == 2) _ = try session.requestTermination(id, .{ .interrupted = .user_cancel });
+                var terminal = run.execute();
+                defer terminal.deinit();
+                if (action == 2) try std.testing.expect(terminal.termination_signal.? == .interrupted);
+            },
+            else => unreachable,
+        }
+        try std.testing.expect(observing.watched_freed);
+        try std.testing.expect(observing.watched_zero);
+        try std.testing.expect(session.run_image == null);
+        try std.testing.expectEqual(@as(usize, 0), network.calls);
+        try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
+        if (action == 4) {
+            try std.testing.expect(fake_core.zero_host_tools_seen);
+            try std.testing.expect(fake_core.image_tool == null);
+        }
+    }
+}
+
+test "GenerateImage failed per-Run preparation releases copies and leaves the Session reusable" {
+    for (0..5) |offset| {
+        fake_core.reset();
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var network: ImageNoEffects = .{};
+        const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, failing.allocator(), &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform } });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const input: lifecycle.ImageGenerationRunInput = .{
+            .binding = .{
+                .endpoint = "https://image-policy.example.test/v1/images/generations",
+                .model = "fixture-image",
+                .credential = "owned-run-secret",
+                .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit },
+            },
+            .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform },
+        };
+        failing.fail_index = failing.alloc_index + offset;
+        try std.testing.expectError(error.OutOfMemory, session.prepareRunWithImage(.{ .text = "prepared text" }, input));
+        try std.testing.expect(session.run_image == null);
+        try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+        failing.fail_index = std.math.maxInt(usize);
+        const next = try session.prepareRunWithImage(.{ .text = "still usable" }, null);
+        try session.cancelPreparedRun(next);
+        try std.testing.expectEqual(@as(usize, 0), network.calls);
+    }
+}
+
+test "GenerateImage callback holding lease before registration observes close and sends nothing" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    var gate: ImageAllocationGate = .{};
+    var network: ImageNoEffects = .{};
+    const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, gate.allocator(), &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform } });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    try session.configureImageGenerationForTesting(.{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit } });
+    const id = try session.prepareRun(.{ .text = "close registration race" });
+    var work: ImageRunWork = .{ .session = session, .id = id };
+    const run_thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+    fake_core.waitRunEntered();
+    var invocation: ImageInvocation = .{ .tool = fake_core.image_tool.?, .identity = imageIdentity(session, id) };
+    gate.armed.store(true, .release);
+    const callback_thread = try std.Thread.spawn(.{}, ImageInvocation.execute, .{&invocation});
+    gate.entered.waitUncancelable(std.testing.io);
+    const close_thread = try std.Thread.spawn(.{}, fixture.closeOnThread, .{session});
+    while (session.snapshot().state != .closing) std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    gate.proceed.post(std.testing.io);
+    callback_thread.join();
+    invocation.release();
+    close_thread.join();
+    run_thread.join();
+    work.result.?.deinit();
+    try std.testing.expectEqual(wire.HOST_FAILED, invocation.status);
+    try std.testing.expectEqual(@as(usize, 0), network.calls);
+    try std.testing.expectEqual(@as(usize, 0), session.image_sends);
+    try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
+}
+
+test "GenerateImage preallocates result before sending and performs no allocation after commit" {
+    const Probe = struct {
+        allocator: *std.testing.FailingAllocator,
+        runtime: *lifecycle.Runtime = undefined,
+        body: []const u8,
+        requests: usize = 0,
+        commits: usize = 0,
+        fn fetch(context: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, buffer: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.requests += 1;
+            @memcpy(buffer[0..self.body.len], self.body);
+            return .{ .status = 200, .body = buffer[0..self.body.len] };
+        }
+        fn commit(context: *anyopaque, bytes: []const u8, _: *const lifecycle.CompletionCancellation) lifecycle.ImageGenerationOutputResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.commits += 1;
+            // The minimum budget is still held, including result capacity.
+            std.testing.expectEqual(self.runtime.image_budget.limit, self.runtime.image_budget.used.load(.acquire)) catch return .{ .failed = .{ .code = .write_failed } };
+            std.testing.expect(!self.runtime.image_budget.acquire(1)) catch return .{ .failed = .{ .code = .write_failed } };
+            // Everything after commit must succeed with all future allocations disabled.
+            self.allocator.fail_index = self.allocator.alloc_index;
+            return .{ .saved = lifecycle.ImageGenerationReceipt.init("saved.png", bytes.len) catch unreachable };
+        }
+    };
+    const png = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/agent/testdata/generated.png", std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(png);
+    const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(png.len));
+    defer std.testing.allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, png);
+    const body = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .data = .{.{ .b64_json = b64 }} }, .{});
+    defer std.testing.allocator.free(body);
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var probe: Probe = .{ .allocator = &failing, .body = body };
+    var limits: lifecycle.ImageGenerationLimits = .{};
+    limits.memory_bytes = limits.workingBytes();
+    const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, failing.allocator(), &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &probe, .perform_fn = Probe.fetch }, .limits = limits });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    probe.runtime = runtime;
+    const session = try openSession(runtime);
+    try session.configureImageGenerationForTesting(.{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &probe, .commit_fn = Probe.commit } });
+    const id = try session.prepareRun(.{ .text = "result ownership under pressure" });
+    var work: ImageRunWork = .{ .session = session, .id = id };
+    const thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        fake_core.releaseControlled();
+        thread.join();
+        work.result.?.deinit();
+    }
+    fake_core.waitRunEntered();
+    var invocation: ImageInvocation = .{ .tool = fake_core.image_tool.?, .identity = imageIdentity(session, id) };
+    failing.fail_index = failing.alloc_index;
+    invocation.execute();
+    try std.testing.expectEqual(wire.HOST_FAILED, invocation.status);
+    try std.testing.expectEqualStrings("{\"status\":\"capacity\"}", try sdk.borrowedBytes(.{ .ptr = invocation.result.ptr, .len = invocation.result.len }));
+    try std.testing.expectEqual(@as(usize, 0), probe.requests);
+    try std.testing.expectEqual(@as(usize, 0), probe.commits);
+    invocation.release();
+    failing.fail_index = std.math.maxInt(usize);
+    invocation.execute();
+    try std.testing.expectEqual(wire.HOST_OK, invocation.status);
+    try std.testing.expectEqual(@as(usize, 1), probe.requests);
+    try std.testing.expectEqual(@as(usize, 1), probe.commits);
+    try std.testing.expect(std.mem.indexOf(u8, try sdk.borrowedBytes(.{ .ptr = invocation.result.ptr, .len = invocation.result.len }), "\"status\":\"saved\"") != null);
+    try std.testing.expect(runtime.image_budget.used.load(.acquire) > 0);
+    var blocked: ImageInvocation = .{ .tool = invocation.tool, .identity = invocation.identity };
+    blocked.execute(); // A retained result leaves insufficient working capacity.
+    try std.testing.expectEqual(wire.HOST_FAILED, blocked.status);
+    try std.testing.expectEqualStrings("{\"status\":\"capacity\"}", try sdk.borrowedBytes(.{ .ptr = blocked.result.ptr, .len = blocked.result.len }));
+    try std.testing.expectEqual(@as(usize, 1), probe.requests);
+    blocked.release();
+    invocation.release();
+    try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), runtime.image_results_created.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 3), runtime.image_results_released.load(.acquire));
+}
 
 test "active input correlates adoption before receipt and never changes the Run" {
     const Mode = struct { adopt: bool, omit_event: bool = false, fail_run: bool = false };

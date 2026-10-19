@@ -1,5 +1,5 @@
 const std = @import("std");
-const transport = @import("transport.zig");
+const transport = @import("agent_http_transport");
 const types = @import("types.zig");
 
 pub const Error = error{

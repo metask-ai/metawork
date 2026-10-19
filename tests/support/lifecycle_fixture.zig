@@ -3,6 +3,7 @@ pub const lifecycle = @import("metawork_agent");
 pub const product_control = @import("metawork_product_control");
 pub const product_skill = @import("metawork_product_skill");
 pub const product_task = @import("metawork_product_task");
+pub const product_workspace = @import("metawork_product_workspace");
 pub const account_contract = @import("metawork_account_contract");
 pub const models_contract = @import("metawork_product_models_contract");
 pub const models_ports = @import("product_models_ports");
@@ -301,6 +302,8 @@ pub const FakeCore = struct {
     buffer_releases: usize = 0,
     credential_seen: bool = false,
     zero_host_tools_seen: bool = false,
+    image_tool_seen: bool = false,
+    image_tool: ?wire.HostToolV1 = null,
     builtin_allowlist_seen: bool = false,
     last_allowed_tool_count: usize = 0,
     last_allowed_tool_names: [16][32]u8 = [_][32]u8{.{0} ** 32} ** 16,
@@ -380,6 +383,7 @@ pub const FakeCore = struct {
     permission_callback_count: usize = 0,
     permission_arguments_json: []const u8 = "{}",
     permission_tool_namespace: []const u8 = "builtin",
+    permission_tool_name: []const u8 = "Bash",
     permission_session_choices: bool = true,
     ui_unavailable_callbacks: usize = 0,
     ui_fatal_callbacks: usize = 0,
@@ -879,6 +883,13 @@ pub fn runtimeCreate(
     fake_core.lock();
     defer fake_core.unlock();
     fake_core.runtime_created += 1;
+    fake_core.image_tool = if (config.?.host_tool_count == 1) config.?.host_tools.?[0] else null;
+    fake_core.image_tool_seen = if (config.?.host_tools) |tools|
+        config.?.host_tool_count == 1 and
+            std.mem.eql(u8, sdk.borrowedBytes(tools[0].name) catch "", "GenerateImage") and
+            tools[0].execute != null and tools[0].release_result != null
+    else
+        false;
     fake_core.zero_host_tools_seen = config.?.host_tools == null and
         config.?.host_tool_count == 0 and
         config.?.builtin_tools != null and
@@ -2799,6 +2810,7 @@ fn permissionRequestJson(
     fake_core.lock();
     const arguments = fake_core.permission_arguments_json;
     const namespace = fake_core.permission_tool_namespace;
+    const name = fake_core.permission_tool_name;
     const session_choices = fake_core.permission_session_choices;
     fake_core.unlock();
     const binding = if (std.mem.eql(u8, namespace, "builtin"))
@@ -2810,8 +2822,8 @@ fn permissionRequestJson(
     std.json.Stringify.value(arguments, .{}, &writer) catch return error.NoSpaceLeft;
     return std.fmt.bufPrint(
         storage,
-        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"{s}\",\"name\":\"Bash\",\"binding\":\"{s}\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":{d},\"arguments_json\":{s},\"responses\":{s},\"candidate\":{s}}}",
-        .{ session_id, run_id, namespace, binding, policy_generation, writer.buffered(), if (session_choices) "[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"]" else "[\"deny_once\",\"allow_once\"]", if (session_choices) "{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\",\"target\":null}" else "null" },
+        "{{\"type\":\"permission\",\"request_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"session_id\":\"{s}\",\"run_id\":{d},\"tool_call_id\":\"tool-1\",\"tool\":{{\"namespace\":\"{s}\",\"name\":\"{s}\",\"binding\":\"{s}\"}},\"canonical_arguments_digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"policy_generation\":{d},\"arguments_json\":{s},\"responses\":{s},\"candidate\":{s}}}",
+        .{ session_id, run_id, namespace, name, binding, policy_generation, writer.buffered(), if (session_choices) "[\"deny_once\",\"deny_session\",\"allow_once\",\"allow_session\"]" else "[\"deny_once\",\"allow_once\"]", if (session_choices) "{\"rule_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"scope\":\"exact_arguments\",\"target\":null}" else "null" },
     );
 }
 
