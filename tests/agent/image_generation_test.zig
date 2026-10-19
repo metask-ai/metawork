@@ -758,6 +758,32 @@ test "GenerateImage canonical failures never synthesize a saved file or leak a c
     }
 }
 
+test "GenerateImage HTTP 401 429 and 503 never retry implicitly and permit a later explicit Run" {
+    const cases = .{
+        .{ "reject-401", @as(u16, 401) },
+        .{ "reject-429", @as(u16, 429) },
+        .{ "reject-503", @as(u16, 503) },
+    };
+    inline for (cases) |case| {
+        var h: Harness = undefined;
+        try h.init(case[0], .{});
+        defer h.deinit();
+        const session = try h.session(.full_access, true);
+        for (1..3) |requests| {
+            try execute(session);
+            try h.evidence(requests, 0, "provider_rejected");
+            try std.testing.expectEqual(@as(usize, 0), h.sink.attempts);
+            try std.testing.expectError(error.FileNotFound, h.tmp.dir.openFile(std.testing.io, "image-1.png", .{}));
+        }
+        const trace = try h.trace();
+        defer std.testing.allocator.free(trace);
+        var marker: [96]u8 = undefined;
+        const rejection = try std.fmt.bufPrint(&marker, "\"kind\":\"image_rejected\",\"status\":{d}", .{case[1]});
+        try std.testing.expectEqual(@as(usize, 2), count(trace, rejection));
+        try std.testing.expectEqual(@as(usize, 2), count(trace, "provider_rejected"));
+    }
+}
+
 test "GenerateImage missing binding and permission refusal produce zero image requests" {
     for ([_]bool{ false, true }) |binding| {
         var h: Harness = undefined;

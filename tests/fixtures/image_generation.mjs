@@ -1,5 +1,11 @@
 import { createServer } from "node:http";
-import { appendFileSync, readFileSync, mkdirSync, renameSync, symlinkSync } from "node:fs";
+import {
+  appendFileSync,
+  readFileSync,
+  mkdirSync,
+  renameSync,
+  symlinkSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { protocolTextSse, protocolToolSse } from "./provider_protocol.mjs";
 
@@ -85,6 +91,16 @@ const server = createServer(async (request, response) => {
         return request.socket.destroy();
       if (mode === "reject") {
         response.writeHead(403);
+        return response.end("synthetic-image-key");
+      }
+      const rejection = {
+        "reject-401": 401,
+        "reject-429": 429,
+        "reject-503": 503,
+      }[mode];
+      if (rejection) {
+        trace({ kind: "image_rejected", status: rejection });
+        response.writeHead(rejection, { "retry-after": "1" });
         return response.end("synthetic-image-key");
       }
       if (mode === "redirect") {
