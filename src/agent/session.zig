@@ -2308,15 +2308,15 @@ pub const Session = struct {
         defer self.releaseCoreCallback();
         const outcome = self.performImage(arguments);
         const options = runtime.image_test orelse return wire.HOST_FATAL;
-        const encoded = generate_image.result(runtime.allocator, outcome) catch return wire.HOST_FAILED;
-        defer runtime.allocator.free(encoded);
-        if (encoded.len > options.limits.result_bytes) return wire.HOST_FAILED;
+        const result_reservation = options.limits.result_bytes + @sizeOf(ImageResultHeader);
+        if (!runtime.image_budget.acquire(result_reservation)) return wire.HOST_FAILED;
+        var reserved = result_reservation;
+        defer runtime.image_budget.release(reserved);
+        var result_buffer: [4096]u8 = undefined;
+        const encoded = generate_image.result(result_buffer[0..options.limits.result_bytes], outcome) catch return wire.HOST_FAILED;
         const allocation_len = @sizeOf(ImageResultHeader) + encoded.len;
-        if (!runtime.image_budget.acquire(allocation_len)) return wire.HOST_FAILED;
-        const allocation = runtime.allocator.alloc(u8, allocation_len) catch {
-            runtime.image_budget.release(allocation_len);
-            return wire.HOST_FAILED;
-        };
+        const allocation = runtime.allocator.alloc(u8, allocation_len) catch return wire.HOST_FAILED;
+        reserved -= allocation_len;
         std.mem.bytesAsValue(ImageResultHeader, allocation[0..@sizeOf(ImageResultHeader)]).* = .{ .allocation_len = allocation_len };
         @memcpy(allocation[@sizeOf(ImageResultHeader)..], encoded);
         result_out.* = .{ .ptr = allocation.ptr + @sizeOf(ImageResultHeader), .len = encoded.len };
@@ -2351,7 +2351,7 @@ pub const Session = struct {
         defer runtime.allocator.free(prompt);
         var call: image_generation.Call = .{
             .cancellation = image_http.Cancellation.init(options.transport),
-            .timeout_ms = limits.timeout_ms,
+            .deadline_ns = std.Io.Timestamp.now(runtime.io, .awake).nanoseconds + @as(i96, limits.timeout_ms) * std.time.ns_per_ms,
             .io = runtime.io,
         };
         self.lock();
@@ -2378,6 +2378,7 @@ pub const Session = struct {
         defer {
             self.lock();
             self.image_calls[slot.?] = null;
+            if (!call.sent) self.image_sends -= 1;
             self.unlock();
         }
         const watchdog = std.Thread.spawn(.{}, image_generation.Call.watchdog, .{&call}) catch return .{ .failed = .capacity };

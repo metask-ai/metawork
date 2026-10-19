@@ -44,6 +44,7 @@ const Sink = struct {
     fail_write: bool = false,
     cancel_before_commit: bool = false,
     cancel_after_commit: bool = false,
+    long_name: bool = false,
 
     fn output(self: *Sink) agent.ImageGenerationOutput {
         return .{ .context = self, .commit_fn = commit };
@@ -53,8 +54,8 @@ const Sink = struct {
         self.mutex.lockUncancelable(std.testing.io);
         defer self.mutex.unlock(std.testing.io);
         self.attempts += 1;
-        var name_storage: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_storage, "image-{d}.png", .{if (self.force_conflict) @as(usize, 1) else self.attempts});
+        var name_storage: [200]u8 = @splat('a');
+        const name = if (self.long_name) &name_storage else try std.fmt.bufPrint(&name_storage, "image-{d}.png", .{if (self.force_conflict) @as(usize, 1) else self.attempts});
         const receipt = try agent.ImageGenerationReceipt.init(name, bytes.len);
         const file = try self.dir.createFile(std.testing.io, name, .{ .exclusive = true });
         var closed = false;
@@ -338,10 +339,12 @@ test "GenerateImage owns binding buffers and concurrent sessions keep distinct o
     try h.init("cross-session", .{ .sends_per_run = 1 });
     defer h.deinit();
     const first = try h.session(.full_access, true);
-    const second = try h.session(.full_access, false);
     try h.tmp.dir.createDir(std.testing.io, "second", .default_dir);
     var second_dir = try h.tmp.dir.openDir(std.testing.io, "second", .{});
     defer second_dir.close(std.testing.io);
+    const second_root = try second_dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(second_root);
+    const second = try open(h.runtime, second_root, &h.fixture, .full_access);
     var second_sink: Sink = .{ .dir = second_dir };
     const endpoint = try std.testing.allocator.dupe(u8, h.fixture.endpoint);
     defer std.testing.allocator.free(endpoint);
@@ -371,4 +374,139 @@ test "GenerateImage owns binding buffers and concurrent sessions keep distinct o
     const trace = try h.trace();
     defer std.testing.allocator.free(trace);
     try std.testing.expect(std.mem.indexOf(u8, trace, "\"active\":2") != null);
+}
+
+fn waitImage(h: *Harness) !void {
+    for (0..5000) |_| {
+        const trace = h.trace() catch |err| {
+            if (err != error.FileNotFound) return err;
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+            continue;
+        };
+        defer std.testing.allocator.free(trace);
+        if (count(trace, "\"kind\":\"image\"") != 0) return;
+        std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    return error.ImageRequestNotObserved;
+}
+
+test "GenerateImage blocked HTTP is cancelled by stop close and Runtime shutdown without UI drain" {
+    for (0..3) |action| {
+        var h: Harness = undefined;
+        try h.init("hold", .{});
+        defer h.deinit();
+        const session = try h.session(.full_access, true);
+        var work: Work = .{ .session = session, .id = try session.prepareRun(.{ .text = "Generate the fixture image." }) };
+        const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+        defer {
+            thread.join();
+            if (work.result) |*result| result.deinit();
+        }
+        try waitImage(&h); // request received, rather than a guessed sleep
+        const start = std.Io.Timestamp.now(std.testing.io, .awake);
+        switch (action) {
+            0 => {
+                _ = try session.requestTermination(work.id, .{ .interrupted = .user_cancel });
+            },
+            1 => try session.close(.session_close),
+            2 => try h.runtime.shutdown(),
+            else => unreachable,
+        }
+        for (0..3000) |_| {
+            if (work.done.load(.acquire)) break;
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+        try std.testing.expect(work.done.load(.acquire));
+        try std.testing.expect(start.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).nanoseconds < 3 * std.time.ns_per_s);
+        try std.testing.expect(work.result.?.termination_signal.? == .interrupted);
+        try h.evidence(1, 0, "");
+    }
+}
+
+test "GenerateImage independent deadline stops one request without cancelling another or the next Run" {
+    var h: Harness = undefined;
+    try h.init("deadline-mixed", .{ .timeout_ms = 500 });
+    defer h.deinit();
+    const session = try h.session(.full_access, true);
+    try execute(session);
+    try h.evidence(2, 1, "outcome_unknown");
+    try execute(session);
+    try h.evidence(4, 3, "saved");
+}
+
+test "GenerateImage test output refuses conflicts and cleans partial files before commit" {
+    for (0..3) |fault| {
+        var h: Harness = undefined;
+        try h.init("success", .{});
+        defer h.deinit();
+        h.sink.force_conflict = fault == 0;
+        h.sink.fail_write = fault == 1;
+        h.sink.cancel_before_commit = fault == 2;
+        if (fault == 0) try h.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "image-1.png", .data = "sentinel" });
+        try execute(try h.session(.full_access, true));
+        try h.evidence(1, 0, "output_failed");
+        if (fault == 0) {
+            const bytes = try h.tmp.dir.readFileAlloc(std.testing.io, "image-1.png", std.testing.allocator, .limited(100));
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqualStrings("sentinel", bytes);
+        } else try std.testing.expectError(error.FileNotFound, h.tmp.dir.openFile(std.testing.io, "image-1.png", .{}));
+    }
+}
+
+test "GenerateImage committed fact survives cancellation and oversized result encoding" {
+    var h: Harness = undefined;
+    try h.init("success", .{});
+    defer h.deinit();
+    h.sink.cancel_after_commit = true;
+    try execute(try h.session(.full_access, true));
+    try h.evidence(1, 1, "saved");
+    var failed: Harness = undefined;
+    try failed.init("success", .{ .result_bytes = 256 });
+    defer failed.deinit();
+    failed.sink.long_name = true;
+    try execute(try failed.session(.full_access, true));
+    try std.testing.expectEqual(@as(usize, 1), failed.sink.saved);
+    try std.testing.expectEqual(@as(usize, 0), failed.runtime.image_results_created.load(.acquire));
+    const name = [_]u8{'a'} ** 200;
+    const bytes = try failed.tmp.dir.readFileAlloc(std.testing.io, &name, std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(bytes);
+    const png = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.png_path, std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(png);
+    try std.testing.expectEqualSlices(u8, png, bytes);
+    const trace = try failed.trace();
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "\"kind\":\"image\""));
+    try std.testing.expectEqual(@as(usize, 0), count(trace, "\\\"status\\\":\\\"saved\\\""));
+}
+
+test "GenerateImage Runtime working budget bounds parallel calls and returns to zero" {
+    var limits: agent.ImageGenerationLimits = .{ .timeout_ms = 300 };
+    limits.memory_bytes = limits.workingBytes() + 10_000;
+    var h: Harness = undefined;
+    try h.init("concurrent", limits);
+    defer h.deinit();
+    try execute(try h.session(.full_access, true));
+    try h.evidence(1, 0, "capacity");
+}
+
+test "GenerateImage unavailable permission callback sends nothing and closes normally" {
+    const Ui = struct {
+        fn notify(context: ?*anyopaque) agent.EventReadyNotification {
+            const session: *agent.Session = @ptrCast(@alignCast(context.?));
+            return if (session.pendingUiRequest() != null) .unavailable else .already_pending;
+        }
+    };
+    var h: Harness = undefined;
+    try h.init("success", .{});
+    defer h.deinit();
+    const session = try h.session(.default, true);
+    h.runtime.event_ready_notifier = .{ .context = session, .notify_fn = Ui.notify };
+    var run = try session.beginRun(try session.prepareRun(.{ .text = "Generate the fixture image." }));
+    var terminal = run.execute();
+    defer terminal.deinit();
+    run.deinit();
+    try std.testing.expect(terminal.termination_signal.? == .event_consumer_notification_failure);
+    try h.evidence(0, 0, "");
+    h.runtime.event_ready_notifier = null;
+    try session.close(.session_close);
 }

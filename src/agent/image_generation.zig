@@ -22,7 +22,7 @@ pub const Limits = struct {
 
     pub fn workingBytes(self: Limits) usize {
         // Request escaping, response, fixed JSON arena, decoded bytes and headers.
-        return self.prompt_bytes * 6 + 8192 + self.response_bytes * 5 + self.image_bytes;
+        return self.prompt_bytes * 7 + 8192 + self.response_bytes * 5 + self.image_bytes;
     }
 };
 
@@ -138,12 +138,12 @@ pub const Budget = struct {
 pub const Call = struct {
     cancellation: http.Cancellation,
     finished: std.atomic.Value(bool) = .init(false),
-    timeout_ms: u32,
+    deadline_ns: i96,
     io: std.Io,
+    sent: bool = false,
 
     pub fn watchdog(self: *Call) void {
-        var elapsed: u64 = 0;
-        while (elapsed < self.timeout_ms) : (elapsed += 5) {
+        while (std.Io.Timestamp.now(self.io, .awake).nanoseconds < self.deadline_ns) {
             if (self.finished.load(.acquire) or self.cancellation.isRequested()) return;
             std.Io.Timeout.sleep(.{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }, self.io) catch break;
         }
@@ -172,6 +172,8 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
         std.crypto.secureZero(u8, buffer);
         allocator.free(buffer);
     }
+    if (call.cancellation.isRequested()) return .{ .failed = .cancelled };
+    call.sent = true;
     const response = network.perform(.{
         .url = binding.endpoint,
         .headers = &.{ .{ .name = "Content-Type", .value = "application/json" }, .{ .name = "Authorization", .value = bearer, .sensitive = true } },

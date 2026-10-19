@@ -21,16 +21,18 @@ pub fn prompt(allocator: std.mem.Allocator, arguments: []const u8, limit: usize)
     return allocator.dupe(u8, value);
 }
 
-pub fn result(allocator: std.mem.Allocator, outcome: image.Outcome) ![]u8 {
-    return switch (outcome) {
-        .saved => |*receipt| std.json.Stringify.valueAlloc(allocator, .{
+pub fn result(buffer: []u8, outcome: image.Outcome) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    switch (outcome) {
+        .saved => |*receipt| try std.json.Stringify.value(.{
             .status = "saved",
             .path = receipt.pathView(),
             .media_type = "image/png",
             .size_bytes = receipt.size_bytes,
-        }, .{}),
-        .failed => |failure| std.json.Stringify.valueAlloc(allocator, .{ .status = @tagName(failure) }, .{}),
-    };
+        }, .{}, &writer),
+        .failed => |failure| try std.json.Stringify.value(.{ .status = @tagName(failure) }, .{}, &writer),
+    }
+    return writer.buffered();
 }
 
 test "GenerateImage arguments reject execution configuration and duplicate keys" {

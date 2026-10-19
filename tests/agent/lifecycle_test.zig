@@ -55,6 +55,157 @@ const cancelOnThread = fixture.cancelOnThread;
 const failPipelineOnThread = fixture.failPipelineOnThread;
 const CallbackSignal = fixture.CallbackSignal;
 
+const ImageRunWork = struct {
+    session: *lifecycle.Session,
+    id: u64,
+    result: ?lifecycle.TerminalResult = null,
+    fn execute(self: *@This()) void {
+        var run = self.session.beginRun(self.id) catch @panic("image fake Run failed");
+        self.result = run.execute();
+        run.deinit();
+    }
+};
+
+const ImageInvocation = struct {
+    tool: wire.HostToolV1,
+    identity: wire.RunContextV1,
+    result: wire.OwnedBytesV1 = .{ .ptr = null, .len = 0 },
+    status: u32 = wire.HOST_FATAL,
+    fn execute(self: *@This()) void {
+        self.status = self.tool.execute.?(self.tool.ctx, &self.identity, sdk.bytesView("{\"prompt\":\"red pixel\"}"), &self.result);
+    }
+    fn release(self: *@This()) void {
+        self.tool.release_result.?(self.tool.ctx, &self.result);
+    }
+};
+
+fn imageIdentity(session: *lifecycle.Session, id: u64) wire.RunContextV1 {
+    const raw: *fixture.FakeSession = @ptrCast(@alignCast(session.raw.?));
+    var result = std.mem.zeroes(wire.RunContextV1);
+    result.struct_size = @sizeOf(wire.RunContextV1);
+    result.session = session.raw;
+    result.run_id = id;
+    result.session_id = sdk.bytesView(raw.session_id[0..raw.session_id_len]);
+    return result;
+}
+
+const ImageNoEffects = struct {
+    calls: usize = 0,
+    fn perform(context: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, _: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        return error.Unexpected;
+    }
+    fn commit(_: *anyopaque, _: []const u8, _: *const lifecycle.CompletionCancellation) !lifecycle.ImageGenerationReceipt {
+        return error.Unexpected;
+    }
+};
+
+test "GenerateImage fake Core rejects wrong Run Session identity and callbacks after close" {
+    for (0..4) |fault| {
+        fake_core.reset();
+        fake_core.setNextPlan(.controlled);
+        var network: ImageNoEffects = .{};
+        const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, std.testing.allocator, &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform } });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRun(.{ .text = "identity injection" });
+        var work: ImageRunWork = .{ .session = session, .id = id };
+        const thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+        fake_core.waitRunEntered();
+        var invocation: ImageInvocation = .{ .tool = fake_core.image_tool.?, .identity = imageIdentity(session, id) };
+        // Bind the same identity through a legitimate, unavailable image result.
+        invocation.execute();
+        try std.testing.expectEqual(wire.HOST_FAILED, invocation.status);
+        try std.testing.expect(std.mem.indexOf(u8, try sdk.borrowedBytes(.{ .ptr = invocation.result.ptr, .len = invocation.result.len }), "unavailable") != null);
+        invocation.release();
+        try std.testing.expect(invocation.result.ptr == null and invocation.result.len == 0);
+        switch (fault) {
+            0 => invocation.identity.run_id += 1,
+            1 => invocation.identity.session = @ptrFromInt(1),
+            2 => invocation.identity.session_id = sdk.bytesView("different-session"),
+            3 => try session.close(.session_close),
+            else => unreachable,
+        }
+        invocation.execute();
+        try std.testing.expectEqual(wire.HOST_FATAL, invocation.status);
+        try std.testing.expect(invocation.result.ptr == null and invocation.result.len == 0);
+        fake_core.releaseControlled();
+        thread.join();
+        work.result.?.deinit();
+        try std.testing.expectEqual(@as(usize, 0), network.calls);
+        try std.testing.expectEqual(@as(usize, 1), runtime.image_results_created.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), runtime.image_results_released.load(.acquire));
+    }
+}
+
+const ImageAllocationGate = struct {
+    parent: std.mem.Allocator = std.testing.allocator,
+    armed: std.atomic.Value(bool) = .init(false),
+    entered: std.Io.Semaphore = .{},
+    proceed: std.Io.Semaphore = .{},
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.armed.swap(false, .acq_rel)) {
+            self.entered.post(std.testing.io);
+            self.proceed.waitUncancelable(std.testing.io);
+        }
+        return self.parent.rawAlloc(len, alignment, ra);
+    }
+    fn resize(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawResize(bytes, alignment, len, ra);
+    }
+    fn remap(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.rawRemap(bytes, alignment, len, ra);
+    }
+    fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.parent.rawFree(bytes, alignment, ra);
+    }
+};
+
+test "GenerateImage callback holding lease before registration observes close and sends nothing" {
+    fake_core.reset();
+    fake_core.setNextPlan(.controlled);
+    var gate: ImageAllocationGate = .{};
+    var network: ImageNoEffects = .{};
+    const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, gate.allocator(), &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform } });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try openSession(runtime);
+    try session.configureImageGenerationForTesting(.{ .endpoint = "http://127.0.0.1:1/v1/images/generations", .model = "fixture-image", .credential = "synthetic-image-key", .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit } });
+    const id = try session.prepareRun(.{ .text = "close registration race" });
+    var work: ImageRunWork = .{ .session = session, .id = id };
+    const run_thread = try std.Thread.spawn(.{}, ImageRunWork.execute, .{&work});
+    fake_core.waitRunEntered();
+    var invocation: ImageInvocation = .{ .tool = fake_core.image_tool.?, .identity = imageIdentity(session, id) };
+    gate.armed.store(true, .release);
+    const callback_thread = try std.Thread.spawn(.{}, ImageInvocation.execute, .{&invocation});
+    gate.entered.waitUncancelable(std.testing.io);
+    const close_thread = try std.Thread.spawn(.{}, fixture.closeOnThread, .{session});
+    while (session.snapshot().state != .closing) std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+    gate.proceed.post(std.testing.io);
+    callback_thread.join();
+    invocation.release();
+    close_thread.join();
+    run_thread.join();
+    work.result.?.deinit();
+    try std.testing.expectEqual(wire.HOST_FAILED, invocation.status);
+    try std.testing.expectEqual(@as(usize, 0), network.calls);
+    try std.testing.expectEqual(@as(usize, 0), session.image_sends);
+    try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
+}
+
 test "active input correlates adoption before receipt and never changes the Run" {
     const Mode = struct { adopt: bool, omit_event: bool = false, fail_run: bool = false };
     for ([_]Mode{ .{ .adopt = false }, .{ .adopt = true }, .{ .adopt = true, .omit_event = true }, .{ .adopt = true, .fail_run = true } }) |mode| {
