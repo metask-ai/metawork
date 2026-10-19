@@ -1,6 +1,6 @@
 # MetaWork 原生生图阶段 B 方案
 
-> 状态：已获实施授权，从 B0 开始；先完成不收费的验证。正式 Host Tool 与设置入口仍关闭，不调用收费服务。B0 已发现 canonical Core 的无 grant checkpoint 恢复阻塞，见[验证缺口](../validation.md#generateimage-工具集合迁移的恢复缺口)。本文不是 decision record，也不替代领域真源。
+> 状态：已获实施授权；B0.1 离线前置核对已完成，继续不收费的实施与验证。正式 Host Tool 与设置入口仍关闭，不调用收费服务。B0.2 的 canonical Core 无 grant checkpoint 恢复缺口阻塞正式集合迁移，不阻塞隔离装配中的 B1/B2 实施，见[验证缺口](../validation.md#generateimage-工具集合迁移的恢复缺口)。本文不是 decision record，也不替代领域真源。
 
 阶段 B 交付一个最小正式链路：用户在 Models 设置中明确选择 Metask 生图模型，普通 Task 的模型通过 `GenerateImage` 发起一次图片生成，结果保存到 owning Workspace，工具返回真实文件引用。对话模型与生图模型独立；对话来源为 Custom Provider 的 Task 也可以消费已配置的 Metask 生图能力。
 
@@ -243,13 +243,17 @@ UI 实施遵循现有设计系统、双语、键盘、深浅主题、窄屏与�
 | 子任务 | 依赖 | 完成条件与提交边界 |
 | --- | --- | --- |
 | B0 合同与 canonical 行为核对 | 阶段 A 评审修复 | 固定 API/授权/目录/返回格式合同及正式部署待验证项；取得工具集合变化/Host permission 的真实 Core 证据，核对文件 API 与 Run 即时 lease handoff 合同；不要求收费请求。先提交必要 probe/fixture 与合同收敛，不开放产品 |
-| B1 Models 生图能力 | B0 | 一次 catalog 分出用途、独立可空选择、持久化兼容、精确解析 owned 图片 candidate；对话选择与账号隔离回归通过后提交 |
-| B2 Agent 与正式输出 | B0 | 独立正式 target 输入、生产预算、owned 目录与单次 commit、无主线程等待、结果单调性；测试替身替换为真实产品输出适配的证据通过后提交 |
+| B0.1 合同与离线前置核对 | 阶段 A 评审修复 | 已取得固定工具、权限、文件 API 与 lease 的离线证据；未知正式部署事实保留给 B5；不把已复现的上游恢复缺口当成通过 |
+| B0.2 旧工具集合恢复缺口关闭 | B0.1 | 等待上游交付符合官方恢复合同的 canonical artifact，再验证旧无 grant checkpoint；当前不修改 AgentCore 生产者，不放宽消费者校验 |
+| B1 Models 生图能力 | B0.1 | 一次 catalog 分出用途、独立可空选择、持久化兼容、精确解析 owned 图片 candidate；对话选择与账号隔离回归通过后提交 |
+| B2 Agent 与正式输出 | B0.1 | 独立正式 target 输入、生产预算、owned 目录与单次 commit、无主线程等待、结果单调性；测试替身替换为真实产品输出适配的证据通过后提交 |
 | B3 Run 接线与恢复 | B1、B2 | 所有 Run 的即时 lease handoff、冻结/清零/失效、logout/refresh/过期、权限/noninteractive、checkpoint degraded 和并发闭合后提交 |
 | B4 Models 设置与 Bridge | B1 | 最小选择区域、typed command/view、allowlist；可独立验证设置组件，发布呈现仍等 B5。受影响 Renderer/Bridge 验证通过后提交，无须等待 B3 才开始实现 |
 | B5 正式能力验收与启用 | B0–B4 | 核对正式部署，以明确付费额度验证真实服务/模型；正式集合切换后重新验收最终 App 构建产物、Core、UI 与平台，全部通过才完成发布 Gate |
 
 每个子任务完成后检查其是否可独立验证并及时提交，记录实际 revision 与验证。不能用“最终启用时再补”留下跨 owner 半条 active 链路；保留隔离测试入口只为持续验证明确的 fixture target，不保留旧正式实现。
+
+B0 是 B0.1/B0.2 的父任务。Models、图片 client、生产输出和 Run 接线可在固定隔离装配中继续实施；旧工具集合迁移的证据仍由 B0.2 提供，B0 未完成时 B5 不得通过。这里修正的是实现任务的依赖，不改变正式 Host Tool Gate、SDK 校验、恢复政策或任何 machine guard。
 
 B0 的源码与无收费 fixture 核对可先做；真实付费调用只在用户明确提供可用测试身份、模型和有界生成次数后执行。当前实施授权不包含使用本机已有凭据调用收费服务。
 
@@ -265,7 +269,7 @@ B0 的源码与无收费 fixture 核对可先做；真实付费调用只在用�
 | 即时 lease | Account 的现有能力在不变更 authenticated 状态或 generation、且没有通知的情况下，仍会拒绝 hard expiry 与时钟不可用的新 lease；已有 owned copy 保持独立寿命。App → Models 的一次 Run preparation handoff 按 §6 实施，不消费 catalog 缓存 token |
 | 文件 API | Windows 实测 exclusive 创建不覆盖，no-follow + 句柄类型可识别 junction，打开文件的 identity 可区分名称被替换。只是 B2 的 API 前提，不是生产 sink 验收；macOS 与真实文件取消/清理仍待后续验证 |
 
-B0 的离线探针可先独立提交；无 grant checkpoint 的合法恢复证据必须由 canonical 依赖修复后补齐。不得把“测试准确断言了拒绝”当成 B0 通过，也不得提前解除 B1/B2 的 DAG 依赖。
+B0 的离线探针已独立提交；无 grant checkpoint 的合法恢复证据必须由 canonical 依赖修复后补齐。不得把“测试准确断言了拒绝”当成 B0 通过。B1/B2 的实施只依赖已完成的 B0.1，正式集合切换及发布继续受 B0.2 和 B5 约束。
 
 ## 13 验收矩阵
 
