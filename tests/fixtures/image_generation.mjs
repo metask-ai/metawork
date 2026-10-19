@@ -147,17 +147,15 @@ const server = createServer(async (request, response) => {
           .trim()
           .split("\n\n")
           .map((line) => JSON.parse(line.slice(6)));
-        const second = events
-          .slice(1, 4)
-          .map((e) => ({
-            ...e,
-            index: 1,
-            ...(e.content_block
-              ? {
-                  content_block: { ...e.content_block, id: "image_parallel_2" },
-                }
-              : {}),
-          }));
+        const second = events.slice(1, 4).map((e) => ({
+          ...e,
+          index: 1,
+          ...(e.content_block
+            ? {
+                content_block: { ...e.content_block, id: "image_parallel_2" },
+              }
+            : {}),
+        }));
         events.splice(4, 0, ...second);
         if (mode === "concurrent-quota")
           events.splice(
