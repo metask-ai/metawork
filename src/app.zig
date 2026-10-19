@@ -697,6 +697,8 @@ pub fn run(init: std.process.Init) !void {
     models_coordinator_state.setCompletionTransport(
         app.completion_transport.transport(),
     );
+    control.setImageRunPreparation(models_coordinator_state.imageRunPreparation());
+    defer control.setImageRunPreparation(null);
     account_coordinator_state.setCommitObserver(.{
         .context = &models_coordinator_state,
         .notify_fn = notifyModelsAuthorizationChanged,
@@ -779,6 +781,7 @@ test {
     std.testing.refAllDecls(account_coordinator);
     std.testing.refAllDecls(metask_http_transport);
     std.testing.refAllDecls(models_automation_vault);
+    std.testing.refAllDecls(models_coordinator);
     std.testing.refAllDecls(attachment_images);
 }
 

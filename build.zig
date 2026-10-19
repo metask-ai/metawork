@@ -254,6 +254,13 @@ pub fn build(b: *std.Build) void {
         if (spec.root_module == test_modules.image_output)
             b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
     }
+    const image_preparation_step = b.step("test-image-run-preparation", "Run image authorization, ownership and projection tests");
+    for ([_]*std.Build.Module{ test_modules.app, test_modules.product_task_runtime, test_modules.product_task_execution }) |module| {
+        image_preparation_step.dependOn(&b.addRunArtifact(b.addTest(.{
+            .root_module = module,
+            .filters = &.{"image Run"},
+        })).step);
+    }
     const model_metadata_step = b.step("test-model-metadata", "Run Models declarations, resolution and Host/Renderer contract tests");
     for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers, test_modules.models_runtime }) |module| {
         model_metadata_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
@@ -612,6 +619,7 @@ fn createLifecycleFixture(
     fixture.addImport("metawork_product_control", modules.product_control);
     fixture.addImport("metawork_product_skill", modules.product_skill);
     fixture.addImport("metawork_product_task", modules.product_task);
+    fixture.addImport("metawork_product_workspace", modules.product_workspace);
     fixture.addImport("metawork_account_contract", modules.account_contract);
     fixture.addImport("metawork_product_models_contract", modules.models_contract);
     fixture.addImport("product_models_ports", modules.models_ports);
@@ -1824,6 +1832,7 @@ fn wireAgentCore(
     product_control_ports.addImport("product_models_ports", models_ports);
     product_control_ports.addImport("metawork_product_mcp", product_mcp);
     product_control_ports.addImport("metawork_product_schedule", product_schedule);
+    product_control_ports.addImport("metawork_product_task", product_task);
     const product_workspace_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/workspace/runtime.zig"),
         .target = target,
@@ -1855,6 +1864,7 @@ fn wireAgentCore(
         .target = target,
         .optimize = root_module.optimize,
     });
+    product_control_ports.addImport("metawork_product_workspace", product_workspace);
     image_output.addImport("metawork_agent", agent);
     image_output.addImport("metawork_product_workspace", product_workspace);
     const product_control_runtime = b.createModule(.{
@@ -2005,6 +2015,8 @@ fn wireAgentCore(
     );
     app.addImport("metawork_product_mcp", product_mcp);
     app.addImport("metawork_product_control_ports", product_control_ports);
+    app.addImport("image_output", image_output);
+    app.addImport("metawork_product_workspace", product_workspace);
     app.addImport("metawork_product_skill", product_skill);
     app.addImport("metawork_product_task", product_task);
     app.addImport("metawork_bridge", bridge);

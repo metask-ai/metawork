@@ -149,7 +149,7 @@ pub const TextProjection = struct {
         *anyopaque,
         []const u8,
         usize,
-        []const u8,
+        []const []const u8,
         usize,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})!ProjectedText,
     discard_candidate_fn: *const fn (*anyopaque, []u8) void,
@@ -163,7 +163,7 @@ pub const TextProjection = struct {
         self: TextProjection,
         value: []const u8,
         max: usize,
-        sensitive: []const u8,
+        sensitive: []const []const u8,
         reclaimable: usize,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})!ProjectedText {
         return self.project_fn(self.context, value, max, sensitive, reclaimable);
@@ -368,6 +368,9 @@ pub const RunClock = struct {
 };
 
 pub const OperationEffects = struct {
+    /// Caller owns until a Run record is installed; preparation consumes it.
+    /// The pointer is callback-scoped and cleared from retained effects.
+    image_execution: ?*?task_state.OwnedImageExecution = null,
     /// Borrowed only during prepareRun; never retained by PreparedRun or a worker.
     model_target: ?models_contract.SourceCandidateInput = null,
     text: TextProjection,
@@ -1112,6 +1115,7 @@ const PendingUiContext = struct {
 };
 
 const EventContext = struct {
+    image_secret: []const u8 = &.{},
     runtime: *Runtime,
     effects: EventEffects,
 };
@@ -1605,7 +1609,7 @@ pub const Runtime = struct {
         const projected_workspace = try input.text.project(
             input.workspace_root,
             input.max_workspace_bytes,
-            input.execution.api_key,
+            &.{input.execution.api_key},
             0,
         );
         var workspace_live = true;
@@ -1828,7 +1832,7 @@ pub const Runtime = struct {
         defer if (raw_owned) self.releaseInputPayload(raw);
         try effects.text.reserveBytes(task_state.additional_input_projection_bytes);
         errdefer effects.text.releaseBytes(task_state.additional_input_projection_bytes);
-        const projected = try effects.text.project(text, effects.limits.max_user_message_bytes, run.redaction_secret, 0);
+        const projected = try effects.text.project(text, effects.limits.max_user_message_bytes, &run.redactionSecrets(), 0);
         const result = &task.send_input_result.?;
         const id = run.next_input_id;
         run.next_input_id += 1;
@@ -1998,7 +2002,8 @@ pub const Runtime = struct {
         const execution = try taskExecutionInput(task);
         var input_parts: [agent.multimodal_input_limits.max_parts]agent.InputPart = undefined;
         const agent_input = try validateRunInput(task, input, effects.limits, &input_parts);
-        const run_id = try access.prepareRun(agent_input);
+        const image = if (effects.image_execution) |owned| if (owned.*) |*value| value.input() else null else null;
+        const run_id = try access.prepareRunWithImage(agent_input, image);
         var prepared = true;
         errdefer if (prepared)
             task_execution.cancelPreparedRunOrPanic(&access, run_id);
@@ -2009,6 +2014,10 @@ pub const Runtime = struct {
         errdefer if (record_owned) discardRun(self, task, slot, effects.release);
         const run_record = &task.durable.runs[slot].?;
         run_record.id = run_id;
+        if (effects.image_execution) |owned| {
+            run_record.image_execution = owned.*;
+            owned.* = null;
+        }
 
         var run_lease = task.runtime.worker_leases.acquire() catch return error.TaskBusy;
         var run_lease_owned = true;
@@ -2223,7 +2232,7 @@ pub const Runtime = struct {
             self,
             &access,
             run_id,
-            run_record.redaction_secret,
+            &run_record.redactionSecrets(),
         );
         var identity_collision = false;
         const dispatch = requestRunTermination(run_record, .user_cancel);
@@ -2279,7 +2288,7 @@ pub const Runtime = struct {
             run_id,
             request_id,
             response,
-            run_record.redaction_secret,
+            &run_record.redactionSecrets(),
         );
         const history_slot = task.durable.ui_history_next;
         const previous_history_record = task.durable.ui_history[history_slot];
@@ -2403,13 +2412,13 @@ pub const Runtime = struct {
         const context = latestReviewContext(run);
         const input: permission_review.Input = .{
             .host = .{ .delegated = true, .constraints = review_constraints, .authorization = review_authorization },
-            .user_intent = try copyReviewField(&writer, text, intent, 8 * 1024, run.redaction_secret),
+            .user_intent = try copyReviewField(&writer, text, intent, 8 * 1024, &run.redactionSecrets()),
             .request = .{
-                .tool_name = try copyReviewField(&writer, text, request.tool.name, 128, run.redaction_secret),
-                .arguments_json = try copyReviewField(&writer, text, request.arguments_json, 16 * 1024, run.redaction_secret),
-                .working_directory = try copyReviewField(&writer, text, task.durable.workspace_root, 2 * 1024, run.redaction_secret),
+                .tool_name = try copyReviewField(&writer, text, request.tool.name, 128, &run.redactionSecrets()),
+                .arguments_json = try copyReviewField(&writer, text, request.arguments_json, 16 * 1024, &run.redactionSecrets()),
+                .working_directory = try copyReviewField(&writer, text, task.durable.workspace_root, 2 * 1024, &run.redactionSecrets()),
             },
-            .context = try copyReviewField(&writer, text, context, 4 * 1024, run.redaction_secret),
+            .context = try copyReviewField(&writer, text, context, 4 * 1024, &run.redactionSecrets()),
         };
         return .{ .allocator = self.allocator, .identity = identity, .input = input, .bytes = bytes, .execution = owned_execution, .tool_namespace = request.tool.namespace };
     }
@@ -2490,7 +2499,7 @@ pub const Runtime = struct {
             return false;
         }
         if (!validReviewReason(suggestion.reason.text())) return false;
-        const projected = try effects.text.project(suggestion.reason.text(), task_state.ui_record_detail_capacity, run.redaction_secret, 0);
+        const projected = try effects.text.project(suggestion.reason.text(), task_state.ui_record_detail_capacity, &run.redactionSecrets(), 0);
         defer {
             std.crypto.secureZero(u8, projected.value);
             effects.text.discardCandidate(projected.value);
@@ -2592,9 +2601,9 @@ pub const Runtime = struct {
                     task.durable.runs,
                     task.runtime.active_run_id,
                 )) |run_record|
-                    run_record.redaction_secret
+                    &run_record.redactionSecrets()
                 else if (task.runtime.execution()) |execution|
-                    execution.input().api_key
+                    &.{execution.input().api_key}
                 else
                     &.{},
             )
@@ -2847,7 +2856,7 @@ pub const Runtime = struct {
         const projected = try text.project(
             trimmed,
             max_title_bytes,
-            sensitive,
+            &.{sensitive},
             previous_title.len,
         );
         task.durable.title = projected.value;
@@ -3291,7 +3300,7 @@ pub const Runtime = struct {
     ) (task_state.EventApplyError || error{UnknownTask})!EventOutcome {
         const task = self.findByRouteId(envelope.session_id) orelse
             return error.UnknownTask;
-        var context = EventContext{ .runtime = self, .effects = effects };
+        var context = EventContext{ .runtime = self, .effects = effects, .image_secret = if (task_state.findRun(task.durable.runs, envelope.run_id)) |run| run.redactionSecrets()[1] else &.{} };
         const projection = EventProjection{
             .context = &context,
             .max_assistant_message_bytes = effects.max_assistant_message_bytes,
@@ -3515,7 +3524,7 @@ pub const Runtime = struct {
                     const projected = projection.project(
                         task_policy.boundAutomaticTitle(value),
                         max_title_bytes,
-                        run.redaction_secret,
+                        &run.redactionSecrets(),
                         reclaimable,
                     ) catch null;
                     if (projected) |title| {
@@ -3545,6 +3554,20 @@ pub const Runtime = struct {
             }
         }
         return result;
+    }
+
+    /// Image effects and projection scrub credentials outlive both execution
+    /// and event drain. Worker leases also cover automatic title production.
+    pub fn releaseQuiescentImages(self: *Runtime, effects: ReleaseEffects) void {
+        for (self.tasks) |*entry| {
+            const task = &(entry.* orelse continue);
+            if (task.runtime.worker_leases.hasLive()) continue;
+            for (task.durable.runs) |*run_entry| {
+                const run = &(run_entry.* orelse continue);
+                if (run.event_stream_finalized and run.automatic_title.state.load(.acquire) != .running)
+                    releaseImageExecution(run, effects);
+            }
+        }
     }
 
     /// Settles checkpoint export results after the event-drain barrier. Blob
@@ -4004,8 +4027,8 @@ pub const Runtime = struct {
     ) bool {
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            var credentials: [3][]const u8 = undefined;
-            for (retainedExecutionCredentials(task, &credentials)) |credential| {
+            var credentials = RetainedCredentials{ .task = task };
+            while (credentials.next()) |credential| {
                 if (credential.len != 0 and
                     std.mem.indexOf(u8, value, credential) != null)
                     return true;
@@ -4026,8 +4049,8 @@ pub const Runtime = struct {
         var changed = false;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            var credentials: [3][]const u8 = undefined;
-            for (retainedExecutionCredentials(task, &credentials)) |credential| {
+            var credentials = RetainedCredentials{ .task = task };
+            while (credentials.next()) |credential| {
                 if (credential.len != 0)
                     changed = redact_fn(value, credential) or changed;
             }
@@ -4042,8 +4065,8 @@ pub const Runtime = struct {
         var longest: usize = 0;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            var credentials: [3][]const u8 = undefined;
-            for (retainedExecutionCredentials(task, &credentials)) |credential| {
+            var credentials = RetainedCredentials{ .task = task };
+            while (credentials.next()) |credential| {
                 if (credential.len > longest and
                     std.mem.startsWith(u8, value, credential))
                     longest = credential.len;
@@ -4059,8 +4082,8 @@ pub const Runtime = struct {
         if (value.len == 0) return false;
         for (self.tasks) |*entry| {
             const task = &(entry.* orelse continue);
-            var credentials: [3][]const u8 = undefined;
-            for (retainedExecutionCredentials(task, &credentials)) |credential| {
+            var credentials = RetainedCredentials{ .task = task };
+            while (credentials.next()) |credential| {
                 if (value.len < credential.len and
                     std.mem.startsWith(u8, credential, value)) return true;
             }
@@ -4300,7 +4323,7 @@ pub const Runtime = struct {
             errdefer if (original_model) |value| self.allocator.free(value);
             const source_id = try self.allocator.dupe(u8, rebind_input.source_id);
             errdefer self.allocator.free(source_id);
-            const projected = try rebind_input.text.project(model, models_contract.Limits.model_id_bytes, input.execution.api_key, 0);
+            const projected = try rebind_input.text.project(model, models_contract.Limits.model_id_bytes, &.{input.execution.api_key}, 0);
             errdefer rebind_input.text.discardCandidate(projected.value);
             var access = if (attached_rebind) try task.runtime.acquireAccess() else null;
             errdefer if (access) |*value| value.deinit();
@@ -5253,6 +5276,7 @@ pub const Runtime = struct {
         effects: LifecycleEffects,
     ) RecoverySync {
         var result: RecoverySync = .{};
+        self.releaseQuiescentImages(effects.release);
         const titles = self.syncAutomaticTitles(
             effects.max_title_bytes,
             effects.text,
@@ -5657,7 +5681,7 @@ fn appendEventAssistant(
         };
     }
     target.list.appendSliceAssumeCapacity(suffix);
-    return redactTrackedText(target, credential);
+    return redactTrackedTextSecrets(target, &.{ credential, context.image_secret });
 }
 
 fn appendEventGroup(
@@ -5691,7 +5715,7 @@ fn appendEventGroup(
     // their segment state immediately after this returns.
     target.list.appendSliceAssumeCapacity(first);
     target.list.appendSliceAssumeCapacity(second);
-    return redactTrackedText(target, credential);
+    return redactTrackedTextSecrets(target, &.{ credential, context.image_secret });
 }
 
 fn replaceEventText(
@@ -5706,7 +5730,7 @@ fn replaceEventText(
     const projected = try context.effects.text.project(
         value,
         max,
-        credential,
+        &.{ credential, context.image_secret },
         previous.len,
     );
     target.* = projected.value;
@@ -5742,14 +5766,14 @@ fn findOrCreateEventTool(
     const owned_name = try context.effects.text.project(
         name,
         context.effects.max_tool_field_bytes,
-        run_record.redaction_secret,
+        &run_record.redactionSecrets(),
         0,
     );
     errdefer context.effects.text.discardCandidate(owned_name.value);
     const owned_input = try context.effects.text.project(
         input,
         context.effects.max_tool_field_bytes,
-        run_record.redaction_secret,
+        &run_record.redactionSecrets(),
         0,
     );
     errdefer context.effects.text.discardCandidate(owned_input.value);
@@ -5874,7 +5898,7 @@ fn replaceEventFileReferences(
         const title = try context.effects.text.project(
             reference.title,
             context.effects.max_file_ref_field_bytes,
-            credential,
+            &.{ credential, context.image_secret },
             0,
         );
         owned.title = title.value;
@@ -5888,7 +5912,7 @@ fn replaceEventFileReferences(
         const display = try context.effects.text.project(
             display_source,
             context.effects.max_file_ref_field_bytes,
-            credential,
+            &.{ credential, context.image_secret },
             0,
         );
         owned.display_path = display.value;
@@ -5896,7 +5920,7 @@ fn replaceEventFileReferences(
         const kind = try context.effects.text.project(
             reference.kind,
             context.effects.max_file_ref_field_bytes,
-            credential,
+            &.{ credential, context.image_secret },
             0,
         );
         owned.kind = kind.value;
@@ -6018,7 +6042,7 @@ fn recordEventFileChanges(
         const path_projection = context.effects.text.project(
             display_path,
             context.effects.max_file_change_field_bytes,
-            run.redaction_secret,
+            &run.redactionSecrets(),
             0,
         ) catch {
             context.effects.text.discardCandidate(owned_id.?);
@@ -6037,7 +6061,7 @@ fn recordEventFileChanges(
             const from_projection = context.effects.text.project(
                 from,
                 context.effects.max_file_change_field_bytes,
-                run.redaction_secret,
+                &run.redactionSecrets(),
                 0,
             ) catch {
                 context.effects.text.discardCandidate(owned_path.?);
@@ -6220,17 +6244,25 @@ fn formatFileReferenceId(
 }
 
 fn redactTrackedText(target: *task_state.TrackedText, credential: []const u8) bool {
+    return redactTrackedTextSecrets(target, &.{credential});
+}
+
+fn redactTrackedTextSecrets(target: *task_state.TrackedText, secrets: []const []const u8) bool {
     std.debug.assert(target.committed_len <= target.list.items.len);
-    if (credential.len == 0) {
-        target.committed_len = target.list.items.len;
-        return false;
-    }
     var read = target.committed_len;
     var write = target.committed_len;
     var redacted = false;
     while (read < target.list.items.len) {
         const value = target.list.items;
-        if (credentialEndAtCodepoint(value, read, credential)) |redaction_end| {
+        var match_end: usize = 0;
+        var cursor = read;
+        while (cursor == read or cursor < match_end) : (cursor += utf8CodepointLen(value, cursor)) {
+            for (secrets) |secret| if (credentialEndAtCodepoint(value, cursor, secret)) |end| {
+                match_end = @max(match_end, end);
+            };
+        }
+        if (match_end != 0) {
+            const redaction_end = match_end;
             const marker_len = @min(redaction_end - read, 3);
             @memset(target.list.items[write..][0..marker_len], '*');
             write += marker_len;
@@ -6238,7 +6270,10 @@ fn redactTrackedText(target: *task_state.TrackedText, credential: []const u8) bo
             redacted = true;
             continue;
         }
-        if (credentialMayContinueAtCodepoint(value, read, credential)) {
+        const partial = for (secrets) |secret| {
+            if (credentialMayContinueAtCodepoint(value, read, secret)) break true;
+        } else false;
+        if (partial) {
             const remaining = value[read..];
             std.mem.copyForwards(
                 u8,
@@ -6319,6 +6354,14 @@ fn releaseExecutionValueNoFail(
         compact.redaction_secret = &.{};
     }
     execution.deinit();
+}
+
+fn releaseImageExecution(run: *task_state.RunRecord, effects: ReleaseEffects) void {
+    if (run.image_execution) |*image| {
+        effects.redactAll(image.candidate.input().bearer);
+        image.deinit();
+        run.image_execution = null;
+    }
 }
 
 fn releaseProjectedSlice(
@@ -6612,7 +6655,7 @@ fn copyRunInput(
     self: *Runtime,
     task: *const task_state.Task,
     input: RunInput,
-    credential: []const u8,
+    credentials: []const []const u8,
     effects: OperationEffects,
 ) RunError!task_state.RunInputRecord {
     return switch (input) {
@@ -6622,7 +6665,7 @@ fn copyRunInput(
             const projected = try effects.text.project(
                 value,
                 effects.limits.max_user_message_bytes,
-                credential,
+                credentials,
                 0,
             );
             break :blk .{ .text = .{
@@ -6639,7 +6682,7 @@ fn copyRunInput(
                 const projected = try effects.text.project(
                     multimodal.text,
                     effects.limits.max_user_message_bytes,
-                    credential,
+                    credentials,
                     0,
                 );
                 text = projected.value;
@@ -6658,7 +6701,7 @@ fn copyRunInput(
                 const display = try effects.text.project(
                     item.display_name,
                     effects.limits.max_tool_field_bytes,
-                    credential,
+                    credentials,
                     0,
                 );
                 record.* = .{
@@ -6703,14 +6746,14 @@ fn copyRunInput(
             const invocation = try effects.text.project(
                 skill.invocation_name,
                 effects.limits.max_catalog_projection_bytes,
-                credential,
+                credentials,
                 0,
             );
             errdefer effects.text.discardCandidate(invocation.value);
             const display = try effects.text.project(
                 skill.display_name,
                 effects.limits.max_catalog_projection_bytes,
-                credential,
+                credentials,
                 0,
             );
             errdefer effects.text.discardCandidate(display.value);
@@ -6727,7 +6770,7 @@ fn copyRunInput(
                 const projected = try effects.text.project(
                     value,
                     effects.limits.max_user_message_bytes,
-                    credential,
+                    credentials,
                     0,
                 );
                 target.* = projected.value;
@@ -6756,7 +6799,7 @@ fn reserveRun(
     const slot = findEmptyRun(task.durable.runs) orelse return error.RunCapacity;
     if (task.durable.next_run_generation == std.math.maxInt(u64))
         return error.RunGenerationExhausted;
-    var input_record = try copyRunInput(self, task, input, execution.api_key, effects);
+    var input_record = try copyRunInput(self, task, input, &.{ execution.api_key, if (effects.image_execution) |owned| if (owned.*) |*image| image.candidate.input().bearer else &.{} else &.{} }, effects);
     errdefer deinitRunInput(self, effects.release, &input_record);
     const tools = try self.allocator.alloc(
         ?task_state.ToolView,
@@ -6858,7 +6901,7 @@ fn applyProvisionalTitle(
     const projected = text.project(
         task_policy.boundAutomaticTitle(candidate),
         max_title_bytes,
-        credential,
+        &.{credential},
         previous.len,
     ) catch return false;
     if (projected.value.len == 0) {
@@ -6874,6 +6917,7 @@ fn applyProvisionalTitle(
 fn cleanRunEffects(effects: OperationEffects) OperationEffects {
     var clean = effects;
     clean.model_target = null;
+    clean.image_execution = null;
     return clean;
 }
 
@@ -6898,7 +6942,7 @@ fn applyModelIntent(
     const owned_model = try self.allocator.dupe(u8, intent.model_id);
     errdefer self.allocator.free(owned_model);
     const previous = task.durable.execution_model;
-    const replacement = try effects.text.project(intent.model_id, effects.limits.max_model_id_bytes, installed.secret, previous.len);
+    const replacement = try effects.text.project(intent.model_id, effects.limits.max_model_id_bytes, &.{installed.secret}, previous.len);
     errdefer {
         effects.text.discardCandidate(replacement.value);
         effects.text.restorePrevious(previous.len);
@@ -6979,22 +7023,27 @@ fn requestPermissionTermination(
 
 /// Read-only secret views stay stable while the worker transfers its owned
 /// execution into a candidate. No worker mutates these composition views.
-fn retainedExecutionCredentials(task: *const task_state.Task, output: *[3][]const u8) []const []const u8 {
-    var count: usize = 0;
-    if (task.runtime.executionConst()) |execution| {
-        output[count] = execution.secret;
-        count += 1;
-    }
-    if (task.runtime.restore_job) |job| {
-        output[count] = job.credential;
-        count += 1;
-        if (job.rebind) |rebind| {
-            output[count] = rebind.original_credential;
-            count += 1;
+const RetainedCredentials = struct {
+    task: *const task_state.Task,
+    index: usize = 0,
+
+    fn next(self: *RetainedCredentials) ?[]const u8 {
+        while (self.index < 3 + self.task.durable.runs.len) {
+            const index = self.index;
+            self.index += 1;
+            if (index == 0) {
+                if (self.task.runtime.executionConst()) |execution| return execution.secret;
+            } else if (index == 1) {
+                if (self.task.runtime.restore_job) |job| return job.credential;
+            } else if (index == 2) {
+                if (self.task.runtime.restore_job) |job| if (job.rebind) |rebind| return rebind.original_credential;
+            } else {
+                if (self.task.durable.runs[index - 3]) |*run| if (run.image_execution) |*image| return image.candidate.input().bearer;
+            }
         }
+        return null;
     }
-    return output[0..count];
-}
+};
 
 fn exportRecoveryCheckpoint(job: *recovery_job.Job, access: *task_agent_session.Access, model: []const u8) recovery_job.ExportOutcome {
     const rebind = &job.rebind.?;
@@ -7221,10 +7270,10 @@ fn reviewIntent(input: *const task_state.RunInputRecord, buffer: []u8) ![]const 
     return writer.buffered();
 }
 
-fn copyReviewField(writer: *std.Io.Writer, text: TextProjection, value: []const u8, max: usize, credential: []const u8) ![]const u8 {
+fn copyReviewField(writer: *std.Io.Writer, text: TextProjection, value: []const u8, max: usize, credentials: []const []const u8) ![]const u8 {
     if (value.len > max) return error.ReviewInputLimit;
     if (!std.unicode.utf8ValidateSlice(value)) return error.ReviewInputInvalid;
-    const projected = try text.project(value, max, credential, 0);
+    const projected = try text.project(value, max, credentials, 0);
     defer {
         std.crypto.secureZero(u8, projected.value);
         text.discardCandidate(projected.value);
@@ -7249,7 +7298,7 @@ fn prepareUiRecord(
     run_id: u64,
     request_id: u64,
     response: UiResponse,
-    credential: []const u8,
+    secrets: []const []const u8,
 ) ControlError!task_state.UiRecord {
     var record = task_state.UiRecord{
         .request_id = request_id,
@@ -7282,7 +7331,7 @@ fn prepareUiRecord(
         .allow_session, .deny_session => if (request.candidate == null) return error.InvalidUiResponse,
         .allow_once, .deny_once => {},
     }
-    fillUiRecord(&record, request, credential);
+    fillUiRecord(&record, request, secrets);
     return record;
 }
 
@@ -7290,7 +7339,7 @@ fn prepareCancelledUiRecord(
     self: *Runtime,
     access: *task_agent_session.Access,
     run_id: u64,
-    credential: []const u8,
+    secrets: []const []const u8,
 ) ?task_state.UiRecord {
     if (run_id == 0) return null;
     var pending = access.copyPendingUiRequest(self.allocator) catch return null;
@@ -7305,14 +7354,14 @@ fn prepareCancelledUiRecord(
         .kind = .permission,
         .state = .cancelled,
     };
-    fillUiRecord(&record, parsed.value(), credential);
+    fillUiRecord(&record, parsed.value(), secrets);
     return record;
 }
 
 fn fillUiRecord(
     record: *task_state.UiRecord,
     permission: agent.PermissionRequest,
-    credential: []const u8,
+    secrets: []const []const u8,
 ) void {
     if (permission.request_id.len <= task_state.permission_summary_field_capacity) {
         @memcpy(
@@ -7324,7 +7373,7 @@ fn fillUiRecord(
     const projected = task_execution.projectSanitized(
         &record.detail,
         permission.arguments_json,
-        credential,
+        secrets,
     );
     record.detail_len = projected.len;
     record.detail_truncated = projected.truncated;
@@ -7456,6 +7505,7 @@ fn deinitRun(
     run: *task_state.RunRecord,
 ) void {
     std.debug.assert(run.checkpoint.lease == null);
+    releaseImageExecution(run, effects);
     releaseAutomaticTitle(&run.automatic_title);
     for (run.tools) |*entry| if (entry.*) |*tool|
         deinitTool(self, effects, tool);
@@ -8060,4 +8110,16 @@ test "approval intent CAS, no-op, delegation commit and history authority stay d
     try std.testing.expectError(error.UnsupportedPermissionProfile, runtime.beginApprovalChange(1, 1, 3, .full_access, effects));
     try std.testing.expect(task.approval_change == null);
     try std.testing.expectEqual(settled_generation, task.runtime.permission_review.generation);
+}
+
+test "image Run incremental projection keeps a credential prefix private across chunks" {
+    var text: task_state.TrackedText = .{};
+    defer text.list.deinit(std.testing.allocator);
+    try text.list.appendSlice(std.testing.allocator, "prefix image-");
+    try std.testing.expect(!redactTrackedTextSecrets(&text, &.{ "dialogue-secret", "image-token" }));
+    try std.testing.expectEqual(@as(usize, "prefix ".len), text.committed_len);
+    try text.list.appendSlice(std.testing.allocator, "token suffix");
+    try std.testing.expect(redactTrackedTextSecrets(&text, &.{ "dialogue-secret", "image-token" }));
+    try std.testing.expectEqualStrings("prefix *** suffix", text.list.items);
+    try std.testing.expectEqual(text.list.items.len, text.committed_len);
 }

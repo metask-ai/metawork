@@ -8,6 +8,9 @@ const models_metask = @import("product_models_metask");
 const metask_transport = @import("metask_transport");
 const control_ports = @import("metawork_product_control_ports");
 const agent_protocol = @import("product_agent_protocol_adapter");
+const product_task = @import("metawork_product_task");
+const product_workspace = @import("metawork_product_workspace");
+const image_output = @import("image_output");
 
 pub const ProbeNotifier = struct {
     context: *anyopaque,
@@ -267,6 +270,51 @@ pub const Coordinator = struct {
         return .{ .context = self, .submit_fn = submitCommand };
     }
 
+    pub fn imageRunPreparation(self: *Coordinator) control_ports.ImageRunPreparation {
+        return .{ .context = self, .prepare_fn = prepareImageRun };
+    }
+
+    fn prepareImageRun(context: *anyopaque, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
+        const self: *Coordinator = @ptrCast(@alignCast(context));
+        self.assertMainThread();
+        const view = self.management.imageView();
+        if (!view.selection_available) return null;
+        const transport = self.completion_transport orelse return null;
+        var lease = (self.account.authorizationLease() catch return null) orelse return null;
+        defer lease.deinit();
+        var candidate = switch (self.management.prepareImageCandidate(.{
+            .principal_ref = lease.principal_ref,
+            .authorization_generation = lease.authorization_generation,
+            .bearer = lease.access_token,
+            .expected_selection_revision = view.selection_revision,
+            .expected_catalog_generation = view.catalog_generation,
+        })) {
+            .ready => |value| value,
+            .rejected => return null,
+        };
+        defer candidate.deinit();
+        const allocator = std.heap.c_allocator;
+        const output = allocator.create(image_output.Output) catch return null;
+        output.* = image_output.Output.init(allocator, self.io, self.main_thread_id, workspace) catch {
+            allocator.destroy(output);
+            return null;
+        };
+        return .{
+            .candidate = candidate.take(),
+            .transport = transport,
+            .output = output.port(),
+            .output_owner = output,
+            .release_output_fn = releaseImageOutput,
+        };
+    }
+
+    fn releaseImageOutput(context: *anyopaque) void {
+        const output: *image_output.Output = @ptrCast(@alignCast(context));
+        const allocator = output.allocator;
+        output.deinit();
+        allocator.destroy(output);
+    }
+
     fn submitCommand(
         context: *anyopaque,
         command: models_contract.CustomProviderCommand,
@@ -524,4 +572,130 @@ fn managementError(error_code: models_contract.ModelsError) models_contract.Mana
         .no_models,
         => .catalog_unavailable,
     };
+}
+
+test "image Run preparation borrows a fresh Account lease and freezes owned output authority" {
+    const Fixture = struct {
+        available: bool = false,
+        reject: bool = false,
+        calls: usize = 0,
+        expected_generation: u64 = 0,
+        expected_token: []const u8 = "image-access-a",
+        model: []const u8 = "image-model-a",
+
+        fn imageView(context: *anyopaque) models_contract.MetaskImageView {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return .{ .catalog_state = .ready, .catalog_generation = 7, .selection_revision = 3, .selection_available = self.available };
+        }
+        fn prepare(context: *anyopaque, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            std.testing.expectEqualStrings("account-image", input.principal_ref) catch unreachable;
+            std.testing.expectEqual(self.expected_generation, input.authorization_generation) catch unreachable;
+            std.testing.expectEqualStrings(self.expected_token, input.bearer) catch unreachable;
+            std.testing.expectEqual(@as(u64, 3), input.expected_selection_revision) catch unreachable;
+            std.testing.expectEqual(@as(u64, 7), input.expected_catalog_generation) catch unreachable;
+            if (self.reject) return .{ .rejected = .generation_mismatch };
+            return .{ .ready = models_contract.OwnedImageCandidate.copy(std.testing.allocator, self.model, input.bearer, 7, 3) catch unreachable };
+        }
+        fn accountHttp(_: *anyopaque, request: account_api.TransportRequest, output: []u8) account_api.TransportError!account_api.TransportResponse {
+            if (request.kind != .refresh_token) return error.ProtocolFailed;
+            const body = "{\"access_token\":\"image-access-b\",\"refresh_token\":\"synthetic-refresh-b\",\"token_type\":\"Bearer\",\"expires_in\":3600}";
+            @memcpy(output[0..body.len], body);
+            return .{ .status = 200, .body = output[0..body.len] };
+        }
+        fn modelsHttp(_: *anyopaque, _: metask_transport.Request, _: []u8) metask_transport.TransportError!metask_transport.Response {
+            @panic("image preparation must not refresh the catalog");
+        }
+        fn imageHttp(_: ?*anyopaque, _: agent.CompletionHttpRequest, _: *const agent.CompletionCancellation, _: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
+            @panic("image preparation must not generate or reserve a file");
+        }
+        fn wake(_: *anyopaque) void {}
+    };
+    var fixture: Fixture = .{};
+    var account = account_api.Runtime.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{ .context = &fixture, .perform_fn = Fixture.accountHttp }, account_api.TestSupport.loopbackEndpoint(), .{ .context = &fixture, .notify_fn = Fixture.wake });
+    var platform: account_api.TestSupport.Platform = .{ .now_unix_seconds = 100 };
+    account_api.TestSupport.attachPlatform(&account, &platform);
+    defer {
+        account_api.TestSupport.detachPlatform(&account);
+        account.deinit();
+    }
+    var authenticated = try account_api.TestSupport.prepareAuthenticated(&account, "account-image", "Image User", fixture.expected_token, "synthetic-refresh", 200);
+    defer authenticated.deinit();
+    account.commit(&authenticated);
+    var lease = (try account.authorizationLease()).?;
+    fixture.expected_generation = lease.authorization_generation;
+    lease.deinit();
+    // This unit observes only the two image management methods; catalog and
+    // selection behavior are independently tested against the real Models owner.
+    var management: control_ports.ModelsManagement = undefined;
+    management.context = &fixture;
+    management.image_view_fn = Fixture.imageView;
+    management.prepare_image_candidate_fn = Fixture.prepare;
+    var coordinator = Coordinator.init(&account, .{ .context = &fixture, .perform_fn = Fixture.modelsHttp }, management, std.Thread.getCurrentId(), std.testing.io);
+    coordinator.setCompletionTransport(.{ .perform_fn = Fixture.imageHttp });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root);
+    const authority: product_workspace.TaskAuthority = .{ .id = 5, .epoch = 2, .kind = .manual, .canonical_root = root[0..root_len], .trust = .explicitly_trusted };
+    const port = coordinator.imageRunPreparation();
+    try std.testing.expect(port.prepare(authority) == null);
+    try std.testing.expectEqual(@as(usize, 0), fixture.calls);
+    fixture.available = true;
+    var first = port.prepare(authority).?;
+    defer first.deinit();
+    try std.testing.expectEqualStrings(models_contract.metask_images_generations_url, first.input().binding.endpoint);
+    try std.testing.expectEqualStrings("image-model-a", first.input().binding.model);
+    try std.testing.expectEqualStrings("image-access-a", first.input().binding.credential);
+    const output: *image_output.Output = @ptrCast(@alignCast(first.output_owner));
+    @memset(root[0..root_len], 'x');
+    try std.testing.expect(!std.mem.eql(u8, root[0..root_len], output.root));
+    // Hard expiry requires no Account notification or cached-view change.
+    platform.now_unix_seconds = 200;
+    try std.testing.expect(port.prepare(authority) == null);
+    platform.now_unix_seconds = null;
+    try std.testing.expect(port.prepare(authority) == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+    platform.now_unix_seconds = 150;
+    fixture.expected_token = "image-access-b";
+    fixture.model = "image-model-b";
+    // Drive the real Account refresh transition with a synthetic in-process
+    // transport. Image preparation itself never dispatches Account work.
+    var refresh = switch (account.prepareTokenRefresh()) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer refresh.deinit();
+    try std.testing.expect(account.admitEffect(&refresh));
+    account.commit(&refresh);
+    try std.testing.expect(account.dispatchCommitted(&refresh) == null);
+    account_api.TestSupport.joinNetwork(&account);
+    var rotated = switch (account.prepareNextCompletion().?) {
+        .prepared => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer rotated.deinit();
+    account.commit(&rotated);
+    lease = (try account.authorizationLease()).?;
+    fixture.expected_generation = lease.authorization_generation;
+    lease.deinit();
+    _ = try tmp.dir.realPath(std.testing.io, &root);
+    var second = port.prepare(authority).?;
+    defer second.deinit();
+    try std.testing.expectEqualStrings("image-access-b", second.input().binding.credential);
+    try std.testing.expectEqualStrings("image-model-b", second.input().binding.model);
+    try std.testing.expectEqualStrings("image-access-a", first.input().binding.credential);
+    fixture.reject = true;
+    try std.testing.expect(port.prepare(authority) == null);
+    fixture.available = false;
+    try std.testing.expect(port.prepare(authority) == null);
+    try std.testing.expectEqual(@as(usize, 3), fixture.calls);
+    var logged_out = account_api.TestSupport.prepareLoggedOutAfterExternalCommit(&account);
+    defer logged_out.deinit();
+    account.commit(&logged_out);
+    fixture.available = true;
+    try std.testing.expect(port.prepare(authority) == null);
+    try std.testing.expectEqual(@as(usize, 3), fixture.calls);
+    try std.testing.expectEqualStrings("image-access-a", first.input().binding.credential);
 }

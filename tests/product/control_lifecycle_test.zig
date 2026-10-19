@@ -4704,6 +4704,9 @@ test "scheduled noninteractive permission request automatically stops the Produc
         },
     );
     defer workbench.deinit();
+    var image: ImageAdmissionProbe = .{};
+    workbench.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
+    defer workbench.setImageRunPreparation(null);
     try installControlExecution(&workbench);
 
     const schedule_id = try workbench.createScheduledTask(.{
@@ -4752,6 +4755,17 @@ test "scheduled noninteractive permission request automatically stops the Produc
         schedule_support.notification_kind,
     );
     try std.testing.expectEqual(task_id, schedule_support.notification_task_id);
+    for (0..5000) |_| {
+        try workbench.drainAgentEvents();
+        if (image.released == 1) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    const task = workbench.task_runtime.find(task_id).?;
+    try std.testing.expectEqual(@as(usize, 1), image.calls);
+    try std.testing.expectEqual(@as(usize, 1), image.released);
+    try std.testing.expectEqual(task.durable.workspace_id, image.workspace_id);
+    try std.testing.expectEqual(task.durable.workspace_epoch, image.workspace_epoch);
+    try std.testing.expect(task.durable.runs[0].?.image_execution == null);
 }
 
 test "scheduled admission rejects an unconfigured Task persistence capability" {
@@ -10179,4 +10193,129 @@ test "active input checkpoint export failure ends continuation without retry" {
     for (0..5) |_| scenario.control.syncLifecycle();
     try std.testing.expectEqual(@as(usize, 1), fake_core.run_calls);
     try std.testing.expectEqual(@as(usize, 0), scenario.control.task_runtime.pending_input_bytes);
+}
+
+const ImageAdmissionProbe = struct {
+    calls: usize = 0,
+    released: usize = 0,
+    available: bool = true,
+    secret: []const u8 = "run-image-secret-a",
+    model: []const u8 = "image-a",
+    workspace_id: u64 = 0,
+    workspace_epoch: u64 = 0,
+
+    fn prepare(context: *anyopaque, authority: fixture.product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.workspace_id = authority.id;
+        self.workspace_epoch = authority.epoch;
+        if (!self.available) return null;
+        return .{
+            .candidate = models_contract.OwnedImageCandidate.copy(std.testing.allocator, self.model, self.secret, 7, @intCast(self.calls)) catch unreachable,
+            .transport = .{ .perform_fn = imageHttp },
+            .output = .{ .context = self, .commit_fn = output },
+            .output_owner = self,
+            .release_output_fn = release,
+        };
+    }
+    fn release(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.released += 1;
+    }
+    fn imageHttp(_: ?*anyopaque, _: lifecycle.CompletionHttpRequest, _: *const lifecycle.CompletionCancellation, _: []u8) lifecycle.CompletionTransportError!lifecycle.CompletionTransportResponse {
+        @panic("ordinary Product Runtime must still declare zero Host tools");
+    }
+    fn output(_: *anyopaque, _: []const u8, _: *const lifecycle.ImageGenerationCancellation) lifecycle.ImageGenerationOutputResult {
+        @panic("ordinary Product Runtime must still declare zero Host tools");
+    }
+};
+
+test "image Run admission freezes per-Run input and retains scrub ownership through terminal event drain" {
+    const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), 4, .controlled, true);
+    defer scenario.deinit();
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    var image: ImageAdmissionProbe = .{};
+    scenario.control.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
+    defer scenario.control.setImageRunPreparation(null);
+    fake_core.rearmControlled();
+    const id = try scenario.control.runTask(scenario.task_id, .{ .text = "use run-image-secret-a safely" });
+    try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    const run = &task.durable.runs[1].?;
+    try std.testing.expectEqual(@as(usize, 1), image.calls);
+    try std.testing.expectEqual(task.durable.workspace_id, image.workspace_id);
+    try std.testing.expectEqual(task.durable.workspace_epoch, image.workspace_epoch);
+    try std.testing.expectEqualStrings("use *** safely", run.input.text.value);
+    try std.testing.expect(run.input.text.redacted);
+    try std.testing.expectEqualStrings("image-a", run.image_execution.?.input().binding.model);
+    image.secret = "run-image-secret-b";
+    image.model = "image-b";
+    image.available = false;
+    try std.testing.expectEqualStrings("run-image-secret-a", run.image_execution.?.input().binding.credential);
+    try std.testing.expect(scenario.control.task_runtime.containsExecutionCredential("run-image-secret-a"));
+    try std.testing.expectEqual(@as(usize, "run-image-secret-a".len), scenario.control.task_runtime.matchedExecutionCredentialPrefix("run-image-secret-a suffix"));
+    try std.testing.expect(scenario.control.task_runtime.executionCredentialMayContinue("run-image-"));
+    fake_core.releaseControlled();
+    // Do not drain Agent events: worker completion alone must not erase the
+    // credential needed to sanitize canonical events still in the pump.
+    for (0..5000) |_| {
+        scenario.control.syncLifecycle();
+        if (!task.runtime.worker_leases.hasLive()) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(!task.runtime.worker_leases.hasLive());
+    try std.testing.expectEqual(@as(usize, 0), image.released);
+    try std.testing.expect(run.image_execution != null);
+    var event = try fixture.pumpEnvelope(scenario.task_id, id, "{\"text_chunk\":\"run-image-secret-a\"}");
+    defer event.deinit();
+    try scenario.control.applyEvent(&event);
+    for ([_][]const u8{ run.assistant.list.items, run.output_segment.list.items, run.output_continued.list.items }) |bytes|
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "run-image-secret-a") == null);
+    try settleInputScenario(scenario);
+    try std.testing.expect(run.image_execution == null);
+    try std.testing.expectEqual(@as(usize, 1), image.released);
+    try std.testing.expect(!scenario.control.task_runtime.containsExecutionCredential("run-image-secret-a"));
+    var snapshot: [128 * 1024]u8 = undefined;
+    const encoded = try scenario.control.writeSnapshot(&snapshot);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "run-image-secret-a") == null);
+    fake_core.rearmControlled();
+    _ = try scenario.control.runTask(scenario.task_id, .{ .text = "text remains available" });
+    try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
+    try std.testing.expectEqual(@as(usize, 2), image.calls);
+    try std.testing.expect(task.durable.runs[2].?.image_execution == null);
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    try std.testing.expectEqual(@as(usize, 1), image.released);
+    try std.testing.expect(fake_core.zero_host_tools_seen);
+}
+
+test "image Run follow-up resolves the next configuration and admission rollback releases its owner" {
+    const scenario = try ReviewScenario.initConfigured(productControlConfiguration(), 4, .controlled, true);
+    defer scenario.deinit();
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    var image: ImageAdmissionProbe = .{};
+    scenario.control.setImageRunPreparation(.{ .context = &image, .prepare_fn = ImageAdmissionProbe.prepare });
+    defer scenario.control.setImageRunPreparation(null);
+    try std.testing.expectError(error.InvalidRunInput, scenario.control.runTask(scenario.task_id, .{ .text = "\xff" }));
+    try std.testing.expectEqual(@as(usize, 1), image.calls);
+    try std.testing.expectEqual(@as(usize, 1), image.released);
+    const task = scenario.control.task_runtime.find(scenario.task_id).?;
+    try std.testing.expect(task.durable.runs[1] == null);
+    fake_core.rearmControlled();
+    const id = try scenario.control.runTask(scenario.task_id, .{ .text = "source for follow-up" });
+    try waitControlSnapshot(&scenario.control, "\"inputReady\":true");
+    const sent = try scenario.control.sendInput("image-follow-up", scenario.task_id, task.durable.binding_epoch, .{ .run = id }, .{ .text = "new instruction run-image-secret-a" });
+    try std.testing.expectEqual(.submitted, sent.outcome);
+    try std.testing.expect(std.mem.indexOf(u8, task.durable.runs[1].?.additional_inputs[0].?.text, "run-image-secret-a") == null);
+    image.available = false;
+    fake_core.releaseControlled();
+    try settleInputScenario(scenario);
+    try std.testing.expectEqual(@as(usize, 3), image.calls);
+    try std.testing.expectEqual(@as(usize, 2), image.released);
+    try std.testing.expect(task.durable.runs[1].?.image_execution == null);
+    try std.testing.expect(task.durable.runs[2].?.image_execution == null);
+    try std.testing.expectEqual(@as(?u64, task.durable.runs[2].?.id), task.durable.runs[1].?.additional_inputs[0].?.transferred_to_run_id);
+    try std.testing.expect(fake_core.zero_host_tools_seen);
 }

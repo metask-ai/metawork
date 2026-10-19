@@ -591,7 +591,37 @@ pub const ConversationCoverage = enum {
     excluded,
 };
 
+/// Ephemeral Run authority. The output context is Application-owned; it is
+/// released only after the worker and canonical event stream are quiescent.
+/// Candidate credential is also the Product projection scrub copy.
+pub const OwnedImageExecution = struct {
+    candidate: models_contract.OwnedImageCandidate,
+    transport: agent.CompletionTransport,
+    output: agent.ImageGenerationOutput,
+    output_owner: *anyopaque,
+    release_output_fn: *const fn (*anyopaque) void,
+
+    pub fn input(self: *const OwnedImageExecution) agent.ImageGenerationRunInput {
+        const candidate = self.candidate.input();
+        return .{ .binding = .{
+            .endpoint = candidate.endpoint,
+            .model = candidate.selection.model_id,
+            .credential = candidate.bearer,
+            .output = self.output,
+        }, .transport = self.transport };
+    }
+
+    pub fn deinit(self: *OwnedImageExecution) void {
+        self.release_output_fn(self.output_owner);
+        self.candidate.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const RunRecord = struct {
+    /// Never encoded in history or reconstructed from a checkpoint.
+    image_execution: ?OwnedImageExecution = null,
+
     /// Runtime-only monotonic admission time. Never restored from history.
     admitted_at_ms: ?u64 = null,
     /// Durable elapsed time frozen from the monotonic Run clock when Product
@@ -686,6 +716,10 @@ pub const RunRecord = struct {
     checkpoint_export_context: CheckpointExportContext = undefined,
     checkpoint: CheckpointPostprocess = .{},
     automatic_title: AutomaticTitle = .{},
+
+    pub fn redactionSecrets(self: *const RunRecord) [2][]const u8 {
+        return .{ self.redaction_secret, if (self.image_execution) |*image| image.candidate.input().bearer else &.{} };
+    }
 
     pub fn provisionalRedacted(self: *const RunRecord) bool {
         return self.output_continued_redacted or self.output_segment_redacted;

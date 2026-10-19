@@ -25,6 +25,7 @@ pub const PermissionReviewEffects = runtime.PermissionReviewEffects;
 pub const PermissionReviewOutcome = runtime.PermissionReviewOutcome;
 pub const TerminalSummary = runtime.TerminalSummary;
 pub const RunInput = runtime.RunInput;
+pub const OwnedImageExecution = state.OwnedImageExecution;
 pub const RunError = runtime.RunError;
 pub const MultimodalAttachment = runtime.MultimodalAttachment;
 pub const PermissionChoice = runtime.PermissionChoice;

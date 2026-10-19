@@ -3,6 +3,7 @@ pub const lifecycle = @import("metawork_agent");
 pub const product_control = @import("metawork_product_control");
 pub const product_skill = @import("metawork_product_skill");
 pub const product_task = @import("metawork_product_task");
+pub const product_workspace = @import("metawork_product_workspace");
 pub const account_contract = @import("metawork_account_contract");
 pub const models_contract = @import("metawork_product_models_contract");
 pub const models_ports = @import("product_models_ports");

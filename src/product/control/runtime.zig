@@ -1169,6 +1169,7 @@ pub const Runtime = struct {
     canonical_user_home: ?[]u8,
     custom_provider_capabilities: CustomProviderCapabilities,
     completion_factory: CompletionFactory,
+    image_run_preparation: ?control_ports.ImageRunPreparation = null,
     permission_jobs: [permission_job.capacity]?*permission_job.Job = @splat(null),
     mcp: ?mcp_runtime.Runtime = null,
 
@@ -3958,6 +3959,10 @@ pub const Runtime = struct {
         var model_target = try self.resolveTaskRunModel(task.id());
         defer if (model_target) |*target| target.deinit();
         var run_effects = self.taskRuntimeOperationEffects();
+        const image_workspace = try self.workspace.taskRunAuthority(workspace.id, workspace.epoch);
+        var image = self.prepareRunImage(image_workspace);
+        defer if (image) |*value| value.deinit();
+        run_effects.image_execution = &image;
         run_effects.model_target = if (model_target) |*target| target.input() else null;
         var run = try self.task_runtime.startRun(
             task.id(),
@@ -4801,6 +4806,9 @@ pub const Runtime = struct {
             .preparation = &order_preparation,
         };
         var operation_effects = self.taskRuntimeOperationEffects();
+        var image = self.prepareRunImage(workspace);
+        defer if (image) |*value| value.deinit();
+        operation_effects.image_execution = &image;
         operation_effects.model_target = if (model_target) |*target| target.input() else null;
         if (attachment_borrow != null) {
             acceptance_context = .{
@@ -7740,13 +7748,13 @@ pub const Runtime = struct {
         context: *anyopaque,
         value: []const u8,
         max: usize,
-        sensitive: []const u8,
+        sensitive: []const []const u8,
         reclaimable: usize,
     ) (std.mem.Allocator.Error || error{ProjectionCapacity})!task_runtime.ProjectedText {
         const self: *Runtime = @ptrCast(@alignCast(context));
         std.debug.assert(reclaimable <= self.projection_bytes);
         self.projection_bytes -= reclaimable;
-        const projected = self.copyProjected(value, max, sensitive) catch |err|
+        const projected = self.copyProjectedSecrets(value, max, sensitive) catch |err|
             return restore: {
                 self.projection_bytes += reclaimable;
                 break :restore switch (err) {
@@ -8650,13 +8658,22 @@ pub const Runtime = struct {
         max: usize,
         credential: []const u8,
     ) Error!ProjectedCopy {
+        return self.copyProjectedSecrets(value, max, &.{credential});
+    }
+
+    fn copyProjectedSecrets(
+        self: *Runtime,
+        value: []const u8,
+        max: usize,
+        credentials: []const []const u8,
+    ) Error!ProjectedCopy {
         const capacity = @min(value.len, max);
         const scratch = try self.allocator.alloc(u8, capacity);
         defer self.allocator.free(scratch);
         const result = sanitizeInto(
             scratch,
             value,
-            credential,
+            credentials,
         );
         return .{
             .value = try self.copyBounded(scratch[0..result.len], max),
@@ -8678,7 +8695,7 @@ pub const Runtime = struct {
         const result = sanitizeInto(
             scratch,
             value,
-            credential,
+            &.{credential},
         );
         try self.replaceTracked(target, scratch[0..result.len], max);
         return result;
@@ -8930,7 +8947,7 @@ pub const Runtime = struct {
         const result = sanitizeInto(
             &record.detail,
             permission.arguments_json,
-            credential,
+            &.{credential},
         );
         record.detail_len = result.len;
         record.detail_truncated = result.truncated;
@@ -8989,9 +9006,23 @@ pub const Runtime = struct {
         };
     }
 
+    pub fn setImageRunPreparation(self: *Runtime, preparation: ?control_ports.ImageRunPreparation) void {
+        self.image_run_preparation = preparation;
+    }
+
+    fn prepareRunImage(self: *Runtime, workspace: product_workspace.TaskAuthority) ?product_task.OwnedImageExecution {
+        const preparation = self.image_run_preparation orelse return null;
+        const image = preparation.prepare(workspace) orelse return null;
+        // Scrub facts written before this newly acquired credential was known.
+        self.redactAllProductProjectionsNoFail(image.candidate.input().bearer);
+        return image;
+    }
+
     pub fn modelsManagement(self: *Runtime) control_ports.ModelsManagement {
         return .{
             .context = self,
+            .image_view_fn = controlImageView,
+            .prepare_image_candidate_fn = controlPrepareImageCandidate,
             .start_custom_providers_fn = controlStartCustomProviders,
             .start_custom_providers_unavailable_fn = controlStartCustomProvidersUnavailable,
             .stop_custom_providers_fn = controlStopCustomProviders,
@@ -9259,6 +9290,12 @@ fn controlStopCustomProviders(context: *anyopaque) void {
 }
 fn controlResetModelStore(context: *anyopaque, expected_revision: u64) models_contract.CommandResult {
     return controlOwner(context).resetModelsStore(expected_revision);
+}
+fn controlImageView(context: *anyopaque) models_contract.MetaskImageView {
+    return controlOwner(context).custom_providers.imageView();
+}
+fn controlPrepareImageCandidate(context: *anyopaque, input: models_contract.ImagePreparationInput) models_contract.ImagePreparation {
+    return controlOwner(context).custom_providers.prepareImageCandidate(input);
 }
 fn controlCreateCustomProvider(context: *anyopaque, secret: []const u8, spec: models_contract.CustomProviderSpec) models_contract.CommandResult {
     return controlOwner(context).createCustomProviderWithCredential(secret, spec);
@@ -9595,7 +9632,7 @@ fn commitTerminal(
         const diagnostic_projection = sanitizeInto(
             run.terminal_diagnostic,
             diagnostic,
-            run.redaction_secret,
+            &run.redactionSecrets(),
         );
         run.terminal_payload = .{
             .exclude_on_product_terminal = false,
@@ -9752,12 +9789,20 @@ const SanitizeResult = struct {
     redacted: bool,
 };
 
-fn sanitizeInto(destination: []u8, value: []const u8, secret: []const u8) SanitizeResult {
+fn sanitizeInto(destination: []u8, value: []const u8, secrets: []const []const u8) SanitizeResult {
     var read: usize = 0;
     var write: usize = 0;
     var redacted = false;
     while (read < value.len) {
-        if (credentialEndAtCodepoint(value, read, secret)) |redaction_end| {
+        var match_end: usize = 0;
+        var cursor = read;
+        while (cursor == read or cursor < match_end) : (cursor += utf8CodepointLen(value, cursor)) {
+            for (secrets) |secret| if (credentialEndAtCodepoint(value, cursor, secret)) |end| {
+                match_end = @max(match_end, end);
+            };
+        }
+        if (match_end != 0) {
+            const redaction_end = match_end;
             const marker_len = @min(redaction_end - read, 3);
             if (marker_len > destination.len - write) break;
             @memset(destination[write..][0..marker_len], '*');
@@ -9778,9 +9823,9 @@ fn sanitizeInto(destination: []u8, value: []const u8, secret: []const u8) Saniti
 fn projectTaskWorkerText(
     destination: []u8,
     value: []const u8,
-    secret: []const u8,
+    secrets: []const []const u8,
 ) if (builtin.is_test) task_test_execution.Projection else void {
-    const projected = sanitizeInto(destination, value, secret);
+    const projected = sanitizeInto(destination, value, secrets);
     return .{
         .len = projected.len,
         .truncated = projected.truncated,
@@ -18202,7 +18247,7 @@ test "tool projection truncates on UTF-8 boundaries and records bounded UI histo
             .kind = .permission,
             .state = .allowed_once,
         };
-        const detail = sanitizeInto(&record.detail, "Continue?", "");
+        const detail = sanitizeInto(&record.detail, "Continue?", &.{});
         record.detail_len = detail.len;
         control.pushUiRecord(view, record);
     }

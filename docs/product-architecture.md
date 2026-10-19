@@ -140,6 +140,10 @@ Workspace 是 Product Control-owned 产品对象；产品语义和用户操作�
 
 Manual Workspace 与 Automatic Workspace 共用一个 registry 和 Task 引用关系，`kind` 在 record 生命周期内不可改变。Manual intent 必须重新校验 Workspace identity、epoch 与 authorization；Automatic intent 必须取得 Workspace Runtime 当前已安装的 automatic-root capability。Renderer 不提交物理路径、automatic root 或目录授权 token。已严格恢复的可见 Manual record 保留用户先前的目录选择：Workspace owner 重新解析精确 canonical root 并打开目录验证实际可用性，成功恢复为 available，失败保留 record 为不可用供重新选择；不把重启本身视为撤销选择，不恢复已移除记录的可见性、不改变 epoch，也不接受路径已重定向的目录。此检查不代表后续文件访问永久成功，执行仍遵循既有准入和实际 I/O 结果。
 
+Manual、Scheduled 首次创建及后续 Run、自动 follow-up 共用图片准备规则：Product 在 admission 中取得当前 Workspace authority，Application Models coordinator 仅在已有可用图片选择时取得 Account 当次 authorization lease，并将 principal、授权代次和选择/目录 revisions 借给 Models 解析。准备不发起登录、刷新、目录请求或生成，也不创建文件。图片未配置、授权过期、解析拒绝或 Application 图片准备资源不足时，本 Run 的图片配置为空，文本接纳继续；同一 Run 不因后续设置、授权或目录变化而升级、替换配置或自动重发，下一 Run 重新准备。effect capability 只提供执行输入，不改变 Host Tool 注册集合。
+
+Product 的每 Run owned 图片 candidate 与输出 effect 在准备失败、回滚或执行结束后按所有权释放。Agent 的执行副本在 callback/I/O 静止后清零；Product 的独立投影清理副本须等该 Task 的 worker 静止且该 Run canonical event drain 已完成，先清洗已知产品投影再清零释放。增量文本、工具字段、权限记录、review、标题及终态诊断同时覆盖对话和图片 credential；未决文本后缀不能因新增凭据类型而提前公开。上述图片配置、secret 和 effect owner 都是临时执行数据，不进入历史或 checkpoint；恢复后的新 Run 重新取得当前配置。
+
 图片输出的 Workspace authority 由 Product 在 Run admission 校验并冻结，Application 文件 effect 只复制执行所需的 Workspace identity、epoch 与有界 canonical root，不保存可变 Task/Workspace 指针。捕获不打开目录或预创建文件；Agent 只借用窄 output port，Application 对象必须存活到全部调用与文件 I/O 静止。实际效果在 worker 上逐级以 no-follow 打开并检查目录句柄类型，拒绝 symlink/reparse 跳转；Host 在固定 `generated-images/` 内以随机名称独占创建文件，不覆盖既存文件，名称冲突只在同一次落盘中有界换名。文件名和 receipt 在写入前准备，完整写入、同步、命名文件及目录身份复核均在关闭前完成，关闭后返回 committed receipt。该结果不承诺崩溃持久性或对任意 Workspace 写入者的完整原子隔离。
 
 已提交文件保留，后续取消不能撤销 saved 事实；未提交失败仅尝试删除本次创建且当前身份仍一致的文件。文件移动、替换或清理 I/O 失败时保留现场，以本次返回值报告 `cleanup_incomplete` 和 Host 生成的 attempted path；它不是文件仍位于该路径或已被删除的证明。不建立共享 last-error、持久 cleanup debt、启动扫描或自动重生成。取消通过现有可取消 I/O 会合，返回前必须等待文件操作及清理静止；不能把受控会合的关闭证据扩展为任意阻塞系统调用均有严格时限。Manual 文件属于用户 Workspace，Automatic 目录继续遵循既有移除合同。

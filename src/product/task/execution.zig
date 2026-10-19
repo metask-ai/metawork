@@ -55,13 +55,13 @@ pub const Projection = struct {
 pub fn projectSanitized(
     destination: []u8,
     value: []const u8,
-    secret: []const u8,
+    secrets: []const []const u8,
 ) Projection {
     var read: usize = 0;
     var write: usize = 0;
     var redacted = false;
     while (read < value.len) {
-        if (credentialEndAtCodepoint(value, read, secret)) |redaction_end| {
+        if (credentialsEndAtCodepoint(value, read, secrets)) |redaction_end| {
             const marker_len = @min(redaction_end - read, 3);
             if (marker_len > destination.len - write) break;
             @memset(destination[write..][0..marker_len], '*');
@@ -94,6 +94,29 @@ fn utf8CodepointLen(value: []const u8, start: usize) usize {
     );
 }
 
+fn credentialsEndAtCodepoint(value: []const u8, start: usize, secrets: []const []const u8) ?usize {
+    var end: usize = 0;
+    var cursor = start;
+    // Merge overlaps using the original bytes, never a previously masked copy.
+    while (cursor == start or cursor < end) : (cursor += utf8CodepointLen(value, cursor)) {
+        for (secrets) |secret| if (credentialEndAtCodepoint(value, cursor, secret)) |match_end| {
+            end = @max(end, match_end);
+        };
+    }
+    return if (end == 0) null else end;
+}
+
+test "image Run projection masks both credentials and their overlapping original bytes" {
+    var output: [128]u8 = undefined;
+    const result = projectSanitized(&output, "prefix abcdef suffix image-token", &.{ "abcd", "cdef", "image-token" });
+    try std.testing.expectEqualStrings("prefix *** suffix ***", output[0..result.len]);
+    try std.testing.expect(result.redacted);
+    try std.testing.expect(!result.truncated);
+    const short = projectSanitized(output[0..2], "image-token", &.{"image-token"});
+    try std.testing.expect(short.truncated);
+    try std.testing.expectEqual(@as(usize, 0), short.len);
+}
+
 fn credentialEndAtCodepoint(
     value: []const u8,
     codepoint_start: usize,
@@ -119,15 +142,15 @@ fn credentialEndAtCodepoint(
 }
 
 pub const TextProjector = struct {
-    project_fn: *const fn ([]u8, []const u8, []const u8) Projection,
+    project_fn: *const fn ([]u8, []const u8, []const []const u8) Projection,
 
     fn project(
         self: TextProjector,
         destination: []u8,
         value: []const u8,
-        secret: []const u8,
+        secrets: []const []const u8,
     ) Projection {
-        return self.project_fn(destination, value, secret);
+        return self.project_fn(destination, value, secrets);
     }
 };
 
@@ -436,7 +459,7 @@ fn generateAutomaticTitle(job: *RunJob) void {
     const projected = job.projector.project(
         &run.automatic_title.result,
         result.text,
-        config.api_key,
+        &run.redactionSecrets(),
     );
     run.automatic_title.result_len = projected.len;
     run.automatic_title.generated_redacted = projected.redacted;
@@ -475,7 +498,7 @@ pub fn commitRunTerminal(
 ) bool {
     std.debug.assert(state.isTerminalPhase(phase));
     if (run.terminal_publication.cmpxchgStrong(.open, .publishing, .acq_rel, .acquire) == null) {
-        const projected = projector.project(run.terminal_diagnostic, diagnostic, run.redaction_secret);
+        const projected = projector.project(run.terminal_diagnostic, diagnostic, &run.redactionSecrets());
         run.terminal_payload = .{
             .exclude_on_product_terminal = exclude_on_product_terminal,
             .phase = phase,
@@ -572,7 +595,7 @@ pub fn commitCompactProductTerminal(
         const projected = projector.project(
             compact.terminal_diagnostic,
             diagnostic,
-            compact.redaction_secret,
+            &.{compact.redaction_secret},
         );
         compact.terminal_payload = .{
             .exclude_on_product_terminal = exclude_on_product_terminal,
