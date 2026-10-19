@@ -652,6 +652,92 @@ test "GenerateImage captured output root refuses an ancestor retargeted to a jun
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "outside/nested/generated-images", .{}));
 }
 
+test "GenerateImage per-Run input freezes borrowed data and effects and never inherits a prior Run" {
+    const Forward = struct {
+        network: *backend.Backend,
+        endpoint: []const u8,
+        calls: std.atomic.Value(usize) = .init(0),
+
+        fn transport(self: *@This()) agent.CompletionTransport {
+            return .{ .context = self, .perform_fn = perform, .signal_cancellation_fn = signal };
+        }
+        fn perform(context: ?*anyopaque, request: agent.CompletionHttpRequest, cancellation: *const agent.CompletionCancellation, buffer: []u8) agent.CompletionTransportError!agent.CompletionTransportResponse {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (!std.mem.eql(u8, request.url, "https://image-policy.example.test/v1/images/generations")) return error.InvalidHttp;
+            _ = self.calls.fetchAdd(1, .monotonic);
+            // Test effect only: assert the frozen HTTPS policy target, then
+            // route synthetic credentials to the one local fixture listener.
+            return self.network.transport().perform(.{ .url = self.endpoint, .headers = request.headers, .body = request.body }, cancellation, buffer);
+        }
+        fn signal(context: ?*anyopaque, cancellation: *agent.CompletionCancellation) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            const network = self.network.transport();
+            network.signal_cancellation_fn.?(network.context, cancellation);
+        }
+    };
+    var h: Harness = undefined;
+    try h.init("success", .{ .timeout_ms = 1000 });
+    defer h.deinit();
+    const session = try h.session(.full_access, true);
+    var first: Forward = .{ .network = &h.network, .endpoint = h.fixture.endpoint };
+    var second: Forward = .{ .network = &h.network, .endpoint = h.fixture.endpoint };
+    var alternate_sink: Sink = .{ .dir = h.tmp.dir };
+    var endpoint = "https://image-policy.example.test/v1/images/generations".*;
+    var model = "fixture-image".*;
+    var credential = "synthetic-image-key".*;
+    var input: agent.ImageGenerationRunInput = .{
+        .binding = .{ .endpoint = &endpoint, .model = &model, .credential = &credential, .output = h.sink.output() },
+        .transport = first.transport(),
+    };
+    const id = try session.prepareRunWithImage(.{ .text = "Generate the fixture image." }, input);
+    @memset(&endpoint, 'x');
+    @memset(&model, 'x');
+    @memset(&credential, 0);
+    input.binding.output = alternate_sink.output();
+    input.transport = second.transport();
+    var work: Work = .{ .session = session, .id = id };
+    const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+    thread.join();
+    defer work.result.?.deinit();
+    try std.testing.expectEqual(@as(?agent.TerminalFailure, null), work.result.?.failure);
+    try std.testing.expectEqual(@as(usize, 1), first.calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), second.calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), alternate_sink.saved);
+    try std.testing.expect(session.run_image == null);
+    try h.evidence(1, 1, "saved");
+
+    // Explicit unavailability also overrides the Session's synthetic fixture
+    // source. Neither the previous production input nor the fixture is reused.
+    var missing: Work = .{ .session = session, .id = try session.prepareRunWithImage(.{ .text = "Generate the fixture image." }, null) };
+    const missing_thread = try std.Thread.spawn(.{}, Work.run, .{&missing});
+    missing_thread.join();
+    defer missing.result.?.deinit();
+    try std.testing.expectEqual(@as(?agent.TerminalFailure, null), missing.result.?.failure);
+    try h.evidence(1, 1, "unavailable");
+    const next: agent.ImageGenerationRunInput = .{
+        .binding = .{
+            .endpoint = "https://image-policy.example.test/v1/images/generations",
+            .model = "fixture-image",
+            .credential = "synthetic-image-key",
+            .output = h.sink.output(),
+        },
+        .transport = second.transport(),
+    };
+    const cancelled = try session.prepareRunWithImage(.{ .text = "Generate the fixture image." }, next);
+    try session.cancelPreparedRun(cancelled);
+    try std.testing.expect(session.run_image == null);
+    try std.testing.expectEqual(@as(usize, 0), second.calls.load(.acquire));
+    var renewed: Work = .{ .session = session, .id = try session.prepareRunWithImage(.{ .text = "Generate the fixture image." }, next) };
+    const renewed_thread = try std.Thread.spawn(.{}, Work.run, .{&renewed});
+    renewed_thread.join();
+    defer renewed.result.?.deinit();
+    try std.testing.expectEqual(@as(?agent.TerminalFailure, null), renewed.result.?.failure);
+    try std.testing.expectEqual(@as(usize, 1), first.calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), second.calls.load(.acquire));
+    try std.testing.expect(session.run_image == null);
+    try h.evidence(2, 2, "saved");
+}
+
 test "GenerateImage canonical failures never synthesize a saved file or leak a credential" {
     const cases = .{
         .{ "invalid", @as(usize, 0), "invalid_arguments" },

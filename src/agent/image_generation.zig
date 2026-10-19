@@ -135,11 +135,20 @@ pub const OwnedBinding = struct {
         return .{ .endpoint = endpoint, .model = model, .credential = credential, .output = input.output };
     }
 
+    pub fn clone(self: *const OwnedBinding, allocator: std.mem.Allocator) !OwnedBinding {
+        return copy(allocator, .{
+            .endpoint = self.endpoint,
+            .model = self.model,
+            .credential = self.credential,
+            .output = self.output,
+        });
+    }
+
     pub fn deinit(self: *OwnedBinding, allocator: std.mem.Allocator) void {
         allocator.free(self.endpoint);
         allocator.free(self.model);
         std.crypto.secureZero(u8, self.credential);
-        allocator.free(self.credential);
+        allocator.rawFree(self.credential, .of(u8), @returnAddress());
         self.* = undefined;
     }
 };
@@ -223,7 +232,7 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
     const bearer = std.fmt.allocPrint(allocator, "Bearer {s}", .{binding.credential}) catch return .{ .failed = .capacity };
     defer {
         std.crypto.secureZero(u8, bearer);
-        allocator.free(bearer);
+        allocator.rawFree(bearer, .of(u8), @returnAddress());
     }
     const buffer = allocator.alloc(u8, limits.response_bytes) catch return .{ .failed = .capacity };
     defer {

@@ -200,6 +200,8 @@ Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 
 
 图片 output port 每次返回独立的 committed receipt 或有界分类失败，不通过任意 error 文本、共享错误槽或借用调用栈字符串传递文件事实。清理不完整的 attempted path 必须以 owned value 交付；即使取消同时发生，也不能丢弃该事实或把它当作 saved。输出取消只依赖共享取消 token，不要求 HTTP transport 提供文件 I/O 的唤醒。成功及失败 metadata 都必须装入发送前预留的结果容量，release 仍遵循原有 owned result 合同。
 
+图片配置以 Run preparation 为冻结点：`prepareRunWithImage` 在排队前复制 target、model、credential，并捕获本 Run 的 HTTP/output capability；显式空配置冻结 unavailable，不继承上一 Run、Session fixture 或历史工具结果。调用方只需保持配置字节到 preparation 返回，但必须持有 effect context 到 Run callback 与 I/O 静止。queued cancel、Core 调用前中止及正常/失败 terminal 都在静止后释放执行副本并清零 credential；这不代替 Product 对尚未 drain 的事件保留独立脱敏副本。既有 fixture 配置只作为隔离测试的输入来源，callback 同样只消费冻结后的 Run 数据；配置有无不改变正式工具声明或 Session grants。
+
 ## 5. Host envelope 与产品状态
 
 Host 可以在 AgentCore event 外增加产品路由 envelope：

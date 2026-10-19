@@ -9687,7 +9687,10 @@ fn settleInputScenario(scenario: *ReviewScenario) !void {
     for (0..5000) |_| {
         try scenario.control.drainAgentEvents();
         const task = scenario.control.task_runtime.find(scenario.task_id).?;
-        if (!task.runtime.worker_leases.hasLive() and task.runtime.active_operation == .none) return;
+        // Retiring the source worker can precede event/checkpoint finalization.
+        // A reserved continuation is still work, even while the active slot is idle.
+        if (!task.runtime.worker_leases.hasLive() and task.runtime.active_operation == .none and
+            scenario.control.task_runtime.inputContinuation(scenario.task_id) == null) return;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
     return error.TestUnexpectedResult;

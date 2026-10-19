@@ -147,6 +147,9 @@ const ImageAllocationGate = struct {
     armed: std.atomic.Value(bool) = .init(false),
     entered: std.Io.Semaphore = .{},
     proceed: std.Io.Semaphore = .{},
+    watched: ?[]const u8 = null,
+    watched_freed: bool = false,
+    watched_zero: bool = false,
     fn allocator(self: *@This()) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
@@ -168,9 +171,98 @@ const ImageAllocationGate = struct {
     }
     fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
         const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.watched) |target| if (bytes.ptr == target.ptr and bytes.len == target.len) {
+            self.watched_freed = true;
+            self.watched_zero = true;
+            for (bytes) |byte| if (byte != 0) {
+                self.watched_zero = false;
+                break;
+            };
+            self.watched = null;
+        };
         self.parent.rawFree(bytes, alignment, ra);
     }
 };
+
+test "GenerateImage per-Run credentials are zeroed on every exit without opening the product Gate" {
+    for (0..5) |action| {
+        fake_core.reset();
+        var observing: ImageAllocationGate = .{};
+        var network: ImageNoEffects = .{};
+        const runtime = if (action == 4)
+            try lifecycle.Runtime.initWithApi(std.testing.io, observing.allocator(), &fake_api, .{ .max_sessions = 1 })
+        else
+            try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, observing.allocator(), &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform } });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const id = try session.prepareRunWithImage(.{ .text = "one frozen image Run" }, .{
+            .binding = .{
+                .endpoint = "https://image-policy.example.test/v1/images/generations",
+                .model = "fixture-image",
+                .credential = "owned-run-secret",
+                .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit },
+            },
+            .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform },
+        });
+        observing.watched = session.run_image.?.binding.credential;
+        switch (action) {
+            0 => try session.cancelPreparedRun(id),
+            1 => try session.close(.session_close),
+            2, 3, 4 => {
+                var run = try session.beginRun(id);
+                defer run.deinit();
+                if (action == 2) _ = try session.requestTermination(id, .{ .interrupted = .user_cancel });
+                var terminal = run.execute();
+                defer terminal.deinit();
+                if (action == 2) try std.testing.expect(terminal.termination_signal.? == .interrupted);
+            },
+            else => unreachable,
+        }
+        try std.testing.expect(observing.watched_freed);
+        try std.testing.expect(observing.watched_zero);
+        try std.testing.expect(session.run_image == null);
+        try std.testing.expectEqual(@as(usize, 0), network.calls);
+        try std.testing.expectEqual(@as(usize, 0), runtime.image_budget.used.load(.acquire));
+        if (action == 4) {
+            try std.testing.expect(fake_core.zero_host_tools_seen);
+            try std.testing.expect(fake_core.image_tool == null);
+        }
+    }
+}
+
+test "GenerateImage failed per-Run preparation releases copies and leaves the Session reusable" {
+    for (0..5) |offset| {
+        fake_core.reset();
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var network: ImageNoEffects = .{};
+        const runtime = try lifecycle.Runtime.initImageGenerationWithApiForTesting(std.testing.io, failing.allocator(), &fake_api, .{ .max_sessions = 1 }, .{ .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform } });
+        defer {
+            runtime.shutdown() catch unreachable;
+            runtime.deinit();
+        }
+        const session = try openSession(runtime);
+        const input: lifecycle.ImageGenerationRunInput = .{
+            .binding = .{
+                .endpoint = "https://image-policy.example.test/v1/images/generations",
+                .model = "fixture-image",
+                .credential = "owned-run-secret",
+                .output = .{ .context = &network, .commit_fn = ImageNoEffects.commit },
+            },
+            .transport = .{ .context = &network, .perform_fn = ImageNoEffects.perform },
+        };
+        failing.fail_index = failing.alloc_index + offset;
+        try std.testing.expectError(error.OutOfMemory, session.prepareRunWithImage(.{ .text = "prepared text" }, input));
+        try std.testing.expect(session.run_image == null);
+        try std.testing.expectEqual(lifecycle.SessionState.idle, session.snapshot().state);
+        failing.fail_index = std.math.maxInt(usize);
+        const next = try session.prepareRunWithImage(.{ .text = "still usable" }, null);
+        try session.cancelPreparedRun(next);
+        try std.testing.expectEqual(@as(usize, 0), network.calls);
+    }
+}
 
 test "GenerateImage callback holding lease before registration observes close and sends nothing" {
     fake_core.reset();

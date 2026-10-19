@@ -227,7 +227,7 @@ pub const Runtime = struct {
 
         self.* = .{
             .image_test = image_test,
-            .image_budget = .{ .limit = if (image_test) |options| options.limits.memory_bytes else 0 },
+            .image_budget = .{ .limit = if (image_test) |options| options.limits.memory_bytes else image.production_limits.memory_bytes },
             .io = io,
             .allocator = allocator,
             .api = api,
