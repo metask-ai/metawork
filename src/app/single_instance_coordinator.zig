@@ -363,3 +363,108 @@ fn activationFailure(interactive: bool, failure: compat.Failure) CoordinateError
     if (interactive) compat.reportFailure(failure);
     return error.ActivationFailed;
 }
+
+const WakeTransportTest = struct {
+    var calls: std.atomic.Value(usize) = .init(0);
+    var fail: std.atomic.Value(bool) = .init(true);
+    var hold: std.atomic.Value(bool) = .init(false);
+    var entered: std.atomic.Value(bool) = .init(false);
+
+    fn wake(_: ?*anyopaque) anyerror!void {
+        _ = calls.fetchAdd(1, .monotonic);
+        entered.store(true, .release);
+        while (hold.load(.acquire)) std.Thread.yield() catch {};
+        if (fail.load(.acquire)) return error.InjectedWakeFailure;
+    }
+
+    fn forward(root: []const u8, request: []const u8) !protocol.Status {
+        var response: [compat.max_transport_response_bytes]u8 = undefined;
+        const length = try compat.forward(std.heap.c_allocator, root, request, &response);
+        return protocol.decodeResponse(response[0..length]);
+    }
+
+    const Forward = struct {
+        root: []const u8,
+        request: []const u8,
+        result: anyerror!protocol.Status = error.NotRun,
+        fn run(self: *@This()) void {
+            self.result = forward(self.root, self.request);
+        }
+    };
+    const Stop = struct {
+        coordinator: *Coordinator,
+        completed: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            self.coordinator.stopIngress();
+            self.completed.store(true, .release);
+        }
+    };
+};
+
+test "single-instance coordinator reports SDK wake failure over real transport and joins before teardown" {
+    const T = WakeTransportTest;
+    const native_sdk = @import("native_sdk");
+    const platform = @import("platform.zig");
+    T.calls.store(0, .monotonic);
+    T.fail.store(true, .release);
+    T.hold.store(false, .release);
+    T.entered.store(false, .release);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.services.wake_fn = T.wake;
+    var adapter = platform.Adapter.init(std.testing.io, std.Thread.getCurrentId());
+    defer adapter.deinit();
+    var coordinator: Coordinator = undefined;
+    try std.testing.expectEqual(Disposition.primary, try coordinator.init(std.testing.io, std.testing.allocator, .{ .vector = &.{} }, root, "wake-test", false, false));
+    // Declare platform cleanup first: ingress must join before services clear.
+    defer adapter.stop(&harness.runtime);
+    defer coordinator.deinit();
+    const identity = protocol.Identity.init("wake-test", root);
+    var storage: [protocol.max_frame_bytes]u8 = undefined;
+    const request = try protocol.encodeRequest(&storage, identity, root, &.{"metawork"});
+    try std.testing.expectEqual(protocol.Status.accepted, try T.forward(root, request));
+    try std.testing.expectEqual(@as(usize, 0), T.calls.load(.monotonic));
+    try adapter.start(&harness.runtime);
+    try std.testing.expect(coordinator.bindWakeAndDrain(.{ .context = &adapter, .notify_fn = platform.Adapter.notifyMainLoop }));
+    try std.testing.expect(!coordinator.drain());
+    try std.testing.expectEqual(protocol.Status.rejected, try T.forward(root, request));
+    try std.testing.expectEqual(@as(usize, 1), T.calls.load(.monotonic));
+    try std.testing.expect(!coordinator.drain());
+    T.fail.store(false, .release);
+    try std.testing.expectEqual(protocol.Status.accepted, try T.forward(root, request));
+    try std.testing.expect(coordinator.drain());
+    try std.testing.expect(!coordinator.drain());
+
+    T.fail.store(true, .release);
+    T.hold.store(true, .release);
+    T.entered.store(false, .release);
+    var forward: T.Forward = .{ .root = root, .request = request };
+    {
+        const forward_thread = try std.Thread.spawn(.{}, T.Forward.run, .{&forward});
+        defer forward_thread.join();
+        defer T.hold.store(false, .release);
+        while (!T.entered.load(.acquire)) std.Thread.yield() catch {};
+        var stop: T.Stop = .{ .coordinator = &coordinator };
+        {
+            const stop_thread = try std.Thread.spawn(.{}, T.Stop.run, .{&stop});
+            defer stop_thread.join();
+            defer T.hold.store(false, .release);
+            while (true) {
+                coordinator.queue.mutex.lockUncancelable(std.testing.io);
+                const stopping = coordinator.queue.stopping;
+                coordinator.queue.mutex.unlock(std.testing.io);
+                if (stopping) break;
+                std.Thread.yield() catch {};
+            }
+            try std.testing.expect(!stop.completed.load(.acquire));
+            try std.testing.expect(adapter.services() != null);
+        }
+    }
+    // stopIngress has joined the callback; the transport response is now fixed.
+    try std.testing.expectEqual(protocol.Status.stopping, try forward.result);
+    try std.testing.expect(!coordinator.drain());
+}

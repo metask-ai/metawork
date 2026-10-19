@@ -768,6 +768,7 @@ test "Windows window chrome Application test roots" {
 
 test "main-loop wake Application test roots" {
     std.testing.refAllDecls(app_platform);
+    std.testing.refAllDecls(app_single_instance);
 }
 
 test "MCP Application composition imports the startup owner" {
