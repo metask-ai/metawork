@@ -31,6 +31,11 @@ pub fn result(buffer: []u8, outcome: image.Outcome) ![]const u8 {
             .size_bytes = receipt.size_bytes,
         }, .{}, &writer),
         .failed => |failure| try std.json.Stringify.value(.{ .status = @tagName(failure) }, .{}, &writer),
+        .output_failure => |*failure| try std.json.Stringify.value(.{
+            .status = "output_failed",
+            .reason = @tagName(failure.code),
+            .attempted_path = failure.pathView(),
+        }, .{}, &writer),
     }
     return writer.buffered();
 }
@@ -52,6 +57,12 @@ test "GenerateImage every valid receipt fits the minimum result budget including
     defer decoded.deinit();
     try std.testing.expectEqualSlices(u8, &path, decoded.value.path);
     try std.testing.expectEqual(std.math.maxInt(usize), decoded.value.size_bytes);
+    const failure = try image.OutputFailure.init(.cleanup_incomplete, &path);
+    const failed = try result(&buffer, .{ .output_failure = failure });
+    const failure_json = try std.json.parseFromSlice(struct { status: []const u8, reason: []const u8, attempted_path: []const u8 }, std.testing.allocator, failed, .{});
+    defer failure_json.deinit();
+    try std.testing.expectEqualStrings("cleanup_incomplete", failure_json.value.reason);
+    try std.testing.expectEqualSlices(u8, &path, failure_json.value.attempted_path);
     try std.testing.expect(!(image.Limits{ .result_bytes = 256 }).validate());
     var limits: image.Limits = .{};
     limits.memory_bytes = limits.workingBytes();

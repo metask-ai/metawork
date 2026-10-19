@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { appendFileSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { appendFileSync, readFileSync, mkdirSync, renameSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { protocolTextSse, protocolToolSse } from "./provider_protocol.mjs";
 
@@ -13,6 +13,13 @@ if (mode === "output-junction") {
     join(dirname(tracePath), "generated-images"),
     "junction",
   );
+}
+if (mode === "output-root-junction") {
+  const base = dirname(tracePath);
+  const outside = join(base, "outside");
+  mkdirSync(join(outside, "nested"), { recursive: true });
+  renameSync(join(base, "redirect"), join(base, "original"));
+  symlinkSync(outside, join(base, "redirect"), "junction");
 }
 const png = readFileSync(
   new URL("../../src/agent/testdata/generated.png", import.meta.url),

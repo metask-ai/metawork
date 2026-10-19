@@ -32,6 +32,9 @@ pub const ImageGenerationTestOptions = struct {
 };
 pub const ImageGenerationTestBinding = image_generation.BindingInput;
 pub const ImageGenerationOutput = image_generation.Output;
+pub const ImageGenerationOutputResult = image_generation.OutputResult;
+pub const ImageGenerationOutputFailure = image_generation.OutputFailure;
+pub const ImageGenerationCancellation = image_http.Cancellation;
 pub const ImageGenerationReceipt = image_generation.Receipt;
 pub const ImageGenerationLimits = image_generation.Limits;
 pub const image_generation_limits = image_generation.production_limits;

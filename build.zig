@@ -200,6 +200,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "metawork-product-workspace-automatic-root", .root_module = test_modules.product_workspace_automatic_root },
         .{ .name = "metawork-product-workspace-configuration", .root_module = test_modules.product_workspace_configuration },
         .{ .name = "metawork-product-workspace", .root_module = test_modules.product_workspace_runtime },
+        .{ .name = "metawork-app-image-output", .root_module = test_modules.image_output },
         .{ .name = "metawork-product-workspace-view", .root_module = test_modules.product_workspace_view },
         .{ .name = "metawork-product-schedule", .root_module = test_modules.product_schedule },
         .{ .name = "metawork-product-schedule-state", .root_module = test_modules.product_schedule_state },
@@ -250,6 +251,8 @@ pub fn build(b: *std.Build) void {
             b.step("test-product-skill-policy", "Run Product Skill authority policy tests").dependOn(&b.addRunArtifact(tests).step);
         if (spec.root_module == test_modules.product_task_runtime)
             b.step("test-product-task-runtime", "Run Product Task runtime kernel tests").dependOn(&b.addRunArtifact(tests).step);
+        if (spec.root_module == test_modules.image_output)
+            b.step("test-image-output", "Run Workspace image output tests").dependOn(&b.addRunArtifact(tests).step);
     }
     const model_metadata_step = b.step("test-model-metadata", "Run Models declarations, resolution and Host/Renderer contract tests");
     for ([_]*std.Build.Module{ test_modules.models_contract, test_modules.models_metask, test_modules.models_providers, test_modules.models_runtime }) |module| {
@@ -549,6 +552,7 @@ const WiredModules = struct {
     product_workspace_configuration: *std.Build.Module,
     product_workspace: *std.Build.Module,
     product_workspace_runtime: *std.Build.Module,
+    image_output: *std.Build.Module,
     product_workspace_view: *std.Build.Module,
     product_schedule: *std.Build.Module,
     product_schedule_state: *std.Build.Module,
@@ -878,6 +882,7 @@ fn addImageGenerationTests(b: *std.Build, modules: WiredModules, link_libc: bool
     const cases = b.createModule(.{ .root_source_file = b.path("tests/agent/image_generation_test.zig"), .target = modules.agent.resolved_target, .optimize = modules.agent.optimize, .link_libc = link_libc });
     cases.addImport("metawork_agent", modules.agent);
     cases.addImport("image_http_backend", backend);
+    cases.addImport("image_output", modules.image_output);
     cases.addImport("lifecycle_fixture", createLifecycleFixture(b, modules, link_libc));
     cases.addOptions("image_fixture_options", fixture_options);
     const tests = b.addTest(.{ .name = "metawork-generate-image", .root_module = cases });
@@ -1845,6 +1850,13 @@ fn wireAgentCore(
         "product_workspace_configuration",
         product_workspace_configuration,
     );
+    const image_output = b.createModule(.{
+        .root_source_file = b.path("src/app/image_output.zig"),
+        .target = target,
+        .optimize = root_module.optimize,
+    });
+    image_output.addImport("metawork_agent", agent);
+    image_output.addImport("metawork_product_workspace", product_workspace);
     const product_control_runtime = b.createModule(.{
         .root_source_file = b.path("src/product/control/runtime.zig"),
         .target = target,
@@ -2087,6 +2099,7 @@ fn wireAgentCore(
         .product_workspace_configuration = product_workspace_configuration,
         .product_workspace = product_workspace,
         .product_workspace_runtime = product_workspace_runtime,
+        .image_output = image_output,
         .product_workspace_view = product_workspace_view,
         .product_schedule = product_schedule,
         .product_schedule_state = product_schedule_state,

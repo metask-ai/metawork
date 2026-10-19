@@ -198,6 +198,8 @@ Manual Task 使用 interactive callback policy；Scheduled occurrence 创建的 
 
 图片执行 client 消费 Host 已解析的 target、model、credential 与输出能力；正式输入只接受有界 HTTPS URL，拒绝 userinfo、query、fragment、控制字符及不安全结构，不在 Agent 复制 Models 的正式地址政策。隔离 fixture 入口只接受固定 loopback Images Generation 目标，不能借该入口访问正式服务。图片 codec、deadline、发送额度、固定并发槽和 owned buffer 预算由 Agent 统一约束，生产与缩小测试预算使用同一校验；working reservation 包含响应解析 scratch、解码图片与发送前预分配的结果，不增加等待队列或自动重发。请求发出但没有 saved receipt 时，即使服务拒绝、响应无效或落盘失败，也不能承诺未生成或未计费；工具说明须覆盖这些失败的禁止自动重试语义。这些输入与 client 能力不改变正式 Host Tool Gate。
 
+图片 output port 每次返回独立的 committed receipt 或有界分类失败，不通过任意 error 文本、共享错误槽或借用调用栈字符串传递文件事实。清理不完整的 attempted path 必须以 owned value 交付；即使取消同时发生，也不能丢弃该事实或把它当作 saved。输出取消只依赖共享取消 token，不要求 HTTP transport 提供文件 I/O 的唤醒。成功及失败 metadata 都必须装入发送前预留的结果容量，release 仍遵循原有 owned result 合同。
+
 ## 5. Host envelope 与产品状态
 
 Host 可以在 AgentCore event 外增加产品路由 envelope：

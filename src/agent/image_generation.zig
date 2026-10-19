@@ -47,7 +47,6 @@ pub const Failure = enum {
     provider_rejected,
     invalid_response,
     unsupported_output,
-    output_failed,
 };
 
 pub const Receipt = struct {
@@ -79,8 +78,26 @@ pub const Receipt = struct {
 pub const Output = struct {
     context: *anyopaque,
     /// A receipt is a committed fact, even if cancellation raced with commit.
-    commit_fn: *const fn (*anyopaque, []const u8, *const http.Cancellation) anyerror!Receipt,
+    commit_fn: *const fn (*anyopaque, []const u8, *const http.Cancellation) OutputResult,
 };
+
+pub const OutputFailure = struct {
+    pub const Code = enum { unavailable, cancelled, write_failed, cleanup_incomplete };
+    code: Code,
+    attempted_path: [Receipt.max_path_bytes]u8 = undefined,
+    path_len: usize = 0,
+
+    pub fn init(code: Code, path: []const u8) error{InvalidPath}!OutputFailure {
+        const validated = try Receipt.init(path, 0);
+        return .{ .code = code, .attempted_path = validated.path, .path_len = validated.path_len };
+    }
+
+    pub fn pathView(self: *const OutputFailure) ?[]const u8 {
+        return if (self.path_len == 0) null else self.attempted_path[0..self.path_len];
+    }
+};
+
+pub const OutputResult = union(enum) { saved: Receipt, failed: OutputFailure };
 
 pub const BindingInput = struct {
     endpoint: []const u8,
@@ -192,7 +209,7 @@ pub const Call = struct {
     }
 };
 
-pub const Outcome = union(enum) { saved: Receipt, failed: Failure };
+pub const Outcome = union(enum) { saved: Receipt, failed: Failure, output_failure: OutputFailure };
 
 pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *const OwnedBinding, prompt: []const u8, limits: Limits, call: *Call) Outcome {
     if (call.cancellation.isRequested()) return .{ .failed = .cancelled };
@@ -228,9 +245,14 @@ pub fn perform(allocator: std.mem.Allocator, network: http.Transport, binding: *
     } };
     defer allocator.free(decoded);
     if (call.cancellation.isRequested()) return .{ .failed = .outcome_unknown };
-    const receipt = binding.output.commit_fn(binding.output.context, decoded, &call.cancellation) catch |err|
-        return .{ .failed = if (err == error.Cancelled or err == error.Canceled or call.cancellation.isRequested()) .outcome_unknown else .output_failed };
-    return .{ .saved = receipt };
+    return switch (binding.output.commit_fn(binding.output.context, decoded, &call.cancellation)) {
+        .saved => |receipt| .{ .saved = receipt },
+        .failed => |failure| if (failure.code != .cleanup_incomplete and
+            (failure.code == .cancelled or call.cancellation.isRequested()))
+            .{ .failed = .outcome_unknown }
+        else
+            .{ .output_failure = failure },
+    };
 }
 
 pub fn decode(allocator: std.mem.Allocator, body: []const u8, limits: Limits) ![]u8 {
@@ -312,8 +334,8 @@ test "production image limits bound every input and allow two maximum working re
 
 test "production target structure and isolated fixture admission remain separate" {
     const Fixture = struct {
-        fn output(_: *anyopaque, _: []const u8, _: *const http.Cancellation) !Receipt {
-            return error.Unexpected;
+        fn output(_: *anyopaque, _: []const u8, _: *const http.Cancellation) OutputResult {
+            return .{ .failed = .{ .code = .write_failed } };
         }
     };
     var context: u8 = 0;
@@ -392,11 +414,11 @@ test "production image codec delivers a PNG beyond fixture byte limits through a
             @memcpy(buffer[0..self.body.len], self.body);
             return .{ .status = 200, .body = buffer[0..self.body.len] };
         }
-        fn output(context: *anyopaque, bytes: []const u8, _: *const http.Cancellation) !Receipt {
+        fn output(context: *anyopaque, bytes: []const u8, _: *const http.Cancellation) OutputResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.writes += 1;
-            try std.testing.expectEqualSlices(u8, self.png, bytes);
-            return Receipt.init("generated-images/fixture.png", bytes.len);
+            std.testing.expectEqualSlices(u8, self.png, bytes) catch return .{ .failed = .{ .code = .write_failed } };
+            return .{ .saved = Receipt.init("generated-images/fixture.png", bytes.len) catch unreachable };
         }
     };
     var fixture: Fixture = .{ .png = png, .body = body };
@@ -443,9 +465,9 @@ test "image response decoding preserves PNG bytes and rejects malformed or redir
     try std.testing.expectError(error.InvalidResponse, validatePng(png[0 .. png.len - 1]));
 }
 
-test "cancellation before send is cancelled and every post-send cancellation is outcome unknown" {
+test "post-send cancellation reports unknown and preserves incomplete cleanup facts" {
     const Fixture = struct {
-        const Phase = enum { before_send, response, decoded, output };
+        const Phase = enum { before_send, response, decoded, output, cleanup };
         body: []const u8,
         phase: Phase,
         decode_token: ?*http.Cancellation = null,
@@ -480,11 +502,12 @@ test "cancellation before send is cancelled and every post-send cancellation is 
             @memcpy(buffer[0..self.body.len], self.body);
             return .{ .status = 200, .body = buffer[0..self.body.len] };
         }
-        fn output(context: *anyopaque, _: []const u8, token: *const http.Cancellation) !Receipt {
+        fn output(context: *anyopaque, _: []const u8, token: *const http.Cancellation) OutputResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.writes += 1;
             @constCast(token).request();
-            return error.Cancelled;
+            if (self.phase == .cleanup) return .{ .failed = OutputFailure.init(.cleanup_incomplete, "generated-images/attempted.png") catch unreachable };
+            return .{ .failed = .{ .code = .cancelled } };
         }
     };
     const png = @embedFile("testdata/generated.png");
@@ -500,8 +523,11 @@ test "cancellation before send is cancelled and every post-send cancellation is 
         var call: Call = .{ .cancellation = http.Cancellation.init(transport), .deadline_ns = 0, .io = std.testing.io };
         if (phase == .before_send) call.cancellation.request();
         const outcome = perform(fixture.allocator(), transport, &binding, "red pixel", .{}, &call);
-        try std.testing.expectEqual(if (phase == .before_send) Failure.cancelled else Failure.outcome_unknown, outcome.failed);
+        if (phase == .cleanup) {
+            try std.testing.expectEqual(OutputFailure.Code.cleanup_incomplete, outcome.output_failure.code);
+            try std.testing.expectEqualStrings("generated-images/attempted.png", outcome.output_failure.pathView().?);
+        } else try std.testing.expectEqual(if (phase == .before_send) Failure.cancelled else Failure.outcome_unknown, outcome.failed);
         try std.testing.expectEqual(@as(usize, if (phase == .before_send) 0 else 1), fixture.requests);
-        try std.testing.expectEqual(@as(usize, if (phase == .output) 1 else 0), fixture.writes);
+        try std.testing.expectEqual(@as(usize, if (phase == .output or phase == .cleanup) 1 else 0), fixture.writes);
     }
 }

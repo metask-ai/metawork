@@ -3,6 +3,7 @@ const agent = @import("metawork_agent");
 const backend = @import("image_http_backend");
 const options = @import("image_fixture_options");
 const sdk = @import("lifecycle_fixture").sdk;
+const workspace_output = @import("image_output");
 
 // Pass-through instrumentation over the exact staged binary. No result, issue,
 // checkpoint or status is fabricated; only the schema-change case changes the
@@ -102,7 +103,11 @@ const Sink = struct {
     long_name: bool = false,
 
     fn output(self: *Sink) agent.ImageGenerationOutput {
-        return .{ .context = self, .commit_fn = commit };
+        return .{ .context = self, .commit_fn = commitResult };
+    }
+    fn commitResult(context: *anyopaque, bytes: []const u8, cancellation: *const agent.CompletionCancellation) agent.ImageGenerationOutputResult {
+        return .{ .saved = commit(context, bytes, cancellation) catch |err|
+            return .{ .failed = .{ .code = if (err == error.Cancelled) .cancelled else .write_failed } } };
     }
     fn commit(context: *anyopaque, bytes: []const u8, cancellation: *const agent.CompletionCancellation) !agent.ImageGenerationReceipt {
         const self: *Sink = @ptrCast(@alignCast(context));
@@ -159,6 +164,15 @@ fn execute(session: *agent.Session) !void {
     defer terminal.deinit();
     try std.testing.expectEqual(@as(?agent.TerminalFailure, null), terminal.failure);
     try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), terminal.stop_reason);
+}
+
+fn executeWorker(session: *agent.Session) !void {
+    var work: Work = .{ .session = session, .id = try session.prepareRun(.{ .text = "Generate the fixture image." }) };
+    const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+    thread.join();
+    defer work.result.?.deinit();
+    try std.testing.expectEqual(@as(?agent.TerminalFailure, null), work.result.?.failure);
+    try std.testing.expectEqual(@as(?agent.StopReason, .end_turn), work.result.?.stop_reason);
 }
 
 fn count(trace: []const u8, needle: []const u8) usize {
@@ -544,6 +558,100 @@ test "GenerateImage identical prompts are separate requests and concurrent calls
     try successful("prompt-url", 1);
 }
 
+test "GenerateImage canonical Core saves actual Workspace files and rejects output directory junctions" {
+    for ([_][]const u8{ "success", "repeat", "concurrent", "output-junction" }) |mode| {
+        var h: Harness = undefined;
+        try h.init(mode, .{});
+        defer h.deinit();
+        var output = try workspace_output.Output.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{
+            .id = 1,
+            .epoch = 1,
+            .kind = .manual,
+            .canonical_root = h.root,
+            .trust = .explicitly_trusted,
+        });
+        defer output.deinit();
+        const session = try h.session(.full_access, false);
+        try session.configureImageGenerationForTesting(.{
+            .endpoint = h.fixture.endpoint,
+            .model = "fixture-image",
+            .credential = "synthetic-image-key",
+            .output = output.port(),
+        });
+        try executeWorker(session);
+        const trace = try h.trace();
+        defer std.testing.allocator.free(trace);
+        const junction = std.mem.eql(u8, mode, "output-junction");
+        const expected: usize = if (std.mem.eql(u8, mode, "repeat") or std.mem.eql(u8, mode, "concurrent")) 2 else 1;
+        try std.testing.expectEqual(expected, count(trace, "\"kind\":\"image\""));
+        try std.testing.expectEqual(@as(usize, 0), count(trace, "fixture_error"));
+        try std.testing.expectEqual(if (junction) @as(usize, 0) else expected, count(trace, "\\\"status\\\":\\\"saved\\\""));
+        if (junction) {
+            try std.testing.expect(std.mem.indexOf(u8, trace, "output_failed") != null);
+            var outside = try h.tmp.dir.openDir(std.testing.io, "outside", .{ .iterate = true });
+            defer outside.close(std.testing.io);
+            var entries = outside.iterate();
+            try std.testing.expectEqual(@as(?std.Io.Dir.Entry, null), try entries.next(std.testing.io));
+        } else {
+            const png = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, options.png_path, std.testing.allocator, .limited(1024));
+            defer std.testing.allocator.free(png);
+            var directory = try h.tmp.dir.openDir(std.testing.io, "generated-images", .{ .iterate = true });
+            defer directory.close(std.testing.io);
+            var entries = directory.iterate();
+            var files: usize = 0;
+            while (try entries.next(std.testing.io)) |entry| {
+                try std.testing.expectEqual(std.Io.File.Kind.file, entry.kind);
+                const bytes = try directory.readFileAlloc(std.testing.io, entry.name, std.testing.allocator, .limited(1024));
+                defer std.testing.allocator.free(bytes);
+                try std.testing.expectEqualSlices(u8, png, bytes);
+                var path: [256]u8 = undefined;
+                const receipt_path = try std.fmt.bufPrint(&path, "\\\"path\\\":\\\"generated-images/{s}\\\"", .{entry.name});
+                try std.testing.expect(std.mem.indexOf(u8, trace, receipt_path) != null);
+                files += 1;
+            }
+            try std.testing.expectEqual(expected, files);
+        }
+        try std.testing.expectEqual(h.runtime.image_results_created.load(.acquire), h.runtime.image_results_released.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 0), h.runtime.image_budget.used.load(.acquire));
+    }
+}
+
+test "GenerateImage captured output root refuses an ancestor retargeted to a junction" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try tmp.dir.createDirPath(std.testing.io, "redirect/nested");
+    const captured = try std.fs.path.join(std.testing.allocator, &.{ root, "redirect", "nested" });
+    defer std.testing.allocator.free(captured);
+    var output = try workspace_output.Output.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{
+        .id = 1,
+        .epoch = 1,
+        .kind = .manual,
+        .canonical_root = captured,
+        .trust = .explicitly_trusted,
+    });
+    defer output.deinit();
+    const trace_path = try std.fs.path.join(std.testing.allocator, &.{ root, "trace.jsonl" });
+    defer std.testing.allocator.free(trace_path);
+    var fixture = try Fixture.start(trace_path, "output-root-junction");
+    defer fixture.deinit();
+    var network: backend.Backend = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    const runtime = try agent.Runtime.initImageGenerationForTesting(std.testing.io, std.testing.allocator, .{ .max_sessions = 1 }, .{ .transport = network.transport() });
+    defer {
+        runtime.shutdown() catch unreachable;
+        runtime.deinit();
+    }
+    const session = try open(runtime, root, &fixture, .full_access);
+    try session.configureImageGenerationForTesting(.{ .endpoint = fixture.endpoint, .model = "fixture-image", .credential = "synthetic-image-key", .output = output.port() });
+    try executeWorker(session);
+    const trace = try tmp.dir.readFileAlloc(std.testing.io, "trace.jsonl", std.testing.allocator, .limited(1024 * 1024));
+    defer std.testing.allocator.free(trace);
+    try std.testing.expectEqual(@as(usize, 1), count(trace, "\"kind\":\"image\""));
+    try std.testing.expect(std.mem.indexOf(u8, trace, "output_failed") != null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "outside/nested/generated-images", .{}));
+}
+
 test "GenerateImage canonical failures never synthesize a saved file or leak a credential" {
     const cases = .{
         .{ "invalid", @as(usize, 0), "invalid_arguments" },
@@ -703,6 +811,59 @@ test "GenerateImage blocked HTTP is cancelled by stop close and Runtime shutdown
         try std.testing.expect(work.done.load(.acquire));
         try std.testing.expect(start.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).nanoseconds < 3 * std.time.ns_per_s);
         try std.testing.expect(work.result.?.termination_signal.? == .interrupted);
+        try h.evidence(1, 0, "");
+    }
+}
+
+test "GenerateImage real Workspace output joins cancelled file work on stop close and shutdown" {
+    for (0..3) |action| {
+        var h: Harness = undefined;
+        try h.init("success", .{});
+        defer h.deinit();
+        var output = try workspace_output.Output.init(std.testing.allocator, std.testing.io, std.Thread.getCurrentId(), .{
+            .id = 1,
+            .epoch = 1,
+            .kind = .manual,
+            .canonical_root = h.root,
+            .trust = .explicitly_trusted,
+        });
+        defer output.deinit();
+        var barrier: workspace_output.TestSupport.Barrier = .{ .io = std.testing.io };
+        workspace_output.TestSupport.blockBeforeWrite(&output, &barrier);
+        const session = try h.session(.full_access, false);
+        try session.configureImageGenerationForTesting(.{ .endpoint = h.fixture.endpoint, .model = "fixture-image", .credential = "synthetic-image-key", .output = output.port() });
+        var work: Work = .{ .session = session, .id = try session.prepareRun(.{ .text = "Generate the fixture image." }) };
+        const thread = try std.Thread.spawn(.{}, Work.run, .{&work});
+        var joined = false;
+        defer {
+            barrier.release();
+            if (!joined) thread.join();
+            if (work.result) |*result| result.deinit();
+        }
+        const deadline = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds + 3 * std.time.ns_per_s;
+        while (!barrier.entered.load(.acquire)) {
+            if (std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds >= deadline) return error.ImageRequestNotObserved;
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+        const start = std.Io.Timestamp.now(std.testing.io, .awake);
+        switch (action) {
+            0 => _ = try session.requestTermination(work.id, .{ .interrupted = .user_cancel }),
+            1 => try session.close(.session_close),
+            2 => try h.runtime.shutdown(),
+            else => unreachable,
+        }
+        while (!work.done.load(.acquire)) {
+            if (start.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).nanoseconds >= 3 * std.time.ns_per_s)
+                return error.TestUnexpectedResult;
+            std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+        thread.join();
+        joined = true;
+        try std.testing.expect(work.result.?.termination_signal.? == .interrupted);
+        var directory = try h.tmp.dir.openDir(std.testing.io, "generated-images", .{ .iterate = true });
+        defer directory.close(std.testing.io);
+        var entries = directory.iterate();
+        try std.testing.expectEqual(@as(?std.Io.Dir.Entry, null), try entries.next(std.testing.io));
         try h.evidence(1, 0, "");
     }
 }
